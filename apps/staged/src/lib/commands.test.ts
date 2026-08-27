@@ -384,6 +384,7 @@ describe('cached mutation command wrappers', () => {
   let cachedCommand: ReturnType<typeof vi.fn>;
   let invalidateCache: ReturnType<typeof vi.fn>;
   let invalidateCacheByCommand: ReturnType<typeof vi.fn>;
+  let invalidateCacheByArgs: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -391,6 +392,7 @@ describe('cached mutation command wrappers', () => {
     cachedCommand = vi.fn();
     invalidateCache = vi.fn();
     invalidateCacheByCommand = vi.fn();
+    invalidateCacheByArgs = vi.fn();
 
     vi.doMock('./transport', () => ({
       isTauri: false,
@@ -401,6 +403,7 @@ describe('cached mutation command wrappers', () => {
       cachedInvoke: vi.fn(),
       invalidateCache,
       invalidateCacheByCommand,
+      invalidateCacheByArgs,
     }));
   });
 
@@ -482,6 +485,41 @@ describe('cached mutation command wrappers', () => {
       sessionId: 'session-1',
     });
     expect(cachedCommand).not.toHaveBeenCalled();
+  });
+
+  it('passes force through project list caches as bypassRead', async () => {
+    const projects = [{ id: 'project-1' }];
+    const branches = [{ id: 'branch-1' }];
+    const repos = [{ id: 'repo-1' }];
+    cachedCommand
+      .mockResolvedValueOnce({ data: projects, revalidating: null })
+      .mockResolvedValueOnce({ data: branches, revalidating: null })
+      .mockResolvedValueOnce({ data: repos, revalidating: null });
+
+    const { listProjects, listBranchesForProject, listProjectRepos } = await import('./commands');
+
+    await expect(listProjects({ force: true })).resolves.toEqual({
+      data: projects,
+      revalidating: null,
+    });
+    await expect(listBranchesForProject('project-1', { force: true })).resolves.toEqual({
+      data: branches,
+      revalidating: null,
+    });
+    await expect(listProjectRepos('project-1', { force: true })).resolves.toEqual({
+      data: repos,
+      revalidating: null,
+    });
+
+    expect(cachedCommand.mock.calls).toEqual([
+      ['list_projects', undefined, { ttl: 5 * 60_000, bypassRead: true }],
+      [
+        'list_branches_for_project',
+        { projectId: 'project-1' },
+        { ttl: 2 * 60_000, bypassRead: true },
+      ],
+      ['list_project_repos', { projectId: 'project-1' }, { ttl: 10 * 60_000, bypassRead: true }],
+    ]);
   });
 
   it('uses the standard provider discovery cache by default', async () => {

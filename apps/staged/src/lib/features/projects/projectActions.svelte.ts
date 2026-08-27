@@ -116,9 +116,12 @@ class ProjectActionsController {
 
     try {
       await commands.deleteProject(id);
+      // The delete's project-changed event prunes the project and its
+      // "Deleting…" marker from projectsDataStore, and each branch's
+      // branch-changed invalidates its timeline caches. In web mode an echo
+      // lost to a WebSocket gap is recovered by the reconnect revalidation in
+      // transport.ts, so the marker can't outlive the socket outage.
       projectStateStore.markAsRead(id);
-      projectsDataStore.projectDeleteFinished(id, { removed: true });
-      commands.invalidateProjectBranchTimelines(branchesToClear.map((b) => b.id));
       for (const branch of branchesToClear) {
         workspaceLifecycle.clearBranchState(branch.id);
       }
@@ -126,7 +129,7 @@ class ProjectActionsController {
       console.error('Failed to delete project:', e);
       const message = e instanceof Error ? e.message : String(e);
       toast.error('Unable to delete project', { description: message });
-      projectsDataStore.projectDeleteFinished(id);
+      projectsDataStore.projectDeleteFailed(id);
     }
   }
 }

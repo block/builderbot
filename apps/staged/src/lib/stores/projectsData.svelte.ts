@@ -23,6 +23,14 @@
  * View-lifecycle side effects (workspaceLifecycle.enqueueInitialSetup,
  * queued-session draining, run-action hydration) intentionally stay out of
  * the store — consuming views wire them by watching branchesByProject.
+ *
+ * Authoritative freshness comes from the store change feed (project-changed,
+ * branch-changed, repos-changed): every mutating backend store method
+ * publishes, so a write in any window — or in the backend itself — refetches
+ * here. The remaining imperative entry points (projectCreated,
+ * setBranchesByProject, refreshProject) exist for immediacy: they paint the
+ * local window's own mutation without waiting a coalescing window for the
+ * echo; the event-driven refetch then confirms.
  */
 
 import { listenToEvent, type UnlistenFn } from '../transport';
@@ -30,10 +38,13 @@ import * as commands from '../commands';
 import { repoBadgeStore } from './repoBadges.svelte';
 import type {
   Branch,
+  BranchChangedEvent,
   PrStatusChangedEvent,
   Project,
+  ProjectChangedEvent,
   ProjectRepo,
   RepoHomeItem,
+  ReposChangedEvent,
   SessionStatusPayload,
 } from '../types';
 
@@ -122,6 +133,8 @@ class ProjectsDataStore {
   private loadGeneration = 0;
   private initialLoad: Promise<void> | null = null;
   private revalidatePending = false;
+  private revalidateQueued = false;
+  private revalidateQueuedForce = false;
   private backgroundHydrationCancel: (() => void) | null = null;
   /** In-flight per-project hydrations, so the foreground fetch, the idle drip
    *  and the grid's sweep share one request instead of racing three. */
@@ -134,6 +147,10 @@ class ProjectsDataStore {
   private unlisteners: UnlistenFn[] = [];
   private pendingPrStatusEvents: PrStatusChangedEvent[] = [];
   private prStatusFlushCancel: (() => void) | null = null;
+  private pendingBranchChanges: BranchChangedEvent[] = [];
+  private branchChangedFlushCancel: (() => void) | null = null;
+  private branchRefetchInFlight = new Set<string>();
+  private branchRefetchQueued = new Set<string>();
 
   // ── Reactive reads ──
 
@@ -306,9 +323,9 @@ class ProjectsDataStore {
     const generation = this.loadGeneration;
     try {
       const [projectsResult, branchesResult, reposResult] = await Promise.all([
-        commands.listProjects(),
-        commands.listBranchesForProject(projectId),
-        commands.listProjectRepos(projectId),
+        commands.listProjects({ force: true }),
+        commands.listBranchesForProject(projectId, { force: true }),
+        commands.listProjectRepos(projectId, { force: true }),
       ]);
       if (generation !== this.loadGeneration) return;
       this._projects = projectsResult.data;
@@ -352,17 +369,31 @@ class ProjectsDataStore {
     this._branchesByProject = next;
   }
 
-  private async revalidate(): Promise<void> {
-    if (this.revalidatePending) return;
+  private async revalidate({ force = false }: { force?: boolean } = {}): Promise<void> {
+    if (this.revalidatePending) {
+      // A change arrived while a reload was in flight; that reload may have
+      // read the list before the write committed, so run once more after it.
+      // Preserve force across the queue: if any queued event says the backend
+      // changed, the follow-up fetch must not accept a cached answer.
+      this.revalidateQueued = true;
+      this.revalidateQueuedForce ||= force;
+      return;
+    }
     this.revalidatePending = true;
     try {
-      await this.loadProjectsAndHydrate();
+      await this.loadProjectsAndHydrate({ force });
     } finally {
       this.revalidatePending = false;
+      if (this.revalidateQueued) {
+        const queuedForce = this.revalidateQueuedForce;
+        this.revalidateQueued = false;
+        this.revalidateQueuedForce = false;
+        void this.revalidate({ force: queuedForce });
+      }
     }
   }
 
-  private async loadProjectsAndHydrate(): Promise<void> {
+  private async loadProjectsAndHydrate({ force = false }: { force?: boolean } = {}): Promise<void> {
     const generation = ++this.loadGeneration;
     this.cancelBackgroundHydration();
     // Those promises are already no-ops under the new generation; drop them so
@@ -374,7 +405,7 @@ class ProjectsDataStore {
     this._error = null;
     await repoBadgeStore.loadAll();
     try {
-      const { data, revalidating } = await commands.listProjects();
+      const { data, revalidating } = await commands.listProjects({ force });
       if (generation !== this.loadGeneration) return;
       this.applyProjectList(data, generation);
       this._loaded = true;
@@ -427,6 +458,17 @@ class ProjectsDataStore {
       if (projectIds.has(projectId)) prunedHydrated.set(projectId, hydratedAt);
     }
     this._hydratedProjects = prunedHydrated;
+
+    // A project that vanished from the fetched list finished deleting: drop
+    // its in-progress marker in the same apply, so the card goes straight
+    // from "Deleting…" to gone with no flash of a live project in between.
+    if (this._deletingProjectNames.size > 0) {
+      const prunedDeleting = new Map<string, string>();
+      for (const [projectId, name] of this._deletingProjectNames) {
+        if (projectIds.has(projectId)) prunedDeleting.set(projectId, name);
+      }
+      this._deletingProjectNames = prunedDeleting;
+    }
 
     this.scheduleBackgroundHydration(
       projectList.map((p) => p.id),
@@ -613,52 +655,39 @@ class ProjectsDataStore {
 
   // ── Project-delete lifecycle ──
   //
-  // Replaces the staged:project-delete-start/end window-event relay between
-  // ProjectsList and ProjectHome: the delete flow calls these directly and
-  // every consumer sees the same deletingProjectNames.
+  // On the success path the data side is event-driven: the backend delete
+  // publishes project-changed, whose list refetch removes the project and
+  // its "Deleting…" marker in one apply (see applyProjectList). Until that
+  // lands, the marker keeps the card in its deleting state — even if a fetch
+  // started before the delete resolves late and still contains the project —
+  // so nothing ever flashes back to life.
+  //
+  // The marker is not purely cosmetic, though: flushBranchChanges suppresses
+  // branch refetches for a deleting project, since the cascade emits one
+  // branch-changed per branch and refetching a doomed list N times would be
+  // pure churn. That debt has to be paid back when the delete fails — see
+  // projectDeleteFailed.
 
   projectDeleteStarted(projectId: string, name: string): void {
     this._deletingProjectNames = new Map(this._deletingProjectNames).set(projectId, name);
   }
 
-  /** Mark a delete finished. `removed` prunes the project from the store
-   *  (backend deletion succeeded); omit it when the delete failed. */
-  projectDeleteFinished(projectId: string, options: { removed?: boolean } = {}): void {
+  /** Clear the in-progress marker for a delete that failed — the project is
+   *  still alive, so no project-changed refetch will prune it. The cascade may
+   *  have deleted branch rows before failing, and flushBranchChanges dropped
+   *  those branch-changed events on the floor, so refetch the list here: it is
+   *  the only signal that will ever repair it. Clearing the marker first also
+   *  lets any trailing branch-changed from the same cascade take the normal
+   *  path instead of being dropped a second time. */
+  projectDeleteFailed(projectId: string): void {
     const next = new Map(this._deletingProjectNames);
     next.delete(projectId);
     this._deletingProjectNames = next;
-    if (options.removed) {
-      this.removeProject(projectId);
-    }
-  }
-
-  private removeProject(projectId: string): void {
-    // Bump the generation so any list or branch apply already in flight — an
-    // SWR `revalidating` promise, a concurrent ensureLoaded() revalidation,
-    // refreshProject's un-deduped list replacement — is discarded instead of
-    // resurrecting the project it fetched before the backend delete.
-    const generation = ++this.loadGeneration;
-    // In-flight hydrations are no-ops under the new generation; drop them so
-    // callers after the bump start fresh fetches.
-    this.hydrationInFlight.clear();
-    this._projects = this._projects.filter((p) => p.id !== projectId);
-    const branches = new Map(this._branchesByProject);
-    branches.delete(projectId);
-    this._branchesByProject = branches;
-    const repos = new Map(this._reposByProject);
-    repos.delete(projectId);
-    this._reposByProject = repos;
-    const hydrated = new Map(this._hydratedProjects);
-    hydrated.delete(projectId);
-    this._hydratedProjects = hydrated;
-    // The bump halted the running idle drip too. Restart it for whatever is
-    // still un-hydrated — including a first hydration the bump just discarded
-    // — but not for hydrated projects: a delete doesn't stale their data, so
-    // this isn't the refetch-everything drip a fresh list apply schedules.
-    this.scheduleBackgroundHydration(
-      this._projects.filter((p) => !this._hydratedProjects.has(p.id)).map((p) => p.id),
-      generation
-    );
+    // Same guard as flushBranchChanges: an un-hydrated project has nothing
+    // painted to repair. In practice this always fires — the delete flow awaits
+    // ensureProjectHydrated before starting — so the guard is consistency, not
+    // a live filter here.
+    this.refetchBranchesIfHydrated(projectId);
   }
 
   // ── Event listeners ──
@@ -685,7 +714,7 @@ class ProjectsDataStore {
     // sprout/draft-PR icon flips as soon as the first commit lands.
     this.unlisteners.push(
       listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
-        void this.handleCommitSessionCompleted(payload);
+        this.handleCommitSessionCompleted(payload);
       })
     );
 
@@ -698,21 +727,42 @@ class ProjectsDataStore {
       })
     );
 
+    // Store change feed: a project write in any window (or the backend)
+    // reloads the list. Create/rename land the new row; a delete's refetch
+    // prunes the project and its "Deleting…" marker together, and the
+    // generation bump discards any stale apply still in flight.
+    this.unlisteners.push(
+      listenToEvent<ProjectChangedEvent>('project-changed', () => {
+        void this.revalidate({ force: true });
+      })
+    );
+
+    // Store change feed: refetch the branch lists a branch write touched.
+    // Buffered per frame like pr-status-changed — a bulk operation arrives
+    // as one event per branch, and each refetch replaces the whole list.
+    this.unlisteners.push(
+      listenToEvent<BranchChangedEvent>('branch-changed', (payload) => {
+        this.pendingBranchChanges.push(payload);
+        this.branchChangedFlushCancel ??= scheduleFrame(() => this.flushBranchChanges());
+      })
+    );
+
+    // Store change feed: badges and the home repo list (pins, recents,
+    // affinities) are all repo writes.
+    this.unlisteners.push(
+      listenToEvent<ReposChangedEvent>('repos-changed', () => {
+        void repoBadgeStore.loadAll();
+        if (this._homeRepos !== null || this.homeReposInFlight) {
+          void this.startHomeReposFetch();
+        }
+      })
+    );
+
     const onCacheStale = () => {
       void this.refresh();
     };
     window.addEventListener('cache-stale', onCacheStale);
     this.unlisteners.push(() => window.removeEventListener('cache-stale', onCacheStale));
-
-    const onPinnedReposChanged = () => {
-      if (this._homeRepos !== null || this.homeReposInFlight) {
-        void this.startHomeReposFetch();
-      }
-    };
-    window.addEventListener('staged:pinned-repos-changed', onPinnedReposChanged);
-    this.unlisteners.push(() =>
-      window.removeEventListener('staged:pinned-repos-changed', onPinnedReposChanged)
-    );
   }
 
   /** Tear down all listeners (tests, symmetry with startListeners). */
@@ -724,6 +774,9 @@ class ProjectsDataStore {
     this.prStatusFlushCancel?.();
     this.prStatusFlushCancel = null;
     this.pendingPrStatusEvents = [];
+    this.branchChangedFlushCancel?.();
+    this.branchChangedFlushCancel = null;
+    this.pendingBranchChanges = [];
     this.cancelBackgroundHydration();
     this.listening = false;
   }
@@ -761,14 +814,97 @@ class ProjectsDataStore {
     this._branchesByProject = next;
   }
 
-  private async handleCommitSessionCompleted(payload: SessionStatusPayload): Promise<void> {
+  private handleCommitSessionCompleted(payload: SessionStatusPayload): void {
     if (payload.status !== 'completed') return;
     if (payload.sessionType !== 'commit') return;
     const projectId = payload.projectId;
-    if (!projectId || !this._branchesByProject.has(projectId)) return;
+    if (!projectId) return;
+    this.refetchBranchesIfHydrated(projectId);
+  }
+
+  /**
+   * Map a burst of branch-changed events to the set of projects whose branch
+   * lists need refetching: the project the backend resolved, plus any known
+   * project whose list still holds the branch. The feed names every project a
+   * write touches — a move publishes once per side — so that scan is the
+   * fallback for what the backend couldn't see: an unresolved projectId, or a
+   * list this window holds that no longer matches the row. A null branchId is
+   * the feed's lag recovery — it can't name what it dropped, so every hydrated
+   * list is suspect. Collection stays broad; the single hydration filter is in
+   * refetchBranchesIfHydrated.
+   */
+  private flushBranchChanges(): void {
+    this.branchChangedFlushCancel = null;
+    const events = this.pendingBranchChanges;
+    this.pendingBranchChanges = [];
+    if (events.length === 0) return;
+
+    const projectIds = new Set<string>();
+    for (const { branchId, projectId } of events) {
+      if (branchId === null) {
+        for (const knownProjectId of this._branchesByProject.keys()) {
+          projectIds.add(knownProjectId);
+        }
+        continue;
+      }
+      if (projectId) projectIds.add(projectId);
+      for (const [knownProjectId, branches] of this._branchesByProject) {
+        if (branches.some((b) => b.id === branchId)) projectIds.add(knownProjectId);
+      }
+    }
+    for (const projectId of projectIds) {
+      // A deleting project's teardown emits one event per branch — refetching a
+      // list that's mid-cascade-delete would just churn. If that delete fails,
+      // projectDeleteFailed refetches once to repair what was skipped.
+      if (this.isProjectDeleting(projectId)) continue;
+      this.refetchBranchesIfHydrated(projectId);
+    }
+  }
+
+  /**
+   * Refetch a project's branch list only when the store holds — or is about to
+   * hold — real fetched data to repair.
+   *
+   * Hydrated: refetch now. First hydration in flight: refetch once it settles,
+   * so this event's fresh read applies last — the in-flight fetch may have read
+   * pre-mutation state, and skipping outright would leave that stale read
+   * painted until the project's next event. Otherwise skip: the entry
+   * applyProjectList seeds for every listed project is `[]`, which no view ever
+   * painted (they gate on isProjectHydrated), and the eventual first hydration
+   * reads post-event state anyway. Fetching there would also half-hydrate the
+   * project — branches without repos, still unmarked — so the idle drip would
+   * refetch it regardless.
+   *
+   * Unknown projects are subsumed: hydrated ⊆ known, since markProjectHydrated
+   * is only reached for listed or just-created projects and applyProjectList
+   * prunes _hydratedProjects against the same fetched list.
+   */
+  private refetchBranchesIfHydrated(projectId: string): void {
+    if (this._hydratedProjects.has(projectId)) {
+      void this.refetchProjectBranches(projectId);
+      return;
+    }
+    const inFlight = this.hydrationInFlight.get(projectId);
+    if (inFlight) {
+      void inFlight.then(() => this.refetchProjectBranches(projectId));
+    }
+  }
+
+  /** Refetch one project's branch list and apply it under the current load
+   *  generation. */
+  private async refetchProjectBranches(projectId: string): Promise<void> {
+    if (this.branchRefetchInFlight.has(projectId)) {
+      // The pending read may predate this change. Run one more fetch after it
+      // settles rather than racing two responses that can apply out of order.
+      this.branchRefetchQueued.add(projectId);
+      return;
+    }
+    this.branchRefetchInFlight.add(projectId);
     const generation = this.loadGeneration;
     try {
-      const { data: branches, revalidating } = await commands.listBranchesForProject(projectId);
+      const { data: branches, revalidating } = await commands.listBranchesForProject(projectId, {
+        force: true,
+      });
       this.applyProjectBranches(projectId, branches, generation);
       if (revalidating) {
         revalidating
@@ -777,16 +913,18 @@ class ProjectsDataStore {
           })
           .catch((e) => {
             console.error(
-              `[projectsData] Failed to revalidate branches for project ${projectId} after commit:`,
+              `[projectsData] Failed to revalidate branches for project ${projectId}:`,
               e
             );
           });
       }
     } catch (e) {
-      console.error(
-        `[projectsData] Failed to refresh branches for project ${projectId} after commit:`,
-        e
-      );
+      console.error(`[projectsData] Failed to refetch branches for project ${projectId}:`, e);
+    } finally {
+      this.branchRefetchInFlight.delete(projectId);
+      if (this.branchRefetchQueued.delete(projectId)) {
+        void this.refetchProjectBranches(projectId);
+      }
     }
   }
 }

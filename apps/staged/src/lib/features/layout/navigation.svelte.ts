@@ -6,9 +6,14 @@
  * current route instead of owning navigation.
  *
  * The last viewed project is persisted so the user returns to it on relaunch.
+ * Only the first window (label `main`) and web mode persist it; secondary
+ * windows are seeded with their opener's selected project and persist nothing,
+ * so concurrent windows can't fight over the one key.
  */
 
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import { getWindowLabel } from '../../transport';
+import { takeWindowSeed } from '../../commands';
 import {
   readSnapshot,
   writeSnapshot,
@@ -54,12 +59,22 @@ function rootRoute(): DetailRoute {
   return { kind: 'projects' };
 }
 
+function initialProjectId(): string | null {
+  const label = getWindowLabel();
+  // localStorage is shared by Tauri webviews. Only `main` owns the persisted
+  // snapshot; a secondary window must start empty until it consumes its
+  // explicit backend seed. In web mode there is no label and the synchronous
+  // snapshot remains the cold-boot accelerator.
+  if (label && label !== 'main') return null;
+  return readSnapshot<string>(SNAPSHOT_KEYS.lastProject);
+}
+
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
-  // Web-only: seed synchronously from the localStorage mirror so <ProjectHome>
-  // can paint on the first frame of a cold iOS reload, before the async
-  // persistent store and `listProjects()` validation resolve (see initNavigation).
-  selectedProjectId: readSnapshot<string>(SNAPSHOT_KEYS.lastProject),
+  // Web and the first Tauri window seed synchronously from the localStorage
+  // mirror so <ProjectHome> can paint before the async persistent store and
+  // `listProjects()` validation resolve (see initNavigation).
+  selectedProjectId: initialProjectId(),
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
   detailStack: [rootRoute()] as DetailRoute[],
@@ -124,8 +139,16 @@ function pushOrReplaceRoute(route: DetailRoute): void {
 /**
  * Persist the current navigation target.
  * Saves `null` for the home screen or the project ID.
+ *
+ * Only the first window (label `main`) and web mode persist. Labels are minted
+ * fresh each launch, so a secondary window's key would never be read back —
+ * and since a new window opens on its opener's project rather than a restored
+ * one, writing at all would only accumulate orphan `…:win-N` entries in
+ * `preferences.json`.
  */
 function persistLastProject(projectId: string | null): void {
+  // Web mode has no window label; `null` collapses to `main` and persists.
+  if ((getWindowLabel() ?? 'main') !== 'main') return;
   setStoreValue(LAST_PROJECT_STORE_KEY, projectId);
   // Mirror to localStorage for the synchronous cold-boot restore (web only).
   if (projectId) writeSnapshot(SNAPSHOT_KEYS.lastProject, projectId);
@@ -138,12 +161,28 @@ function persistLastProject(projectId: string | null): void {
  * Must be called after `initPersistentStore()` (which is done inside
  * `initPreferences()`). If the stored project no longer exists the
  * user is sent to the home screen instead.
+ *
+ * Only the first window (label `main`) restores the persisted route on cold
+ * start; a secondary window opens on the project its opener seeded it with.
  */
 export async function initNavigation(): Promise<void> {
   // Kick the shared projects load immediately so the data is warming while we
   // read the persisted route — every consumer (sidebar, landing page, this
   // validation) shares the one fetch.
   const projectsLoad = projectsDataStore.ensureLoaded();
+
+  const label = getWindowLabel();
+  if (label && label !== 'main') {
+    const seedProjectId = await takeWindowSeed().catch(() => null);
+    if (!seedProjectId) return;
+    // Validate against the project list like the restore path below — the
+    // project could have been deleted between opening and initializing.
+    await projectsLoad;
+    if (projectsDataStore.loaded && !projectsDataStore.projects.some((p) => p.id === seedProjectId))
+      return;
+    setDetailStack([rootRoute(), { kind: 'project', projectId: seedProjectId }]);
+    return;
+  }
 
   // `selectedProjectId` may already be set synchronously from the localStorage
   // mirror (web cold boot). Fall back to the async persistent store otherwise —

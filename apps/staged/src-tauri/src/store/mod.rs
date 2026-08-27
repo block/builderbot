@@ -46,6 +46,51 @@ pub use repo_badges::{fallback_short_name, next_hue};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tokio::sync::broadcast;
+
+// =============================================================================
+// StoreChange
+// =============================================================================
+
+/// A domain-level change published by every mutating `Store` method.
+///
+/// The variants speak the frontend's vocabulary (projects, branches, notes,
+/// reviews, repos) — never table names. Each carries the aggregate id the
+/// mutation already had in scope; secondary ids are filled best-effort and
+/// may be `None`, in which case consumers fall back to a broader refetch.
+///
+/// Sessions are deliberately absent: chat polls at 500ms and session
+/// lifecycle already flows through `session-status-changed` & friends, so
+/// session-family writes (sessions, messages, queued messages, session-scoped
+/// images, repo actions) publish nothing here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StoreChange {
+    /// A project row or its attached `project_repos` changed.
+    Project { project_id: Option<String> },
+    /// A branch or anything on its timeline (commits, workdir assignment,
+    /// branch-attached images) changed.
+    ///
+    /// `project_id` means "this project's branch list is affected", not "this
+    /// branch's current parent", so a mutation touching more than one project's
+    /// list publishes once per project: a move names both the target and the
+    /// source.
+    Branch {
+        branch_id: String,
+        project_id: Option<String>,
+    },
+    /// A branch note or project note changed.
+    Notes {
+        branch_id: Option<String>,
+        project_id: Option<String>,
+    },
+    /// A review or its comments / reviewed files / reference files changed.
+    Review {
+        review_id: String,
+        branch_id: Option<String>,
+    },
+    /// Repo badges, recent repos, or repo affinities changed.
+    Repos { github_repo: Option<String> },
+}
 
 // =============================================================================
 // Error type
@@ -207,6 +252,11 @@ pub struct ResolvedSession {
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Change feed for mutating methods. `None` (the default, and what unit
+    /// tests get) makes every publish a no-op; the app wires a sender in at
+    /// construction so a task above the Tauri boundary can forward changes
+    /// to all windows and web clients.
+    change_tx: Option<broadcast::Sender<StoreChange>>,
 }
 
 impl Store {
@@ -219,9 +269,17 @@ impl Store {
         let conn = Connection::open(path)?;
         let store = Self {
             conn: Mutex::new(conn),
+            change_tx: None,
         };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Attach the change feed sender. Keeps `Store` Tauri-agnostic: it only
+    /// knows it publishes [`StoreChange`]s, not who listens.
+    pub fn with_change_sender(mut self, tx: broadcast::Sender<StoreChange>) -> Self {
+        self.change_tx = Some(tx);
+        self
     }
 
     /// In-memory database for testing.
@@ -230,9 +288,51 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         let store = Self {
             conn: Mutex::new(conn),
+            change_tx: None,
         };
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Publish a change to the feed, if one is attached.
+    ///
+    /// Never blocks and never fails the mutation: a send error just means
+    /// nobody is listening right now.
+    pub(crate) fn publish(&self, change: StoreChange) {
+        if let Some(tx) = &self.change_tx {
+            let _ = tx.send(change);
+        }
+    }
+
+    /// Like [`Store::publish`] but lazy — `make` (and any payload-enrichment
+    /// query inside it) only runs when a change feed is attached.
+    pub(crate) fn publish_with(&self, make: impl FnOnce() -> StoreChange) {
+        if let Some(tx) = &self.change_tx {
+            let _ = tx.send(make());
+        }
+    }
+
+    /// Best-effort single-id lookup for change payload enrichment.
+    ///
+    /// `sql` must select exactly one (possibly NULL) TEXT column keyed by
+    /// `?1`. Returns `None` on any miss or error — a missing secondary id
+    /// degrades to a broader frontend refetch, never a failed write.
+    pub(crate) fn lookup_id(conn: &Connection, sql: &str, key: &str) -> Option<String> {
+        conn.query_row(sql, [key], |row| row.get::<_, Option<String>>(0))
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+    }
+
+    /// A branch's `project_id`, for [`StoreChange::Branch`] payload
+    /// enrichment from modules that only hold the branch id.
+    pub(crate) fn branch_project_id(conn: &Connection, branch_id: &str) -> Option<String> {
+        Self::lookup_id(
+            conn,
+            "SELECT project_id FROM branches WHERE id = ?1",
+            branch_id,
+        )
     }
 
     /// Resolve an optional session_id into its associated metadata.

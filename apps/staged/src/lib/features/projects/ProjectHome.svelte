@@ -502,7 +502,7 @@
   });
 
   $effect(() => {
-    if (!loading && selectedProjectId && projects.length > 0 && !selectedProject) {
+    if (projectsDataStore.loaded && !loading && selectedProjectId && !selectedProject) {
       goHome();
     }
   });
@@ -670,7 +670,6 @@
           )
         );
       }
-      commands.invalidateBranchTimeline(branch.id);
     } catch (e) {
       console.error('Failed to delete branch:', e);
     } finally {
@@ -710,7 +709,6 @@
         projectsDataStore.refreshProject(sourceProjectId),
         projectsDataStore.refreshProject(targetProjectId),
       ]);
-      commands.invalidateBranchTimeline(branchId);
     } catch (e) {
       console.error('Failed to move branch:', e);
       throw e;

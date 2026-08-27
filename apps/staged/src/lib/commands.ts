@@ -72,8 +72,15 @@ export function confirmResetStore(): Promise<void> {
 // Projects
 // =============================================================================
 
-export function listProjects(): Promise<SwrResult<Project[]>> {
-  return cachedCommand('list_projects', undefined, { ttl: 5 * 60_000 });
+export interface ForceRefreshOptions {
+  force?: boolean;
+}
+
+export function listProjects(options: ForceRefreshOptions = {}): Promise<SwrResult<Project[]>> {
+  return cachedCommand('list_projects', undefined, {
+    ttl: 5 * 60_000,
+    bypassRead: options.force,
+  });
 }
 
 export async function createProject(
@@ -109,8 +116,18 @@ export async function deleteProject(id: string): Promise<void> {
   ]);
 }
 
-export function listProjectRepos(projectId: string): Promise<SwrResult<ProjectRepo[]>> {
-  return cachedCommand('list_project_repos', { projectId }, { ttl: 10 * 60_000 });
+export function listProjectRepos(
+  projectId: string,
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<ProjectRepo[]>> {
+  return cachedCommand(
+    'list_project_repos',
+    { projectId },
+    {
+      ttl: 10 * 60_000,
+      bypassRead: options.force,
+    }
+  );
 }
 
 export function listRecentRepos(limit?: number): Promise<RecentRepo[]> {
@@ -286,8 +303,18 @@ export function startProjectSession(
 // Branches
 // =============================================================================
 
-export function listBranchesForProject(projectId: string): Promise<SwrResult<Branch[]>> {
-  return cachedCommand('list_branches_for_project', { projectId }, { ttl: 2 * 60_000 });
+export function listBranchesForProject(
+  projectId: string,
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<Branch[]>> {
+  return cachedCommand(
+    'list_branches_for_project',
+    { projectId },
+    {
+      ttl: 2 * 60_000,
+      bypassRead: options.force,
+    }
+  );
 }
 
 /** Get a single branch by ID. */
@@ -492,6 +519,17 @@ export async function warmProjectTimelines(projectId: string): Promise<void> {
   }
 }
 
+/**
+ * Drop a branch's timeline from every cache layer and tell open views to
+ * refetch.
+ *
+ * Don't call this after a store-backed mutation — those publish
+ * branch-changed / notes-changed / review-changed, and
+ * cacheInvalidationListener already invalidates centrally in every window.
+ * The remaining call sites cover what the change feed deliberately doesn't:
+ * git-only worktree operations (reset, discard) and session-family writes
+ * (queueing or cancelling sessions), which publish nothing.
+ */
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
   inFlightTimelines.delete(branchId);
@@ -499,6 +537,20 @@ export function invalidateBranchTimeline(branchId: string): void {
   window.dispatchEvent(
     new CustomEvent('timeline-invalidated', { detail: { branchIds: [branchId] } })
   );
+}
+
+/**
+ * Drop *every* branch's timeline and tell all open views to refetch — the
+ * blunt version of `invalidateBranchTimeline` for when we don't know which
+ * branches changed. Reserved for the store change feed's lag recovery
+ * (`branch-changed` with a null branchId); nothing else should need it.
+ */
+export function invalidateAllBranchTimelines(): void {
+  timelineCache.clear();
+  inFlightTimelines.clear();
+  invalidateCacheByCommand('get_branch_timeline');
+  // `branchIds: null` means "all" — every listening card reloads.
+  window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds: null } }));
 }
 
 interface GetBranchTimelineOptions {
@@ -1553,6 +1605,31 @@ export function refreshPrStatusesNow(clientId: string, projectId: string): Promi
 /** Tell the backend this client has disconnected so its interest is dropped. */
 export function disconnectPrPollClient(clientId: string): Promise<void> {
   return invokeCommand('disconnect_client', { clientId });
+}
+
+// =============================================================================
+// Windows
+// =============================================================================
+
+/**
+ * Open a new full-peer app window, optionally seeded with the opener's
+ * selected project. Returns the new window's label.
+ */
+export function newWindow(seedProjectId: string | null): Promise<string> {
+  return invokeCommand('new_window', { seedProjectId });
+}
+
+/**
+ * One-shot read of the project this window was seeded with by its opener, if
+ * any. Consumes the seed; only secondary (`win-*`) windows ever have one.
+ */
+export function takeWindowSeed(): Promise<string | null> {
+  return invokeCommand('take_window_seed');
+}
+
+/** Claim process-wide ownership of the updater loop for the current window. */
+export function claimUpdaterOwnership(): Promise<boolean> {
+  return invokeCommand('claim_updater_ownership');
 }
 
 // =============================================================================

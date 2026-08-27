@@ -285,8 +285,8 @@
     const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
 
-    // Pin changes propagate through the store's staged:pinned-repos-changed
-    // listener; this mount only has to make sure the cache is warm.
+    // Pin changes propagate through the store's repos-changed listener;
+    // this mount only has to make sure the cache is warm.
     void projectsDataStore.ensureHomeReposLoaded();
 
     return () => {

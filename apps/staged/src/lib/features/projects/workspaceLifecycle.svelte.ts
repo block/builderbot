@@ -515,7 +515,6 @@ class WorkspaceLifecycleController {
           )
         );
       }
-      commands.invalidateBranchTimeline(branchId);
 
       // NOTE: prerun actions are only triggered here when opts.runPrerun
       // is set (e.g. the retry path). The normal creation paths run them

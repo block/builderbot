@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "enables the default permissions",
-  "windows": ["main"],
+  "windows": ["main", "win-*"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
@@ -13,6 +13,7 @@
     "window-state:default",
     "store:default",
     "core:window:allow-set-badge-count",
+    "core:window:allow-set-title",
     "dialog:default",
     "process:allow-restart",
     "updater:default",

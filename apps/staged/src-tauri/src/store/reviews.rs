@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::git::Span;
 
 use super::models::{Comment, CommentType, Review, ReviewScope};
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     /// Create a new review.
@@ -26,6 +26,10 @@ impl Store {
                 review.completed_at,
             ],
         )?;
+        self.publish(StoreChange::Review {
+            review_id: review.id.clone(),
+            branch_id: Some(review.branch_id.clone()),
+        });
         Ok(())
     }
 
@@ -80,6 +84,10 @@ impl Store {
                 review.completed_at,
             ],
         )?;
+        self.publish(StoreChange::Review {
+            review_id: review.id.clone(),
+            branch_id: Some(review.branch_id.clone()),
+        });
         Ok(review)
     }
 
@@ -160,6 +168,7 @@ impl Store {
             params![review_id, path],
         )?;
         Self::touch_review(&conn, review_id)?;
+        self.publish_review_changed(&conn, review_id);
         Ok(())
     }
 
@@ -171,6 +180,7 @@ impl Store {
             params![review_id, path],
         )?;
         Self::touch_review(&conn, review_id)?;
+        self.publish_review_changed(&conn, review_id);
         Ok(())
     }
 
@@ -193,6 +203,7 @@ impl Store {
             ],
         )?;
         Self::touch_review(&conn, review_id)?;
+        self.publish_review_changed(&conn, review_id);
         Ok(())
     }
 
@@ -204,7 +215,9 @@ impl Store {
             "UPDATE comments SET content = ?1, github_comment_stale = CASE WHEN github_comment_id IS NOT NULL THEN 1 ELSE 0 END WHERE id = ?2",
             params![content, comment_id],
         )?;
-        Self::touch_review_for_comment(&conn, comment_id)?;
+        if let Some(review_id) = Self::touch_review_for_comment(&conn, comment_id)? {
+            self.publish_review_changed(&conn, &review_id);
+        }
         Ok(())
     }
 
@@ -220,6 +233,9 @@ impl Store {
             "UPDATE comments SET github_comment_id = ?1, github_comment_type = ?2, github_comment_stale = 0 WHERE id = ?3",
             params![github_id, github_type, comment_id],
         )?;
+        if let Some(review_id) = Self::comment_review_id(&conn, comment_id) {
+            self.publish_review_changed(&conn, &review_id);
+        }
         Ok(())
     }
 
@@ -246,6 +262,9 @@ impl Store {
             )?,
             other => return Err(StoreError(format!("Invalid comment session type: {other}"))),
         };
+        if let Some(review_id) = Self::comment_review_id(&conn, comment_id) {
+            self.publish_review_changed(&conn, &review_id);
+        }
         Ok(())
     }
 
@@ -257,7 +276,9 @@ impl Store {
             "UPDATE comments SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             params![now, comment_id],
         )?;
-        Self::touch_review_for_comment(&conn, comment_id)?;
+        if let Some(review_id) = Self::touch_review_for_comment(&conn, comment_id)? {
+            self.publish_review_changed(&conn, &review_id);
+        }
         Ok(())
     }
 
@@ -270,6 +291,7 @@ impl Store {
             params![now, review_id],
         )?;
         Self::touch_review(&conn, review_id)?;
+        self.publish_review_changed(&conn, review_id);
         Ok(())
     }
 
@@ -280,7 +302,9 @@ impl Store {
             "UPDATE comments SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
             params![comment_id],
         )?;
-        Self::touch_review_for_comment(&conn, comment_id)?;
+        if let Some(review_id) = Self::touch_review_for_comment(&conn, comment_id)? {
+            self.publish_review_changed(&conn, &review_id);
+        }
         Ok(())
     }
 
@@ -324,6 +348,7 @@ impl Store {
             params![review_id, path],
         )?;
         Self::touch_review(&conn, review_id)?;
+        self.publish_review_changed(&conn, review_id);
         Ok(())
     }
 
@@ -335,6 +360,7 @@ impl Store {
             params![review_id, path],
         )?;
         Self::touch_review(&conn, review_id)?;
+        self.publish_review_changed(&conn, review_id);
         Ok(())
     }
 
@@ -362,7 +388,19 @@ impl Store {
     /// Delete an entire review and all associated data (cascades).
     pub fn delete_review(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM reviews WHERE id = ?1", params![id])?;
+        let branch_id: Option<String> = conn
+            .query_row(
+                "DELETE FROM reviews WHERE id = ?1 RETURNING branch_id",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if branch_id.is_some() {
+            self.publish(StoreChange::Review {
+                review_id: id.to_string(),
+                branch_id,
+            });
+        }
         Ok(())
     }
 
@@ -394,6 +432,7 @@ impl Store {
             "UPDATE reviews SET completed_at = COALESCE(completed_at, ?1) WHERE id = ?2",
             params![now, id],
         )?;
+        self.publish_review_changed(&conn, id);
         Ok(())
     }
 
@@ -405,6 +444,7 @@ impl Store {
             "UPDATE reviews SET title = ?1, updated_at = ?2, completed_at = COALESCE(completed_at, ?3) WHERE id = ?4",
             params![title, now, now, id],
         )?;
+        self.publish_review_changed(&conn, id);
         Ok(())
     }
 
@@ -416,6 +456,7 @@ impl Store {
             "UPDATE reviews SET commit_sha = ?1, updated_at = ?2 WHERE id = ?3",
             params![commit_sha, now, id],
         )?;
+        self.publish_review_changed(&conn, id);
         Ok(())
     }
 
@@ -432,18 +473,37 @@ impl Store {
     }
 
     /// Look up the parent review for a comment and touch its `updated_at`.
-    fn touch_review_for_comment(conn: &Connection, comment_id: &str) -> Result<(), StoreError> {
-        let review_id: Option<String> = conn
-            .query_row(
-                "SELECT review_id FROM comments WHERE id = ?1",
-                params![comment_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(rid) = review_id {
-            Self::touch_review(conn, &rid)?;
+    /// Returns the review id so callers can publish a change for it.
+    fn touch_review_for_comment(
+        conn: &Connection,
+        comment_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let review_id = Self::comment_review_id(conn, comment_id);
+        if let Some(rid) = &review_id {
+            Self::touch_review(conn, rid)?;
         }
-        Ok(())
+        Ok(review_id)
+    }
+
+    /// The parent review of a comment, best-effort.
+    fn comment_review_id(conn: &Connection, comment_id: &str) -> Option<String> {
+        Self::lookup_id(
+            conn,
+            "SELECT review_id FROM comments WHERE id = ?1",
+            comment_id,
+        )
+    }
+
+    /// Publish a [`StoreChange::Review`] with best-effort branch enrichment.
+    fn publish_review_changed(&self, conn: &Connection, review_id: &str) {
+        self.publish_with(|| StoreChange::Review {
+            review_id: review_id.to_string(),
+            branch_id: Self::lookup_id(
+                conn,
+                "SELECT branch_id FROM reviews WHERE id = ?1",
+                review_id,
+            ),
+        });
     }
 
     fn row_to_review_header(row: &rusqlite::Row) -> rusqlite::Result<Review> {

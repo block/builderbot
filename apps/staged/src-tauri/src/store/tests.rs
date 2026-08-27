@@ -2995,3 +2995,308 @@ fn test_delete_branch_cascades_reviews() {
     store.delete_branch(&branch.id).unwrap();
     assert!(store.get_review(&review.id).unwrap().is_none());
 }
+
+// =============================================================================
+// Change feed
+// =============================================================================
+
+#[test]
+fn change_feed_publishes_domain_changes_for_mutations() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Project {
+            project_id: Some(project.id.clone())
+        }
+    );
+
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Branch {
+            branch_id: branch.id.clone(),
+            project_id: Some(project.id.clone())
+        }
+    );
+
+    // Methods that only hold the aggregate id enrich the secondary id by lookup.
+    store.update_branch_name(&branch.id, "feature-2").unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Branch {
+            branch_id: branch.id.clone(),
+            project_id: Some(project.id.clone())
+        }
+    );
+
+    // Deletes resolve enrichment before the row disappears.
+    store.delete_branch(&branch.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Branch {
+            branch_id: branch.id.clone(),
+            project_id: Some(project.id.clone())
+        }
+    );
+}
+
+#[test]
+fn change_feed_ensure_review_publishes_only_on_create() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let review = store
+        .ensure_review(&branch.id, "abc123", ReviewScope::Commit)
+        .unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Review {
+            review_id: review.id.clone(),
+            branch_id: Some(branch.id.clone())
+        }
+    );
+
+    // Second ensure finds the existing review — no write, no event.
+    let again = store
+        .ensure_review(&branch.id, "abc123", ReviewScope::Commit)
+        .unwrap();
+    assert_eq!(again.id, review.id);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn change_feed_pr_status_publishes_only_on_domain_change() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let expected = super::StoreChange::Branch {
+        branch_id: branch.id.clone(),
+        project_id: Some(project.id.clone()),
+    };
+    let poll = |checks: &str| {
+        store
+            .update_branch_pr_status(
+                &branch.id,
+                Some("OPEN".to_string()),
+                Some(checks.to_string()),
+                Some("APPROVED".to_string()),
+                Some(true),
+                Some(false),
+                Some("https://github.com/test-owner/test-repo/pull/1".to_string()),
+                Some(1_700_000_000),
+                Some("abc123".to_string()),
+            )
+            .unwrap();
+    };
+
+    // First fetch moves the domain fields off their defaults.
+    poll("PENDING");
+    assert_eq!(rx.try_recv().unwrap(), expected);
+
+    // The steady state: the poller refetches identical PR state. Only
+    // pr_fetched_at / updated_at move, so the feed stays silent.
+    poll("PENDING");
+    assert!(rx.try_recv().is_err());
+
+    // A genuine flip publishes exactly one event.
+    poll("SUCCESS");
+    assert_eq!(rx.try_recv().unwrap(), expected);
+    assert!(rx.try_recv().is_err());
+
+    // The clear path (PR gone) nulls the fields — also a real change.
+    store
+        .update_branch_pr_status(&branch.id, None, None, None, None, None, None, None, None)
+        .unwrap();
+    assert_eq!(rx.try_recv().unwrap(), expected);
+
+    // Clearing an already-cleared branch is a no-op poll echo.
+    store
+        .update_branch_pr_status(&branch.id, None, None, None, None, None, None, None, None)
+        .unwrap();
+    assert!(rx.try_recv().is_err());
+
+    // A branch that no longer exists publishes nothing.
+    store.delete_branch(&branch.id).unwrap();
+    while rx.try_recv().is_ok() {}
+    poll("SUCCESS");
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn change_feed_workspace_status_publishes_only_on_domain_change() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    // A local branch starts with a NULL workspace_status, so the first real
+    // status exercises the null-safe half of the `IS NOT` guard.
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let expected = super::StoreChange::Branch {
+        branch_id: branch.id.clone(),
+        project_id: Some(project.id.clone()),
+    };
+    // Returns the stored status, so every assertion below pins the write as
+    // well as the publish.
+    let poll = |status: WorkspaceStatus| {
+        store
+            .update_branch_workspace_status(&branch.id, &status)
+            .unwrap();
+        store
+            .get_branch(&branch.id)
+            .unwrap()
+            .unwrap()
+            .workspace_status
+    };
+
+    // NULL -> Starting is a real change.
+    assert_eq!(
+        poll(WorkspaceStatus::Starting),
+        Some(WorkspaceStatus::Starting)
+    );
+    assert_eq!(rx.try_recv().unwrap(), expected);
+
+    // The steady state: the Blox poller rewrites the status it already sees.
+    // The status is still stored, so the silence is "nothing moved", not "a
+    // real change went missing".
+    assert_eq!(
+        poll(WorkspaceStatus::Starting),
+        Some(WorkspaceStatus::Starting)
+    );
+    assert!(rx.try_recv().is_err());
+
+    // A genuine transition publishes exactly one event.
+    assert_eq!(
+        poll(WorkspaceStatus::Running),
+        Some(WorkspaceStatus::Running)
+    );
+    assert_eq!(rx.try_recv().unwrap(), expected);
+    assert!(rx.try_recv().is_err());
+
+    // ...and its own poll echo is silent again.
+    assert_eq!(
+        poll(WorkspaceStatus::Running),
+        Some(WorkspaceStatus::Running)
+    );
+    assert!(rx.try_recv().is_err());
+
+    // A branch that no longer exists matches no row, so it publishes nothing.
+    store.delete_branch(&branch.id).unwrap();
+    while rx.try_recv().is_ok() {}
+    store
+        .update_branch_workspace_status(&branch.id, &WorkspaceStatus::Stopped)
+        .unwrap();
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn change_feed_workspace_status_by_name_publishes_only_for_moved_branches() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let already = Branch::new_remote(&project.id, "peer-a", "main", "shared-ws");
+    let moving = Branch::new_remote(&project.id, "peer-b", "main", "shared-ws");
+    store.create_branch(&already).unwrap();
+    store.create_branch(&moving).unwrap();
+    // Both are created Starting, so park one elsewhere to give it somewhere to
+    // move back from.
+    store
+        .update_branch_workspace_status(&moving.id, &WorkspaceStatus::Suspended)
+        .unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let ids = store
+        .update_workspace_status_by_workspace_name("shared-ws", &WorkspaceStatus::Starting)
+        .unwrap();
+
+    // The return value still covers every branch on the workspace, moved or
+    // not — `resume_workspace` reads an empty vec as "no such workspace" and
+    // turns it into a user-visible error.
+    let mut returned = ids.clone();
+    returned.sort();
+    let mut all_ids = vec![already.id.clone(), moving.id.clone()];
+    all_ids.sort();
+    assert_eq!(returned, all_ids);
+
+    // Only the branch whose status actually moved publishes.
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Branch {
+            branch_id: moving.id.clone(),
+            project_id: Some(project.id.clone()),
+        }
+    );
+    assert!(rx.try_recv().is_err());
+
+    // Both rows hold the new status, so the silence was a no-op and not a
+    // skipped write.
+    for id in &ids {
+        assert_eq!(
+            store.get_branch(id).unwrap().unwrap().workspace_status,
+            Some(WorkspaceStatus::Starting)
+        );
+    }
+}
+
+#[test]
+fn change_feed_deletes_publish_only_when_a_row_is_removed() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let repo = ProjectRepo::new(&project.id, "test-owner/test-repo", "main", None).primary();
+    store.create_project_repo(&repo).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // The delete that lands carries the enrichment resolved before the row went.
+    store.delete_branch(&branch.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Branch {
+            branch_id: branch.id.clone(),
+            project_id: Some(project.id.clone()),
+        }
+    );
+
+    // Two windows racing to delete the same branch: the loser matches no row.
+    // Publishing here would carry `project_id: None`, the frontend's widest
+    // tier — every cached branch list dropped and refetched in every window.
+    store.delete_branch(&branch.id).unwrap();
+    assert!(rx.try_recv().is_err());
+
+    store.delete_project_repo(&repo.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Project {
+            project_id: Some(project.id.clone()),
+        }
+    );
+
+    store.delete_project_repo(&repo.id).unwrap();
+    assert!(rx.try_recv().is_err());
+}

@@ -15,7 +15,6 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     vi.doMock('../../api/commands', () => ({
       setupWorktree: vi.fn(),
       setupWorktreeAndRunPrerun,
-      invalidateBranchTimeline: vi.fn(),
       drainQueuedSessions: vi.fn(async () => {}),
       pollAllWorkspaceStatuses: vi.fn(async () => ({})),
     }));

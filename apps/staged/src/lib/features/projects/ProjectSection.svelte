@@ -263,9 +263,10 @@
     deletingNoteIds = new Set([...deletingNoteIds, noteId]);
     try {
       await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
+      // Optimistic removal; the delete's notes-changed event re-fetches every
+      // window's project-note surfaces (including this one) to confirm.
       projectNotes = projectNotes.filter((n) => n.id !== noteId);
       hashtagVersion++;
-      window.dispatchEvent(new CustomEvent('project-notes-invalidated'));
     } catch (e) {
       console.error('[ProjectSection] Failed to delete project note:', e);
     } finally {
@@ -505,6 +506,14 @@
     };
     window.addEventListener('timeline-invalidated', onTimelineInvalidated);
 
+    // Re-fetch when a project-note write lands anywhere — another window, or
+    // this one's own edit echoing back through notes-changed.
+    const onProjectNotesInvalidated = () => {
+      void loadProjectNotes();
+      hashtagVersion++;
+    };
+    window.addEventListener('project-notes-invalidated', onProjectNotesInvalidated);
+
     const unlistenSession = listenToEvent<{
       sessionId: string;
       status: string;
@@ -534,10 +543,8 @@
           projectNotes = projectNotes.filter((n) => n.sessionId !== sessionId);
         }
 
-        // Invalidate timeline caches so hashtag items pick up new commits/notes
-        for (const b of branches) {
-          commands.invalidateBranchTimeline(b.id);
-        }
+        // Branch timelines were already invalidated by sessionStatusListener
+        // for the session's own branch; just re-derive the hashtag items.
         hashtagVersion++;
       }
     });
@@ -545,6 +552,7 @@
     return () => {
       unlistenSession();
       window.removeEventListener('timeline-invalidated', onTimelineInvalidated);
+      window.removeEventListener('project-notes-invalidated', onProjectNotesInvalidated);
     };
   });
 </script>

@@ -704,11 +704,12 @@
         // Push/force-push session tracking lives in pushStateStore and is
         // cleared centrally by sessionStatusListener.handlePushCompletion.
 
-        // Only reload if this session belongs to our branch
+        // Only handle completions for sessions that belong to our branch.
+        // The timeline reload itself is central now: sessionStatusListener
+        // invalidates the branch on the same event, and the resulting
+        // timeline-invalidated dispatch force-reloads this card below.
         if (eventBranchId && eventBranchId !== branchId) return;
 
-        commands.invalidateBranchTimeline(branch.id);
-        loadTimeline();
         // Handle PR session completion
         if (prButton && eventSessionId === prButton.getPrSessionId()) {
           prButton.handlePrSessionComplete(status);
@@ -766,9 +767,11 @@
   // Re-fetch timeline when the cache is invalidated (e.g. after project-setup-progress)
   $effect(() => {
     const handler = (e: Event) => {
-      const { branchIds } = (e as CustomEvent<{ branchIds: string[] }>).detail;
+      // A null list means "every branch" — the change feed lost track of what
+      // it dropped, so nothing is known to be current.
+      const { branchIds } = (e as CustomEvent<{ branchIds: string[] | null }>).detail;
       const timelineKey = branchTimelineReadyKey(branch);
-      if (branchIds.includes(branch.id) && timelineKey) {
+      if ((branchIds === null || branchIds.includes(branch.id)) && timelineKey) {
         void loadTimeline({ force: true });
       }
     };

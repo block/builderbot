@@ -5,19 +5,38 @@ const CACHE_SCHEMA_VERSION = 1;
 const MAX_CACHE_ENTRIES = 200;
 
 /**
- * Tracks the last invalidation time per cache key. When a read starts, it
+ * Tracks the invalidation generation per cache key. When a read starts, it
  * captures the current epoch for that key. If the key is invalidated while
  * the network request is in flight, the epoch advances and the stale write
  * is skipped — preventing pre-mutation data from repopulating the cache.
  */
 const invalidationEpochs = new Map<string, number>();
 
+/**
+ * Generation for full-cache invalidations. Unlike the per-key map, this also
+ * covers keys that exist only as in-flight requests when the generation moves.
+ */
+let fullInvalidationEpoch = 0;
+
+interface InvalidationEpoch {
+  key: number;
+  full: number;
+}
+
 function getEpoch(key: string): number {
   return invalidationEpochs.get(key) ?? 0;
 }
 
 function bumpEpoch(key: string): void {
-  invalidationEpochs.set(key, Date.now());
+  invalidationEpochs.set(key, getEpoch(key) + 1);
+}
+
+function captureEpoch(key: string): InvalidationEpoch {
+  return { key: getEpoch(key), full: fullInvalidationEpoch };
+}
+
+function isEpochCurrent(key: string, epoch: InvalidationEpoch): boolean {
+  return getEpoch(key) === epoch.key && fullInvalidationEpoch === epoch.full;
 }
 
 /**
@@ -124,14 +143,14 @@ export async function* cachedInvoke<T>(
   }
 
   addInFlight(key);
-  const epochAtStart = getEpoch(key);
+  const epochAtStart = captureEpoch(key);
 
   try {
     const data = await invokeCommand<T>(command, args);
     const fetchedAt = Date.now();
     // Skip the cache write if the key was invalidated while we were fetching —
     // writing would repopulate the cache with pre-mutation data.
-    if (getEpoch(key) === epochAtStart) {
+    if (isEpochCurrent(key, epochAtStart)) {
       await cacheSet(key, {
         key,
         data,
@@ -171,6 +190,27 @@ export async function cachedCommand<T>(
   const key = cacheKey(command, args);
   const store = getStore();
 
+  if (config.bypassRead) {
+    addInFlight(key);
+    const epochAtStart = captureEpoch(key);
+    try {
+      const data = await invokeCommand<T>(command, args);
+      // Skip the cache write if the key was invalidated while we were fetching —
+      // writing would repopulate the cache with pre-mutation data.
+      if (isEpochCurrent(key, epochAtStart)) {
+        await cacheSet(key, {
+          key,
+          data,
+          fetchedAt: Date.now(),
+          schemaVersion: CACHE_SCHEMA_VERSION,
+        } satisfies CacheEntry<T>);
+      }
+      return { data, revalidating: null };
+    } finally {
+      removeInFlight(key);
+    }
+  }
+
   const entry = await get<CacheEntry<T>>(key, store).catch(() => undefined);
   const isUsable = entry != null && entry.schemaVersion === CACHE_SCHEMA_VERSION;
   const isFresh = isUsable && !entry.stale && Date.now() - entry.fetchedAt < config.ttl;
@@ -180,12 +220,12 @@ export async function cachedCommand<T>(
   }
 
   addInFlight(key);
-  const epochAtStart = getEpoch(key);
+  const epochAtStart = captureEpoch(key);
   const network = invokeCommand<T>(command, args)
     .then(async (data) => {
       // Skip the cache write if the key was invalidated while we were fetching —
       // writing would repopulate the cache with pre-mutation data.
-      if (getEpoch(key) === epochAtStart) {
+      if (isEpochCurrent(key, epochAtStart)) {
         await cacheSet(key, {
           key,
           data,
@@ -310,6 +350,10 @@ export async function invalidateCacheByArgs(
 /** Mark all entries as stale so SWR serves them while revalidating. */
 export async function markAllStale(): Promise<void> {
   if (isTauri) return;
+  // Move the generation before the first IndexedDB await so every request
+  // already in flight is barred from writing a pre-invalidation response,
+  // including first-load keys that do not exist in the store yet.
+  fullInvalidationEpoch += 1;
   const store = getStore();
   const allEntries = await entries<string, CacheEntry<unknown>>(store);
   await Promise.all(allEntries.map(([k, entry]) => set(k, { ...entry, stale: true }, store)));
@@ -318,6 +362,7 @@ export async function markAllStale(): Promise<void> {
 /** Remove all cached entries. */
 export async function clearAllCache(): Promise<void> {
   if (isTauri) return;
+  fullInvalidationEpoch += 1;
   await clear(getStore());
 }
 

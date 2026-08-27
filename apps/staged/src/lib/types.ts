@@ -118,6 +118,36 @@ export interface PrStatusChangedEvent {
   failedChecks: PrFailedCheck[];
 }
 
+// Store change feed events (src-tauri/src/store_events.rs). Every mutating
+// store method publishes one, so these fire for a write made in any window or
+// in the backend itself. A null id means the backend couldn't resolve it —
+// treat as "refetch the whole surface". An event whose ids are *all* null is
+// the feed's lag recovery: it dropped changes it can no longer describe, and
+// every one of these fires at once.
+
+export interface ProjectChangedEvent {
+  projectId: string | null;
+}
+
+export interface BranchChangedEvent {
+  branchId: string | null;
+  projectId: string | null;
+}
+
+export interface NotesChangedEvent {
+  branchId: string | null;
+  projectId: string | null;
+}
+
+export interface ReviewChangedEvent {
+  reviewId: string | null;
+  branchId: string | null;
+}
+
+export interface ReposChangedEvent {
+  githubRepo: string | null;
+}
+
 export interface CommitTimelineItem {
   /** DB id — present for pending/failed commits so they can be deleted by id. */
   id: string | null;

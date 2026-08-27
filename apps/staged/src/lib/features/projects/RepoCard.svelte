@@ -261,8 +261,9 @@
       } else {
         await commands.pinRepo(repo.githubRepo, repo.subpath);
       }
+      // The pin write's repos-changed event refetches the home repo list in
+      // every window; onChange covers this view's immediate repaint.
       onChange?.();
-      window.dispatchEvent(new CustomEvent('staged:pinned-repos-changed'));
     } catch (e) {
       console.error('[RepoCard] Failed to toggle pin:', e);
       toast.error('Failed to update pin', {

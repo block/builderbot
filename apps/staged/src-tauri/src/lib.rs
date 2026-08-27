@@ -36,10 +36,12 @@ pub mod session_completion;
 pub mod session_runner;
 pub mod shell_env;
 pub mod store;
+pub mod store_events;
 pub(crate) mod terminal_output;
 pub mod timeline;
 pub mod util_commands;
 pub mod web_server;
+pub mod window_commands;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -279,6 +281,15 @@ fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
     }
 }
 
+fn start_store_services(
+    store: Arc<Store>,
+    pr_scheduler: Arc<pr_poll_scheduler::PrPollScheduler>,
+    app_handle: tauri::AppHandle,
+) {
+    background_sync::spawn(Arc::clone(&store), app_handle.clone());
+    pr_poll_scheduler::spawn(pr_scheduler, store, app_handle);
+}
+
 // =============================================================================
 // Store status commands
 // =============================================================================
@@ -292,16 +303,53 @@ fn get_store_status(db_state: tauri::State<'_, DbState>) -> Option<StoreIncompat
 /// Delete the old database and create a fresh store.
 ///
 /// Called after the user confirms the reset dialog.
-#[tauri::command]
-fn confirm_reset_store(
-    db_state: tauri::State<'_, DbState>,
-    store_slot: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-) -> Result<(), String> {
+fn reset_store(
+    db_state: &DbState,
+    store_slot: &Mutex<Option<Arc<Store>>>,
+    store_change_tx: &tokio::sync::broadcast::Sender<store::StoreChange>,
+) -> Result<Option<Arc<Store>>, String> {
+    // This guard is the reset claim. Holding it through file deletion, store
+    // creation, and slot replacement makes concurrent confirmations serialize;
+    // the loser observes `None` and must not delete the newly created store.
+    let mut needs_reset = db_state.needs_reset.lock().unwrap();
+    match needs_reset.as_ref() {
+        None => return Ok(None),
+        Some(info) if info.kind == "needs_reset" => {}
+        Some(_) => {
+            return Err(
+                "Database was created by a newer Staged version and cannot be reset".to_string(),
+            );
+        }
+    }
+
     store::remove_db_files(&db_state.db_path).map_err(|e| e.to_string())?;
 
-    let s = Store::new(&db_state.db_path).map_err(|e| e.to_string())?;
-    *store_slot.lock().unwrap() = Some(Arc::new(s));
-    *db_state.needs_reset.lock().unwrap() = None;
+    let store = Arc::new(
+        Store::new(&db_state.db_path)
+            .map_err(|e| e.to_string())?
+            .with_change_sender(store_change_tx.clone()),
+    );
+    *store_slot.lock().unwrap() = Some(Arc::clone(&store));
+    *needs_reset = None;
+    Ok(Some(store))
+}
+
+#[tauri::command]
+fn confirm_reset_store(
+    app_handle: tauri::AppHandle,
+    db_state: tauri::State<'_, DbState>,
+    store_slot: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    store_change_tx: tauri::State<'_, tokio::sync::broadcast::Sender<store::StoreChange>>,
+    pr_scheduler: tauri::State<'_, Arc<pr_poll_scheduler::PrPollScheduler>>,
+) -> Result<(), String> {
+    if let Some(store) = reset_store(&db_state, &store_slot, &store_change_tx)? {
+        start_store_services(store, Arc::clone(pr_scheduler.inner()), app_handle.clone());
+        // Every window owns its prompt state. Tell peers to dismiss it after
+        // the shared backend store has been replaced successfully.
+        if let Err(error) = app_handle.emit("store-reset-completed", ()) {
+            log::warn!("Failed to broadcast store reset completion: {error}");
+        }
+    }
     Ok(())
 }
 
@@ -1717,6 +1765,53 @@ fn delete_action_context(
 // Tauri App Setup
 // =============================================================================
 
+/// What the app menu handler should do with a menu event.
+#[derive(Debug, PartialEq, Eq)]
+enum MenuDispatch {
+    /// Forward as this frontend event, addressed to the focused window.
+    EmitToFocused(&'static str),
+    /// Create a window here in the backend, with no project seed.
+    OpenWindowUnseeded,
+    /// Nothing to do — unknown item, or a window-scoped item with no target.
+    Drop,
+}
+
+/// Route a menu item to its handler. Menu actions apply to the focused window
+/// only — a broadcast would e.g. open settings in every window, or fire Delete
+/// Project in each window against its own selected project.
+///
+/// With no window focused (every window minimized — reachable on macOS, where
+/// the app menu stays live) window-scoped items drop, like a disabled menu item:
+/// routing them to an arbitrary minimized window would open settings invisibly,
+/// or delete whichever project that window happened to have selected. New Window
+/// is the exception. It's exactly what a user reaches for when nothing is
+/// visible, and it only round-trips through the frontend to inherit the opener's
+/// selected project — with no opener there is nothing to inherit, so the backend
+/// can just create it. That also un-strands the other items: the new window is
+/// focused, so Settings/Find/zoom route normally again.
+fn dispatch_menu_event(id: &str, has_focused_window: bool) -> MenuDispatch {
+    let event_name = match id {
+        "new_window" => "menu:new-window",
+        "settings" => "menu:settings",
+        "find" => "menu:find",
+        "find_next" => "menu:find-next",
+        "find_previous" => "menu:find-previous",
+        "delete_project" => "menu:delete-project",
+        "zoom_in" => "menu:zoom-in",
+        "zoom_out" => "menu:zoom-out",
+        "zoom_reset" => "menu:zoom-reset",
+        _ => return MenuDispatch::Drop,
+    };
+
+    if has_focused_window {
+        MenuDispatch::EmitToFocused(event_name)
+    } else if id == "new_window" {
+        MenuDispatch::OpenWindowUnseeded
+    } else {
+        MenuDispatch::Drop
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1733,6 +1828,12 @@ pub fn run() {
                     tauri_plugin_window_state::StateFlags::all()
                         & !tauri_plugin_window_state::StateFlags::VISIBLE,
                 )
+                // Only track the main window. Secondary `win-*` windows get
+                // fresh labels each launch, so persisting their geometry would
+                // accumulate stale entries in the state file that are never
+                // restored — they are placed by cascade instead (see
+                // `window_commands::new_window`).
+                .with_filter(|label| label == "main")
                 .build(),
         )
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -1793,6 +1894,16 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+,"),
                 )?;
+                // ⇧⌘N, not plain ⌘N: the native accelerator consumes the
+                // keydown before the webview sees it, and ⌘N belongs to the
+                // frontend's New Project shortcut (`app-new-project`).
+                let new_window_item = MenuItem::with_id(
+                    handle,
+                    "new_window",
+                    "New Window",
+                    true,
+                    Some("CmdOrCtrl+Shift+N"),
+                )?;
                 let find_item =
                     MenuItem::with_id(handle, "find", "Find…", true, Some("CmdOrCtrl+F"))?;
                 let find_next_item =
@@ -1849,7 +1960,11 @@ pub fn run() {
                     handle,
                     "File",
                     true,
-                    &[&PredefinedMenuItem::close_window(handle, None)?],
+                    &[
+                        &new_window_item,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &PredefinedMenuItem::close_window(handle, None)?,
+                    ],
                 )?;
 
                 let edit_menu = Submenu::with_items(
@@ -1925,16 +2040,26 @@ pub fn run() {
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
             let session_registry = Arc::new(session_runner::SessionRegistry::new());
+            // Store change feed: every mutating store method publishes a
+            // StoreChange here; the coalescer forwards them to all windows
+            // and web clients as domain events. Created unconditionally
+            // (like the scheduler) so `confirm_reset_store` can wire the
+            // same feed into a replacement store.
+            let (store_change_tx, store_change_rx) =
+                tokio::sync::broadcast::channel::<store::StoreChange>(1024);
+            store_events::spawn(app.handle().clone(), store_change_rx);
+            app.manage(store_change_tx.clone());
             // Backend-owned PR-poll scheduler. Managed unconditionally so the
             // interest/hint commands resolve even before the store exists (e.g.
-            // during the needs-reset prompt); the tick loop is only spawned once
-            // the store is ready (the `Ok` branch below).
+            // during the needs-reset prompt); the tick loop is spawned once the
+            // store is ready, either below or after a confirmed reset.
             let pr_scheduler = Arc::new(pr_poll_scheduler::PrPollScheduler::new());
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
-                    let s =
-                        Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
+                    let s = Store::new(&db_path)
+                        .map_err(|e| format!("Failed to open store: {e}"))?
+                        .with_change_sender(store_change_tx.clone());
                     let store_arc = Arc::new(s);
                     // Recover sessions whose owner process is dead; leave sessions
                     // owned by other live Staged instances untouched.
@@ -1964,13 +2089,12 @@ pub fn run() {
                         Ok(n) => log::info!("Cleaned up {n} pending image(s) from previous run"),
                         Err(e) => log::warn!("Failed to clean up pending images: {e}"),
                     }
-                    // Start the tiered background sync service for all cloned repos.
-                    background_sync::spawn(Arc::clone(&store_arc), app.handle().clone());
-                    // Start the backend PR-poll scheduler — it owns polling
-                    // cadence/concurrency; the frontend only sends interest hints.
-                    pr_poll_scheduler::spawn(
-                        Arc::clone(&pr_scheduler),
+                    // Start the store-backed services only once the store is
+                    // ready. The reset path calls the same helper after it
+                    // creates a compatible replacement.
+                    start_store_services(
                         Arc::clone(&store_arc),
+                        Arc::clone(&pr_scheduler),
                         app.handle().clone(),
                     );
                     // `fsmonitor-v1` only flips `.git/config` flags on stale
@@ -2019,6 +2143,8 @@ pub fn run() {
             app.manage(store_slot);
             app.manage(session_registry);
             app.manage(pr_scheduler);
+            app.manage(window_commands::NewWindowState::new());
+            app.manage(window_commands::UpdaterWindowState::default());
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(ShutdownState::default());
@@ -2060,27 +2186,66 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            let maybe_event_name = match event.id().as_ref() {
-                "settings" => Some("menu:settings"),
-                "find" => Some("menu:find"),
-                "find_next" => Some("menu:find-next"),
-                "find_previous" => Some("menu:find-previous"),
-                "delete_project" => Some("menu:delete-project"),
-                "zoom_in" => Some("menu:zoom-in"),
-                "zoom_out" => Some("menu:zoom-out"),
-                "zoom_reset" => Some("menu:zoom-reset"),
-                _ => None,
-            };
-
-            if let Some(event_name) = maybe_event_name {
-                if let Err(e) = app.emit(event_name, ()) {
-                    log::warn!("Failed to emit {event_name} event: {e}");
+            // Thin interpreter over `dispatch_menu_event`, which owns the
+            // routing rules (and their tests).
+            let focused = window_commands::focused_window(app);
+            match dispatch_menu_event(event.id().as_ref(), focused.is_some()) {
+                MenuDispatch::EmitToFocused(event_name) => {
+                    // Some by construction: EmitToFocused is only returned when
+                    // `focused.is_some()`.
+                    if let Some(window) = focused {
+                        if let Err(e) = app.emit_to(window.label(), event_name, ()) {
+                            log::warn!("Failed to emit {event_name} event: {e}");
+                        }
+                    }
+                }
+                MenuDispatch::OpenWindowUnseeded => {
+                    // Menus exist only on macOS, where menu events are delivered
+                    // on the main thread — the same thread `setup` builds the
+                    // first window on.
+                    if let Err(e) = window_commands::open_new_window(app, None) {
+                        log::warn!("Failed to open window from menu: {e}");
+                    }
+                }
+                MenuDispatch::Drop => {}
+            }
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                // Native windows have no WS heartbeat and their PR-poll client
+                // ids are exempt from TTL eviction, so a closed window must
+                // explicitly drop its interest or the scheduler keeps polling
+                // at that window's cadence forever.
+                let app = window.app_handle();
+                app.state::<Arc<pr_poll_scheduler::PrPollScheduler>>()
+                    .disconnect_client(format!(
+                        "{}{}",
+                        pr_poll_scheduler::TAURI_CLIENT_PREFIX,
+                        window.label()
+                    ));
+                // Drop any unconsumed navigation seed (window closed pre-init).
+                app.state::<window_commands::NewWindowState>()
+                    .discard_seed(window.label());
+                // The updater UI is window-owned but process-wide. A native
+                // destruction hook is the reliable handoff point even when the
+                // webview's frontend teardown never runs.
+                if app
+                    .state::<window_commands::UpdaterWindowState>()
+                    .window_destroyed(window.label())
+                {
+                    if let Err(error) = app.emit("updater-owner-available", ()) {
+                        log::warn!("Failed to announce updater ownership release: {error}");
+                    }
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
             get_store_status,
             confirm_reset_store,
+            // Windows
+            window_commands::new_window,
+            window_commands::take_window_seed,
+            window_commands::claim_updater_ownership,
             list_projects,
             create_project,
             list_project_repos,
@@ -2292,9 +2457,141 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::cleanup_project_branches_best_effort;
+    use super::{
+        cleanup_project_branches_best_effort, dispatch_menu_event, reset_store, DbState,
+        MenuDispatch, StoreIncompatibility,
+    };
     use crate::store::{Branch, BranchType};
     use std::collections::HashMap;
+    use std::sync::{Arc, Barrier, Mutex};
+
+    fn reset_info(kind: &str) -> StoreIncompatibility {
+        StoreIncompatibility {
+            db_app_version: "0.1.0".to_string(),
+            app_version: "0.2.0".to_string(),
+            kind: kind.to_string(),
+        }
+    }
+
+    #[test]
+    fn concurrent_store_resets_create_the_replacement_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_state = Arc::new(DbState {
+            db_path: dir.path().join("data.db"),
+            needs_reset: Mutex::new(Some(reset_info("needs_reset"))),
+        });
+        let store_slot = Arc::new(Mutex::new(None));
+        let (store_change_tx, _) = tokio::sync::broadcast::channel(4);
+        let barrier = Arc::new(Barrier::new(3));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let db_state = Arc::clone(&db_state);
+                let store_slot = Arc::clone(&store_slot);
+                let store_change_tx = store_change_tx.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    reset_store(&db_state, &store_slot, &store_change_tx)
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|performed| **performed).count(), 1);
+        assert!(store_slot.lock().unwrap().is_some());
+        assert!(db_state.needs_reset.lock().unwrap().is_none());
+        assert!(db_state.db_path.exists());
+    }
+
+    #[test]
+    fn a_too_new_store_cannot_be_reset_by_invoking_the_command_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        std::fs::write(&db_path, b"newer database").unwrap();
+        let db_state = DbState {
+            db_path: db_path.clone(),
+            needs_reset: Mutex::new(Some(reset_info("too_new"))),
+        };
+        let store_slot = Mutex::new(None);
+        let (store_change_tx, _) = tokio::sync::broadcast::channel(4);
+
+        let error = match reset_store(&db_state, &store_slot, &store_change_tx) {
+            Err(error) => error,
+            Ok(_) => panic!("too-new store should not be reset"),
+        };
+
+        assert!(error.contains("newer Staged version"));
+        assert_eq!(std::fs::read(db_path).unwrap(), b"newer database");
+        assert!(store_slot.lock().unwrap().is_none());
+        assert_eq!(
+            db_state
+                .needs_reset
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|info| info.kind.as_str()),
+            Some("too_new")
+        );
+    }
+
+    /// Every menu item this app defines, with the frontend event it routes to.
+    const MENU_ITEMS: &[(&str, &str)] = &[
+        ("new_window", "menu:new-window"),
+        ("settings", "menu:settings"),
+        ("find", "menu:find"),
+        ("find_next", "menu:find-next"),
+        ("find_previous", "menu:find-previous"),
+        ("delete_project", "menu:delete-project"),
+        ("zoom_in", "menu:zoom-in"),
+        ("zoom_out", "menu:zoom-out"),
+        ("zoom_reset", "menu:zoom-reset"),
+    ];
+
+    #[test]
+    fn menu_events_go_to_the_focused_window() {
+        for (id, event_name) in MENU_ITEMS {
+            assert_eq!(
+                dispatch_menu_event(id, true),
+                MenuDispatch::EmitToFocused(event_name),
+                "menu item {id} should emit {event_name} to the focused window"
+            );
+        }
+    }
+
+    #[test]
+    fn new_window_falls_back_to_native_creation_with_no_focused_window() {
+        assert_eq!(
+            dispatch_menu_event("new_window", false),
+            MenuDispatch::OpenWindowUnseeded
+        );
+    }
+
+    #[test]
+    fn other_menu_events_drop_with_no_focused_window() {
+        for (id, _) in MENU_ITEMS.iter().filter(|(id, _)| *id != "new_window") {
+            assert_eq!(
+                dispatch_menu_event(id, false),
+                MenuDispatch::Drop,
+                "window-scoped menu item {id} has no target and should drop"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_menu_events_drop_regardless_of_focus() {
+        for id in ["", "quit", "menu:new-window", "New Window"] {
+            assert_eq!(dispatch_menu_event(id, true), MenuDispatch::Drop);
+            assert_eq!(dispatch_menu_event(id, false), MenuDispatch::Drop);
+        }
+    }
 
     fn remote_branch(
         project_id: &str,

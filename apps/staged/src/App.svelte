@@ -6,7 +6,13 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { isTauri, listenToEvent, getWindowSync, type UnlistenFn } from './lib/transport';
+  import {
+    getWindowLabel,
+    isTauri,
+    getWindowSync,
+    listenToEvent,
+    type UnlistenFn,
+  } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -45,6 +51,8 @@
     triggerShortcut,
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
+  import { applyWindowTitle, formatWindowTitle } from './lib/features/layout/windowTitle';
+  import { projectFiltersStore } from './lib/features/projects/projectFilters.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { projectsDataStore } from './lib/stores/projectsData.svelte';
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
@@ -53,6 +61,7 @@
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
+  import { listenForMenuEvents } from './lib/listeners/menuListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import type { StoreIncompatibility } from './lib/types';
@@ -61,20 +70,18 @@
   const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
-  let unlistenSettings: UnlistenFn | undefined;
-  let unlistenFind: UnlistenFn | undefined;
-  let unlistenFindNext: UnlistenFn | undefined;
-  let unlistenFindPrevious: UnlistenFn | undefined;
-  let unlistenDeleteProject: UnlistenFn | undefined;
-  let unlistenZoomIn: UnlistenFn | undefined;
-  let unlistenZoomOut: UnlistenFn | undefined;
-  let unlistenZoomReset: UnlistenFn | undefined;
+  let unlistenMenu: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let unlistenCacheInvalidation: UnlistenFn | undefined;
   let unlistenPageLifecycle: (() => void) | undefined;
   let unlistenAcpToolsReconciled: UnlistenFn | undefined;
+  let unlistenStoreReset: UnlistenFn | undefined;
+  let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let stopUpdaterLoop: (() => void) | null = null;
+  let updaterStartPending = false;
+  let updaterStartQueued = false;
+  let destroyed = false;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
@@ -87,6 +94,16 @@
   // =========================================================================
   $effect(() => {
     prPollingService.setSelectedProject(navigation.selectedProjectId);
+  });
+
+  // =========================================================================
+  // Per-window title — each window names itself after what it is filtered to,
+  // so the macOS Window menu can tell windows apart instead of listing
+  // "Staged" three times. The filter store is per-webview, so this is already
+  // window-local; see windowTitle.ts for the format and the IPC guards.
+  // =========================================================================
+  $effect(() => {
+    void applyWindowTitle(formatWindowTitle(projectFiltersStore.activeFilters));
   });
 
   // Refresh git state (TTL-gated) for the selected project's branches when the
@@ -139,6 +156,14 @@
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
+  function requestNewWindow() {
+    // The new window inherits this window's selected project, mirroring the
+    // macOS menu path in menuListener.ts.
+    void commands.newWindow(navigation.selectedProjectId ?? null).catch((e) => {
+      console.error('Failed to open new window:', e);
+    });
+  }
+
   function navigateBack(): boolean {
     if (!navigation.canGoBack) return false;
     popDetailRoute();
@@ -173,15 +198,24 @@
     }
   }
 
-  function startUpdaterLoop(): () => void {
+  async function startUpdaterLoop(): Promise<(() => void) | null> {
     const isTauriApp = isTauri;
+    const windowLabel = getWindowLabel();
     void logUpdater(
-      `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp}`
+      `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp} window=${windowLabel}`
     );
 
     if (!updaterEnabled || import.meta.env.DEV || !isTauriApp) {
       void logUpdater('[updater] skipped because a gate condition was not met');
-      return () => {};
+      return null;
+    }
+
+    // Update prompts and relaunches are app-wide. The backend grants one live
+    // window ownership and releases it from the native Destroyed hook, allowing
+    // a surviving peer to take over even if frontend teardown never runs.
+    if (!(await commands.claimUpdaterOwnership())) {
+      void logUpdater('[updater] skipped because another window owns the updater loop');
+      return null;
     }
 
     let cancelled = false;
@@ -259,6 +293,35 @@
     };
   }
 
+  async function ensureUpdaterLoopStarted() {
+    if (destroyed || stopUpdaterLoop || updaterStartPending) return;
+    updaterStartPending = true;
+    try {
+      const stop = await startUpdaterLoop();
+      if (destroyed) stop?.();
+      else stopUpdaterLoop = stop;
+    } catch (error) {
+      await logUpdater(`[updater] failed to claim ownership: ${error}`);
+    } finally {
+      updaterStartPending = false;
+      if (updaterStartQueued) {
+        updaterStartQueued = false;
+        requestUpdaterLoopStart();
+      }
+    }
+  }
+
+  function requestUpdaterLoopStart() {
+    // An ownership-release event can cross an already-running claim that is
+    // about to lose to the old owner. Preserve that event and retry once the
+    // pending claim settles, or every window can end up ownerless.
+    if (updaterStartPending) {
+      updaterStartQueued = true;
+      return;
+    }
+    void ensureUpdaterLoopStarted();
+  }
+
   onMount(async () => {
     darkMode.init();
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
@@ -273,30 +336,16 @@
       void commands.warmProjectTimelines(navigation.selectedProjectId);
     }
 
-    // Listen for the app menu Preferences item.
-    unlistenSettings = listenToEvent('menu:settings', () => {
-      if (!triggerShortcut('app-open-settings')) openSettings();
+    // App-menu items, all nine registered and torn down as one. See
+    // menuListener.ts for why they're window-scoped.
+    unlistenMenu = listenForMenuEvents();
+    unlistenStoreReset = listenToEvent<void>('store-reset-completed', () => {
+      storeIncompat = null;
+      storeError = null;
+      resetting = false;
     });
-    unlistenFind = listenToEvent('menu:find', () => {
-      if (!triggerShortcut('search-find')) runSearchShortcut('find');
-    });
-    unlistenFindNext = listenToEvent('menu:find-next', () => {
-      if (!triggerShortcut('search-find-next')) runSearchShortcut('next');
-    });
-    unlistenFindPrevious = listenToEvent('menu:find-previous', () => {
-      if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
-    });
-    unlistenDeleteProject = listenToEvent('menu:delete-project', () => {
-      triggerShortcut('app-delete-project');
-    });
-    unlistenZoomIn = listenToEvent('menu:zoom-in', () => {
-      if (!triggerShortcut('view-increase-size')) increaseSize();
-    });
-    unlistenZoomOut = listenToEvent('menu:zoom-out', () => {
-      if (!triggerShortcut('view-decrease-size')) decreaseSize();
-    });
-    unlistenZoomReset = listenToEvent('menu:zoom-reset', () => {
-      if (!triggerShortcut('view-reset-size')) resetSize();
+    unlistenUpdaterOwnerAvailable = listenToEvent<void>('updater-owner-available', () => {
+      requestUpdaterLoopStart();
     });
 
     // Global session-status listener — must live at App level so it works
@@ -372,6 +421,24 @@
         modifiers: { meta: true },
         handler: requestNewProject,
       },
+      // New Window is Tauri-only (the web server rejects `new_window`). On
+      // macOS the native File ▸ New Window accelerator (⇧⌘N) consumes the
+      // keydown before the webview sees it and routes through the menu
+      // listener instead, so this binding is effectively for Windows/Linux,
+      // where the macOS-only menu — previously the sole caller of
+      // `newWindow` — doesn't exist.
+      ...(isTauri
+        ? [
+            {
+              id: 'app-new-window',
+              description: 'New window',
+              category: 'app' as const,
+              keys: ['n'],
+              modifiers: { meta: true, shift: true },
+              handler: requestNewWindow,
+            },
+          ]
+        : []),
       {
         id: 'app-go-back',
         description: 'Back',
@@ -486,25 +553,21 @@
 
     // Window was created hidden — show it now that the theme is applied
     await getWindowSync().show();
-    stopUpdaterLoop = startUpdaterLoop();
+    requestUpdaterLoopStart();
   });
 
   onDestroy(() => {
+    destroyed = true;
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
     unregisterShortcuts?.();
-    unlistenSettings?.();
-    unlistenFind?.();
-    unlistenFindNext?.();
-    unlistenFindPrevious?.();
-    unlistenDeleteProject?.();
-    unlistenZoomIn?.();
-    unlistenZoomOut?.();
-    unlistenZoomReset?.();
+    unlistenMenu?.();
     unlistenSessionStatus?.();
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
+    unlistenStoreReset?.();
+    unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();

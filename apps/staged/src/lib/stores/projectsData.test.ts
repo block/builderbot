@@ -113,6 +113,7 @@ let listProjectRepos: ReturnType<typeof vi.fn>;
 let listReposForHome: ReturnType<typeof vi.fn>;
 let invalidateProjectBranchTimelines: ReturnType<typeof vi.fn>;
 let ensureForRepos: ReturnType<typeof vi.fn>;
+let badgeLoadAll: ReturnType<typeof vi.fn>;
 let eventListeners: Map<string, EventCallback[]>;
 let windowTarget: EventTarget;
 
@@ -124,6 +125,17 @@ function emit(event: string, payload: unknown): void {
 
 function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+/**
+ * Freeze the idle drip, so a test can hold a project in the known-but-
+ * un-hydrated state the hydration guard turns on. scheduleDeferredTask prefers
+ * requestIdleCallback over its setTimeout fallback, so a stub that never
+ * invokes its callback means the drip is scheduled and never runs.
+ */
+function freezeBackgroundHydration(): void {
+  vi.stubGlobal('requestIdleCallback', () => 1);
+  vi.stubGlobal('cancelIdleCallback', () => {});
 }
 
 async function importStore() {
@@ -146,6 +158,7 @@ beforeEach(() => {
   listReposForHome = vi.fn().mockResolvedValue([]);
   invalidateProjectBranchTimelines = vi.fn();
   ensureForRepos = vi.fn().mockResolvedValue(undefined);
+  badgeLoadAll = vi.fn().mockResolvedValue(undefined);
 
   vi.doMock('../commands', () => ({
     listProjects,
@@ -167,7 +180,7 @@ beforeEach(() => {
   }));
   vi.doMock('./repoBadges.svelte', () => ({
     repoBadgeStore: {
-      loadAll: vi.fn().mockResolvedValue(undefined),
+      loadAll: badgeLoadAll,
       ensureForRepos,
     },
   }));
@@ -554,6 +567,9 @@ describe('refreshProject', () => {
     );
     await store.refreshProject('p1');
 
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(listBranchesForProject).toHaveBeenLastCalledWith('p1', { force: true });
+    expect(listProjectRepos).toHaveBeenLastCalledWith('p1', { force: true });
     expect(store.projects[0].name).toBe('Renamed');
     expect(store.branchesByProject.get('p1')).toHaveLength(2);
     expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
@@ -683,6 +699,9 @@ describe('event listeners', () => {
     expect(eventListeners.get('pr-status-changed')).toHaveLength(1);
     expect(eventListeners.get('session-status-changed')).toHaveLength(1);
     expect(eventListeners.get('project-setup-progress')).toHaveLength(1);
+    expect(eventListeners.get('project-changed')).toHaveLength(1);
+    expect(eventListeners.get('branch-changed')).toHaveLength(1);
+    expect(eventListeners.get('repos-changed')).toHaveLength(1);
   });
 
   it('coalesces a pr-status-changed burst into one flush, last event winning', async () => {
@@ -724,12 +743,15 @@ describe('event listeners', () => {
       expect(store.branchesByProject.get('p1')![0].prState).toBe('OPEN');
     });
     expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
   });
 
-  it('ignores non-commit sessions and unknown projects', async () => {
+  it('ignores non-commit sessions and un-hydrated projects', async () => {
+    freezeBackgroundHydration();
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
     const store = await importStore();
     await store.ensureLoaded();
-    await store.ensureProjectsHydrated();
+    await store.ensureProjectHydrated('p1');
     store.startListeners();
     listBranchesForProject.mockClear();
 
@@ -744,6 +766,14 @@ describe('event listeners', () => {
       status: 'completed',
       sessionType: 'commit',
       projectId: 'unknown',
+    } satisfies SessionStatusPayload);
+    // p2 is listed but was never hydrated, so no sprout icon is painted for it
+    // — there is nothing for the refetch to flip.
+    emit('session-status-changed', {
+      sessionId: 's3',
+      status: 'completed',
+      sessionType: 'commit',
+      projectId: 'p2',
     } satisfies SessionStatusPayload);
 
     await tick();
@@ -765,6 +795,9 @@ describe('event listeners', () => {
     await vi.waitFor(() => {
       expect(store.branchesByProject.get('p1')).toHaveLength(2);
     });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(listBranchesForProject).toHaveBeenLastCalledWith('p1', { force: true });
+    expect(listProjectRepos).toHaveBeenLastCalledWith('p1', { force: true });
     expect(store.projects[0].name).toBe('Renamed');
     expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
   });
@@ -782,25 +815,246 @@ describe('event listeners', () => {
     });
   });
 
-  it('refetches home repos when pinned repos change', async () => {
+  it('reloads the project list on project-changed', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    store.startListeners();
+
+    listProjects.mockResolvedValue(swr([project({ name: 'Renamed' })]));
+    emit('project-changed', { projectId: 'p1' });
+
+    await vi.waitFor(() => {
+      expect(store.projects[0].name).toBe('Renamed');
+    });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+  });
+
+  it('registers a project created in another window on project-changed', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    store.startListeners();
+
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    emit('project-changed', { projectId: 'p2' });
+
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    });
+  });
+
+  it('preserves force for a project-changed refetch queued behind an in-flight reload', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    store.startListeners();
+
+    let resolveFirst!: (value: SwrResult<Project[]>) => void;
+    listProjects.mockReturnValueOnce(
+      new Promise<SwrResult<Project[]>>((resolve) => {
+        resolveFirst = resolve;
+      })
+    );
+
+    // Remount-time revalidation starts unforced.
+    void store.ensureLoaded();
+    await tick();
+    expect(listProjects).toHaveBeenLastCalledWith({ force: false });
+
+    // An event arriving while it is pending queues a forced follow-up.
+    emit('project-changed', { projectId: 'p2' });
+    await tick();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    resolveFirst(swr([project()]));
+
+    await vi.waitFor(() => {
+      expect(listProjects).toHaveBeenCalledTimes(3);
+    });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    });
+  });
+
+  it('refetches the resolved project’s branches on branch-changed, coalescing a burst', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    listBranchesForProject.mockClear();
+    listBranchesForProject.mockResolvedValue(swr([branch({ branchName: 'renamed' })]));
+
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')![0].branchName).toBe('renamed');
+    });
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
+  });
+
+  it('queues a branch refetch when another change arrives during an in-flight read', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    listBranchesForProject.mockClear();
+
+    let resolveFirst!: (value: SwrResult<Branch[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveFirst = resolve;
+      })
+    );
+
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(1));
+
+    // This change may have committed after the first read began. It must queue
+    // a follow-up rather than race a second response against the first.
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await tick();
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+
+    listBranchesForProject.mockResolvedValue(swr([branch({ branchName: 'fresh' })]));
+    resolveFirst(swr([branch({ branchName: 'stale' })]));
+
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')![0].branchName).toBe('fresh');
+    });
+  });
+
+  it('falls back to projects holding the branch when branch-changed lacks a project', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    listBranchesForProject.mockClear();
+    listBranchesForProject.mockResolvedValue(swr([]));
+
+    emit('branch-changed', { branchId: 'b1', projectId: null });
+
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')).toHaveLength(0);
+    });
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
+  });
+
+  it('refetches every hydrated project’s branches when branch-changed names none', async () => {
+    freezeBackgroundHydration();
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    listBranchesForProject.mockImplementation((projectId: string) =>
+      Promise.resolve(swr([branch({ id: `${projectId}-b1`, projectId })]))
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectHydrated('p1');
+    store.startListeners();
+    listBranchesForProject.mockClear();
+
+    // The lag flush: the feed dropped changes it can no longer name, so it
+    // expands to every project the store paints — p2, never hydrated, is not
+    // one of them even though applyProjectList seeded it a branch entry.
+    emit('branch-changed', { branchId: null, projectId: null });
+    await tick();
+
+    expect(listBranchesForProject.mock.calls).toEqual([['p1', { force: true }]]);
+  });
+
+  it('skips branch-changed refetches for a known but un-hydrated project', async () => {
+    freezeBackgroundHydration();
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectHydrated('p1');
+    store.startListeners();
+    listBranchesForProject.mockClear();
+
+    // The state _branchesByProject.has() cannot distinguish: p2 is in the
+    // fetched list, so it holds a seeded empty entry, but nobody ever fetched
+    // it and no view painted it.
+    expect(store.branchesByProject.has('p2')).toBe(true);
+    expect(store.isProjectHydrated('p2')).toBe(false);
+
+    emit('branch-changed', { branchId: 'p2-b1', projectId: 'p2' });
+    await tick();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
+
+  it('chains a branch-changed refetch onto a first hydration still in flight', async () => {
+    freezeBackgroundHydration();
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveBranches = resolve;
+      })
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+    store.startListeners();
+
+    // The first hydration is mid-flight, so its read may predate the mutation
+    // the event announces — skipping outright would paint that stale read and
+    // leave it until the project's next event.
+    const hydrating = store.hydrateProject('p1');
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await tick();
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+
+    listBranchesForProject.mockResolvedValue(swr([branch({ branchName: 'renamed' })]));
+    resolveBranches(swr([branch({ branchName: 'stale' })]));
+    await hydrating;
+
+    // Exactly one follow-up, and it applies after the hydration it chained onto.
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')![0].branchName).toBe('renamed');
+    });
+    expect(listBranchesForProject).toHaveBeenCalledTimes(2);
+    expect(listBranchesForProject).toHaveBeenLastCalledWith('p1', { force: true });
+  });
+
+  it('skips branch-changed refetches for unknown or deleting projects', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    listBranchesForProject.mockClear();
+
+    store.projectDeleteStarted('p1', 'Alpha');
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    emit('branch-changed', { branchId: 'b-elsewhere', projectId: 'unknown' });
+    await tick();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
+
+  it('reloads badges and home repos on repos-changed', async () => {
     listReposForHome.mockResolvedValue([homeRepo()]);
     const store = await importStore();
     store.startListeners();
     await store.ensureHomeReposLoaded();
+    badgeLoadAll.mockClear();
 
     listReposForHome.mockResolvedValue([homeRepo({ pinned: true })]);
-    windowTarget.dispatchEvent(new Event('staged:pinned-repos-changed'));
+    emit('repos-changed', { githubRepo: 'org/alpha' });
 
     await vi.waitFor(() => {
       expect(store.homeRepos[0].pinned).toBe(true);
     });
+    expect(badgeLoadAll).toHaveBeenCalledTimes(1);
   });
 
-  it('does not fetch home repos on pin changes before anyone loaded them', async () => {
+  it('does not fetch home repos on repos-changed before anyone loaded them', async () => {
     const store = await importStore();
     store.startListeners();
 
-    windowTarget.dispatchEvent(new Event('staged:pinned-repos-changed'));
+    emit('repos-changed', { githubRepo: 'org/alpha' });
     await tick();
 
     expect(listReposForHome).not.toHaveBeenCalled();
@@ -820,34 +1074,105 @@ describe('event listeners', () => {
 });
 
 describe('project-delete lifecycle', () => {
-  it('tracks deleting projects and prunes state when removal completes', async () => {
+  it('tracks the deleting project until the post-delete refetch prunes it', async () => {
     const store = await importStore();
+    store.startListeners();
     await store.ensureLoaded();
 
     store.projectDeleteStarted('p1', 'Alpha');
     expect(store.isProjectDeleting('p1')).toBe(true);
     expect(store.deletingProjectNames.get('p1')).toBe('Alpha');
 
-    store.projectDeleteFinished('p1', { removed: true });
+    // The backend delete publishes project-changed; the refetch removes the
+    // project and its "Deleting…" marker in one apply.
+    listProjects.mockResolvedValue(swr([]));
+    emit('project-changed', { projectId: 'p1' });
+
+    await vi.waitFor(() => {
+      expect(store.projects).toHaveLength(0);
+    });
     expect(store.isProjectDeleting('p1')).toBe(false);
-    expect(store.projects).toHaveLength(0);
     expect(store.branchesByProject.has('p1')).toBe(false);
     expect(store.reposByProject.has('p1')).toBe(false);
   });
 
-  it('keeps the project when a delete fails', async () => {
+  it('keeps the project and repairs its branch list when a delete fails', async () => {
+    listBranchesForProject.mockResolvedValue(swr([branch(), branch({ id: 'b2' })]));
+    const store = await importStore();
+    store.startListeners();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    listBranchesForProject.mockClear();
+
+    store.projectDeleteStarted('p1', 'Alpha');
+
+    // The cascade's per-branch events are dropped while the delete is in
+    // flight — refetching a doomed list N times would be pure churn.
+    emit('branch-changed', { branchId: 'b2', projectId: 'p1' });
+    await tick();
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+
+    // The delete failed after the cascade already deleted b2's row, so the
+    // dropped events are the ones that would have pruned it: clearing the
+    // marker has to refetch, or the card lists a branch that no longer exists.
+    listBranchesForProject.mockResolvedValue(swr([branch()]));
+    store.projectDeleteFailed('p1');
+
+    expect(store.isProjectDeleting('p1')).toBe(false);
+    expect(store.projects).toHaveLength(1);
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')!.map((b) => b.id)).toEqual(['b1']);
+    });
+  });
+
+  it('does not fetch branches for an un-hydrated project when a delete fails', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    listBranchesForProject.mockClear();
+
+    // No branch list was ever painted for this project, so there is nothing to
+    // repair — and fetching would insert a map entry the store never loaded.
+    store.projectDeleteFailed('p-unknown');
+    await tick();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+    expect(store.branchesByProject.has('p-unknown')).toBe(false);
+  });
+
+  it('does not fetch branches when a delete fails for a known but un-hydrated project', async () => {
+    freezeBackgroundHydration();
+    const store = await importStore();
+    await store.ensureLoaded();
+    listBranchesForProject.mockClear();
+
+    // p1 is listed, so applyProjectList seeded it a branch entry — but nothing
+    // fetched or painted it, and a fetch here would half-hydrate it: branches
+    // without repos, unmarked, so the idle drip would refetch it anyway.
+    expect(store.branchesByProject.has('p1')).toBe(true);
+    store.projectDeleteFailed('p1');
+    await tick();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
+
+  it('keeps the deleting marker through an apply that still contains the project', async () => {
     const store = await importStore();
     await store.ensureLoaded();
 
     store.projectDeleteStarted('p1', 'Alpha');
-    store.projectDeleteFinished('p1');
+    // A reload that read the list before the backend delete committed: the
+    // project stays, but so does its marker — the card must not flash back
+    // to a live project mid-delete.
+    await store.ensureLoaded(); // kicks a background revalidation
+    await tick();
 
-    expect(store.isProjectDeleting('p1')).toBe(false);
     expect(store.projects).toHaveLength(1);
-    expect(store.branchesByProject.has('p1')).toBe(true);
+    expect(store.isProjectDeleting('p1')).toBe(true);
   });
 
-  it('discards an SWR revalidation that resolves after the delete', async () => {
+  it('discards an SWR revalidation that resolves after the post-delete refetch', async () => {
     const beta = project({ id: 'p2', name: 'Beta' });
     let resolveFresh!: (value: Project[]) => void;
     listProjects.mockResolvedValueOnce(
@@ -859,46 +1184,31 @@ describe('project-delete lifecycle', () => {
       )
     );
     const store = await importStore();
+    store.startListeners();
     await store.ensureLoaded();
 
     store.projectDeleteStarted('p2', 'Beta');
-    store.projectDeleteFinished('p2', { removed: true });
+    listProjects.mockResolvedValue(swr([project()]));
+    emit('project-changed', { projectId: 'p2' });
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+    });
 
-    // Fetched before the backend delete — applying it would resurrect p2.
+    // Fetched before the backend delete — applying it would resurrect p2,
+    // but the post-delete reload's generation bump discards it.
     resolveFresh([project(), beta]);
     await tick();
 
     expect(store.projects.map((p) => p.id)).toEqual(['p1']);
     expect(store.branchesByProject.has('p2')).toBe(false);
-  });
-
-  it('discards a concurrent ensureLoaded revalidation that resolves after the delete', async () => {
-    const beta = project({ id: 'p2', name: 'Beta' });
-    listProjects.mockResolvedValue(swr([project(), beta]));
-    const store = await importStore();
-    await store.ensureLoaded();
-
-    let resolveReload!: (value: SwrResult<Project[]>) => void;
-    listProjects.mockReturnValueOnce(
-      new Promise<SwrResult<Project[]>>((resolve) => {
-        resolveReload = resolve;
-      })
-    );
-    await store.ensureLoaded(); // kicks the background revalidation
-
-    store.projectDeleteStarted('p2', 'Beta');
-    store.projectDeleteFinished('p2', { removed: true });
-
-    resolveReload(swr([project(), beta]));
-    await tick();
-
-    expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+    expect(store.isProjectDeleting('p2')).toBe(false);
   });
 
   it("discards refreshProject's list replacement racing the delete", async () => {
     const beta = project({ id: 'p2', name: 'Beta' });
     listProjects.mockResolvedValue(swr([project(), beta]));
     const store = await importStore();
+    store.startListeners();
     await store.ensureLoaded();
 
     let resolveList!: (value: SwrResult<Project[]>) => void;
@@ -910,41 +1220,16 @@ describe('project-delete lifecycle', () => {
     const refreshing = store.refreshProject('p1');
 
     store.projectDeleteStarted('p2', 'Beta');
-    store.projectDeleteFinished('p2', { removed: true });
+    listProjects.mockResolvedValue(swr([project()]));
+    emit('project-changed', { projectId: 'p2' });
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+    });
 
     resolveList(swr([project(), beta]));
     await refreshing;
 
     expect(store.projects.map((p) => p.id)).toEqual(['p1']);
-  });
-
-  it('restarts the idle drip so un-hydrated projects still fill in after a delete', async () => {
-    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
-    const store = await importStore();
-    await store.ensureLoaded();
-    expect(store.isProjectHydrated('p1')).toBe(false);
-
-    store.projectDeleteStarted('p2', 'Beta');
-    store.projectDeleteFinished('p2', { removed: true });
-
-    await vi.waitFor(() => {
-      expect(store.isProjectHydrated('p1')).toBe(true);
-    });
-    expect(listBranchesForProject).not.toHaveBeenCalledWith('p2');
-  });
-
-  it('does not refetch already-hydrated projects after a delete', async () => {
-    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
-    const store = await importStore();
-    await store.ensureLoaded();
-    await store.ensureProjectsHydrated();
-    listBranchesForProject.mockClear();
-
-    store.projectDeleteStarted('p2', 'Beta');
-    store.projectDeleteFinished('p2', { removed: true });
-    await tick();
-
-    expect(listBranchesForProject).not.toHaveBeenCalled();
   });
 });
 

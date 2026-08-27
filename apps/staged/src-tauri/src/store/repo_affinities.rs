@@ -3,7 +3,7 @@
 use rusqlite::params;
 
 use super::models::SuggestedRepo;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// Build the canonical affinity key for a repo, encoding the subpath when present.
 /// The `::` delimiter is safe because neither GitHub `owner/repo` names nor
@@ -47,6 +47,8 @@ impl Store {
                     last_seen_at = ?3",
             params![a, b, now_timestamp()],
         )?;
+        // Affinity keys are composite (`repo::subpath`); no single repo to name.
+        self.publish(StoreChange::Repos { github_repo: None });
         Ok(())
     }
 

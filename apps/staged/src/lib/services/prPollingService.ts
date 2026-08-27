@@ -17,7 +17,7 @@
  * `pr-statuses-refreshed`; components subscribe to those directly.
  */
 
-import { isTauri, listenToEvent, type UnlistenFn } from '../transport';
+import { getWindowLabel, isTauri, listenToEvent, type UnlistenFn } from '../transport';
 import {
   setForegroundProject,
   setPrPollFocus,
@@ -35,17 +35,19 @@ import {
 // owns a stable id for the lifetime of the page that is threaded through every
 // interest hint.
 //
-//   - Native (Tauri): the fixed well-known id `tauri-main` (must match
-//     `TAURI_CLIENT_ID` in pr_poll_scheduler.rs), so single-client behaviour is
-//     identical to before per-client interest existed.
+//   - Native (Tauri): `tauri-<window label>` — one client per window, so each
+//     window's project selection and focus count independently in the
+//     backend's union (the first window's label is `main`, keeping its id
+//     byte-for-byte the pre-seeded `tauri-main`). The `tauri-` prefix must
+//     match `TAURI_CLIENT_PREFIX` in pr_poll_scheduler.rs: it exempts native
+//     windows from TTL eviction (they have no WS heartbeat); the backend drops
+//     the client when the window is destroyed.
 //   - Web (browser): a fresh UUID per page load (per tab). The same value must
 //     be appended to the WS connect URL (`?clientId=<id>`) by the web transport
 //     so the backend correlates this client's interest (invoke channel) with
 //     its disconnect (WS close). See `getPrPollClientId`.
 
-const TAURI_CLIENT_ID = 'tauri-main';
-
-const clientId: string = isTauri ? TAURI_CLIENT_ID : crypto.randomUUID();
+const clientId: string = isTauri ? `tauri-${getWindowLabel() ?? 'main'}` : crypto.randomUUID();
 
 /**
  * This client's PR-poll id, stable for the page's lifetime. Exposed so the web

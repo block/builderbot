@@ -1752,13 +1752,13 @@ pub fn start_session(
                 _ => Vec::new(),
             };
             // Local sessions also get STAGEDCTL_LOCK pointing at this
-            // instance's control-server discovery file, so any agent Staged
-            // spawns can run stagedctl with zero configuration. Remote (Blox)
-            // sessions are skipped: they can't reach a loopback listener or
-            // the file.
+            // instance's control-server discovery file plus STAGEDCTL_BIN
+            // pointing at the bundled sidecar, so any agent Staged spawns can
+            // run stagedctl with zero configuration. Remote (Blox) sessions
+            // are skipped: they can't reach a loopback listener or the file.
             let mut session_env = config.extra_env.clone();
             if config.workspace_name.is_none() {
-                session_env.extend(crate::control_server::stagedctl_lock_env());
+                session_env.extend(crate::control_server::stagedctl_env());
             }
             let driver = driver
                 .with_extra_env(crate::agent::env_vars::merge_agent_env(
@@ -1819,6 +1819,11 @@ pub fn start_session(
                     Ok(snapshot) => {
                         let mut vars = snapshot.vars().into_owned();
                         crate::acp_tools::apply_managed_tools_env(&mut vars);
+                        // Put this instance's stagedctl shim dir on the
+                        // agent's PATH so the bare `stagedctl` name resolves
+                        // (STAGEDCTL_BIN above is the exact-path fallback,
+                        // e.g. when this snapshot capture fails).
+                        crate::control_server::apply_stagedctl_path(&mut vars);
                         driver.with_env_snapshot(vars)
                     }
                     Err(e) => {

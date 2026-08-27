@@ -234,6 +234,65 @@ pub(crate) fn resolve_pikchr_grammar_reference(
     grammar_path.to_string_lossy().into_owned()
 }
 
+const STAGEDCTL_GUIDE_RESOURCE: &str = "resources/stagedctl/guide.md";
+
+/// Path of the bundled stagedctl guide, resolving like the pikchr grammar:
+/// the bundle's resource dir first, the source tree in dev.
+fn bundled_stagedctl_guide_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Ok(path) = app_handle
+        .path()
+        .resolve(STAGEDCTL_GUIDE_RESOURCE, BaseDirectory::Resource)
+    {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(STAGEDCTL_GUIDE_RESOURCE);
+    if source_path.is_file() {
+        return Some(source_path);
+    }
+
+    None
+}
+
+/// stagedctl guidance for a session prompt, or `None` when the session can't
+/// reach this instance's control server: remote (Blox) sessions have no
+/// loopback path, and a session is never told about a CLI it cannot run
+/// (control server down or sidecar missing).
+pub(crate) fn stagedctl_session_guidance(
+    app_handle: &tauri::AppHandle,
+    workspace_name: Option<&str>,
+) -> Option<String> {
+    if workspace_name.is_some() || !crate::control_server::stagedctl_session_ready() {
+        return None;
+    }
+    let guide_reference =
+        bundled_stagedctl_guide_path(app_handle).map(|path| path.display().to_string());
+    Some(stagedctl_guidance_text(guide_reference.as_deref()))
+}
+
+/// The prompt paragraph teaching `--help`-first discovery of stagedctl.
+/// Modeled on berd's berd-help skill, it deliberately does not restate
+/// commands or flags — the CLI's own help is the authoritative reference —
+/// so this text cannot go stale against the binary. It does state the
+/// product invariant (every verb is UI-visible and read-only or reversible)
+/// as a self-check heuristic.
+fn stagedctl_guidance_text(guide_reference: Option<&str>) -> String {
+    let mut guidance = "This session was spawned by the Staged desktop app, whose control CLI \
+`stagedctl` is on your PATH (exact binary path in $STAGEDCTL_BIN). Use it when you need to \
+inspect or drive the app itself; never edit files under ~/.staged directly. Discover the \
+command surface instead of guessing: `stagedctl --help` lists the nouns, `stagedctl <noun> \
+<verb> --help` is the authoritative reference for flags, addressing, and exit codes, and \
+`--json` switches any command to machine-readable output. Every stagedctl verb is visible in \
+the app's UI and is read-only or reversible; a verb you cannot find is deliberately absent."
+        .to_string();
+    if let Some(reference) = guide_reference {
+        guidance.push_str(&format!(" For the full guide, read: {reference}"));
+    }
+    guidance
+}
+
 /// Whether the local Pikchr `generate_pikchr` tool applies to a session.
 ///
 /// The pikchr MCP server binds to loopback, so it's only reachable from
@@ -4867,6 +4926,7 @@ async fn prepare_branch_session_start(
             matches!(session_type, BranchSessionType::Note),
             branch.workspace_name.as_deref(),
         ),
+        stagedctl_session_guidance(app_handle, branch.workspace_name.as_deref()).as_deref(),
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -6358,6 +6418,7 @@ async fn start_queued_session_for_branch(
             matches!(session_type, BranchSessionType::Note),
             branch.workspace_name.as_deref(),
         ),
+        stagedctl_session_guidance(&app_handle, branch.workspace_name.as_deref()).as_deref(),
     );
 
     // The SHAs the artifact anchors to and the remote working directory are
@@ -8004,6 +8065,7 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     base_branch: Option<&str>,
     pikchr_grammar_reference: &str,
     pikchr_tools_available: bool,
+    stagedctl_guidance: Option<&str>,
 ) -> String {
     let mut action_instructions = match session_type {
         BranchSessionType::Note => [
@@ -8164,6 +8226,14 @@ Rules:\n\
         action_instructions.push_str(note_media_guidance());
     }
 
+    // stagedctl applies to every session type (a review session may still
+    // read timelines or check session status); `None` means the session
+    // can't reach the control server, so the CLI is never advertised.
+    if let Some(guidance) = stagedctl_guidance {
+        action_instructions.push_str("\n\n");
+        action_instructions.push_str(guidance);
+    }
+
     let action_tag = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
     );
@@ -8257,8 +8327,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// Calls [`build_full_prompt_with_pikchr_reference`] with the default pikchr
-    /// grammar reference and no pikchr tools. Production callers thread both
-    /// through explicitly; only these tests want the defaults.
+    /// grammar reference, no pikchr tools, and no stagedctl guidance.
+    /// Production callers thread all three through explicitly; only these
+    /// tests want the defaults.
     fn build_full_prompt(
         user_prompt: &str,
         project_information: &str,
@@ -8276,6 +8347,7 @@ mod tests {
             base_branch,
             PIKCHR_GRAMMAR_URL,
             false,
+            None,
         )
     }
 
@@ -13375,10 +13447,90 @@ mod tests {
             None,
             "/tmp/staged/pikchr/grammar.md",
             true,
+            None,
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
         assert!(prompt.contains("generate_pikchr"));
+    }
+
+    #[test]
+    fn branch_session_prompts_include_supplied_stagedctl_guidance() {
+        // The guidance applies to every session type, inside the <action> tag.
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Commit,
+            BranchSessionType::Review,
+        ] {
+            let guidance = stagedctl_guidance_text(Some("/tmp/staged/stagedctl/guide.md"));
+            let prompt = build_full_prompt_with_pikchr_reference(
+                "user prompt",
+                "project info",
+                "branch context",
+                &session_type,
+                None,
+                None,
+                PIKCHR_GRAMMAR_URL,
+                false,
+                Some(&guidance),
+            );
+
+            let action_end = prompt.find("</action>").expect("action tag present");
+            let guidance_start = prompt
+                .find("stagedctl --help")
+                .unwrap_or_else(|| panic!("{session_type:?} prompt should teach --help discovery"));
+            assert!(
+                guidance_start < action_end,
+                "{session_type:?} guidance must sit inside the <action> tag"
+            );
+            assert!(prompt.contains("For the full guide, read: /tmp/staged/stagedctl/guide.md"));
+        }
+    }
+
+    #[test]
+    fn stagedctl_guidance_is_omitted_when_unavailable() {
+        // `None` (remote workspace, control server down, or sidecar missing)
+        // must leave no trace of the CLI in the prompt.
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            None,
+            None,
+        );
+
+        assert!(!prompt.contains("stagedctl"));
+    }
+
+    #[test]
+    fn stagedctl_guidance_teaches_discovery_not_commands() {
+        let guidance = stagedctl_guidance_text(Some("/tmp/guide.md"));
+
+        // --help-first discovery, machine output, and the safety invariant.
+        assert!(guidance.contains("stagedctl --help"));
+        assert!(guidance.contains("--json"));
+        assert!(guidance.contains("$STAGEDCTL_BIN"));
+        assert!(guidance.contains("read-only or reversible"));
+        assert!(guidance.contains("For the full guide, read: /tmp/guide.md"));
+
+        // Modeled on berd-help: never restate the verb table — it would go
+        // stale against the CLI. Spot-check that no v1 noun/verb pair leaks in.
+        for verbs in [
+            "project list",
+            "timeline show",
+            "session start",
+            "image add",
+        ] {
+            assert!(
+                !guidance.contains(verbs),
+                "guidance must not restate the `{verbs}` command"
+            );
+        }
+
+        // Without a resolvable guide file the pointer is dropped entirely.
+        let without_reference = stagedctl_guidance_text(None);
+        assert!(!without_reference.contains("full guide"));
     }
 
     #[test]

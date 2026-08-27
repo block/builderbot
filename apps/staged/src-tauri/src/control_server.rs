@@ -24,6 +24,14 @@
 //! are swept on startup and our own file is removed on exit. Agent sessions
 //! spawned by Staged receive the file's path in `STAGEDCTL_LOCK` so the CLI
 //! finds its owning instance with zero configuration.
+//!
+//! **Sidecar reachability:** the `stagedctl` binary ships as a Tauri sidecar
+//! next to the app executable. At startup this module resolves it, exposes
+//! its path to sessions as `STAGEDCTL_BIN`, and builds a per-instance PATH
+//! shim dir (`~/.staged/control-bin-<pid>/stagedctl` symlink) that
+//! `session_runner` prepends to every local agent session's PATH so a bare
+//! `stagedctl` just works. Shim dirs follow the discovery file's lifecycle
+//! (pid-suffixed, swept when dead, removed on exit).
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +52,12 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Env var carrying the discovery-file path into spawned agent sessions.
 pub const STAGEDCTL_LOCK_ENV: &str = "STAGEDCTL_LOCK";
+
+/// Env var carrying the absolute path of this instance's bundled `stagedctl`
+/// sidecar into spawned agent sessions. The PATH shim dir makes the bare
+/// `stagedctl` name resolve; this is the exact-path escape hatch (berd's
+/// `BERDCTL_BIN` equivalent).
+pub const STAGEDCTL_BIN_ENV: &str = "STAGEDCTL_BIN";
 
 /// The dispatch commands backing the v1 `stagedctl` command table — the only
 /// verbs reachable through the control server. Every entry must be visible in
@@ -79,6 +93,21 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// server never started (bind failure) and sessions get no `STAGEDCTL_LOCK`.
 static DISCOVERY_FILE: OnceLock<PathBuf> = OnceLock::new();
 
+/// Path of the bundled `stagedctl` sidecar, resolved at control-server start.
+/// `None` means the sidecar wasn't found next to the app executable (e.g. a
+/// bare `cargo run` outside the tauri CLI) and sessions get no
+/// `STAGEDCTL_BIN` or PATH shim.
+static STAGEDCTL_BIN: OnceLock<PathBuf> = OnceLock::new();
+
+/// Per-instance PATH shim dir (`~/.staged/control-bin-<pid>/`) holding a
+/// `stagedctl` symlink to the sidecar, prepended to every local agent
+/// session's PATH. Pid-suffixed for the same reason as the discovery file:
+/// `~/.staged` is shared, and a dev instance and a production install must
+/// never point each other's sessions at the wrong binary (or at a symlink
+/// dangling into a cleaned dev target dir). Swept and removed alongside the
+/// discovery file.
+static STAGEDCTL_SHIM_DIR: OnceLock<PathBuf> = OnceLock::new();
+
 #[derive(Clone)]
 struct ControlState {
     app_handle: tauri::AppHandle,
@@ -92,6 +121,33 @@ pub fn stagedctl_lock_env() -> Option<(String, String)> {
     DISCOVERY_FILE
         .get()
         .map(|path| (STAGEDCTL_LOCK_ENV.to_string(), path.display().to_string()))
+}
+
+/// All stagedctl env pairs for spawned agent sessions: `STAGEDCTL_LOCK` once
+/// the control server is up, plus `STAGEDCTL_BIN` when the sidecar resolved.
+pub fn stagedctl_env() -> Vec<(String, String)> {
+    let mut vars: Vec<(String, String)> = stagedctl_lock_env().into_iter().collect();
+    if let Some(bin) = STAGEDCTL_BIN.get() {
+        vars.push((STAGEDCTL_BIN_ENV.to_string(), bin.display().to_string()));
+    }
+    vars
+}
+
+/// Prepend this instance's shim dir to a captured env snapshot's PATH so a
+/// bare `stagedctl` resolves inside spawned agent sessions. No-op when the
+/// sidecar (and therefore the shim) is unavailable.
+pub fn apply_stagedctl_path(vars: &mut Vec<(String, String)>) {
+    if let Some(shim_dir) = STAGEDCTL_SHIM_DIR.get() {
+        crate::acp_tools::prepend_dirs_to_path(vars, std::slice::from_ref(shim_dir));
+    }
+}
+
+/// Whether spawned local sessions can actually run `stagedctl`: the control
+/// server is reachable (discovery file written) and the sidecar resolved.
+/// Prompt scaffolding consults this so sessions are never told about a CLI
+/// they cannot use.
+pub fn stagedctl_session_ready() -> bool {
+    DISCOVERY_FILE.get().is_some() && STAGEDCTL_BIN.get().is_some()
 }
 
 /// Start the control server in a background task. Called unconditionally at
@@ -122,6 +178,7 @@ async fn run(app_handle: tauri::AppHandle) -> Result<(), String> {
     let path = discovery_file_path(&dir, pid);
     write_discovery_file(&path, port, pid, generation)?;
     let _ = DISCOVERY_FILE.set(path.clone());
+    setup_stagedctl_shim(&dir, pid);
     log::info!("[control_server] listening on 127.0.0.1:{port}, discovery file {path:?}");
 
     let state = ControlState {
@@ -219,6 +276,70 @@ async fn invoke(
 }
 
 // =============================================================================
+// stagedctl sidecar + PATH shim
+// =============================================================================
+
+/// Locate the bundled `stagedctl` sidecar. The tauri CLI copies
+/// `bundle.externalBin` entries next to the app executable — into
+/// `target/{debug,release}` for dev runs and `Contents/MacOS/` in the bundle
+/// — with the target-triple suffix stripped, so it always sits beside
+/// `current_exe`.
+fn locate_stagedctl_sidecar() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.parent()?.join("stagedctl");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Resolve the sidecar and build this instance's PATH shim dir. A missing
+/// sidecar or failed shim is logged and degrades gracefully: sessions still
+/// get `STAGEDCTL_LOCK`, just no `STAGEDCTL_BIN` / bare-name resolution.
+fn setup_stagedctl_shim(dir: &std::path::Path, pid: u32) {
+    let Some(bin) = locate_stagedctl_sidecar() else {
+        log::warn!(
+            "[control_server] stagedctl sidecar not found next to the app executable; \
+             agent sessions get STAGEDCTL_LOCK only"
+        );
+        return;
+    };
+    match create_stagedctl_shim_dir(&stagedctl_shim_dir_path(dir, pid), &bin) {
+        Ok(()) => {
+            let _ = STAGEDCTL_SHIM_DIR.set(stagedctl_shim_dir_path(dir, pid));
+        }
+        Err(e) => log::warn!("[control_server] failed to create stagedctl PATH shim: {e}"),
+    }
+    let _ = STAGEDCTL_BIN.set(bin);
+}
+
+fn stagedctl_shim_dir_path(dir: &std::path::Path, pid: u32) -> PathBuf {
+    dir.join(format!("control-bin-{pid}"))
+}
+
+/// Create (or refresh, after a same-pid restart of the control server) the
+/// shim dir containing a `stagedctl` symlink to the bundled sidecar.
+#[cfg(unix)]
+fn create_stagedctl_shim_dir(
+    shim_dir: &std::path::Path,
+    bin: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(shim_dir).map_err(|e| format!("create {shim_dir:?}: {e}"))?;
+    let link = shim_dir.join("stagedctl");
+    match std::fs::remove_file(&link) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("remove existing {link:?}: {e}")),
+    }
+    std::os::unix::fs::symlink(bin, &link).map_err(|e| format!("symlink {link:?} -> {bin:?}: {e}"))
+}
+
+#[cfg(not(unix))]
+fn create_stagedctl_shim_dir(
+    _shim_dir: &std::path::Path,
+    _bin: &std::path::Path,
+) -> Result<(), String> {
+    Err("stagedctl PATH shim is only supported on unix".to_string())
+}
+
+// =============================================================================
 // Discovery file
 // =============================================================================
 
@@ -264,18 +385,25 @@ fn write_discovery_file(
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {tmp:?} -> {path:?}: {e}"))
 }
 
-/// Remove this instance's discovery file. Called from the app exit handler.
-pub fn remove_discovery_file() {
+/// Remove this instance's discovery file and PATH-shim dir. Called from the
+/// app exit handler.
+pub fn remove_instance_files() {
     if let Some(path) = DISCOVERY_FILE.get() {
         if let Err(e) = std::fs::remove_file(path) {
             log::warn!("[control_server] failed to remove discovery file {path:?}: {e}");
         }
     }
+    if let Some(dir) = STAGEDCTL_SHIM_DIR.get() {
+        if let Err(e) = std::fs::remove_dir_all(dir) {
+            log::warn!("[control_server] failed to remove shim dir {dir:?}: {e}");
+        }
+    }
 }
 
-/// Delete `control-<pid>.json` files (and orphaned temp files) left behind by
-/// instances that are no longer running. `~/.staged` is shared by every
-/// Staged instance, so only files whose embedded pid is dead are touched.
+/// Delete `control-<pid>.json` files (plus orphaned temp files) and
+/// `control-bin-<pid>` shim dirs left behind by instances that are no longer
+/// running. `~/.staged` is shared by every Staged instance, so only entries
+/// whose embedded pid is dead are touched.
 fn sweep_stale_discovery_files(dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -289,21 +417,28 @@ fn sweep_stale_discovery_files(dir: &std::path::Path) {
         if pid == std::process::id() || crate::session_runner::is_process_alive(pid) {
             continue;
         }
-        if let Err(e) = std::fs::remove_file(entry.path()) {
+        let path = entry.path();
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = result {
             log::warn!("[control_server] failed to sweep stale {name}: {e}");
         } else {
-            log::info!("[control_server] swept stale discovery file {name}");
+            log::info!("[control_server] swept stale control entry {name}");
         }
     }
 }
 
-/// Parse the pid out of a `control-<pid>.json` or `control-<pid>.json.tmp`
-/// filename; `None` for anything else.
+/// Parse the pid out of a `control-<pid>.json`, `control-<pid>.json.tmp`, or
+/// `control-bin-<pid>` filename; `None` for anything else.
 fn stale_sweep_candidate_pid(filename: &str) -> Option<u32> {
     let rest = filename.strip_prefix("control-")?;
     let pid = rest
         .strip_suffix(".json")
-        .or_else(|| rest.strip_suffix(".json.tmp"))?;
+        .or_else(|| rest.strip_suffix(".json.tmp"))
+        .or_else(|| rest.strip_prefix("bin-"))?;
     pid.parse().ok()
 }
 
@@ -469,10 +604,15 @@ mod tests {
         std::fs::write(&dead, "{}").unwrap();
         let dead_tmp = dir.path().join("control-999999998.json.tmp");
         std::fs::write(&dead_tmp, "{").unwrap();
+        let dead_shim = stagedctl_shim_dir_path(dir.path(), 999999997);
+        std::fs::create_dir_all(&dead_shim).unwrap();
+        std::fs::write(dead_shim.join("stagedctl"), "").unwrap();
 
         // Our own pid — alive.
         let alive = discovery_file_path(dir.path(), std::process::id());
         std::fs::write(&alive, "{}").unwrap();
+        let alive_shim = stagedctl_shim_dir_path(dir.path(), std::process::id());
+        std::fs::create_dir_all(&alive_shim).unwrap();
 
         // Non-discovery files are never touched.
         let foreign = dir.path().join("data.db");
@@ -482,17 +622,59 @@ mod tests {
 
         assert!(!dead.exists(), "dead-pid discovery file should be swept");
         assert!(!dead_tmp.exists(), "orphaned temp file should be swept");
+        assert!(!dead_shim.exists(), "dead-pid shim dir should be swept");
         assert!(alive.exists(), "live-pid discovery file must survive");
+        assert!(alive_shim.exists(), "live-pid shim dir must survive");
         assert!(foreign.exists(), "unrelated files must survive");
     }
 
     #[test]
-    fn stale_sweep_candidate_pid_parses_only_discovery_filenames() {
+    fn stale_sweep_candidate_pid_parses_only_control_entry_names() {
         assert_eq!(stale_sweep_candidate_pid("control-123.json"), Some(123));
         assert_eq!(stale_sweep_candidate_pid("control-123.json.tmp"), Some(123));
+        assert_eq!(stale_sweep_candidate_pid("control-bin-123"), Some(123));
         assert_eq!(stale_sweep_candidate_pid("control-abc.json"), None);
         assert_eq!(stale_sweep_candidate_pid("control-.json"), None);
+        assert_eq!(stale_sweep_candidate_pid("control-bin-"), None);
         assert_eq!(stale_sweep_candidate_pid("preferences.json"), None);
         assert_eq!(stale_sweep_candidate_pid("data.db"), None);
+    }
+
+    // -------------------------------------------------------------------
+    // stagedctl PATH shim
+    // -------------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_dir_holds_a_stagedctl_symlink_to_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("stagedctl-sidecar");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+
+        let shim_dir = stagedctl_shim_dir_path(dir.path(), 1234);
+        create_stagedctl_shim_dir(&shim_dir, &bin).unwrap();
+
+        let link = shim_dir.join("stagedctl");
+        assert_eq!(std::fs::read_link(&link).unwrap(), bin);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shim_dir_refresh_replaces_an_existing_symlink() {
+        // Pids are reused across app restarts of the same process image; a
+        // stale symlink from an earlier start of this pid must be replaced,
+        // not error the setup.
+        let dir = tempfile::tempdir().unwrap();
+        let old_bin = dir.path().join("old-sidecar");
+        let new_bin = dir.path().join("new-sidecar");
+        std::fs::write(&old_bin, "").unwrap();
+        std::fs::write(&new_bin, "").unwrap();
+
+        let shim_dir = stagedctl_shim_dir_path(dir.path(), 1234);
+        create_stagedctl_shim_dir(&shim_dir, &old_bin).unwrap();
+        create_stagedctl_shim_dir(&shim_dir, &new_bin).unwrap();
+
+        let link = shim_dir.join("stagedctl");
+        assert_eq!(std::fs::read_link(&link).unwrap(), new_bin);
     }
 }

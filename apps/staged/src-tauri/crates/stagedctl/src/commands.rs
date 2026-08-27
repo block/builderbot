@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cli::{Cli, ImageVerb, Noun, ProjectVerb, SessionType, SessionVerb, TimelineVerb};
-use crate::client::{default_data_dir, resolve_lock_path, Client, CtlError, STAGEDCTL_LOCK_ENV};
+use crate::client::{default_data_dir, discover_and_connect, Client, CtlError, STAGEDCTL_LOCK_ENV};
 
 /// One command's result: the value `--json` prints, and the human rendering.
 pub struct CmdOutput {
@@ -23,12 +23,11 @@ pub struct CmdOutput {
 
 pub fn run(cli: Cli) -> Result<CmdOutput, CtlError> {
     validate(&cli.command)?;
-    let lock_path = resolve_lock_path(
+    let client = discover_and_connect(
         cli.lock_path.as_deref(),
         std::env::var_os(STAGEDCTL_LOCK_ENV),
         default_data_dir().as_deref(),
     )?;
-    let client = Client::connect(&lock_path)?;
 
     match cli.command {
         Noun::Project(ProjectVerb::List) => project_list(&client),

@@ -5,7 +5,9 @@
 //! spawned agent sessions as `$STAGEDCTL_LOCK`. The CLI resolves the file,
 //! pings the server to verify it is talking to the instance the file
 //! describes (pid + generation) and that both sides speak the same protocol
-//! version, and only then sends any command payload.
+//! version, and only then sends any command payload. Without an explicit
+//! path it tries every live-pid discovery file, newest first, until one
+//! passes that handshake — file freshness alone can lie (pid reuse).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -80,41 +82,70 @@ pub fn default_data_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|d| d.join(".staged"))
 }
 
-/// Resolve which discovery file to use: `--lock-path` beats
-/// `$STAGEDCTL_LOCK` beats the newest live-pid `control-*.json` in the data
-/// dir. No candidate at all means we are not under a Staged app.
-pub fn resolve_lock_path(
+/// Resolve the discovery files to try, in order: `--lock-path` beats
+/// `$STAGEDCTL_LOCK` (each an exact, single candidate) beats every live-pid
+/// `control-*.json` in the data dir, newest first. No candidate at all
+/// means we are not under a Staged app.
+pub fn resolve_lock_candidates(
     flag: Option<&Path>,
     env_value: Option<std::ffi::OsString>,
     data_dir: Option<&Path>,
-) -> Result<PathBuf, CtlError> {
+) -> Result<Vec<PathBuf>, CtlError> {
     if let Some(path) = flag {
-        return Ok(path.to_path_buf());
+        return Ok(vec![path.to_path_buf()]);
     }
     if let Some(value) = env_value {
         if !value.is_empty() {
-            return Ok(PathBuf::from(value));
+            return Ok(vec![PathBuf::from(value)]);
         }
     }
-    if let Some(dir) = data_dir {
-        if let Some(path) = newest_live_discovery_file(dir) {
-            return Ok(path);
-        }
+    let candidates = data_dir.map(live_discovery_files).unwrap_or_default();
+    if candidates.is_empty() {
+        return Err(CtlError::Environment(
+            "not running under a Staged app: $STAGEDCTL_LOCK is not set and no running \
+             Staged instance was found (no live control-<pid>.json under ~/.staged). \
+             Start the Staged app, or pass --lock-path."
+                .to_string(),
+        ));
     }
-    Err(CtlError::Environment(
-        "not running under a Staged app: $STAGEDCTL_LOCK is not set and no running \
-         Staged instance was found (no live control-<pid>.json under ~/.staged). \
-         Start the Staged app, or pass --lock-path."
-            .to_string(),
-    ))
+    Ok(candidates)
 }
 
-/// Newest (by mtime) `control-<pid>.json` in `dir` whose embedded pid is a
-/// live process. Dead-pid leftovers are the app's problem to sweep; we just
-/// skip them.
-fn newest_live_discovery_file(dir: &Path) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+/// Resolve discovery and connect, trying each candidate in order until one
+/// passes the ping handshake. An explicit `--lock-path` or `$STAGEDCTL_LOCK`
+/// yields exactly one candidate; the data-dir fallback may yield several —
+/// multiple running instances, or a pid-reuse zombie shadowing a real one —
+/// and the handshake, not file freshness, decides which is real. If none
+/// answers, the newest candidate's error is reported.
+pub fn discover_and_connect(
+    flag: Option<&Path>,
+    env_value: Option<std::ffi::OsString>,
+    data_dir: Option<&Path>,
+) -> Result<Client, CtlError> {
+    let candidates = resolve_lock_candidates(flag, env_value, data_dir)?;
+    let mut first_err: Option<CtlError> = None;
+    for path in &candidates {
+        match Client::connect(path) {
+            Ok(client) => return Ok(client),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    Err(first_err.expect("resolve_lock_candidates never returns an empty list"))
+}
+
+/// Every `control-<pid>.json` in `dir` whose embedded pid is a live process,
+/// newest-mtime first. Dead-pid leftovers are the app's problem to sweep; we
+/// just skip them. A live pid is necessary but not sufficient: a crashed
+/// instance's file survives every sweep once an unrelated process reclaims
+/// its pid, so callers must not commit to a single candidate — they try each
+/// in order until the ping handshake picks out a real control server.
+fn live_discovery_files(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
@@ -131,11 +162,10 @@ fn newest_live_discovery_file(dir: &Path) -> Option<PathBuf> {
         let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
             continue;
         };
-        if best.as_ref().map_or(true, |(t, _)| mtime > *t) {
-            best = Some((mtime, entry.path()));
-        }
+        candidates.push((mtime, entry.path()));
     }
-    best.map(|(_, path)| path)
+    candidates.sort_by(|(a, _), (b, _)| b.cmp(a));
+    candidates.into_iter().map(|(_, path)| path).collect()
 }
 
 #[cfg(unix)]
@@ -372,23 +402,24 @@ mod tests {
         let flag = PathBuf::from("/flag/control-1.json");
         let env = std::ffi::OsString::from("/env/control-2.json");
 
-        let got = resolve_lock_path(Some(&flag), Some(env.clone()), Some(dir.path())).unwrap();
-        assert_eq!(got, flag);
+        let got =
+            resolve_lock_candidates(Some(&flag), Some(env.clone()), Some(dir.path())).unwrap();
+        assert_eq!(got, vec![flag]);
 
-        let got = resolve_lock_path(None, Some(env), Some(dir.path())).unwrap();
-        assert_eq!(got, PathBuf::from("/env/control-2.json"));
+        let got = resolve_lock_candidates(None, Some(env), Some(dir.path())).unwrap();
+        assert_eq!(got, vec![PathBuf::from("/env/control-2.json")]);
 
-        let got = resolve_lock_path(None, None, Some(dir.path())).unwrap();
-        assert_eq!(got, fallback);
+        let got = resolve_lock_candidates(None, None, Some(dir.path())).unwrap();
+        assert_eq!(got, vec![fallback]);
     }
 
     #[test]
     fn empty_env_value_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let fallback = write_discovery_json(dir.path(), std::process::id(), 1, 1);
-        let got =
-            resolve_lock_path(None, Some(std::ffi::OsString::new()), Some(dir.path())).unwrap();
-        assert_eq!(got, fallback);
+        let got = resolve_lock_candidates(None, Some(std::ffi::OsString::new()), Some(dir.path()))
+            .unwrap();
+        assert_eq!(got, vec![fallback]);
     }
 
     #[test]
@@ -399,23 +430,48 @@ mod tests {
         std::fs::write(dir.path().join("data.db"), "not a discovery file").unwrap();
         std::fs::write(dir.path().join("control-abc.json"), "{}").unwrap();
 
-        let err = resolve_lock_path(None, None, Some(dir.path())).unwrap_err();
+        let err = resolve_lock_candidates(None, None, Some(dir.path())).unwrap_err();
         assert_eq!(err.exit_code(), 3, "no live instance must exit 3: {err}");
 
         let live = write_discovery_json(dir.path(), std::process::id(), 1, 1);
-        let got = resolve_lock_path(None, None, Some(dir.path())).unwrap();
-        assert_eq!(got, live);
+        let got = resolve_lock_candidates(None, None, Some(dir.path())).unwrap();
+        assert_eq!(got, vec![live]);
+    }
+
+    #[test]
+    fn fallback_orders_live_candidates_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two live pids: our own, and pid 1 (init/launchd — kill(1, 0)
+        // yields EPERM, which counts as alive).
+        let ours = write_discovery_json(dir.path(), std::process::id(), 1, 1);
+        let other = write_discovery_json(dir.path(), 1, 1, 1);
+        set_mtime(&ours, std::time::Duration::from_secs(100));
+        set_mtime(&other, std::time::Duration::from_secs(10));
+
+        let got = resolve_lock_candidates(None, None, Some(dir.path())).unwrap();
+        assert_eq!(got, vec![other, ours]);
     }
 
     #[test]
     fn no_candidates_is_an_environment_error() {
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_lock_path(None, None, Some(dir.path())).unwrap_err();
+        let err = resolve_lock_candidates(None, None, Some(dir.path())).unwrap_err();
         assert_eq!(err.exit_code(), 3);
         assert!(
             err.to_string().contains("STAGEDCTL_LOCK"),
             "error should tell the caller how discovery works: {err}"
         );
+    }
+
+    /// Backdate a file's mtime by `age` so candidate ordering is
+    /// deterministic regardless of filesystem timestamp granularity.
+    fn set_mtime(path: &Path, age: Duration) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
     }
 
     #[test]
@@ -587,6 +643,44 @@ mod tests {
         let client = Client::connect(&lock).unwrap();
         assert!(client
             .invoke("cancel_session", serde_json::json!({}))
+            .is_ok());
+    }
+
+    #[test]
+    fn fallback_skips_a_zombie_newest_candidate_via_handshake() {
+        // Pid-reuse blind spot: a crashed instance's discovery file whose
+        // pid was reclaimed by an unrelated long-lived process looks alive
+        // to every liveness probe and survives the app's sweep. If it is
+        // also newest by mtime, committing to it would fail even though a
+        // real instance is running — discovery must fall through to older
+        // live candidates until the handshake succeeds.
+        let pid = std::process::id();
+        let (port, _handle) = fake_server(move |request_line| {
+            if request_line.starts_with("GET /api/ping") {
+                (200, ping_body(pid, 1, PROTOCOL_VERSION))
+            } else if request_line.starts_with("POST /api/invoke/list_projects") {
+                (200, "[]".to_string())
+            } else {
+                (404, r#"{"error":"unexpected route"}"#.to_string())
+            }
+        });
+        // Closed port for the zombie: bind and immediately drop.
+        let closed_port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = write_discovery_json(dir.path(), pid, port, 1);
+        // The zombie: pid 1 is alive (it just isn't a Staged app), file is
+        // newest, port answers nothing.
+        write_discovery_json(dir.path(), 1, closed_port, 1);
+        set_mtime(&real, Duration::from_secs(100));
+
+        let client = discover_and_connect(None, None, Some(dir.path())).unwrap();
+        assert!(client
+            .invoke("list_projects", serde_json::json!({}))
             .is_ok());
     }
 

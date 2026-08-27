@@ -10,8 +10,9 @@ Control a running Staged app from the command line.
 
 stagedctl is built for agents running inside Staged-spawned sessions: the
 app injects $STAGEDCTL_LOCK into those sessions, and stagedctl uses it to
-find the app with zero configuration. Outside a session it falls back to
-the newest running Staged instance (control-<pid>.json under ~/.staged).
+find the app with zero configuration. Outside a session it tries each
+running Staged instance (control-<pid>.json under ~/.staged), newest
+first, until one answers.
 
 Addressing:
   <project>   a project name or id, as printed by `stagedctl project list`
@@ -37,7 +38,7 @@ Exit codes:
 )]
 pub struct Cli {
     /// Path to the app's control file (defaults to $STAGEDCTL_LOCK, then
-    /// the newest live control-<pid>.json under ~/.staged)
+    /// live control-<pid>.json files under ~/.staged, newest first)
     #[arg(long, global = true, value_name = "PATH")]
     pub lock_path: Option<std::path::PathBuf>,
 

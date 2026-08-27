@@ -17,6 +17,17 @@
 //! `push_branch`. Exposing a destructive verb reopens the auth design and
 //! must come with a `PROTOCOL_VERSION` bump.
 //!
+//! Loopback TCP bounds callers to the same *host*, not the same *user*:
+//! another local account can find this listener with a port scan of
+//! 127.0.0.1 and pass every header check — the 0600 discovery file only
+//! hides the port, it does not gate the connection. v1 accepts that,
+//! matching berd: Staged targets effectively single-user dev machines, and
+//! the allowlist caps what such a caller gets (timeline reads and session
+//! starts, nothing destructive). If that assumption stops holding, the
+//! upgrade path is a Unix-domain socket with 0600 perms — or a
+//! peer-credential (`LOCAL_PEERCRED`/`SO_PEERCRED`) check on this listener
+//! — not a reintroduced token.
+//!
 //! **Discovery:** on listener start the server atomically writes
 //! `~/.staged/control-<pid>.json` (0600) containing
 //! `{port, pid, generation, protocolVersion}`. The pid suffix exists because
@@ -265,7 +276,14 @@ async fn invoke(
             .into_response();
     }
 
-    match crate::web_server::dispatch(&command, args, &state.app_handle).await {
+    match crate::web_server::dispatch(
+        &command,
+        args,
+        &state.app_handle,
+        crate::web_server::DispatchCaller::Control,
+    )
+    .await
+    {
         Ok(value) => Json(value).into_response(),
         Err(msg) => (
             StatusCode::BAD_REQUEST,

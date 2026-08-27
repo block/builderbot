@@ -758,7 +758,7 @@ async fn invoke_command(
     State(state): State<WebAppState>,
     Json(args): Json<Value>,
 ) -> Response {
-    match dispatch(&command, args, &state.app_handle).await {
+    match dispatch(&command, args, &state.app_handle, DispatchCaller::Web).await {
         Ok(value) => Json(value).into_response(),
         Err(msg) => (
             StatusCode::BAD_REQUEST,
@@ -879,18 +879,92 @@ pub(crate) fn preferences_store(
         .map_err(|e| format!("Failed to load preferences store: {e}"))
 }
 
+/// Who is calling [`dispatch`]. A handful of commands encode same-host-only
+/// semantics — they take local file paths or launch local apps — which are
+/// valid from the loopback control server but a hole from a remote browser.
+/// Making the caller a parameter closes those arms by construction (see
+/// [`web_caller_rejection`]) instead of relying on `start()` staying stubbed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DispatchCaller {
+    /// The `stagedctl` loopback control server (`control_server.rs`): the
+    /// caller is a process on the same machine as the app.
+    Control,
+    /// The browser-facing web server: the caller may be a remote browser.
+    /// (Its `start()` is currently stubbed, but rejection of same-host-only
+    /// commands must not depend on that.)
+    Web,
+}
+
+/// Why a web (remote-browser) caller may not run `command`, or `None` if it
+/// may. From a remote browser, `create_image` would mean "read any file on
+/// the app's machine into a viewable timeline" and `open_in_app` would mean
+/// "open an arbitrary path in an arbitrary local app" — so both are rejected
+/// before any dispatch arm runs, and restoring the web listener cannot
+/// silently inherit them.
+fn web_caller_rejection(cmd: &str, caller: DispatchCaller) -> Option<&'static str> {
+    if caller != DispatchCaller::Web {
+        return None;
+    }
+    // `cmd`, not `command`: `web_dispatch_covers_tauri_commands` locates
+    // dispatch's arm table by searching for a match over `command`, so that
+    // spelling must stay unique to dispatch().
+    match cmd {
+        "create_image" => Some(
+            "create_image is not available in web mode: it reads a file path \
+             on the app's machine (use create_image_from_data)",
+        ),
+        "open_in_app" => Some(
+            "open_in_app is not available in web mode: it launches an app on \
+             the app's machine",
+        ),
+        _ => None,
+    }
+}
+
+/// The `create_image` args the control surface accepts, enforcing that the
+/// created image is UI-visible: `pending: true` (hidden until a session
+/// attaches it) and a missing `branchId` (project-scoped images are
+/// write-only — nothing lists or renders them) are both rejected, so no
+/// caller — the well-behaved CLI or a raw POST to the control port — can
+/// create an artifact the UI never shows. Returns
+/// `(branchId, projectId, filePath)`.
+fn control_create_image_args(args: &Value) -> Result<(String, String, String), String> {
+    if opt_arg::<bool>(args, "pending")?.unwrap_or(false) {
+        return Err(
+            "create_image with pending=true is not available through the control surface: \
+             a pending image is invisible until a session attaches it"
+                .to_string(),
+        );
+    }
+    let Some(branch_id) = opt_arg::<String>(args, "branchId")? else {
+        return Err(
+            "create_image requires a branchId through the control surface: \
+             a project-scoped image is invisible in the UI"
+                .to_string(),
+        );
+    };
+    Ok((branch_id, arg(args, "projectId")?, arg(args, "filePath")?))
+}
+
 /// The big dispatcher. Maps command names to handler logic.
 ///
 /// Each arm extracts arguments from the JSON body and calls the same
 /// underlying logic as the corresponding Tauri command. Return values
 /// are serialized to `serde_json::Value`. Shared by the (stubbed) web
-/// server and the `stagedctl` control server (`control_server.rs`).
+/// server and the `stagedctl` control server (`control_server.rs`);
+/// `caller` says which, so same-host-only arms can be closed to web
+/// callers by construction.
 pub(crate) async fn dispatch(
     command: &str,
     args: Value,
     app_handle: &tauri::AppHandle,
+    caller: DispatchCaller,
 ) -> Result<Value, String> {
     use tauri::Manager;
+
+    if let Some(reason) = web_caller_rejection(command, caller) {
+        return Err(reason.to_string());
+    }
 
     // Convenience aliases — pull shared state from the Tauri AppHandle
     let store_mutex: &Mutex<Option<Arc<Store>>> = &app_handle.state::<Mutex<Option<Arc<Store>>>>();
@@ -2927,16 +3001,18 @@ pub(crate) async fn dispatch(
         // Images
         // =====================================================================
         "create_image" => {
-            // Dispatch also serves same-host callers (stagedctl), for which
-            // a filesystem path is valid — unlike the remote-browser case
-            // this arm used to reject.
+            // Web callers never reach this arm (`web_caller_rejection` — a
+            // filesystem path is only valid same-host); what remains is the
+            // control surface, whose args are pinned so it can never create
+            // a UI-invisible image.
+            let (branch_id, project_id, file_path) = control_create_image_args(&args)?;
             let store = get_store(store_mutex)?;
-            let branch_id: Option<String> = opt_arg(&args, "branchId")?;
-            let project_id: String = arg(&args, "projectId")?;
-            let file_path: String = arg(&args, "filePath")?;
-            let pending: Option<bool> = opt_arg(&args, "pending")?;
             let image = crate::image_commands::create_image_impl(
-                store, branch_id, project_id, file_path, pending,
+                store,
+                Some(branch_id),
+                project_id,
+                file_path,
+                Some(false),
             )?;
             crate::image_commands::emit_image_created(app_handle, &image);
             Ok(serde_json::to_value(image).unwrap())
@@ -4097,8 +4173,9 @@ pub(crate) async fn dispatch(
             Ok(serde_json::to_value(openers).unwrap())
         }
         "open_in_app" => {
-            // Valid for same-host callers (stagedctl): the app to open in
-            // runs on the same machine as the dispatcher.
+            // Web callers never reach this arm (`web_caller_rejection`);
+            // for the control surface the app to open in runs on the same
+            // machine as the caller.
             let path: String = arg(&args, "path")?;
             let app_id: String = arg(&args, "appId")?;
             crate::util_commands::open_in_app(path, app_id).await?;
@@ -4163,9 +4240,93 @@ mod blocking_guard_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{event_gap_payload, normalize_ws_client_id, web_client_id};
+    use super::{
+        control_create_image_args, event_gap_payload, normalize_ws_client_id, web_caller_rejection,
+        web_client_id, DispatchCaller,
+    };
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, BTreeSet};
+
+    // -------------------------------------------------------------------
+    // Caller identity: same-host-only commands are closed to web callers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn web_callers_cannot_reach_same_host_only_commands() {
+        for command in ["create_image", "open_in_app"] {
+            assert!(
+                web_caller_rejection(command, DispatchCaller::Web).is_some(),
+                "{command} takes local paths / launches local apps and must be \
+                 rejected for web callers"
+            );
+            assert!(
+                web_caller_rejection(command, DispatchCaller::Control).is_none(),
+                "{command} must stay reachable from the same-host control server"
+            );
+        }
+        // Everything else is unaffected by caller identity.
+        assert_eq!(
+            web_caller_rejection("list_projects", DispatchCaller::Web),
+            None
+        );
+
+        // The check is only structural if dispatch() actually consults it
+        // before running any arm: pin the call site. The needle is assembled
+        // at runtime so this assertion's own source can't satisfy it.
+        let call_site = format!("web_caller_rejection({}, caller)", "command");
+        assert!(
+            include_str!("web_server.rs").contains(&call_site),
+            "dispatch() must gate on web_caller_rejection before its match"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // create_image through the control surface can't make invisible artifacts
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn control_create_image_rejects_pending_images() {
+        // A pending image is hidden until a session attaches it — invisible
+        // through the control surface, so rejected regardless of the CLI
+        // behaving (a raw POST to the control port hits this too).
+        let err = control_create_image_args(&json!({
+            "branchId": "b1", "projectId": "p1",
+            "filePath": "/tmp/x.png", "pending": true,
+        }))
+        .unwrap_err();
+        assert!(err.contains("pending"), "got: {err}");
+    }
+
+    #[test]
+    fn control_create_image_rejects_missing_branch_id() {
+        // Project-scoped images are write-only — nothing lists or renders
+        // them — so a branch is required.
+        for args in [
+            json!({ "projectId": "p1", "filePath": "/tmp/x.png" }),
+            json!({ "branchId": null, "projectId": "p1", "filePath": "/tmp/x.png" }),
+        ] {
+            let err = control_create_image_args(&args).unwrap_err();
+            assert!(err.contains("branchId"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn control_create_image_accepts_branch_scoped_non_pending_args() {
+        // pending omitted and pending:false are equivalent — the dispatch
+        // arm pins the impl call to pending=Some(false) either way.
+        for args in [
+            json!({ "branchId": "b1", "projectId": "p1", "filePath": "/tmp/x.png" }),
+            json!({
+                "branchId": "b1", "projectId": "p1",
+                "filePath": "/tmp/x.png", "pending": false,
+            }),
+        ] {
+            let (branch_id, project_id, file_path) = control_create_image_args(&args).unwrap();
+            assert_eq!(branch_id, "b1");
+            assert_eq!(project_id, "p1");
+            assert_eq!(file_path, "/tmp/x.png");
+        }
+    }
 
     #[test]
     fn ws_client_id_drops_blank_and_reserved_ids() {

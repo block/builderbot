@@ -142,3 +142,4 @@ no-managed-acp-tools = []
 # path = "src/bin/debug_diff.rs"
 
 [workspace]
+members = ["crates/stagedctl"]

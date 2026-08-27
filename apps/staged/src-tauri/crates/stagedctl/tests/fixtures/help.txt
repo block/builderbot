@@ -1,0 +1,380 @@
+=== stagedctl --help ===
+Control a running Staged app from the command line.
+
+stagedctl is built for agents running inside Staged-spawned sessions: the
+app injects $STAGEDCTL_LOCK into those sessions, and stagedctl uses it to
+find the app with zero configuration. Outside a session it falls back to
+the newest running Staged instance (control-<pid>.json under ~/.staged).
+
+Addressing:
+  <project>   a project name or id, as printed by `stagedctl project list`
+  --repo      a repo address of the form <owner>/<repo>[:<subpath>], as
+              printed by `stagedctl project get <project>`
+
+Ids print in hashtag reference form (#note:<id>, #project-note:<id>,
+#review:<id>, #commit:<sha>) so they can be pasted directly into session
+prompts. Every command also accepts --json for machine-readable output.
+
+Exit codes:
+  0  success
+  1  command failed (stderr carries `code: message`)
+  2  transport fault talking to the app
+  3  no running Staged app, or the app was updated (restart Staged)
+
+Usage: stagedctl [OPTIONS] <COMMAND>
+
+Commands:
+  project   Inspect projects and the repos attached to them
+  timeline  Read project and repo timelines (commits, notes, reviews, images)
+  session   Start, observe, wait for, and cancel agent sessions
+  image     Attach images to a repo's timeline
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== stagedctl project --help ===
+Inspect projects and the repos attached to them
+
+Usage: stagedctl project [OPTIONS] <COMMAND>
+
+Commands:
+  list  List every project in the app
+  get   Show one project's repos and branches
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl project list --help ===
+List every project in the app.
+
+Each line shows the project name, its primary repo address, where its
+branches run (local or remote), and the project id. Both the name and the
+id are accepted anywhere a <project> argument is expected.
+
+Usage: stagedctl project list [OPTIONS]
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl project get --help ===
+Show one project: every attached repo with its address, and every branch
+with its base branch, PR status, and worktree location.
+
+The printed repo addresses (<owner>/<repo>[:<subpath>]) are exactly what
+the --repo flag of `timeline show`, `session start`, `session list`, and
+`image add` expects.
+
+Usage: stagedctl project get [OPTIONS] <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl timeline --help ===
+Read project and repo timelines (commits, notes, reviews, images)
+
+Usage: stagedctl timeline [OPTIONS] <COMMAND>
+
+Commands:
+  show  Show a project's timeline, or a single repo's with --repo
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl timeline show --help ===
+Show a project's timeline, or a single repo's with --repo.
+
+Without --repo this prints the whole project: its project notes, then one
+timeline per repo. With --repo it prints only that repo's timeline. Items
+are ordered oldest to newest and print with hashtag references (#note:<id>,
+#review:<id>, #commit:<sha>, #project-note:<id>) that can be pasted into
+session prompts. An item produced by a still-running session carries a
+[session <status>] suffix.
+
+Timelines are the way to find finished work: a completed session shows up
+here as its artifact (commit, note, review, or image), not in
+`session list`.
+
+Usage: stagedctl timeline show [OPTIONS] <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --repo <REPO>
+          Repo address <owner>/<repo>[:<subpath>] (see `stagedctl project get`)
+
+      --branch <BRANCH>
+          Branch name, only needed when the repo has more than one branch in this project
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl session --help ===
+Start, observe, wait for, and cancel agent sessions
+
+Usage: stagedctl session [OPTIONS] <COMMAND>
+
+Commands:
+  start   Start an agent session (spends tokens; visible in the app)
+  status  Show one session's status (works for finished sessions too)
+  wait    Block until a session finishes (default timeout 240s)
+  cancel  Cancel a queued or running session
+  list    List queued and running sessions
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl session start --help ===
+Start an agent session. This spawns a real agent that edits the worktree
+and spends tokens; the session appears immediately in the app's timeline
+and can be cancelled with `stagedctl session cancel`.
+
+With --repo, starts a session on that repo's branch; --type is required
+and picks the artifact the session produces: a commit, a branch note, or
+a code review. Without --repo, starts a project-level session, which
+researches across the whole project, writes a project note, and may fan
+work out into the project's repos; --type is not allowed there.
+
+Prints the new session id and the artifact's hashtag reference. Follow up
+with `stagedctl session wait <sessionId>` to block until it finishes.
+
+Usage: stagedctl session start [OPTIONS] --prompt <TEXT> <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --repo <REPO>
+          Repo address <owner>/<repo>[:<subpath>]; omit to start a project-level session
+
+      --branch <BRANCH>
+          Branch name, only needed when the repo has more than one branch in this project
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+      --type <TYPE>
+          What the session produces (required with --repo, invalid without)
+
+          Possible values:
+          - note:   Investigate and write a note on the branch
+          - commit: Make changes and commit them
+          - review: Review a commit and leave comments
+
+      --prompt <TEXT>
+          The prompt for the agent
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl session status --help ===
+Show one session: status (queued, running, completed, error, cancelled),
+why it ended, its provider, prompt, and working directory.
+
+Session ids come from `session start`, `session list`, or the [session ...]
+suffixes in `timeline show`.
+
+Usage: stagedctl session status [OPTIONS] <SESSION_ID>
+
+Arguments:
+  <SESSION_ID>
+          Session id
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl session wait --help ===
+Poll the app until the session reaches a terminal state.
+
+Exit 0 when the session completes. Exits 1 with `session_error` or
+`session_cancelled` when it ends any other way, and with `wait_timeout`
+when --timeout elapses — in that case the session KEEPS RUNNING; waiting
+never cancels anything.
+
+Usage: stagedctl session wait [OPTIONS] <SESSION_ID>
+
+Arguments:
+  <SESSION_ID>
+          Session id
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --timeout <SECONDS>
+          Seconds to wait before giving up (the session keeps running)
+          
+          [default: 240]
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl session cancel --help ===
+Cancel a queued or running session. The session's pending artifact stays
+in the timeline marked as cancelled. Undo by starting a new session.
+
+Usage: stagedctl session cancel [OPTIONS] <SESSION_ID>
+
+Arguments:
+  <SESSION_ID>
+          Session id
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl session list --help ===
+List every queued and running session in the app, optionally narrowed to
+one project or one repo. Completed sessions are not listed — find them
+through their artifact in `timeline show`, or directly with
+`session status <id>`.
+
+Usage: stagedctl session list [OPTIONS]
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --project <PROJECT>
+          Only sessions in this project (name or id)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+      --repo <REPO>
+          Only sessions on this repo's branches; requires --project
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+=== stagedctl image --help ===
+Attach images to a repo's timeline
+
+Usage: stagedctl image [OPTIONS] <COMMAND>
+
+Commands:
+  add   Attach an image file to a repo's timeline
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+  -h, --help
+          Print help
+
+=== stagedctl image add --help ===
+Attach a local image file to a repo's timeline, where sessions on that
+branch can see it and users can view or delete it.
+
+The file is read from this machine's filesystem: it must exist, be at most
+10 MB, and be a png, jpg, jpeg, gif, or webp.
+
+Usage: stagedctl image add [OPTIONS] --repo <REPO> --file <PATH> <PROJECT>
+
+Arguments:
+  <PROJECT>
+          Project name or id (see `stagedctl project list`)
+
+Options:
+      --lock-path <PATH>
+          Path to the app's control file (defaults to $STAGEDCTL_LOCK, then the newest live control-<pid>.json under ~/.staged)
+
+      --repo <REPO>
+          Repo address <owner>/<repo>[:<subpath>] (see `stagedctl project get`)
+
+      --branch <BRANCH>
+          Branch name, only needed when the repo has more than one branch in this project
+
+      --json
+          Print machine-readable JSON on stdout instead of human-readable text
+
+      --file <PATH>
+          Path to the image file
+
+  -h, --help
+          Print help (see a summary with '-h')
+

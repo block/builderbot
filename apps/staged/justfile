@@ -166,11 +166,11 @@ fmt-check-frontend:
 
 # Lint Rust code with clippy
 lint:
-    cd src-tauri && cargo clippy -- -D warnings
+    cd src-tauri && cargo clippy --workspace -- -D warnings
 
 # Run Rust unit tests
 test:
-    cd src-tauri && cargo test --lib --bins --tests
+    cd src-tauri && cargo test --workspace --lib --bins --tests
 
 # Run frontend unit tests
 test-frontend:

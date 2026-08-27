@@ -1,0 +1,25 @@
+[package]
+name = "stagedctl"
+version = "0.1.0"
+description = "Command-line control for a running Staged app"
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+# Deliberately thin: this crate must not depend on staged_lib. The CLI is a
+# dumb flag→JSON mapper over the control server's fixed verb table; all
+# validation and trust live app-side (see src/control_server.rs).
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
+dirs = "6.0"
+time = { version = "0.3", features = ["formatting"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

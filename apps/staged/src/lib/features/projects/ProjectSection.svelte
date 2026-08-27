@@ -870,7 +870,7 @@
       projectId?: string;
       branchId?: string | null;
     }>('session-status-changed', async (payload) => {
-      const { sessionId, status, projectId } = payload;
+      const { sessionId, status, projectId, branchId } = payload;
       if (projectId !== project.id) return;
 
       if (status === 'running') {
@@ -881,14 +881,20 @@
         // fresh-Set reassignment is what makes its badge appear.
         activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
 
-        // A listed note whose session starts running again was resumed — from
-        // the note's chat, a row's Resume, or another window. Its row still
-        // holds the finished status, so refetch it to show it running.
-        if (
-          !payload.branchId &&
-          projectNotes.some((n) => n.sessionId === sessionId && !isSessionActive(n.sessionStatus))
-        ) {
-          await refreshNoteForSession(sessionId);
+        if (!branchId) {
+          const listed = projectNotes.find((n) => n.sessionId === sessionId);
+          if (!listed) {
+            // A project session started outside this client (stagedctl)
+            // created a note stub we haven't loaded. Branch sessions carry a
+            // branchId; project sessions never do.
+            await loadProjectNotes();
+          } else if (!isSessionActive(listed.sessionStatus)) {
+            // A listed note whose session starts running again was resumed —
+            // from the note's chat, a row's Resume, or another window. Its row
+            // still holds the finished status, so refetch it to show it
+            // running.
+            await refreshNoteForSession(sessionId);
+          }
         }
         return;
       }

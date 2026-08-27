@@ -1041,6 +1041,17 @@ export interface SessionReconcileEvent {
 }
 
 /**
+ * Payload emitted by the `image-created` Tauri event for timeline-visible
+ * (non-pending) images, so clients that didn't create the image (e.g. when
+ * stagedctl did) can refresh the affected branch timeline.
+ */
+export interface ImageCreatedPayload {
+  imageId: string;
+  branchId: string | null;
+  projectId: string;
+}
+
+/**
  * One entry of the `get_active_sessions` busy-state snapshot: a running,
  * queued or disconnected session projected to its branch/project context.
  * Carries the same discriminators as `SessionStatusPayload` so the snapshot

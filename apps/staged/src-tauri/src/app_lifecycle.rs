@@ -608,6 +608,10 @@ pub fn shutdown_cleanup(app: &AppHandle) {
     };
 
     quit_state.run_cleanup_once(|| {
+        // Retire the stagedctl discovery file first so CLI callers stop
+        // finding an instance that is going away.
+        crate::control_server::remove_discovery_file();
+
         // Signal both kinds of work before waiting on either, so they shut down
         // in parallel inside one shared budget instead of one after the other.
         let OwnedSessionSignals {

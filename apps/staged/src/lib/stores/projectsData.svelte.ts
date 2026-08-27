@@ -40,6 +40,7 @@ import { repoBadgeStore } from './repoBadges.svelte';
 import type {
   Branch,
   BranchChangedEvent,
+  ImageCreatedPayload,
   PrStatusChangedEvent,
   Project,
   ProjectChangedEvent,
@@ -1001,10 +1002,27 @@ class ProjectsDataStore {
     );
 
     // Refresh a project's branches when a commit session completes so the
-    // sprout/draft-PR icon flips as soon as the first commit lands.
+    // sprout/draft-PR icon flips as soon as the first commit lands. Session
+    // starts (running/queued) also invalidate the branch timeline: sessions
+    // launched outside this client (stagedctl, another window) otherwise
+    // never surface their pending artifact stub.
     this.unlisteners.push(
       listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
+        if ((payload.status === 'running' || payload.status === 'queued') && payload.branchId) {
+          commands.invalidateProjectBranchTimelines([payload.branchId]);
+        }
         this.handleCommitSessionCompleted(payload);
+      })
+    );
+
+    // Images created outside this client (stagedctl) land directly in a
+    // branch timeline; the creating client refreshes itself, everyone else
+    // refreshes here.
+    this.unlisteners.push(
+      listenToEvent<ImageCreatedPayload>('image-created', (payload) => {
+        if (payload.branchId) {
+          commands.invalidateProjectBranchTimelines([payload.branchId]);
+        }
       })
     );
 

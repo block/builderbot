@@ -1751,10 +1751,19 @@ pub fn start_session(
                 (None, Some(provider_id)) => crate::agent::env_vars::read_agent_env(provider_id),
                 _ => Vec::new(),
             };
+            // Local sessions also get STAGEDCTL_LOCK pointing at this
+            // instance's control-server discovery file, so any agent Staged
+            // spawns can run stagedctl with zero configuration. Remote (Blox)
+            // sessions are skipped: they can't reach a loopback listener or
+            // the file.
+            let mut session_env = config.extra_env.clone();
+            if config.workspace_name.is_none() {
+                session_env.extend(crate::control_server::stagedctl_lock_env());
+            }
             let driver = driver
                 .with_extra_env(crate::agent::env_vars::merge_agent_env(
                     agent_env,
-                    config.extra_env.clone(),
+                    session_env,
                 ))
                 .with_background_hold(config.background_hold.clone())
                 // Publish the hold so the UI can show "waiting on background

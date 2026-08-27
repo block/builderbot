@@ -14,6 +14,7 @@ pub mod blox;
 mod branch_teardown;
 pub mod branches;
 pub(crate) mod commit_reassociation;
+pub mod control_server;
 pub mod diff_cache;
 pub mod diff_commands;
 pub mod doctor;
@@ -2097,6 +2098,11 @@ pub fn run() {
                 project_transfer::prune_backups(transfer_store.as_deref());
             });
 
+            // Loopback control server for stagedctl — always on. Writes a
+            // pid-suffixed discovery file under ~/.staged and exposes only
+            // the fixed allowlist in `control_server::ALLOWED_COMMANDS`.
+            control_server::start(app.handle().clone());
+
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.
             let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
@@ -2271,6 +2277,7 @@ pub fn run() {
             delete_action_context,
             // Timeline
             timeline::get_branch_timeline,
+            timeline::get_project_timeline,
             timeline::refresh_branch_git_state,
             timeline::list_parent_branch_commits,
             timeline::reset_branch_to_remote,

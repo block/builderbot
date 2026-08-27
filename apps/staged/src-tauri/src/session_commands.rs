@@ -4465,7 +4465,36 @@ pub async fn start_project_session(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ProjectSessionResponse, String> {
     let store = get_store(&store)?;
+    start_project_session_for_store(
+        store,
+        Arc::clone(&registry),
+        Arc::clone(&action_executor),
+        Arc::clone(&action_registry),
+        app_handle,
+        project_id,
+        prompt,
+        provider,
+        image_ids,
+        acp_config_selection,
+    )
+    .await
+}
 
+/// Body of [`start_project_session`], shared with the web-mode `dispatch()`
+/// arm.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_project_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    project_id: String,
+    prompt: String,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
+) -> Result<ProjectSessionResponse, String> {
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
@@ -4957,9 +4986,12 @@ fn insert_running_branch_session(
     })
 }
 
+/// `app_handle` is optional so store-level tests can run without a Tauri
+/// app; `None` skips the queued `session-status-changed` announcement.
 #[allow(clippy::too_many_arguments)]
 fn insert_queued_branch_session(
     store: &Arc<Store>,
+    app_handle: Option<&tauri::AppHandle>,
     branch_id: &str,
     prompt: &str,
     session_type: &BranchSessionType,
@@ -5000,6 +5032,31 @@ fn insert_queued_branch_session(
             review.id
         }
     };
+
+    // Announce the queued session so clients that did not issue this call
+    // (the desktop UI when stagedctl queues work) refresh the branch
+    // timeline and show the queued artifact stub.
+    if let Some(app_handle) = app_handle {
+        let project_id = store
+            .get_branch(branch_id)
+            .ok()
+            .flatten()
+            .map(|branch| branch.project_id);
+        crate::web_server::emit_to_all(
+            app_handle,
+            "session-status-changed",
+            session_runner::SessionStatusEvent {
+                session_id: session.id.clone(),
+                status: "queued".to_string(),
+                error_message: None,
+                completion_reason: None,
+                branch_id: Some(branch_id.to_string()),
+                project_id,
+                session_type: Some(session_type.as_str().to_string()),
+                dependency_skipped: false,
+            },
+        );
+    }
 
     Ok(BranchSessionResponse {
         session_id: session.id,
@@ -5409,6 +5466,7 @@ pub async fn start_or_queue_branch_session_for_store(
         {
             return insert_queued_branch_session(
                 &store,
+                Some(&app_handle),
                 &branch_id,
                 &prompt,
                 &session_type,
@@ -5463,9 +5521,12 @@ pub async fn start_or_queue_branch_session_for_store(
     Ok(response)
 }
 
+/// `app_handle` is optional so store-level tests can run without a Tauri
+/// app; `None` skips the queued `session-status-changed` announcement.
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session_for_store(
     store: Arc<Store>,
+    app_handle: Option<&tauri::AppHandle>,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -5482,6 +5543,7 @@ pub fn queue_branch_session_for_store(
     // Queued is where a start on a branch being transferred goes anyway.
     insert_queued_branch_session(
         &store,
+        app_handle,
         &branch_id,
         &prompt,
         &session_type,
@@ -5571,6 +5633,7 @@ pub async fn start_or_queue_branch_session(
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -5582,6 +5645,7 @@ pub fn queue_branch_session(
     let store = get_store(&store)?;
     queue_branch_session_for_store(
         store,
+        Some(&app_handle),
         branch_id,
         prompt,
         session_type,
@@ -11016,6 +11080,7 @@ mod tests {
 
         let response = queue_branch_session_for_store(
             Arc::clone(&store),
+            None,
             branch.id.clone(),
             "capture a note".to_string(),
             BranchSessionType::Note,

@@ -758,7 +758,7 @@ async fn invoke_command(
     State(state): State<WebAppState>,
     Json(args): Json<Value>,
 ) -> Response {
-    match dispatch(&command, args, &state).await {
+    match dispatch(&command, args, &state.app_handle).await {
         Ok(value) => Json(value).into_response(),
         Err(msg) => (
             StatusCode::BAD_REQUEST,
@@ -883,12 +883,16 @@ pub(crate) fn preferences_store(
 ///
 /// Each arm extracts arguments from the JSON body and calls the same
 /// underlying logic as the corresponding Tauri command. Return values
-/// are serialized to `serde_json::Value`.
-async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Value, String> {
+/// are serialized to `serde_json::Value`. Shared by the (stubbed) web
+/// server and the `stagedctl` control server (`control_server.rs`).
+pub(crate) async fn dispatch(
+    command: &str,
+    args: Value,
+    app_handle: &tauri::AppHandle,
+) -> Result<Value, String> {
     use tauri::Manager;
 
     // Convenience aliases — pull shared state from the Tauri AppHandle
-    let app_handle = &state.app_handle;
     let store_mutex: &Mutex<Option<Arc<Store>>> = &app_handle.state::<Mutex<Option<Arc<Store>>>>();
     let session_registry: &Arc<SessionRegistry> = &app_handle.state::<Arc<SessionRegistry>>();
     let action_executor: &Arc<ActionExecutor> = &app_handle.state::<Arc<ActionExecutor>>();
@@ -900,8 +904,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // Store status
         // =====================================================================
         "get_store_status" => {
-            // We don't have DbState in web context — return null (store ready)
-            Ok(Value::Null)
+            // Same-host clients (stagedctl) need the real status so a
+            // needs-reset prompt surfaces as data instead of opaque
+            // "Database not initialized" errors on every other command.
+            let db_state = app_handle.state::<crate::DbState>();
+            let status = db_state.needs_reset.lock().unwrap().clone();
+            Ok(serde_json::to_value(status).unwrap())
         }
         "confirm_reset_store" => {
             // Not applicable in web context
@@ -1478,7 +1486,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             })
             .await
             .map_err(|e| format!("Default branch detection failed: {e}"))?;
-            emit_to_all(&state.app_handle, "repo-cloned", &github_repo);
+            emit_to_all(app_handle, "repo-cloned", &github_repo);
             Ok(serde_json::to_value(default_branch).unwrap())
         }
         "get_repo_clone_path" => {
@@ -2632,6 +2640,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .map_err(|e| format!("Timeline task failed: {e}"))??;
             Ok(serde_json::to_value(timeline).unwrap())
         }
+        "get_project_timeline" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let timeline = tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::build_project_timeline(&store, &project_id)
+            })
+            .await
+            .map_err(|e| format!("Project timeline task failed: {e}"))??;
+            Ok(serde_json::to_value(timeline).unwrap())
+        }
         "refresh_branch_git_state" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
@@ -2908,7 +2926,21 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // =====================================================================
         // Images
         // =====================================================================
-        "create_image" => Err("create_image is not available in web mode".to_string()),
+        "create_image" => {
+            // Dispatch also serves same-host callers (stagedctl), for which
+            // a filesystem path is valid — unlike the remote-browser case
+            // this arm used to reject.
+            let store = get_store(store_mutex)?;
+            let branch_id: Option<String> = opt_arg(&args, "branchId")?;
+            let project_id: String = arg(&args, "projectId")?;
+            let file_path: String = arg(&args, "filePath")?;
+            let pending: Option<bool> = opt_arg(&args, "pending")?;
+            let image = crate::image_commands::create_image_impl(
+                store, branch_id, project_id, file_path, pending,
+            )?;
+            crate::image_commands::emit_image_created(app_handle, &image);
+            Ok(serde_json::to_value(image).unwrap())
+        }
         "create_image_from_data" => {
             let store = get_store(store_mutex)?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
@@ -2924,6 +2956,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             })
             .await
             .map_err(|e| format!("Image task failed: {e}"))??;
+            crate::image_commands::emit_image_created(app_handle, &image);
             Ok(serde_json::to_value(image).unwrap())
         }
         "get_image_path" => {
@@ -3580,93 +3613,21 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let acp_config_selection: Option<store::AcpConfigSelection> =
                 opt_arg(&args, "acpConfigSelection")?;
 
-            let project = store
-                .get_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
-            let project_context = {
-                let store = Arc::clone(&store);
-                let project = project.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    session_commands::build_project_session_context(&store, &project)
-                })
-                .await
-                .map_err(|e| e.to_string())?
-            };
-
-            let is_remote = project.location == store::ProjectLocation::Remote;
-            let pikchr_grammar_reference =
-                session_commands::resolve_pikchr_grammar_reference(app_handle, None);
-            let action_instructions =
-                session_commands::build_project_session_action_instructions_with_pikchr_reference(
-                    is_remote,
-                    &pikchr_grammar_reference,
-                );
-
-            let full_prompt = format!(
-                "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
-            );
-
-            let working_dir = crate::git::project_worktree_root_for(&project.id)
-                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-
-            let mut session = store::Session::new_running(&full_prompt, &working_dir);
-            if let Some(selection) = acp_config_selection.clone() {
-                session = session.with_acp_config_selection(selection);
-            }
-            if let Some(ref p) = provider {
-                session = session.with_provider(p);
-            }
-            // Live from before the `running` write until the runner has
-            // registered (see `SessionRegistry::hold`).
-            let _liveness = session_registry.hold(&session.id);
-            store.create_session(&session).map_err(|e| e.to_string())?;
-
-            let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
-            store
-                .create_project_note(&note)
-                .map_err(|e| e.to_string())?;
-            let note_id = note.id.clone();
-
-            session_runner::start_session(
-                SessionConfig {
-                    session_id: session.id.clone(),
-                    prompt: full_prompt,
-                    working_dir,
-                    agent_session_id: None,
-                    pre_head_sha: None,
-                    provider,
-                    workspace_name: None,
-                    extra_env: vec![],
-                    mcp_project_id: Some(project_id.clone()),
-                    action_executor: Some(Arc::clone(action_executor)),
-                    action_registry: Some(Arc::clone(action_registry)),
-                    remote_working_dir: None,
-                    image_ids: image_ids.unwrap_or_default(),
-                    queued_message_id: None,
-                    acp_config_selection,
-                    branch_id: None,
-                    project_id: Some(project_id),
-                    // Project sessions are always local and write project notes.
-                    expose_pikchr_tools: true,
-                    // This project session's note is the parent for any
-                    // `child_note` repo sessions it spawns.
-                    parent_project_note_id: Some(note_id.clone()),
-                    background_hold: session_commands::default_background_hold(),
-                },
+            let result = session_commands::start_project_session_for_store(
                 store,
-                app_handle.clone(),
                 Arc::clone(session_registry),
-            )?;
-
-            Ok(
-                serde_json::to_value(session_commands::ProjectSessionResponse {
-                    session_id: session.id,
-                    note_id,
-                })
-                .unwrap(),
+                Arc::clone(action_executor),
+                Arc::clone(action_registry),
+                app_handle.clone(),
+                project_id,
+                prompt,
+                provider,
+                image_ids,
+                acp_config_selection,
             )
+            .await?;
+
+            Ok(serde_json::to_value(result).unwrap())
         }
         "queue_branch_session" => {
             let store = get_store(store_mutex)?;
@@ -3681,9 +3642,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 opt_arg(&args, "acpConfigSelection")?;
 
             // A review without a provider discovers the installed agents.
+            let app_handle = app_handle.clone();
             blocking_json(move || {
                 session_commands::queue_branch_session_for_store(
                     store,
+                    Some(&app_handle),
                     branch_id,
                     prompt,
                     session_type,
@@ -4130,10 +4093,17 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "get_available_openers" => {
-            // In web mode, openers are not relevant
-            Ok(serde_json::to_value(Vec::<()>::new()).unwrap())
+            let openers = crate::util_commands::get_available_openers().await?;
+            Ok(serde_json::to_value(openers).unwrap())
         }
-        "open_in_app" => Err("open_in_app is not available in web mode".to_string()),
+        "open_in_app" => {
+            // Valid for same-host callers (stagedctl): the app to open in
+            // runs on the same machine as the dispatcher.
+            let path: String = arg(&args, "path")?;
+            let app_id: String = arg(&args, "appId")?;
+            crate::util_commands::open_in_app(path, app_id).await?;
+            Ok(Value::Null)
+        }
 
         // =====================================================================
         // Doctor

@@ -85,8 +85,8 @@
           },
         });
 
-        // Written-note behaviours on top of Crepe: `[ ]` checkboxes outside
-        // lists, and the first line held as the title H1.
+        // Written-note behaviour on top of Crepe: the first line held as the
+        // title H1.
         editor.editor.use(wysiwygPlugins);
 
         editor.on((listener) => {

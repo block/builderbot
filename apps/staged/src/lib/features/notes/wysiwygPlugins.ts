@@ -4,50 +4,8 @@
  * Imported lazily next to `@milkdown/crepe` (both pull in ProseMirror) and
  * registered on the underlying Milkdown editor before `create()`.
  */
-import { InputRule } from '@milkdown/kit/prose/inputrules';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
-import { findWrapping } from '@milkdown/kit/prose/transform';
-import { $inputRule, $prose } from '@milkdown/kit/utils';
-
-/**
- * Convert `[ ] `, `[x] ` — and the lazier `[] ` — into a task checkbox.
- *
- * The GFM preset ships this conversion only for text already inside a list
- * item (typed after `- `); on a plain paragraph the brackets stay literal
- * text, which the markdown serializer then escapes to `\[ ]` on save and
- * copy. Wrap the paragraph into a fresh task list instead.
- */
-const taskListInputRule = $inputRule(() => {
-  return new InputRule(/^\[(?<checked>[ xX])?\]\s$/, (state, match, start, end) => {
-    const { paragraph, list_item: listItem, bullet_list: bulletList } = state.schema.nodes;
-    if (!paragraph || !listItem || !bulletList) return null;
-    const $start = state.doc.resolve(start);
-    if ($start.parent.type !== paragraph) return null;
-    const checked = (match.groups?.checked ?? '').toLowerCase() === 'x';
-
-    // Already in a list item: make it a task item in place. The preset's own
-    // rule does this for `[ ]`/`[x]`; this also accepts `[]`.
-    const item = $start.node(-1);
-    if (item.type === listItem) {
-      if (item.attrs.checked != null) return null;
-      return state.tr
-        .delete(start, end)
-        .setNodeMarkup($start.before(-1), undefined, { ...item.attrs, checked });
-    }
-
-    const tr = state.tr.delete(start, end);
-    const range = tr.doc.resolve(start).blockRange();
-    const wrapping = range && findWrapping(range, bulletList);
-    if (!range || !wrapping) return null;
-    tr.wrap(range, wrapping);
-    // wrap() opens the wrappers just before the paragraph: the bullet list at
-    // range.start, the list item one token further in.
-    const itemPos = range.start + wrapping.length - 1;
-    const wrapped = tr.doc.nodeAt(itemPos);
-    if (wrapped?.type !== listItem) return null;
-    return tr.setNodeMarkup(itemPos, undefined, { ...wrapped.attrs, checked });
-  });
-});
+import { $prose } from '@milkdown/kit/utils';
 
 /**
  * Keep a non-empty first line a level-1 heading — the note's title.
@@ -80,4 +38,4 @@ const firstLineTitlePlugin = $prose(() => {
   });
 });
 
-export const wysiwygPlugins = [taskListInputRule, firstLineTitlePlugin];
+export const wysiwygPlugins = [firstLineTitlePlugin];

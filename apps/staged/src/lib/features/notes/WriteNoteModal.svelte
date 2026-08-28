@@ -41,10 +41,12 @@
   let initialMarkdown = $derived(note ? noteMarkdownWithTitle(note.title, note.content) : '');
   let canSave = $derived(!saving && markdown.trim().length > 0);
 
-  // Re-seed whenever the dialog opens on a different note (or closes), so the
-  // next open never starts from the previous note's draft.
+  // Re-seed whenever the dialog opens (fresh or on a different note), so an
+  // open never starts from a previous note's draft or saving state. Closing
+  // is deliberately not reset: a successful save keeps `saving` set so the
+  // footer doesn't flick back to "Save" mid close animation.
   $effect(() => {
-    editorKey;
+    if (editorKey === null) return;
     markdown = initialMarkdown;
     saving = false;
     error = null;
@@ -65,7 +67,6 @@
       onClose();
     } catch (e) {
       error = e instanceof Error ? e.message : 'Could not save the note.';
-    } finally {
       saving = false;
     }
   }
@@ -137,13 +138,21 @@
       <Button type="button" variant="outline" onclick={requestClose} disabled={saving}>
         Cancel
       </Button>
-      <Button type="button" onclick={handleSave} disabled={!canSave}>
+      <!-- The spinner overlays an invisible label so the button keeps its
+           width while saving and the Cancel button next to it never shifts. -->
+      <Button
+        type="button"
+        class="relative"
+        onclick={handleSave}
+        disabled={!canSave}
+        aria-busy={saving}
+      >
         {#if saving}
-          <Spinner size={14} />
-          <span>Saving...</span>
-        {:else}
-          Save
+          <span class="absolute inset-0 flex items-center justify-center">
+            <Spinner size={14} />
+          </span>
         {/if}
+        <span class={saving ? 'invisible' : ''}>Save</span>
       </Button>
     </div>
   </Dialog.Content>

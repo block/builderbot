@@ -18,24 +18,16 @@ describe('noteMarkdownWithTitle', () => {
     expect(noteMarkdownWithTitle('Standalone title', '')).toBe('# Standalone title');
   });
 
-  it('does not duplicate content that already starts with an H1', () => {
-    expect(noteMarkdownWithTitle('Stored title', '# Existing title\n\nBody text.')).toBe(
-      '# Existing title\n\nBody text.'
+  it('prepends the stored title even when the body opens with its own heading', () => {
+    // Hiding the title here would show the wrong one and, on the next save,
+    // store the body's heading as the note's title.
+    expect(noteMarkdownWithTitle('Stored title', '# Section\n\nBody text.')).toBe(
+      '# Stored title\n\n# Section\n\nBody text.'
     );
   });
 
   it('leaves untitled note content unchanged', () => {
     expect(noteMarkdownWithTitle('', 'Body text.')).toBe('Body text.');
-  });
-
-  it('does not duplicate a title the content still carries as its first line', () => {
-    expect(noteMarkdownWithTitle('Sub', '## Sub\n\nDetails.')).toBe('## Sub\n\nDetails.');
-  });
-
-  it('still prepends when the content opens with something else', () => {
-    expect(noteMarkdownWithTitle('output.txt', '```\nlogs\n```')).toBe(
-      '# output.txt\n\n```\nlogs\n```'
-    );
   });
 });
 
@@ -57,30 +49,35 @@ describe('splitNoteMarkdown', () => {
     expect(noteMarkdownWithTitle(title, body)).toBe('# Release plan\n\nShip on Friday.');
   });
 
-  it('round-trips a note whose title came from the fallback', () => {
-    const original = '- first item\n- second item';
+  it('keeps a body that opens with its own heading out of the title', () => {
+    const original = '# Release plan\n\n# Risks\n\nShip on Friday.';
     const { title, body } = splitNoteMarkdown(original);
 
-    // The fallback body keeps the title line, so recombining must not add
-    // another copy of it above the list.
+    expect(title).toBe('Release plan');
+    expect(body).toBe('# Risks\n\nShip on Friday.');
     expect(noteMarkdownWithTitle(title, body)).toBe(original);
   });
 
-  it('falls back to the first non-empty line when there is no H1', () => {
+  it('takes the first line as the title when it is not a heading', () => {
     expect(splitNoteMarkdown('\n\nJust a thought.\n\nMore.')).toEqual({
       title: 'Just a thought.',
-      body: '\n\nJust a thought.\n\nMore.',
+      body: 'More.',
     });
   });
 
-  it('strips heading markers from the fallback title', () => {
-    expect(splitNoteMarkdown('## Overview\n\nDetails.').title).toBe('Overview');
+  it('strips heading markers from the title', () => {
+    expect(splitNoteMarkdown('## Overview\n\nDetails.')).toEqual({
+      title: 'Overview',
+      body: 'Details.',
+    });
   });
 
-  it('clips a long fallback title', () => {
+  it('keeps a long title whole', () => {
     const long = 'x'.repeat(120);
 
-    expect(splitNoteMarkdown(long).title).toBe(`${'x'.repeat(80)}…`);
+    // Clipping the title would drop the rest of the line: the body no longer
+    // holds it, so the note would lose text on every save.
+    expect(splitNoteMarkdown(long)).toEqual({ title: long, body: '' });
   });
 
   it('names a note with nothing usable in it', () => {

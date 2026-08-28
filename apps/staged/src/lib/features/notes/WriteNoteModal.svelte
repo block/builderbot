@@ -5,8 +5,9 @@
   user types the markdown themselves. Opens empty for a new note and prefilled
   when an existing written note is clicked in the timeline.
 
-  There is no title field — the note's leading H1 is its title, matching how
-  session notes are stored.
+  There is no title field — the note's first line is its title, stored in the
+  title column and taken back out of the body, matching how session notes are
+  stored. The leading H1 shown here is put back by `noteMarkdownWithTitle`.
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -22,7 +23,7 @@
     open: boolean;
     /** Existing note to edit; omitted when writing a new one. */
     note?: { id: string; title: string; content: string } | null;
-    /** Persist the note. Receives the title derived from the note's leading H1. */
+    /** Persist the note. Receives the title taken from the note's first line. */
     onSave: (note: { title: string; content: string }) => Promise<void>;
     onClose: () => void;
   }

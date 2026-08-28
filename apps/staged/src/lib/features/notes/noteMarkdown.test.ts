@@ -85,6 +85,52 @@ describe('splitNoteMarkdown', () => {
   });
 });
 
+describe('splitNoteMarkdown with a first line that is not a title', () => {
+  // Markdown whose meaning is its markup: as a one-line plain-text title it
+  // would read as syntax, so the note is Untitled and the line stays put.
+  const notTitles = [
+    ['an image', '![Screenshot](shot.png)'],
+    ['a link', '[The docs](https://example.com)'],
+    ['a link inside a sentence', 'Follow [the docs](https://example.com) first'],
+    ['a heading holding a link', '# [The docs](https://example.com)'],
+    ['a bare URL', 'https://example.com/page'],
+    ['a URL the serializer escaped', 'Read this https\\://example.com'],
+    ['a bullet', '- first item'],
+    ['a task item', '- [ ] first item'],
+    ['a numbered item', '1. first item'],
+    ['a quote', '> quoted'],
+    ['a code fence', '```ts'],
+    ['a table row', '| a | b |'],
+    ['a rule', '---'],
+    ['raw HTML', '<div class="x">'],
+  ] as const;
+
+  for (const [label, firstLine] of notTitles) {
+    it(`leaves ${label} in the body and names the note Untitled`, () => {
+      expect(splitNoteMarkdown(`${firstLine}\n\nRest.`)).toEqual({
+        title: UNTITLED_NOTE_TITLE,
+        body: `${firstLine}\n\nRest.`,
+      });
+    });
+  }
+
+  it('settles after one reopen instead of losing or repeating the line', () => {
+    const typed = '![Screenshot](shot.png)\n\nRest.';
+    const saved = splitNoteMarkdown(typed);
+
+    // Reopening puts a real title line above the image, and saving again reads
+    // that line rather than taking a second pass at the image.
+    const reopened = noteMarkdownWithTitle(saved.title, saved.body);
+    expect(reopened).toBe(`# ${UNTITLED_NOTE_TITLE}\n\n${typed}`);
+    expect(splitNoteMarkdown(reopened)).toEqual(saved);
+  });
+
+  it('still takes ordinary titles, including decorated ones', () => {
+    expect(splitNoteMarkdown('**Release** plan\n\nShip.').title).toBe('**Release** plan');
+    expect(splitNoteMarkdown('Notes [draft] for v2\n\nShip.').title).toBe('Notes [draft] for v2');
+  });
+});
+
 describe('renderNoteMarkdown', () => {
   it('uses the shared markdown renderer', () => {
     const html = renderNoteMarkdown('```pikchr\nbox "Start" fit\n```');

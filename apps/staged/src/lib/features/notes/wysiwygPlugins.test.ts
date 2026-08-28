@@ -101,6 +101,35 @@ describe('firstLineTitlePlugin', () => {
     expect(currentMarkdown().includes('more item')).toBe(true);
   });
 
+  it('leaves a first line that is only an image as a paragraph', async () => {
+    const view = await createEditor('![Screenshot](shot.png)');
+    selectStartOf(view, 'paragraph');
+    type(view, 'x');
+
+    // An H1 here would promise a title the save path won't store.
+    expect(view.state.doc.firstChild?.type.name).toBe('paragraph');
+  });
+
+  it('leaves a first line holding a link as a paragraph', async () => {
+    const view = await createEditor('See [the docs](https://example.com)');
+    selectStartOf(view, 'paragraph');
+    type(view, 'x ');
+
+    expect(view.state.doc.firstChild?.type.name).toBe('paragraph');
+  });
+
+  it('demotes the title when a URL is typed into it', async () => {
+    const view = await createEditor('# Read this');
+    const end = view.state.doc.firstChild!.nodeSize - 1;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, end)));
+    type(view, ' https://example.com');
+
+    expect(view.state.doc.firstChild?.type.name).toBe('paragraph');
+    // The serializer escapes the colon so the line can't autolink; the saved
+    // markdown still opens with the demoted paragraph rather than an H1.
+    expect(currentMarkdown().startsWith('Read this https\\://example.com')).toBe(true);
+  });
+
   it('promotes body paragraphs only in first position', async () => {
     const view = await createEditor('# Title\n\nbody');
     selectStartOf(view, 'paragraph');

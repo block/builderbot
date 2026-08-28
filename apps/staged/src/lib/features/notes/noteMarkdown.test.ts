@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   UNTITLED_NOTE_TITLE,
+  canBeNoteTitleLine,
+  canBeNoteTitleText,
   noteMarkdownWithTitle,
   renderNoteMarkdown,
   splitNoteMarkdown,
+  unescapeMarkdown,
 } from './noteMarkdown';
 
 describe('noteMarkdownWithTitle', () => {
@@ -128,6 +131,93 @@ describe('splitNoteMarkdown with a first line that is not a title', () => {
   it('still takes ordinary titles, including decorated ones', () => {
     expect(splitNoteMarkdown('**Release** plan\n\nShip.').title).toBe('**Release** plan');
     expect(splitNoteMarkdown('Notes [draft] for v2\n\nShip.').title).toBe('Notes [draft] for v2');
+  });
+});
+
+describe('unescapeMarkdown', () => {
+  it('consumes the escaped character along with its backslash', () => {
+    // A lookahead that deleted the backslash alone would re-examine the second
+    // half of a `\\` pair and eat that too, losing every backslash typed.
+    expect(unescapeMarkdown('a\\\\\\*b')).toBe('a\\*b');
+    expect(unescapeMarkdown('back\\\\\\slash')).toBe('back\\\\slash');
+  });
+
+  it('only undoes escapes CommonMark defines', () => {
+    // The 32 ASCII punctuation characters, and nothing else: a backslash before
+    // a letter or non-ASCII punctuation is literal, and the serializer knows it
+    // and leaves it alone.
+    expect(unescapeMarkdown('\\—dash \\word')).toBe('\\—dash \\word');
+    expect(unescapeMarkdown('\\!\\"\\#\\$\\%\\&\\\'\\(\\)\\*\\+\\,\\-\\.\\/')).toBe(
+      '!"#$%&\'()*+,-./'
+    );
+    expect(unescapeMarkdown('\\:\\;\\<\\=\\>\\?\\@\\[\\\\\\]\\^\\_\\`\\{\\|\\}\\~')).toBe(
+      ':;<=>?@[\\]^_`{|}~'
+    );
+  });
+});
+
+describe('splitNoteMarkdown with a title the serializer escaped', () => {
+  // The title column is plain text — the timeline row and `#note:` labels render
+  // it as-is — but the line it comes from was written for a markdown parser.
+  const escaped = [
+    ['an identifier', '# snake\\_case\\_name', 'snake_case_name'],
+    ['brackets', '# Plan \\[draft] v2', 'Plan [draft] v2'],
+    ['an asterisk', '# Use \\* for wildcards', 'Use * for wildcards'],
+    ['an ampersand', '# AT\\&T outage', 'AT&T outage'],
+    ['a trailing hash', '# trailing hash \\#', 'trailing hash #'],
+    ['an angle bracket', '# \\<not html>', '<not html>'],
+  ] as const;
+
+  for (const [label, firstLine, title] of escaped) {
+    it(`stores ${label} as the text a reader sees`, () => {
+      expect(splitNoteMarkdown(`${firstLine}\n\nRest.`)).toEqual({ title, body: 'Rest.' });
+    });
+  }
+
+  it('keeps a backslash the user typed', () => {
+    // Typed as `a\*b`, the line serializes to `a\\\*b`: the backslash is escaped
+    // and so is the asterisk behind it.
+    expect(splitNoteMarkdown('# a\\\\\\*b').title).toBe('a\\*b');
+    expect(splitNoteMarkdown('# 50\\\\% off').title).toBe('50\\% off');
+    expect(splitNoteMarkdown('# \\—dash').title).toBe('\\—dash');
+  });
+
+  it('reads the heading marker before unescaping, not after', () => {
+    // `\# Heading` is a paragraph whose visible text opens with a `#`. Unescaping
+    // first would take that for a marker and drop a character the user can see.
+    expect(splitNoteMarkdown('\\# Heading\n\nRest.')).toEqual({
+      title: '# Heading',
+      body: 'Rest.',
+    });
+  });
+
+  it("unescapes a dropped file's own heading too", () => {
+    expect(splitNoteMarkdown('# snake\\_case\\_name\n\nHow to build it.', 'README').title).toBe(
+      'snake_case_name'
+    );
+  });
+
+  it('is a fixed point: a plain title survives the next round trip', () => {
+    const title = 'snake_case_name';
+    const body = 'Details.';
+
+    expect(splitNoteMarkdown(noteMarkdownWithTitle(title, body))).toEqual({ title, body });
+  });
+});
+
+describe('canBeNoteTitleLine and canBeNoteTitleText', () => {
+  // The editor asks about a parsed block's text, the save path about the line the
+  // serializer wrote for it. Both halves promise to agree, which they only do if
+  // the escapes come off exactly once, on the side that has them.
+  it('reject a bullet in either spelling', () => {
+    expect(canBeNoteTitleText('- item')).toBe(false);
+    expect(canBeNoteTitleLine('\\- item')).toBe(false);
+  });
+
+  it('accept a line that only looks like one', () => {
+    // Visible text `\- item`: a literal backslash, so not a bullet at all.
+    expect(canBeNoteTitleText('\\- item')).toBe(true);
+    expect(canBeNoteTitleLine('\\\\- item')).toBe(true);
   });
 });
 

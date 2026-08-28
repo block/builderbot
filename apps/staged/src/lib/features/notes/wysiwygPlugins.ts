@@ -8,7 +8,7 @@ import type { Node } from '@milkdown/kit/prose/model';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import { $prose } from '@milkdown/kit/utils';
 
-import { canBeNoteTitle } from './noteMarkdown';
+import { canBeNoteTitleText } from './noteMarkdown';
 
 /**
  * Keep the first line a level-1 heading exactly when it can be the note's title.
@@ -64,11 +64,15 @@ const firstLineTitlePlugin = $prose(() => {
 /**
  * Whether this block would survive the trip through the title column.
  *
- * The markdown rule (`canBeNoteTitle`) runs on the serialized line, so it sees
- * `[docs](url)` as text. Here the same content is already parsed — a link is a
- * mark and an image is a node with no text at all — so the structure is checked
+ * The markdown rule (`canBeNoteTitleLine`) runs on the serialized line, so it
+ * sees `[docs](url)` as text. Here the same content is already parsed — a link is
+ * a mark and an image is a node with no text at all — so the structure is checked
  * directly and the text is passed through the shared rule for what it can still
  * catch, such as a bare URL typed out.
+ *
+ * The text form of that rule is the one to call: `textContent` is plain already,
+ * so the serializer's escapes have never been added to it and there is nothing to
+ * undo.
  */
 function canHoldTitle(node: Node): boolean {
   if (node.content.size === 0) return false;
@@ -80,7 +84,7 @@ function canHoldTitle(node: Node): boolean {
     }
     return !holdsLinkOrImage;
   });
-  return !holdsLinkOrImage && canBeNoteTitle(node.textContent);
+  return !holdsLinkOrImage && canBeNoteTitleText(node.textContent);
 }
 
 export const wysiwygPlugins = [firstLineTitlePlugin];

@@ -8,6 +8,7 @@ import { TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { getMarkdown } from '@milkdown/kit/utils';
 
+import { splitNoteMarkdown } from './noteMarkdown';
 import { wysiwygPlugins } from './wysiwygPlugins';
 
 // The editor under test is Milkdown with the same presets Crepe layers its
@@ -128,6 +129,20 @@ describe('firstLineTitlePlugin', () => {
     // The serializer escapes the colon so the line can't autolink; the saved
     // markdown still opens with the demoted paragraph rather than an H1.
     expect(currentMarkdown().startsWith('Read this https\\://example.com')).toBe(true);
+  });
+
+  it('saves a title the serializer escaped as the text on screen', async () => {
+    // Pins the assumption the unescape is there for, against the real
+    // serializer: underscores in the title line come back out as `\_`. Seeded
+    // from markdown rather than typed, since the emphasis input rule would fire
+    // on the second `_` and produce italics instead of the literal text.
+    const view = await createEditor('# snake\\_case\\_name');
+    const end = view.state.doc.firstChild!.nodeSize - 1;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, end)));
+    type(view, '2');
+
+    expect(currentMarkdown().startsWith('# snake\\_case\\_name2')).toBe(true);
+    expect(splitNoteMarkdown(currentMarkdown()).title).toBe('snake_case_name2');
   });
 
   it('promotes body paragraphs only in first position', async () => {

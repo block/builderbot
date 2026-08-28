@@ -27,6 +27,16 @@ describe('noteMarkdownWithTitle', () => {
   it('leaves untitled note content unchanged', () => {
     expect(noteMarkdownWithTitle('', 'Body text.')).toBe('Body text.');
   });
+
+  it('does not duplicate a title the content still carries as its first line', () => {
+    expect(noteMarkdownWithTitle('Sub', '## Sub\n\nDetails.')).toBe('## Sub\n\nDetails.');
+  });
+
+  it('still prepends when the content opens with something else', () => {
+    expect(noteMarkdownWithTitle('output.txt', '```\nlogs\n```')).toBe(
+      '# output.txt\n\n```\nlogs\n```'
+    );
+  });
 });
 
 describe('splitNoteMarkdown', () => {
@@ -45,6 +55,15 @@ describe('splitNoteMarkdown', () => {
     const { title, body } = splitNoteMarkdown('# Release plan\n\nShip on Friday.');
 
     expect(noteMarkdownWithTitle(title, body)).toBe('# Release plan\n\nShip on Friday.');
+  });
+
+  it('round-trips a note whose title came from the fallback', () => {
+    const original = '- first item\n- second item';
+    const { title, body } = splitNoteMarkdown(original);
+
+    // The fallback body keeps the title line, so recombining must not add
+    // another copy of it above the list.
+    expect(noteMarkdownWithTitle(title, body)).toBe(original);
   });
 
   it('falls back to the first non-empty line when there is no H1', () => {

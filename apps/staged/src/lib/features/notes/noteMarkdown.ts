@@ -9,9 +9,22 @@ export function noteMarkdownWithTitle(title: string, content: string): string {
 
   const normalizedContent = content.trimStart();
   if (!normalizedContent) return `# ${normalizedTitle}`;
-  if (startsWithMarkdownH1(normalizedContent)) return content;
+  if (startsWithTitleLine(normalizedContent, normalizedTitle)) return content;
 
   return `# ${normalizedTitle}\n\n${normalizedContent}`;
+}
+
+/**
+ * True when the content already opens with its own title line, so prepending
+ * one would show the user a duplicate.
+ *
+ * A leading H1 is the stored shape and wins outright, whatever the title
+ * column says. Otherwise the test is whether `splitNoteMarkdown` would read
+ * this very title back off the content: its no-H1 fallback keeps the whole
+ * document as the body, title line included.
+ */
+function startsWithTitleLine(content: string, title: string): boolean {
+  return startsWithMarkdownH1(content) || titleFromFirstLine(content) === title;
 }
 
 function startsWithMarkdownH1(content: string): boolean {
@@ -32,7 +45,9 @@ const TITLE_MAX_LENGTH = 80;
  * `noteMarkdownWithTitle` is the inverse, recombining them for display or editing.
  *
  * Without a leading H1 there is no session prompt to fall back on, so the first
- * non-empty line stands in, clipped to a title-sized string.
+ * non-empty line stands in, clipped to a title-sized string. The body then keeps
+ * that line — it is real content, a list item or a demoted heading — which is why
+ * `noteMarkdownWithTitle` recognises it instead of prepending a second copy.
  */
 export function splitNoteMarkdown(markdown: string): { title: string; body: string } {
   const trimmed = markdown.trimStart();

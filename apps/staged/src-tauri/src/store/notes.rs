@@ -277,6 +277,10 @@ impl Store {
             "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = ?4 WHERE id = ?5",
             params![title, content, now, completed_at, id],
         )?;
+        self.publish(StoreChange::Notes {
+            branch_id: Some(existing.branch_id.clone()),
+            project_id: None,
+        });
 
         Ok(Note {
             title,

@@ -17,12 +17,19 @@ import { $prose } from '@milkdown/kit/utils';
  * the round-trip through `noteMarkdownWithTitle` on the H1 path rather than
  * prepending a duplicate of the first line on the next edit.
  *
- * Only non-empty paragraphs are promoted: a fresh note's empty first block
- * stays a paragraph so the doc still counts as empty (the placeholder shows,
- * the trailing-paragraph plugin stays idle), and a heading the user demoted
- * to another level on purpose is their call. Composition transactions are
- * skipped — retyping the block under an active IME session would break it —
- * so a composed title is promoted on the next ordinary edit instead.
+ * A deeper heading on the first line is re-levelled too, rather than left as
+ * the user typed it: `## Sub` on line one is still the title, and leaving it
+ * alone sent the save down `splitNoteMarkdown`'s no-H1 fallback, which reopens
+ * the note with the title line showing twice.
+ *
+ * Only non-empty top-level text blocks are promoted: a fresh note's empty first
+ * block stays a paragraph so the doc still counts as empty (the placeholder
+ * shows, the trailing-paragraph plugin stays idle), and a document opening with
+ * a list or a code fence keeps its structure — there is no sensible in-place
+ * promotion, and `noteMarkdownWithTitle` handles that shape without duplicating
+ * the line. Composition transactions are skipped — retyping the block under an
+ * active IME session would break it — so a composed title is promoted on the
+ * next ordinary edit instead.
  */
 const firstLineTitlePlugin = $prose(() => {
   return new Plugin({
@@ -31,8 +38,10 @@ const firstLineTitlePlugin = $prose(() => {
       if (!transactions.some((tr) => tr.docChanged && !tr.getMeta('composition'))) return null;
       const heading = state.schema.nodes.heading;
       const first = state.doc.firstChild;
-      if (!heading || !first) return null;
-      if (first.type.name !== 'paragraph' || first.content.size === 0) return null;
+      if (!heading || !first || first.content.size === 0) return null;
+      const promotable =
+        first.type.name === 'paragraph' || (first.type === heading && first.attrs.level !== 1);
+      if (!promotable) return null;
       return state.tr.setBlockType(1, 1, heading, { level: 1 });
     },
   });

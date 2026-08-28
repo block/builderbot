@@ -39,6 +39,8 @@
   // opens on a different note rather than reusing the previous one's content.
   let editorKey = $derived(open ? (note?.id ?? 'new') : null);
   let initialMarkdown = $derived(note ? noteMarkdownWithTitle(note.title, note.content) : '');
+  // Button state only — `handleSave` re-checks against the editor rather than
+  // this debounced copy of the document.
   let canSave = $derived(!saving && markdown.trim().length > 0);
 
   // Re-seed whenever the dialog opens (fresh or on a different note), so an
@@ -53,12 +55,14 @@
   });
 
   async function handleSave() {
-    if (!canSave) return;
-    // The editor is the source of truth: markdownUpdated can lag the last
-    // keystroke, and a note typed and saved fast enough would lose it.
+    // Deliberately not `canSave`: that reads the debounced `markdown` state,
+    // so a note typed and saved by Cmd+Enter inside the debounce window would
+    // silently no-op. The editor is the source of truth for both the emptiness
+    // check and the content — markdownUpdated can lag the last keystroke.
+    if (saving) return;
     const current = editor?.getMarkdown() ?? markdown;
-    const { title, body } = splitNoteMarkdown(current);
     if (!current.trim()) return;
+    const { title, body } = splitNoteMarkdown(current);
 
     saving = true;
     error = null;

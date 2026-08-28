@@ -72,7 +72,7 @@ describe('firstLineTitlePlugin', () => {
     expect(currentMarkdown().startsWith('# Hello')).toBe(true);
   });
 
-  it('does not re-level a heading the user demoted', async () => {
+  it('re-levels a deeper heading on the first line', async () => {
     const view = await createEditor('## Sub');
     const end = view.state.doc.firstChild!.nodeSize - 1;
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, end)));
@@ -80,7 +80,25 @@ describe('firstLineTitlePlugin', () => {
 
     const first = view.state.doc.firstChild;
     expect(first?.type.name).toBe('heading');
-    expect(first?.attrs.level).toBe(2);
+    expect(first?.attrs.level).toBe(1);
+    expect(currentMarkdown().startsWith('# Sub!')).toBe(true);
+  });
+
+  it('leaves deeper headings alone below the first line', async () => {
+    const view = await createEditor('# Title\n\n## Sub\n\nbody');
+    selectStartOf(view, 'paragraph');
+    type(view, 'more ');
+
+    expect(view.state.doc.child(1).attrs.level).toBe(2);
+  });
+
+  it('leaves a document that opens with a list alone', async () => {
+    const view = await createEditor('- item');
+    selectStartOf(view, 'paragraph');
+    type(view, 'more ');
+
+    expect(view.state.doc.firstChild?.type.name).toBe('bullet_list');
+    expect(currentMarkdown().includes('more item')).toBe(true);
   });
 
   it('promotes body paragraphs only in first position', async () => {

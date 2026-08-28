@@ -3140,6 +3140,42 @@ fn change_feed_publishes_domain_changes_for_mutations() {
 }
 
 #[test]
+fn change_feed_written_note_edits_publish_like_other_note_mutations() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let mut note = Note::new(&branch.id, "Draft", "# Draft").with_subtype(Note::SUBTYPE_WRITTEN);
+    store.create_note_with_unique_title(&mut note).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // Without this, a note edited in one window leaves every other view showing
+    // the old title and content until some unrelated event refreshes it.
+    store
+        .update_written_note(&note.id, "Final", "# Final")
+        .unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Notes {
+            branch_id: Some(branch.id.clone()),
+            project_id: None
+        }
+    );
+
+    // A rejected edit writes nothing, so it announces nothing.
+    let agent = Note::new(&branch.id, "Agent note", "body").with_session("session-1");
+    store.create_note(&agent).unwrap();
+    while rx.try_recv().is_ok() {}
+    assert!(store
+        .update_written_note(&agent.id, "Hijacked", "mine now")
+        .is_err());
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn change_feed_ensure_review_publishes_only_on_create() {
     let (tx, mut rx) = tokio::sync::broadcast::channel(64);
     let store = Store::in_memory().unwrap().with_change_sender(tx);

@@ -1370,7 +1370,10 @@
                 </Button>
               </span>
             {/if}
-            {#if onWriteNote}
+            <!-- The menu is the only way to reach an overflowed button, so it
+                 renders whenever something overflowed — not just when there is
+                 a "Write note" action to hang off it. -->
+            {#if onWriteNote || overflowMenuActions.length > 0}
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger
                   class={buttonVariants({ variant: 'outline', size: 'icon-sm' })}
@@ -1380,11 +1383,13 @@
                   <MoreHorizontal size={16} />
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content align="start" sideOffset={4} class="min-w-[180px]">
-                  <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
-                    <PencilLine size={14} /> Write note
-                  </DropdownMenu.Item>
-                  {#if overflowMenuActions.length > 0}
-                    <DropdownMenu.Separator />
+                  {#if onWriteNote}
+                    <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
+                      <PencilLine size={14} /> Write note
+                    </DropdownMenu.Item>
+                    {#if overflowMenuActions.length > 0}
+                      <DropdownMenu.Separator />
+                    {/if}
                   {/if}
                   {#each overflowMenuActions as action (action)}
                     {#if action === 'note'}

@@ -1119,8 +1119,9 @@ export function createNote(
  * Save an edit to a user-authored ("written") note. Rejects notes an agent
  * session produced — their content belongs to that session.
  *
- * Callers invalidate the branch timeline themselves (see `ActionOutputModal`);
- * the note id alone doesn't identify which timeline to refresh.
+ * Like the other note mutations this publishes `notes-changed`, so other views
+ * refresh on their own; the calling card still invalidates locally so its own
+ * timeline updates without waiting for the round trip.
  */
 export function updateNote(
   noteId: string,

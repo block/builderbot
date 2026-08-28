@@ -60,6 +60,7 @@
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
+  import { splitNoteMarkdown } from '../notes/noteMarkdown';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -1733,8 +1734,12 @@
         textPaths.map(async (filePath, i) => {
           try {
             const content = await commands.readTextFile(filePath);
-            const title = fileNameFromPath(filePath);
-            await commands.createNote(branch.id, title, content);
+            // Through the same split the editor saves through, so a dropped file
+            // is stored like any other note: its own leading H1 becomes the
+            // title (and leaves the body, which the viewer would otherwise show
+            // straight under the file name), and the file name titles the rest.
+            const note = splitNoteMarkdown(content, fileNameFromPath(filePath));
+            await commands.createNote(branch.id, note.title, note.body);
           } catch (e) {
             const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
             const detail = reason ?? 'it may be a binary file';

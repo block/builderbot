@@ -131,6 +131,49 @@ describe('splitNoteMarkdown with a first line that is not a title', () => {
   });
 });
 
+describe('splitNoteMarkdown with a fallback title', () => {
+  // The drag-drop writer already has a name for the note — the file's — so it
+  // only gives it up to the document's own H1.
+  it("takes the document's own H1 over the fallback", () => {
+    expect(splitNoteMarkdown('# Project\n\nHow to build it.', 'README')).toEqual({
+      title: 'Project',
+      body: 'How to build it.',
+    });
+  });
+
+  it('round-trips a dropped file that names itself', () => {
+    const file = '# Project\n\nHow to build it.';
+    const { title, body } = splitNoteMarkdown(file, 'README');
+
+    // The heading is stored once, in the title column, so the viewer shows one.
+    expect(noteMarkdownWithTitle(title, body)).toBe(file);
+  });
+
+  it('keeps the fallback when the first line is ordinary text', () => {
+    const log = '12:00 boot\n12:01 ready';
+
+    expect(splitNoteMarkdown(log, 'server')).toEqual({ title: 'server', body: log });
+  });
+
+  it('keeps the fallback for a heading below H1', () => {
+    // `## Overview` is a section of the document, not the name of it.
+    expect(splitNoteMarkdown('## Overview\n\nDetails.', 'notes')).toEqual({
+      title: 'notes',
+      body: '## Overview\n\nDetails.',
+    });
+  });
+
+  it('keeps the fallback when the H1 could not be a title', () => {
+    const doc = '# [The docs](https://example.com)\n\nRest.';
+
+    expect(splitNoteMarkdown(doc, 'links')).toEqual({ title: 'links', body: doc });
+  });
+
+  it('names an empty file after itself rather than Untitled', () => {
+    expect(splitNoteMarkdown('  \n\n', 'empty')).toEqual({ title: 'empty', body: '' });
+  });
+});
+
 describe('renderNoteMarkdown', () => {
   it('uses the shared markdown renderer', () => {
     const html = renderNoteMarkdown('```pikchr\nbox "Start" fit\n```');

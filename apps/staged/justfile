@@ -87,6 +87,90 @@ dev-web repo="":
     {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
     pnpm exec tauri dev --config "$TAURI_CONFIG"
 
+# Build and run the release app with the HTTPS web server. Requires PEM cert/key files.
+run-web:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Unlike `dev-web` there is no Vite/HMR: the desktop window and the phone
+    # get the same built bundle, so this is the path that exercises the service
+    # worker and the production frontend. One Staged process at a time — a
+    # `just dev`/`dev-web` instance elsewhere shares ~/.staged and the port.
+
+    [[ -d node_modules ]] || pnpm install
+
+    if [[ -z "${STAGED_WEB_CERT_PATH:-}" || -z "${STAGED_WEB_KEY_PATH:-}" ]]; then
+        printf '%s\n' \
+            'Error: `just run-web` serves browser access over HTTPS.' \
+            'Provide PEM certificate/key files covering the hostname you browse to:' \
+            '' \
+            '  STAGED_WEB_CERT_PATH=/path/to/cert.pem \' \
+            '  STAGED_WEB_KEY_PATH=/path/to/key.pem \' \
+            '  just run-web' >&2
+        exit 1
+    fi
+
+    # `tauri build` runs `pnpm run build` first, so dist/ is always regenerated
+    # here. The window's assets are compiled into the binary while the server
+    # reads dist/ from disk — rebuilding both together keeps them in sync.
+    # `--bundles app` skips the DMG that `just build` would also produce.
+    pnpm exec tauri build --bundles app
+
+    # Cargo resolves a relative CARGO_TARGET_DIR against its own cwd (src-tauri)
+    TARGET_DIR="$(pwd)/src-tauri/target"
+    if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+        case "$CARGO_TARGET_DIR" in
+            /*) TARGET_DIR="$CARGO_TARGET_DIR" ;;
+            *) TARGET_DIR="$(pwd)/src-tauri/$CARGO_TARGET_DIR" ;;
+        esac
+    fi
+
+    APP_BIN="$TARGET_DIR/release/bundle/macos/Staged.app/Contents/MacOS/Staged"
+    if [[ ! -x "$APP_BIN" ]]; then
+        echo "Error: no app bundle at $APP_BIN" >&2
+        exit 1
+    fi
+
+    export STAGED_WEB_SERVER=1
+
+    # The server locates the frontend by trying <exe>/../dist, then
+    # <exe>/../../../../dist, then ../dist relative to the cwd. Only the last
+    # one resolves for a bundled release binary, so launch from src-tauri to
+    # make ../dist mean apps/staged/dist. Anywhere else serves 404s.
+    cd src-tauri
+
+    "$APP_BIN" &
+    APP_PID=$!
+    trap 'kill "$APP_PID" 2>/dev/null || true' EXIT
+
+    # Release builds install no logger, so web server failures (bad cert path,
+    # :5175 already bound by another Staged instance) are completely silent.
+    # Probe the server rather than trusting that the app launched.
+    STATUS=000
+    for _ in $(seq 1 30); do
+        kill -0 "$APP_PID" 2>/dev/null || break
+        STATUS=$(curl -sk --max-time 2 -o /dev/null -w '%{http_code}' https://localhost:5175/sw.js) || true
+        [[ "$STATUS" == "000" ]] || break
+        sleep 1
+    done
+
+    case "$STATUS" in
+        2*|3*)
+            echo "Web server ready on https://${STAGED_WEB_HOST:-$(hostname)}:5175"
+            ;;
+        404)
+            echo "Web server is up but dist/ did not resolve — it is serving 404s." >&2
+            ;;
+        *)
+            printf '%s\n' \
+                'Web server never came up on :5175. Release builds log nothing, so check:' \
+                '  - STAGED_WEB_CERT_PATH / STAGED_WEB_KEY_PATH point at readable PEM files' \
+                '  - no other Staged instance already holds the port' >&2
+            ;;
+    esac
+
+    wait "$APP_PID" || true
+
 # Build the app for production
 build:
     pnpm run tauri:build

@@ -529,6 +529,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 completed_at: n.completed_at,
                 suggested_next_commit_step: n.suggested_next_commit_step,
                 suggested_next_note_step: n.suggested_next_note_step,
+                subtype: n.subtype,
             }
         })
         .collect();

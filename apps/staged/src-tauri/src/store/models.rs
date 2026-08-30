@@ -891,9 +891,17 @@ pub struct Note {
     /// rather than a standalone branch note. Children are hidden from the
     /// branch timeline and fetched via the parent project-note view.
     pub parent_project_note_id: Option<String>,
+    /// How the note's content came to be. `None` means a session produced it;
+    /// [`Note::SUBTYPE_WRITTEN`] means the user authored it directly and it can
+    /// be edited in place.
+    pub subtype: Option<String>,
 }
 
 impl Note {
+    /// Subtype marking a note the user wrote themselves rather than one an
+    /// agent session produced. Only these are editable via `update_note`.
+    pub const SUBTYPE_WRITTEN: &'static str = "written";
+
     pub fn new(branch_id: &str, title: &str, content: &str) -> Self {
         let now = now_timestamp();
         let has_content = !content.is_empty();
@@ -909,6 +917,7 @@ impl Note {
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
             parent_project_note_id: None,
+            subtype: None,
         }
     }
 
@@ -920,6 +929,15 @@ impl Note {
     pub fn with_parent_project_note(mut self, id: &str) -> Self {
         self.parent_project_note_id = Some(id.to_string());
         self
+    }
+
+    pub fn with_subtype(mut self, subtype: &str) -> Self {
+        self.subtype = Some(subtype.to_string());
+        self
+    }
+
+    pub fn is_written(&self) -> bool {
+        self.subtype.as_deref() == Some(Self::SUBTYPE_WRITTEN)
     }
 }
 

@@ -14,11 +14,14 @@
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import FileSearch from '@lucide/svelte/icons/file-search';
   import Plus from '@lucide/svelte/icons/plus';
+  import MoreHorizontal from '@lucide/svelte/icons/more-horizontal';
+  import PencilLine from '@lucide/svelte/icons/pencil-line';
   import { isResumableReason } from '../../types';
   import type {
     BranchGitState,
     BranchTimeline as BranchTimelineData,
     HashtagItem,
+    NoteSubtype,
     UpstreamRelation,
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
@@ -26,8 +29,10 @@
   import TimelineContextMenu, {
     type TimelineContextMenuAction,
   } from './TimelineContextMenu.svelte';
-  import { Button } from '$lib/components/ui/button';
+  import { Button, buttonVariants } from '$lib/components/ui/button';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
+  import { computeFooterOverflow, overflowedActions } from './footerOverflow';
   import { escapeHtml, hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
   import {
     formatRelativeTime,
@@ -89,7 +94,10 @@
     >;
     onNewNote?: () => void;
     onNewCommit?: () => void;
-    onNewReview?: (e: MouseEvent) => void;
+    /** Alt-click skips the prompt dialog; the overflow menu item passes no event. */
+    onNewReview?: (e?: MouseEvent) => void;
+    /** Open the editor for a note the user writes themselves (no agent session). */
+    onWriteNote?: () => void;
     onPullOrigin?: () => void;
     onPushOrigin?: () => void;
     onRebaseBranch?: () => void;
@@ -175,6 +183,7 @@
     onNewNote,
     onNewCommit,
     onNewReview,
+    onWriteNote,
     onPullOrigin,
     onPushOrigin,
     onRebaseBranch,
@@ -266,6 +275,7 @@
     noteTitle?: string;
     noteContent?: string;
     noteUpdatedAt?: number;
+    noteSubtype?: NoteSubtype;
     reviewId?: string;
     imageId?: string;
     imageFilename?: string;
@@ -744,6 +754,7 @@
         noteTitle: stripXmlTags(note.title),
         noteContent: note.content,
         noteUpdatedAt: note.updatedAt,
+        noteSubtype: note.subtype,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
@@ -920,13 +931,52 @@
     return actions;
   });
   let actionFooterVisible = $derived(
-    !!onNewNote || !!onNewCommit || !!onNewReview || !!footerActions
+    !!onNewNote || !!onNewCommit || !!onNewReview || !!onWriteNote || !!footerActions
   );
 
   /** True when the timeline has no content and action buttons should be enlarged. */
   let actionButtonsEnlarged = $derived(
     items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
   );
+
+  // ── Footer overflow ───────────────────────────────────────────────────
+  //
+  // The label tiers are container queries, but the `…` menu's content is
+  // portaled outside the `timeline` container, so which items it lists has to
+  // come from a measured width. See `footerOverflow.ts`.
+
+  let timelineEl = $state<HTMLDivElement | null>(null);
+  let timelineWidth = $state(0);
+
+  $effect(() => {
+    const el = timelineEl;
+    if (!el) {
+      timelineWidth = 0;
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[entries.length - 1];
+      // Entry sizes are in local CSS pixels, so an animating ancestor (card
+      // expand, dialog zoom) can't report a transformed width.
+      timelineWidth = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  let footerActionsAvailable = $derived({
+    note: !!onNewNote,
+    commit: !!onNewCommit,
+    review: !!onNewReview,
+  });
+  // The enlarged empty-timeline state stacks full-width pills and hides the
+  // right group, so it has room for all three regardless of card width.
+  let footerOverflow = $derived(
+    actionButtonsEnlarged
+      ? computeFooterOverflow(0, footerActionsAvailable)
+      : computeFooterOverflow(timelineWidth, footerActionsAvailable)
+  );
+  let overflowMenuActions = $derived(overflowedActions(footerOverflow, footerActionsAvailable));
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
@@ -940,6 +990,7 @@
         content: item.noteContent ?? '',
         sessionId: item.sessionId,
         updatedAt: item.noteUpdatedAt,
+        subtype: item.noteSubtype,
       });
     } else if (item.type === 'review' && item.reviewId && onReviewClick) {
       onReviewClick(item.reviewId);
@@ -1040,7 +1091,7 @@
 {:else}
   <!-- Unified timeline (vertical) -->
   <TimelineContextMenu actions={timelineContextMenuActions} {onNewSessionReferring}>
-    <div class="timeline">
+    <div class="timeline" bind:this={timelineEl}>
       {#each normalItems as item, index (item.key)}
         <div>
           <TimelineRow
@@ -1199,7 +1250,7 @@
             class="footer-left-actions"
             class:footer-left-actions-enlarged={actionButtonsEnlarged}
           >
-            {#if onNewNote}
+            {#if onNewNote && !footerOverflow.note}
               <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
                 <Button
                   variant="ghost"
@@ -1239,7 +1290,7 @@
                 </Button>
               </span>
             {/if}
-            {#if onNewCommit}
+            {#if onNewCommit && !footerOverflow.commit}
               <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
                 <Button
                   variant="ghost"
@@ -1279,7 +1330,7 @@
                 </Button>
               </span>
             {/if}
-            {#if onNewReview}
+            {#if onNewReview && !footerOverflow.review}
               <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
                 <Button
                   variant="ghost"
@@ -1318,6 +1369,56 @@
                   >
                 </Button>
               </span>
+            {/if}
+            <!-- The menu is the only way to reach an overflowed button, so it
+                 renders whenever something overflowed — not just when there is
+                 a "Write note" action to hang off it. -->
+            {#if onWriteNote || overflowMenuActions.length > 0}
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger
+                  class={buttonVariants({ variant: 'outline', size: 'icon-sm' })}
+                  aria-label="More timeline actions"
+                  title="More actions"
+                >
+                  <MoreHorizontal size={16} />
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Content align="start" sideOffset={4} class="min-w-[180px]">
+                  {#if onWriteNote}
+                    <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
+                      <PencilLine size={14} /> Write note
+                    </DropdownMenu.Item>
+                    {#if overflowMenuActions.length > 0}
+                      <DropdownMenu.Separator />
+                    {/if}
+                  {/if}
+                  {#each overflowMenuActions as action (action)}
+                    {#if action === 'note'}
+                      <DropdownMenu.Item
+                        disabled={newSessionDisabled}
+                        onSelect={() => onNewNote?.()}
+                      >
+                        <FileText size={14} /> New note
+                      </DropdownMenu.Item>
+                    {:else if action === 'commit'}
+                      <DropdownMenu.Item
+                        disabled={newSessionDisabled}
+                        onSelect={() => onNewCommit?.()}
+                      >
+                        <GitCommitVertical size={14} /> New commit
+                      </DropdownMenu.Item>
+                    {:else}
+                      <!-- No MouseEvent here, so the alt-click shortcut that skips
+                           the prompt dialog is only on the visible button. -->
+                      <DropdownMenu.Item
+                        disabled={newSessionDisabled}
+                        onSelect={() => onNewReview?.()}
+                      >
+                        <FileSearch size={14} /> New code review
+                      </DropdownMenu.Item>
+                    {/if}
+                  {/each}
+                </DropdownMenu.Content>
+              </DropdownMenu.Root>
             {/if}
           </div>
           {#if footerActions && !actionButtonsEnlarged}

@@ -1,4 +1,4 @@
-import type { Session, SessionMessage } from '../../types';
+import type { NoteSubtype, Session, SessionMessage } from '../../types';
 
 export interface LinkedNoteContext {
   id: string;
@@ -15,6 +15,8 @@ export interface NoteClickInfo {
   content: string;
   sessionId?: string;
   updatedAt?: number;
+  /** `'written'` routes the click to the editor instead of the read-only viewer. */
+  subtype?: NoteSubtype;
 }
 
 export function countAssistantMessagesAfterNote(

@@ -181,6 +181,9 @@ pub struct NoteTimelineItem {
     pub completed_at: Option<i64>,
     pub suggested_next_commit_step: Option<String>,
     pub suggested_next_note_step: Option<String>,
+    /// `None` for session-produced notes, `"written"` for user-authored ones —
+    /// the frontend routes the latter to the editor instead of the viewer.
+    pub subtype: Option<String>,
 }
 
 /// Review with session status resolved.
@@ -2315,6 +2318,7 @@ pub fn run() {
             timeline::reset_branch_to_remote,
             // Notes
             note_commands::create_note,
+            note_commands::update_note,
             note_commands::delete_note,
             note_commands::get_note,
             note_commands::list_child_notes,

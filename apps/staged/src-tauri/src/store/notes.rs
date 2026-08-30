@@ -27,7 +27,8 @@ impl Store {
     pub fn create_note_with_unique_title(&self, note: &mut Note) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         if !note.title.is_empty() {
-            note.title = Self::resolve_unique_note_title(&conn, &note.branch_id, &note.title)?;
+            note.title =
+                Self::resolve_unique_note_title(&conn, &note.branch_id, &note.title, None)?;
         }
         Self::insert_note(&conn, note)?;
         self.publish(StoreChange::Notes {
@@ -39,8 +40,8 @@ impl Store {
 
     fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
         conn.execute(
-            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 note.id,
                 note.branch_id,
@@ -53,19 +54,25 @@ impl Store {
                 note.suggested_next_commit_step,
                 note.suggested_next_note_step,
                 note.parent_project_note_id,
+                note.subtype,
             ],
         )?;
         Ok(())
     }
 
+    /// Pick a title that is unique among the branch's notes. `exclude_id` is the
+    /// note being renamed, so re-saving a written note under its own title keeps
+    /// that title instead of collecting a ` (2)` suffix on every save.
     fn resolve_unique_note_title(
         conn: &rusqlite::Connection,
         branch_id: &str,
         base: &str,
+        exclude_id: Option<&str>,
     ) -> Result<String, StoreError> {
-        let mut stmt = conn.prepare("SELECT title FROM notes WHERE branch_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT title FROM notes WHERE branch_id = ?1 AND id IS NOT ?2")?;
         let titles: Vec<String> = stmt
-            .query_map(params![branch_id], |row| row.get(0))?
+            .query_map(params![branch_id, exclude_id], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
 
         if !titles.iter().any(|t| t == base) {
@@ -90,7 +97,7 @@ impl Store {
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
              FROM notes WHERE id = ?1",
             params![id],
             Self::row_to_note,
@@ -106,7 +113,7 @@ impl Store {
     pub fn list_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
              FROM notes WHERE branch_id = ?1 AND parent_project_note_id IS NULL
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -120,7 +127,7 @@ impl Store {
     pub fn list_all_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
              FROM notes WHERE branch_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -135,7 +142,7 @@ impl Store {
     pub fn list_child_notes(&self, parent_project_note_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
              FROM notes WHERE parent_project_note_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -147,7 +154,7 @@ impl Store {
     pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
              FROM notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_note,
@@ -160,7 +167,7 @@ impl Store {
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
              FROM notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_note,
@@ -226,6 +233,64 @@ impl Store {
         Ok(())
     }
 
+    /// Rewrite a user-authored note's title and content, returning the saved row.
+    ///
+    /// Unlike [`Store::update_note_title_and_content`] (the session runner's path)
+    /// this always advances `updated_at` — a user save is an explicit edit, not a
+    /// re-extraction — and leaves the suggested next steps alone, since nothing
+    /// regenerates them for a written note. Notes an agent produced are rejected:
+    /// their content belongs to the session that wrote it.
+    pub fn update_written_note(
+        &self,
+        id: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<Note, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let existing = conn
+            .query_row(
+                "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+                 FROM notes WHERE id = ?1",
+                params![id],
+                Self::row_to_note,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError(format!("Note not found: {id}")))?;
+
+        if !existing.is_written() {
+            return Err(StoreError(format!(
+                "Note {id} was produced by a session and cannot be edited"
+            )));
+        }
+
+        let title = if title.is_empty() {
+            title.to_string()
+        } else {
+            Self::resolve_unique_note_title(&conn, &existing.branch_id, title, Some(id))?
+        };
+        let now = now_timestamp();
+        let completed_at =
+            existing
+                .completed_at
+                .or(if content.is_empty() { None } else { Some(now) });
+        conn.execute(
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = ?4 WHERE id = ?5",
+            params![title, content, now, completed_at, id],
+        )?;
+        self.publish(StoreChange::Notes {
+            branch_id: Some(existing.branch_id.clone()),
+            project_id: None,
+        });
+
+        Ok(Note {
+            title,
+            content: content.to_string(),
+            updated_at: now,
+            completed_at,
+            ..existing
+        })
+    }
+
     pub fn mark_note_completed(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
@@ -267,6 +332,7 @@ impl Store {
             suggested_next_commit_step: row.get(8)?,
             suggested_next_note_step: row.get(9)?,
             parent_project_note_id: row.get(10)?,
+            subtype: row.get(11)?,
         })
     }
 }

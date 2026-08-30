@@ -184,7 +184,18 @@ export interface NoteTimelineItem {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  subtype: NoteSubtype;
 }
+
+/**
+ * How a note's content came to be. `null` means an agent session produced it;
+ * `'written'` means the user authored it directly, so it opens in the editor
+ * rather than the read-only viewer.
+ */
+export type NoteSubtype = 'written' | null;
+
+/** Subtype marking a user-authored note. */
+export const WRITTEN_NOTE_SUBTYPE = 'written';
 
 /** A full branch note record, as returned by `get_branch_note_by_session`. */
 export interface BranchNote {
@@ -198,6 +209,7 @@ export interface BranchNote {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  subtype: NoteSubtype;
 }
 
 export interface ReviewTimelineItem {

@@ -2338,6 +2338,100 @@ fn test_create_note_with_unique_title_skips_empty_titles() {
 }
 
 #[test]
+fn test_written_note_round_trips_its_subtype() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut written = Note::new(&branch.id, "Design sketch", "# Design sketch")
+        .with_subtype(Note::SUBTYPE_WRITTEN);
+    store.create_note_with_unique_title(&mut written).unwrap();
+    let agent = Note::new(&branch.id, "Agent note", "body").with_session("session-1");
+    store.create_note(&agent).unwrap();
+
+    assert!(store.get_note(&written.id).unwrap().unwrap().is_written());
+    assert!(!store.get_note(&agent.id).unwrap().unwrap().is_written());
+}
+
+#[test]
+fn test_update_written_note_rewrites_title_and_content() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut note = Note::new(&branch.id, "Draft", "# Draft").with_subtype(Note::SUBTYPE_WRITTEN);
+    store.create_note_with_unique_title(&mut note).unwrap();
+    let created_completed_at = note.completed_at;
+
+    let updated = store
+        .update_written_note(&note.id, "Final", "# Final\n\nbody")
+        .unwrap();
+    assert_eq!(updated.title, "Final");
+    assert_eq!(updated.content, "# Final\n\nbody");
+    // Completion is write-once: the note has been readable since it was saved.
+    assert_eq!(updated.completed_at, created_completed_at);
+
+    let stored = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(stored.title, "Final");
+    assert_eq!(stored.content, "# Final\n\nbody");
+    assert!(stored.is_written());
+}
+
+#[test]
+fn test_update_written_note_keeps_its_own_title_but_avoids_others() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut note = Note::new(&branch.id, "Notes", "body").with_subtype(Note::SUBTYPE_WRITTEN);
+    store.create_note_with_unique_title(&mut note).unwrap();
+    let other = Note::new(&branch.id, "Other", "body");
+    store.create_note(&other).unwrap();
+
+    // Re-saving under the same title must not accumulate " (2)" suffixes.
+    let resaved = store
+        .update_written_note(&note.id, "Notes", "body v2")
+        .unwrap();
+    assert_eq!(resaved.title, "Notes");
+
+    // Renaming onto another note's title still disambiguates.
+    let renamed = store
+        .update_written_note(&note.id, "Other", "body v3")
+        .unwrap();
+    assert_eq!(renamed.title, "Other (2)");
+}
+
+#[test]
+fn test_update_written_note_rejects_session_produced_notes() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // An agent owns this note's content — its session would overwrite any edit
+    // on the next turn, so the store refuses rather than silently losing it.
+    let agent = Note::new(&branch.id, "Agent note", "body").with_session("session-1");
+    store.create_note(&agent).unwrap();
+
+    assert!(store
+        .update_written_note(&agent.id, "Hijacked", "mine now")
+        .is_err());
+    let unchanged = store.get_note(&agent.id).unwrap().unwrap();
+    assert_eq!(unchanged.content, "body");
+
+    assert!(store
+        .update_written_note("missing", "Title", "body")
+        .is_err());
+}
+
+#[test]
 fn test_list_child_notes_returns_children_and_excludes_them_from_branch_timeline() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -3043,6 +3137,42 @@ fn change_feed_publishes_domain_changes_for_mutations() {
             project_id: Some(project.id.clone())
         }
     );
+}
+
+#[test]
+fn change_feed_written_note_edits_publish_like_other_note_mutations() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let mut note = Note::new(&branch.id, "Draft", "# Draft").with_subtype(Note::SUBTYPE_WRITTEN);
+    store.create_note_with_unique_title(&mut note).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // Without this, a note edited in one window leaves every other view showing
+    // the old title and content until some unrelated event refreshes it.
+    store
+        .update_written_note(&note.id, "Final", "# Final")
+        .unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Notes {
+            branch_id: Some(branch.id.clone()),
+            project_id: None
+        }
+    );
+
+    // A rejected edit writes nothing, so it announces nothing.
+    let agent = Note::new(&branch.id, "Agent note", "body").with_session("session-1");
+    store.create_note(&agent).unwrap();
+    while rx.try_recv().is_ok() {}
+    assert!(store
+        .update_written_note(&agent.id, "Hijacked", "mine now")
+        .is_err());
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]

@@ -126,6 +126,7 @@ describe('timelineToHashtagItems', () => {
           completedAt: 1000,
           suggestedNextCommitStep: null,
           suggestedNextNoteStep: null,
+          subtype: null,
         },
         {
           id: 'new-note',
@@ -139,6 +140,7 @@ describe('timelineToHashtagItems', () => {
           completedAt: 5000,
           suggestedNextCommitStep: null,
           suggestedNextNoteStep: null,
+          subtype: null,
         },
       ],
       commits: [

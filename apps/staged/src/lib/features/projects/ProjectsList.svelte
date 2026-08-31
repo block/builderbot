@@ -47,7 +47,7 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { repoSeedFromNewProjectEvent, repoSeedFromRepoFilters } from './newProjectEvent';
+  import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
@@ -329,12 +329,7 @@
       size="icon-xs"
       class="max-md:size-10 [&_svg]:size-3.5"
       aria-label="New project"
-      onclick={() => {
-        // This button opens the modal directly rather than dispatching the
-        // event, so it seeds from the active repo filter itself.
-        newProjectInitialRepo = repoSeedFromRepoFilters(projectFiltersStore.activeRepoFilters);
-        showNewProjectModal = true;
-      }}
+      onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
     >
       <Plus size={14} />
     </Button>

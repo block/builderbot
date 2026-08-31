@@ -329,10 +329,7 @@
       size="icon-xs"
       class="max-md:size-10 [&_svg]:size-3.5"
       aria-label="New project"
-      onclick={() => {
-        newProjectInitialRepo = null;
-        showNewProjectModal = true;
-      }}
+      onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
     >
       <Plus size={14} />
     </Button>

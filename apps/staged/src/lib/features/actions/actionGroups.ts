@@ -40,7 +40,7 @@ export function getPinnedActions(actions: ProjectAction[]): ProjectAction[] {
  * user is adding by hand.
  *
  * Every other way an action reaches a context pins on the user's behalf:
- * detection pins its run suggestion, and migration 0025 pinned the implicit
+ * detection pins its run suggestion, and migration 0028 pinned the implicit
  * main action of every context that predates pinning. A context whose actions
  * are all typed in here goes through neither, so without a default its first
  * action leaves the card header empty — where before pinning existed, adding a

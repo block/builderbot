@@ -146,7 +146,7 @@ fn resolve_branch_repo_context(
 /// button in its card header that detection has always implied. The gate is
 /// "had no run actions", not "has nothing pinned": a user who deliberately
 /// unpins their run action would otherwise have it pinned right back by the
-/// next re-detect. Contexts that predate pinning are covered by the 0026
+/// next re-detect. Contexts that predate pinning are covered by the 0028
 /// migration instead.
 ///
 /// Persistence belongs inside the detection window: every surface treats the

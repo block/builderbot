@@ -3271,6 +3271,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 crate::session_commands::get_active_sessions_impl(&store, session_registry)?;
             Ok(serde_json::to_value(sessions).unwrap())
         }
+        "list_child_sessions" => {
+            let store = get_store(store_mutex)?;
+            let parent_session_id: String = arg(&args, "parentSessionId")?;
+            let children = store
+                .list_running_child_sessions(&parent_session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(children).unwrap())
+        }
         "get_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

@@ -162,6 +162,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "sessions", "acp_title"));
     assert!(column_exists(&conn, "sessions", "branch_id"));
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
+    assert!(column_exists(&conn, "sessions", "parent_session_id"));
     assert!(column_exists(&conn, "notes", "parent_project_note_id"));
     assert!(!column_exists(&conn, "reviews", "is_auto"));
     assert!(column_exists(&conn, "repo_actions", "pinned"));

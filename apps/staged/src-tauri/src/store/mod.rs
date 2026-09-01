@@ -48,6 +48,7 @@ pub use models::*;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use repo_badges::{fallback_short_name, next_hue};
 pub use session_poll::{SessionPoll, SessionPollRequest};
+pub use sessions::ChildSessionInfo;
 pub use tool_bodies::{ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES};
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 

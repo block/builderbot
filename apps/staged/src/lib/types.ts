@@ -577,18 +577,6 @@ export interface ActiveSessionInfo {
 }
 
 /**
- * Payload of the `app:quit-requested` event: what a quit would interrupt.
- *
- * Emitted by `app_lifecycle::request_quit` when the user quits with sessions
- * still active. Sessions are what gate the quit; running actions are reported
- * so the dialog can say they stop too.
- */
-export interface QuitRequestedPayload {
-  sessions: ActiveSessionInfo[];
-  runningActionCount: number;
-}
-
-/**
  * Payload emitted by the `pr-created` domain event when a completed PR
  * session produced a pull request. The backend has already persisted the PR
  * number and kicked off a status refresh; clients only render.

@@ -2219,8 +2219,7 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
-            // Close-to-hide / the quit gate (`CloseRequested`), and dropping a
-            // pending quit prompt whose host window went away (`Destroyed`).
+            // Close-to-hide / the quit gate (`CloseRequested`).
             app_lifecycle::on_window_event(window, event);
 
             if let tauri::WindowEvent::Destroyed = event {
@@ -2259,10 +2258,8 @@ pub fn run() {
             window_commands::take_window_seed,
             window_commands::claim_updater_ownership,
             // Lifecycle — desktop only; the web-mode `dispatch` table refuses
-            // these so a browser client can't quit the host.
+            // this so a browser client can't quit the host.
             app_lifecycle::quit_app,
-            app_lifecycle::confirm_quit,
-            app_lifecycle::cancel_quit,
             list_projects,
             create_project,
             list_project_repos,

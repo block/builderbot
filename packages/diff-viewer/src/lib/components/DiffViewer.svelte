@@ -17,7 +17,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { MessageSquarePlus, MessageSquare, X, FileText, Code } from '@lucide/svelte';
+  import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
+  import X from '@lucide/svelte/icons/x';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import Code from '@lucide/svelte/icons/code';
   import { marked } from 'marked';
   import { sanitize } from '../utils/sanitize';
   import type {

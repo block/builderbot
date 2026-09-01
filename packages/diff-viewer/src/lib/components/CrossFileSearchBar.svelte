@@ -4,7 +4,11 @@
   Displays at the top of the sidebar with input, match counter, and close button.
 -->
 <script lang="ts">
-	import { Search, X, Loader2, FileText, GitCompareArrows } from '@lucide/svelte';
+	import Search from '@lucide/svelte/icons/search';
+	import X from '@lucide/svelte/icons/x';
+	import Loader2 from '@lucide/svelte/icons/loader-circle';
+	import FileText from '@lucide/svelte/icons/file-text';
+	import GitCompareArrows from '@lucide/svelte/icons/git-compare-arrows';
 	import type { FileDiffSummary, FileDiff } from '../types';
 	import type { SearchScope } from '../state/searchState.svelte';
 

@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { Trash2 } from '@lucide/svelte';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import type { Snippet } from 'svelte';
   import type { Comment, CommentActionContext } from '../types';
   import {

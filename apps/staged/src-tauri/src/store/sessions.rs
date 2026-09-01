@@ -380,6 +380,10 @@ impl Store {
     ///
     /// Queued children are excluded: nothing is happening for them yet, so
     /// showing them under a spinner would misreport the parent's progress.
+    ///
+    /// Each child yields exactly one row even if it somehow acquires several
+    /// artifacts: callers key UI elements by `session_id`, so a duplicate
+    /// here would throw in Svelte's keyed `{#each}`.
     pub fn list_running_child_sessions(
         &self,
         parent_session_id: &str,
@@ -400,6 +404,7 @@ impl Store {
              JOIN branches b ON b.id = COALESCE(c.branch_id, n.branch_id, r.branch_id)
              LEFT JOIN project_repos pr ON pr.id = b.project_repo_id
              WHERE s.parent_session_id = ?1 AND s.status = 'running'
+             GROUP BY s.id
              ORDER BY s.created_at ASC",
         )?;
         let children = stmt

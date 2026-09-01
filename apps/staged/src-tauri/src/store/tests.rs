@@ -919,6 +919,26 @@ fn test_list_running_child_sessions_maps_a_child_note_to_note() {
 }
 
 #[test]
+fn test_list_running_child_sessions_yields_one_row_per_multi_artifact_child() {
+    let store = Store::in_memory().unwrap();
+    let (_project, branch, _repo, parent) = child_session_fixture(&store);
+
+    // Nothing in the schema stops a session from owning several artifact rows;
+    // the badge query must still yield one row per child, because the frontend
+    // keys badges by session_id.
+    let child = child_session(&store, &parent.id, &branch.id, "note");
+    store
+        .create_note(&Note::new(&branch.id, "second note", "").with_session(&child.id))
+        .unwrap();
+    store.transition_queued_to_running(&child.id).unwrap();
+
+    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].session_id, child.id);
+    assert_eq!(children[0].session_type, "note");
+}
+
+#[test]
 fn test_list_running_child_sessions_excludes_inactive_children_and_other_parents() {
     let store = Store::in_memory().unwrap();
     let (_project, branch, _repo, parent) = child_session_fixture(&store);

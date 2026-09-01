@@ -73,6 +73,30 @@ fn build_repo_note_stub(
     note
 }
 
+/// Build the queued session row for a `start_repo_session` call.
+///
+/// The parent link is stamped here rather than per-outcome so all four
+/// outcomes are attributable to the project session that requested them —
+/// `parent_project_note_id` only ever covers `child_note`.
+fn build_repo_session_stub(
+    instructions: &str,
+    branch_id: &str,
+    parent_session_id: &str,
+    provider: Option<&str>,
+    acp_config_selection: Option<AcpConfigSelection>,
+) -> Session {
+    let mut session = Session::new_queued(instructions)
+        .with_branch(branch_id)
+        .with_parent_session(parent_session_id);
+    if let Some(provider) = provider {
+        session = session.with_provider(provider);
+    }
+    if let Some(selection) = acp_config_selection {
+        session = session.with_acp_config_selection(selection);
+    }
+    session
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct StartRepoSessionParams {
     /// GitHub repo slug present in the project, e.g. "org/repo".
@@ -558,6 +582,10 @@ struct ProjectToolsHandler {
     /// attach their note to this parent so it is aggregated under it and hidden from
     /// the repo timeline. `None` for handlers without a parent project note in scope.
     parent_project_note_id: Option<String>,
+    /// Session ID of the parent project session. Stamped onto every repo
+    /// session this handler starts so the project detail view can show which
+    /// repo work the parent is waiting on.
+    parent_session_id: String,
     /// Cancellation token for the parent project session.
     /// Signalled when the user cancels the project session.
     cancel_token: CancellationToken,
@@ -575,6 +603,7 @@ impl ProjectToolsHandler {
         provider: Option<String>,
         acp_config_selection: Option<AcpConfigSelection>,
         parent_project_note_id: Option<String>,
+        parent_session_id: String,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
@@ -587,6 +616,7 @@ impl ProjectToolsHandler {
             provider,
             acp_config_selection,
             parent_project_note_id,
+            parent_session_id,
             cancel_token,
         }
     }
@@ -636,18 +666,17 @@ impl ProjectToolsHandler {
             self.provider.clone()
         };
 
-        let mut session =
-            crate::store::Session::new_queued(&p.instructions).with_branch(&target.branch.id);
-        if let Some(ref provider) = session_provider {
-            session = session.with_provider(provider);
-        }
-        if let Some(selection) = inherited_acp_config_selection(
-            self.provider.as_deref(),
+        let session = build_repo_session_stub(
+            &p.instructions,
+            &target.branch.id,
+            &self.parent_session_id,
             session_provider.as_deref(),
-            self.acp_config_selection.as_ref(),
-        ) {
-            session = session.with_acp_config_selection(selection);
-        }
+            inherited_acp_config_selection(
+                self.provider.as_deref(),
+                session_provider.as_deref(),
+                self.acp_config_selection.as_ref(),
+            ),
+        );
         if let Err(e) = self.store.create_session(&session) {
             return format!("Error creating queued session: {e}");
         }
@@ -1130,6 +1159,7 @@ pub async fn start_project_mcp_server(
     provider: Option<String>,
     acp_config_selection: Option<AcpConfigSelection>,
     parent_project_note_id: Option<String>,
+    parent_session_id: String,
     cancel_token: CancellationToken,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1150,6 +1180,7 @@ pub async fn start_project_mcp_server(
         provider,
         acp_config_selection,
         parent_project_note_id,
+        parent_session_id,
         cancel_token,
     );
     log::debug!(
@@ -1177,9 +1208,9 @@ pub async fn start_project_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_repo_note_stub, comment_line_range, inherited_acp_config_selection,
-        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind, RepoSessionHandle,
-        REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
+        build_repo_note_stub, build_repo_session_stub, comment_line_range,
+        inherited_acp_config_selection, worktree_ready_reply, ProjectToolsHandler,
+        RepoArtifactKind, RepoSessionHandle, REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
     use crate::git::Span;
     use crate::store::{
@@ -1318,6 +1349,51 @@ mod tests {
         assert_eq!(timeline.len(), 1);
         assert_eq!(timeline[0].id, note.id);
         assert!(store.list_child_notes(&note.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn repo_session_stub_records_the_parent_project_session() {
+        let store = Store::in_memory().unwrap();
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let parent = Session::new_running("plan the work", Path::new("/tmp"));
+        store.create_session(&parent).unwrap();
+
+        // Every outcome shares this one stub, so the parent link lands on the
+        // queued row before any artifact is created.
+        let session = build_repo_session_stub(
+            "make the change",
+            &branch.id,
+            &parent.id,
+            Some("claude"),
+            None,
+        );
+        assert_eq!(
+            session.parent_session_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        store.create_session(&session).unwrap();
+
+        let persisted = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            persisted.parent_session_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(persisted.branch_id.as_deref(), Some(branch.id.as_str()));
+        assert_eq!(persisted.provider.as_deref(), Some("claude"));
+
+        // A commit outcome's stub artifact is what ties the child to its repo;
+        // once running, the parent can see it in flight.
+        store
+            .create_commit(&crate::store::Commit::new_pending(&branch.id).with_session(&session.id))
+            .unwrap();
+        store.transition_queued_to_running(&session.id).unwrap();
+        let children = store.list_running_child_sessions(&parent.id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].session_id, session.id);
+        assert_eq!(children[0].session_type, "commit");
     }
 
     #[test]

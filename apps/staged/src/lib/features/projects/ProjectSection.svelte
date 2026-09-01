@@ -10,6 +10,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import type {
     AcpConfigSelection,
+    ChildSessionInfo,
     Project,
     ProjectRepo,
     Branch,
@@ -38,6 +39,12 @@
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import {
+    buildChildSessionBadges,
+    childSessionRepos,
+    runningSecondaryMeta,
+  } from '../timeline/childSessionBadges';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -158,6 +165,52 @@
 
   onDestroy(() => {
     liveSessionHintPoller.destroy();
+  });
+
+  // ── In-flight repo sessions spawned by running project sessions ────────
+  /** Running children keyed by the project session that started them. */
+  let childSessionsBySession = $state<Record<string, ChildSessionInfo[]>>({});
+  let childSessionsGeneration = 0;
+
+  /**
+   * Rebuild the child map for the given project sessions.
+   *
+   * Rebuilt wholesale rather than patched, so a session that stopped running
+   * drops out without a separate pruning pass. Driven by events rather than a
+   * poller: the backend emits `session-status-changed` for a child both when
+   * the queue drains it and when it finishes.
+   */
+  async function refreshChildSessions(parentIds: string[]) {
+    const generation = ++childSessionsGeneration;
+    try {
+      const entries = await Promise.all(
+        parentIds.map(
+          async (id) => [id, await commands.listChildSessions(id)] as [string, ChildSessionInfo[]]
+        )
+      );
+      // A newer refresh already landed; its result is the current one.
+      if (generation !== childSessionsGeneration) return;
+
+      const next: Record<string, ChildSessionInfo[]> = {};
+      for (const [id, children] of entries) {
+        if (children.length > 0) next[id] = children;
+      }
+      childSessionsBySession = next;
+
+      // Badges for a repo the user hasn't seen yet are generated lazily; until
+      // one exists the child renders untinted with a fallback name.
+      void repoBadgeStore.ensureForRepos(
+        childSessionRepos(entries.flatMap(([, children]) => children))
+      );
+    } catch (e) {
+      console.error('[ProjectSection] Failed to load child sessions:', e);
+    }
+  }
+
+  // Covers hydration too: a window opening onto an in-progress project session
+  // sees its running children on the first pass.
+  $effect(() => {
+    void refreshChildSessions(runningNoteSessionIds);
   });
 
   // Hashtag reference items
@@ -561,6 +614,9 @@
         // Bridge: track until the stub (already loaded by startProjectSession) is
         // updated with an authoritative sessionStatus on the terminal event.
         activeSessionIds = new Set([...activeSessionIds, sessionId]);
+        // This may be a repo session the queue just drained on a parent's
+        // behalf, which is exactly when its badge should appear.
+        void refreshChildSessions(runningNoteSessionIds);
         return;
       }
 
@@ -568,6 +624,9 @@
         const next = new Set(activeSessionIds);
         next.delete(sessionId);
         activeSessionIds = next;
+
+        // A finished child drops its badge; a finished parent drops the row.
+        void refreshChildSessions(runningNoteSessionIds);
 
         // Surgically update just the affected note instead of reloading all
         const updatedNote = await commands.getProjectNoteBySession(sessionId);
@@ -614,6 +673,11 @@
               isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
             {@const liveTitle =
               isRunning && note.sessionId ? liveSessionTitles[note.sessionId] : undefined}
+            {@const childBadges = buildChildSessionBadges(
+              (isRunning && note.sessionId ? childSessionsBySession[note.sessionId] : undefined) ??
+                [],
+              (githubRepo, subpath) => repoBadgeStore.lookup(githubRepo, subpath)
+            )}
             <TimelineRow
               type={noteType}
               title={isRunning
@@ -622,10 +686,11 @@
                   ? 'Session finished — no note created'
                   : note.title || 'Untitled note'}
               secondaryMeta={isRunning
-                ? (liveHint ?? 'Generating note')
+                ? runningSecondaryMeta(childBadges, liveHint)
                 : isFailed
                   ? undefined
                   : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
+              childSessionBadges={childBadges}
               deleting={deletingNoteIds.has(note.id)}
               isLast={false}
               sessionId={note.sessionId ?? undefined}

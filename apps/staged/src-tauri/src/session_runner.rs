@@ -1564,6 +1564,7 @@ pub fn start_session(
                     config.provider.clone(),
                     config.acp_config_selection.clone(),
                     config.parent_project_note_id.clone(),
+                    config.session_id.clone(),
                     cancel_token.clone(),
                 )
                 .await

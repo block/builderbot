@@ -18,6 +18,8 @@
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
   import Spinner from '../../shared/Spinner.svelte';
+  import ChildSessionBadge from './ChildSessionBadge.svelte';
+  import type { ChildSessionBadgeProps } from './childSessionBadges';
   import { Button } from '$lib/components/ui/button';
 
   export type TimelineItemType =
@@ -60,6 +62,12 @@
     /** Tertiary metadata shown after the secondary meta (e.g. commit author). */
     tertiaryMeta?: string;
     badges?: TimelineBadge[];
+    /**
+     * In-flight repo sessions this row's session spawned. Rendered in place of
+     * `secondaryMeta` — distinct from `badges`, which counts comments/warnings
+     * on a finished artifact.
+     */
+    childSessionBadges?: ChildSessionBadgeProps[];
     deleting?: boolean;
     isLast?: boolean;
     sessionId?: string;
@@ -107,6 +115,7 @@
     secondaryMeta,
     tertiaryMeta,
     badges,
+    childSessionBadges,
     deleting = false,
     isLast = false,
     sessionId,
@@ -360,10 +369,19 @@
             class:failed-title={isFailed}>{title}</span
           >
         {/if}
-        {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
+        {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0) || (childSessionBadges && childSessionBadges.length > 0)}
           <div class="timeline-meta">
             {#if meta}
               <span class="meta-item">{meta}</span>
+            {/if}
+            {#if childSessionBadges}
+              {#each childSessionBadges as childBadge (childBadge.key)}
+                <ChildSessionBadge
+                  sessionType={childBadge.sessionType}
+                  shortName={childBadge.shortName}
+                  hue={childBadge.hue}
+                />
+              {/each}
             {/if}
             {#if secondaryMeta}
               <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>

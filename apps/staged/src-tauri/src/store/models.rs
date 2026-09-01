@@ -585,6 +585,15 @@ pub struct Session {
     /// transcript would otherwise re-fire those effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_effects_at: Option<i64>,
+    /// Session that spawned this one: the project session behind a
+    /// `start_repo_session` call, or the note session behind a Pikchr diagram
+    /// sub-session. `None` for sessions a user started directly.
+    ///
+    /// Unlike `Note::parent_project_note_id`, which only traces `child_note`
+    /// outcomes, this covers every spawned session — which is what lets the
+    /// project detail view show a running project session's in-flight children.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -677,6 +686,7 @@ impl Session {
             acp_title: None,
             branch_id: None,
             completion_effects_at: None,
+            parent_session_id: None,
         }
     }
 
@@ -702,6 +712,7 @@ impl Session {
             acp_title: None,
             branch_id: None,
             completion_effects_at: None,
+            parent_session_id: None,
         }
     }
 
@@ -714,6 +725,13 @@ impl Session {
     /// branch-scoped insert must call this; see [`Session::branch_id`].
     pub fn with_branch(mut self, branch_id: &str) -> Self {
         self.branch_id = Some(branch_id.to_string());
+        self
+    }
+
+    /// Record the session that spawned this one (a project session starting a
+    /// repo session, or a note session starting a Pikchr sub-session).
+    pub fn with_parent_session(mut self, parent_session_id: &str) -> Self {
+        self.parent_session_id = Some(parent_session_id.to_string());
         self
     }
 

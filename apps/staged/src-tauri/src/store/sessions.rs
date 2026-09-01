@@ -7,6 +7,23 @@ use super::models::{
 };
 use super::{now_timestamp, Store, StoreError};
 
+/// A running session spawned by another session, projected to the repo it is
+/// working in.
+///
+/// `githubRepo`/`subpath` are the repo badge lookup key; both are absent for a
+/// branch whose `project_repo_id` was cleared, which just means the badge falls
+/// back to plain styling.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildSessionInfo {
+    pub session_id: String,
+    /// One of `"commit"`, `"note"`, `"review"`.
+    pub session_type: String,
+    pub branch_id: String,
+    pub github_repo: Option<String>,
+    pub subpath: Option<String>,
+}
+
 impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -19,8 +36,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 session.id,
                 session.prompt,
@@ -38,6 +55,7 @@ impl Store {
                 session.acp_title,
                 session.branch_id,
                 session.completion_effects_at,
+                session.parent_session_id,
             ],
         )?;
         Ok(())
@@ -55,7 +73,7 @@ impl Store {
         id: &str,
     ) -> Result<Option<Session>, StoreError> {
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -308,7 +326,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -340,7 +358,7 @@ impl Store {
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions WHERE status IN ('running', 'queued')
              ORDER BY created_at ASC",
         )?;
@@ -348,6 +366,54 @@ impl Store {
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
+    }
+
+    /// List the still-running sessions spawned by `parent_session_id`, oldest
+    /// first, projected to the repo they are working in.
+    ///
+    /// Children are found through their artifact (commit / note / review)
+    /// rather than `sessions.branch_id`, which `start_repo_session` leaves
+    /// unstamped on the queued row. That artifact join is also what resolves
+    /// the child's kind, so a `child_note` (a note carrying
+    /// `parent_project_note_id`) reports as a plain `"note"` here — the badge
+    /// only needs to say what kind of work is in flight and where.
+    ///
+    /// Queued children are excluded: nothing is happening for them yet, so
+    /// showing them under a spinner would misreport the parent's progress.
+    pub fn list_running_child_sessions(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<ChildSessionInfo>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.id,
+                    CASE WHEN c.session_id IS NOT NULL THEN 'commit'
+                         WHEN n.session_id IS NOT NULL THEN 'note'
+                         ELSE 'review' END AS session_type,
+                    b.id AS branch_id,
+                    pr.github_repo,
+                    pr.subpath
+             FROM sessions s
+             LEFT JOIN commits c ON c.session_id = s.id
+             LEFT JOIN notes n ON n.session_id = s.id
+             LEFT JOIN reviews r ON r.session_id = s.id
+             JOIN branches b ON b.id = COALESCE(c.branch_id, n.branch_id, r.branch_id)
+             LEFT JOIN project_repos pr ON pr.id = b.project_repo_id
+             WHERE s.parent_session_id = ?1 AND s.status = 'running'
+             ORDER BY s.created_at ASC",
+        )?;
+        let children = stmt
+            .query_map(params![parent_session_id], |row| {
+                Ok(ChildSessionInfo {
+                    session_id: row.get(0)?,
+                    session_type: row.get(1)?,
+                    branch_id: row.get(2)?,
+                    github_repo: row.get(3)?,
+                    subpath: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(children)
     }
 
     /// Store the ACP session ID returned by the agent after `new_session`.
@@ -464,7 +530,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions
              WHERE status = ?2 AND branch_id = ?1
              ORDER BY created_at ASC",
@@ -659,6 +725,7 @@ impl Store {
             acp_title: row.get(13)?,
             branch_id: row.get(14)?,
             completion_effects_at: row.get(15)?,
+            parent_session_id: row.get(16)?,
         })
     }
 }

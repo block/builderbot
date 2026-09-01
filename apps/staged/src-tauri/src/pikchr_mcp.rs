@@ -838,7 +838,7 @@ rendered PNG preview you may open as an optional final check."
             ),
             None => (self.provider_id.clone(), Vec::new(), None),
         };
-        let session = new_pikchr_child_session(&provider_id);
+        let session = new_pikchr_child_session(&provider_id, &self.parent_session_id);
 
         // Claim the child session's slot in the SessionRegistry, or refuse the
         // call because a shutdown has already been claimed.
@@ -1189,8 +1189,9 @@ async fn forward_user_cancel(
 /// Split from persisting it so its id can be reserved in the registry first —
 /// see [`reserve_child_session`], which is what a refusal that has written
 /// nothing depends on.
-fn new_pikchr_child_session(provider_id: &str) -> Session {
-    let session = Session::new_running(PIKCHR_CHILD_SESSION_PROMPT, &std::env::temp_dir());
+fn new_pikchr_child_session(provider_id: &str, parent_session_id: &str) -> Session {
+    let session = Session::new_running(PIKCHR_CHILD_SESSION_PROMPT, &std::env::temp_dir())
+        .with_parent_session(parent_session_id);
     if provider_id.is_empty() {
         session
     } else {
@@ -1546,11 +1547,20 @@ arrow from OTLP.e to COLL.w "OTLP /v1/logs + auth" above
 SNOW: box "unifiedevents/batch" "→ Snowflake (UAP unchanged)" fit fill 0xffd6d6 with .w at 0.6 right of COLL.e
 arrow from COLL.e to SNOW.w"#;
 
+    /// The note session that asked for a diagram. The child session's parent
+    /// link is a real foreign key, so the parent row has to exist.
+    fn parent_session(store: &Store) -> Session {
+        let session = Session::new_running("draw me a diagram", &std::env::temp_dir());
+        store.create_session(&session).expect("create parent");
+        session
+    }
+
     #[test]
     fn create_pikchr_child_session_persists_running_provider_session() {
         let store = Store::in_memory().expect("in-memory store");
+        let parent = parent_session(&store);
 
-        let session = new_pikchr_child_session("fake-agent");
+        let session = new_pikchr_child_session("fake-agent", &parent.id);
         persist_pikchr_child_session(&store, &session).expect("persist child session");
 
         assert_eq!(session.prompt, PIKCHR_CHILD_SESSION_PROMPT);
@@ -1565,6 +1575,10 @@ arrow from COLL.e to SNOW.w"#;
         assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
         assert_eq!(persisted.status, SessionStatus::Running);
         assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+        assert_eq!(
+            persisted.parent_session_id.as_deref(),
+            Some(parent.id.as_str())
+        );
     }
 
     /// The reservation is in the registry *before* the quit gate reads, which
@@ -1658,7 +1672,8 @@ arrow from COLL.e to SNOW.w"#;
     async fn registry_stop_terminates_the_run_and_reads_as_a_user_stop() {
         let registry = Arc::new(SessionRegistry::new());
         let store = Arc::new(Store::in_memory().expect("in-memory store"));
-        let session = new_pikchr_child_session("fake-agent");
+        let parent = parent_session(&store);
+        let session = new_pikchr_child_session("fake-agent", &parent.id);
         persist_pikchr_child_session(&store, &session).expect("persist child session");
 
         let registration = registry.register_external(&session.id);
@@ -1752,7 +1767,8 @@ arrow from COLL.e to SNOW.w"#;
     async fn a_cancel_landing_before_the_forwarder_runs_never_starts_the_specialist() {
         let registry = Arc::new(SessionRegistry::new());
         let store = Arc::new(Store::in_memory().expect("in-memory store"));
-        let session = new_pikchr_child_session("fake-agent");
+        let parent = parent_session(&store);
+        let session = new_pikchr_child_session("fake-agent", &parent.id);
         persist_pikchr_child_session(&store, &session).expect("persist child session");
 
         let registration = registry.register_external(&session.id);

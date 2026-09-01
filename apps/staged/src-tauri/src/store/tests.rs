@@ -813,6 +813,146 @@ fn test_get_active_sessions_returns_running_and_queued_only() {
 }
 
 #[test]
+fn test_session_round_trips_parent_session_id() {
+    let store = Store::in_memory().unwrap();
+
+    let parent = Session::new_running("project session", Path::new("/tmp"));
+    store.create_session(&parent).unwrap();
+    let child = Session::new_queued("repo work").with_parent_session(&parent.id);
+    store.create_session(&child).unwrap();
+
+    let fetched = store.get_session(&child.id).unwrap().unwrap();
+    assert_eq!(
+        fetched.parent_session_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+    // Sessions a user started directly have no parent.
+    let fetched_parent = store.get_session(&parent.id).unwrap().unwrap();
+    assert!(fetched_parent.parent_session_id.is_none());
+}
+
+/// Fixture for the child-session badge query: a project with one repo, one
+/// branch on it, and a parent project session.
+fn child_session_fixture(store: &Store) -> (Project, Branch, ProjectRepo, Session) {
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let repo = ProjectRepo::new(&project.id, "test-owner/test-repo", "main", None);
+    store.create_project_repo(&repo).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main").with_project_repo(&repo.id);
+    store.create_branch(&branch).unwrap();
+    let parent = Session::new_running("project session", Path::new("/tmp"));
+    store.create_session(&parent).unwrap();
+    (project, branch, repo, parent)
+}
+
+/// Enqueue a child session of `parent` and give it the artifact that makes it
+/// a commit / note / review child, mirroring `start_repo_session`.
+fn child_session(store: &Store, parent_id: &str, branch_id: &str, kind: &str) -> Session {
+    let session = Session::new_queued(kind).with_parent_session(parent_id);
+    store.create_session(&session).unwrap();
+    match kind {
+        "commit" => store
+            .create_commit(&Commit::new_pending(branch_id).with_session(&session.id))
+            .unwrap(),
+        "note" => store
+            .create_note(&Note::new(branch_id, "research", "").with_session(&session.id))
+            .unwrap(),
+        "review" => store
+            .create_review(
+                &Review::new(branch_id, "", ReviewScope::Branch).with_session(&session.id),
+            )
+            .unwrap(),
+        other => panic!("unknown child kind {other}"),
+    }
+    session
+}
+
+#[test]
+fn test_list_running_child_sessions_projects_each_kind_to_its_repo() {
+    let store = Store::in_memory().unwrap();
+    let (_project, branch, repo, parent) = child_session_fixture(&store);
+
+    for kind in ["commit", "note", "review"] {
+        let child = child_session(&store, &parent.id, &branch.id, kind);
+        store.transition_queued_to_running(&child.id).unwrap();
+    }
+
+    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    let kinds: Vec<&str> = children.iter().map(|c| c.session_type.as_str()).collect();
+    // Ordered by start order, which is the order they were enqueued.
+    assert_eq!(kinds, vec!["commit", "note", "review"]);
+    for child in &children {
+        assert_eq!(child.branch_id, branch.id);
+        assert_eq!(
+            child.github_repo.as_deref(),
+            Some(repo.github_repo.as_str())
+        );
+        assert!(child.subpath.is_none());
+    }
+}
+
+#[test]
+fn test_list_running_child_sessions_maps_a_child_note_to_note() {
+    let store = Store::in_memory().unwrap();
+    let (project, branch, _repo, parent) = child_session_fixture(&store);
+    let project_note = ProjectNote::new(&project.id, "Parent", "");
+    store.create_project_note(&project_note).unwrap();
+
+    // A `child_note` outcome: the note is aggregated under the project note and
+    // hidden from the repo timeline, but it is still a note as far as the badge
+    // is concerned.
+    let child = Session::new_queued("investigate").with_parent_session(&parent.id);
+    store.create_session(&child).unwrap();
+    store
+        .create_note(
+            &Note::new(&branch.id, "investigate", "")
+                .with_session(&child.id)
+                .with_parent_project_note(&project_note.id),
+        )
+        .unwrap();
+    store.transition_queued_to_running(&child.id).unwrap();
+
+    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].session_type, "note");
+    assert_eq!(children[0].session_id, child.id);
+}
+
+#[test]
+fn test_list_running_child_sessions_excludes_inactive_children_and_other_parents() {
+    let store = Store::in_memory().unwrap();
+    let (_project, branch, _repo, parent) = child_session_fixture(&store);
+
+    let running = child_session(&store, &parent.id, &branch.id, "commit");
+    store.transition_queued_to_running(&running.id).unwrap();
+
+    // Queued: nothing is happening for it yet, so a spinner would misreport.
+    child_session(&store, &parent.id, &branch.id, "note");
+
+    // Terminal children have already landed on the branch timeline.
+    for status in [
+        SessionStatus::Completed,
+        SessionStatus::Error,
+        SessionStatus::Cancelled,
+    ] {
+        let finished = child_session(&store, &parent.id, &branch.id, "review");
+        store
+            .update_session_status(&finished.id, status, None, None)
+            .unwrap();
+    }
+
+    // Another project session's running child.
+    let other_parent = Session::new_running("other project session", Path::new("/tmp"));
+    store.create_session(&other_parent).unwrap();
+    let other_child = child_session(&store, &other_parent.id, &branch.id, "commit");
+    store.transition_queued_to_running(&other_child.id).unwrap();
+
+    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].session_id, running.id);
+}
+
+#[test]
 fn test_queued_session_messages_order_and_image_ids() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));

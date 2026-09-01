@@ -53,8 +53,14 @@ describe('kebab ↔ Pascal icon names', () => {
 describe('searchIconNames', () => {
   const names = ['play', 'play-circle', 'circle-play', 'rocket', 'wrench'];
 
-  it('offers the curated set for an empty query', () => {
-    expect(searchIconNames(names, '   ')).toBe(CURATED_ICONS);
+  it('offers the curated set for an empty query when the map has every name', () => {
+    expect(searchIconNames([...CURATED_ICONS, 'circle-play'], '   ')).toEqual(CURATED_ICONS);
+  });
+
+  it('drops curated names the loaded map lacks instead of surfacing them', () => {
+    // A Lucide upgrade renaming a curated icon must degrade the shortlist,
+    // not hand the grid a name that resolves to undefined.
+    expect(searchIconNames(names, '   ')).toEqual(['play', 'rocket', 'wrench']);
   });
 
   it('substring-matches anywhere in the name, and takes spaces for dashes', () => {

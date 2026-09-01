@@ -8,6 +8,8 @@ import {
   assertValidVersion,
   assertVersionTagMatchesVersion,
   assertUrlReachable,
+  normalizeUpdaterEndpoint,
+  normalizeUpdaterPublicKey,
 } from './release-checks.mjs';
 
 const STABLE_ENDPOINT =
@@ -106,6 +108,34 @@ describe('assertValidUpdaterPublicKey', () => {
   it('rejects multi-line or non-base64 values', () => {
     expect(() => assertValidUpdaterPublicKey('line one\nline two')).toThrow(/base64/);
     expect(() => assertValidUpdaterPublicKey('has spaces inside')).toThrow(/base64/);
+  });
+});
+
+describe('normalizeUpdaterPublicKey', () => {
+  it('strips surrounding whitespace so the written key is the validated key', () => {
+    expect(normalizeUpdaterPublicKey('  dW50cnVzdGVkIGNvbW1lbnQ6IHB1YmtleQ==\n')).toBe(
+      'dW50cnVzdGVkIGNvbW1lbnQ6IHB1YmtleQ=='
+    );
+  });
+
+  it('still rejects invalid keys', () => {
+    expect(() => normalizeUpdaterPublicKey('not base64!!')).toThrow(/base64/);
+    expect(() => normalizeUpdaterPublicKey('  ')).toThrow(/non-empty/);
+  });
+});
+
+describe('normalizeUpdaterEndpoint', () => {
+  it('strips surrounding whitespace so the written endpoint is the validated one', () => {
+    expect(normalizeUpdaterEndpoint(`\n${STABLE_ENDPOINT}  `)).toBe(STABLE_ENDPOINT);
+  });
+
+  it('still rejects invalid endpoints', () => {
+    expect(() => normalizeUpdaterEndpoint(` ${STABLE_ENDPOINT.replace('https', 'http')} `)).toThrow(
+      /must use https/
+    );
+    expect(() => normalizeUpdaterEndpoint(undefined as unknown as string)).toThrow(
+      /not a valid URL/
+    );
   });
 });
 

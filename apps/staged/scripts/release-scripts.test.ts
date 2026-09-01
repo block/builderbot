@@ -134,6 +134,24 @@ describe('build-tauri-release-config.mjs', () => {
     });
   });
 
+  it('writes the trimmed key and endpoint when the secrets carry a trailing newline', () => {
+    const result = runScript('build-tauri-release-config.mjs', {
+      env: {
+        STAGED_UPDATER_PUBLIC_KEY: `${PUBLIC_KEY}\n`,
+        STAGED_UPDATER_ENDPOINT: `${STABLE_ENDPOINT}\n`,
+      },
+    });
+    expect(result.status).toBe(0);
+
+    // Tauri's base64 decoder rejects an untrimmed key at runtime, so the value
+    // written to the config must match the validated one exactly.
+    const config = JSON.parse(readFileSync(releaseConfigPath(), 'utf-8'));
+    expect(config.plugins.updater).toEqual({
+      pubkey: PUBLIC_KEY,
+      endpoints: [STABLE_ENDPOINT],
+    });
+  });
+
   it('rejects non-stable channels', () => {
     const result = runScript('build-tauri-release-config.mjs', {
       env: { STAGED_RELEASE_CHANNEL: 'beta' },

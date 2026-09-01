@@ -75,7 +75,8 @@
 
   <p class="update-version">Staged v{appVersion}</p>
 
-  <p
+  <!-- A div, not a p: Spinner renders a div, which is invalid inside a p. -->
+  <div
     class="update-status"
     class:update-status-error={updater.status === 'error'}
     role="status"
@@ -87,7 +88,7 @@
       <TriangleAlert size={12} aria-hidden="true" />
     {/if}
     <span>{statusText}</span>
-  </p>
+  </div>
 
   {#if showReleaseNotes}
     <div class="release-notes">
@@ -142,7 +143,6 @@
   }
 
   .update-status {
-    margin: 0;
     display: flex;
     align-items: center;
     gap: 6px;

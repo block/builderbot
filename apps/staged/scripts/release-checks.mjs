@@ -40,9 +40,23 @@ export function assertVersionTagMatchesVersion(tag, version) {
  * feed naming scheme and prevents tokens from leaking into the build config.
  */
 export function assertValidUpdaterEndpoint(endpoint) {
+  normalizeUpdaterEndpoint(endpoint);
+}
+
+/**
+ * Validate the updater endpoint and return the exact value to write into the
+ * Tauri config. Surrounding whitespace (a trailing newline carried in from a
+ * CI secret or a `$(cat …)` substitution) is stripped, so the value written to
+ * the config is byte-for-byte the value that was validated.
+ */
+export function normalizeUpdaterEndpoint(endpoint) {
+  if (typeof endpoint !== 'string') {
+    throw new Error(`Updater endpoint is not a valid URL: "${endpoint}"`);
+  }
+  const normalized = endpoint.trim();
   let url;
   try {
-    url = new URL(endpoint);
+    url = new URL(normalized);
   } catch {
     throw new Error(`Updater endpoint is not a valid URL: "${endpoint}"`);
   }
@@ -58,18 +72,32 @@ export function assertValidUpdaterEndpoint(endpoint) {
   if (!url.pathname.endsWith('/latest.json')) {
     throw new Error(`Updater endpoint must point at a latest.json feed, got "${endpoint}".`);
   }
+  return normalized;
 }
 
 /** The updater public key is a single-line base64 string (Tauri signer format). */
 export function assertValidUpdaterPublicKey(pubkey) {
+  normalizeUpdaterPublicKey(pubkey);
+}
+
+/**
+ * Validate the updater public key and return the exact value to write into the
+ * Tauri config. The surrounding whitespace tolerated here (typically a trailing
+ * newline from `$(cat staged-release.key.pub)` or a CI secret) must be stripped
+ * before the key is written: Rust's base64 decoder rejects it at runtime, which
+ * would produce an official build whose updater cannot verify signatures.
+ */
+export function normalizeUpdaterPublicKey(pubkey) {
   if (typeof pubkey !== 'string' || !pubkey.trim()) {
     throw new Error('Updater public key must be a non-empty string.');
   }
-  if (!/^[A-Za-z0-9+/=]+$/.test(pubkey.trim())) {
+  const normalized = pubkey.trim();
+  if (!/^[A-Za-z0-9+/=]+$/.test(normalized)) {
     throw new Error(
       'Updater public key must be the single-line base64 value produced by `tauri signer generate`.'
     );
   }
+  return normalized;
 }
 
 /**

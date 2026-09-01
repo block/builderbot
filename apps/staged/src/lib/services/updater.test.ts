@@ -4,6 +4,7 @@ import {
   initialUpdaterState,
   UPDATER_CHECK_INTERVAL_MS,
   UPDATER_CHECK_TIMEOUT_MS,
+  UPDATER_STALE_SETTLE_GRACE_MS,
   type UpdateHandle,
   type UpdaterAdapters,
   type UpdaterEnvironment,
@@ -47,8 +48,14 @@ function makeUpdate(overrides: Partial<UpdateHandle> = {}): UpdateHandle {
     version: '1.2.3',
     body: 'notes',
     downloadAndInstall: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
+}
+
+/** The `close` mock of an update handle built by `makeUpdate`. */
+function closeMock(update: UpdateHandle): ReturnType<typeof vi.fn> {
+  return update.close as ReturnType<typeof vi.fn>;
 }
 
 function makeService(
@@ -235,6 +242,7 @@ describe('deduplication', () => {
 
   it('does not start a new native check while a timed-out check is still settling', async () => {
     const harness = makeHarness();
+    const stale = makeUpdate();
     let resolveStale!: (u: UpdateHandle | null) => void;
     harness.adapters.checkForUpdate.mockImplementationOnce(
       () => new Promise<UpdateHandle | null>((resolve) => (resolveStale = resolve))
@@ -248,17 +256,114 @@ describe('deduplication', () => {
     expect(service.state.status).toBe('error');
     expect(service.state.error).toBe('Update check timed out.');
 
-    // Interval fires while the original native request is still pending.
-    vi.advanceTimersByTime(UPDATER_CHECK_INTERVAL_MS);
+    // A check requested while the original native request is still pending is
+    // queued rather than started.
+    void service.checkNow();
     await flush();
     expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(1);
 
-    // Once the stale check settles, its result is discarded (no prompt) and
-    // the queued run proceeds.
-    resolveStale(makeUpdate());
+    // Once the stale check settles, its result is discarded (no prompt), its
+    // native handle is released, and the queued run proceeds.
+    resolveStale(stale);
     await flush();
     expect(harness.adapters.confirmInstall).not.toHaveBeenCalled();
+    expect(closeMock(stale)).toHaveBeenCalledTimes(1);
     expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it('resumes checks when a timed-out native check never settles', async () => {
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockImplementationOnce(
+      () => new Promise<UpdateHandle | null>(() => {})
+    );
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    vi.advanceTimersByTime(UPDATER_CHECK_TIMEOUT_MS);
+    await flush();
+    void service.checkNow();
+    await flush();
+    expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(1);
+
+    // The wait for the hung native promise is bounded: checks resume anyway.
+    vi.advanceTimersByTime(UPDATER_STALE_SETTLE_GRACE_MS);
+    await flush();
+    expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(2);
+    expect(service.state.status).toBe('up-to-date');
+  });
+});
+
+// ── Native handle lifecycle ────────────────────────────────────────────────
+
+describe('update handle lifecycle', () => {
+  it('bounds the native check with the same timeout as the renderer race', async () => {
+    const harness = makeHarness();
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    expect(harness.adapters.checkForUpdate).toHaveBeenCalledWith({
+      timeoutMs: UPDATER_CHECK_TIMEOUT_MS,
+    });
+  });
+
+  it('releases the handle when the user declines', async () => {
+    const update = makeUpdate();
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockResolvedValue(update);
+    harness.adapters.confirmInstall.mockResolvedValue(false);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    expect(closeMock(update)).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the handle of a repeat check whose prompt is suppressed', async () => {
+    const harness = makeHarness();
+    const first = makeUpdate();
+    const repeat = makeUpdate();
+    harness.adapters.checkForUpdate.mockResolvedValueOnce(first).mockResolvedValue(repeat);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    vi.advanceTimersByTime(UPDATER_CHECK_INTERVAL_MS);
+    await flush();
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(1);
+    expect(closeMock(first)).toHaveBeenCalledTimes(1);
+    expect(closeMock(repeat)).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases the handle when the install fails', async () => {
+    const update = makeUpdate();
+    (update.downloadAndInstall as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('disk full')
+    );
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockResolvedValue(update);
+    harness.adapters.confirmInstall.mockResolvedValue(true);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    expect(closeMock(update)).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps checking when releasing a handle fails', async () => {
+    const update = makeUpdate();
+    closeMock(update).mockRejectedValue(new Error('resource already closed'));
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockResolvedValueOnce(update).mockResolvedValue(null);
+    harness.adapters.confirmInstall.mockResolvedValue(false);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    vi.advanceTimersByTime(UPDATER_CHECK_INTERVAL_MS);
+    await flush();
+    expect(service.state.status).toBe('up-to-date');
   });
 });
 

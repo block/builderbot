@@ -9,7 +9,9 @@
  *   - startup and 15-minute periodic background checks;
  *   - explicit manual checks (for a future Settings entry point);
  *   - in-flight run deduplication and timed-out/stale-result handling — a
- *     timed-out native check can never overlap a second native check;
+ *     timed-out native check does not overlap a second native check, but the
+ *     wait for it to settle is bounded so a hung call cannot disable updates;
+ *   - releasing every native update handle (`Update` is a Tauri resource);
  *   - per-session prompt suppression for background checks (the same version
  *     is prompted once); explicit manual checks always re-prompt so a user
  *     who declined earlier can still install from Settings;
@@ -37,6 +39,13 @@ export const UPDATER_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 /** How long a native update check may take before it is considered timed out. */
 export const UPDATER_CHECK_TIMEOUT_MS = 15_000;
+
+/**
+ * How long to wait for a timed-out native check to settle before starting
+ * another one anyway. Bounds recovery: a native call that never settles must
+ * not disable update checks for the rest of the session.
+ */
+export const UPDATER_STALE_SETTLE_GRACE_MS = 30_000;
 
 // =============================================================================
 // Types
@@ -78,11 +87,18 @@ export function initialUpdaterState(): UpdaterState {
   return { status: 'unavailable', availableVersion: null, releaseNotes: null, error: null };
 }
 
-/** Minimal structural view of `@tauri-apps/plugin-updater`'s `Update`. */
+/**
+ * Minimal structural view of `@tauri-apps/plugin-updater`'s `Update`.
+ *
+ * `Update` extends Tauri's `Resource`: every handle owns an entry in the native
+ * resource table that is only freed by `close()`, so the service releases each
+ * handle it obtains — including ones it never installs.
+ */
 export interface UpdateHandle {
   version: string;
   body?: string;
   downloadAndInstall(): Promise<void>;
+  close(): Promise<void>;
 }
 
 /** Build/runtime gates. All three must allow updating for the service to run. */
@@ -97,8 +113,12 @@ export interface UpdaterEnvironment {
 
 /** Injectable native/platform touchpoints. Defaults lazy-import the plugins. */
 export interface UpdaterAdapters {
-  /** Query the fixed release feed. Resolves null when already up to date. */
-  checkForUpdate(): Promise<UpdateHandle | null>;
+  /**
+   * Query the fixed release feed. Resolves null when already up to date.
+   * `timeoutMs` bounds the native request itself, so a slow or unresponsive
+   * feed fails natively instead of leaving a renderer-side promise pending.
+   */
+  checkForUpdate(options: { timeoutMs: number }): Promise<UpdateHandle | null>;
   /** Native consent dialog. Resolves true when the user accepts the install. */
   confirmInstall(message: string, options: { title: string; kind: 'info' }): Promise<boolean>;
   /** Relaunch the app after a successful install. */
@@ -119,6 +139,7 @@ export interface UpdaterServiceOptions {
   adapters?: Partial<UpdaterAdapters>;
   checkIntervalMs?: number;
   checkTimeoutMs?: number;
+  staleSettleGraceMs?: number;
 }
 
 export interface UpdaterService {
@@ -182,9 +203,9 @@ export function logUpdaterMessage(message: string): void {
 
 function defaultAdapters(): UpdaterAdapters {
   return {
-    async checkForUpdate() {
+    async checkForUpdate({ timeoutMs }) {
       const { check } = await import('@tauri-apps/plugin-updater');
-      return check();
+      return check({ timeout: timeoutMs });
     },
     async confirmInstall(message, options) {
       const { confirm } = await import('@tauri-apps/plugin-dialog');
@@ -211,6 +232,7 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
   const adapters: UpdaterAdapters = { ...defaultAdapters(), ...options.adapters };
   const checkIntervalMs = options.checkIntervalMs ?? UPDATER_CHECK_INTERVAL_MS;
   const checkTimeoutMs = options.checkTimeoutMs ?? UPDATER_CHECK_TIMEOUT_MS;
+  const staleSettleGraceMs = options.staleSettleGraceMs ?? UPDATER_STALE_SETTLE_GRACE_MS;
 
   const available = isUpdaterAvailable(env);
 
@@ -224,19 +246,72 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
   // suppression) and resolves the promises of everyone awaiting it.
   let runInFlight = false;
   let queuedRun: { manual: boolean; promise: Promise<void>; resolve: () => void } | null = null;
-  // A native check that lost the timeout race but has not settled yet. No new
-  // native check may start until it settles; its late result is discarded.
-  let staleCheckSettling = false;
+  // Native checks that lost the timeout race and have not settled yet. No new
+  // native check starts while one is outstanding and its late result is
+  // discarded, but the wait is bounded by `staleSettleGraceMs`.
+  let staleChecks = 0;
   // Prompt each offered version at most once per app session for background
   // checks; explicit manual checks always re-prompt.
   let lastPromptedUpdateVersion: string | null = null;
 
   function drainQueuedRun(): void {
-    if (!cancelled && queuedRun && !runInFlight && !staleCheckSettling) {
+    if (!cancelled && queuedRun && !runInFlight && staleChecks === 0) {
       const queued = queuedRun;
       queuedRun = null;
       void runUpdater('queued', { manual: queued.manual }).finally(queued.resolve);
     }
+  }
+
+  /**
+   * Free an update handle's native resource. Every handle must be released,
+   * including ones that are never installed (declined, suppressed, stale), or
+   * Tauri's resource table grows with every check that finds an update.
+   */
+  async function releaseUpdate(update: UpdateHandle | null): Promise<void> {
+    if (!update) return;
+    try {
+      await update.close();
+    } catch (error) {
+      adapters.log(`[updater] failed to release update handle: ${error}`);
+    }
+  }
+
+  /**
+   * Wait for a timed-out native check to settle before starting another one,
+   * discarding (and releasing) whatever it eventually produces. The wait is
+   * bounded: if the native promise is still pending after the grace period,
+   * checks resume anyway, so a wedged native call cannot disable updates for
+   * the rest of the session.
+   */
+  function trackStaleCheck(checkPromise: Promise<UpdateHandle | null>): void {
+    staleChecks += 1;
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      staleChecks -= 1;
+      drainQueuedRun();
+    };
+
+    void checkPromise
+      .then(
+        (stale) => {
+          adapters.log('[updater] timed-out check settled; stale result ignored');
+          return releaseUpdate(stale);
+        },
+        (error) => {
+          adapters.log(`[updater] timed-out check failed while settling: ${error}`);
+        }
+      )
+      .finally(release);
+
+    adapters.setTimeout(() => {
+      if (released) return;
+      adapters.log(
+        `[updater] timed-out check still pending after ${staleSettleGraceMs}ms; resuming checks`
+      );
+      release();
+    }, staleSettleGraceMs);
   }
 
   async function runUpdater(
@@ -245,7 +320,7 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
   ): Promise<void> {
     const manual = options.manual ?? trigger === 'manual';
     if (cancelled) return;
-    if (runInFlight || staleCheckSettling) {
+    if (runInFlight || staleChecks > 0) {
       if (queuedRun) {
         queuedRun.manual ||= manual;
       } else {
@@ -262,33 +337,23 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     }
 
     runInFlight = true;
+    // Released in the finally block, whatever the outcome of this run.
+    let update: UpdateHandle | null = null;
     try {
       adapters.log(`[updater] checking for updates (${trigger})`);
       state.status = 'checking';
       state.error = null;
 
-      const checkPromise = adapters.checkForUpdate();
+      const checkPromise = adapters.checkForUpdate({ timeoutMs: checkTimeoutMs });
       const timeoutPromise = new Promise<'timeout'>((resolve) => {
         adapters.setTimeout(() => resolve('timeout'), checkTimeoutMs);
       });
       const outcome = await Promise.race([checkPromise, timeoutPromise]);
 
       if (outcome === 'timeout') {
-        // The native request is still settling; block further checks until it
-        // does, then discard whatever it produced (it is stale by then).
-        staleCheckSettling = true;
-        checkPromise.then(
-          () => {
-            staleCheckSettling = false;
-            adapters.log('[updater] timed-out check settled; stale result ignored');
-            drainQueuedRun();
-          },
-          (error) => {
-            staleCheckSettling = false;
-            adapters.log(`[updater] timed-out check failed while settling: ${error}`);
-            drainQueuedRun();
-          }
-        );
+        // The native request has not settled; hold further checks (bounded)
+        // and discard whatever it eventually produced — stale by then.
+        trackStaleCheck(checkPromise);
         adapters.log(`[updater] check timed out after ${checkTimeoutMs}ms`);
         if (!cancelled) {
           state.status = 'error';
@@ -297,9 +362,9 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
         return;
       }
 
+      update = outcome;
       if (cancelled) return;
 
-      const update = outcome;
       if (!update) {
         adapters.log('[updater] no update available');
         state.status = 'up-to-date';
@@ -348,6 +413,7 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       }
     } finally {
       runInFlight = false;
+      await releaseUpdate(update);
       drainQueuedRun();
     }
   }

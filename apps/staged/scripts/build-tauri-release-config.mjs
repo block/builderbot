@@ -10,8 +10,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   assertStableChannel,
-  assertValidUpdaterEndpoint,
-  assertValidUpdaterPublicKey,
+  normalizeUpdaterEndpoint,
+  normalizeUpdaterPublicKey,
 } from './release-checks.mjs';
 
 function readArg(name) {
@@ -62,12 +62,11 @@ if (officialRelease && missing.length > 0) {
   );
 }
 
-if (publicKey) {
-  assertValidUpdaterPublicKey(publicKey);
-}
-if (endpoint) {
-  assertValidUpdaterEndpoint(endpoint);
-}
+// Validation returns the value that gets written, so the config can never
+// contain an unvalidated variant (e.g. a key with a trailing newline that
+// Tauri's base64 decoder would reject at runtime).
+const normalizedPublicKey = publicKey ? normalizeUpdaterPublicKey(publicKey) : undefined;
+const normalizedEndpoint = endpoint ? normalizeUpdaterEndpoint(endpoint) : undefined;
 
 const baseConfigPath = resolve(process.cwd(), 'src-tauri/tauri.conf.json');
 const outputConfigPath = resolve(process.cwd(), 'src-tauri/tauri.release.conf.json');
@@ -93,15 +92,15 @@ if (signingIdentity) {
   console.log(`macOS signing identity configured (${signingIdentity})`);
 }
 
-if (publicKey && endpoint) {
+if (normalizedPublicKey && normalizedEndpoint) {
   releaseConfig.plugins = {
     ...(baseConfig.plugins ?? {}),
     updater: {
-      pubkey: publicKey,
-      endpoints: [endpoint],
+      pubkey: normalizedPublicKey,
+      endpoints: [normalizedEndpoint],
     },
   };
-  console.log(`Updater config enabled (${endpoint})`);
+  console.log(`Updater config enabled (${normalizedEndpoint})`);
 } else {
   console.log(`Updater config skipped (missing: ${missing.join(', ')})`);
 }

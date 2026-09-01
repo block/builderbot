@@ -55,11 +55,15 @@ GitHub's global `releases/latest` endpoint.
 
 The config generator validates both values: the endpoint must be an HTTPS,
 credential-free URL pointing at a `latest.json` feed, and the public key must be
-the single-line base64 value produced by `tauri signer generate`. Official release
-builds (the workflow sets `STAGED_OFFICIAL_RELEASE=true`) **fail closed** if either
-value is missing, rather than silently producing a release configuration without
-updater settings. Unofficial local builds may still generate a config without
-updater settings for testing.
+the single-line base64 value produced by `tauri signer generate`. Validation returns
+the value that is written, so surrounding whitespace (typically a trailing newline
+from `$(cat …)` or a CI secret) is stripped rather than written into the config —
+Tauri's base64 decoder would reject an untrimmed key at runtime, producing a signed
+build whose updater cannot verify anything. Official release builds (the workflow
+sets `STAGED_OFFICIAL_RELEASE=true`) **fail closed** if either value is missing,
+rather than silently producing a release configuration without updater settings.
+Unofficial local builds may still generate a config without updater settings for
+testing.
 
 ### 3. The renderer cannot supply update URLs or keys
 
@@ -83,9 +87,14 @@ re-prompts, so a declined update can still be installed without restarting.
 ### 5. Failed checks never block the app
 
 Update checks run in the background (at startup and every 15 minutes) with a
-timeout. Network failures, malformed or unsigned feeds, and install errors are
-logged and treated as recoverable; they must never block the window, workspace, or
-database from opening.
+timeout that is applied both to the native request and to the renderer waiting on
+it. A check that times out holds off the next one only until it settles, and that
+wait is itself bounded — a native call that never settles cannot disable updates
+for the rest of the session. Network failures, malformed or unsigned feeds, and
+install errors are logged and treated as recoverable; they must never block the
+window, workspace, or database from opening. Every update handle the renderer
+obtains is released (Tauri's `Update` is a native resource), including handles for
+updates that are declined, suppressed, or discarded after a timeout.
 
 ### 6. Database compatibility is owned by SQLite migrations, not the updater
 

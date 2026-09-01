@@ -384,6 +384,11 @@ impl Store {
     /// Each child yields exactly one row even if it somehow acquires several
     /// artifacts: callers key UI elements by `session_id`, so a duplicate
     /// here would throw in Svelte's keyed `{#each}`.
+    ///
+    /// `created_at` is only millisecond-precision, and an agent can fire
+    /// several `start_repo_session` calls inside one millisecond, so `rowid`
+    /// breaks the tie — otherwise badges for concurrent children could swap
+    /// positions from one refresh to the next.
     pub fn list_running_child_sessions(
         &self,
         parent_session_id: &str,
@@ -405,7 +410,7 @@ impl Store {
              LEFT JOIN project_repos pr ON pr.id = b.project_repo_id
              WHERE s.parent_session_id = ?1 AND s.status = 'running'
              GROUP BY s.id
-             ORDER BY s.created_at ASC",
+             ORDER BY s.created_at ASC, s.rowid ASC",
         )?;
         let children = stmt
             .query_map(params![parent_session_id], |row| {

@@ -847,8 +847,13 @@ fn child_session_fixture(store: &Store) -> (Project, Branch, ProjectRepo, Sessio
 
 /// Enqueue a child session of `parent` and give it the artifact that makes it
 /// a commit / note / review child, mirroring `start_repo_session`.
+///
+/// Every child is stamped with the same `created_at`, which is what real
+/// back-to-back `start_repo_session` calls produce at `now_timestamp`'s
+/// millisecond precision: ordering has to fall through to the tie-break.
 fn child_session(store: &Store, parent_id: &str, branch_id: &str, kind: &str) -> Session {
-    let session = Session::new_queued(kind).with_parent_session(parent_id);
+    let mut session = Session::new_queued(kind).with_parent_session(parent_id);
+    session.created_at = 1_000;
     store.create_session(&session).unwrap();
     match kind {
         "commit" => store
@@ -879,7 +884,9 @@ fn test_list_running_child_sessions_projects_each_kind_to_its_repo() {
 
     let children = store.list_running_child_sessions(&parent.id).unwrap();
     let kinds: Vec<&str> = children.iter().map(|c| c.session_type.as_str()).collect();
-    // Ordered by start order, which is the order they were enqueued.
+    // Ordered by start order, which is the order they were enqueued: these
+    // three share a `created_at`, so the row order is the tie-break's doing and
+    // badge positions stay put across refreshes.
     assert_eq!(kinds, vec!["commit", "note", "review"]);
     for child in &children {
         assert_eq!(child.branch_id, branch.id);

@@ -19,7 +19,6 @@
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import ProjectsSidebar from './lib/features/projects/ProjectsSidebar.svelte';
   import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
-  import QuitConfirmDialog from './lib/features/lifecycle/QuitConfirmDialog.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
@@ -63,7 +62,6 @@
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
   import { listenForMenuEvents } from './lib/listeners/menuListener';
-  import { listenForQuitRequests } from './lib/listeners/quitListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import type { StoreIncompatibility } from './lib/types';
@@ -79,7 +77,6 @@
   let unlistenAcpToolsReconciled: UnlistenFn | undefined;
   let unlistenStoreReset: UnlistenFn | undefined;
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
-  let unlistenQuitRequests: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let stopUpdaterLoop: (() => void) | null = null;
   let updaterStartPending = false;
@@ -359,9 +356,6 @@
     // Refresh provider discovery (and any loaded doctor report) once the
     // backend finishes installing/upgrading the managed ACP bridges.
     unlistenAcpToolsReconciled = listenForAcpToolsReconciled();
-    // Raise the quit confirmation when the backend gates a quit on running
-    // sessions (Tauri only — see quitListener.ts).
-    unlistenQuitRequests = listenForQuitRequests();
     // Keep the shared project-list cache fresh for the app's lifetime — the
     // store dedupes, so starting before any view consumes it is safe.
     projectsDataStore.startListeners();
@@ -574,7 +568,6 @@
     unlistenAcpToolsReconciled?.();
     unlistenStoreReset?.();
     unlistenUpdaterOwnerAvailable?.();
-    unlistenQuitRequests?.();
     projectsDataStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();
@@ -705,9 +698,6 @@
   <!-- Shared remove-project confirmation — serves every route's delete entry
        point (sidebar, landing grid, ProjectHome top bar/shortcut). -->
   <ProjectDeleteDialog />
-
-  <!-- Quit confirmation, raised by the backend when a quit would stop sessions. -->
-  <QuitConfirmDialog />
 
   <ReferenceModalHost />
   <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />

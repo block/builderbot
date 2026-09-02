@@ -422,6 +422,29 @@ export function isResumableReason(reason: string | null | undefined): boolean {
   return !!reason && RESUMABLE_REASONS.has(reason as CompletionReason);
 }
 
+/**
+ * Completion reasons whose *turn* finished — the agent did the work, whatever
+ * happened to the wait that followed it.
+ *
+ * Mirrors `terminal_state_completed_successfully` in
+ * `src-tauri/src/session_runner.rs`, which is what gates the backend's own
+ * post-completion hooks. `held_until_cap` and `hold_stopped` belong here even
+ * though they are also resumable: the two sets deliberately overlap, because a
+ * truncated background wait leaves a turn both complete (its output is real)
+ * and worth nudging (its background work went unconfirmed). Use this — not an
+ * equality check against `turn_complete` — for anything gated on the agent
+ * having produced output.
+ */
+export const COMPLETED_TURN_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
+  'turn_complete',
+  'held_until_cap',
+  'hold_stopped',
+]);
+
+export function isCompletedTurnReason(reason: string | null | undefined): boolean {
+  return !!reason && COMPLETED_TURN_REASONS.has(reason as CompletionReason);
+}
+
 export interface AcpConfigValueSelection {
   configId: string;
   valueId: string;

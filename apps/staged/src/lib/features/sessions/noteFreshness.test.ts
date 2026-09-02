@@ -77,6 +77,17 @@ describe('note freshness', () => {
     }
   );
 
+  it.each([['held_until_cap'], ['hold_stopped']] satisfies [CompletionReason][])(
+    'shows the CTA for a %s session — the turn completed, only its wait was truncated',
+    (completionReason) => {
+      const messages = [message(1, 'assistant', 3000)];
+
+      expect(getNoteFollowupLabel(session('completed', completionReason), messages, note())).toBe(
+        'Ask for the note to be updated'
+      );
+    }
+  );
+
   it('asks for a note to be written when an empty linked note has a later assistant message', () => {
     const messages = [message(1, 'assistant', 3000)];
     const emptyNote = note({ content: '', hasParsedNote: false });

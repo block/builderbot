@@ -6,7 +6,7 @@ import {
   nextBackgroundHold,
   pruneStoppingTaskIds,
 } from './backgroundHold';
-import { isResumableReason, RESUMABLE_REASONS } from '../../types';
+import { isCompletedTurnReason, isResumableReason, RESUMABLE_REASONS } from '../../types';
 
 describe('liveActivityRow', () => {
   it('shows the thinking row with a plain Stop before any hold is reported', () => {
@@ -208,5 +208,30 @@ describe('held_until_cap', () => {
   it('leaves a cleanly completed turn non-resumable', () => {
     expect(RESUMABLE_REASONS.has('turn_complete')).toBe(false);
     expect(isResumableReason('turn_complete')).toBe(false);
+  });
+
+  it('is a completed turn as well as a resumable one', () => {
+    // The two sets overlap on purpose: a truncated wait leaves the turn both
+    // complete (its output is real, so output-gated affordances belong) and
+    // worth nudging (its background work went unconfirmed).
+    for (const reason of ['held_until_cap', 'hold_stopped'] as const) {
+      expect(isCompletedTurnReason(reason)).toBe(true);
+      expect(isResumableReason(reason)).toBe(true);
+    }
+  });
+
+  it('leaves reasons whose turn never finished out of the completed set', () => {
+    expect(isCompletedTurnReason('turn_complete')).toBe(true);
+    for (const reason of [
+      'interrupted',
+      'project_session_interrupted',
+      'crashed',
+      'app_quit',
+      'unknown',
+    ] as const) {
+      expect(isCompletedTurnReason(reason)).toBe(false);
+    }
+    expect(isCompletedTurnReason(null)).toBe(false);
+    expect(isCompletedTurnReason(undefined)).toBe(false);
   });
 });

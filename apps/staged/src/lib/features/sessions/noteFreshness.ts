@@ -1,3 +1,4 @@
+import { isCompletedTurnReason } from '../../types';
 import type { NoteSubtype, Session, SessionMessage } from '../../types';
 
 export interface LinkedNoteContext {
@@ -73,13 +74,24 @@ export function hasNoteFollowupBeenSent(
   );
 }
 
+/**
+ * Whether to offer the "ask for the note to be updated" CTA: the session's
+ * turn finished and left assistant output newer than the note.
+ *
+ * Keyed on the turn having completed, not on `turn_complete` exactly — a
+ * session held open for background work whose wait was truncated
+ * (`held_until_cap`, `hold_stopped`) still finished its turn, so its fresh
+ * output is just as worth folding into the note.
+ */
 export function shouldAskForNoteUpdate(
   session: Session | null,
   messages: SessionMessage[],
   noteContext: LinkedNoteContext | null | undefined
 ): boolean {
   if (!session || !noteContext) return false;
-  if (session.status !== 'completed' || session.completionReason !== 'turn_complete') return false;
+  if (session.status !== 'completed' || !isCompletedTurnReason(session.completionReason)) {
+    return false;
+  }
   if (hasNoteFollowupBeenSent(messages, noteContext.updatedAt)) return false;
 
   const latestAssistant = latestAssistantMessage(messages);

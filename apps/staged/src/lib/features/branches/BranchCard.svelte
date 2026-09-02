@@ -42,6 +42,7 @@
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
   import { subscribeDragDrop } from './dragDrop';
+  import { rebaseInFlight } from './rebaseInFlight';
   import type {
     Branch,
     BranchGitState,
@@ -686,6 +687,12 @@
   let branchCommandDisabledReason = $derived(
     branchIdentityWarning ?? (commandPipelinePending ? 'Command in progress' : null)
   );
+  /**
+   * A rebase is already queued or running, so the header Rebase button hides —
+   * see `rebaseInFlight`. `commandPipelinePending` covers the window between
+   * the click and the timeline reload that surfaces the pipeline's pending row.
+   */
+  let rebaseAlreadyInFlight = $derived(rebaseInFlight(timeline?.commits));
   /**
    * Gate for reset to origin, which still executes immediately: it is validated
    * against a point-in-time preview of what would be discarded, so a busy branch
@@ -1912,7 +1919,7 @@
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
         parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
-        onRebase={branchCommandDisabledReason
+        onRebase={branchCommandDisabledReason || rebaseAlreadyInFlight
           ? undefined
           : () => startBranchCommandPipeline('rebase')}
         rebaseDisabled={!!branchCommandDisabledReason}

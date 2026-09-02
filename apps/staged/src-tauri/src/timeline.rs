@@ -202,6 +202,7 @@ fn parse_commit_lines(
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                pipeline_kind: None,
                 is_own_commit: false, // set later by build_branch_timeline
             });
         }
@@ -268,6 +269,7 @@ fn map_local_commits(
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                pipeline_kind: None,
                 is_own_commit: false, // set later by build_branch_timeline
             }
         })
@@ -465,21 +467,17 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     for dc in db_commits {
         if dc.sha.is_none() {
             let resolved = store.resolve_session_status(dc.session_id.as_deref());
+            let session = resolved
+                .session_id
+                .as_deref()
+                .and_then(|sid| store.get_session(sid).ok().flatten());
 
             commits.push(CommitTimelineItem {
                 id: Some(dc.id.clone()),
                 sha: String::new(),
                 short_sha: String::new(),
                 subject: non_empty_acp_title(&resolved)
-                    .or_else(|| {
-                        resolved.session_id.as_deref().and_then(|sid| {
-                            store
-                                .get_session(sid)
-                                .ok()
-                                .flatten()
-                                .map(|s| s.prompt.clone())
-                        })
-                    })
+                    .or_else(|| session.as_ref().map(|s| s.prompt.clone()))
                     .unwrap_or_else(|| "Pending commit".to_string()),
                 author: String::new(),
                 author_email: String::new(),
@@ -489,6 +487,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                pipeline_kind: session.and_then(|s| s.pipeline).and_then(|p| p.kind),
                 is_own_commit: true, // pending commits are always the current user's
             });
         }
@@ -1440,7 +1439,8 @@ mod tests {
     use super::*;
     use crate::git::Span;
     use crate::store::models::{
-        Branch, Comment, Commit, Note, Project, ReviewScope, Session, SessionStatus, Workdir,
+        Branch, Comment, Commit, Note, PipelineExecution, PipelineKind, Project, ReviewScope,
+        Session, SessionStatus, Workdir,
     };
     use crate::test_utils::TempGitRepo;
     use std::fs;
@@ -1752,6 +1752,38 @@ mod tests {
         assert_eq!(subject_of(&untitled_commit.id), "add more tests");
     }
 
+    /// The pending row of a queued rebase pipeline carries the pipeline kind,
+    /// so the frontend can withhold the Rebase button without matching on the
+    /// subject (which an agent-pushed ACP title can replace mid-pipeline).
+    #[test]
+    fn build_branch_timeline_pending_commit_carries_pipeline_kind() {
+        let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let mut rebase = Session::new_queued("Rebase branch");
+        rebase.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+        store.create_session(&rebase).unwrap();
+        let plain = running_session(&store, "add more tests", None);
+        let rebase_commit = Commit::new_pending(&branch.id).with_session(&rebase.id);
+        let plain_commit = Commit::new_pending(&branch.id).with_session(&plain.id);
+        store.create_commit(&rebase_commit).unwrap();
+        store.create_commit(&plain_commit).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let kind_of = |commit_id: &str| {
+            timeline
+                .commits
+                .iter()
+                .find(|c| c.id.as_deref() == Some(commit_id))
+                .unwrap()
+                .pipeline_kind
+                .clone()
+        };
+        assert_eq!(kind_of(&rebase_commit.id), Some(PipelineKind::Rebase));
+        assert_eq!(kind_of(&plain_commit.id), None);
+    }
+
     #[test]
     fn build_branch_timeline_running_note_shows_acp_title() {
         let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
@@ -1880,6 +1912,7 @@ mod tests {
             session_id: None,
             session_status: None,
             completion_reason: None,
+            pipeline_kind: None,
             is_own_commit: false,
         }
     }

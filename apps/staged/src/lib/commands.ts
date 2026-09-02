@@ -1565,6 +1565,23 @@ export function runDoctorFix(
   return invokeCommand('run_doctor_fix', { checkId, fixType });
 }
 
+/** Start an interactive login fix. Output is delivered through doctor-login-output events. */
+export function startDoctorLogin(checkId: string): Promise<void> {
+  return invokeCommand('start_doctor_login', { checkId });
+}
+
+/** Submit a line to an interactive doctor login started by startDoctorLogin. */
+export function sendDoctorLoginCode(checkId: string, code: string): Promise<void> {
+  return invokeCommand('send_doctor_login_code', { checkId, code });
+}
+
+export interface DoctorLoginOutput {
+  checkId: string;
+  line: string | null;
+  done: boolean;
+  error: string | null;
+}
+
 /**
  * Run a source-aware update for a single readout (main CLI or ACP bridge).
  *

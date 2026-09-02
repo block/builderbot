@@ -717,6 +717,7 @@ pub fn start_session(
                         &cancel_token,
                         agent_session_id.as_deref(),
                         &selected_acp_config_options,
+                        None,
                     )
                     .await;
 

@@ -97,6 +97,7 @@
     nextBackgroundHold,
     pruneStoppingTaskIds,
     pruneTaskStopNotices,
+    statusEventSupersededLoad,
     type SessionBackgroundHold,
   } from './backgroundHold';
   import {
@@ -791,6 +792,7 @@
     // it is the status from the last time the pane showed this session. Nobody
     // may judge a hold report against it until the load below replaces it.
     statusLoadedForSessionId = null;
+    const statusVersionBeforeFetch = statusEventVersion;
     try {
       const [s, msgsResult, acpMsgs, queued] = await Promise.all([
         getSession(sessionId),
@@ -803,8 +805,16 @@
         error = 'Session not found';
         return;
       }
-      session = s;
-      statusLoadedForSessionId = s.id;
+      // A status event applied to this session mid-fetch is newer than what
+      // these queries read, so adopting `s` would revert the status *and* mark
+      // the reverted value current for this open — the marker the hold's
+      // freshness guard trusts. Leave both to the event, which set them itself.
+      // The rest of the row is skipped with them, the same trade the poll path
+      // makes; a session left running is re-fetched by the poll it just started.
+      if (!statusEventSupersededLoad(statusVersionBeforeFetch, statusEventVersion, session, s.id)) {
+        session = s;
+        statusLoadedForSessionId = s.id;
+      }
       // A hold reported while the status was unknown was kept on trust; now
       // that the real status is in, re-judge it — a snapshot answered for a
       // session that had already finished would otherwise sit unrendered
@@ -2247,9 +2257,14 @@
                 Stop task
               </Button>
             </div>
-            {#if stopNotice}
-              <div class="hold-task-notice" role="status" in:messageSlide>{stopNotice}</div>
-            {/if}
+            <!-- Mounted with its row, empty until there is something to say:
+                 `role="status"` announces *changes* to a region already in the
+                 accessibility tree, so a region created in the same render as
+                 its text is the one screen readers miss — which would be
+                 exactly the answer the user clicked Stop for. -->
+            <div class="hold-task-notice" class:hold-task-notice-idle={!stopNotice} role="status">
+              {stopNotice ?? ''}
+            </div>
           {/each}
         {/if}
 
@@ -2887,6 +2902,20 @@
     padding: 0 0 4px 22px;
     color: var(--text-faint);
     font-size: var(--size-xs);
+  }
+
+  /* With nothing to report the region stays mounted — that is what lets a
+     later notice be announced — but out of flow, so it adds neither height nor
+     one of the column's 12px gaps to a row that looks untouched. Hidden by
+     clipping rather than `display`/`visibility`, which would drop it from the
+     accessibility tree and undo the point. */
+  .hold-task-notice-idle {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 
   .note-followup-row {

@@ -8,6 +8,7 @@ import {
   nextBackgroundHold,
   pruneStoppingTaskIds,
   pruneTaskStopNotices,
+  statusEventSupersededLoad,
 } from './backgroundHold';
 import { isCompletedTurnReason, isResumableReason, RESUMABLE_REASONS } from '../../types';
 
@@ -225,6 +226,76 @@ describe('a pane reopened on a session it already showed', () => {
         )
       ).toBeNull();
     }
+  });
+});
+
+describe('statusEventSupersededLoad', () => {
+  const loaded = { id: 'session-1' };
+
+  it('lets the load adopt its row when no status event moved', () => {
+    expect(statusEventSupersededLoad(4, 4, loaded, 'session-1')).toBe(false);
+    expect(statusEventSupersededLoad(4, 4, null, 'session-1')).toBe(false);
+  });
+
+  it('holds the load off when an event applied to the session mid-fetch', () => {
+    expect(statusEventSupersededLoad(4, 5, loaded, 'session-1')).toBe(true);
+  });
+
+  it('lets a first load adopt its row even when an event moved', () => {
+    // Nothing was loaded for that event to apply to, so it was dropped: the
+    // fetched row is the only session this pane is going to get, and
+    // discarding it would leave the pane with none at all.
+    expect(statusEventSupersededLoad(4, 5, null, 'session-1')).toBe(false);
+    expect(statusEventSupersededLoad(4, 5, undefined, 'session-1')).toBe(false);
+  });
+
+  it('lets the load adopt its row when the event applied to another session', () => {
+    expect(statusEventSupersededLoad(4, 5, { id: 'session-2' }, 'session-1')).toBe(false);
+  });
+});
+
+describe('a session that finishes while its pane is loading', () => {
+  const holding = {
+    holding: true,
+    liveTasks: 1,
+    tasks: [{ id: 'task-1', name: 'Run the tests', description: null, outputFilePath: null }],
+  };
+
+  it('keeps the event’s status rather than the row the load read before it', () => {
+    // Ordering: the pane is reopened on a running session, `getSession` reads
+    // `running`, the session then completes and its terminal event lands —
+    // applying `completed` and marking the status current — and only then do
+    // the load's four queries resolve.
+    const versionBeforeFetch = 7;
+    // What the terminal event left behind while the queries were in flight.
+    const afterEvent = { id: 'session-1', status: 'completed' as const };
+    const versionAfterFetch = 8;
+    const markedCurrentByEvent = 'session-1';
+    // What the load's `getSession` read, a moment before the session finished.
+    const fetched = { id: 'session-1', status: 'running' as const };
+
+    const adopt = !statusEventSupersededLoad(
+      versionBeforeFetch,
+      versionAfterFetch,
+      afterEvent,
+      fetched.id
+    );
+    expect(adopt).toBe(false);
+
+    const shown = adopt ? fetched : afterEvent;
+    const statusCurrentFor = adopt ? fetched.id : markedCurrentByEvent;
+    expect(shown.status).toBe('completed');
+    // With the event's status left in place and current, a late `holding: true`
+    // is still judged against a finished session.
+    expect(
+      nextBackgroundHold(holding, knownSessionStatus('session-1', shown, statusCurrentFor))
+    ).toBeNull();
+
+    // The premise, so this can't pass by asserting nothing: adopting the
+    // fetched row is exactly what would resurrect the wait.
+    expect(
+      nextBackgroundHold(holding, knownSessionStatus('session-1', fetched, fetched.id))
+    ).toEqual(holding);
   });
 });
 

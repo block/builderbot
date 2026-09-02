@@ -1134,10 +1134,24 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            // Read the token again here rather than reusing what the
-            // terminal-state match saw: any Stop observed before the follow-up
-            // is launched should suppress it, including one that landed while
-            // the post-completion hooks ran.
+            // Read the token again rather than reusing what the terminal-state
+            // match saw, to catch a Stop that reached the registry before the
+            // `deregister` above but only fires the token after that match read
+            // it: `cancel_with_completion_reason` clones the
+            // `Arc<RunningSession>` out from under the registry lock and calls
+            // `apply_cancellation` after releasing it, so the flip can land any
+            // time after the clone — including once the session has left the
+            // map.
+            //
+            // A Stop landing *later* — during the seconds-long post-completion
+            // hooks, say — never reaches this token at all: `apply_cancellation`
+            // is only reachable through the registry map, and the session was
+            // deregistered before those hooks ran. Such a Stop takes
+            // `cancel_session`'s `!was_running` branch, writes `Cancelled`
+            // straight to the DB, and so makes `transition_from_running` above
+            // return false — it is `transitioned`, not this gate, that
+            // suppresses the follow-up over that longer window. Moving the
+            // deregister after the hooks would hand this gate that job instead.
             let should_drain_queued_message =
                 queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
             let session_id_for_follow_up = session_id_for_status.clone();

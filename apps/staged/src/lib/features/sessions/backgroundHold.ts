@@ -61,6 +61,32 @@ export function knownSessionStatus(
 }
 
 /**
+ * Whether a `session-status-changed` event landed while a load's queries were
+ * in flight *and* has already been applied to the session that load is about —
+ * in which case the fetched row carries a status the pane has since moved past,
+ * and adopting it would both revert the status and (via
+ * `statusLoadedForSessionId`) certify the reverted value as current for this
+ * open. The poll path guards the same way; this is the load path's version.
+ *
+ * `versionBefore`/`versionAfter` are the pane's status-event counter, sampled
+ * either side of the fetch. A move alone isn't enough: the event handler bumps
+ * the counter for every event matching the pane's session, but only *applies*
+ * one when that session is already loaded. On a first load there is nothing
+ * loaded to apply to (the pane cleared it), so the event was dropped and the
+ * fetched row is the only session the pane will get — discarding it there would
+ * leave the pane with no session at all.
+ */
+export function statusEventSupersededLoad(
+  versionBefore: number,
+  versionAfter: number,
+  loaded: { id: string } | null | undefined,
+  fetchedSessionId: string
+): boolean {
+  if (versionAfter === versionBefore) return false;
+  return loaded?.id === fetchedSessionId;
+}
+
+/**
  * The hold to hold onto, given what was just reported (by event or by the
  * mount-time snapshot) and the status the session is in.
  *

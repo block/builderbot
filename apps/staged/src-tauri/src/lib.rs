@@ -8,6 +8,7 @@ pub mod acp_tools;
 pub mod acp_tools_reconciler;
 pub mod actions;
 pub mod agent;
+pub mod app_lifecycle;
 pub mod background_sync;
 pub mod blox;
 pub mod branches;
@@ -48,9 +49,7 @@ pub mod test_utils;
 
 use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use store::Store;
 use tauri::{Emitter, Manager};
 
@@ -65,11 +64,6 @@ use tauri::{Emitter, Manager};
 struct DbState {
     db_path: PathBuf,
     needs_reset: Mutex<Option<StoreIncompatibility>>,
-}
-
-#[derive(Default)]
-struct ShutdownState {
-    quit_in_progress: AtomicBool,
 }
 
 pub(crate) fn preferences_store_path_buf() -> Option<PathBuf> {
@@ -259,29 +253,6 @@ pub(crate) fn get_store(
         .unwrap()
         .clone()
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
-}
-
-fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
-    let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-    let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-    let stopped_execution_ids = actions::commands::stop_all_actions(
-        &executor,
-        &registry,
-        actions::StopOptions {
-            force_kill_after: Some(Duration::from_secs(1)),
-        },
-    );
-
-    if stopped_execution_ids.is_empty() {
-        return;
-    }
-
-    if !executor.wait_for_executions(&stopped_execution_ids, Duration::from_secs(2)) {
-        log::warn!(
-            "Timed out waiting for {} action(s) to stop during app shutdown",
-            stopped_execution_ids.len()
-        );
-    }
 }
 
 fn start_store_services(
@@ -1784,6 +1755,10 @@ enum MenuDispatch {
     EmitToFocused(&'static str),
     /// Create a window here in the backend, with no project seed.
     OpenWindowUnseeded,
+    /// Run the quit gate in the backend (`app_lifecycle::request_quit`).
+    RequestQuit,
+    /// Reveal a window in the backend (`app_lifecycle::show_a_window`).
+    ShowWindow,
     /// Nothing to do — unknown item, or a window-scoped item with no target.
     Drop,
 }
@@ -1802,6 +1777,15 @@ enum MenuDispatch {
 /// can just create it. That also un-strands the other items: the new window is
 /// focused, so Settings/Find/zoom route normally again.
 fn dispatch_menu_event(id: &str, has_focused_window: bool) -> MenuDispatch {
+    // Lifecycle items are app-scoped and handled in the backend, focus or no
+    // focus — every window being hidden is exactly when `Window ▸ Staged` and a
+    // gateable `Cmd+Q` matter most.
+    match id {
+        app_lifecycle::QUIT_MENU_ID => return MenuDispatch::RequestQuit,
+        app_lifecycle::SHOW_WINDOW_MENU_ID => return MenuDispatch::ShowWindow,
+        _ => {}
+    }
+
     let event_name = match id {
         "new_window" => "menu:new-window",
         "settings" => "menu:settings",
@@ -1945,6 +1929,26 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+0"),
                 )?;
+                // Custom rather than `PredefinedMenuItem::quit`: that one maps
+                // straight to `NSApp terminate:`, which reaches no Tauri hook,
+                // so Cmd+Q could never be gated on running sessions.
+                let quit_item = MenuItem::with_id(
+                    handle,
+                    app_lifecycle::QUIT_MENU_ID,
+                    "Quit Staged",
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?;
+                // Recovery path for an app whose windows are all hidden: Cmd+Tab
+                // sends no reopen event, so without this the app looks dead (the
+                // same reason Slack exposes `Window ▸ Slack`).
+                let show_window_item = MenuItem::with_id(
+                    handle,
+                    app_lifecycle::SHOW_WINDOW_MENU_ID,
+                    "Staged",
+                    true,
+                    None::<&str>,
+                )?;
 
                 let app_menu = Submenu::with_items(
                     handle,
@@ -1964,7 +1968,7 @@ pub fn run() {
                         &PredefinedMenuItem::hide(handle, None)?,
                         &PredefinedMenuItem::hide_others(handle, None)?,
                         &PredefinedMenuItem::separator(handle)?,
-                        &PredefinedMenuItem::quit(handle, Some("Quit Staged"))?,
+                        &quit_item,
                     ],
                 )?;
 
@@ -2022,6 +2026,8 @@ pub fn run() {
                         &PredefinedMenuItem::maximize(handle, None)?,
                         &PredefinedMenuItem::separator(handle)?,
                         &PredefinedMenuItem::close_window(handle, None)?,
+                        &PredefinedMenuItem::separator(handle)?,
+                        &show_window_item,
                     ],
                 )?;
 
@@ -2159,7 +2165,7 @@ pub fn run() {
             app.manage(window_commands::UpdaterWindowState::default());
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
-            app.manage(ShutdownState::default());
+            app.manage(app_lifecycle::QuitState::default());
             app.manage(DbState {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
@@ -2219,10 +2225,15 @@ pub fn run() {
                         log::warn!("Failed to open window from menu: {e}");
                     }
                 }
+                MenuDispatch::RequestQuit => app_lifecycle::request_quit(app, false),
+                MenuDispatch::ShowWindow => app_lifecycle::show_a_window(app),
                 MenuDispatch::Drop => {}
             }
         })
         .on_window_event(|window, event| {
+            // Close-to-hide / the quit gate (`CloseRequested`).
+            app_lifecycle::on_window_event(window, event);
+
             if let tauri::WindowEvent::Destroyed = event {
                 // Native windows have no WS heartbeat and their PR-poll client
                 // ids are exempt from TTL eviction, so a closed window must
@@ -2258,6 +2269,9 @@ pub fn run() {
             window_commands::new_window,
             window_commands::take_window_seed,
             window_commands::claim_updater_ownership,
+            // Lifecycle — desktop only; the web-mode `dispatch` table refuses
+            // this so a browser client can't quit the host.
+            app_lifecycle::quit_app,
             list_projects,
             create_project,
             list_project_repos,
@@ -2454,17 +2468,30 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let shutdown = app_handle.state::<ShutdownState>();
-                if shutdown.quit_in_progress.swap(true, Ordering::SeqCst) {
-                    return;
-                }
-
-                api.prevent_exit();
-                stop_actions_for_app_shutdown(app_handle);
-                app_handle.exit(0);
+        .run(|app_handle, event| match event {
+            // Now that window close is intercepted, the only producers are our
+            // own confirmed quit (which has already cleaned up) and the updater's
+            // relaunch — which ignores `prevent_exit` anyway, so nothing here
+            // tries to hold the exit back.
+            tauri::RunEvent::ExitRequested { .. } => {
+                app_lifecycle::shutdown_cleanup(app_handle);
             }
+            // The only hook on the `NSApp terminate:` path (Dock ▸ Quit, logout),
+            // which never emits `ExitRequested`. Without it those quits orphan
+            // the agent and action child processes.
+            tauri::RunEvent::Exit => {
+                app_lifecycle::shutdown_cleanup(app_handle);
+            }
+            // Dock-icon click or `open -a Staged` on an app whose windows are
+            // all hidden.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
+                app_lifecycle::show_a_window(app_handle);
+            }
+            _ => {}
         });
 }
 
@@ -2600,9 +2627,26 @@ mod tests {
 
     #[test]
     fn unknown_menu_events_drop_regardless_of_focus() {
-        for id in ["", "quit", "menu:new-window", "New Window"] {
+        for id in ["", "menu:new-window", "New Window"] {
             assert_eq!(dispatch_menu_event(id, true), MenuDispatch::Drop);
             assert_eq!(dispatch_menu_event(id, false), MenuDispatch::Drop);
+        }
+    }
+
+    /// The lifecycle items must route with no window focused: every window
+    /// being hidden is exactly when `Window ▸ Staged` and a gateable `Cmd+Q`
+    /// matter most.
+    #[test]
+    fn lifecycle_menu_events_route_to_the_backend_regardless_of_focus() {
+        for focused in [true, false] {
+            assert_eq!(
+                dispatch_menu_event(crate::app_lifecycle::QUIT_MENU_ID, focused),
+                MenuDispatch::RequestQuit
+            );
+            assert_eq!(
+                dispatch_menu_event(crate::app_lifecycle::SHOW_WINDOW_MENU_ID, focused),
+                MenuDispatch::ShowWindow
+            );
         }
     }
 

@@ -69,6 +69,23 @@ export function confirmResetStore(): Promise<void> {
 }
 
 // =============================================================================
+// App lifecycle
+// =============================================================================
+
+/**
+ * Quit Staged, through the same gate as `Cmd+Q` — the backend raises a native
+ * confirmation alert when sessions are still running, and owns the answer.
+ * Closing the window only hides it, so UI that means "end the app" (the
+ * store-incompatibility screens) needs this.
+ *
+ * Desktop only: the command is not in the web-mode dispatch table, so a browser
+ * client cannot quit the host.
+ */
+export function quitApp(): Promise<void> {
+  return invokeCommand('quit_app');
+}
+
+// =============================================================================
 // Projects
 // =============================================================================
 

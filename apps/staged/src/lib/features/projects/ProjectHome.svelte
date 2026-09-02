@@ -12,7 +12,6 @@
   import Pause from '@lucide/svelte/icons/pause';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import { getWindowSync } from '../../transport';
   import type {
     Project,
     ProjectRepo,
@@ -208,8 +207,10 @@
     }
   }
 
+  // Quits rather than closing the window: closing the last window only hides
+  // it, and there is no usable app behind this screen to come back to.
   function handleClose() {
-    getWindowSync().close();
+    void commands.quitApp().catch((e) => console.error('Failed to quit:', e));
   }
 
   function scheduleDeferredTask(callback: () => void, timeout = 1500): () => void {

@@ -586,8 +586,10 @@
     }
   }
 
+  // Quits rather than closing the window: closing the last window only hides
+  // it, and there is no usable app behind this screen to come back to.
   function handleClose() {
-    getWindowSync().close();
+    void commands.quitApp().catch((e) => console.error('Failed to quit:', e));
   }
 </script>
 

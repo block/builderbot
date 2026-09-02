@@ -243,6 +243,92 @@ pub(crate) fn local_note_pikchr_tools_available(
     is_note_session && workspace_name.is_none()
 }
 
+/// Opt out of the post-turn background hold entirely (`0`/`false`/`no`/`off`),
+/// restoring the legacy teardown-on-prompt-resolve behavior.
+const BACKGROUND_HOLD_ENV: &str = "STAGED_BACKGROUND_HOLD";
+
+/// Override the background hold's hard cap, in seconds.
+const BACKGROUND_HOLD_CAP_SECS_ENV: &str = "STAGED_BACKGROUND_HOLD_CAP_SECS";
+
+/// Feature gate for the post-turn background hold
+/// (`SessionConfig::background_hold`).
+///
+/// When set, a session's agent connection is held open after each prompt
+/// resolves until its background tasks drain (or the hard cap expires), and
+/// post-completion hooks fire on that settled event — so a background shell's
+/// out-of-turn continuation, and any commit it makes, is no longer lost to the
+/// teardown that used to follow the prompt resolving.
+///
+/// On in every build: the managed bridge install floats on the npm latest and
+/// upgrades on every launch, so it is comfortably past the version that keys
+/// `tool_progress` and Bash terminal metadata to the announced tool-call id
+/// (claude-agent-acp #916/#917) — which is what the live background-task
+/// tracking the hold keys off reads.
+///
+/// Overridable without a rebuild, since a hold that misbehaves in the field
+/// needs an escape hatch that isn't "ship a new binary":
+/// - `STAGED_BACKGROUND_HOLD=0` (or `false`/`no`/`off`) disables it.
+/// - `STAGED_BACKGROUND_HOLD_CAP_SECS=<n>` replaces the 10-minute default cap.
+///
+/// Every `SessionConfig` construction site derives the value here so the policy
+/// lives in one place.
+pub(crate) fn default_background_hold() -> Option<acp_client::BackgroundHoldConfig> {
+    background_hold_from_overrides(
+        std::env::var(BACKGROUND_HOLD_ENV).ok().as_deref(),
+        std::env::var(BACKGROUND_HOLD_CAP_SECS_ENV).ok().as_deref(),
+    )
+}
+
+/// Resolve the background-hold config from raw override values.
+///
+/// Split out from [`default_background_hold`] so the policy is testable
+/// without mutating the process environment. An unparseable override is a
+/// typo, not an instruction: it is warned about and ignored, because guessing
+/// either way — silently disabling the hold, or silently uncapping it — is
+/// worse than the documented default.
+fn background_hold_from_overrides(
+    enabled: Option<&str>,
+    cap_secs: Option<&str>,
+) -> Option<acp_client::BackgroundHoldConfig> {
+    if let Some(raw) = enabled {
+        let value = raw.trim();
+        match value {
+            _ if value.eq_ignore_ascii_case("0")
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("no")
+                || value.eq_ignore_ascii_case("off") =>
+            {
+                log::info!("{BACKGROUND_HOLD_ENV}={raw}: post-turn background hold disabled");
+                return None;
+            }
+            _ if value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on") => {}
+            _ => log::warn!(
+                "Ignoring {BACKGROUND_HOLD_ENV}={raw}: expected one of 1/true/yes/on or 0/false/no/off"
+            ),
+        }
+    }
+
+    let mut config = acp_client::BackgroundHoldConfig::default();
+    if let Some(raw) = cap_secs {
+        match raw.trim().parse::<u64>() {
+            // A zero cap would tear the session down the instant it started
+            // holding — indistinguishable from disabling the feature, which
+            // BACKGROUND_HOLD_ENV already expresses unambiguously.
+            Ok(0) | Err(_) => log::warn!(
+                "Ignoring {BACKGROUND_HOLD_CAP_SECS_ENV}={raw}: expected a positive number of seconds"
+            ),
+            Ok(secs) => {
+                config.hold_cap = std::time::Duration::from_secs(secs);
+                log::info!("{BACKGROUND_HOLD_CAP_SECS_ENV}={raw}: background hold cap set to {secs}s");
+            }
+        }
+    }
+    Some(config)
+}
+
 fn pikchr_note_guidance(reference: &str, pikchr_tools_available: bool) -> String {
     let mut guidance = format!(
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
@@ -1108,6 +1194,7 @@ pub async fn start_session(
             project_id: None,
             expose_pikchr_tools: false,
             parent_project_note_id: None,
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -1365,6 +1452,7 @@ pub(crate) async fn resume_session_for_store(
             // When resuming a project session, keep its parent project note in
             // scope so `child_note` repo sessions still attach to it.
             parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+            background_hold: default_background_hold(),
         },
         Arc::clone(&store),
         app_handle,
@@ -1645,6 +1733,26 @@ pub fn cancel_session(
         }
     }
     Ok(())
+}
+
+/// Stop one background task on a held session without cancelling the session
+/// itself — the hold then settles on its own quiescence path once the rest of
+/// the task set drains. Contrast `cancel_session`, which stops the whole wait.
+///
+/// Returns the agent's own `{stopped}` answer: `false` means it didn't stop
+/// the task (unknown id, already terminal, or a stop already in flight).
+/// Errors when the session has no connection to serve the stop or isn't
+/// holding for background work.
+#[tauri::command]
+pub async fn stop_session_async_task(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    session_id: String,
+    task_id: String,
+) -> Result<bool, String> {
+    let handle = registry
+        .async_task_stop_handle(&session_id)
+        .ok_or_else(|| "Session is not running".to_string())?;
+    handle.stop(&task_id).await
 }
 
 #[tauri::command]
@@ -2326,6 +2434,7 @@ pub async fn start_project_session(
             // This project session's note is the parent for any `child_note`
             // repo sessions it spawns.
             parent_project_note_id: Some(note_id.clone()),
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -2720,6 +2829,7 @@ fn launch_running_branch_session(
             project_id: Some(project_id),
             expose_pikchr_tools,
             parent_project_note_id: None,
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -3242,6 +3352,7 @@ async fn start_queued_session_for_branch(
                 branch.workspace_name.as_deref(),
             ),
             parent_project_note_id: None,
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -7069,5 +7180,73 @@ mod tests {
             .expect("standalone note missing from branch history");
         assert!(!standalone_entry.content.contains("Child note"));
         assert!(!standalone_entry.content.contains("#project-note:"));
+    }
+
+    #[test]
+    fn background_hold_is_on_by_default_with_the_documented_cap() {
+        let config = background_hold_from_overrides(None, None)
+            .expect("background hold is enabled without overrides");
+
+        assert_eq!(config, acp_client::BackgroundHoldConfig::default());
+        assert_eq!(config.hold_cap, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn background_hold_env_can_disable_it() {
+        for raw in ["0", "false", "FALSE", "no", "off", " off "] {
+            assert_eq!(
+                background_hold_from_overrides(Some(raw), None),
+                None,
+                "{raw} should disable the hold"
+            );
+        }
+    }
+
+    #[test]
+    fn background_hold_env_can_enable_it_explicitly() {
+        for raw in ["1", "true", "TRUE", "yes", "on"] {
+            assert_eq!(
+                background_hold_from_overrides(Some(raw), None),
+                Some(acp_client::BackgroundHoldConfig::default()),
+                "{raw} should keep the hold enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn background_hold_env_ignores_unparseable_values() {
+        // A typo must not silently disable the feature.
+        assert_eq!(
+            background_hold_from_overrides(Some("maybe"), None),
+            Some(acp_client::BackgroundHoldConfig::default())
+        );
+    }
+
+    #[test]
+    fn background_hold_cap_override_replaces_the_default_cap() {
+        let config = background_hold_from_overrides(None, Some("90"))
+            .expect("cap override leaves the hold enabled");
+
+        assert_eq!(config.hold_cap, std::time::Duration::from_secs(90));
+        // Only the cap moves; the rest of the policy is untouched.
+        assert_eq!(
+            config.debounce,
+            acp_client::BackgroundHoldConfig::default().debounce
+        );
+    }
+
+    #[test]
+    fn background_hold_cap_override_ignores_zero_and_garbage() {
+        let default_cap = acp_client::BackgroundHoldConfig::default().hold_cap;
+        for raw in ["0", "-5", "soon", ""] {
+            let config = background_hold_from_overrides(None, Some(raw))
+                .expect("a bad cap must not disable the hold");
+            assert_eq!(config.hold_cap, default_cap, "{raw} should be ignored");
+        }
+    }
+
+    #[test]
+    fn background_hold_cap_override_is_not_read_when_disabled() {
+        assert_eq!(background_hold_from_overrides(Some("0"), Some("90")), None);
     }
 }

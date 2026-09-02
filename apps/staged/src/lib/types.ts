@@ -384,18 +384,38 @@ export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'canc
 
 export type CompletionReason =
   | 'turn_complete'
+  /**
+   * The turn finished but the session was held open for background work, and
+   * the hold's hard cap expired before that work could be confirmed drained —
+   * the wait was truncated, so the session is worth nudging.
+   */
+  | 'held_until_cap'
+  /**
+   * The turn finished but the wait for its background work was stopped before
+   * it could be confirmed drained — the user pressed Stop mid-hold, or the
+   * agent process exited under it. Same truncated-wait semantics as
+   * `held_until_cap`.
+   */
+  | 'hold_stopped'
   | 'interrupted'
   | 'project_session_interrupted'
   | 'crashed'
   | 'app_quit'
   | 'unknown';
 
-/** Completion reasons that indicate a session can be resumed. */
+/**
+ * Completion reasons that indicate a session can be resumed.
+ *
+ * Mirrors `CompletionReason::is_resumable` in `src-tauri/src/store/models.rs`.
+ * `turn_complete` is absent on purpose: the agent said it was done.
+ */
 export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
   'crashed',
   'app_quit',
   'interrupted',
   'project_session_interrupted',
+  'held_until_cap',
+  'hold_stopped',
 ]);
 
 export function isResumableReason(reason: string | null | undefined): boolean {
@@ -522,6 +542,12 @@ export interface SessionMessage {
   acpSessionInfo?: unknown;
   acpConfigOptions?: unknown;
   acpSessionModeState?: unknown;
+  /**
+   * Attribution for rows the agent produced outside a live user turn — a
+   * background continuation while the session was held open. Absent means the
+   * row belongs to a turn the user prompted.
+   */
+  acpOrigin?: string;
 }
 
 // =============================================================================
@@ -611,6 +637,39 @@ export interface PushCompletedPayload {
   branchId: string;
   sessionId: string;
   outcome: PushCompletedOutcome;
+}
+
+/**
+ * Payload emitted by the `session-background-hold` Tauri event.
+ *
+ * A presentational sub-state of `running`, not a status: the session stays
+ * `running` while its agent is held open past turn end for background work.
+ */
+export interface SessionBackgroundHoldPayload {
+  sessionId: string;
+  /** False withdraws the wait — a new turn took over, or teardown started. */
+  holding: boolean;
+  /** Live background tasks the agent is reporting; 0 when not holding. */
+  liveTasks: number;
+  /**
+   * The live tasks by name, when the agent names them (typed asyncTasks
+   * announce each spawn's metadata). Older bridges only report the count, so
+   * this stays empty and the wait renders as the bare-count row.
+   */
+  tasks: SessionBackgroundHoldTask[];
+  branchId?: string | null;
+  projectId?: string | null;
+}
+
+/**
+ * One named background task in a `SessionBackgroundHoldPayload`. The id keys
+ * the per-task stop (`stop_session_async_task`); the rest is presentation.
+ */
+export interface SessionBackgroundHoldTask {
+  id: string;
+  name?: string | null;
+  description?: string | null;
+  outputFilePath?: string | null;
 }
 
 // =============================================================================

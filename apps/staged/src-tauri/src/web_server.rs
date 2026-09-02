@@ -3003,6 +3003,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     project_id: None,
                     expose_pikchr_tools: false,
                     parent_project_note_id: None,
+                    background_hold: session_commands::default_background_hold(),
                 },
                 store,
                 app_handle.clone(),
@@ -3200,6 +3201,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     // When resuming a project session, keep its parent project note
                     // in scope so `child_note` repo sessions still attach to it.
                     parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+                    background_hold: session_commands::default_background_hold(),
                 },
                 Arc::clone(&store),
                 app_handle.clone(),
@@ -3373,6 +3375,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     // This project session's note is the parent for any
                     // `child_note` repo sessions it spawns.
                     parent_project_note_id: Some(note_id.clone()),
+                    background_hold: session_commands::default_background_hold(),
                 },
                 store,
                 app_handle.clone(),
@@ -3432,6 +3435,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let session_id: String = arg(&args, "sessionId")?;
             session_registry.cancel(&session_id);
             Ok(Value::Null)
+        }
+        "stop_session_async_task" => {
+            let session_id: String = arg(&args, "sessionId")?;
+            let task_id: String = arg(&args, "taskId")?;
+            let handle = session_registry
+                .async_task_stop_handle(&session_id)
+                .ok_or_else(|| "Session is not running".to_string())?;
+            let stopped = handle.stop(&task_id).await?;
+            Ok(serde_json::to_value(stopped).unwrap())
         }
         "delete_session" => {
             let store = get_store(store_mutex)?;

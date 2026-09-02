@@ -80,6 +80,7 @@ fn acp_tool_call_metadata(metadata: AcpToolCallMetadata) -> AcpMessageMetadata {
         acp_raw_output: metadata.raw_output,
         acp_content: metadata.content,
         acp_locations: metadata.locations,
+        acp_origin: metadata.origin,
         ..Default::default()
     }
 }
@@ -90,6 +91,7 @@ fn acp_event_metadata(metadata: AcpEventMetadata) -> AcpMessageMetadata {
         acp_message_id: metadata.message_id,
         acp_content: metadata.content,
         acp_usage: metadata.usage,
+        acp_origin: metadata.origin,
         ..Default::default()
     }
 }
@@ -487,6 +489,7 @@ mod tests {
                 },
             ],
             raw_request: None,
+            origin: None,
         }
     }
 
@@ -756,6 +759,7 @@ mod tests {
                     "inputTokens": 5,
                     "outputTokens": 7
                 })),
+                origin: None,
             },
         )
         .await;
@@ -780,6 +784,40 @@ mod tests {
         assert_eq!(
             metadata_rows[0].acp.acp_usage.as_ref().unwrap()["outputTokens"],
             7
+        );
+        assert_eq!(
+            metadata_rows[0].acp.acp_origin, None,
+            "a live turn's chunk carries no background attribution"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_continuation_attribution_is_persisted_with_the_chunk() {
+        let (store, session_id, writer) = setup_writer();
+        let origin = acp_client::background_continuation_origin(Some("task-notification"));
+
+        <MessageWriter as acp_client::MessageWriter>::record_acp_event_metadata(
+            &writer,
+            acp_client::AcpEventMetadata {
+                event_kind: Some("agent_message_chunk".to_string()),
+                message_id: Some("background-continuation-1".to_string()),
+                content: Some(serde_json::json!({
+                    "content": {"type": "text", "text": "the build passed"}
+                })),
+                usage: None,
+                origin: Some(origin.clone()),
+            },
+        )
+        .await;
+
+        let metadata_rows = store
+            .get_session_acp_metadata_messages(&session_id)
+            .unwrap();
+        assert_eq!(metadata_rows.len(), 1);
+        assert_eq!(metadata_rows[0].acp.acp_origin.as_deref(), Some(&*origin));
+        assert_eq!(
+            metadata_rows[0].acp.acp_message_id.as_deref(),
+            Some("background-continuation-1")
         );
     }
 

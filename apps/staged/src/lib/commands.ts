@@ -1032,6 +1032,16 @@ export function cancelSession(sessionId: string): Promise<void> {
   return invokeCommand('cancel_session', { sessionId });
 }
 
+/**
+ * Stop one background task on a held session without cancelling the session —
+ * the hold then settles on its own once the rest of the task set drains.
+ * Resolves with the agent's own answer: `false` means it didn't stop the task
+ * (unknown id, already finished, or a stop already in flight).
+ */
+export function stopSessionAsyncTask(sessionId: string, taskId: string): Promise<boolean> {
+  return invokeCommand('stop_session_async_task', { sessionId, taskId });
+}
+
 export function deleteSession(sessionId: string): Promise<void> {
   return invokeCommand('delete_session', { sessionId });
 }

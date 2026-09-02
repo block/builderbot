@@ -48,6 +48,7 @@
     AcpConfigSelection,
     AcpConfigValueSelection,
     Session,
+    SessionBackgroundHoldPayload,
     SessionMessage,
     QueuedSessionMessage,
     HashtagItem,
@@ -73,6 +74,7 @@
     queueSessionMessage,
     resumeSession,
     sendQueuedSessionMessage,
+    stopSessionAsyncTask,
     type AcpConfigDiscovery,
     type AcpConfigSelector,
   } from '../../api/commands';
@@ -86,6 +88,11 @@
   } from '../agents/acpConfigSelection';
   import { setAcpConfigPref } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
+  import {
+    backgroundHoldTaskRows,
+    liveActivityRow,
+    type SessionBackgroundHold,
+  } from './backgroundHold';
   import {
     buildBranchHashtagItems,
     findHashtagItemForReference,
@@ -201,8 +208,13 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   let unlistenStatus: UnlistenFn | null = null;
+  let unlistenBackgroundHold: UnlistenFn | null = null;
   let statusEventVersion = 0;
   let closed = false;
+  /** Latest background hold reported for this session; null when not holding. */
+  let backgroundHold = $state<SessionBackgroundHold | null>(null);
+  /** Per-task stops in flight, so each row disables its own button only. */
+  let stoppingTaskIds = $state<Set<string>>(new Set());
 
   let inputText = $state('');
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
@@ -236,6 +248,13 @@
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
+  // Holding is a sub-state of running, so the session stays live and only the
+  // activity row changes: the wait plus its live task count, and a Stop that
+  // says what it stops.
+  let activityRow = $derived(liveActivityRow(isLive ? backgroundHold : null));
+  // One row per named live task (typed asyncTasks only — raw mode names
+  // nothing and keeps the bare count), each stoppable on its own.
+  let holdTaskRows = $derived(backgroundHoldTaskRows(isLive ? backgroundHold : null));
   let hasQueuedMessages = $derived(queuedMessages.length > 0);
   let noteFollowupLabel = $derived(getNoteFollowupLabel(session, messages, noteInfo));
   let assistantMarkdownContent = $derived(
@@ -570,6 +589,7 @@
     closed = true;
     stopPolling();
     unlistenStatus?.();
+    unlistenBackgroundHold?.();
   });
 
   // This pane can be mounted once and reused across opens (the `active` prop toggles
@@ -629,6 +649,8 @@
       if (payload.status === 'running') {
         startPolling();
       } else {
+        // A terminal status ends any wait: the agent has been torn down.
+        backgroundHold = null;
         stopPolling();
       }
     });
@@ -637,6 +659,31 @@
     return () => {
       unlistenStatus?.();
       unlistenStatus = null;
+    };
+  });
+
+  // The session stays `running` while its agent is held open for background
+  // work, so the wait arrives on its own event rather than as a status change.
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) return;
+
+    backgroundHold = null;
+    const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
+      'session-background-hold',
+      (payload) => {
+        if (payload.sessionId !== id) return;
+        backgroundHold = payload.holding
+          ? { holding: true, liveTasks: payload.liveTasks, tasks: payload.tasks }
+          : null;
+      }
+    );
+    unlistenBackgroundHold = unlisten;
+
+    return () => {
+      unlistenBackgroundHold?.();
+      unlistenBackgroundHold = null;
     };
   });
 
@@ -967,6 +1014,26 @@
       error = `Failed to cancel: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       cancelling = false;
+    }
+  }
+
+  /**
+   * Stop one background task; the session keeps waiting on the rest. The row
+   * itself disappears via the hold event once the agent publishes the task's
+   * `stopped` state — a `false` answer (already finished, or a stop already
+   * in flight) reconciles the same way, so only a failed request surfaces.
+   */
+  async function handleStopTask(taskId: string) {
+    if (!session || stoppingTaskIds.has(taskId)) return;
+    stoppingTaskIds = new Set(stoppingTaskIds).add(taskId);
+    try {
+      await stopSessionAsyncTask(session.id, taskId);
+    } catch (e) {
+      error = `Failed to stop background task: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      const next = new Set(stoppingTaskIds);
+      next.delete(taskId);
+      stoppingTaskIds = next;
     }
   }
 
@@ -2001,15 +2068,19 @@
         {/each}
 
         {#if isLive}
-          <div class="thinking" in:messageSlide>
+          <div
+            class="thinking"
+            class:thinking-waiting={activityRow.waitingOnBackground}
+            in:messageSlide
+          >
             <Spinner size={14} />
-            <span>Thinking…</span>
+            <span>{activityRow.label}</span>
             <Button
               variant="destructive"
               size="sm"
               class="ml-auto"
-              title="Stop session"
-              aria-label="Stop session"
+              title={activityRow.stopLabel}
+              aria-label={activityRow.stopLabel}
               onclick={handleCancel}
               disabled={cancelling}
             >
@@ -2021,6 +2092,27 @@
               Stop
             </Button>
           </div>
+          {#each holdTaskRows as taskRow (taskRow.id)}
+            <div class="thinking thinking-waiting hold-task-row" in:messageSlide>
+              <span title={taskRow.description ?? undefined}>{taskRow.label}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                class="ml-auto"
+                title={taskRow.stopLabel}
+                aria-label={taskRow.stopLabel}
+                onclick={() => handleStopTask(taskRow.id)}
+                disabled={stoppingTaskIds.has(taskRow.id)}
+              >
+                {#if stoppingTaskIds.has(taskRow.id)}
+                  <Spinner size={14} />
+                {:else}
+                  <CircleStop size={14} />
+                {/if}
+                Stop task
+              </Button>
+            </div>
+          {/each}
         {/if}
 
         {#if noteFollowupLabel}
@@ -2634,6 +2726,19 @@
     color: var(--text-muted);
     font-size: var(--size-xs);
     padding: 4px 0;
+  }
+
+  /* Still running, but waiting on a background task rather than working —
+     called out so the wait (and its Stop) reads as a distinct state. */
+  .thinking-waiting {
+    color: var(--ui-warning);
+  }
+
+  /* A named task under the wait, with a stop of its own — indented so the
+     wait row above reads as the session-level state (and keeps the
+     session-level Stop). */
+  .hold-task-row {
+    padding-left: 22px;
   }
 
   .note-followup-row {

@@ -1303,6 +1303,8 @@ fn test_completion_reason_round_trips() {
 
     for reason in [
         CompletionReason::TurnComplete,
+        CompletionReason::HeldUntilCap,
+        CompletionReason::HoldStopped,
         CompletionReason::Interrupted,
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
@@ -1321,6 +1323,26 @@ fn test_completion_reason_round_trips() {
             "round-trip failed for {:?}",
             reason
         );
+    }
+}
+
+#[test]
+fn test_completion_reason_resumability() {
+    // Anything that cut a session's work short can be nudged; a turn the agent
+    // said it finished cannot. Mirrored by RESUMABLE_REASONS in
+    // `src/lib/types.ts`, which drives the Resume affordance.
+    for reason in [
+        CompletionReason::HeldUntilCap,
+        CompletionReason::HoldStopped,
+        CompletionReason::Interrupted,
+        CompletionReason::ProjectSessionInterrupted,
+        CompletionReason::Crashed,
+        CompletionReason::AppQuit,
+    ] {
+        assert!(reason.is_resumable(), "{reason:?} should be resumable");
+    }
+    for reason in [CompletionReason::TurnComplete, CompletionReason::Unknown] {
+        assert!(!reason.is_resumable(), "{reason:?} should not be resumable");
     }
 }
 

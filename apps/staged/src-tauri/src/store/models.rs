@@ -460,6 +460,16 @@ impl SessionStatus {
 pub enum CompletionReason {
     /// Agent finished its turn normally (`prompt()` → `Ok`).
     TurnComplete,
+    /// The turn finished, but the session was held open for background work
+    /// and the hold's hard cap expired before that work could be confirmed
+    /// drained — so the wait was truncated. Post-completion hooks still ran
+    /// best-effort; the session is resumable so the user can nudge it.
+    HeldUntilCap,
+    /// The turn finished, but the wait for its background work was stopped
+    /// before quiescence — the user pressed Stop mid-hold, or the agent
+    /// process exited under it. Same truncated-wait semantics as
+    /// [`Self::HeldUntilCap`]: hooks ran best-effort, resumable.
+    HoldStopped,
     /// Direct user stop, legacy unknown stop, or generic cancellation.
     Interrupted,
     /// A parent project session stopped this repo session.
@@ -476,6 +486,8 @@ impl CompletionReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::TurnComplete => "turn_complete",
+            Self::HeldUntilCap => "held_until_cap",
+            Self::HoldStopped => "hold_stopped",
             Self::Interrupted => "interrupted",
             Self::ProjectSessionInterrupted => "project_session_interrupted",
             Self::Crashed => "crashed",
@@ -487,12 +499,32 @@ impl CompletionReason {
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "turn_complete" => Some(Self::TurnComplete),
+            "held_until_cap" => Some(Self::HeldUntilCap),
+            "hold_stopped" => Some(Self::HoldStopped),
             "interrupted" => Some(Self::Interrupted),
             "project_session_interrupted" => Some(Self::ProjectSessionInterrupted),
             "crashed" => Some(Self::Crashed),
             "app_quit" => Some(Self::AppQuit),
             "unknown" => Some(Self::Unknown),
             _ => None,
+        }
+    }
+
+    /// Whether a session that ended for this reason is worth resuming — its
+    /// work was cut short rather than finished.
+    ///
+    /// Mirrored by `RESUMABLE_REASONS` in `src/lib/types.ts`, which is what
+    /// actually offers the user the Resume affordance; keep the two in step.
+    /// `TurnComplete` is *not* resumable: the agent said it was done.
+    pub fn is_resumable(&self) -> bool {
+        match self {
+            Self::HeldUntilCap
+            | Self::HoldStopped
+            | Self::Interrupted
+            | Self::ProjectSessionInterrupted
+            | Self::Crashed
+            | Self::AppQuit => true,
+            Self::TurnComplete | Self::Unknown => false,
         }
     }
 }
@@ -859,6 +891,11 @@ pub struct AcpMessageMetadata {
     pub acp_config_options: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_session_mode_state: Option<serde_json::Value>,
+    /// Attribution for rows the agent produced outside a live user turn — a
+    /// background continuation while the session was held open. `None` is the
+    /// ordinary case: part of a turn the user prompted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_origin: Option<String>,
 }
 
 // =============================================================================

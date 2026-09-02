@@ -371,6 +371,36 @@ pub fn background_continuation_origin(origin_kind: Option<&str>) -> String {
     }
 }
 
+/// Longest task-name segment [`labeled_background_continuation_origin`] will
+/// put in an origin tag.
+///
+/// The name is the agent's, not ours: for a background shell the bridge falls
+/// back to the spawn's description, which is the *command* — arbitrarily long
+/// and often multi-line. This value is persisted as an attribution column, so
+/// it gets bounded rather than embedding a whole script in every row a
+/// continuation writes.
+const ORIGIN_TASK_NAME_MAX_CHARS: usize = 64;
+
+/// Reduce a task name to a single-line, length-bounded label safe to persist
+/// inside an origin tag.
+///
+/// Runs of whitespace — including the newlines and indentation a multi-line
+/// shell command carries — collapse to single spaces, and the result is
+/// truncated on a char boundary with a trailing ellipsis so a clipped label
+/// reads as clipped. `None` when nothing is left: an all-whitespace name
+/// labels nothing, so the tag stays at its unlabeled form.
+fn origin_task_name_label(name: &str) -> Option<String> {
+    let collapsed: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut label: String = collapsed.chars().take(ORIGIN_TASK_NAME_MAX_CHARS).collect();
+    if collapsed.chars().count() > ORIGIN_TASK_NAME_MAX_CHARS {
+        label.push('…');
+    }
+    Some(label)
+}
+
 /// [`background_continuation_origin`], additionally labeled with the name of
 /// the task that woke the cycle when the connection knows it — typed
 /// asyncTasks announce every spawn with a `name`, and the task most recently
@@ -378,13 +408,15 @@ pub fn background_continuation_origin(origin_kind: Option<&str>) -> String {
 /// label only ever extends that one kind: no other cycle kind is woken by a
 /// settled task, and consumers of the persisted tag match on the
 /// [`BACKGROUND_CONTINUATION_ORIGIN`] prefix, so the suffix stays additive.
+///
+/// The name is sanitized and bounded first — see [`origin_task_name_label`].
 pub fn labeled_background_continuation_origin(
     origin_kind: Option<&str>,
     woke_task_name: Option<&str>,
 ) -> String {
-    match (origin_kind, woke_task_name) {
-        (Some(TASK_NOTIFICATION_ORIGIN), Some(name)) => {
-            format!("{BACKGROUND_CONTINUATION_ORIGIN}:{TASK_NOTIFICATION_ORIGIN}:{name}")
+    match (origin_kind, woke_task_name.and_then(origin_task_name_label)) {
+        (Some(TASK_NOTIFICATION_ORIGIN), Some(label)) => {
+            format!("{BACKGROUND_CONTINUATION_ORIGIN}:{TASK_NOTIFICATION_ORIGIN}:{label}")
         }
         _ => background_continuation_origin(origin_kind),
     }
@@ -2355,9 +2387,15 @@ impl BackgroundTaskSet {
     /// - `background_tasks_changed` carries the full live set with REPLACE
     ///   semantics — the authoritative snapshot.
     /// - `task_started` inserts `task_id`.
-    /// - `task_updated` removes `task_id` on a terminal `patch.status`
-    ///   (`completed` / `failed` / `killed`); non-terminal patches (e.g.
-    ///   `running`) are ignored.
+    /// - `task_updated` removes `task_id` on a terminal `patch.status`;
+    ///   non-terminal patches (`pending` / `running` / `paused`) are ignored.
+    ///   The terminal set matches upstream's own `taskState` mapping, which
+    ///   folds `killed`, `cancelled` and `stopped` together — wider than the
+    ///   bridge's `liveBackgroundTasks` pruning, which only checks
+    ///   `completed` / `failed` / `killed`. Taking the wider set means a task
+    ///   the agent reports as cancelled or stopped leaves this set on the
+    ///   patch, rather than lingering until a `task_notification` or
+    ///   `background_tasks_changed` snapshot reconciles it.
     /// - `task_notification` means the task settled — removes `task_id`.
     fn apply_sdk_message(&mut self, message: &serde_json::Value) -> bool {
         if message.get("type").and_then(serde_json::Value::as_str) != Some("system") {
@@ -2396,7 +2434,7 @@ impl BackgroundTaskSet {
                     message
                         .pointer("/patch/status")
                         .and_then(serde_json::Value::as_str),
-                    Some("completed" | "failed" | "killed")
+                    Some("completed" | "failed" | "killed" | "cancelled" | "stopped")
                 );
                 terminal && task_id().is_some_and(|id| self.task_ids.remove(id))
             }
@@ -5479,7 +5517,7 @@ mod tests {
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
         hold_for_background_quiescence, is_config_selection_unavailable_error,
         is_missing_mcp_transport_error, labeled_background_continuation_origin,
-        mcp_server_transport_supported, permission_response_for_decision,
+        mcp_server_transport_supported, origin_task_name_label, permission_response_for_decision,
         permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
         resolve_acp_working_dir, resolve_session_config_option_selection,
         resolve_spawn_working_dir, sanitize_remote_acp_chunk, sdk_message_mentions_task,
@@ -5495,8 +5533,8 @@ mod tests {
         SdkSessionState, SessionLifetime, SessionSettleReason, SessionSettled,
         StopAsyncTaskRequest, TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD,
         AVAILABILITY_PROBE_SUBTYPE, BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES,
-        CLAUDE_SDK_MESSAGE_METHOD, CONTINUATION_MESSAGE_ID_PREFIX, PERMISSION_ANNOUNCEMENT_GRACE,
-        SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
+        CLAUDE_SDK_MESSAGE_METHOD, CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS,
+        PERMISSION_ANNOUNCEMENT_GRACE, SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, ContentChunk, ExtNotification, McpCapabilities, McpServer,
@@ -6626,17 +6664,33 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             })
         };
         let mut set = BackgroundTaskSet::default();
-        for id in ["task-1", "task-2", "task-3", "task-4"] {
+        for id in ["task-1", "task-2", "task-3", "task-4", "task-5", "task-6"] {
             set.apply_sdk_message(&task_started(id));
         }
 
-        assert!(!set.apply_sdk_message(&task_updated("task-1", "running")));
-        assert_eq!(set.sorted_ids().len(), 4);
+        // Non-terminal patches keep the task live. `pending` and `paused` are
+        // the other two states upstream's mapping treats as non-terminal.
+        for status in ["running", "pending", "paused"] {
+            assert!(!set.apply_sdk_message(&task_updated("task-1", status)));
+        }
+        assert_eq!(set.sorted_ids().len(), 6);
 
+        // The terminal set matches upstream's `taskState` mapping, which folds
+        // `killed`, `cancelled` and `stopped` together: a task the agent
+        // reports as cancelled or stopped is dead and must not keep the hold
+        // open waiting for a reconciling snapshot.
         assert!(set.apply_sdk_message(&task_updated("task-1", "completed")));
         assert!(set.apply_sdk_message(&task_updated("task-2", "failed")));
         assert!(set.apply_sdk_message(&task_updated("task-3", "killed")));
-        assert_eq!(set.sorted_ids(), ["task-4"]);
+        assert!(set.apply_sdk_message(&task_updated("task-4", "cancelled")));
+        assert!(set.apply_sdk_message(&task_updated("task-5", "stopped")));
+        assert_eq!(set.sorted_ids(), ["task-6"]);
+
+        // A status this client doesn't know keeps the task live — pessimistic,
+        // like the typed set's `Unknown`: the cap bounds a stale entry, while
+        // dropping a live task loses its continuation.
+        assert!(!set.apply_sdk_message(&task_updated("task-6", "reticulating")));
+        assert_eq!(set.sorted_ids(), ["task-6"]);
 
         // Terminal update for an unknown task is a no-op.
         assert!(!set.apply_sdk_message(&task_updated("task-9", "completed")));
@@ -7178,6 +7232,68 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(
             labeled_background_continuation_origin(None, Some("Run the tests")),
             BACKGROUND_CONTINUATION_ORIGIN
+        );
+    }
+
+    #[test]
+    fn a_background_shells_command_name_is_bounded_before_it_is_persisted() {
+        // A background shell's task name is the command itself: the bridge
+        // falls back to the spawn description, which is `input.command`. The
+        // origin is persisted as an attribution value, so a multi-line script
+        // must not land in it verbatim.
+        let command = "sleep 20 && echo done\n  > marker.txt\t&& \\\n  echo 'and a tail long \
+                       enough to be clipped by the bound'";
+        let origin =
+            labeled_background_continuation_origin(Some(TASK_NOTIFICATION_ORIGIN), Some(command));
+
+        assert!(!origin.contains('\n'), "got: {origin}");
+        assert!(!origin.contains('\t'), "got: {origin}");
+        assert!(
+            origin.ends_with('…'),
+            "a clipped label reads as clipped: {origin}"
+        );
+        // Consumers prefix-match, so the bound must not disturb the prefix.
+        assert!(origin.starts_with(&format!(
+            "{BACKGROUND_CONTINUATION_ORIGIN}:{TASK_NOTIFICATION_ORIGIN}:"
+        )));
+        assert!(
+            origin.chars().count()
+                <= BACKGROUND_CONTINUATION_ORIGIN.chars().count()
+                    + TASK_NOTIFICATION_ORIGIN.chars().count()
+                    + ORIGIN_TASK_NAME_MAX_CHARS
+                    + "::…".chars().count()
+        );
+    }
+
+    #[test]
+    fn a_task_name_is_collapsed_and_clipped_but_a_short_one_is_untouched() {
+        assert_eq!(
+            origin_task_name_label("Run the tests"),
+            Some("Run the tests".to_string())
+        );
+        // Newlines, tabs and runs of spaces all collapse to single spaces.
+        assert_eq!(
+            origin_task_name_label("  Run\n\tthe   tests  "),
+            Some("Run the tests".to_string())
+        );
+        // Exactly at the bound is not clipped; one char past it is.
+        let at_bound = "x".repeat(ORIGIN_TASK_NAME_MAX_CHARS);
+        assert_eq!(origin_task_name_label(&at_bound), Some(at_bound.clone()));
+        assert_eq!(
+            origin_task_name_label(&format!("{at_bound}y")),
+            Some(format!("{at_bound}…"))
+        );
+        // Multi-byte names are clipped on a char boundary, not a byte one.
+        let multibyte = "é".repeat(ORIGIN_TASK_NAME_MAX_CHARS + 10);
+        let clipped = origin_task_name_label(&multibyte).expect("a non-blank name labels");
+        assert_eq!(clipped.chars().count(), ORIGIN_TASK_NAME_MAX_CHARS + 1);
+        // A name that is only whitespace labels nothing, so the tag stays at
+        // its unlabeled form rather than ending in a bare separator.
+        assert_eq!(origin_task_name_label("   \n\t "), None);
+        assert_eq!(origin_task_name_label(""), None);
+        assert_eq!(
+            labeled_background_continuation_origin(Some(TASK_NOTIFICATION_ORIGIN), Some("  \n ")),
+            background_continuation_origin(Some(TASK_NOTIFICATION_ORIGIN))
         );
     }
 

@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   backgroundHoldTaskRows,
   isBackgroundHolding,
+  isTaskHeld,
   liveActivityRow,
   nextBackgroundHold,
   pruneStoppingTaskIds,
+  pruneTaskStopNotices,
 } from './backgroundHold';
 import { isCompletedTurnReason, isResumableReason, RESUMABLE_REASONS } from '../../types';
 
@@ -191,6 +193,62 @@ describe('pruneStoppingTaskIds', () => {
 
   it('never grows the set', () => {
     expect(pruneStoppingTaskIds(new Set(), hold)).toEqual(new Set());
+  });
+});
+
+describe('isTaskHeld', () => {
+  const hold = {
+    holding: true,
+    liveTasks: 1,
+    tasks: [{ id: 'task-1', name: 'Run the tests', description: null, outputFilePath: null }],
+  };
+
+  it('is true while the task still has a row on screen', () => {
+    expect(isTaskHeld(hold, 'task-1')).toBe(true);
+  });
+
+  it('is false once the row has left the reported set', () => {
+    // The stop the user asked for took effect while the request was in flight;
+    // saying "did not stop" would contradict the row disappearing.
+    expect(isTaskHeld({ ...hold, tasks: [] }, 'task-1')).toBe(false);
+    expect(isTaskHeld(hold, 'task-2')).toBe(false);
+  });
+
+  it('is false for a withdrawn hold, or one that names nothing', () => {
+    expect(isTaskHeld({ ...hold, holding: false }, 'task-1')).toBe(false);
+    expect(isTaskHeld({ holding: true, liveTasks: 2 }, 'task-1')).toBe(false);
+    expect(isTaskHeld(null, 'task-1')).toBe(false);
+    expect(isTaskHeld(undefined, 'task-1')).toBe(false);
+  });
+});
+
+describe('pruneTaskStopNotices', () => {
+  const hold = {
+    holding: true,
+    liveTasks: 2,
+    tasks: [
+      { id: 'task-1', name: 'Run the tests', description: null, outputFilePath: null },
+      { id: 'task-2', name: 'Build docs', description: null, outputFilePath: null },
+    ],
+  };
+  const notices = new Map([
+    ['task-1', "The agent didn't stop this task — it may have already finished."],
+    ['task-2', 'Stop failed: connection closed'],
+  ]);
+
+  it('keeps a notice while the row it explains is still shown', () => {
+    expect(pruneTaskStopNotices(notices, hold)).toEqual(notices);
+  });
+
+  it('drops a notice with the row it belongs to', () => {
+    expect(pruneTaskStopNotices(notices, { ...hold, tasks: [hold.tasks[0]] })).toEqual(
+      new Map([['task-1', notices.get('task-1')!]])
+    );
+  });
+
+  it('drops every notice once the hold is withdrawn', () => {
+    expect(pruneTaskStopNotices(notices, { holding: false, liveTasks: 0 })).toEqual(new Map());
+    expect(pruneTaskStopNotices(notices, null)).toEqual(new Map());
   });
 });
 

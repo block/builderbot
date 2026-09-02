@@ -91,9 +91,11 @@
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import {
     backgroundHoldTaskRows,
+    isTaskHeld,
     liveActivityRow,
     nextBackgroundHold,
     pruneStoppingTaskIds,
+    pruneTaskStopNotices,
     type SessionBackgroundHold,
   } from './backgroundHold';
   import {
@@ -223,6 +225,12 @@
   let backgroundHoldReportVersion = 0;
   /** Per-task stops in flight, so each row disables its own button only. */
   let stoppingTaskIds = $state<Set<string>>(new Set());
+  /**
+   * What a per-task stop answered, keyed by task id and rendered on that task's
+   * own row. Only outcomes the user can't see for themselves land here — see
+   * `noteTaskStopOutcome`.
+   */
+  let taskStopNotices = $state<Map<string, string>>(new Map());
 
   let inputText = $state('');
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
@@ -679,6 +687,7 @@
 
     backgroundHold = null;
     stoppingTaskIds = new Set();
+    taskStopNotices = new Map();
     const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
       'session-background-hold',
       (payload) => {
@@ -720,12 +729,15 @@
     const pruned = pruneStoppingTaskIds(stoppingTaskIds, backgroundHold);
     // Pruning only ever removes, so a size match means nothing changed.
     if (pruned.size !== stoppingTaskIds.size) stoppingTaskIds = pruned;
+    const prunedNotices = pruneTaskStopNotices(taskStopNotices, backgroundHold);
+    if (prunedNotices.size !== taskStopNotices.size) taskStopNotices = prunedNotices;
   }
 
   /** Withdraw the wait: no hold, and no per-task stop left to be in flight. */
   function clearBackgroundHold() {
     backgroundHold = null;
     if (stoppingTaskIds.size > 0) stoppingTaskIds = new Set();
+    if (taskStopNotices.size > 0) taskStopNotices = new Map();
   }
 
   function isComposerFocused(): boolean {
@@ -1078,16 +1090,47 @@
   async function handleStopTask(taskId: string) {
     if (!session || stoppingTaskIds.has(taskId)) return;
     stoppingTaskIds = new Set(stoppingTaskIds).add(taskId);
+    // A fresh click supersedes whatever the last one was told.
+    clearTaskStopNotice(taskId);
     try {
       const stopped = await stopSessionAsyncTask(session.id, taskId);
       if (!stopped) {
         unmarkStoppingTask(taskId);
-        error = 'The agent did not stop that background task — it may have already finished.';
+        noteTaskStopOutcome(
+          taskId,
+          "The agent didn't stop this task — it may have already finished."
+        );
       }
     } catch (e) {
       unmarkStoppingTask(taskId);
-      error = `Failed to stop background task: ${e instanceof Error ? e.message : String(e)}`;
+      noteTaskStopOutcome(taskId, `Stop failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  /**
+   * Report what a per-task stop answered, on the row it is about.
+   *
+   * Deliberately not `error`: that state replaces the entire transcript with a
+   * centered error card until the next load or send, which is a heavy penalty
+   * for the likeliest answer here (the task finished a moment before the
+   * click). The notice lives on its row instead, and dies with it.
+   *
+   * Nothing is said at all once the row has left the reported hold: the task
+   * terminated while the request was in flight — what the click asked for — so
+   * a "did not stop" line would contradict the row vanishing in front of the
+   * user.
+   */
+  function noteTaskStopOutcome(taskId: string, notice: string) {
+    if (!isTaskHeld(backgroundHold, taskId)) return;
+    taskStopNotices = new Map(taskStopNotices).set(taskId, notice);
+  }
+
+  /** Drop one row's stop notice. */
+  function clearTaskStopNotice(taskId: string) {
+    if (!taskStopNotices.has(taskId)) return;
+    const next = new Map(taskStopNotices);
+    next.delete(taskId);
+    taskStopNotices = next;
   }
 
   /** Re-enable one task row's stop button. */
@@ -2154,6 +2197,7 @@
             </Button>
           </div>
           {#each holdTaskRows as taskRow (taskRow.id)}
+            {@const stopNotice = taskStopNotices.get(taskRow.id)}
             <div class="thinking thinking-waiting hold-task-row" in:messageSlide>
               <span title={taskRow.description ?? undefined}>{taskRow.label}</span>
               <Button
@@ -2173,6 +2217,9 @@
                 Stop task
               </Button>
             </div>
+            {#if stopNotice}
+              <div class="hold-task-notice" role="status" in:messageSlide>{stopNotice}</div>
+            {/if}
           {/each}
         {/if}
 
@@ -2800,6 +2847,16 @@
      session-level Stop). */
   .hold-task-row {
     padding-left: 22px;
+  }
+
+  /* What a per-task stop answered, under the row it is about — the agent
+     stopped nothing, or the request failed. On the row rather than in `error`,
+     which would replace the whole transcript with an error card for what is
+     usually just "that task had already finished". */
+  .hold-task-notice {
+    padding: 0 0 4px 22px;
+    color: var(--text-faint);
+    font-size: var(--size-xs);
   }
 
   .note-followup-row {

@@ -130,6 +130,27 @@ export function backgroundHoldTaskRows(
   });
 }
 
+/** Ids of the tasks a hold is reporting — exactly the rows on screen. */
+function heldTaskIds(hold: SessionBackgroundHold | null | undefined): Set<string> {
+  if (!isBackgroundHolding(hold)) return new Set();
+  return new Set((hold?.tasks ?? []).map((task) => task.id));
+}
+
+/**
+ * Whether a task still has a row in the reported hold.
+ *
+ * Gates what a per-task stop is allowed to say about its own answer. Once the
+ * row has left the set the task has terminated — which is what the click asked
+ * for — so reporting that the agent "did not stop" it would contradict the row
+ * disappearing in front of the user.
+ */
+export function isTaskHeld(
+  hold: SessionBackgroundHold | null | undefined,
+  taskId: string
+): boolean {
+  return heldTaskIds(hold).has(taskId);
+}
+
 /**
  * The per-task stops still worth showing as in-flight, after a hold report.
  *
@@ -146,7 +167,21 @@ export function pruneStoppingTaskIds(
   stopping: ReadonlySet<string>,
   hold: SessionBackgroundHold | null | undefined
 ): Set<string> {
-  if (!isBackgroundHolding(hold)) return new Set();
-  const live = new Set((hold?.tasks ?? []).map((task) => task.id));
+  const live = heldTaskIds(hold);
   return new Set([...stopping].filter((id) => live.has(id)));
+}
+
+/**
+ * The per-task stop notices still worth showing, after a hold report.
+ *
+ * A notice belongs to the row it is about — it says what happened to *that*
+ * task's stop — so it goes when the row does. Keeping it would leave an
+ * explanation floating with nothing left to explain.
+ */
+export function pruneTaskStopNotices(
+  notices: ReadonlyMap<string, string>,
+  hold: SessionBackgroundHold | null | undefined
+): Map<string, string> {
+  const live = heldTaskIds(hold);
+  return new Map([...notices].filter(([id]) => live.has(id)));
 }

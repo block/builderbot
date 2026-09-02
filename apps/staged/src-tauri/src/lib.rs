@@ -2450,6 +2450,8 @@ pub fn run() {
             doctor::run_doctor,
             doctor::run_doctor_freshness,
             doctor::run_doctor_fix,
+            doctor::start_doctor_login,
+            doctor::send_doctor_login_code,
             doctor::run_doctor_update,
         ])
         .build(tauri::generate_context!())

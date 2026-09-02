@@ -1,12 +1,34 @@
 //! Tauri command wrappers for the doctor health-check system.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use serde::Serialize;
 
 pub use doctor::types::{AuthStatus, InstallSource};
 pub use doctor::{
-    AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, ExecuteFixOptions, FixType,
-    RunChecksOptions,
+    AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, ExecuteFixOptions, FixStdin,
+    FixStdinWriter, FixType, RunChecksOptions,
 };
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorLoginOutput {
+    pub check_id: String,
+    pub line: Option<String>,
+    pub done: bool,
+    pub error: Option<String>,
+}
+
+/// Writers for login fixes currently owned by the UI. This is intentionally
+/// only a lifetime map for active subprocesses, not a cache of authentication
+/// state; doctor remains the source of truth for whether login is available.
+static ACTIVE_LOGINS: OnceLock<Mutex<HashMap<String, FixStdinWriter>>> = OnceLock::new();
+
+fn active_logins() -> &'static Mutex<HashMap<String, FixStdinWriter>> {
+    ACTIVE_LOGINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Environment snapshot for doctor checks and fixes. Shaped through
 /// `apply_managed_tools_env` so checks resolve binaries from the same PATH
@@ -55,10 +77,17 @@ fn execute_fix_options(
     command_override: Option<String>,
     env_vars: Vec<(String, String)>,
 ) -> ExecuteFixOptions {
+    // Everything else stays at doctor's defaults: Staged's fixes are
+    // non-interactive, so nothing here feeds a prompt and the child keeps
+    // inheriting stdin rather than getting a piped one; the standard fix
+    // timeout is far above any install or login this runs. Spelled with
+    // `..Default::default()` so a new doctor option doesn't break this
+    // workspace-excluded crate, which `cargo check` under `crates/` never
+    // compiles but `staged-ci.yml` does.
     ExecuteFixOptions {
         command_override,
         npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
-        env: None,
+        ..Default::default()
     }
     .with_env_snapshot(env_vars)
 }
@@ -106,17 +135,77 @@ async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
     report
 }
 
-/// Run a fix for a doctor check, identified by check ID and fix type.
-///
-/// The actual shell command is looked up from the static check definitions —
-/// the caller never sends a raw command string. Two families of fixes are
-/// native rather than shell commands: the node-runtime fix (re)installs the
-/// pinned managed runtime, and install fixes for the managed ACP bridges run
-/// the floating managed installer so the bridge lands in
-/// `~/.staged/packages/tools` with an absolute-path shim instead of the
-/// crate's `npm install -g`. Remaining npm-backed fixes install the managed
-/// runtime first, since they run npm from it into the private prefix (the
-/// existing "Running…" spinner covers the one-time download).
+/// Start an interactive login fix and stream its output to the frontend.
+#[tauri::command]
+pub async fn start_doctor_login(
+    app_handle: tauri::AppHandle,
+    check_id: String,
+) -> Result<(), String> {
+    doctor::agents::lookup_fix_command(&check_id, &FixType::Auth)
+        .ok_or_else(|| format!("No login fix available for {check_id}"))?;
+    let env_vars = doctor_env_vars().await;
+    let (writer, stdin) = FixStdin::pipe();
+    {
+        let mut logins = active_logins().lock().unwrap_or_else(|e| e.into_inner());
+        if logins.contains_key(&check_id) {
+            return Err(format!("A login is already running for {check_id}"));
+        }
+        logins.insert(check_id.clone(), writer);
+    }
+
+    let event_check_id = check_id.clone();
+    let event_app = app_handle.clone();
+    tokio::spawn(async move {
+        let result = doctor::execute_fix_streaming_with_env_options(
+            check_id.clone(),
+            FixType::Auth,
+            ExecuteFixOptions::default()
+                .with_env_snapshot(env_vars)
+                .with_stdin(stdin),
+            move |line| {
+                crate::web_server::emit_to_all(
+                    &event_app,
+                    "doctor-login-output",
+                    DoctorLoginOutput {
+                        check_id: event_check_id.clone(),
+                        line: Some(line.to_string()),
+                        done: false,
+                        error: None,
+                    },
+                );
+            },
+        )
+        .await;
+
+        active_logins()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&check_id);
+        crate::web_server::emit_to_all(
+            &app_handle,
+            "doctor-login-output",
+            DoctorLoginOutput {
+                check_id,
+                line: None,
+                done: true,
+                error: result.err(),
+            },
+        );
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub fn send_doctor_login_code(check_id: String, code: String) -> Result<(), String> {
+    let writer = active_logins()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&check_id)
+        .cloned()
+        .ok_or_else(|| format!("No active login for {check_id}"))?;
+    writer.send_line(code)
+}
+
 #[tauri::command]
 pub async fn run_doctor_fix(check_id: String, fix_type: FixType) -> Result<(), String> {
     if check_id == NODE_RUNTIME_CHECK_ID {

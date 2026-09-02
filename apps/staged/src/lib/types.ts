@@ -569,6 +569,19 @@ export interface SessionMessage {
    * Attribution for rows the agent produced outside a live user turn — a
    * background continuation while the session was held open. Absent means the
    * row belongs to a turn the user prompted.
+   *
+   * Only the ACP *metadata* rows carry it — the `content: ''` rows from
+   * `getSessionAcpMetadataMessages`, written alongside each chunk. The visible
+   * transcript row is appended separately and has no ACP metadata of its own,
+   * so reading this field off assistant text always yields `undefined`. To
+   * badge visible output as a continuation, join the text to its metadata row
+   * through `acpMessageId`; for a continuation that id is the synthesized
+   * `background-continuation-<n>` when the agent named no message of its own.
+   *
+   * The value is `background-continuation`, optionally refined with the
+   * bridge's own cycle kind and the name of the task that woke it
+   * (`background-continuation:task-notification:Run the tests`), so match on
+   * the `background-continuation` prefix rather than the whole string.
    */
   acpOrigin?: string;
 }

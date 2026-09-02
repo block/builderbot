@@ -389,6 +389,13 @@ const ORIGIN_TASK_NAME_MAX_CHARS: usize = 64;
 /// truncated on a char boundary with a trailing ellipsis so a clipped label
 /// reads as clipped. `None` when nothing is left: an all-whitespace name
 /// labels nothing, so the tag stays at its unlabeled form.
+///
+/// Only whitespace is touched. A colon is not whitespace, so it survives into
+/// the label and the tag around it is *not* safe to `split(':')` — see
+/// [`labeled_background_continuation_origin`]. Neither are other non-printing
+/// bytes: the ANSI escapes in a command reach the label intact, which is
+/// harmless for storage but has to be escaped by anything that renders the
+/// value raw.
 fn origin_task_name_label(name: &str) -> Option<String> {
     let collapsed: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -410,6 +417,20 @@ fn origin_task_name_label(name: &str) -> Option<String> {
 /// [`BACKGROUND_CONTINUATION_ORIGIN`] prefix, so the suffix stays additive.
 ///
 /// The name is sanitized and bounded first — see [`origin_task_name_label`].
+///
+/// # Reading the tag back
+///
+/// The three segments are separated by `:`, but the label is *not* a
+/// colon-free field: a task name is the agent's, and for a background shell it
+/// is the command, so `sleep 5; echo a:b` yields
+/// `background-continuation:task-notification:sleep 5; echo a:b`. A consumer
+/// must prefix-match on [`BACKGROUND_CONTINUATION_ORIGIN`], or limit the split
+/// (`splitn(3, ':')`) to keep the label whole — `split(':')` and index is
+/// wrong for exactly the names most worth reading.
+///
+/// The recovered label is also lossy by construction: whitespace-collapsed,
+/// and clipped to [`ORIGIN_TASK_NAME_MAX_CHARS`] with a trailing `…`. It reads
+/// as a human hint, not as a key to match a task by.
 pub fn labeled_background_continuation_origin(
     origin_kind: Option<&str>,
     woke_task_name: Option<&str>,
@@ -7233,6 +7254,29 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             labeled_background_continuation_origin(None, Some("Run the tests")),
             BACKGROUND_CONTINUATION_ORIGIN
         );
+    }
+
+    #[test]
+    fn a_colon_in_a_task_name_survives_into_the_tag_so_the_split_must_be_limited() {
+        // A background shell's name is its command, so colons in the label are
+        // ordinary, not pathological — the tag is three segments, not a
+        // colon-free field list.
+        let origin = labeled_background_continuation_origin(
+            Some(TASK_NOTIFICATION_ORIGIN),
+            Some("sleep 5; echo a:b"),
+        );
+        assert_eq!(
+            origin,
+            "background-continuation:task-notification:sleep 5; echo a:b"
+        );
+        // The advice consumers are given — prefix-match — is unaffected.
+        assert!(origin.starts_with(BACKGROUND_CONTINUATION_ORIGIN));
+        // A limited split recovers the name whole; an unlimited one shreds it.
+        let mut parts = origin.splitn(3, ':');
+        assert_eq!(parts.next(), Some(BACKGROUND_CONTINUATION_ORIGIN));
+        assert_eq!(parts.next(), Some(TASK_NOTIFICATION_ORIGIN));
+        assert_eq!(parts.next(), Some("sleep 5; echo a:b"));
+        assert_eq!(origin.split(':').count(), 4);
     }
 
     #[test]

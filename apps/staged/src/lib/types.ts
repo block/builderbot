@@ -582,6 +582,13 @@ export interface SessionMessage {
    * bridge's own cycle kind and the name of the task that woke it
    * (`background-continuation:task-notification:Run the tests`), so match on
    * the `background-continuation` prefix rather than the whole string.
+   *
+   * The task name is the agent's — for a background shell it is the command —
+   * so it can contain colons of its own and may be a clipped prefix ending in
+   * `…`. Neither `split(':')` nor `split(':', 3)` reads it back (the latter
+   * drops everything past the third field rather than keeping it); match
+   * `/^([^:]+):([^:]+):(.*)$/` or slice at the second `indexOf(':')`. Treat
+   * the recovered name as a hint, not a key to match a task by.
    */
   acpOrigin?: string;
 }

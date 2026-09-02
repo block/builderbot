@@ -3,6 +3,12 @@
 
   Displays rendered markdown content in a clean modal.
   Read-only view.
+
+  Callers pass the note they snapshotted at click time, so while the modal is
+  open it subscribes to `notes-changed` and refetches on any write that could
+  touch this note — the session runner rewriting it, an edit in another window,
+  a delete-and-rewrite. Nothing here is editable, so a refresh can't clobber
+  user input.
 -->
 <script lang="ts">
   import { onDestroy } from 'svelte';
@@ -18,9 +24,13 @@
   import {
     countAssistantMessagesAfter,
     getBranchNoteBySession,
+    getNote,
+    getProjectNote,
     getProjectNoteBySession,
     handleExternalLinkClick,
   } from '../../api/commands';
+  import { listenToEvent } from '../../transport';
+  import { notesChangeAffectsNote } from './noteRefresh';
   import { formatChatButtonLabel, type LinkedNoteContext } from '../sessions/noteFreshness';
   import SessionChatPane from '../sessions/SessionChatPane.svelte';
   import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
@@ -37,7 +47,7 @@
   } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
-  import type { HashtagItem, ProjectRepo, Session } from '../../types';
+  import type { HashtagItem, NotesChangedEvent, ProjectRepo, Session } from '../../types';
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
@@ -95,6 +105,9 @@
   let liveNote = $state<{ id: string; title: string; content: string; updatedAt: number } | null>(
     null
   );
+  // Ordering guard for overlapping refreshes — a burst of writes fires a burst
+  // of events, and only the newest fetch may write `liveNote`.
+  let liveNoteRefreshSeq = 0;
   let assistantMessagesAfterNote = $state(0);
   let assistantMessagesAfterNoteLoadedKey = $state<string | null>(null);
   let chatAutoOpenDecisionKey = $state<string | null>(null);
@@ -222,12 +235,29 @@
     }
   });
 
+  // Fresh props supersede the override — and any refresh still in flight for
+  // the note they replaced, since reference navigation swaps notes in place.
   $effect(() => {
     noteId;
     title;
     content;
     noteUpdatedAt;
     liveNote = null;
+    liveNoteRefreshSeq++;
+  });
+
+  // The props are a snapshot taken when the note was clicked; the surfaces
+  // behind the modal reload themselves off this same feed, but nothing maps
+  // their fresh data back into those props. So refetch here on any write that
+  // could touch this note — including one made while the chat pane is closed,
+  // which is the only other refresh path.
+  $effect(() => {
+    if (!open) return;
+    const target = { noteKind, branchId, projectId };
+    return listenToEvent<NotesChangedEvent>('notes-changed', (payload) => {
+      if (!notesChangeAffectsNote(payload, target)) return;
+      void refreshLiveNote();
+    });
   });
 
   onDestroy(() => {
@@ -285,14 +315,31 @@
     }
   }
 
+  /**
+   * Fetch the current row for the note on screen.
+   *
+   * Session lookup comes first: it resolves a note this modal opened before the
+   * runner had written it, which has no id yet. Otherwise fall back to the id,
+   * which is all a reference-history entry for a session-less note carries.
+   */
+  async function fetchLatestNote() {
+    if (sessionId) {
+      return noteKind === 'project'
+        ? await getProjectNoteBySession(sessionId)
+        : await getBranchNoteBySession(sessionId);
+    }
+    const id = displayNoteId;
+    if (!id) return null;
+    return noteKind === 'project' ? await getProjectNote(id) : await getNote(id);
+  }
+
   async function refreshLiveNote() {
-    if (!sessionId) return;
+    const seq = ++liveNoteRefreshSeq;
     try {
-      const refreshed =
-        noteKind === 'project'
-          ? await getProjectNoteBySession(sessionId)
-          : await getBranchNoteBySession(sessionId);
-      if (!refreshed) return;
+      const refreshed = await fetchLatestNote();
+      // A later refresh already landed, or the note is gone — either way this
+      // result is not the one to render.
+      if (!refreshed || seq !== liveNoteRefreshSeq) return;
       liveNote = {
         id: refreshed.id,
         title: refreshed.title,
@@ -300,7 +347,7 @@
         updatedAt: refreshed.updatedAt,
       };
     } catch {
-      // The next open or poll-backed refresh will try again.
+      // The next notes-changed event or reopen will try again.
     }
   }
 

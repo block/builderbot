@@ -166,6 +166,45 @@ pub struct SessionBackgroundHoldTask {
     pub output_file_path: Option<String>,
 }
 
+/// The hold a session is reporting right now, as `get_session_background_hold`
+/// answers it.
+///
+/// [`SessionBackgroundHoldEvent`] is emitted on *change*, so a pane that mounts
+/// mid-hold — a reloaded window, a newly opened peer window, a pane switched
+/// back to — has already missed every report and would render a plain
+/// "Thinking…" until the task set next changes (with one long task, that is the
+/// whole wait). This is the same payload minus the routing context, so a pane
+/// renders the snapshot exactly as it would have rendered the event it missed.
+///
+/// The cleared default (`holding: false`) is the answer for a session that
+/// isn't running, isn't holding, or has never connected.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBackgroundHoldSnapshot {
+    pub holding: bool,
+    pub live_tasks: usize,
+    pub tasks: Vec<SessionBackgroundHoldTask>,
+}
+
+impl From<acp_client::BackgroundHoldStatus> for SessionBackgroundHoldSnapshot {
+    fn from(status: acp_client::BackgroundHoldStatus) -> Self {
+        Self {
+            holding: status.holding,
+            live_tasks: status.live_tasks,
+            tasks: status
+                .tasks
+                .into_iter()
+                .map(|task| SessionBackgroundHoldTask {
+                    id: task.id,
+                    name: task.name,
+                    description: task.description,
+                    output_file_path: task.output_file_path,
+                })
+                .collect(),
+        }
+    }
+}
+
 // =============================================================================
 // Session registry — tracks running sessions for cancellation
 // =============================================================================
@@ -200,6 +239,12 @@ struct RunningSession {
     /// re-connects). `None` until then, or for sessions that never connect
     /// (e.g. externally registered ones).
     async_task_stop: std::sync::Mutex<Option<acp_client::AsyncTaskStopHandle>>,
+    /// The last background hold the session's connection reported, so a client
+    /// that mounts mid-hold can ask for the wait it missed. The hold is
+    /// reported on change only; the driver reports the cleared default on the
+    /// way out of every hold, so this returns to "not holding" without needing
+    /// its own reset.
+    background_hold: std::sync::Mutex<acp_client::BackgroundHoldStatus>,
 }
 
 impl RunningSession {
@@ -240,6 +285,7 @@ impl SessionRegistry {
             token: token.clone(),
             cancellation_completion_reason: std::sync::Mutex::new(None),
             async_task_stop: std::sync::Mutex::new(None),
+            background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
         });
         let mut inner = self.inner.lock().unwrap();
         // If a cancellation arrived while this session was still starting up
@@ -356,6 +402,29 @@ impl SessionRegistry {
             .running
             .get(session_id)
             .and_then(|running| running.async_task_stop.lock().unwrap().clone())
+    }
+
+    /// Retain the hold `session_id`'s connection just reported, so a client
+    /// that mounts after it was emitted can still learn about the wait.
+    /// Recorded before the event is emitted, so a client reacting to the event
+    /// by querying can never read a staler answer than the one it reacted to.
+    fn record_background_hold(&self, session_id: &str, status: acp_client::BackgroundHoldStatus) {
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.background_hold.lock().unwrap() = status;
+        }
+    }
+
+    /// The hold `session_id` is reporting right now, as its last report left
+    /// it. The cleared default for a session that isn't running (deregistered
+    /// on exit), hasn't connected, or was never holding.
+    pub fn background_hold(&self, session_id: &str) -> acp_client::BackgroundHoldStatus {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .map(|running| running.background_hold.lock().unwrap().clone())
+            .unwrap_or_default()
     }
 
     /// Register a session whose work is driven outside `start_session` (e.g. a
@@ -595,7 +664,12 @@ pub fn start_session(
                     let session_id = config.session_id.clone();
                     let branch_id = config.branch_id.clone();
                     let project_id = config.project_id.clone();
+                    let registry = Arc::clone(&registry);
                     Arc::new(move |status: acp_client::BackgroundHoldStatus| {
+                        // Retain before emitting: the report is a change
+                        // delta, so a pane that mounts mid-hold (or reloads
+                        // under one) has to ask for the wait it missed.
+                        registry.record_background_hold(&session_id, status.clone());
                         emit_background_hold(
                             &app_handle,
                             &session_id,
@@ -3477,6 +3551,9 @@ fn emit_status(
 /// renders in place of its running indicator ("waiting on background task
 /// (N)", with a stop affordance). Keeping it off `SessionStatus` avoids a
 /// schema migration for a state that is never terminal.
+///
+/// Emitted on *change*, so a client that wasn't listening yet asks for the
+/// current hold instead — see [`SessionBackgroundHoldSnapshot`].
 fn emit_background_hold(
     app_handle: &AppHandle,
     session_id: &str,
@@ -3484,20 +3561,16 @@ fn emit_background_hold(
     branch_id: Option<String>,
     project_id: Option<String>,
 ) {
+    let SessionBackgroundHoldSnapshot {
+        holding,
+        live_tasks,
+        tasks,
+    } = status.into();
     let event = SessionBackgroundHoldEvent {
         session_id: session_id.to_string(),
-        holding: status.holding,
-        live_tasks: status.live_tasks,
-        tasks: status
-            .tasks
-            .into_iter()
-            .map(|task| SessionBackgroundHoldTask {
-                id: task.id,
-                name: task.name,
-                description: task.description,
-                output_file_path: task.output_file_path,
-            })
-            .collect(),
+        holding,
+        live_tasks,
+        tasks,
         branch_id,
         project_id,
     };
@@ -4017,6 +4090,54 @@ mod tests {
             registry.cancellation_completion_reason("session-3"),
             Some(CompletionReason::Interrupted)
         );
+    }
+
+    #[test]
+    fn the_registry_answers_the_hold_a_pane_mounting_mid_hold_missed() {
+        let registry = SessionRegistry::new();
+        registry.register("session-holding");
+
+        // Nothing reported yet: not holding, so a pane mounting before the
+        // hold begins renders its usual running indicator.
+        assert!(!registry.background_hold("session-holding").holding);
+
+        let holding = acp_client::BackgroundHoldStatus {
+            holding: true,
+            live_tasks: 1,
+            tasks: vec![acp_client::BackgroundHoldTask {
+                id: "task-1".to_string(),
+                name: Some("Run the tests".to_string()),
+                description: None,
+                output_file_path: None,
+            }],
+        };
+        registry.record_background_hold("session-holding", holding.clone());
+
+        // The report is a change delta and the pane wasn't listening for it,
+        // so the retained answer is the whole wait — count and named tasks.
+        assert_eq!(registry.background_hold("session-holding"), holding);
+        let snapshot: SessionBackgroundHoldSnapshot =
+            registry.background_hold("session-holding").into();
+        assert!(snapshot.holding);
+        assert_eq!(snapshot.live_tasks, 1);
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.tasks[0].id, "task-1");
+        assert_eq!(snapshot.tasks[0].name.as_deref(), Some("Run the tests"));
+
+        // The driver reports the cleared default on the way out of every hold,
+        // so no separate reset is needed to stop advertising the wait.
+        registry.record_background_hold(
+            "session-holding",
+            acp_client::BackgroundHoldStatus::default(),
+        );
+        assert!(!registry.background_hold("session-holding").holding);
+
+        // A deregistered (finished) session, and one that never existed, both
+        // answer "not holding" rather than a not-found the client must handle.
+        registry.record_background_hold("session-holding", holding);
+        registry.deregister("session-holding");
+        assert!(!registry.background_hold("session-holding").holding);
+        assert!(!registry.background_hold("session-never-seen").holding);
     }
 
     #[test]

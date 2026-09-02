@@ -1755,6 +1755,23 @@ pub async fn stop_session_async_task(
     handle.stop(&task_id).await
 }
 
+/// The background hold a session is reporting right now — the wait, its live
+/// task count, and the named tasks a client can stop one at a time.
+///
+/// `session-background-hold` is emitted on change, so a client that starts
+/// listening mid-hold (a reloaded window, a newly opened peer window, a pane
+/// switched back to) has missed every report for that hold and would show a
+/// plain running indicator for the rest of it. This is how it catches up.
+/// Answers the cleared default for a session that isn't running or isn't
+/// holding, so there is no not-found case to handle.
+#[tauri::command]
+pub fn get_session_background_hold(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    session_id: String,
+) -> session_runner::SessionBackgroundHoldSnapshot {
+    registry.background_hold(&session_id).into()
+}
+
 #[tauri::command]
 pub fn delete_session(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,

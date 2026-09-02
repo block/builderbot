@@ -66,6 +66,7 @@
     getSession,
     getSessionAcpMetadataMessages,
     getSessionAcpMetadataMessagesSince,
+    getSessionBackgroundHold,
     getSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
@@ -91,6 +92,8 @@
   import {
     backgroundHoldTaskRows,
     liveActivityRow,
+    nextBackgroundHold,
+    pruneStoppingTaskIds,
     type SessionBackgroundHold,
   } from './backgroundHold';
   import {
@@ -213,6 +216,11 @@
   let closed = false;
   /** Latest background hold reported for this session; null when not holding. */
   let backgroundHold = $state<SessionBackgroundHold | null>(null);
+  /**
+   * Counts hold reports received by event, so the mount-time snapshot can tell
+   * whether a newer report landed while it was in flight.
+   */
+  let backgroundHoldReportVersion = 0;
   /** Per-task stops in flight, so each row disables its own button only. */
   let stoppingTaskIds = $state<Set<string>>(new Set());
 
@@ -650,7 +658,7 @@
         startPolling();
       } else {
         // A terminal status ends any wait: the agent has been torn down.
-        backgroundHold = null;
+        clearBackgroundHold();
         stopPolling();
       }
     });
@@ -670,22 +678,55 @@
     if (!isActive || !id) return;
 
     backgroundHold = null;
+    stoppingTaskIds = new Set();
     const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
       'session-background-hold',
       (payload) => {
         if (payload.sessionId !== id) return;
-        backgroundHold = payload.holding
-          ? { holding: true, liveTasks: payload.liveTasks, tasks: payload.tasks }
-          : null;
+        backgroundHoldReportVersion += 1;
+        applyBackgroundHold(payload);
       }
     );
     unlistenBackgroundHold = unlisten;
+
+    // The event above is emitted on change, so a pane mounting mid-hold has
+    // already missed every report for it — with one long task, that is the
+    // entire wait. Ask for the current hold, but let any live report that
+    // landed while the request was in flight win: it is newer by definition.
+    const versionAtAttach = backgroundHoldReportVersion;
+    getSessionBackgroundHold(id)
+      .then((snapshot) => {
+        if (closed || sessionId !== id) return;
+        if (backgroundHoldReportVersion !== versionAtAttach) return;
+        applyBackgroundHold(snapshot);
+      })
+      .catch(() => {
+        // Best-effort catch-up: the next report still paints the wait.
+      });
 
     return () => {
       unlistenBackgroundHold?.();
       unlistenBackgroundHold = null;
     };
   });
+
+  /**
+   * Adopt a reported hold — from the event or the mount-time snapshot — and
+   * reconcile the per-task stops in flight against it. A stop stays marked
+   * until its row leaves the reported set, which is what proves it took.
+   */
+  function applyBackgroundHold(report: SessionBackgroundHold) {
+    backgroundHold = nextBackgroundHold(report, session?.status);
+    const pruned = pruneStoppingTaskIds(stoppingTaskIds, backgroundHold);
+    // Pruning only ever removes, so a size match means nothing changed.
+    if (pruned.size !== stoppingTaskIds.size) stoppingTaskIds = pruned;
+  }
+
+  /** Withdraw the wait: no hold, and no per-task stop left to be in flight. */
+  function clearBackgroundHold() {
+    backgroundHold = null;
+    if (stoppingTaskIds.size > 0) stoppingTaskIds = new Set();
+  }
 
   function isComposerFocused(): boolean {
     return document.activeElement === inputEl;
@@ -935,6 +976,10 @@
         status: 'running',
         acpConfigSelection: acpConfigSelection ?? session.acpConfigSelection ?? null,
       };
+      // A new turn is starting: any hold reported belonged to the previous
+      // one, so drop it rather than letting this local flip back to `running`
+      // re-render the old wait in place of "Thinking…".
+      clearBackgroundHold();
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
@@ -993,6 +1038,8 @@
       await sendQueuedSessionMessage(id);
       await refreshQueuedMessages();
       if (session) session = { ...session, status: 'running' };
+      // The queued message starts a new turn — see sendMessage.
+      clearBackgroundHold();
       startPolling();
       scrollToBottom();
     } catch (e) {
@@ -1019,22 +1066,36 @@
 
   /**
    * Stop one background task; the session keeps waiting on the rest. The row
-   * itself disappears via the hold event once the agent publishes the task's
-   * `stopped` state — a `false` answer (already finished, or a stop already
-   * in flight) reconciles the same way, so only a failed request surfaces.
+   * disappears via the hold report once the agent publishes the task's
+   * terminal state, and the button stays in-flight until then — clearing the
+   * mark when the request merely resolves would re-enable it for that gap,
+   * which reads as the stop not having taken.
+   *
+   * A `false` answer means the agent stopped nothing (unknown id, already
+   * finished, or a stop already in flight): un-mark the row and say so, since
+   * no terminal state may be coming to explain the button re-enabling.
    */
   async function handleStopTask(taskId: string) {
     if (!session || stoppingTaskIds.has(taskId)) return;
     stoppingTaskIds = new Set(stoppingTaskIds).add(taskId);
     try {
-      await stopSessionAsyncTask(session.id, taskId);
+      const stopped = await stopSessionAsyncTask(session.id, taskId);
+      if (!stopped) {
+        unmarkStoppingTask(taskId);
+        error = 'The agent did not stop that background task — it may have already finished.';
+      }
     } catch (e) {
+      unmarkStoppingTask(taskId);
       error = `Failed to stop background task: ${e instanceof Error ? e.message : String(e)}`;
-    } finally {
-      const next = new Set(stoppingTaskIds);
-      next.delete(taskId);
-      stoppingTaskIds = next;
     }
+  }
+
+  /** Re-enable one task row's stop button. */
+  function unmarkStoppingTask(taskId: string) {
+    if (!stoppingTaskIds.has(taskId)) return;
+    const next = new Set(stoppingTaskIds);
+    next.delete(taskId);
+    stoppingTaskIds = next;
   }
 
   // =========================================================================

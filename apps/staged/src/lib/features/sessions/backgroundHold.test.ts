@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { backgroundHoldTaskRows, isBackgroundHolding, liveActivityRow } from './backgroundHold';
+import {
+  backgroundHoldTaskRows,
+  isBackgroundHolding,
+  liveActivityRow,
+  nextBackgroundHold,
+  pruneStoppingTaskIds,
+} from './backgroundHold';
 import { isResumableReason, RESUMABLE_REASONS } from '../../types';
 
 describe('liveActivityRow', () => {
@@ -110,6 +116,81 @@ describe('isBackgroundHolding', () => {
     expect(isBackgroundHolding({ holding: false, liveTasks: 0 })).toBe(false);
     expect(isBackgroundHolding(null)).toBe(false);
     expect(isBackgroundHolding(undefined)).toBe(false);
+  });
+});
+
+describe('nextBackgroundHold', () => {
+  const holding = {
+    holding: true,
+    liveTasks: 2,
+    tasks: [{ id: 'task-1', name: 'Run the tests', description: null, outputFilePath: null }],
+  };
+
+  it('adopts a hold reported for a running session', () => {
+    expect(nextBackgroundHold(holding, 'running')).toEqual(holding);
+  });
+
+  it('drops a hold reported after the session reached a terminal status', () => {
+    // The event that arrives once the agent has torn down is stale: adopting
+    // it would resurface the wait if the session later flips back to running
+    // (a resume, a queued send), showing the old wait instead of "Thinking…".
+    for (const status of ['completed', 'error', 'cancelled'] as const) {
+      expect(nextBackgroundHold(holding, status)).toBeNull();
+    }
+  });
+
+  it('keeps a hold for a session whose status is not loaded yet', () => {
+    // On mount the snapshot request races the session load; the wait renders
+    // behind its own running check, so dropping the hold here would lose the
+    // very report the mounting pane asked for.
+    expect(nextBackgroundHold(holding, null)).toEqual(holding);
+    expect(nextBackgroundHold(holding, undefined)).toEqual(holding);
+  });
+
+  it('clears on a withdrawn hold whatever the status', () => {
+    expect(nextBackgroundHold({ holding: false, liveTasks: 0 }, 'running')).toBeNull();
+    expect(nextBackgroundHold(null, 'running')).toBeNull();
+    expect(nextBackgroundHold(undefined, 'running')).toBeNull();
+  });
+});
+
+describe('pruneStoppingTaskIds', () => {
+  const hold = {
+    holding: true,
+    liveTasks: 2,
+    tasks: [
+      { id: 'task-1', name: 'Run the tests', description: null, outputFilePath: null },
+      { id: 'task-2', name: 'Build docs', description: null, outputFilePath: null },
+    ],
+  };
+
+  it('keeps a stop in flight while its row is still in the reported set', () => {
+    // The agent publishing the task's terminal state is what proves the stop
+    // took — until then the button must not re-enable and invite a re-click.
+    expect(pruneStoppingTaskIds(new Set(['task-1']), hold)).toEqual(new Set(['task-1']));
+  });
+
+  it('releases a stop once its row leaves the set', () => {
+    expect(
+      pruneStoppingTaskIds(new Set(['task-1', 'task-2']), { ...hold, tasks: [hold.tasks[1]] })
+    ).toEqual(new Set(['task-2']));
+  });
+
+  it('releases every stop when the hold is withdrawn', () => {
+    expect(pruneStoppingTaskIds(new Set(['task-1']), { holding: false, liveTasks: 0 })).toEqual(
+      new Set()
+    );
+    expect(pruneStoppingTaskIds(new Set(['task-1']), null)).toEqual(new Set());
+  });
+
+  it('releases a stop the agent never named — raw mode reports no tasks', () => {
+    expect(pruneStoppingTaskIds(new Set(['task-1']), { holding: true, liveTasks: 2 })).toEqual(
+      new Set()
+    );
+  });
+
+  it('never grows the set', () => {
+    expect(pruneStoppingTaskIds(new Set(), hold)).toEqual(new Set());
   });
 });
 

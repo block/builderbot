@@ -2409,6 +2409,7 @@ pub fn run() {
             session_commands::build_note_followup_message,
             session_commands::cancel_session,
             session_commands::stop_session_async_task,
+            session_commands::get_session_background_hold,
             session_commands::delete_session,
             session_commands::start_branch_session,
             session_commands::start_or_queue_branch_session,

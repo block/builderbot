@@ -640,13 +640,17 @@ export interface PushCompletedPayload {
 }
 
 /**
- * Payload emitted by the `session-background-hold` Tauri event.
+ * The background hold a session is reporting right now, as
+ * `get_session_background_hold` answers it.
  *
  * A presentational sub-state of `running`, not a status: the session stays
  * `running` while its agent is held open past turn end for background work.
+ *
+ * The event below is emitted on *change*, so a pane that mounts mid-hold has
+ * already missed every report for it and asks for this instead — otherwise it
+ * would render a plain running indicator for the rest of the wait.
  */
-export interface SessionBackgroundHoldPayload {
-  sessionId: string;
+export interface SessionBackgroundHoldSnapshot {
   /** False withdraws the wait — a new turn took over, or teardown started. */
   holding: boolean;
   /** Live background tasks the agent is reporting; 0 when not holding. */
@@ -657,6 +661,14 @@ export interface SessionBackgroundHoldPayload {
    * this stays empty and the wait renders as the bare-count row.
    */
   tasks: SessionBackgroundHoldTask[];
+}
+
+/**
+ * Payload emitted by the `session-background-hold` Tauri event: a
+ * `SessionBackgroundHoldSnapshot` plus the routing context clients filter on.
+ */
+export interface SessionBackgroundHoldPayload extends SessionBackgroundHoldSnapshot {
+  sessionId: string;
   branchId?: string | null;
   projectId?: string | null;
 }

@@ -29,6 +29,7 @@ import type {
   ActiveSessionInfo,
   Session,
   SessionMessage,
+  SessionBackgroundHoldSnapshot,
   QueuedSessionMessage,
   DiffFilesResponse,
   FileDiff,
@@ -1040,6 +1041,19 @@ export function cancelSession(sessionId: string): Promise<void> {
  */
 export function stopSessionAsyncTask(sessionId: string, taskId: string): Promise<boolean> {
   return invokeCommand('stop_session_async_task', { sessionId, taskId });
+}
+
+/**
+ * The background hold a session is reporting right now. `session-background-hold`
+ * is emitted on change, so a pane that mounts mid-hold (a reloaded window, a
+ * newly opened peer window, a pane switched back to) asks for the wait it
+ * missed rather than showing a plain running indicator until the task set next
+ * changes. Answers a cleared hold for a session that isn't holding.
+ */
+export function getSessionBackgroundHold(
+  sessionId: string
+): Promise<SessionBackgroundHoldSnapshot> {
+  return invokeCommand('get_session_background_hold', { sessionId });
 }
 
 export function deleteSession(sessionId: string): Promise<void> {

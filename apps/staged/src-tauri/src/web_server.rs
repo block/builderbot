@@ -3445,6 +3445,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let stopped = handle.stop(&task_id).await?;
             Ok(serde_json::to_value(stopped).unwrap())
         }
+        "get_session_background_hold" => {
+            let session_id: String = arg(&args, "sessionId")?;
+            let snapshot: session_runner::SessionBackgroundHoldSnapshot =
+                session_registry.background_hold(&session_id).into();
+            Ok(serde_json::to_value(snapshot).unwrap())
+        }
         "delete_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

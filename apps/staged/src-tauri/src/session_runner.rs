@@ -3784,6 +3784,7 @@ mod tests {
         // The two helpers are read together in the terminal-state match, so a
         // reason exempted from the late cancel must also name a completed
         // turn — an exemption that recorded `interrupted` would be incoherent.
+        let mut exempted = 0;
         for settle in [
             SessionSettleReason::Immediate,
             SessionSettleReason::Quiescent,
@@ -3791,6 +3792,7 @@ mod tests {
             SessionSettleReason::HoldStopped,
         ] {
             if completed_turn_survives_late_cancel(Some(settle)) {
+                exempted += 1;
                 assert!(
                     terminal_state_completed_successfully(
                         "completed",
@@ -3800,6 +3802,14 @@ mod tests {
                 );
             }
         }
+        // Everything above is conditional on the exemption, so an emptied
+        // exemption set would satisfy the invariant vacuously. Count the
+        // reasons that took the branch — the three reached through a hold —
+        // so the test still fails if the exemption it describes goes away.
+        assert!(
+            exempted >= 3,
+            "expected every hold-reached reason to be exempt from the late cancel, found {exempted}"
+        );
     }
 
     #[test]

@@ -966,15 +966,13 @@ pub fn start_session(
                 ("cancelled", None, cancellation_completion_reason.clone())
             }
             Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
-            // A cancel that landed during the post-turn background hold
-            // stopped only the *wait* — the turn had already completed before
-            // it, and the connection settled `HoldStopped` knowing about the
-            // cancel. Fall through to the completed arm so the stop can't
-            // erase the turn's artifacts (commit detection, note generation).
+            // A cancel that landed on a turn which had already completed and
+            // held for its background work stopped only the *wait*. Fall
+            // through to the completed arm so the stop can't erase the turn's
+            // artifacts (commit detection, note generation, pr/push outcomes).
             Ok(AgentRunOutcome::Completed)
                 if cancel_token.is_cancelled()
-                    && settle_reason.get()
-                        != Some(acp_client::SessionSettleReason::HoldStopped) =>
+                    && !completed_turn_survives_late_cancel(settle_reason.get()) =>
             {
                 ("cancelled", None, cancellation_completion_reason.clone())
             }
@@ -2944,6 +2942,41 @@ fn completed_turn_completion_reason(
     }
 }
 
+/// Whether a completed turn stays completed when a cancel is observed at
+/// teardown, rather than being recorded `cancelled`.
+///
+/// Settling is not instantaneous: after the connection reports its outcome the
+/// task still finalizes the writer and gracefully stops the child (seconds, for
+/// a remote session). A Stop pressed in that window cancels the token but has
+/// nothing left to stop — the turn finished and the hold already reached its
+/// own outcome. Recording `cancelled` there would erase a fully-drained turn's
+/// artifacts and skip its post-completion hooks: exactly what the background
+/// hold exists to prevent.
+///
+/// So every reason reached *through* a hold survives a late cancel:
+/// - `HoldStopped` — the connection settled knowing about the cancel; it
+///   applied to the wait, not the turn (a cancel during the hold can only
+///   settle this way, never `Quiescent`).
+/// - `Quiescent` — the background set drained and the agent confirmed idle.
+/// - `HeldUntilCap` — the cap truncated the wait before the cancel arrived.
+///
+/// `Immediate` (the connection tore down as the prompt resolved, so there was
+/// no hold) and a connection that never reported a settle reason keep the
+/// legacy semantics: they have no post-turn window of their own, and a cancel
+/// racing their teardown has always recorded `cancelled`.
+fn completed_turn_survives_late_cancel(
+    settle_reason: Option<acp_client::SessionSettleReason>,
+) -> bool {
+    matches!(
+        settle_reason,
+        Some(
+            acp_client::SessionSettleReason::Quiescent
+                | acp_client::SessionSettleReason::HeldUntilCap
+                | acp_client::SessionSettleReason::HoldStopped
+        )
+    )
+}
+
 /// Whether a terminal state is "the agent did the work" — the gate for
 /// post-completion hooks, draining a queued follow-up, and auto-review.
 ///
@@ -3573,6 +3606,62 @@ mod tests {
             "cancelled",
             &CompletionReason::HeldUntilCap
         ));
+    }
+
+    #[test]
+    fn a_turn_that_settled_after_holding_survives_a_cancel_at_teardown() {
+        use acp_client::SessionSettleReason;
+
+        // Every reason reached through a hold: a Stop landing in the teardown
+        // window can't turn a finished, drained turn into a cancellation.
+        for settle in [
+            SessionSettleReason::HoldStopped,
+            SessionSettleReason::Quiescent,
+            SessionSettleReason::HeldUntilCap,
+        ] {
+            assert!(
+                completed_turn_survives_late_cancel(Some(settle)),
+                "{settle:?} settled after a real hold and must survive a late cancel"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_that_never_held_keeps_the_legacy_cancel_semantics() {
+        use acp_client::SessionSettleReason;
+
+        // No hold means no post-turn window of its own, so a cancel racing
+        // teardown still records `cancelled` — as it did before the hold.
+        assert!(!completed_turn_survives_late_cancel(Some(
+            SessionSettleReason::Immediate
+        )));
+        // A connection that died without settling reported nothing to trust.
+        assert!(!completed_turn_survives_late_cancel(None));
+    }
+
+    #[test]
+    fn every_completed_settle_reason_agrees_on_the_reason_it_records() {
+        use acp_client::SessionSettleReason;
+
+        // The two helpers are read together in the terminal-state match, so a
+        // reason exempted from the late cancel must also name a completed
+        // turn — an exemption that recorded `interrupted` would be incoherent.
+        for settle in [
+            SessionSettleReason::Immediate,
+            SessionSettleReason::Quiescent,
+            SessionSettleReason::HeldUntilCap,
+            SessionSettleReason::HoldStopped,
+        ] {
+            if completed_turn_survives_late_cancel(Some(settle)) {
+                assert!(
+                    terminal_state_completed_successfully(
+                        "completed",
+                        &completed_turn_completion_reason(Some(settle))
+                    ),
+                    "{settle:?} survives a late cancel, so its reason must run the hooks"
+                );
+            }
+        }
     }
 
     #[test]

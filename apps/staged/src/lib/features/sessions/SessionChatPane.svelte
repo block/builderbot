@@ -92,6 +92,7 @@
   import {
     backgroundHoldTaskRows,
     isTaskHeld,
+    knownSessionStatus,
     liveActivityRow,
     nextBackgroundHold,
     pruneStoppingTaskIds,
@@ -223,6 +224,12 @@
    * whether a newer report landed while it was in flight.
    */
   let backgroundHoldReportVersion = 0;
+  /**
+   * Session whose `session.status` describes *this* open, rather than being
+   * left over from the last time the pane showed it — see `knownSessionStatus`.
+   * Cleared when a load starts, set when one resolves or a status event lands.
+   */
+  let statusLoadedForSessionId: string | null = null;
   /** Per-task stops in flight, so each row disables its own button only. */
   let stoppingTaskIds = $state<Set<string>>(new Set());
   /**
@@ -651,16 +658,20 @@
     const unlisten = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
       if (payload.sessionId !== id) return;
       statusEventVersion += 1;
-      session =
-        session?.id === id
-          ? {
-              ...session,
-              status: payload.status,
-              errorMessage: payload.errorMessage ?? session.errorMessage,
-              completionReason: payload.completionReason ?? session.completionReason,
-              updatedAt: Date.now(),
-            }
-          : session;
+      if (session?.id === id) {
+        session = {
+          ...session,
+          status: payload.status,
+          errorMessage: payload.errorMessage ?? session.errorMessage,
+          completionReason: payload.completionReason ?? session.completionReason,
+          updatedAt: Date.now(),
+        };
+        // Applying the payload makes the status current even mid-load, so a
+        // hold reported after it is judged against this rather than treated as
+        // unknown. (A payload for a session that isn't loaded is dropped, as
+        // it always was, and must not mark anything current.)
+        statusLoadedForSessionId = id;
+      }
       refreshQueuedMessages();
       if (payload.status === 'running') {
         startPolling();
@@ -693,7 +704,7 @@
       (payload) => {
         if (payload.sessionId !== id) return;
         backgroundHoldReportVersion += 1;
-        applyBackgroundHold(payload);
+        applyBackgroundHold(id, payload);
       }
     );
     unlistenBackgroundHold = unlisten;
@@ -707,7 +718,7 @@
       .then((snapshot) => {
         if (closed || sessionId !== id) return;
         if (backgroundHoldReportVersion !== versionAtAttach) return;
-        applyBackgroundHold(snapshot);
+        applyBackgroundHold(id, snapshot);
       })
       .catch(() => {
         // Best-effort catch-up: the next report still paints the wait.
@@ -720,12 +731,21 @@
   });
 
   /**
-   * Adopt a reported hold — from the event or the mount-time snapshot — and
-   * reconcile the per-task stops in flight against it. A stop stays marked
-   * until its row leaves the reported set, which is what proves it took.
+   * Adopt a hold reported for `id` — from the event or the mount-time snapshot
+   * — and reconcile the per-task stops in flight against it. A stop stays
+   * marked until its row leaves the reported set, which is what proves it took.
+   *
+   * The report is judged against the session's status only when that status is
+   * known to be this open's: a pane reopened on a session it already showed
+   * still carries the status from last time until its load resolves, and
+   * mistaking that for the current one would discard the very hold the
+   * mounting pane just asked for.
    */
-  function applyBackgroundHold(report: SessionBackgroundHold) {
-    backgroundHold = nextBackgroundHold(report, session?.status);
+  function applyBackgroundHold(id: string, report: SessionBackgroundHold) {
+    backgroundHold = nextBackgroundHold(
+      report,
+      knownSessionStatus(id, session, statusLoadedForSessionId)
+    );
     const pruned = pruneStoppingTaskIds(stoppingTaskIds, backgroundHold);
     // Pruning only ever removes, so a size match means nothing changed.
     if (pruned.size !== stoppingTaskIds.size) stoppingTaskIds = pruned;
@@ -767,6 +787,10 @@
     }
     loading = true;
     error = null;
+    // Whatever `session.status` says right now predates this load: on a reopen
+    // it is the status from the last time the pane showed this session. Nobody
+    // may judge a hold report against it until the load below replaces it.
+    statusLoadedForSessionId = null;
     try {
       const [s, msgsResult, acpMsgs, queued] = await Promise.all([
         getSession(sessionId),
@@ -780,6 +804,12 @@
         return;
       }
       session = s;
+      statusLoadedForSessionId = s.id;
+      // A hold reported while the status was unknown was kept on trust; now
+      // that the real status is in, re-judge it — a snapshot answered for a
+      // session that had already finished would otherwise sit unrendered
+      // behind `isLive` until some later flip back to `running` surfaced it.
+      if (backgroundHold) applyBackgroundHold(s.id, backgroundHold);
       messages = msgsResult.data;
       queuedMessages = queued;
       if (msgsResult.revalidating) {

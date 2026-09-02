@@ -30,6 +30,37 @@ const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
 ]);
 
 /**
+ * The status to judge a hold report against, or `null` when the viewer doesn't
+ * know one for that session yet.
+ *
+ * Two ways the loaded session fails to describe the reported hold, both of
+ * them the same reused-pane hazard: the pane is mounted once and switched
+ * between sessions, and its load path deliberately *keeps* the existing
+ * session object when the id is unchanged (so a reopened transcript stays
+ * visible instead of flashing a loading state).
+ *
+ * - `loaded` is some other session — the pane still shows the last one.
+ * - `loaded` is the right session, but its status predates this open:
+ *   whatever it was when the pane was last visible. A session that has since
+ *   been resumed, or drained a queued follow-up, is running and possibly
+ *   holding while the pane still remembers `completed`.
+ *
+ * `statusLoadedForSessionId` names the session whose status is current — set
+ * when a load resolves or a status event lands, cleared when a load starts.
+ * Anything else reads as unknown, which is the honest answer and the one
+ * [`nextBackgroundHold`] treats as "keep the hold".
+ */
+export function knownSessionStatus(
+  heldSessionId: string,
+  loaded: { id: string; status: SessionStatus } | null | undefined,
+  statusLoadedForSessionId: string | null | undefined
+): SessionStatus | null {
+  if (!loaded || loaded.id !== heldSessionId) return null;
+  if (statusLoadedForSessionId !== heldSessionId) return null;
+  return loaded.status;
+}
+
+/**
  * The hold to hold onto, given what was just reported (by event or by the
  * mount-time snapshot) and the status the session is in.
  *
@@ -43,7 +74,9 @@ const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set<SessionStatus>([
  * A status that isn't known yet keeps the hold: on mount the snapshot request
  * and the session load are in flight together, and the wait is rendered behind
  * its own `running` check anyway — so discarding a hold for a session still
- * loading would lose the very report the mounting pane asked for.
+ * loading would lose the very report the mounting pane asked for. Pass the
+ * status through [`knownSessionStatus`], which is what tells a status that
+ * isn't known yet apart from a stale one left over from the previous open.
  */
 export function nextBackgroundHold(
   report: SessionBackgroundHold | null | undefined,

@@ -3,6 +3,7 @@ import {
   backgroundHoldTaskRows,
   isBackgroundHolding,
   isTaskHeld,
+  knownSessionStatus,
   liveActivityRow,
   nextBackgroundHold,
   pruneStoppingTaskIds,
@@ -153,6 +154,77 @@ describe('nextBackgroundHold', () => {
     expect(nextBackgroundHold({ holding: false, liveTasks: 0 }, 'running')).toBeNull();
     expect(nextBackgroundHold(null, 'running')).toBeNull();
     expect(nextBackgroundHold(undefined, 'running')).toBeNull();
+  });
+});
+
+describe('knownSessionStatus', () => {
+  const loaded = { id: 'session-1', status: 'completed' as const };
+
+  it('is the loaded status once the load for that session has resolved', () => {
+    expect(knownSessionStatus('session-1', loaded, 'session-1')).toBe('completed');
+  });
+
+  it('is unknown while a reopened session still carries last time’s status', () => {
+    // The reused-pane case: the pane kept the session object it was already
+    // showing, so its status is whatever it was when the pane was last
+    // visible — the load that would refresh it is still in flight.
+    expect(knownSessionStatus('session-1', loaded, null)).toBeNull();
+    expect(knownSessionStatus('session-1', loaded, undefined)).toBeNull();
+  });
+
+  it('is unknown when the loaded session is a different one', () => {
+    expect(knownSessionStatus('session-2', loaded, 'session-1')).toBeNull();
+    expect(knownSessionStatus('session-1', null, 'session-1')).toBeNull();
+    expect(knownSessionStatus('session-1', undefined, 'session-1')).toBeNull();
+  });
+
+  it('is unknown when the current status belongs to a different session', () => {
+    // Switched panes: the previous session's load is the one that resolved.
+    expect(
+      knownSessionStatus('session-1', { id: 'session-1', status: 'running' }, 'session-2')
+    ).toBeNull();
+  });
+});
+
+describe('a pane reopened on a session it already showed', () => {
+  const holding = {
+    holding: true,
+    liveTasks: 1,
+    tasks: [{ id: 'task-1', name: 'Run the tests', description: null, outputFilePath: null }],
+  };
+  // Left over from the last time the pane showed this session: it completed,
+  // the user switched away, and it has since been resumed and is holding.
+  const staleTerminal = { id: 'session-1', status: 'completed' as const };
+
+  it('keeps the mount-time snapshot its stale terminal status would have discarded', () => {
+    // The snapshot (one registry read) beats the session load (four queries,
+    // one of them the whole transcript), and the event that would repaint the
+    // wait is emit-on-change — so discarding this loses the wait for the rest
+    // of the hold.
+    expect(
+      nextBackgroundHold(holding, knownSessionStatus('session-1', staleTerminal, null))
+    ).toEqual(holding);
+  });
+
+  it('drops the same report once the load confirms the session really finished', () => {
+    expect(
+      nextBackgroundHold(holding, knownSessionStatus('session-1', staleTerminal, 'session-1'))
+    ).toBeNull();
+  });
+
+  it('still drops a late holding report after a terminal status event', () => {
+    // The guard's own job, unweakened: a status event applied to the loaded
+    // session makes its status current too, so an event still in flight from
+    // the torn-down agent can't resurface the wait on a later flip back to
+    // running.
+    for (const status of ['cancelled', 'error'] as const) {
+      expect(
+        nextBackgroundHold(
+          holding,
+          knownSessionStatus('session-1', { id: 'session-1', status }, 'session-1')
+        )
+      ).toBeNull();
+    }
   });
 });
 

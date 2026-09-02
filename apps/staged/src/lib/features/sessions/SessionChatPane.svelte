@@ -706,24 +706,39 @@
         if (payload.sessionId !== id) return;
         backgroundHoldReportVersion += 1;
         applyBackgroundHold(id, payload);
+      },
+      {
+        // The event above is emitted on change, so a pane mounting mid-hold
+        // has already missed every report for it — with one long task, that is
+        // the entire wait. Ask for the current hold, from inside the hook that
+        // says this listener is live: the backend records the retained
+        // snapshot before it emits, so with the listener up first, every
+        // report is either contained in the answer below or delivered as an
+        // event. Nothing can fall between. Requesting beside the
+        // `listenToEvent` call instead would leave the registration window
+        // (a `listen()` roundtrip on Tauri, a connecting socket on web) as a
+        // hole this guard cannot see.
+        //
+        // The overlap is arbitrated by the version: a live report that lands
+        // while the request is in flight wins, being newer by definition. It
+        // is captured per fire rather than once — the hook fires again on
+        // every web reconnect, and a version captured at effect time would be
+        // permanently behind by then, discarding every later snapshot.
+        onEstablished: () => {
+          const versionAtEstablished = backgroundHoldReportVersion;
+          getSessionBackgroundHold(id)
+            .then((snapshot) => {
+              if (closed || sessionId !== id) return;
+              if (backgroundHoldReportVersion !== versionAtEstablished) return;
+              applyBackgroundHold(id, snapshot);
+            })
+            .catch(() => {
+              // Best-effort catch-up: the next report still paints the wait.
+            });
+        },
       }
     );
     unlistenBackgroundHold = unlisten;
-
-    // The event above is emitted on change, so a pane mounting mid-hold has
-    // already missed every report for it — with one long task, that is the
-    // entire wait. Ask for the current hold, but let any live report that
-    // landed while the request was in flight win: it is newer by definition.
-    const versionAtAttach = backgroundHoldReportVersion;
-    getSessionBackgroundHold(id)
-      .then((snapshot) => {
-        if (closed || sessionId !== id) return;
-        if (backgroundHoldReportVersion !== versionAtAttach) return;
-        applyBackgroundHold(id, snapshot);
-      })
-      .catch(() => {
-        // Best-effort catch-up: the next report still paints the wait.
-      });
 
     return () => {
       unlistenBackgroundHold?.();

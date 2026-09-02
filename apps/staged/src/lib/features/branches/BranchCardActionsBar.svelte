@@ -50,6 +50,10 @@
     /** Rebase/Squash queue behind running sessions, so this covers only the
      *  cases where they can't run at all (detached HEAD, wrong branch). */
     rebaseSquashDisabled?: boolean;
+    /** A rebase is already queued or running, which disables only Rebase: a
+     *  second request wouldn't dedupe against a *running* rebase, it would land
+     *  a redundant one behind it. Squash still queues normally. */
+    rebaseAlreadyInFlight?: boolean;
     commitCount?: number;
   }
 
@@ -67,6 +71,7 @@
     onRebaseBranch,
     onSquashCommits,
     rebaseSquashDisabled = false,
+    rebaseAlreadyInFlight = false,
     commitCount = 0,
   }: Props = $props();
 
@@ -294,7 +299,10 @@
           <FolderInput size={14} /> Move to Project…
         </DropdownMenu.Item>
       {/if}
-      <DropdownMenu.Item disabled={rebaseSquashDisabled} onSelect={() => onRebaseBranch?.()}>
+      <DropdownMenu.Item
+        disabled={rebaseSquashDisabled || rebaseAlreadyInFlight}
+        onSelect={() => onRebaseBranch?.()}
+      >
         <GitBranch size={14} /> Rebase Branch
       </DropdownMenu.Item>
       {#if commitCount >= 2}

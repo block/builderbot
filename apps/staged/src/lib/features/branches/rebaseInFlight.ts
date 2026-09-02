@@ -9,11 +9,16 @@ import { isSessionActive } from '../../shared/sessionStatus';
  * subject — the subject is a display label an agent-pushed ACP title can
  * replace once a conflicted rebase hands off to an agent.
  *
- * The header Rebase button hides while this is true: clicking it again would
- * only re-request work the backend dedupes anyway, and the timeline already
- * shows the rebase row. Rendering nothing beats a disabled control here — the
- * button comes back on its own when the rebase finishes and the parent is
- * still ahead.
+ * The header Rebase button hides while this is true, and the `…` menu's Rebase
+ * item disables. The backend only dedupes the *queued* case
+ * (`queue_commit_pipeline_locked` matches against `find_queued_pipeline`, which
+ * reads queued sessions only), so against a rebase that is already **running** a
+ * second request inserts a fresh queued rebase that runs once the first lands.
+ * This guard is what stops that redundant second rebase, not a cosmetic tidy-up.
+ *
+ * The header renders nothing rather than a disabled control — it is a transient
+ * state with the rebase row already visible in the timeline, and the button
+ * comes back on its own if the rebase finishes with the parent still ahead.
  */
 export function rebaseInFlight(
   commits: Pick<CommitTimelineItem, 'pipelineKind' | 'sessionStatus'>[] | undefined

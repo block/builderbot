@@ -688,9 +688,10 @@
     branchIdentityWarning ?? (commandPipelinePending ? 'Command in progress' : null)
   );
   /**
-   * A rebase is already queued or running, so the header Rebase button hides —
-   * see `rebaseInFlight`. `commandPipelinePending` covers the window between
-   * the click and the timeline reload that surfaces the pipeline's pending row.
+   * A rebase is already queued or running, so the header Rebase button hides
+   * and the menu's Rebase item disables — see `rebaseInFlight`.
+   * `commandPipelinePending` covers the window between the click and the
+   * timeline reload that surfaces the pipeline's pending row.
    */
   let rebaseAlreadyInFlight = $derived(rebaseInFlight(timeline?.commits));
   /**
@@ -1919,10 +1920,8 @@
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
         parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
-        onRebase={branchCommandDisabledReason || rebaseAlreadyInFlight
-          ? undefined
-          : () => startBranchCommandPipeline('rebase')}
-        rebaseDisabled={!!branchCommandDisabledReason}
+        onRebase={rebaseAlreadyInFlight ? undefined : () => startBranchCommandPipeline('rebase')}
+        rebaseDisabledReason={branchCommandDisabledReason}
         warning={branchIdentityWarning}
         {refreshingGitState}
         fetchError={timeline?.gitState?.fetch.error ?? null}
@@ -1945,6 +1944,7 @@
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
           onSquashCommits={() => startBranchCommandPipeline('squash')}
           rebaseSquashDisabled={!!branchCommandDisabledReason}
+          {rebaseAlreadyInFlight}
           {commitCount}
         />
       </div>

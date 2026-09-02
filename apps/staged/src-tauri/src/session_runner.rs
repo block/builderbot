@@ -1147,11 +1147,19 @@ pub fn start_session(
             // hooks, say — never reaches this token at all: `apply_cancellation`
             // is only reachable through the registry map, and the session was
             // deregistered before those hooks ran. Such a Stop takes
-            // `cancel_session`'s `!was_running` branch, writes `Cancelled`
-            // straight to the DB, and so makes `transition_from_running` above
-            // return false — it is `transitioned`, not this gate, that
-            // suppresses the follow-up over that longer window. Moving the
-            // deregister after the hooks would hand this gate that job instead.
+            // `session_commands::cancel_session_impl`'s `!was_running` branch,
+            // writes `Cancelled` straight to the DB, and so makes
+            // `transition_from_running` above return false — it is
+            // `transitioned`, not this gate, that suppresses the follow-up over
+            // that longer window. Moving the deregister after the hooks would
+            // hand this gate that job instead.
+            //
+            // Naming the shared body rather than a command is the point: the
+            // Tauri command and the web dispatcher's `cancel_session` arm both
+            // route through it, so this holds whichever transport the Stop
+            // arrived on. A transport that cancelled through the registry alone
+            // would leave the row `running`, let the transition win, and drain
+            // the follow-up anyway.
             let should_drain_queued_message =
                 queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
             let session_id_for_follow_up = session_id_for_status.clone();

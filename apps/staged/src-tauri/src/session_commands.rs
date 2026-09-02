@@ -64,7 +64,11 @@ enum RemotePikchrGrammarStaging {
 // consider extracting a shared `state.rs`.
 // =============================================================================
 
-fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
+/// Takes the store slot itself rather than the `tauri::State` wrapper, so the
+/// web dispatcher — which pulls the slot off the `AppHandle` and has no
+/// `State` to hand — can call the same shared command bodies. Command
+/// arguments deref-coerce, so `get_store(&store)` on a `State` is unchanged.
+fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
         .unwrap()
@@ -1694,33 +1698,48 @@ pub(crate) fn build_note_followup_message_impl(
     ))
 }
 
-#[tauri::command]
-pub fn cancel_session(
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    app_handle: tauri::AppHandle,
-    session_id: String,
+/// A user Stop, for every transport that can carry one.
+///
+/// The registry is the fast path: a session whose cancellation token is
+/// registered gets it fired, and the session runner records the terminal state
+/// itself. The `!was_running` fallback covers the rest — a session that is
+/// `running` or `queued` in the store but has no live token to fire, either
+/// because it never started one or because it was deregistered before its
+/// terminal write. Without it the row would sit at `running` forever.
+///
+/// Both the `cancel_session` Tauri command and the web dispatcher's arm of the
+/// same name call this. They must not diverge: `session_runner` relies on this
+/// fallback's store write to make `transition_from_running` lose, which is what
+/// suppresses a queued follow-up when a Stop lands during the post-completion
+/// hooks (see the comment on that gate). A transport that cancelled through the
+/// registry alone would flip no token and write no status, so that Stop would
+/// be silently dropped and the follow-up would start anyway.
+pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
+    registry: &session_runner::SessionRegistry,
+    store: &Mutex<Option<Arc<Store>>>,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
 ) -> Result<(), String> {
-    let was_running = registry.cancel(&session_id);
+    let was_running = registry.cancel(session_id);
     if !was_running {
-        let store = get_store(&store)?;
-        if let Ok(Some(session)) = store.get_session(&session_id) {
+        let store = get_store(store)?;
+        if let Ok(Some(session)) = store.get_session(session_id) {
             if session.status == store::SessionStatus::Running
                 || session.status == store::SessionStatus::Queued
             {
                 let _ = store.update_session_status(
-                    &session_id,
+                    session_id,
                     store::SessionStatus::Cancelled,
                     None,
                     Some(&store::CompletionReason::Interrupted),
                 );
-                let branch_id = store.get_branch_id_for_session(&session_id).ok().flatten();
-                let project_id = store.get_project_id_for_session(&session_id).ok().flatten();
+                let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
+                let project_id = store.get_project_id_for_session(session_id).ok().flatten();
                 crate::web_server::emit_to_all(
-                    &app_handle,
+                    app_handle,
                     "session-status-changed",
                     session_runner::SessionStatusEvent {
-                        session_id: session_id.clone(),
+                        session_id: session_id.to_string(),
                         status: "cancelled".to_string(),
                         error_message: None,
                         completion_reason: Some("interrupted".to_string()),
@@ -1733,6 +1752,16 @@ pub fn cancel_session(
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_session(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    cancel_session_impl(&registry, &store, &app_handle, &session_id)
 }
 
 /// Stop one background task on a held session without cancelling the session
@@ -5356,6 +5385,113 @@ mod tests {
             .unwrap();
 
         assert!(get_active_sessions_impl(&store).unwrap().is_empty());
+    }
+
+    /// A mock app so [`cancel_session_impl`]'s status event has somewhere to
+    /// go. Nothing listens, so the emit is a no-op — the point is to drive the
+    /// real shared body rather than a test-only reimplementation of it.
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app")
+    }
+
+    fn cancel_through_shared_body(
+        registry: &session_runner::SessionRegistry,
+        store: &Arc<Store>,
+        session_id: &str,
+    ) {
+        let app = mock_app();
+        let slot = Mutex::new(Some(Arc::clone(store)));
+        cancel_session_impl(registry, &slot, app.handle(), session_id).unwrap();
+    }
+
+    /// The store-write fallback, exercised through the body the **web**
+    /// dispatcher calls — `web_server::dispatch`'s `cancel_session` arm hands
+    /// this function the registry, the store slot off the `AppHandle`, and the
+    /// session id, so this is that transport's cancel behaviour.
+    ///
+    /// It used to cancel through the registry alone, which for a session no
+    /// longer registered (deregistered before its post-completion hooks ran)
+    /// flipped no token and wrote no status. `session_runner` reads this write
+    /// back as a lost `transition_from_running`, which is what suppresses the
+    /// queued follow-up over that window — so without it the Stop was dropped
+    /// and the follow-up started anyway.
+    #[test]
+    fn cancelling_an_unregistered_session_records_the_stop_in_the_store() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = session_runner::SessionRegistry::new();
+        assert!(!registry.is_running(&session.id));
+
+        cancel_through_shared_body(&registry, &store, &session.id);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+    }
+
+    /// Same for a session still `queued`: it has no token either, and leaving
+    /// it would strand the row.
+    #[test]
+    fn cancelling_an_unregistered_queued_session_records_the_stop_in_the_store() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Queued);
+
+        cancel_through_shared_body(&session_runner::SessionRegistry::new(), &store, &session.id);
+
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Cancelled
+        );
+    }
+
+    /// The fallback is only for rows with no live token. A registered session
+    /// gets its token fired and its status left alone, so the session runner
+    /// still owns the terminal write.
+    #[test]
+    fn cancelling_a_registered_session_fires_the_token_and_leaves_the_status() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = Arc::new(session_runner::SessionRegistry::new());
+        let registration = registry.register_external(&session.id);
+
+        cancel_through_shared_body(&registry, &store, &session.id);
+
+        assert!(registration.token().is_cancelled());
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
+    /// A Stop that lands after the session already settled must not rewrite a
+    /// finished row as cancelled — the terminal-state match, not this, decides
+    /// how a completed turn is recorded.
+    #[test]
+    fn cancelling_an_already_terminal_session_leaves_it_completed() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        store
+            .update_session_status(
+                &session.id,
+                store::SessionStatus::Completed,
+                None,
+                Some(&store::CompletionReason::TurnComplete),
+            )
+            .unwrap();
+
+        cancel_through_shared_body(&session_runner::SessionRegistry::new(), &store, &session.id);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Completed);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::TurnComplete)
+        );
     }
 
     #[test]

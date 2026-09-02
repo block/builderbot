@@ -104,8 +104,12 @@ fn event_gap_payload() -> String {
 /// callers don't need to pass it explicitly. This is the preferred way to
 /// emit events — it replaces direct `app_handle.emit()` calls so that web
 /// browser clients connected via WebSocket also receive the event.
-pub fn emit_to_all<S: serde::Serialize + Clone>(
-    app_handle: &tauri::AppHandle,
+///
+/// Generic over the runtime so command bodies that emit can be driven by
+/// `MockRuntime` under test; production callers pass the concrete `Wry`
+/// handle and infer `R`.
+pub fn emit_to_all<R: tauri::Runtime, S: serde::Serialize + Clone>(
+    app_handle: &tauri::AppHandle<R>,
     event_name: &str,
     payload: S,
 ) {
@@ -3433,7 +3437,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
         "cancel_session" => {
             let session_id: String = arg(&args, "sessionId")?;
-            session_registry.cancel(&session_id);
+            // Shared with the Tauri command so a browser Stop also takes the
+            // store-write fallback when the session is no longer registered.
+            session_commands::cancel_session_impl(
+                session_registry,
+                store_mutex,
+                app_handle,
+                &session_id,
+            )?;
             Ok(Value::Null)
         }
         "stop_session_async_task" => {
@@ -3897,6 +3908,57 @@ mod tests {
             missing.is_empty(),
             "web_server::dispatch is missing command arms for: {missing:#?}"
         );
+    }
+
+    /// Having an arm is not the same as having the *same* arm — which is the
+    /// gap `web_dispatch_covers_tauri_commands` can't see. This one had drifted:
+    /// it cancelled through `SessionRegistry::cancel` alone, so a browser Stop
+    /// on a session no longer registered — deregistered before its
+    /// post-completion hooks ran — would flip no token and write no status, and
+    /// `session_runner`'s queued follow-up would drain anyway.
+    ///
+    /// Latent rather than live, since [`start`] is stubbed and nothing serves
+    /// this dispatcher in this build. That is precisely why it needs a test:
+    /// the arms are kept compiling to stay in sync for the day the server is
+    /// restored, and a dormant arm has no user to notice it diverging.
+    ///
+    /// Both transports now share one body; the behaviour it must have is pinned
+    /// by
+    /// `session_commands::tests::cancelling_an_unregistered_session_records_the_stop_in_the_store`,
+    /// and this keeps the web arm reaching it.
+    #[test]
+    fn web_cancel_session_takes_the_shared_store_write_fallback() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "cancel_session");
+
+        assert!(
+            arm.contains("session_commands::cancel_session_impl"),
+            "the web `cancel_session` arm must call the shared body, not cancel \
+             through the registry alone: {arm}"
+        );
+    }
+
+    /// The source of one `dispatch` arm, from its `"command" =>` pattern to the
+    /// end of its block. Source-level for the same reason as
+    /// `web_dispatch_covers_tauri_commands`: `dispatch` needs a `WebAppState`
+    /// with a real `AppHandle`, which a unit test has no way to build.
+    fn dispatch_arm_body(source: &str, command: &str) -> String {
+        let marker = format!("\"{command}\" =>");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("dispatch should have a `{command}` arm"))
+            + marker.len();
+
+        let mut depth = 0isize;
+        let mut end = start;
+        for line in source[start..].lines() {
+            end += line.len() + 1;
+            depth += brace_delta_ignoring_strings(line);
+            if depth == 0 {
+                break;
+            }
+        }
+
+        source[start..end.min(source.len())].to_string()
     }
 
     fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {

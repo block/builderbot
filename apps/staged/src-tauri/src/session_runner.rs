@@ -1134,7 +1134,12 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            let should_drain_queued_message = completed_successfully;
+            // Read the token again here rather than reusing what the
+            // terminal-state match saw: any Stop observed before the follow-up
+            // is launched should suppress it, including one that landed while
+            // the post-completion hooks ran.
+            let should_drain_queued_message =
+                queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
             let session_id_for_follow_up = session_id_for_status.clone();
             let action_executor_for_follow_up = config
                 .action_executor
@@ -3051,8 +3056,27 @@ fn completed_turn_survives_late_cancel(
     )
 }
 
+/// Whether a finished turn should immediately start the next queued message.
+///
+/// Recording finished work and *starting new work* are separate decisions, so
+/// this is deliberately stricter than
+/// [`terminal_state_completed_successfully`] alone. Since a turn that held for
+/// background work survives a late cancel (see
+/// [`completed_turn_survives_late_cancel`]), a Stop pressed in the teardown
+/// window records `completed` — and a session with a queued follow-up would
+/// then launch it. From the user's side they pressed Stop on a session the UI
+/// still showed as running and got a new turn instead of a stop.
+///
+/// So the completed turn keeps everything it earned — its status, its hooks,
+/// its commit detection, its pr/push outcomes — and the Stop keeps its one
+/// meaning: no further work starts.
+fn queued_follow_up_should_start(completed_successfully: bool, cancel_requested: bool) -> bool {
+    completed_successfully && !cancel_requested
+}
+
 /// Whether a terminal state is "the agent did the work" — the gate for
-/// post-completion hooks, draining a queued follow-up, and auto-review.
+/// post-completion hooks, auto-review, and (with
+/// [`queued_follow_up_should_start`] on top) draining a queued follow-up.
 ///
 /// `HeldUntilCap` and `HoldStopped` count: the turn itself completed and only
 /// the *wait* for its background work was truncated, so artifacts it produced
@@ -3710,6 +3734,47 @@ mod tests {
         )));
         // A connection that died without settling reported nothing to trust.
         assert!(!completed_turn_survives_late_cancel(None));
+    }
+
+    #[test]
+    fn a_stop_at_teardown_keeps_the_turn_but_starts_no_queued_follow_up() {
+        use acp_client::SessionSettleReason;
+
+        // A held turn that settled cleanly and then caught a Stop in the
+        // teardown window: it still records as a completed, hook-running turn…
+        let settle = Some(SessionSettleReason::Quiescent);
+        assert!(completed_turn_survives_late_cancel(settle));
+        let completed_successfully = terminal_state_completed_successfully(
+            "completed",
+            &completed_turn_completion_reason(settle),
+        );
+        assert!(completed_successfully);
+        // …but the Stop still means "no more work": the queued message waits
+        // for the user to send it rather than opening a turn they didn't ask
+        // for on a session the UI was still showing as running.
+        assert!(!queued_follow_up_should_start(completed_successfully, true));
+    }
+
+    #[test]
+    fn an_uncancelled_completed_turn_still_drains_its_queued_follow_up() {
+        // The ordinary path is untouched: every completion the hooks run for
+        // keeps draining, including a turn whose background wait was truncated.
+        for reason in [
+            CompletionReason::TurnComplete,
+            CompletionReason::HeldUntilCap,
+            CompletionReason::HoldStopped,
+        ] {
+            let completed_successfully =
+                terminal_state_completed_successfully("completed", &reason);
+            assert!(
+                queued_follow_up_should_start(completed_successfully, false),
+                "{reason:?} completed the turn, so its queued follow-up should start"
+            );
+        }
+        // And a turn that didn't complete never drained, cancel or no cancel.
+        for cancel_requested in [false, true] {
+            assert!(!queued_follow_up_should_start(false, cancel_requested));
+        }
     }
 
     #[test]

@@ -176,9 +176,7 @@
    * Rebuild the child map for the given project sessions.
    *
    * Rebuilt wholesale rather than patched, so a session that stopped running
-   * drops out without a separate pruning pass. Driven by events rather than a
-   * poller: the backend emits `session-status-changed` for a child both when
-   * the queue drains it and when it finishes.
+   * drops out without a separate pruning pass.
    */
   async function refreshChildSessions(parentIds: string[]) {
     const generation = ++childSessionsGeneration;
@@ -207,8 +205,12 @@
     }
   }
 
-  // Covers hydration too: a window opening onto an in-progress project session
-  // sees its running children on the first pass.
+  // The only trigger. Every `session-status-changed` branch below reassigns
+  // `activeSessionIds` to a *fresh* Set, so this derived-on-derived re-runs
+  // even when the id set is unchanged — which is what drops the badge of a
+  // child whose start this window never saw. Covers hydration too: a window
+  // opening onto an in-progress project session sees its running children on
+  // the first pass.
   $effect(() => {
     void refreshChildSessions(runningNoteSessionIds);
   });
@@ -613,20 +615,17 @@
       if (status === 'running') {
         // Bridge: track until the stub (already loaded by startProjectSession) is
         // updated with an authoritative sessionStatus on the terminal event.
-        activeSessionIds = new Set([...activeSessionIds, sessionId]);
         // This may be a repo session the queue just drained on a parent's
-        // behalf, which is exactly when its badge should appear.
-        void refreshChildSessions(runningNoteSessionIds);
+        // behalf; the reassignment is what makes its badge appear.
+        activeSessionIds = new Set([...activeSessionIds, sessionId]);
         return;
       }
 
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        // A finished child drops its badge; a finished parent drops the row.
         const next = new Set(activeSessionIds);
         next.delete(sessionId);
         activeSessionIds = next;
-
-        // A finished child drops its badge; a finished parent drops the row.
-        void refreshChildSessions(runningNoteSessionIds);
 
         // Surgically update just the affected note instead of reloading all
         const updatedNote = await commands.getProjectNoteBySession(sessionId);

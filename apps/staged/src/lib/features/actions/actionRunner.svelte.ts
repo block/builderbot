@@ -1,6 +1,6 @@
 /**
  * ActionRunner — the shared action-runner state machine behind a card's
- * action surfaces (running pills, primary run button, Actions submenu,
+ * action surfaces (running pills, pinned action buttons, Actions submenu,
  * output modal).
  *
  * Owns the configured action list, the live running-execution set (hydrated
@@ -27,13 +27,7 @@ import {
   type RunPhase,
 } from './actions';
 import { onBranchActionStatus, onBranchRunPhaseChanged } from '../../services/branchEventService';
-import {
-  getPrimaryActionExecution,
-  getPrimaryRunAction,
-  getRemainingRunActions,
-  getSecondaryRunningActions,
-  groupActionsByType,
-} from './actionGroups';
+import { getPinnedActions, getSecondaryRunningActions, groupActionsByType } from './actionGroups';
 
 export type RunningAction = {
   executionId: string;
@@ -97,14 +91,16 @@ export class ActionRunner {
   outputModal = $state<ActionOutputModalState | null>(null);
 
   groupedActions = $derived(groupActionsByType(this.actions));
-  primaryRunAction = $derived(getPrimaryRunAction(this.groupedActions));
-  remainingRunActions = $derived(getRemainingRunActions(this.groupedActions));
-  primaryActionExecution = $derived(
-    getPrimaryActionExecution(this.runningActions, this.primaryRunAction?.id ?? null)
-  );
+  pinnedActions = $derived(getPinnedActions(this.actions));
+  pinnedActionIds = $derived(new Set(this.pinnedActions.map((a) => a.id)));
   secondaryRunningActions = $derived(
-    getSecondaryRunningActions(this.runningActions, this.primaryRunAction?.id ?? null)
+    getSecondaryRunningActions(this.runningActions, this.pinnedActionIds)
   );
+
+  /** The live execution of one action, for the button that renders it. */
+  executionFor(actionId: string): RunningAction | null {
+    return this.runningActions.find((a) => a.actionId === actionId) ?? null;
+  }
 
   constructor(opts: ActionRunnerOptions) {
     this.getScopeId = opts.getScopeId;
@@ -175,34 +171,35 @@ export class ActionRunner {
 
         // Auto-remove terminal states after a delay
         const action = this.runningActions[existingIndex];
-        const isPrimaryAction =
-          this.primaryRunAction && action.actionId === this.primaryRunAction.id;
+        // A pinned action shows its outcome in place, on a button that stays
+        // put; a pill has to earn its space, so it lingers longer and fades.
+        const isPinnedAction = this.pinnedActionIds.has(action.actionId);
 
         // Determine delay based on status: completed shows briefly, stopped/failed show longer
         let displayTime: number;
         if (payload.status === 'completed') {
-          displayTime = isPrimaryAction ? 1000 : 2000;
+          displayTime = isPinnedAction ? 1000 : 2000;
         } else {
           // stopped/failed: show status briefly then clean up so rerun works cleanly
-          displayTime = isPrimaryAction ? 2000 : 3000;
+          displayTime = isPinnedAction ? 2000 : 3000;
         }
 
         setTimeout(() => {
           const foundAction = this.runningActions.find(
             (a) => a.executionId === payload.executionId
           );
-          if (foundAction && !isPrimaryAction) {
+          if (foundAction && !isPinnedAction) {
             // Secondary actions fade out
             foundAction.fading = true;
           }
-          // Remove after animation completes (or immediately for primary)
+          // Remove after animation completes (or immediately for pinned)
           setTimeout(
             () => {
               this.runningActions = this.runningActions.filter(
                 (a) => a.executionId !== payload.executionId
               );
             },
-            isPrimaryAction ? 0 : 300
+            isPinnedAction ? 0 : 300
           ); // Match CSS transition duration for secondary
         }, displayTime);
       }

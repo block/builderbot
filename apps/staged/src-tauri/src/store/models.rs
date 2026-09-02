@@ -1145,6 +1145,11 @@ pub struct RepoAction {
     pub sort_order: i32,
     pub auto_commit: bool,
     pub run_detection_mode: Option<RunDetectionMode>,
+    /// Whether the action gets its own button in a card header.
+    pub pinned: bool,
+    /// Kebab-case Lucide icon name for that button, or `None` for the default
+    /// icon of the action's type.
+    pub icon: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1167,6 +1172,8 @@ impl RepoAction {
             sort_order,
             auto_commit: false,
             run_detection_mode: None,
+            pinned: false,
+            icon: None,
             created_at: now,
             updated_at: now,
         }
@@ -1174,6 +1181,16 @@ impl RepoAction {
 
     pub fn with_auto_commit(mut self, auto_commit: bool) -> Self {
         self.auto_commit = auto_commit;
+        self
+    }
+
+    pub fn with_pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
+    }
+
+    pub fn with_icon(mut self, icon: Option<String>) -> Self {
+        self.icon = icon;
         self
     }
 }

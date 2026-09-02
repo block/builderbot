@@ -6,7 +6,7 @@
   The card is the full repo path (rendered by the shared RepoLabel, wrapped over
   as many lines as it needs) above a row of actions: a labelled "Add project"
   button on the left, then — right-aligned — the action-runner surfaces (running
-  pills and the primary run button) or a clone button, the pin toggle, and a
+  pills and a button per pinned action) or a clone button, the pin toggle, and a
   more menu carrying every repo action, an Actions submenu, the local-clone
   openers, and a Repo Settings jump to this repo's entry in Settings → Repos.
   Card tint, border and accent all come from the repo's badge hue.
@@ -60,7 +60,7 @@
   import { Button } from '$lib/components/ui/button';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
   import ActionsSubmenu from '../actions/ActionsSubmenu.svelte';
-  import PrimaryRunActionButton from '../actions/PrimaryRunActionButton.svelte';
+  import PinnedActionButton from '../actions/PinnedActionButton.svelte';
   import RunningActionPills from '../actions/RunningActionPills.svelte';
   import { ActionRunner } from '../actions/actionRunner.svelte';
   import { bulkRepoActions, bulkRunningForScope } from '../actions/repoActionsBulk';
@@ -360,7 +360,9 @@
              --card-bg-strong vars set on the card root, so the runner
              surfaces pick up the repo's badge hue. -->
         <RunningActionPills {runner} variant="outline" />
-        <PrimaryRunActionButton {runner} variant="outline" />
+        {#each runner.pinnedActions as action (action.id)}
+          <PinnedActionButton {runner} {action} variant="outline" />
+        {/each}
         {#if actionsLoaded && runner.actions.length === 0}
           <span class="inline-flex" title="Detect actions">
             <Button

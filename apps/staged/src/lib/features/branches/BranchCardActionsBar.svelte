@@ -1,10 +1,10 @@
 <!--
   BranchCardActionsBar.svelte - Header actions bar for a branch card
 
-  Displays running action buttons, primary run action button/pill,
-  and the "more" dropdown menu with Actions and Open In submenus.
+  Displays running action pills, a button/pill per pinned action, and the
+  "more" dropdown menu with Actions and Open In submenus.
 
-  The action-running machinery (state machine, pills, primary button, Actions
+  The action-running machinery (state machine, pills, pinned buttons, Actions
   submenu, output modal plumbing) is the shared ActionRunner from the actions
   feature, scoped here to the branch id.
 -->
@@ -18,7 +18,7 @@
   import MoreVertical from '@lucide/svelte/icons/more-vertical';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
   import ActionsSubmenu from '../actions/ActionsSubmenu.svelte';
-  import PrimaryRunActionButton from '../actions/PrimaryRunActionButton.svelte';
+  import PinnedActionButton from '../actions/PinnedActionButton.svelte';
   import RunningActionPills from '../actions/RunningActionPills.svelte';
   import { ActionRunner } from '../actions/actionRunner.svelte';
   import type { MenuItem } from '../actions/actionMenu';
@@ -218,10 +218,18 @@
   );
 </script>
 
-<!-- Running actions (excluding primary action), then the primary run action button -->
+<!-- Running actions (excluding pinned ones), then a button per pinned action -->
 {#if isLocal || (isRemote && remoteWorkspaceStatus === 'running')}
   <RunningActionPills {runner} />
-  <PrimaryRunActionButton {runner} show={!isSettingUp} {canResolveEndpoint} {getEndpointCopyUrl} />
+  {#each runner.pinnedActions as action (action.id)}
+    <PinnedActionButton
+      {runner}
+      {action}
+      show={!isSettingUp}
+      {canResolveEndpoint}
+      {getEndpointCopyUrl}
+    />
+  {/each}
 {/if}
 {#snippet renderSubItems(items: MenuItem[])}
   {#each items as item, i (i)}

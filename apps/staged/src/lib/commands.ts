@@ -672,6 +672,10 @@ export interface ProjectAction {
   actionType: string;
   sortOrder: number;
   autoCommit: boolean;
+  /** Whether the action gets its own button in a card header. */
+  pinned: boolean;
+  /** Kebab-case Lucide icon name, or null for the action type's default. */
+  icon: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -689,7 +693,9 @@ export function updateProjectAction(
   command: string,
   actionType: string,
   sortOrder: number,
-  autoCommit: boolean
+  autoCommit: boolean,
+  pinned: boolean,
+  icon: string | null
 ): Promise<void> {
   return invokeCommand('update_project_action', {
     actionId,
@@ -698,6 +704,8 @@ export function updateProjectAction(
     actionType,
     sortOrder,
     autoCommit,
+    pinned,
+    icon,
   });
 }
 
@@ -760,7 +768,9 @@ export function createRepoAction(
   command: string,
   actionType: string,
   sortOrder: number,
-  autoCommit: boolean
+  autoCommit: boolean,
+  pinned: boolean,
+  icon: string | null
 ): Promise<ProjectAction> {
   return invokeCommand('create_repo_action', {
     githubRepo,
@@ -770,6 +780,8 @@ export function createRepoAction(
     actionType,
     sortOrder,
     autoCommit,
+    pinned,
+    icon,
   });
 }
 

@@ -1,10 +1,14 @@
 <!--
   RunningActionPills.svelte — pill row for a scope's running actions,
-  excluding the primary run action (which PrimaryRunActionButton renders).
+  excluding the pinned ones (each of which PinnedActionButton renders).
 
   Each pill shows the action's live status (spinner, sine wave for a serving
   run action, check/alert on completion), opens the output modal on click, and
   stops the action on alt-click. Driven entirely by an ActionRunner.
+
+  Status icon and tooltip come from ActionStatusIcon / actionStatusLabels,
+  shared with the pinned-action buttons. A pill takes the tooltip only: its own
+  text already names the action, so an aria-label would just talk over it.
 
   variant selects the surface theme: 'default' is the branch card's elevated
   neutral pill; 'outline' is a clear background outlined with the host card's
@@ -14,13 +18,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { cubicOut } from 'svelte/easing';
-  import CheckCircle from '@lucide/svelte/icons/check-circle';
-  import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import StopCircle from '@lucide/svelte/icons/stop-circle';
-  import Spinner from '../../shared/Spinner.svelte';
-  import SineWave from '../../shared/SineWave.svelte';
   import { Button } from '$lib/components/ui/button';
   import type { ActionRunner } from './actionRunner.svelte';
+  import ActionStatusIcon from './ActionStatusIcon.svelte';
+  import { actionStatusLabels } from './actionStatusLabels';
   import { altKey, trackAltKey } from './altKey.svelte';
 
   interface Props {
@@ -71,6 +73,8 @@
   {@const isStopping = runner.stoppingExecutions.has(execution.executionId)}
   {@const showStopIcon = altKey.held && isRunning && !isStopping}
   {@const phase = runner.runPhases.get(execution.executionId)}
+  {@const serving =
+    isRunning && !!phase && phase.type !== 'building' && execution.actionType === 'run'}
   <div
     class="running-action-container"
     class:fading={execution.fading}
@@ -92,17 +96,13 @@
             : 'opacity-60 hover:bg-[var(--bg-elevated)] hover:border-[var(--border-muted)]'),
         showStopIcon && 'border-destructive text-destructive',
       ]}
-      title={isStopping
-        ? 'Stopping…'
-        : showStopIcon
-          ? `Stop ${execution.actionName}`
-          : isRunning
-            ? `View output for ${execution.actionName}`
-            : execution.status === 'completed'
-              ? `${execution.actionName} completed`
-              : execution.status === 'failed'
-                ? `${execution.actionName} failed`
-                : execution.actionName}
+      title={actionStatusLabels({
+        actionName: execution.actionName,
+        stopping: isStopping,
+        showStop: showStopIcon,
+        running: isRunning,
+        status: execution.status,
+      }).title}
       onclick={() => {
         if (isRunning && altKey.held && !isStopping) {
           runner.stopAction(execution.executionId, execution.actionName);
@@ -111,21 +111,18 @@
         }
       }}
     >
-      {#if isStopping}
-        <Spinner size={12} class="danger" />
-      {:else if showStopIcon}
-        <StopCircle size={12} />
-      {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
-        <SineWave size={12} />
-      {:else if isRunning}
-        <Spinner size={12} />
-      {:else if execution.status === 'completed'}
-        <CheckCircle size={12} />
-      {:else if execution.status === 'failed'}
-        <AlertCircle size={12} />
-      {:else}
-        <StopCircle size={12} />
-      {/if}
+      <ActionStatusIcon
+        stopping={isStopping}
+        showStop={showStopIcon}
+        {serving}
+        running={isRunning}
+        status={execution.status}
+        size={12}
+      >
+        {#snippet idle()}
+          <StopCircle size={12} />
+        {/snippet}
+      </ActionStatusIcon>
       {execution.actionName}
     </Button>
   </div>

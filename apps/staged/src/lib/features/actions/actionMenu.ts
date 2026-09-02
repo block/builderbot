@@ -1,22 +1,17 @@
 /**
  * Builder for the "Actions" submenu shown in a card's more menu: one group
- * per action type (separated), with the primary run action excluded (it has
- * its own button) and Format & Check collapsed into a nested submenu when
- * they'd crowd the list. The MenuItem shape is also used by other submenu
- * builders (e.g. the branch card's Open In menu).
+ * per action type (separated), with pinned actions excluded (they have their
+ * own buttons in the card header) and Format & Check collapsed into a nested
+ * submenu when they'd crowd the list. The MenuItem shape is also used by other
+ * submenu builders (e.g. the branch card's Open In menu).
  */
 
-import Play from '@lucide/svelte/icons/play';
-import Hammer from '@lucide/svelte/icons/hammer';
-import FlaskConical from '@lucide/svelte/icons/flask-conical';
-import CheckCircle from '@lucide/svelte/icons/check-circle';
-import Wrench from '@lucide/svelte/icons/wrench';
-import Zap from '@lucide/svelte/icons/zap';
 import Wand2 from '@lucide/svelte/icons/wand-2';
 import type { ProjectAction } from '../../api/commands';
 import type { ActionType } from './actions';
+import { getActionTypeIcon, type IconComponent } from './lucideIcons';
 
-export type MenuIconComponent = typeof Play;
+export type MenuIconComponent = IconComponent;
 export type ActionMenuItem = {
   type: 'action';
   label: string;
@@ -38,41 +33,26 @@ export type MenuItem = ActionMenuItem | SeparatorMenuItem | SubmenuMenuItem;
 
 const actionMenuTypes = ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as const;
 
-export function getActionIcon(actionType: string): MenuIconComponent {
-  switch (actionType) {
-    case 'prerun':
-      return Zap;
-    case 'run':
-      return Play;
-    case 'build':
-      return Hammer;
-    case 'format':
-      return Wand2;
-    case 'check':
-      return CheckCircle;
-    case 'test':
-      return FlaskConical;
-    case 'cleanUp':
-      return Wrench;
-    default:
-      return Wrench;
-  }
-}
-
+/**
+ * Build the menu items for a scope's actions, leaving out every action already
+ * pinned to the card header.
+ */
 export function buildActionMenuItems(
   groupedActions: Record<string, ProjectAction[]>,
-  remainingRunActions: ProjectAction[],
+  pinnedActionIds: Set<string>,
   onRun: (action: ProjectAction) => void | Promise<void>
 ): MenuItem[] {
   const toActionItem = (type: ActionType, action: ProjectAction): MenuItem => ({
     type: 'action',
     label: action.name,
-    icon: getActionIcon(type),
+    icon: getActionTypeIcon(type),
     onSelect: () => onRun(action),
   });
+  const unpinned = (type: ActionType): ProjectAction[] =>
+    (groupedActions[type] ?? []).filter((a) => !pinnedActionIds.has(a.id));
 
-  const formatItems = groupedActions.format.map((a) => toActionItem('format', a));
-  const checkItems = groupedActions.check.map((a) => toActionItem('check', a));
+  const formatItems = unpinned('format').map((a) => toActionItem('format', a));
+  const checkItems = unpinned('check').map((a) => toActionItem('check', a));
   const combineFormatCheck = formatItems.length + checkItems.length > 2;
 
   const groups: MenuItem[][] = [];
@@ -95,8 +75,8 @@ export function buildActionMenuItems(
       continue;
     }
 
-    const typeActions = type === 'run' ? remainingRunActions : groupedActions[type];
-    if (!typeActions || typeActions.length === 0) continue;
+    const typeActions = unpinned(type);
+    if (typeActions.length === 0) continue;
     groups.push(typeActions.map((action) => toActionItem(type, action)));
   }
 

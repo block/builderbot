@@ -126,6 +126,32 @@ describe('ActionRunner', () => {
     }
   });
 
+  it('hands each pinned button its own execution, and none to an idle one', async () => {
+    const runner = await newRunner({});
+    runner.runningActions.push(
+      {
+        executionId: 'execution-dev',
+        actionId: 'action-dev',
+        actionName: 'Dev',
+        actionType: 'run',
+        status: 'running',
+      },
+      {
+        executionId: 'execution-test',
+        actionId: 'action-test',
+        actionName: 'Test',
+        actionType: 'test',
+        status: 'completed',
+      }
+    );
+
+    // Several pinned actions can be in flight at once, so a button looks up
+    // its own action rather than sharing one "the primary execution" slot.
+    expect(runner.executionFor('action-dev')?.executionId).toBe('execution-dev');
+    expect(runner.executionFor('action-test')?.status).toBe('completed');
+    expect(runner.executionFor('action-build')).toBeNull();
+  });
+
   it('focuses a running execution instead of starting a second one', async () => {
     const run = vi.fn().mockResolvedValue('execution-2');
     const runner = await newRunner({ run });

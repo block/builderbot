@@ -3,7 +3,7 @@
 
   Renders a DropdownMenu.Sub listing the runner's actions (built by
   buildActionMenuItems), so it must sit inside a DropdownMenu.Content.
-  Renders nothing when the scope has no actions beyond the primary run action.
+  Renders nothing when the scope has no actions beyond its pinned ones.
 -->
 <script lang="ts">
   import Play from '@lucide/svelte/icons/play';
@@ -18,7 +18,7 @@
   let { runner }: Props = $props();
 
   let items = $derived(
-    buildActionMenuItems(runner.groupedActions, runner.remainingRunActions, (action) =>
+    buildActionMenuItems(runner.groupedActions, runner.pinnedActionIds, (action) =>
       runner.runAction(action)
     )
   );

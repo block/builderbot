@@ -3,11 +3,8 @@
   import { cubicInOut } from 'svelte/easing';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Play from '@lucide/svelte/icons/play';
-  import Hammer from '@lucide/svelte/icons/hammer';
-  import FlaskConical from '@lucide/svelte/icons/flask-conical';
-  import Wand2 from '@lucide/svelte/icons/wand-2';
-  import CheckCircle from '@lucide/svelte/icons/check-circle';
   import Zap from '@lucide/svelte/icons/zap';
+  import Pin from '@lucide/svelte/icons/pin';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import Save from '@lucide/svelte/icons/save';
@@ -30,6 +27,9 @@
     listenToRepoActionsDetection,
     type ActionType,
   } from '../actions/actions';
+  import { shouldPinNewAction } from '../actions/actionGroups';
+  import ActionIcon from '../actions/ActionIcon.svelte';
+  import IconPicker from '../actions/IconPicker.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { hueSliderGradient } from '../../shared/badgeColors';
@@ -76,6 +76,8 @@
     command: '',
     actionType: 'run' as ActionType,
     autoCommit: false,
+    pinned: false,
+    icon: null as string | null,
   });
   let badgeEditName = $state('');
   let badgeEditHue = $state(0);
@@ -346,7 +348,16 @@
   }
 
   function startAddAction() {
-    editForm = { name: '', command: '', actionType: 'run', autoCommit: false };
+    editForm = {
+      name: '',
+      command: '',
+      actionType: 'run',
+      autoCommit: false,
+      // A context with nothing pinned has an empty card header, so the action
+      // filling it in opts in by default — see shouldPinNewAction.
+      pinned: shouldPinNewAction(actions),
+      icon: null,
+    };
     editingAction = {} as ProjectAction;
   }
 
@@ -356,6 +367,8 @@
       command: action.command,
       actionType: action.actionType as ActionType,
       autoCommit: action.autoCommit,
+      pinned: action.pinned,
+      icon: action.icon,
     };
     editingAction = action;
   }
@@ -383,7 +396,9 @@
           editForm.command,
           editForm.actionType,
           nextSortOrder,
-          editForm.autoCommit
+          editForm.autoCommit,
+          editForm.pinned,
+          editForm.icon
         );
         if (selectedRepoKey === entryKey) {
           actions = [...actions, newAction];
@@ -396,7 +411,9 @@
           editForm.command,
           editForm.actionType,
           editingAction.sortOrder,
-          editForm.autoCommit
+          editForm.autoCommit,
+          editForm.pinned,
+          editForm.icon
         );
         actions = actions.map((a) =>
           a.id === actionId
@@ -406,6 +423,8 @@
                 command: editForm.command,
                 actionType: editForm.actionType,
                 autoCommit: editForm.autoCommit,
+                pinned: editForm.pinned,
+                icon: editForm.icon,
               }
             : a
         );
@@ -508,27 +527,6 @@
       duration: navigation.activeView === 'settings' ? sidebarSlideMs : 0,
       css: () => 'opacity: 0; pointer-events: none;',
     };
-  }
-
-  function getActionIcon(actionType: string) {
-    switch (actionType) {
-      case 'prerun':
-        return Zap;
-      case 'build':
-        return Hammer;
-      case 'test':
-        return FlaskConical;
-      case 'format':
-        return Wand2;
-      case 'check':
-        return CheckCircle;
-      case 'run':
-        return Play;
-      case 'cleanUp':
-        return Trash2;
-      default:
-        return Play;
-    }
   }
 
   let sortedEntries = $derived.by(() => {
@@ -769,12 +767,18 @@
                   <div class="action-group">
                     <div class="group-header">{type}</div>
                     {#each typeActions as action (action.id)}
-                      {@const Icon = getActionIcon(action.actionType)}
                       <div class="action-row">
                         <div class="action-main">
-                          <Icon size={14} />
+                          <ActionIcon icon={action.icon} actionType={action.actionType} />
                           <div class="action-details">
-                            <div class="action-name">{action.name}</div>
+                            <div class="action-name">
+                              {action.name}
+                              {#if action.pinned}
+                                <span class="action-pinned" title="Shown in the card header">
+                                  <Pin size={11} />
+                                </span>
+                              {/if}
+                            </div>
                             <div class="action-command">
                               <Code2 size={12} />
                               {action.command}
@@ -810,6 +814,11 @@
 
       {#if editingAction}
         <div class="editor">
+          <IconPicker
+            icon={editForm.icon}
+            actionType={editForm.actionType}
+            onSelect={(icon) => (editForm.icon = icon)}
+          />
           <Input bind:value={editForm.name} placeholder="Action name" />
           <Input
             bind:value={editForm.command}
@@ -836,6 +845,10 @@
           <div class="flex items-center gap-1.5">
             <Checkbox id="auto-commit" bind:checked={editForm.autoCommit} />
             <Label for="auto-commit" class="text-muted-foreground text-sm">Auto-commit</Label>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <Checkbox id="pinned" bind:checked={editForm.pinned} />
+            <Label for="pinned" class="text-muted-foreground text-sm">Show in card header</Label>
           </div>
           <div class="editor-buttons">
             <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
@@ -1234,8 +1247,17 @@
   }
 
   .action-name {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     font-size: var(--size-sm);
     font-weight: 600;
+  }
+
+  /* Marks the actions that occupy a slot in every card's header. */
+  .action-pinned {
+    display: inline-flex;
+    color: var(--text-faint);
   }
 
   .action-command {
@@ -1259,7 +1281,7 @@
     background: var(--bg-primary);
     padding: 12px;
     display: grid;
-    grid-template-columns: 1fr 1fr auto auto;
+    grid-template-columns: auto 1fr 1fr auto auto auto;
     gap: 8px;
     align-items: center;
   }
@@ -1267,6 +1289,7 @@
   .editor-buttons {
     display: inline-flex;
     gap: 8px;
+    grid-column: 1 / -1;
     justify-self: end;
   }
 

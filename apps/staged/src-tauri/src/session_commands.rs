@@ -3122,10 +3122,7 @@ pub async fn drain_queued_sessions_for_branch(
     // `app.exit(0)` then orphans, since they run in their own process groups and
     // an exit runs no `kill_on_drop` destructors. The sweep would put the DB rows
     // right; nothing would put the processes right.
-    if app_handle
-        .try_state::<crate::app_lifecycle::QuitState>()
-        .is_some_and(|quit_state| quit_state.is_quitting())
-    {
+    if crate::app_lifecycle::is_quitting(&app_handle) {
         return Ok(false);
     }
 
@@ -3143,6 +3140,13 @@ pub async fn drain_queued_sessions_for_branch(
         };
 
         if !can_start_with_active_branch_sessions(schedule.kind, &active) {
+            break;
+        }
+
+        // The entry gate, re-checked before each claim: every start below
+        // awaits, so a shutdown claimed mid-drain would otherwise keep being
+        // fed the rows the remaining iterations were about to take.
+        if crate::app_lifecycle::is_quitting(&app_handle) {
             break;
         }
 
@@ -3366,6 +3370,21 @@ async fn start_queued_session_for_branch(
     let image_ids = store
         .get_image_ids_for_session(&session_id)
         .unwrap_or_default();
+
+    // Last look before the spawn. The gates above leave real awaits between
+    // themselves and `start_session` (context building, `review_tip_sha`,
+    // `commit_pre_head_sha`, the remote workdir resolve) — room for a whole
+    // shutdown to start. From here the path is synchronous, and
+    // `start_session` registers the session's cancellation token before any
+    // child spawns, so the losing interleaving narrows to a shutdown
+    // publishing `quit_in_progress` and snapshotting the registry inside the
+    // few statements between this load and that registration. Bailing here
+    // deliberately strands the claim: a row left `running` under our pid is
+    // exactly what the sweep's ownership-aware CAS puts right, while a
+    // spawned child is what nothing puts right.
+    if crate::app_lifecycle::is_quitting(&app_handle) {
+        return Ok(false);
+    }
 
     let session_type_str = match session_type {
         BranchSessionType::Commit => "commit",

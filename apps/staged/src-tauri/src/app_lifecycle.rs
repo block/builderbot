@@ -172,6 +172,13 @@ impl QuitState {
     }
 }
 
+/// [`QuitState::is_quitting`] from anywhere that holds an `AppHandle`. `false`
+/// when the state isn't managed (mock apps in tests).
+pub(crate) fn is_quitting(app: &AppHandle) -> bool {
+    app.try_state::<QuitState>()
+        .is_some_and(|quit_state| quit_state.is_quitting())
+}
+
 /// What a quit would interrupt, as the alert describes it.
 #[derive(Debug, Default)]
 struct QuitBlockers {

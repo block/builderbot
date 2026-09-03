@@ -305,7 +305,9 @@
   let currentDisplayRootKey = '';
 
   const replyDraftWriter = createDraftWriteScheduler();
-  let loadedDraftSessionId: string | null = null;
+  // $state so the save effect re-runs when a finished load opens the gate —
+  // otherwise a keystroke typed during the load window is never scheduled.
+  let loadedDraftSessionId = $state<string | null>(null);
   let draftLoadGeneration = 0;
 
   function replyDraftKey(id: string): string {

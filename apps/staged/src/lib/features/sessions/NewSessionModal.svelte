@@ -128,7 +128,10 @@
     acpConfigSelection: null,
   });
   let modeSwitchGeneration = 0;
-  let switchingMode = false;
+  // $state: gates the draft-save effect while a mode switch or the initial
+  // draft load is replacing `prompt`, and re-triggers it when the gate opens
+  // so text typed during the load window still gets scheduled.
+  let switchingMode = $state(false);
 
   // Text-snippet attachment state (modal-local — folded into the prompt on
   // submit or on close, never persisted to the backend).
@@ -405,8 +408,34 @@
       prompt = initialPrompt;
       currentMode = isProjectNote ? 'note' : mode;
       imageIds = [...initialImageIds];
+      // The caller opens the modal synchronously with whatever draft it holds
+      // in memory; the authoritative stored draft is fetched here so the open
+      // never waits on store IPC.
+      if (loadDraftForMode) {
+        switchingMode = true;
+        void loadInitialDraft(currentMode);
+      }
     }
   });
+
+  async function loadInitialDraft(initialMode: BranchSessionType) {
+    const generation = ++modeSwitchGeneration;
+    const promptWhenLoadStarted = prompt;
+    let cachedDraft: string | null = null;
+    try {
+      cachedDraft = (await loadDraftForMode?.(initialMode)) ?? null;
+    } catch (err) {
+      console.error('[NewSessionModal] Failed to load draft:', err);
+    }
+    // A mode switch superseded this load; it owns `prompt` and the save gate now.
+    if (generation !== modeSwitchGeneration) return;
+    // Apply the stored draft only if the user hasn't typed in the meantime.
+    if (cachedDraft !== null && cachedDraft !== prompt && prompt === promptWhenLoadStarted) {
+      prompt = cachedDraft;
+      focusPrompt(null);
+    }
+    switchingMode = false;
+  }
 
   function addSnippet(text: string) {
     const trimmed = text.trim();
@@ -438,26 +467,33 @@
     textSnippets = textSnippets.filter((s) => s.id !== id);
   }
 
+  // Read the signals before the guard: an early return that read zero reactive
+  // values would truncate this effect's dependency list to empty and it would
+  // never run again, killing autosave for the rest of the modal's life.
   $effect(() => {
+    const draft = { prompt, mode: currentMode, imageIds };
     if (!initialized || switchingMode) return;
-    onDraftChange?.({ prompt, mode: currentMode, imageIds });
+    onDraftChange?.(draft);
   });
 
-  // Focus textarea on mount (one-time).
+  // Focus textarea on mount (one-time). One-shot flag because `prefilled` is a
+  // tracked dependency that flips when the first keystroke overwrites a
+  // prefill — re-running would yank the caret to the end mid-edit.
   // We await tick() so the DOM reflects the prompt value set by the init effect above.
+  let didInitialFocus = false;
   $effect(() => {
-    if (textareaEl) {
-      const el = textareaEl;
-      const shouldSelect = prefilled;
-      tick().then(() => {
-        el.focus();
-        if (shouldSelect && el.textContent) {
-          selectPromptContent(el, prefillSelection);
-        } else {
-          placeCursorAtEnd(el);
-        }
-      });
-    }
+    if (!textareaEl || didInitialFocus) return;
+    didInitialFocus = true;
+    const el = textareaEl;
+    const shouldSelect = prefilled;
+    tick().then(() => {
+      el.focus();
+      if (shouldSelect && el.textContent) {
+        selectPromptContent(el, prefillSelection);
+      } else {
+        placeCursorAtEnd(el);
+      }
+    });
   });
 
   // Resolving hashtag references can re-render the editor. Keep diff-launched

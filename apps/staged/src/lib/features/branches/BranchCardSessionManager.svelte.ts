@@ -127,18 +127,21 @@ export default class BranchCardSessionManager {
     });
   }
 
-  async openNewSession(mode: BranchSessionType, e?: MouseEvent) {
+  openNewSession(mode: BranchSessionType, e?: MouseEvent) {
     if (mode === 'review' && e?.altKey) {
       void this.startReviewSessionWithoutDialog();
       return;
     }
-    const request = ++this.openNewSessionRequest;
-    const heldMode = this.newSessionMode;
-    const heldPrompt = this.draftPrompt;
+    // Supersede any in-flight referring open so it can't clobber this one.
+    ++this.openNewSessionRequest;
+    // Open synchronously — the modal fetches the stored draft itself (via
+    // loadDraftForMode) so the click isn't gated on store IPC. Seed it with
+    // the draft held in memory only when that draft belongs to the mode being
+    // opened, or another mode's text would leak in.
+    if (mode !== this.newSessionMode) {
+      this.draftPrompt = '';
+    }
     this.newSessionMode = mode;
-    const draft = await this.loadNewSessionDraftForMode(mode);
-    if (request !== this.openNewSessionRequest) return;
-    this.draftPrompt = this.resolveOpenPrompt(mode, draft, heldMode, heldPrompt);
     this.showNewSession = true;
   }
 
@@ -177,8 +180,9 @@ export default class BranchCardSessionManager {
   }
 
   async loadNewSessionDraftForMode(mode: BranchSessionType): Promise<string | null> {
-    // Never reject: openNewSession callers fire-and-forget, so a failed store
-    // read should degrade to an empty draft instead of blocking the modal.
+    // Never reject: the modal calls this fire-and-forget on mount and on mode
+    // switch, so a failed store read should degrade to keeping the seeded
+    // draft instead of blocking the modal.
     try {
       // Settle queued writes first. Closing the modal and switching modes both
       // save immediately, so reading the store straight away can return the

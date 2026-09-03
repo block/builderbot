@@ -1,6 +1,6 @@
 import { flushSync, mount, tick, unmount, type ComponentProps } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Branch } from '../../types';
+import type { Branch, BranchSessionType } from '../../types';
 
 // Heavy leaf components are stubbed out: the tests exercise the modal's draft
 // effect wiring, not the editor/dialog/picker internals.
@@ -58,6 +58,14 @@ function typeInPrompt(text: string) {
 /** ⌘/Ctrl+1/2/3 mode-switch shortcut (jsdom is non-Mac, so Ctrl). */
 function pressModeShortcut(key: string) {
   window.dispatchEvent(new KeyboardEvent('keydown', { key, ctrlKey: true, cancelable: true }));
+  flushSync();
+}
+
+/** Dismiss the modal via the header close button (same path as Escape). */
+function clickCloseButton() {
+  const btn = document.querySelector<HTMLButtonElement>('[aria-label="Close"]');
+  if (!btn) throw new Error('close button not rendered');
+  btn.click();
   flushSync();
 }
 
@@ -136,6 +144,81 @@ describe('NewSessionModal draft autosave', () => {
     const prompts = onDraftChange.mock.calls.map(([draft]) => (draft as { prompt: string }).prompt);
     expect(prompts).toContain('typed during load');
     expect(prompts).not.toContain('stored draft');
+
+    unmount(modal);
+  });
+
+  it('files the draft under its owner mode when closed during a mode switch', async () => {
+    const pendingNoteLoads: Array<(value: string | null) => void> = [];
+    const onClose = vi.fn();
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      onClose,
+      onDraftChange,
+      loadDraftForMode: vi.fn((mode: BranchSessionType) => {
+        if (mode === 'note') return new Promise<string | null>((r) => pendingNoteLoads.push(r));
+        return Promise.resolve(null);
+      }),
+    });
+    flushSync();
+    await settle();
+
+    typeInPrompt('commit text');
+    await settle();
+
+    pressModeShortcut('1'); // commit → note; note's draft load stays pending
+    await settle();
+
+    // Dismissing mid-switch: the text on screen still belongs to commit mode,
+    // so the close must pair it with commit — filing it under the
+    // half-switched-to note mode would clobber note's stored draft.
+    clickCloseButton();
+    expect(onClose).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'commit text', mode: 'commit' })
+    );
+
+    // The superseded switch must not fire another draft change after close.
+    onDraftChange.mockClear();
+    pendingNoteLoads.forEach((resolve) => resolve('note stored draft'));
+    await settle();
+    expect(onDraftChange).not.toHaveBeenCalled();
+
+    unmount(modal);
+  });
+
+  it('saves text typed during the initial load when a mode switch interrupts it', async () => {
+    let resolveInitialLoad!: (value: string | null) => void;
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      onDraftChange,
+      loadDraftForMode: vi.fn((mode: BranchSessionType) => {
+        if (mode === 'commit') {
+          return new Promise<string | null>((r) => (resolveInitialLoad = r));
+        }
+        return Promise.resolve(null);
+      }),
+    });
+    flushSync();
+    await settle();
+
+    typeInPrompt('typed during load');
+    await settle();
+
+    // Switching modes before the initial load resolves: unlike a switch-in-
+    // flight, no prior save exists for this text, so the outgoing save must
+    // still run — filed under commit, the mode the prompt belongs to.
+    pressModeShortcut('1'); // commit → note
+    await settle();
+    expect(onDraftChange).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'typed during load', mode: 'commit' }),
+      expect.objectContaining({ immediate: true })
+    );
+
+    // The superseded initial load must not clobber the new mode's prompt.
+    resolveInitialLoad('stale stored commit draft');
+    await settle();
+    const prompts = onDraftChange.mock.calls.map(([draft]) => (draft as { prompt: string }).prompt);
+    expect(prompts).not.toContain('stale stored commit draft');
 
     unmount(modal);
   });

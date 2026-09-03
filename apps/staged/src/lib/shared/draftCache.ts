@@ -83,7 +83,13 @@ export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
   let writeQueue: Promise<void> = Promise.resolve();
 
   function enqueue(write: () => Promise<void>): Promise<void> {
-    writeQueue = writeQueue.catch(() => {}).then(write);
+    // The queue's promises never reject: several call sites fire-and-forget
+    // (`void` on onDestroy flushes and clearNow), so a rejected write would
+    // surface as an unhandled rejection at teardown and be invisible
+    // mid-session. Log it here instead and keep the chain alive.
+    writeQueue = writeQueue.then(write).catch((err) => {
+      console.error('[draftCache] Failed to persist draft:', err);
+    });
     return writeQueue;
   }
 

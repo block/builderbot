@@ -45,6 +45,7 @@
     runningSecondaryMeta,
   } from '../timeline/childSessionBadges';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { nextActiveSessionIds } from './activeSessionIds';
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -608,6 +609,7 @@
       sessionId: string;
       status: string;
       projectId?: string;
+      branchId?: string | null;
     }>('session-status-changed', async (payload) => {
       const { sessionId, status, projectId } = payload;
       if (projectId !== project.id) return;
@@ -616,16 +618,15 @@
         // Bridge: track until the stub (already loaded by startProjectSession) is
         // updated with an authoritative sessionStatus on the terminal event.
         // This may be a repo session the queue just drained on a parent's
-        // behalf; the reassignment is what makes its badge appear.
-        activeSessionIds = new Set([...activeSessionIds, sessionId]);
+        // behalf (`branchId` set); its id stays out of the set, but the
+        // fresh-Set reassignment is what makes its badge appear.
+        activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
         return;
       }
 
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         // A finished child drops its badge; a finished parent drops the row.
-        const next = new Set(activeSessionIds);
-        next.delete(sessionId);
-        activeSessionIds = next;
+        activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
 
         // Surgically update just the affected note instead of reloading all
         const updatedNote = await commands.getProjectNoteBySession(sessionId);

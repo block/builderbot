@@ -162,6 +162,11 @@ pub struct CommitTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    /// Kind of the git pipeline behind this row's session. Only set on pending
+    /// rows: it is how the frontend tells a queued/running rebase or squash
+    /// apart from a plain commit session, since the subject is a display label
+    /// an agent-pushed ACP title can replace mid-pipeline.
+    pub pipeline_kind: Option<store::PipelineKind>,
     /// Whether this commit was authored by the current git user.
     pub is_own_commit: bool,
 }
@@ -1175,6 +1180,7 @@ async fn get_repo_default_branch_timeline(
                     session_id: None,
                     session_status: None,
                     completion_reason: None,
+                    pipeline_kind: None,
                     is_own_commit: false,
                 })
             })

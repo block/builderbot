@@ -15,7 +15,10 @@
     baseBranch?: string | null;
     parentAheadCount?: number;
     onRebase?: () => void;
-    rebaseDisabled?: boolean;
+    /** Why the visible Rebase button can't run right now, shown as its tooltip.
+     *  Callers withhold `onRebase` instead when the button shouldn't be offered
+     *  at all. */
+    rebaseDisabledReason?: string | null;
     warning?: string | null;
     refreshingGitState?: boolean;
     fetchError?: string | null;
@@ -28,7 +31,7 @@
     baseBranch = null,
     parentAheadCount = 0,
     onRebase,
-    rebaseDisabled = false,
+    rebaseDisabledReason = null,
     warning = null,
     refreshingGitState = false,
     fetchError = null,
@@ -67,13 +70,13 @@
     {#if parentAheadCount > 0 && onRebase}
       <span
         class="inline-flex"
-        title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
+        title={rebaseDisabledReason ?? 'Rebase onto parent'}
         transition:slide={{ axis: 'x', duration: 150 }}
       >
         <Button
           variant="outline"
           size="xs"
-          disabled={rebaseDisabled}
+          disabled={!!rebaseDisabledReason}
           onclick={onRebase}
           class="h-[22px]">Rebase</Button
         >

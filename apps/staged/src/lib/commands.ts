@@ -10,9 +10,10 @@ import {
   cachedInvoke,
   invalidateCacheByCommand,
   invalidateCache,
+  CACHE_SCHEMA_VERSION,
   type SwrResult,
 } from './cache';
-import { readSnapshot, writeSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
+import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
 import type {
   Project,
   ProjectRepo,
@@ -467,18 +468,41 @@ const MAX_SNAPSHOT_TIMELINES = 40;
 type TimelineCacheEntry = { timeline: BranchTimeline; fetchedAt: number };
 
 /**
+ * Persisted shape of the boot snapshot. Stamped with the shared
+ * `CACHE_SCHEMA_VERSION` because this snapshot outlives a deploy just like the
+ * IndexedDB cache does, and seeds the same timelines the UI reads fields off.
+ */
+type TimelineSnapshot = {
+  schemaVersion: number;
+  timelines: Record<string, TimelineCacheEntry>;
+};
+
+/**
  * Seed the in-memory timeline cache synchronously from the previous session's
  * localStorage snapshot. This runs at module init (before any BranchCard mounts)
  * so cached timelines can paint on the first frame of a cold iOS reload, instead
  * of each card awaiting its own asynchronous IndexedDB read. IndexedDB remains
  * the source of truth; the snapshot is only a paint-on-first-frame accelerator.
- * The seeded entries carry their original `fetchedAt`, so they read as stale and
- * `getBranchTimelineWithRevalidation` still kicks off a fresh fetch.
+ * The seeded entries carry their original `fetchedAt`, so an older snapshot
+ * reads as stale and `getBranchTimelineWithRevalidation` still kicks off a
+ * fresh fetch.
+ *
+ * Entries a previous build wrote are dropped: one restored inside
+ * `TIMELINE_FRESH_MS` suppresses revalidation entirely, so seeding a stale
+ * payload shape would hand the UI missing fields with no fetch to correct them.
+ * A pre-versioning snapshot is a bare record with no `schemaVersion`, so it
+ * fails the same check.
  */
 function seedTimelineCacheFromSnapshot(): void {
-  const snapshot = readSnapshot<Record<string, TimelineCacheEntry>>(SNAPSHOT_KEYS.timelines);
+  const snapshot = readSnapshot<TimelineSnapshot>(SNAPSHOT_KEYS.timelines);
   if (!snapshot) return;
-  for (const [branchId, entry] of Object.entries(snapshot)) {
+  if (snapshot.schemaVersion !== CACHE_SCHEMA_VERSION || !snapshot.timelines) {
+    // Clear rather than leave it: it can never be read again, and it's the
+    // largest thing we put in localStorage.
+    clearSnapshot(SNAPSHOT_KEYS.timelines);
+    return;
+  }
+  for (const [branchId, entry] of Object.entries(snapshot.timelines)) {
     if (entry?.timeline && !timelineCache.has(branchId)) {
       timelineCache.set(branchId, entry);
     }
@@ -495,12 +519,15 @@ seedTimelineCacheFromSnapshot();
  */
 export function persistTimelineSnapshot(): void {
   if (isTauri || timelineCache.size === 0) return;
-  const snapshot: Record<string, TimelineCacheEntry> = Object.fromEntries(
+  const timelines: Record<string, TimelineCacheEntry> = Object.fromEntries(
     [...timelineCache.entries()]
       .sort((a, b) => b[1].fetchedAt - a[1].fetchedAt)
       .slice(0, MAX_SNAPSHOT_TIMELINES)
   );
-  writeSnapshot(SNAPSHOT_KEYS.timelines, snapshot);
+  writeSnapshot<TimelineSnapshot>(SNAPSHOT_KEYS.timelines, {
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    timelines,
+  });
 }
 
 /**

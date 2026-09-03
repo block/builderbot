@@ -168,6 +168,13 @@ export interface CommitTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  /**
+   * Kind of the git pipeline behind this row's session. Only set on pending
+   * rows: it is how a queued/running rebase or squash is told apart from a
+   * plain commit session, since the subject is a display label an agent-pushed
+   * ACP title can replace mid-pipeline.
+   */
+  pipelineKind?: PipelineKind | null;
   /** Whether this commit was authored by the current git user. */
   isOwnCommit: boolean;
 }

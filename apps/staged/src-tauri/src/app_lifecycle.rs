@@ -36,10 +36,11 @@
 //! there is no longer any state where a quit can't ask.
 //!
 //! Every exit path funnels into [`shutdown_cleanup`], which runs its work at
-//! most once — a confirmed quit calls it directly, `RunEvent::ExitRequested`
-//! covers programmatic exits, and `RunEvent::Exit` is the only hook on the
-//! `NSApp terminate:` path (Dock ▸ Quit, logout), which never emits
-//! `ExitRequested`.
+//! most once and makes later callers wait for it to finish — a confirmed quit
+//! calls it directly, `RunEvent::ExitRequested` covers programmatic exits, and
+//! `RunEvent::Exit` is the only hook on the `NSApp terminate:` path (Dock ▸
+//! Quit, logout), which never emits `ExitRequested`. That wait is what keeps an
+//! impatient second quit gesture from cutting a cleanup already in flight short.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,8 +96,15 @@ const ACTION_FORCE_KILL_AFTER: Duration = Duration::from_secs(1);
 /// Quit bookkeeping, managed as Tauri state.
 #[derive(Default)]
 pub struct QuitState {
-    /// Set by the first caller into [`shutdown_cleanup`], so the cleanup runs
-    /// exactly once however many exit events follow it.
+    /// Held for the duration of [`shutdown_cleanup`]'s work; `true` once it has
+    /// completed. The lock is what makes a late caller *wait* rather than skip:
+    /// see [`run_cleanup_once`](Self::run_cleanup_once).
+    cleanup_done: Mutex<bool>,
+    /// Cheap "a shutdown is under way" signal, published by the caller that
+    /// claims the cleanup. Separate from `cleanup_done` because its readers
+    /// ([`request_quit`], [`on_close_requested`]) run on the main thread while a
+    /// cleanup may be in flight and must not block on the lock. The mutex
+    /// claims; this atomic publishes.
     quit_in_progress: AtomicBool,
     /// Set while a confirmation alert is unanswered. An
     /// [`Explicit`](QuitTrigger::Explicit) quit arriving while it is set forces
@@ -114,6 +122,41 @@ impl QuitState {
     /// Clear any pending prompt, returning whether one was pending.
     fn take_prompt(&self) -> bool {
         self.prompt_pending.swap(false, Ordering::SeqCst)
+    }
+
+    /// Run `cleanup` at most once. A caller that arrives while it is already
+    /// running **blocks until it has finished**, then returns without re-running
+    /// it.
+    ///
+    /// Waiting, rather than returning early, is the point. A confirmed quit runs
+    /// the cleanup on a background thread with nothing on screen for up to
+    /// [`SHUTDOWN_BUDGET`], and a `terminate:` arriving in that window (an
+    /// impatient Dock ▸ Quit) reaches [`shutdown_cleanup`] via `RunEvent::Exit`,
+    /// on the main thread, inside `applicationWillTerminate:`. Returning there
+    /// would let that method return and the OS kill the process mid-cancel —
+    /// orphaning the agent CLIs (own process groups, `kill_on_drop` destructors
+    /// an OS kill never runs) and skipping the DB sweep. Holding it open until
+    /// the work is done is what those two guarantees need.
+    ///
+    /// A poisoned lock is taken over rather than propagated: if the first caller
+    /// panicked mid-cleanup, `done` is still `false` and the late caller re-runs
+    /// the work, which is the right recovery given every step is idempotent
+    /// (cancelling a cancelled session is a no-op; the sweep is a guarded CAS
+    /// per row). That's also why this isn't a [`std::sync::Once`] despite the
+    /// matching blocking semantics — a panicked `call_once` poisons the `Once`
+    /// and makes every later caller panic, and a panic inside
+    /// `applicationWillTerminate:` aborts with no cleanup at all.
+    fn run_cleanup_once(&self, cleanup: impl FnOnce()) {
+        let mut done = self
+            .cleanup_done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *done {
+            return;
+        }
+        self.quit_in_progress.store(true, Ordering::SeqCst);
+        cleanup();
+        *done = true;
     }
 }
 
@@ -501,38 +544,39 @@ fn quit_prompt_message(blockers: &QuitBlockers) -> String {
 // Shutdown cleanup
 // =============================================================================
 
-/// Stop everything this process owns. Idempotent — the first caller does the
-/// work, later ones return immediately.
+/// Stop everything this process owns. Runs its work at most once — the first
+/// caller does it, and a caller arriving while it runs waits for it to finish
+/// (see [`QuitState::run_cleanup_once`]) rather than returning to an exit that
+/// would kill the process mid-cleanup.
 pub fn shutdown_cleanup(app: &AppHandle) {
     let Some(quit_state) = app.try_state::<QuitState>() else {
         return;
     };
-    if quit_state.quit_in_progress.swap(true, Ordering::SeqCst) {
-        return;
-    }
 
-    // Signal both kinds of work before waiting on either, so they shut down in
-    // parallel inside one shared budget instead of one after the other.
-    let session_ids = cancel_owned_sessions(app);
-    let execution_ids = stop_running_actions(app);
+    quit_state.run_cleanup_once(|| {
+        // Signal both kinds of work before waiting on either, so they shut down
+        // in parallel inside one shared budget instead of one after the other.
+        let session_ids = cancel_owned_sessions(app);
+        let execution_ids = stop_running_actions(app);
 
-    let deadline = Instant::now() + SHUTDOWN_BUDGET;
-    if !session_ids.is_empty() && !wait_for_sessions(app, &session_ids, deadline) {
-        log::warn!(
-            "Timed out waiting for {} session(s) to stop during app shutdown",
-            session_ids.len()
-        );
-    }
-    if !execution_ids.is_empty() && !wait_for_actions(app, &execution_ids, deadline) {
-        log::warn!(
-            "Timed out waiting for {} action(s) to stop during app shutdown",
-            execution_ids.len()
-        );
-    }
+        let deadline = Instant::now() + SHUTDOWN_BUDGET;
+        if !session_ids.is_empty() && !wait_for_sessions(app, &session_ids, deadline) {
+            log::warn!(
+                "Timed out waiting for {} session(s) to stop during app shutdown",
+                session_ids.len()
+            );
+        }
+        if !execution_ids.is_empty() && !wait_for_actions(app, &execution_ids, deadline) {
+            log::warn!(
+                "Timed out waiting for {} action(s) to stop during app shutdown",
+                execution_ids.len()
+            );
+        }
 
-    // Last, so the rows reflect whatever the session threads managed to write
-    // for themselves first.
-    sweep_active_sessions(app);
+        // Last, so the rows reflect whatever the session threads managed to
+        // write for themselves first.
+        sweep_active_sessions(app);
+    });
 }
 
 /// Cancel every session this process is running, recording `AppQuit` as the
@@ -653,6 +697,7 @@ fn app_store(app: &AppHandle) -> Option<Arc<Store>> {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::Barrier;
 
     fn active_session(session_type: Option<&str>, status: SessionStatus) -> ActiveSessionInfo {
         ActiveSessionInfo {
@@ -707,6 +752,97 @@ mod tests {
         state.set_prompt_pending();
         assert!(state.take_prompt(), "pending prompt did not arm the force");
         assert!(!state.take_prompt(), "prompt stayed armed after answering");
+    }
+
+    /// The `RunEvent::Exit` case: a `terminate:` arriving while a confirmed
+    /// quit's cleanup is still running must hold `applicationWillTerminate:`
+    /// open until that cleanup finishes, not return to an exit that kills the
+    /// process mid-cancel.
+    #[test]
+    fn a_late_caller_waits_for_the_running_cleanup() {
+        let state = Arc::new(QuitState::default());
+        // Trips inside the first closure, so passing it proves the first caller
+        // holds the lock before the test thread tries to take it.
+        let entered = Arc::new(Barrier::new(2));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let first = {
+            let state = Arc::clone(&state);
+            let entered = Arc::clone(&entered);
+            let finished = Arc::clone(&finished);
+            std::thread::spawn(move || {
+                state.run_cleanup_once(|| {
+                    entered.wait();
+                    // Stands in for the bounded waits, so the second caller has
+                    // to block rather than happening to arrive after the fact.
+                    std::thread::sleep(Duration::from_millis(50));
+                    finished.store(true, Ordering::SeqCst);
+                });
+            })
+        };
+
+        entered.wait();
+        let second_ran = AtomicBool::new(false);
+        state.run_cleanup_once(|| second_ran.store(true, Ordering::SeqCst));
+
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "second call returned before the running cleanup had finished"
+        );
+        assert!(
+            !second_ran.load(Ordering::SeqCst),
+            "second call re-ran the cleanup instead of waiting for it"
+        );
+        first.join().unwrap();
+    }
+
+    #[test]
+    fn a_sequential_second_call_does_not_run_the_cleanup_again() {
+        let state = QuitState::default();
+        let runs = AtomicBool::new(false);
+
+        state.run_cleanup_once(|| runs.store(true, Ordering::SeqCst));
+        runs.store(false, Ordering::SeqCst);
+        state.run_cleanup_once(|| runs.store(true, Ordering::SeqCst));
+
+        assert!(!runs.load(Ordering::SeqCst));
+    }
+
+    /// `request_quit`'s "already shutting down" early return and
+    /// `on_close_requested`'s stay-out-of-the-way check both read this from the
+    /// main thread while a cleanup is in flight, so it has to be published
+    /// before the work starts rather than after it.
+    #[test]
+    fn quit_in_progress_is_published_while_the_cleanup_runs() {
+        let state = QuitState::default();
+        assert!(!state.quit_in_progress.load(Ordering::SeqCst));
+
+        state.run_cleanup_once(|| {
+            assert!(
+                state.quit_in_progress.load(Ordering::SeqCst),
+                "shutdown was under way but the flag still read false"
+            );
+        });
+
+        assert!(state.quit_in_progress.load(Ordering::SeqCst));
+    }
+
+    /// Poisoning is taken over rather than propagated, so a cleanup that
+    /// panicked half-done gets re-run by the next exit event — every step of it
+    /// is idempotent.
+    #[test]
+    fn a_panicked_cleanup_is_retried() {
+        let state = Arc::new(QuitState::default());
+
+        let panicked = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || state.run_cleanup_once(|| panic!("cleanup blew up")))
+        };
+        assert!(panicked.join().is_err(), "expected the panic to propagate");
+
+        let retried = AtomicBool::new(false);
+        state.run_cleanup_once(|| retried.store(true, Ordering::SeqCst));
+        assert!(retried.load(Ordering::SeqCst));
     }
 
     /// The ok slot is the default (`Return`) button, so it holds "Keep Running"

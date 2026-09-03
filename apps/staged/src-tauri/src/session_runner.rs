@@ -2552,8 +2552,10 @@ fn finish_session_run(
                 CompletionReason::Crashed => failed_run_completion_reason(e),
                 reason => reason,
             };
-            let rate_limit_recovery = (completion_reason == CompletionReason::RateLimited)
-                .then(|| rate_limit_recovery_details(e, provider_metadata));
+            let rate_limit_recovery =
+                (completion_reason == CompletionReason::RateLimited).then(|| {
+                    rate_limit_recovery_details(e, provider_metadata, crate::store::now_timestamp())
+                });
             if let Some(recovery) = rate_limit_recovery.as_ref() {
                 crate::rate_limit_metrics::record_rate_limit_hit(
                     &session_id_for_status,
@@ -4183,6 +4185,7 @@ fn completion_reason_for_driver_error(
 fn rate_limit_recovery_details(
     error: &str,
     provider_metadata: Option<&serde_json::Value>,
+    now_millis: i64,
 ) -> RateLimitRecovery {
     let mut details = RateLimitRecovery::default();
 
@@ -4191,14 +4194,14 @@ fn rate_limit_recovery_details(
             .pointer("/acp/usageUpdate/_meta")
             .and_then(|meta| meta.get("_claude/rateLimit"))
         {
-            details.resets_at = timestamp_field(rate_limit, &["resetsAt", "resetAt"]);
+            details.resets_at = timestamp_field(rate_limit, &["resetsAt", "resetAt"], now_millis);
             details.kind = string_field(rate_limit, &["rateLimitType", "type", "status"]);
         }
 
         if details.resets_at.is_none() {
-            details.resets_at = metadata
-                .pointer("/acp/promptError/data")
-                .and_then(|data| timestamp_field(data, &["resetsAt", "resetAt", "retryAt"]));
+            details.resets_at = metadata.pointer("/acp/promptError/data").and_then(|data| {
+                timestamp_field(data, &["resetsAt", "resetAt", "retryAt"], now_millis)
+            });
         }
 
         if details.kind.is_none() {
@@ -4236,27 +4239,33 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
 /// `resetsAt?: number`), so numeric fields — and strings that are bare
 /// integers — are converted here to the RFC3339 form the stored column, the
 /// scheduler's parser, and the frontend's `new Date(...)` copy all expect.
-fn timestamp_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+fn timestamp_field(value: &serde_json::Value, names: &[&str], now_millis: i64) -> Option<String> {
     names.iter().find_map(|name| {
         let field = value.get(*name)?;
         if let Some(text) = field.as_str() {
             let text = text.trim();
             if let Ok(epoch) = text.parse::<i64>() {
-                return epoch_to_rfc3339_utc(epoch);
+                return epoch_to_rfc3339_utc(epoch, now_millis);
             }
             return (!text.is_empty()).then(|| text.to_string());
         }
         let epoch = field
             .as_i64()
             .or_else(|| field.as_f64().map(|epoch| epoch.trunc() as i64))?;
-        epoch_to_rfc3339_utc(epoch)
+        epoch_to_rfc3339_utc(epoch, now_millis)
     })
 }
 
 /// Format a positive epoch timestamp as RFC3339 UTC with millisecond
 /// precision. Epoch seconds and millis are split by magnitude: seconds don't
 /// pass 10^11 until year 5138, while millis crossed it in 1973.
-fn epoch_to_rfc3339_utc(epoch: i64) -> Option<String> {
+///
+/// The magnitude split misreads epochs in other scales — microseconds land as
+/// millis centuries out — so anything further ahead than any real provider
+/// reset window is dropped rather than stored: recovery then uses plain
+/// backoff and the UI shows no reset time, instead of both parking on a
+/// timestamp in year 55,000.
+fn epoch_to_rfc3339_utc(epoch: i64, now_millis: i64) -> Option<String> {
     if epoch <= 0 {
         return None;
     }
@@ -4265,6 +4274,10 @@ fn epoch_to_rfc3339_utc(epoch: i64) -> Option<String> {
     } else {
         epoch.checked_mul(1_000)?
     };
+    if millis.saturating_sub(now_millis) > crate::rate_limit_scheduler::MAX_PLAUSIBLE_RESET_LEAD_MS
+    {
+        return None;
+    }
     let datetime =
         time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000).ok()?;
     Some(format!(
@@ -7619,6 +7632,9 @@ mod tests {
         );
     }
 
+    /// 2026-06-24T15:00:00Z, 45 minutes before the reset the fixtures report.
+    const RESET_TEST_NOW_MILLIS: i64 = 1_782_313_200_000;
+
     #[test]
     fn rate_limit_recovery_details_extracts_reset_metadata() {
         let details = rate_limit_recovery_details(
@@ -7636,6 +7652,7 @@ mod tests {
                     }
                 }
             })),
+            RESET_TEST_NOW_MILLIS,
         );
 
         assert_eq!(details.resets_at.as_deref(), Some("2026-06-24T15:45:00Z"));
@@ -7661,6 +7678,7 @@ mod tests {
                     }
                 }
             })),
+            RESET_TEST_NOW_MILLIS,
         );
         assert_eq!(
             details.resets_at.as_deref(),
@@ -7673,6 +7691,7 @@ mod tests {
             timestamp_field(
                 &serde_json::json!({ "resetsAt": 1_782_315_900_000_i64 }),
                 &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
             )
             .as_deref(),
             Some("2026-06-24T15:45:00.000Z")
@@ -7680,7 +7699,8 @@ mod tests {
         assert_eq!(
             timestamp_field(
                 &serde_json::json!({ "retryAt": "1782315900" }),
-                &["retryAt"]
+                &["retryAt"],
+                RESET_TEST_NOW_MILLIS,
             )
             .as_deref(),
             Some("2026-06-24T15:45:00.000Z")
@@ -7691,13 +7711,66 @@ mod tests {
             timestamp_field(
                 &serde_json::json!({ "resetsAt": "2026-06-24T15:45:00Z" }),
                 &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
             )
             .as_deref(),
             Some("2026-06-24T15:45:00Z")
         );
         assert_eq!(
-            timestamp_field(&serde_json::json!({ "resetsAt": -5 }), &["resetsAt"]),
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": -5 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn implausibly_distant_reset_timestamps_are_dropped() {
+        let max_lead = crate::rate_limit_scheduler::MAX_PLAUSIBLE_RESET_LEAD_MS;
+
+        // An epoch in microseconds passes the seconds-vs-millis magnitude
+        // split as millis and lands tens of millennia out; storing it would
+        // show absurd reset copy and park recovery on a bogus retry time.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": 1_782_315_900_000_000_i64 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            ),
+            None
+        );
+
+        // The cap is about lead time, not scale: any epoch beyond the
+        // plausibility window is rejected, one within it is kept.
+        let beyond_window_secs = (RESET_TEST_NOW_MILLIS + max_lead) / 1_000 + 60;
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": beyond_window_secs }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            ),
+            None
+        );
+        let within_window_secs = (RESET_TEST_NOW_MILLIS + max_lead) / 1_000 - 60;
+        assert!(timestamp_field(
+            &serde_json::json!({ "resetsAt": within_window_secs }),
+            &["resetsAt"],
+            RESET_TEST_NOW_MILLIS,
+        )
+        .is_some());
+
+        // Past resets still normalize: they are real data the scheduler
+        // already handles by falling back to backoff.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": 1_782_313_100 }),
+                &["resetsAt"],
+                RESET_TEST_NOW_MILLIS,
+            )
+            .as_deref(),
+            Some("2026-06-24T14:58:20.000Z")
         );
     }
 

@@ -145,6 +145,15 @@ impl Store {
     /// `Cancelled` as well as `Error`: a run cancelled from outside (e.g. a
     /// Pikchr sub-session hitting its tool-call timeout) can carry an
     /// explanation of why it ended. Other statuses clear the message.
+    ///
+    /// Completing also drops the `staged.rateLimitAutoRecovery` fragment: a
+    /// successful completion ends the rate-limit episode, and bookkeeping that
+    /// survived the auto-resume claim would otherwise accumulate `attempt` and
+    /// keep `first_limited_at` across separate limit hits — an unattended
+    /// multi-window run would give up on the retry cap or the 24h window even
+    /// though every intervening resume made real progress. Manual resumes
+    /// already reset it (`transition_to_running` wipes provider metadata);
+    /// this makes the auto-resume path match.
     pub fn transition_from_running(
         &self,
         id: &str,
@@ -158,10 +167,17 @@ impl Store {
         } else {
             None
         };
+        let provider_metadata_expr = if new_status == SessionStatus::Completed {
+            "CASE WHEN json_valid(provider_metadata) THEN json_remove(provider_metadata, '$.staged.rateLimitAutoRecovery') ELSE provider_metadata END"
+        } else {
+            "provider_metadata"
+        };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
-                 owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
-             WHERE id = ?5 AND status = 'running'",
+            &format!(
+                "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, provider_metadata = {provider_metadata_expr}, rate_limit_resets_at = NULL, rate_limit_kind = NULL, updated_at = ?4,
+                     owner_pid = CASE WHEN ?1 = 'disconnected' THEN NULL ELSE owner_pid END
+                 WHERE id = ?5 AND status = 'running'"
+            ),
             params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
         )?;
         Ok(rows > 0)

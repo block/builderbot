@@ -28,6 +28,15 @@ const MIN_RETRY_DELAY_MS: i64 = 5_000;
 const RESET_GRACE_MS: i64 = 30_000;
 const RESET_JITTER_MS: i64 = 5 * 60_000;
 const MAX_RESUMES_PER_TICK: usize = 2;
+/// The longest a provider-reported reset is trusted to sit in the future.
+///
+/// Real provider reset windows top out around a day; anything further —
+/// typically an epoch in the wrong scale (microseconds read as millis land
+/// tens of millennia ahead) — would park the session on a bogus
+/// `next_retry_at` forever, because the 24h give-up is only evaluated when
+/// recovery state is (re)built, never on ticks. Implausible resets fall back
+/// to plain backoff instead.
+pub(crate) const MAX_PLAUSIBLE_RESET_LEAD_MS: i64 = 48 * 60 * 60 * 1_000;
 
 #[derive(Default)]
 pub struct RateLimitScheduler {
@@ -464,14 +473,11 @@ fn build_recovery_state(
         };
     }
 
-    let reset_retry_at = resets_at
-        .and_then(parse_reset_timestamp_millis)
-        .filter(|reset_at| *reset_at > now)
-        .map(|reset_at| {
-            reset_at
-                .saturating_add(RESET_GRACE_MS)
-                .saturating_add(jitter_ms)
-        });
+    let reset_retry_at = plausible_reset_millis(resets_at, now).map(|reset_at| {
+        reset_at
+            .saturating_add(RESET_GRACE_MS)
+            .saturating_add(jitter_ms)
+    });
 
     let (next_retry_at, reason) = if let Some(next_retry_at) = reset_retry_at {
         (next_retry_at, "reset_at")
@@ -612,14 +618,21 @@ fn auto_resume_blocker(store: &Store, session: &Session) -> Result<Option<String
     // Count outstanding calls rather than tracking a single boolean: agents
     // routinely issue parallel tool calls, and ToolCall(A), ToolCall(B),
     // ToolResult(A) still leaves B without a result.
+    //
+    // Only the turn that hit the limit matters, so each User message resets
+    // the count. A ToolCall left unanswered by some past turn — an app quit,
+    // a crash, a cancel mid-call — never gets a ToolResult row, and counting
+    // it would permanently downgrade every future pause of a long-lived
+    // session to manual resume over one messy turn in its history.
     let mut outstanding_tool_calls: usize = 0;
     for message in messages {
         match message.role {
+            MessageRole::User => outstanding_tool_calls = 0,
             MessageRole::ToolCall => outstanding_tool_calls += 1,
             MessageRole::ToolResult => {
                 outstanding_tool_calls = outstanding_tool_calls.saturating_sub(1)
             }
-            MessageRole::User | MessageRole::Assistant => {}
+            MessageRole::Assistant => {}
         }
     }
     if outstanding_tool_calls > 0 {
@@ -652,15 +665,20 @@ fn metadata_for_state(state: &RateLimitAutoRecovery) -> serde_json::Value {
 }
 
 fn jitter_bound_for(resets_at: Option<&str>, now: i64) -> i64 {
-    let has_future_reset = resets_at
-        .and_then(parse_reset_timestamp_millis)
-        .map(|reset_at| reset_at > now)
-        .unwrap_or(false);
-    if has_future_reset {
+    if plausible_reset_millis(resets_at, now).is_some() {
         RESET_JITTER_MS
     } else {
         MAX_BACKOFF_MS
     }
+}
+
+/// A stored reset time the scheduler will actually wait for: parseable, in
+/// the future, and within [`MAX_PLAUSIBLE_RESET_LEAD_MS`] of now.
+fn plausible_reset_millis(resets_at: Option<&str>, now: i64) -> Option<i64> {
+    resets_at
+        .and_then(parse_reset_timestamp_millis)
+        .filter(|reset_at| *reset_at > now)
+        .filter(|reset_at| reset_at.saturating_sub(now) <= MAX_PLAUSIBLE_RESET_LEAD_MS)
 }
 
 /// Parse a stored reset timestamp into UTC millis.
@@ -860,6 +878,42 @@ mod tests {
             .add_session_message(&session.id, MessageRole::ToolResult, "B")
             .unwrap();
         assert_eq!(auto_resume_blocker(&store, &session).unwrap(), None);
+    }
+
+    #[test]
+    fn ignores_unmatched_tool_calls_from_earlier_turns() {
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+
+        // A past turn died mid-tool-call (an app quit, a crash): its ToolCall
+        // row never gets a ToolResult, permanently.
+        store
+            .add_session_message(&session.id, MessageRole::User, "do the thing")
+            .unwrap();
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "A")
+            .unwrap();
+
+        // The turn that hit the limit starts at the next User message and
+        // stopped outside any tool call, so the stale call above must not
+        // downgrade this pause to manual resume.
+        store
+            .add_session_message(&session.id, MessageRole::User, "continue")
+            .unwrap();
+        store
+            .add_session_message(&session.id, MessageRole::Assistant, "working on it")
+            .unwrap();
+        assert_eq!(auto_resume_blocker(&store, &session).unwrap(), None);
+
+        // An unmatched call inside the limited turn itself still blocks.
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "B")
+            .unwrap();
+        assert_eq!(
+            auto_resume_blocker(&store, &session).unwrap(),
+            Some("pending_tool_call".to_string())
+        );
     }
 
     /// A branch whose only session is running, linked to a commit.
@@ -1093,6 +1147,105 @@ mod tests {
         assert_eq!(retry_delay_bound_ms(1), BASE_BACKOFF_MS);
         assert_eq!(retry_delay_bound_ms(2), BASE_BACKOFF_MS * 2);
         assert_eq!(retry_delay_bound_ms(99), MAX_BACKOFF_MS);
+    }
+
+    #[test]
+    fn implausibly_distant_resets_fall_back_to_backoff() {
+        let now = parse_rfc3339_millis("2026-06-24T15:00:00Z").unwrap();
+        // A row written before numeric normalization existed can hold an epoch
+        // in the wrong scale (microseconds read as millis land tens of
+        // millennia out). Waiting for it would park the session forever: the
+        // 24h give-up is only evaluated when recovery state is rebuilt.
+        let micros = (parse_rfc3339_millis("2026-06-24T15:45:00Z").unwrap() * 1_000).to_string();
+        let state = build_recovery_state(None, Some(&micros), now, None, 12_000);
+        assert_eq!(state.reason.as_deref(), Some("backoff"));
+        assert_eq!(jitter_bound_for(Some(&micros), now), MAX_BACKOFF_MS);
+
+        // The cap is on lead time, not scale: just beyond the window falls
+        // back, just within it is honored.
+        let beyond_window = (now + MAX_PLAUSIBLE_RESET_LEAD_MS + 60_000).to_string();
+        let state = build_recovery_state(None, Some(&beyond_window), now, None, 12_000);
+        assert_eq!(state.reason.as_deref(), Some("backoff"));
+
+        let within_window = (now + MAX_PLAUSIBLE_RESET_LEAD_MS - 60_000).to_string();
+        let state = build_recovery_state(None, Some(&within_window), now, None, 12_000);
+        assert_eq!(state.reason.as_deref(), Some("reset_at"));
+        assert_eq!(jitter_bound_for(Some(&within_window), now), RESET_JITTER_MS);
+    }
+
+    #[test]
+    fn successful_completion_clears_retry_bookkeeping_for_the_next_episode() {
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_paused_session(&store);
+        record_rate_limit_pause(&store, &session.id, 10_000).unwrap();
+
+        // The auto-resume claim carries the bookkeeping onto the running row
+        // so a run that pauses again keeps its attempt count.
+        assert!(matches!(
+            claim_for_auto_resume(&store, &session.id).unwrap(),
+            AutoResumeClaim::Claimed(_)
+        ));
+        store
+            .merge_session_provider_metadata(
+                &session.id,
+                &json!({ "acp": { "promptResponse": { "stopReason": "end_turn" } } }),
+            )
+            .unwrap();
+
+        // The resumed run completing ends the episode: the retry budget must
+        // not carry into the next limit hit, or attempts accumulate across
+        // separate episodes until an unattended run gives up despite making
+        // real progress. Unrelated provider metadata survives.
+        assert!(store
+            .transition_from_running(
+                &session.id,
+                SessionStatus::Completed,
+                None,
+                Some(&CompletionReason::TurnComplete),
+            )
+            .unwrap());
+        let completed = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            auto_recovery_from_metadata(completed.provider_metadata.as_ref()),
+            None
+        );
+        assert!(completed
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/acp/promptResponse"))
+            .is_some());
+    }
+
+    #[test]
+    fn failed_runs_keep_retry_bookkeeping() {
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_paused_session(&store);
+        record_rate_limit_pause(&store, &session.id, 10_000).unwrap();
+        assert!(matches!(
+            claim_for_auto_resume(&store, &session.id).unwrap(),
+            AutoResumeClaim::Claimed(_)
+        ));
+
+        // A crash is not a successful episode end: the budget survives so
+        // repeated failures still hit the retry cap and the 24h window.
+        assert!(store
+            .transition_from_running(
+                &session.id,
+                SessionStatus::Error,
+                Some("boom"),
+                Some(&CompletionReason::Crashed),
+            )
+            .unwrap());
+        let errored = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            auto_recovery_from_metadata(errored.provider_metadata.as_ref())
+                .map(|state| state.attempt),
+            Some(1)
+        );
     }
 
     #[test]

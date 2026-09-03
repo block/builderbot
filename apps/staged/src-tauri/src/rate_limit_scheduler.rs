@@ -6,6 +6,7 @@
 //! that stopped with an unmatched tool call stay paused for manual review.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +32,7 @@ const MAX_RESUMES_PER_TICK: usize = 2;
 #[derive(Default)]
 pub struct RateLimitScheduler {
     in_flight: Mutex<HashSet<String>>,
+    tick_loop_spawned: AtomicBool,
 }
 
 impl RateLimitScheduler {
@@ -47,6 +49,15 @@ impl RateLimitScheduler {
 
     fn clear_in_flight(&self, session_id: &str) {
         self.in_flight.lock().unwrap().remove(session_id);
+    }
+
+    /// Claim the right to run this scheduler's tick loop, once per instance.
+    ///
+    /// `start_store_services` runs both at setup and after a confirmed DB
+    /// reset; a second loop over the same scheduler would double every resume
+    /// attempt, so later claims lose.
+    fn try_claim_tick_loop(&self) -> bool {
+        !self.tick_loop_spawned.swap(true, Ordering::SeqCst)
     }
 }
 
@@ -71,6 +82,9 @@ pub fn spawn(
     action_registry: Arc<ActionRegistry>,
     app_handle: AppHandle,
 ) {
+    if !scheduler.try_claim_tick_loop() {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(TICK_INTERVAL_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -105,7 +119,11 @@ async fn run_tick(
             return;
         }
     };
-    crate::rate_limit_metrics::record_scheduled_resume_backlog(sessions.len());
+    let actionable_backlog = sessions
+        .iter()
+        .filter(|session| is_actionable_for_auto_resume(session))
+        .count();
+    crate::rate_limit_metrics::record_scheduled_resume_backlog(actionable_backlog);
     let now = crate::store::now_timestamp();
     let mut started = 0usize;
     let mut drained_branches: HashSet<String> = HashSet::new();
@@ -212,16 +230,11 @@ async fn run_tick(
                     &session_id,
                     "resume_start_failed",
                 );
-                if let Ok(Some(session)) = store_for_task.get_session(&session_id) {
-                    if session.status.as_str() == "paused" {
-                        let _ = mark_gave_up(
-                            &store_for_task,
-                            &session,
-                            crate::store::now_timestamp(),
-                            "resume_start_failed",
-                        );
-                    }
-                }
+                reschedule_after_start_failure(
+                    &store_for_task,
+                    &session_id,
+                    crate::store::now_timestamp(),
+                );
             }
             scheduler_for_task.clear_in_flight(&session_id);
         });
@@ -362,32 +375,45 @@ fn record_rate_limit_pause_for_session(
     Ok(())
 }
 
-fn mark_gave_up(store: &Store, session: &Session, now: i64, reason: &str) -> Result<(), String> {
-    let existing = auto_recovery_from_metadata(session.provider_metadata.as_ref());
-    let state = RateLimitAutoRecovery {
-        attempt: existing.as_ref().map(|s| s.attempt).unwrap_or(0),
-        max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
-        next_retry_at: None,
-        first_limited_at: existing
-            .as_ref()
-            .map(|s| s.first_limited_at)
-            .unwrap_or(session.updated_at),
-        updated_at: now,
-        gave_up_at: Some(now),
-        unsafe_to_auto_resume: false,
-        reason: Some(reason.to_string()),
-    };
-    store
-        .merge_session_provider_metadata(&session.id, &metadata_for_state(&state))
-        .map_err(|e| e.to_string())?;
-    crate::rate_limit_metrics::record_recovery_give_up(
-        &session.id,
-        session.provider.as_deref(),
-        session.rate_limit_kind.as_deref(),
-        state.attempt,
-        state.reason.as_deref(),
-    );
-    Ok(())
+/// Park a failed auto-resume attempt back into the normal retry schedule.
+///
+/// `auto_resume_rate_limited_session` re-parks the session as paused when the
+/// start fails, so a transient error (a store hiccup, a briefly unresolvable
+/// workspace path) lands here with the retry bookkeeping intact. Scheduling a
+/// regular backoff attempt lets a later tick try again; the attempt cap and
+/// the 24h window in [`build_recovery_state`] still bound repeated failures,
+/// so give-up is reserved for starts that keep failing rather than issued on
+/// the first one.
+fn reschedule_after_start_failure(store: &Store, session_id: &str, now: i64) {
+    match store.get_session(session_id) {
+        // Only reschedule a session the failed attempt actually parked; a
+        // session in any other state was claimed by something else (a manual
+        // resume, a cancel, a delete) and is that path's to manage.
+        Ok(Some(session)) if session.status.as_str() == "paused" => {
+            if let Err(e) = record_rate_limit_pause_for_session(store, &session, now) {
+                log::warn!(
+                    "[rate_limit_recovery] failed to reschedule session {session_id} after a failed start: {e}"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            log::warn!(
+                "[rate_limit_recovery] failed to read session {session_id} after a failed start: {e}"
+            );
+        }
+    }
+}
+
+/// Whether the scheduler could still act on this paused session.
+///
+/// Sessions that gave up or need a manual resume stay paused indefinitely;
+/// counting them in the backlog metric would report (and log) a permanent
+/// nonzero backlog long after the scheduler has nothing left to do.
+fn is_actionable_for_auto_resume(session: &Session) -> bool {
+    auto_recovery_from_metadata(session.provider_metadata.as_ref())
+        .map(|state| state.gave_up_at.is_none() && !state.unsafe_to_auto_resume)
+        .unwrap_or(true)
 }
 
 fn build_recovery_state(
@@ -439,7 +465,7 @@ fn build_recovery_state(
     }
 
     let reset_retry_at = resets_at
-        .and_then(parse_rfc3339_millis)
+        .and_then(parse_reset_timestamp_millis)
         .filter(|reset_at| *reset_at > now)
         .map(|reset_at| {
             reset_at
@@ -583,15 +609,20 @@ fn auto_resume_blocker(store: &Store, session: &Session) -> Result<Option<String
     let messages = store
         .get_session_messages(&session.id)
         .map_err(|e| e.to_string())?;
-    let mut unmatched_tool_call = false;
+    // Count outstanding calls rather than tracking a single boolean: agents
+    // routinely issue parallel tool calls, and ToolCall(A), ToolCall(B),
+    // ToolResult(A) still leaves B without a result.
+    let mut outstanding_tool_calls: usize = 0;
     for message in messages {
         match message.role {
-            MessageRole::ToolCall => unmatched_tool_call = true,
-            MessageRole::ToolResult => unmatched_tool_call = false,
+            MessageRole::ToolCall => outstanding_tool_calls += 1,
+            MessageRole::ToolResult => {
+                outstanding_tool_calls = outstanding_tool_calls.saturating_sub(1)
+            }
             MessageRole::User | MessageRole::Assistant => {}
         }
     }
-    if unmatched_tool_call {
+    if outstanding_tool_calls > 0 {
         Ok(Some("pending_tool_call".to_string()))
     } else {
         Ok(None)
@@ -622,7 +653,7 @@ fn metadata_for_state(state: &RateLimitAutoRecovery) -> serde_json::Value {
 
 fn jitter_bound_for(resets_at: Option<&str>, now: i64) -> i64 {
     let has_future_reset = resets_at
-        .and_then(parse_rfc3339_millis)
+        .and_then(parse_reset_timestamp_millis)
         .map(|reset_at| reset_at > now)
         .unwrap_or(false);
     if has_future_reset {
@@ -630,6 +661,29 @@ fn jitter_bound_for(resets_at: Option<&str>, now: i64) -> i64 {
     } else {
         MAX_BACKOFF_MS
     }
+}
+
+/// Parse a stored reset timestamp into UTC millis.
+///
+/// The detection path normalizes what it can to RFC3339, but providers report
+/// resets as numeric epochs too (claude-agent-acp forwards the SDK's numeric
+/// `resetsAt` verbatim), so a bare integer that slipped through — including
+/// rows written before normalization existed — is accepted here as epoch
+/// seconds or millis, split by magnitude: epoch seconds passed 10^11 around
+/// year 5138, while millis crossed it in 1973.
+fn parse_reset_timestamp_millis(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if let Ok(epoch) = value.parse::<i64>() {
+        if epoch <= 0 {
+            return None;
+        }
+        return Some(if epoch >= 100_000_000_000 {
+            epoch
+        } else {
+            epoch.saturating_mul(1_000)
+        });
+    }
+    parse_rfc3339_millis(value)
 }
 
 fn jitter_ms(bound_ms: i64) -> i64 {
@@ -776,6 +830,34 @@ mod tests {
 
         store
             .add_session_message(&session.id, MessageRole::ToolResult, "{}")
+            .unwrap();
+        assert_eq!(auto_resume_blocker(&store, &session).unwrap(), None);
+    }
+
+    #[test]
+    fn detects_unmatched_parallel_tool_calls_as_auto_resume_blocker() {
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+
+        // Two parallel calls, one result: call B still has no result even
+        // though the most recent message is a ToolResult.
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "A")
+            .unwrap();
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "B")
+            .unwrap();
+        store
+            .add_session_message(&session.id, MessageRole::ToolResult, "A")
+            .unwrap();
+        assert_eq!(
+            auto_resume_blocker(&store, &session).unwrap(),
+            Some("pending_tool_call".to_string())
+        );
+
+        store
+            .add_session_message(&session.id, MessageRole::ToolResult, "B")
             .unwrap();
         assert_eq!(auto_resume_blocker(&store, &session).unwrap(), None);
     }
@@ -1011,5 +1093,131 @@ mod tests {
         assert_eq!(retry_delay_bound_ms(1), BASE_BACKOFF_MS);
         assert_eq!(retry_delay_bound_ms(2), BASE_BACKOFF_MS * 2);
         assert_eq!(retry_delay_bound_ms(99), MAX_BACKOFF_MS);
+    }
+
+    #[test]
+    fn parses_numeric_epoch_reset_timestamps_by_magnitude() {
+        let millis = parse_rfc3339_millis("2026-06-24T15:45:00Z").unwrap();
+
+        assert_eq!(
+            parse_reset_timestamp_millis(&(millis / 1_000).to_string()),
+            Some(millis)
+        );
+        assert_eq!(
+            parse_reset_timestamp_millis(&millis.to_string()),
+            Some(millis)
+        );
+        assert_eq!(
+            parse_reset_timestamp_millis(" 2026-06-24T15:45:00Z "),
+            Some(millis)
+        );
+        assert_eq!(parse_reset_timestamp_millis("0"), None);
+        assert_eq!(parse_reset_timestamp_millis("-1766591100"), None);
+        assert_eq!(parse_reset_timestamp_millis("later"), None);
+    }
+
+    #[test]
+    fn tick_loop_claim_is_once_per_scheduler() {
+        let scheduler = RateLimitScheduler::new();
+        assert!(scheduler.try_claim_tick_loop());
+        assert!(!scheduler.try_claim_tick_loop());
+    }
+
+    #[test]
+    fn start_failure_schedules_a_backoff_retry_instead_of_giving_up() {
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+        pause_with_rate_limit(&store, &session.id);
+        record_rate_limit_pause(&store, &session.id, 10_000).unwrap();
+
+        // The failed attempt re-parked the session as paused; one failure
+        // burns an attempt, not the whole recovery.
+        reschedule_after_start_failure(&store, &session.id, 20_000);
+
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        let state = auto_recovery_from_metadata(session.provider_metadata.as_ref()).unwrap();
+        assert_eq!(state.attempt, 2);
+        assert_eq!(state.gave_up_at, None);
+        assert!(state.next_retry_at.is_some());
+    }
+
+    #[test]
+    fn repeated_start_failures_still_hit_the_retry_cap() {
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+        pause_with_rate_limit(&store, &session.id);
+        store
+            .merge_session_provider_metadata(
+                &session.id,
+                &metadata_for_state(&RateLimitAutoRecovery {
+                    attempt: MAX_AUTO_RETRY_ATTEMPTS,
+                    max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+                    next_retry_at: Some(10_000),
+                    first_limited_at: 5_000,
+                    updated_at: 10_000,
+                    gave_up_at: None,
+                    unsafe_to_auto_resume: false,
+                    reason: Some("backoff".to_string()),
+                }),
+            )
+            .unwrap();
+
+        reschedule_after_start_failure(&store, &session.id, 20_000);
+
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        let state = auto_recovery_from_metadata(session.provider_metadata.as_ref()).unwrap();
+        assert_eq!(state.gave_up_at, Some(20_000));
+        assert_eq!(state.reason.as_deref(), Some("retry_cap_exceeded"));
+    }
+
+    #[test]
+    fn start_failure_leaves_sessions_claimed_by_another_path_alone() {
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+
+        // Still running: a manual resume won the race after the failed start.
+        reschedule_after_start_failure(&store, &session.id, 20_000);
+
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            auto_recovery_from_metadata(session.provider_metadata.as_ref()),
+            None
+        );
+    }
+
+    #[test]
+    fn backlog_counts_only_sessions_the_scheduler_can_still_act_on() {
+        let mut session = Session::new_running("test", Path::new("/tmp"));
+
+        // No bookkeeping yet: the next tick will create it, so it counts.
+        assert!(is_actionable_for_auto_resume(&session));
+
+        let state = RateLimitAutoRecovery {
+            attempt: 1,
+            max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+            next_retry_at: Some(10_000),
+            first_limited_at: 5_000,
+            updated_at: 5_000,
+            gave_up_at: None,
+            unsafe_to_auto_resume: false,
+            reason: Some("backoff".to_string()),
+        };
+        session.provider_metadata = Some(metadata_for_state(&state));
+        assert!(is_actionable_for_auto_resume(&session));
+
+        session.provider_metadata = Some(metadata_for_state(&RateLimitAutoRecovery {
+            gave_up_at: Some(10_000),
+            ..state.clone()
+        }));
+        assert!(!is_actionable_for_auto_resume(&session));
+
+        session.provider_metadata = Some(metadata_for_state(&RateLimitAutoRecovery {
+            unsafe_to_auto_resume: true,
+            ..state
+        }));
+        assert!(!is_actionable_for_auto_resume(&session));
     }
 }

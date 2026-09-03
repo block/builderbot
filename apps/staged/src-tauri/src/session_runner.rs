@@ -4191,14 +4191,14 @@ fn rate_limit_recovery_details(
             .pointer("/acp/usageUpdate/_meta")
             .and_then(|meta| meta.get("_claude/rateLimit"))
         {
-            details.resets_at = string_field(rate_limit, &["resetsAt", "resetAt"]);
+            details.resets_at = timestamp_field(rate_limit, &["resetsAt", "resetAt"]);
             details.kind = string_field(rate_limit, &["rateLimitType", "type", "status"]);
         }
 
         if details.resets_at.is_none() {
             details.resets_at = metadata
                 .pointer("/acp/promptError/data")
-                .and_then(|data| string_field(data, &["resetsAt", "resetAt", "retryAt"]));
+                .and_then(|data| timestamp_field(data, &["resetsAt", "resetAt", "retryAt"]));
         }
 
         if details.kind.is_none() {
@@ -4227,6 +4227,56 @@ fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
         .iter()
         .find_map(|name| value.get(*name).and_then(|field| field.as_str()))
         .map(str::to_string)
+}
+
+/// Extract a reset timestamp, normalized to an RFC3339 UTC string.
+///
+/// claude-agent-acp forwards the SDK's `rate_limit_info` verbatim, and the
+/// SDK's `resetsAt` is a numeric epoch timestamp (`SDKRateLimitInfo` declares
+/// `resetsAt?: number`), so numeric fields — and strings that are bare
+/// integers — are converted here to the RFC3339 form the stored column, the
+/// scheduler's parser, and the frontend's `new Date(...)` copy all expect.
+fn timestamp_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        let field = value.get(*name)?;
+        if let Some(text) = field.as_str() {
+            let text = text.trim();
+            if let Ok(epoch) = text.parse::<i64>() {
+                return epoch_to_rfc3339_utc(epoch);
+            }
+            return (!text.is_empty()).then(|| text.to_string());
+        }
+        let epoch = field
+            .as_i64()
+            .or_else(|| field.as_f64().map(|epoch| epoch.trunc() as i64))?;
+        epoch_to_rfc3339_utc(epoch)
+    })
+}
+
+/// Format a positive epoch timestamp as RFC3339 UTC with millisecond
+/// precision. Epoch seconds and millis are split by magnitude: seconds don't
+/// pass 10^11 until year 5138, while millis crossed it in 1973.
+fn epoch_to_rfc3339_utc(epoch: i64) -> Option<String> {
+    if epoch <= 0 {
+        return None;
+    }
+    let millis = if epoch >= 100_000_000_000 {
+        epoch
+    } else {
+        epoch.checked_mul(1_000)?
+    };
+    let datetime =
+        time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        datetime.year(),
+        u8::from(datetime.month()),
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute(),
+        datetime.second(),
+        datetime.millisecond()
+    ))
 }
 
 fn is_rate_limit_error(error: &str, provider_metadata: Option<&serde_json::Value>) -> bool {
@@ -4311,25 +4361,52 @@ fn has_non_retryable_limit_marker(normalized: &str) -> bool {
 }
 
 fn has_rate_limit_marker(normalized: &str) -> bool {
-    let rate_limit_markers = [
+    // Phrase markers are specific enough to substring-match, which keeps
+    // suffix forms matching ("rate limited", "rate limits", "rateLimitType").
+    let substring_markers = [
         "rate limit",
         "ratelimit",
         "rate_limit",
         "too many requests",
-        "429",
         "resource_exhausted",
         "resource exhausted",
         "usage limit",
         "usage_limit",
         "usagelimit",
-        "quota",
         "overloaded",
         "resetsat",
         "resets at",
     ];
-    rate_limit_markers
+    // Driver error text can include arbitrary process stderr, where "429"
+    // appears inside longer numbers (exit codes, byte counts) and "quota"
+    // inside unrelated words ("quotation"); these only count as whole tokens.
+    let token_markers = ["429", "quota"];
+    substring_markers
         .iter()
         .any(|marker| normalized.contains(marker))
+        || token_markers
+            .iter()
+            .any(|marker| contains_token(normalized, marker))
+}
+
+/// Substring match that only counts occurrences not embedded in a longer
+/// alphanumeric run: "http 429" and "error(429)" match "429", "14290" and
+/// "4429" do not. Non-ASCII bytes count as boundaries, which is safe because
+/// a multi-byte character can never continue an ASCII token.
+fn contains_token(text: &str, token: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(token) {
+        let start = search_from + offset;
+        let end = start + token.len();
+        let boundary_before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let boundary_after = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if boundary_before && boundary_after {
+            return true;
+        }
+        search_from = start + 1;
+    }
+    false
 }
 
 fn spawn_pipe_reader<R>(mut pipe: R) -> tokio::task::JoinHandle<io::Result<Vec<u8>>>
@@ -7563,6 +7640,93 @@ mod tests {
 
         assert_eq!(details.resets_at.as_deref(), Some("2026-06-24T15:45:00Z"));
         assert_eq!(details.kind.as_deref(), Some("subscription"));
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_normalizes_numeric_reset_timestamps() {
+        // claude-agent-acp forwards the SDK's rate_limit_info verbatim, where
+        // resetsAt is a numeric epoch, not an RFC3339 string.
+        let details = rate_limit_recovery_details(
+            "Prompt failed",
+            Some(&serde_json::json!({
+                "acp": {
+                    "usageUpdate": {
+                        "_meta": {
+                            "_claude/rateLimit": {
+                                "status": "rejected",
+                                "rateLimitType": "five_hour",
+                                "resetsAt": 1_782_315_900
+                            }
+                        }
+                    }
+                }
+            })),
+        );
+        assert_eq!(
+            details.resets_at.as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(details.kind.as_deref(), Some("five_hour"));
+
+        // Epoch millis and numeric strings normalize to the same instant.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": 1_782_315_900_000_i64 }),
+                &["resetsAt"],
+            )
+            .as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "retryAt": "1782315900" }),
+                &["retryAt"]
+            )
+            .as_deref(),
+            Some("2026-06-24T15:45:00.000Z")
+        );
+
+        // RFC3339 strings pass through untouched; garbage stays absent.
+        assert_eq!(
+            timestamp_field(
+                &serde_json::json!({ "resetsAt": "2026-06-24T15:45:00Z" }),
+                &["resetsAt"],
+            )
+            .as_deref(),
+            Some("2026-06-24T15:45:00Z")
+        );
+        assert_eq!(
+            timestamp_field(&serde_json::json!({ "resetsAt": -5 }), &["resetsAt"]),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_number_and_quotation_markers_do_not_classify_as_rate_limits() {
+        // "429" embedded in a longer number (exit codes, byte counts in
+        // stderr) is not a rate-limit signal; a whole 429 token is.
+        assert_eq!(
+            completion_reason_for_driver_error("agent process exited with code 14290", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("wrote 4429 bytes to stderr", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("HTTP 429 returned by provider", None),
+            CompletionReason::RateLimited
+        );
+
+        // "quota" as part of another word is not a quota error.
+        assert_eq!(
+            completion_reason_for_driver_error("unbalanced quotation mark in config", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("You exceeded your current quota", None),
+            CompletionReason::RateLimited
+        );
     }
 
     #[test]

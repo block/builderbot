@@ -24,6 +24,10 @@ struct RateLimitMetricSnapshot {
 #[derive(Debug, Default)]
 struct RateLimitMetricState {
     snapshot: RateLimitMetricSnapshot,
+    /// Last backlog size handed to [`observe_backlog_if_changed`], logged or
+    /// not. The scheduler observes on every 15s tick, so an unchanged backlog
+    /// (e.g. one permanently parked session) must not log a record per tick.
+    last_scheduled_resume_backlog: usize,
 }
 
 impl RateLimitMetricState {
@@ -40,12 +44,22 @@ impl RateLimitMetricState {
             .or_default() += 1;
     }
 
-    fn observe_backlog(&mut self, paused_sessions: usize) {
+    /// Record the backlog and return a snapshot to log, or `None` when the
+    /// size is unchanged since the last observation.
+    fn observe_backlog_if_changed(
+        &mut self,
+        actionable_sessions: usize,
+    ) -> Option<RateLimitMetricSnapshot> {
+        if actionable_sessions == self.last_scheduled_resume_backlog {
+            return None;
+        }
+        self.last_scheduled_resume_backlog = actionable_sessions;
         self.increment_counter("scheduled_resume_backlog_observations_total");
         self.snapshot.max_scheduled_resume_backlog = self
             .snapshot
             .max_scheduled_resume_backlog
-            .max(paused_sessions);
+            .max(actionable_sessions);
+        Some(self.snapshot.clone())
     }
 }
 
@@ -74,20 +88,22 @@ pub(crate) fn record_rate_limit_hit(
     );
 }
 
-pub(crate) fn record_scheduled_resume_backlog(paused_sessions: usize) {
-    if paused_sessions == 0 {
+/// Observe the count of paused sessions the scheduler can still act on.
+///
+/// Sessions that gave up or need a manual resume are excluded by the caller,
+/// and only a change in the count emits a log record — the size is otherwise
+/// re-observed every tick, and a stable backlog (including its drop back to
+/// zero) is one event, not thousands.
+pub(crate) fn record_scheduled_resume_backlog(actionable_sessions: usize) {
+    let Some(snapshot) = with_state(|state| state.observe_backlog_if_changed(actionable_sessions))
+    else {
         return;
-    }
-
-    let snapshot = with_state(|state| {
-        state.observe_backlog(paused_sessions);
-        state.snapshot.clone()
-    });
+    };
 
     log_metric(
         "scheduled_resume_backlog",
         json!({
-            "pausedSessions": paused_sessions,
+            "pausedSessions": actionable_sessions,
         }),
         snapshot,
     );
@@ -253,6 +269,26 @@ mod tests {
         assert_eq!(metric_label(None), "unknown");
         assert_eq!(metric_label(Some(" claude pro ")), "claude_pro");
         assert_eq!(metric_label(Some("rate-limit")), "rate-limit");
+    }
+
+    #[test]
+    fn backlog_observations_log_only_on_change() {
+        let mut state = RateLimitMetricState::default();
+
+        // Startup with nothing paused: nothing worth logging.
+        assert!(state.observe_backlog_if_changed(0).is_none());
+
+        let snapshot = state.observe_backlog_if_changed(2).unwrap();
+        assert_eq!(snapshot.max_scheduled_resume_backlog, 2);
+
+        // A stable backlog re-observed every tick is one event, not one per tick.
+        assert!(state.observe_backlog_if_changed(2).is_none());
+        assert!(state.observe_backlog_if_changed(2).is_none());
+
+        // Draining back to zero is a change and logs once.
+        let snapshot = state.observe_backlog_if_changed(0).unwrap();
+        assert_eq!(snapshot.max_scheduled_resume_backlog, 2);
+        assert!(state.observe_backlog_if_changed(0).is_none());
     }
 
     #[test]

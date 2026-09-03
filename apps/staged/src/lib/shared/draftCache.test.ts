@@ -13,6 +13,7 @@ vi.mock('./persistentStore', () => ({
   listStoreKeys: vi.fn(async () => [...store.keys()]),
 }));
 
+import { deleteStoreValue, setStoreValue } from './persistentStore';
 import {
   createDraftWriteScheduler,
   DRAFT_TTL_MS,
@@ -177,5 +178,51 @@ describe('draft write scheduler', () => {
     await scheduler.flush();
 
     expect(store.size).toBe(0);
+  });
+
+  it('flush waits for an in-flight clearNow so a reopen read cannot resurrect the draft', async () => {
+    const scheduler = createDraftWriteScheduler();
+    await scheduler.saveNow('draft:project-session:p1', 'submitted');
+
+    // Model a slow store delete (a separate HTTP round-trip in web mode).
+    vi.mocked(deleteStoreValue).mockImplementationOnce(
+      (key: string) =>
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            store.delete(key);
+            resolve();
+          }, 50)
+        )
+    );
+
+    const clearPromise = scheduler.clearNow('draft:project-session:p1');
+    // The flush-before-read pattern used by every draft-load site: without the
+    // flush, this read would land before the delete and resurrect the prompt.
+    const reopenRead = scheduler.flush().then(() => loadDraft('draft:project-session:p1'));
+
+    await vi.advanceTimersByTimeAsync(50);
+    await clearPromise;
+    await expect(reopenRead).resolves.toBeNull();
+  });
+
+  it('logs write failures instead of rejecting, and keeps later writes flowing', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const scheduler = createDraftWriteScheduler();
+      vi.mocked(setStoreValue).mockRejectedValueOnce(new Error('store unavailable'));
+
+      // Call sites fire-and-forget these promises (onDestroy flushes, clearNow
+      // after submit), so a failure must resolve — not reject — and be logged.
+      await expect(scheduler.saveNow('draft:a', 'dropped')).resolves.toBeUndefined();
+      expect(consoleError).toHaveBeenCalledWith(
+        '[draftCache] Failed to persist draft:',
+        expect.any(Error)
+      );
+
+      await scheduler.saveNow('draft:a', 'second attempt');
+      expect(store.get('draft:a')).toMatchObject({ value: 'second attempt' });
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });

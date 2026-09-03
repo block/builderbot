@@ -242,6 +242,10 @@
     const projectId = project.id;
     const generation = ++projectDraftLoadGeneration;
     try {
+      // Settle queued writes first. Submit clears the stored draft and close
+      // saves immediately through the writer, so a quick reopen could read the
+      // store before that write lands and resurrect the just-cleared prompt.
+      await projectDraftWriter.flush();
       const draft = await loadDraft(projectDraftKey(projectId));
       if (generation !== projectDraftLoadGeneration || project.id !== projectId) return;
       if (draftProjectPrompt === promptWhenLoadStarted) {

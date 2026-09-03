@@ -4,8 +4,8 @@
   A focused modal with a prompt textarea. The mode (commit/note/review) is
   switchable via a clickable dropdown in the header for branch sessions. Project
   note sessions keep a fixed note mode and show a simple "Project note" header.
-  On close, returns whatever text was typed and the current mode so the caller
-  can restore state if the user re-opens the modal.
+  On close, returns whatever text was typed and the mode that text belongs to
+  so the caller can restore state if the user re-opens the modal.
 
   Props:
     branch        — the branch to create a session on, for branch sessions
@@ -132,6 +132,12 @@
   // draft load is replacing `prompt`, and re-triggers it when the gate opens
   // so text typed during the load window still gets scheduled.
   let switchingMode = $state(false);
+  // The mode `prompt`'s text belongs to. Lags `currentMode` while a mode
+  // switch's draft load is replacing `prompt`, so anything that pairs the
+  // prompt with a mode (outgoing saves, close, submit) must read this —
+  // `currentMode` mid-switch would file one mode's text under another mode's
+  // key and clobber that mode's stored draft.
+  let promptMode = $state<BranchSessionType>('commit');
 
   // Text-snippet attachment state (modal-local — folded into the prompt on
   // submit or on close, never persisted to the backend).
@@ -298,22 +304,16 @@
     const isPromptPrefill =
       (commitPrefill && prompt === commitPrefill) || (notePrefill && prompt === notePrefill);
     const userDraft = isPromptPrefill ? '' : prompt;
-    const previousMode = currentMode;
-    // A switch already in flight has saved its own outgoing mode's draft and is
-    // about to replace `prompt` with the incoming mode's text. Until that lands,
-    // `prompt` still holds *that* switch's outgoing text while `currentMode` has
-    // already moved on — so saving here would file one mode's draft under
-    // another mode's key (⌘1→⌘2→⌘3 in quick succession).
-    const switchInFlight = switchingMode;
+    // With a switch or the initial draft load in flight, `prompt` still holds
+    // `promptMode`'s text while `currentMode` has already moved on. Filing the
+    // outgoing save under the owner keeps rapid switches (⌘1→⌘2→⌘3) and a
+    // switch during the initial load from saving one mode's text under another
+    // mode's key — the save is correct mid-flight, so it never needs skipping.
+    const outgoingMode = promptMode;
     const generation = ++modeSwitchGeneration;
 
-    if (!switchInFlight) {
-      await onDraftChange?.(
-        { prompt: userDraft, mode: previousMode, imageIds },
-        { immediate: true }
-      );
-      if (generation !== modeSwitchGeneration) return;
-    }
+    await onDraftChange?.({ prompt: userDraft, mode: outgoingMode, imageIds }, { immediate: true });
+    if (generation !== modeSwitchGeneration) return;
 
     switchingMode = true;
     currentMode = newMode;
@@ -339,8 +339,9 @@
         prompt = '';
         focusPrompt(null);
       }
+      promptMode = newMode;
       switchingMode = false;
-      onDraftChange?.({ prompt, mode: currentMode, imageIds });
+      onDraftChange?.({ prompt, mode: promptMode, imageIds });
       return;
     }
 
@@ -353,8 +354,9 @@
     } else {
       prompt = userDraft;
     }
+    promptMode = newMode;
     switchingMode = false;
-    onDraftChange?.({ prompt, mode: currentMode, imageIds });
+    onDraftChange?.({ prompt, mode: promptMode, imageIds });
   }
 
   // Close mode menu on outside click
@@ -407,6 +409,7 @@
       initialized = true;
       prompt = initialPrompt;
       currentMode = isProjectNote ? 'note' : mode;
+      promptMode = currentMode;
       imageIds = [...initialImageIds];
       // The caller opens the modal synchronously with whatever draft it holds
       // in memory; the authoritative stored draft is fetched here so the open
@@ -471,7 +474,7 @@
   // values would truncate this effect's dependency list to empty and it would
   // never run again, killing autosave for the rest of the modal's life.
   $effect(() => {
-    const draft = { prompt, mode: currentMode, imageIds };
+    const draft = { prompt, mode: promptMode, imageIds };
     if (!initialized || switchingMode) return;
     onDraftChange?.(draft);
   });
@@ -518,30 +521,43 @@
     e?.preventDefault();
     // Review mode allows empty prompts; other modes require text or a snippet.
     if (!canSubmit) return;
+    // Mid mode-switch the textarea still shows the outgoing mode's text while
+    // the header shows the new mode — submitting would pair one mode's text
+    // with the other mode's session type. Ignore the submit; the switch's load
+    // lands in milliseconds and ⌘Enter can simply be pressed again.
+    if (switchingMode && promptMode !== currentMode) return;
 
     starting = true;
     // Fold attached snippets into the prompt; the onSubmit signature is unchanged.
     const finalPrompt = foldSnippetsIntoPrompt(prompt.trim(), textSnippets);
+    // Supersede any in-flight draft load so it can't touch state after close.
+    modeSwitchGeneration++;
     onSubmit({
       prompt: finalPrompt,
-      mode: currentMode,
+      mode: promptMode,
       imageIds,
       provider: acpPickerSelection.providerId ?? undefined,
       acpConfigSelection: acpPickerSelection.acpConfigSelection,
     });
     // Close immediately; parent handles async start + optimistic timeline row.
     closed = true;
-    onClose({ prompt: '', mode: currentMode, imageIds: [] });
+    onClose({ prompt: '', mode: promptMode, imageIds: [] });
   }
 
   function handleClose() {
+    // Supersede any in-flight mode switch or draft load: once the modal is
+    // closed it must not replace `prompt` or fire another onDraftChange.
+    modeSwitchGeneration++;
     // Snippets are modal-local state, so they'd die with the component on an
     // accidental dismiss. Fold them into the preserved draft prompt instead —
-    // reopening then shows the same text the submit would have sent.
+    // reopening then shows the same text the submit would have sent. The draft
+    // is filed under `promptMode`: mid mode-switch the text on screen still
+    // belongs to the outgoing mode, and pairing it with `currentMode` would
+    // clobber the incoming mode's stored draft.
     closed = true;
     onClose({
       prompt: foldSnippetsIntoPrompt(prompt, textSnippets),
-      mode: currentMode,
+      mode: promptMode,
       imageIds,
     });
   }

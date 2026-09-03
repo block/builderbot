@@ -306,6 +306,41 @@ impl SessionRegistry {
         self.inner.lock().unwrap().running.remove(session_id);
     }
 
+    /// Register `session_id` around its fallible startup work: the token
+    /// exists before `startup` runs, and a failed startup deregisters on the
+    /// way out.
+    ///
+    /// Registering *before* the slow half of session startup — driver
+    /// construction resolves the agent binary through login-shell probes, and
+    /// probes every known agent when no provider is pinned, so it's seconds of
+    /// wall clock, not statements — is what makes a session that is still
+    /// starting up visible to cancellation. The shutdown path cancels a
+    /// snapshot of registered ids and holds the exit open until they
+    /// deregister, and a user cancel only reaches a token the registry can
+    /// find. Unregistered, both land nowhere while the startup goes on to
+    /// spawn an agent child; registered, they fire this token, which the
+    /// connect path checks before protocol setup, so the child is stopped by
+    /// the connection teardown right after it spawns.
+    ///
+    /// Deregistering on failure is the other half of the contract: the
+    /// session thread that normally deregisters never spawns on that path,
+    /// and a stale entry would hold shutdown's `wait_for_sessions` open for
+    /// its full budget and misreport `is_running`.
+    fn register_for_startup<T>(
+        &self,
+        session_id: &str,
+        startup: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(CancellationToken, T), String> {
+        let token = self.register(session_id);
+        match startup() {
+            Ok(value) => Ok((token, value)),
+            Err(e) => {
+                self.deregister(session_id);
+                Err(e)
+            }
+        }
+    }
+
     /// Cancel a running session. Returns true if the session was found and
     /// signalled, false if it wasn't running (already finished or unknown).
     pub fn cancel(&self, session_id: &str) -> bool {
@@ -592,85 +627,98 @@ pub fn start_session(
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
-    // Create the driver eagerly so we fail fast if the agent isn't found.
-    // Local sessions without an explicit provider resolve the first available
-    // provider and persist it on the session. Review-producing callers resolve
-    // a concrete provider before creating their session/review rows.
-    // Also track the provider id the driver actually resolved to. The pikchr
-    // sub-session (`generate_pikchr`) reuses it so its sub-agent matches the
-    // agent the user chose, without re-running the (login-shell) discovery.
-    let (driver, resolved_provider_id): (AcpDriver, Option<String>) = if let Some(ref ws_name) =
-        config.workspace_name
-    {
-        let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
-        if let Some(ref remote_dir) = config.remote_working_dir {
-            d = d.with_remote_working_dir(remote_dir.clone());
-        }
-        (d, config.provider.clone())
-    } else {
-        match &config.provider {
-            Some(id) => (AcpDriver::new(id)?, Some(id.clone())),
-            None => {
-                // Resolve the first available provider and backfill it on
-                // the local session record so consumers see the provider
-                // that actually ran the agent.
-                let providers = crate::agent::discover_providers();
-                let first = providers.first().ok_or_else(|| {
-                        "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH.".to_string()
-                    })?;
-                if let Err(e) = store.set_session_provider(&config.session_id, &first.id) {
+    // Registered before the driver is constructed, not after — see
+    // `register_for_startup` for why the slow construction must run with the
+    // token already in the registry (a shutdown or user cancel landing during
+    // it would otherwise miss a session about to spawn an agent child).
+    // `start_pipeline_session` registers at entry for the same reason, and the
+    // pipeline handoff's token-replacement contract (see
+    // `PipelineOutcome::HandedOffToAi`) is preserved: the replacement just
+    // happens before the slow work instead of after it.
+    let (cancel_token, (driver, resolved_provider_id)) = registry
+        .register_for_startup(&config.session_id, || {
+            // Create the driver eagerly so we fail fast if the agent isn't found.
+            // Local sessions without an explicit provider resolve the first available
+            // provider and persist it on the session. Review-producing callers resolve
+            // a concrete provider before creating their session/review rows.
+            // Also track the provider id the driver actually resolved to. The pikchr
+            // sub-session (`generate_pikchr`) reuses it so its sub-agent matches the
+            // agent the user chose, without re-running the (login-shell) discovery.
+            let (driver, resolved_provider_id): (AcpDriver, Option<String>) =
+                if let Some(ref ws_name) = config.workspace_name {
+                    let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
+                    if let Some(ref remote_dir) = config.remote_working_dir {
+                        d = d.with_remote_working_dir(remote_dir.clone());
+                    }
+                    (d, config.provider.clone())
+                } else {
+                    match &config.provider {
+                        Some(id) => (AcpDriver::new(id)?, Some(id.clone())),
+                        None => {
+                            // Resolve the first available provider and backfill it on
+                            // the local session record so consumers see the provider
+                            // that actually ran the agent.
+                            let providers = crate::agent::discover_providers();
+                            let first = providers.first().ok_or_else(|| {
+                                "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH.".to_string()
+                            })?;
+                            if let Err(e) =
+                                store.set_session_provider(&config.session_id, &first.id)
+                            {
+                                log::warn!(
+                                    "Failed to backfill provider on session {}: {e}",
+                                    config.session_id
+                                );
+                            }
+                            (AcpDriver::new(&first.id)?, Some(first.id.clone()))
+                        }
+                    }
+                };
+
+            // Persist the user message right away so it's visible immediately.
+            // Include image IDs so the frontend can display them alongside the text.
+            // We also mark attached images as session-scoped immediately after so they
+            // don't appear in the branch timeline. Both operations are kept together;
+            // if set_images_session_id fails we log a warning rather than aborting the
+            // session, since the message was already persisted.
+            if let Some(ref queued_message_id) = config.queued_message_id {
+                store
+                    .add_session_message_with_images_from_queue(
+                        &config.session_id,
+                        MessageRole::User,
+                        &config.prompt,
+                        &config.image_ids,
+                        queued_message_id,
+                    )
+                    .map_err(|e| format!("Failed to persist queued user message: {e}"))?
+            } else {
+                store
+                    .add_session_message_with_images(
+                        &config.session_id,
+                        MessageRole::User,
+                        &config.prompt,
+                        &config.image_ids,
+                    )
+                    .map_err(|e| format!("Failed to persist user message: {e}"))?
+            };
+
+            if !config.image_ids.is_empty() {
+                if let Err(e) = store.set_images_session_id(&config.image_ids, &config.session_id)
+                {
                     log::warn!(
-                        "Failed to backfill provider on session {}: {e}",
+                        "Failed to associate images {:?} with session {}: {e}. \
+                         Images may appear orphaned in the branch timeline.",
+                        config.image_ids,
                         config.session_id
                     );
                 }
-                (AcpDriver::new(&first.id)?, Some(first.id.clone()))
             }
-        }
-    };
+
+            Ok((driver, resolved_provider_id))
+        })?;
 
     let selected_acp_config_options =
         crate::acp_config::selected_acp_config_options(config.acp_config_selection.as_ref());
-
-    // Persist the user message right away so it's visible immediately.
-    // Include image IDs so the frontend can display them alongside the text.
-    // We also mark attached images as session-scoped immediately after so they
-    // don't appear in the branch timeline. Both operations are kept together;
-    // if set_images_session_id fails we log a warning rather than aborting the
-    // session, since the message was already persisted.
-    if let Some(ref queued_message_id) = config.queued_message_id {
-        store
-            .add_session_message_with_images_from_queue(
-                &config.session_id,
-                MessageRole::User,
-                &config.prompt,
-                &config.image_ids,
-                queued_message_id,
-            )
-            .map_err(|e| format!("Failed to persist queued user message: {e}"))?
-    } else {
-        store
-            .add_session_message_with_images(
-                &config.session_id,
-                MessageRole::User,
-                &config.prompt,
-                &config.image_ids,
-            )
-            .map_err(|e| format!("Failed to persist user message: {e}"))?
-    };
-
-    if !config.image_ids.is_empty() {
-        if let Err(e) = store.set_images_session_id(&config.image_ids, &config.session_id) {
-            log::warn!(
-                "Failed to associate images {:?} with session {}: {e}. \
-                 Images may appear orphaned in the branch timeline.",
-                config.image_ids,
-                config.session_id
-            );
-        }
-    }
-
-    let cancel_token = registry.register(&config.session_id);
 
     // The agent protocol may use !Send futures, so we spin up a dedicated
     // thread with its own single-threaded Tokio runtime + LocalSet.
@@ -4360,6 +4408,53 @@ mod tests {
         assert_eq!(
             registry.cancellation_completion_reason("session-running"),
             Some(CompletionReason::ProjectSessionInterrupted)
+        );
+    }
+
+    /// The shutdown path cancelling its registry snapshot while a session's
+    /// driver is still constructing: the session is registered for the whole
+    /// startup, so the cancel fires the token startup hands to the session
+    /// thread, and the reason survives for the terminal write.
+    #[test]
+    fn register_for_startup_makes_the_session_cancellable_during_startup() {
+        let registry = SessionRegistry::new();
+
+        let (token, ()) = registry
+            .register_for_startup("session-starting", || {
+                assert!(registry.is_running("session-starting"));
+                assert!(registry
+                    .cancel_with_completion_reason("session-starting", CompletionReason::AppQuit));
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(token.is_cancelled());
+        assert!(
+            registry.is_running("session-starting"),
+            "a successful startup must stay registered for its session thread to deregister"
+        );
+        assert_eq!(
+            registry.cancellation_completion_reason("session-starting"),
+            Some(CompletionReason::AppQuit)
+        );
+    }
+
+    /// A failed startup never spawns the session thread that normally
+    /// deregisters, so the failure path has to deregister itself — a stale
+    /// entry would hold shutdown's `wait_for_sessions` open for its full
+    /// budget on a session that can never stop.
+    #[test]
+    fn register_for_startup_deregisters_when_startup_fails() {
+        let registry = SessionRegistry::new();
+
+        let result: Result<(CancellationToken, ()), String> =
+            registry.register_for_startup("session-failing", || Err("no agent found".to_string()));
+
+        assert_eq!(result.unwrap_err(), "no agent found");
+        assert!(!registry.is_running("session-failing"));
+        assert!(
+            registry.wait_for_sessions(&["session-failing".to_string()], Duration::ZERO),
+            "shutdown must not wait on a session whose startup failed"
         );
     }
 

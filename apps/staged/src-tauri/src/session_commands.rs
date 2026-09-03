@@ -3374,14 +3374,18 @@ async fn start_queued_session_for_branch(
     // Last look before the spawn. The gates above leave real awaits between
     // themselves and `start_session` (context building, `review_tip_sha`,
     // `commit_pre_head_sha`, the remote workdir resolve) — room for a whole
-    // shutdown to start. From here the path is synchronous, and
-    // `start_session` registers the session's cancellation token before any
-    // child spawns, so the losing interleaving narrows to a shutdown
-    // publishing `quit_in_progress` and snapshotting the registry inside the
-    // few statements between this load and that registration. Bailing here
-    // deliberately strands the claim: a row left `running` under our pid is
-    // exactly what the sweep's ownership-aware CAS puts right, while a
-    // spawned child is what nothing puts right.
+    // shutdown to start. `start_session` registers the session's cancellation
+    // token at entry, before the slow driver construction (login-shell binary
+    // probes — seconds, not statements), so past that registration a shutdown
+    // finds the session in its snapshot: the cancel fires the token, the
+    // connect path checks it before protocol setup, and the child it spawned
+    // is stopped by the connection teardown the exit waits on. The losing
+    // interleaving narrows to a shutdown publishing `quit_in_progress` and
+    // snapshotting the registry inside the few statements between this load
+    // and that registration — the status emit below and the call itself.
+    // Bailing here deliberately strands the claim: a row left `running` under
+    // our pid is exactly what the sweep's ownership-aware CAS puts right,
+    // while a spawned child is what nothing puts right.
     if crate::app_lifecycle::is_quitting(&app_handle) {
         return Ok(false);
     }

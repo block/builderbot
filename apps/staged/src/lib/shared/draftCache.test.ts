@@ -10,6 +10,7 @@ vi.mock('./persistentStore', () => ({
   deleteStoreValue: vi.fn(async (key: string) => {
     store.delete(key);
   }),
+  listStoreKeys: vi.fn(async () => [...store.keys()]),
 }));
 
 import {
@@ -18,6 +19,7 @@ import {
   DRAFT_WRITE_DEBOUNCE_MS,
   loadDraft,
   saveDraft,
+  sweepExpiredDrafts,
 } from './draftCache';
 
 describe('draft cache', () => {
@@ -56,6 +58,45 @@ describe('draft cache', () => {
 
     await expect(loadDraft('draft:first', 5_001)).resolves.toBe('first');
     await expect(loadDraft('draft:second', 5_001)).resolves.toBe('second');
+  });
+});
+
+describe('expired draft sweep', () => {
+  beforeEach(() => {
+    store.clear();
+  });
+
+  it('deletes expired drafts whose owner is gone and keeps live ones', async () => {
+    const now = 10_000;
+    await saveDraft('draft:session-reply:deleted-session', 'orphaned', now);
+    await saveDraft('draft:session-reply:live-session', 'still typing', now + DRAFT_TTL_MS);
+
+    const deleted = await sweepExpiredDrafts(now + DRAFT_TTL_MS);
+
+    expect(deleted).toBe(1);
+    expect(store.has('draft:session-reply:deleted-session')).toBe(false);
+    expect(store.get('draft:session-reply:live-session')).toMatchObject({ value: 'still typing' });
+  });
+
+  it('leaves keys outside the draft namespace alone', async () => {
+    await saveDraft('draft:branch-session:b1:commit', 'old', 1_000);
+    store.set('branch-prefix', 'matt/');
+    store.set('app-mode', 'dark');
+
+    const deleted = await sweepExpiredDrafts(1_000 + DRAFT_TTL_MS);
+
+    expect(deleted).toBe(1);
+    expect(store.get('branch-prefix')).toBe('matt/');
+    expect(store.get('app-mode')).toBe('dark');
+  });
+
+  it('drops unparseable entries under the draft namespace', async () => {
+    store.set('draft:project-session:p1', 'written by an older format');
+
+    const deleted = await sweepExpiredDrafts(20_000);
+
+    expect(deleted).toBe(1);
+    expect(store.has('draft:project-session:p1')).toBe(false);
   });
 });
 

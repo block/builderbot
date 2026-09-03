@@ -296,10 +296,21 @@
       (commitPrefill && prompt === commitPrefill) || (notePrefill && prompt === notePrefill);
     const userDraft = isPromptPrefill ? '' : prompt;
     const previousMode = currentMode;
+    // A switch already in flight has saved its own outgoing mode's draft and is
+    // about to replace `prompt` with the incoming mode's text. Until that lands,
+    // `prompt` still holds *that* switch's outgoing text while `currentMode` has
+    // already moved on — so saving here would file one mode's draft under
+    // another mode's key (⌘1→⌘2→⌘3 in quick succession).
+    const switchInFlight = switchingMode;
     const generation = ++modeSwitchGeneration;
 
-    await onDraftChange?.({ prompt: userDraft, mode: previousMode, imageIds }, { immediate: true });
-    if (generation !== modeSwitchGeneration) return;
+    if (!switchInFlight) {
+      await onDraftChange?.(
+        { prompt: userDraft, mode: previousMode, imageIds },
+        { immediate: true }
+      );
+      if (generation !== modeSwitchGeneration) return;
+    }
 
     switchingMode = true;
     currentMode = newMode;

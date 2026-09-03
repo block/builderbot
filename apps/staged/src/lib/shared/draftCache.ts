@@ -1,4 +1,4 @@
-import { deleteStoreValue, getStoreValue, setStoreValue } from './persistentStore';
+import { deleteStoreValue, getStoreValue, listStoreKeys, setStoreValue } from './persistentStore';
 
 export type DraftEntry = {
   value: string;
@@ -6,6 +6,8 @@ export type DraftEntry = {
   expiresAt: number;
 };
 
+/** Namespace every draft key shares, so expired entries can be swept. */
+export const DRAFT_KEY_PREFIX = 'draft:';
 export const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const DRAFT_WRITE_DEBOUNCE_MS = 350;
 
@@ -46,6 +48,32 @@ export async function saveDraft(key: string, value: string, now = Date.now()): P
 
 export async function clearDraft(key: string): Promise<void> {
   await deleteStoreValue(key);
+}
+
+/**
+ * Delete every expired `draft:*` entry from the store.
+ *
+ * `loadDraft` only expires the one key it reads, and draft keys are scoped to a
+ * session/branch/project id — so once the owner is deleted its key is never
+ * read again and the user's text would sit in `~/.staged/preferences.json`
+ * forever, next to real preferences. Sweeping at startup bounds that to the
+ * TTL. Entries under the namespace that no longer parse as drafts are dropped
+ * too; `loadDraft` already treats them as absent.
+ *
+ * Returns the number of keys deleted.
+ */
+export async function sweepExpiredDrafts(now = Date.now()): Promise<number> {
+  const keys = (await listStoreKeys()).filter((key) => key.startsWith(DRAFT_KEY_PREFIX));
+
+  let deleted = 0;
+  for (const key of keys) {
+    const entry = await getStoreValue<unknown>(key);
+    if (isDraftEntry(entry) && entry.expiresAt > now) continue;
+    await deleteStoreValue(key);
+    deleted += 1;
+  }
+
+  return deleted;
 }
 
 export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {

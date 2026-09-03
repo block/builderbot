@@ -311,6 +311,36 @@
   function replyDraftKey(id: string): string {
     return `draft:session-reply:${id}`;
   }
+
+  /**
+   * Restore the cached reply draft for `id` into the composer.
+   *
+   * Flushes the writer before reading: bouncing between sessions faster than
+   * the write debounce (A → B → A) leaves A's newest keystrokes pending, and a
+   * direct store read would restore the stale value — which the save effect
+   * below would then write back, superseding the pending newer text.
+   */
+  async function loadReplyDraft(id: string, generation: number, textWhenLoadStarted: string) {
+    try {
+      await replyDraftWriter.flush();
+      const draft = await loadDraft(replyDraftKey(id));
+      if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
+      if (inputText === textWhenLoadStarted) {
+        inputText = draft ?? '';
+      }
+      loadedDraftSessionId = id;
+      await tick();
+      autoResize();
+    } catch (err) {
+      console.error('[SessionChatPane] Failed to load reply draft:', err);
+      // Leave the composer as the user left it, but re-enable saving so
+      // further keystrokes still reach the store.
+      if (generation === draftLoadGeneration && active && sessionId === id) {
+        loadedDraftSessionId = id;
+      }
+    }
+  }
+
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
   let modelSpecificFollowupConfig = $state<AcpConfigDiscovery | null>(null);
   let modelSpecificFollowupModelValue = $state<string | null>(null);
@@ -778,14 +808,7 @@
     const generation = ++draftLoadGeneration;
     const inputTextWhenLoadStarted = untrack(() => inputText);
     loadedDraftSessionId = null;
-    loadDraft(replyDraftKey(id)).then((draft) => {
-      if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
-      if (inputText === inputTextWhenLoadStarted) {
-        inputText = draft ?? '';
-      }
-      loadedDraftSessionId = id;
-      tick().then(() => autoResize());
-    });
+    void loadReplyDraft(id, generation, inputTextWhenLoadStarted);
   });
 
   $effect(() => {

@@ -62,6 +62,7 @@
   import { projectsDataStore } from './lib/stores/projectsData.svelte';
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
+  import { sweepExpiredDrafts } from './lib/shared/draftCache';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
@@ -469,6 +470,13 @@
 
     // Cache the BLOX_ENV value once at startup (process-level, never changes).
     initBloxEnv();
+
+    // Expire cached unsent drafts whose owning session/branch/project is gone —
+    // nothing ever reads those keys again, so only this sweep can clear them.
+    // Fire-and-forget: no view waits on it.
+    void sweepExpiredDrafts().catch((e) => {
+      console.error('Failed to sweep expired drafts:', e);
+    });
 
     // Restore persisted unread state and sync the dock badge.
     try {

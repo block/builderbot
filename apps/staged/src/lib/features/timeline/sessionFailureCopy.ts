@@ -20,6 +20,9 @@ export function failedArtifactSubtitle(
       return `Session stopped by project session — no ${noun} created`;
     case 'interrupted':
       return `Session stopped — no ${noun} created`;
+    case 'held_until_cap':
+    case 'hold_stopped':
+      return `Session stopped waiting on background work — no ${noun} created`;
     default:
       return `Session finished — no ${noun} created`;
   }

@@ -48,6 +48,7 @@
     AcpConfigSelection,
     AcpConfigValueSelection,
     Session,
+    SessionBackgroundHoldPayload,
     SessionMessage,
     QueuedSessionMessage,
     HashtagItem,
@@ -65,6 +66,7 @@
     getSession,
     getSessionAcpMetadataMessages,
     getSessionAcpMetadataMessagesSince,
+    getSessionBackgroundHold,
     getSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
@@ -73,6 +75,7 @@
     queueSessionMessage,
     resumeSession,
     sendQueuedSessionMessage,
+    stopSessionAsyncTask,
     type AcpConfigDiscovery,
     type AcpConfigSelector,
   } from '../../api/commands';
@@ -86,6 +89,17 @@
   } from '../agents/acpConfigSelection';
   import { setAcpConfigPref } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
+  import {
+    backgroundHoldTaskRows,
+    isTaskHeld,
+    knownSessionStatus,
+    liveActivityRow,
+    nextBackgroundHold,
+    pruneStoppingTaskIds,
+    pruneTaskStopNotices,
+    statusEventSupersededLoad,
+    type SessionBackgroundHold,
+  } from './backgroundHold';
   import {
     buildBranchHashtagItems,
     findHashtagItemForReference,
@@ -201,8 +215,30 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   let unlistenStatus: UnlistenFn | null = null;
+  let unlistenBackgroundHold: UnlistenFn | null = null;
   let statusEventVersion = 0;
   let closed = false;
+  /** Latest background hold reported for this session; null when not holding. */
+  let backgroundHold = $state<SessionBackgroundHold | null>(null);
+  /**
+   * Counts hold reports received by event, so the mount-time snapshot can tell
+   * whether a newer report landed while it was in flight.
+   */
+  let backgroundHoldReportVersion = 0;
+  /**
+   * Session whose `session.status` describes *this* open, rather than being
+   * left over from the last time the pane showed it — see `knownSessionStatus`.
+   * Cleared when a load starts, set when one resolves or a status event lands.
+   */
+  let statusLoadedForSessionId: string | null = null;
+  /** Per-task stops in flight, so each row disables its own button only. */
+  let stoppingTaskIds = $state<Set<string>>(new Set());
+  /**
+   * What a per-task stop answered, keyed by task id and rendered on that task's
+   * own row. Only outcomes the user can't see for themselves land here — see
+   * `noteTaskStopOutcome`.
+   */
+  let taskStopNotices = $state<Map<string, string>>(new Map());
 
   let inputText = $state('');
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
@@ -236,6 +272,13 @@
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
+  // Holding is a sub-state of running, so the session stays live and only the
+  // activity row changes: the wait plus its live task count, and a Stop that
+  // says what it stops.
+  let activityRow = $derived(liveActivityRow(isLive ? backgroundHold : null));
+  // One row per named live task (typed asyncTasks only — raw mode names
+  // nothing and keeps the bare count), each stoppable on its own.
+  let holdTaskRows = $derived(backgroundHoldTaskRows(isLive ? backgroundHold : null));
   let hasQueuedMessages = $derived(queuedMessages.length > 0);
   let noteFollowupLabel = $derived(getNoteFollowupLabel(session, messages, noteInfo));
   let assistantMarkdownContent = $derived(
@@ -570,6 +613,7 @@
     closed = true;
     stopPolling();
     unlistenStatus?.();
+    unlistenBackgroundHold?.();
   });
 
   // This pane can be mounted once and reused across opens (the `active` prop toggles
@@ -615,20 +659,26 @@
     const unlisten = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
       if (payload.sessionId !== id) return;
       statusEventVersion += 1;
-      session =
-        session?.id === id
-          ? {
-              ...session,
-              status: payload.status,
-              errorMessage: payload.errorMessage ?? session.errorMessage,
-              completionReason: payload.completionReason ?? session.completionReason,
-              updatedAt: Date.now(),
-            }
-          : session;
+      if (session?.id === id) {
+        session = {
+          ...session,
+          status: payload.status,
+          errorMessage: payload.errorMessage ?? session.errorMessage,
+          completionReason: payload.completionReason ?? session.completionReason,
+          updatedAt: Date.now(),
+        };
+        // Applying the payload makes the status current even mid-load, so a
+        // hold reported after it is judged against this rather than treated as
+        // unknown. (A payload for a session that isn't loaded is dropped, as
+        // it always was, and must not mark anything current.)
+        statusLoadedForSessionId = id;
+      }
       refreshQueuedMessages();
       if (payload.status === 'running') {
         startPolling();
       } else {
+        // A terminal status ends any wait: the agent has been torn down.
+        clearBackgroundHold();
         stopPolling();
       }
     });
@@ -639,6 +689,92 @@
       unlistenStatus = null;
     };
   });
+
+  // The session stays `running` while its agent is held open for background
+  // work, so the wait arrives on its own event rather than as a status change.
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) return;
+
+    backgroundHold = null;
+    stoppingTaskIds = new Set();
+    taskStopNotices = new Map();
+    const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
+      'session-background-hold',
+      (payload) => {
+        if (payload.sessionId !== id) return;
+        backgroundHoldReportVersion += 1;
+        applyBackgroundHold(id, payload);
+      },
+      {
+        // The event above is emitted on change, so a pane mounting mid-hold
+        // has already missed every report for it — with one long task, that is
+        // the entire wait. Ask for the current hold, from inside the hook that
+        // says this listener is live: the backend records the retained
+        // snapshot before it emits, so with the listener up first, every
+        // report is either contained in the answer below or delivered as an
+        // event. Nothing can fall between. Requesting beside the
+        // `listenToEvent` call instead would leave the registration window
+        // (a `listen()` roundtrip on Tauri, a connecting socket on web) as a
+        // hole this guard cannot see.
+        //
+        // The overlap is arbitrated by the version: a live report that lands
+        // while the request is in flight wins, being newer by definition. It
+        // is captured per fire rather than once — the hook fires again on
+        // every web reconnect, and a version captured at effect time would be
+        // permanently behind by then, discarding every later snapshot.
+        onEstablished: () => {
+          const versionAtEstablished = backgroundHoldReportVersion;
+          getSessionBackgroundHold(id)
+            .then((snapshot) => {
+              if (closed || sessionId !== id) return;
+              if (backgroundHoldReportVersion !== versionAtEstablished) return;
+              applyBackgroundHold(id, snapshot);
+            })
+            .catch(() => {
+              // Best-effort catch-up: the next report still paints the wait.
+            });
+        },
+      }
+    );
+    unlistenBackgroundHold = unlisten;
+
+    return () => {
+      unlistenBackgroundHold?.();
+      unlistenBackgroundHold = null;
+    };
+  });
+
+  /**
+   * Adopt a hold reported for `id` — from the event or the mount-time snapshot
+   * — and reconcile the per-task stops in flight against it. A stop stays
+   * marked until its row leaves the reported set, which is what proves it took.
+   *
+   * The report is judged against the session's status only when that status is
+   * known to be this open's: a pane reopened on a session it already showed
+   * still carries the status from last time until its load resolves, and
+   * mistaking that for the current one would discard the very hold the
+   * mounting pane just asked for.
+   */
+  function applyBackgroundHold(id: string, report: SessionBackgroundHold) {
+    backgroundHold = nextBackgroundHold(
+      report,
+      knownSessionStatus(id, session, statusLoadedForSessionId)
+    );
+    const pruned = pruneStoppingTaskIds(stoppingTaskIds, backgroundHold);
+    // Pruning only ever removes, so a size match means nothing changed.
+    if (pruned.size !== stoppingTaskIds.size) stoppingTaskIds = pruned;
+    const prunedNotices = pruneTaskStopNotices(taskStopNotices, backgroundHold);
+    if (prunedNotices.size !== taskStopNotices.size) taskStopNotices = prunedNotices;
+  }
+
+  /** Withdraw the wait: no hold, and no per-task stop left to be in flight. */
+  function clearBackgroundHold() {
+    backgroundHold = null;
+    if (stoppingTaskIds.size > 0) stoppingTaskIds = new Set();
+    if (taskStopNotices.size > 0) taskStopNotices = new Map();
+  }
 
   function isComposerFocused(): boolean {
     return document.activeElement === inputEl;
@@ -667,6 +803,11 @@
     }
     loading = true;
     error = null;
+    // Whatever `session.status` says right now predates this load: on a reopen
+    // it is the status from the last time the pane showed this session. Nobody
+    // may judge a hold report against it until the load below replaces it.
+    statusLoadedForSessionId = null;
+    const statusVersionBeforeFetch = statusEventVersion;
     try {
       const [s, msgsResult, acpMsgs, queued] = await Promise.all([
         getSession(sessionId),
@@ -679,7 +820,21 @@
         error = 'Session not found';
         return;
       }
-      session = s;
+      // A status event applied to this session mid-fetch is newer than what
+      // these queries read, so adopting `s` would revert the status *and* mark
+      // the reverted value current for this open — the marker the hold's
+      // freshness guard trusts. Leave both to the event, which set them itself.
+      // The rest of the row is skipped with them, the same trade the poll path
+      // makes; a session left running is re-fetched by the poll it just started.
+      if (!statusEventSupersededLoad(statusVersionBeforeFetch, statusEventVersion, session, s.id)) {
+        session = s;
+        statusLoadedForSessionId = s.id;
+      }
+      // A hold reported while the status was unknown was kept on trust; now
+      // that the real status is in, re-judge it — a snapshot answered for a
+      // session that had already finished would otherwise sit unrendered
+      // behind `isLive` until some later flip back to `running` surfaced it.
+      if (backgroundHold) applyBackgroundHold(s.id, backgroundHold);
       messages = msgsResult.data;
       queuedMessages = queued;
       if (msgsResult.revalidating) {
@@ -888,6 +1043,10 @@
         status: 'running',
         acpConfigSelection: acpConfigSelection ?? session.acpConfigSelection ?? null,
       };
+      // A new turn is starting: any hold reported belonged to the previous
+      // one, so drop it rather than letting this local flip back to `running`
+      // re-render the old wait in place of "Thinking…".
+      clearBackgroundHold();
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
@@ -946,6 +1105,8 @@
       await sendQueuedSessionMessage(id);
       await refreshQueuedMessages();
       if (session) session = { ...session, status: 'running' };
+      // The queued message starts a new turn — see sendMessage.
+      clearBackgroundHold();
       startPolling();
       scrollToBottom();
     } catch (e) {
@@ -968,6 +1129,71 @@
     } finally {
       cancelling = false;
     }
+  }
+
+  /**
+   * Stop one background task; the session keeps waiting on the rest. The row
+   * disappears via the hold report once the agent publishes the task's
+   * terminal state, and the button stays in-flight until then — clearing the
+   * mark when the request merely resolves would re-enable it for that gap,
+   * which reads as the stop not having taken.
+   *
+   * A `false` answer means the agent stopped nothing (unknown id, already
+   * finished, or a stop already in flight): un-mark the row and say so, since
+   * no terminal state may be coming to explain the button re-enabling.
+   */
+  async function handleStopTask(taskId: string) {
+    if (!session || stoppingTaskIds.has(taskId)) return;
+    stoppingTaskIds = new Set(stoppingTaskIds).add(taskId);
+    // A fresh click supersedes whatever the last one was told.
+    clearTaskStopNotice(taskId);
+    try {
+      const stopped = await stopSessionAsyncTask(session.id, taskId);
+      if (!stopped) {
+        unmarkStoppingTask(taskId);
+        noteTaskStopOutcome(
+          taskId,
+          "The agent didn't stop this task — it may have already finished."
+        );
+      }
+    } catch (e) {
+      unmarkStoppingTask(taskId);
+      noteTaskStopOutcome(taskId, `Stop failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * Report what a per-task stop answered, on the row it is about.
+   *
+   * Deliberately not `error`: that state replaces the entire transcript with a
+   * centered error card until the next load or send, which is a heavy penalty
+   * for the likeliest answer here (the task finished a moment before the
+   * click). The notice lives on its row instead, and dies with it.
+   *
+   * Nothing is said at all once the row has left the reported hold: the task
+   * terminated while the request was in flight — what the click asked for — so
+   * a "did not stop" line would contradict the row vanishing in front of the
+   * user.
+   */
+  function noteTaskStopOutcome(taskId: string, notice: string) {
+    if (!isTaskHeld(backgroundHold, taskId)) return;
+    taskStopNotices = new Map(taskStopNotices).set(taskId, notice);
+  }
+
+  /** Drop one row's stop notice. */
+  function clearTaskStopNotice(taskId: string) {
+    if (!taskStopNotices.has(taskId)) return;
+    const next = new Map(taskStopNotices);
+    next.delete(taskId);
+    taskStopNotices = next;
+  }
+
+  /** Re-enable one task row's stop button. */
+  function unmarkStoppingTask(taskId: string) {
+    if (!stoppingTaskIds.has(taskId)) return;
+    const next = new Set(stoppingTaskIds);
+    next.delete(taskId);
+    stoppingTaskIds = next;
   }
 
   // =========================================================================
@@ -2001,15 +2227,19 @@
         {/each}
 
         {#if isLive}
-          <div class="thinking" in:messageSlide>
+          <div
+            class="thinking"
+            class:thinking-waiting={activityRow.waitingOnBackground}
+            in:messageSlide
+          >
             <Spinner size={14} />
-            <span>Thinking…</span>
+            <span>{activityRow.label}</span>
             <Button
               variant="destructive"
               size="sm"
               class="ml-auto"
-              title="Stop session"
-              aria-label="Stop session"
+              title={activityRow.stopLabel}
+              aria-label={activityRow.stopLabel}
               onclick={handleCancel}
               disabled={cancelling}
             >
@@ -2021,6 +2251,36 @@
               Stop
             </Button>
           </div>
+          {#each holdTaskRows as taskRow (taskRow.id)}
+            {@const stopNotice = taskStopNotices.get(taskRow.id)}
+            <div class="thinking thinking-waiting hold-task-row" in:messageSlide>
+              <span title={taskRow.description ?? undefined}>{taskRow.label}</span>
+              <Button
+                variant="outline"
+                size="sm"
+                class="ml-auto"
+                title={taskRow.stopLabel}
+                aria-label={taskRow.stopLabel}
+                onclick={() => handleStopTask(taskRow.id)}
+                disabled={stoppingTaskIds.has(taskRow.id)}
+              >
+                {#if stoppingTaskIds.has(taskRow.id)}
+                  <Spinner size={14} />
+                {:else}
+                  <CircleStop size={14} />
+                {/if}
+                Stop task
+              </Button>
+            </div>
+            <!-- Mounted with its row, empty until there is something to say:
+                 `role="status"` announces *changes* to a region already in the
+                 accessibility tree, so a region created in the same render as
+                 its text is the one screen readers miss — which would be
+                 exactly the answer the user clicked Stop for. -->
+            <div class="hold-task-notice" class:hold-task-notice-idle={!stopNotice} role="status">
+              {stopNotice ?? ''}
+            </div>
+          {/each}
         {/if}
 
         {#if noteFollowupLabel}
@@ -2634,6 +2894,43 @@
     color: var(--text-muted);
     font-size: var(--size-xs);
     padding: 4px 0;
+  }
+
+  /* Still running, but waiting on a background task rather than working —
+     called out so the wait (and its Stop) reads as a distinct state. */
+  .thinking-waiting {
+    color: var(--ui-warning);
+  }
+
+  /* A named task under the wait, with a stop of its own — indented so the
+     wait row above reads as the session-level state (and keeps the
+     session-level Stop). */
+  .hold-task-row {
+    padding-left: 22px;
+  }
+
+  /* What a per-task stop answered, under the row it is about — the agent
+     stopped nothing, or the request failed. On the row rather than in `error`,
+     which would replace the whole transcript with an error card for what is
+     usually just "that task had already finished". */
+  .hold-task-notice {
+    padding: 0 0 4px 22px;
+    color: var(--text-faint);
+    font-size: var(--size-xs);
+  }
+
+  /* With nothing to report the region stays mounted — that is what lets a
+     later notice be announced — but out of flow, so it adds neither height nor
+     one of the column's 12px gaps to a row that looks untouched. Hidden by
+     clipping rather than `display`/`visibility`, which would drop it from the
+     accessibility tree and undo the point. */
+  .hold-task-notice-idle {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 
   .note-followup-row {

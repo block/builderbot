@@ -36,6 +36,7 @@
 //! - All write paths in the background thread use `let _ =` or
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
@@ -51,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 use acp_client::{AgentRunOutcome, McpServer, McpServerHttp};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
-use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
+use crate::agent::{AcpDriver, MessageWriter};
 use crate::commit_reassociation::Reassociation;
 use crate::git::Span;
 use crate::shell_env::ShellEnvCache;
@@ -131,6 +132,79 @@ pub struct SessionStatusEvent {
     pub session_type: Option<String>,
 }
 
+/// Emitted while a *running* session is held open past turn end for background
+/// work (see [`emit_background_hold`]).
+///
+/// A presentational sub-state of `running`, not a status of its own: the
+/// frontend swaps its running indicator for "waiting on background task (N)"
+/// plus a stop affordance until `holding` goes false.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBackgroundHoldEvent {
+    pub session_id: String,
+    /// Whether the session is holding right now. False withdraws the wait —
+    /// a new turn took over, or the session is tearing down.
+    pub holding: bool,
+    /// Live background tasks the agent is reporting; 0 when not holding.
+    pub live_tasks: usize,
+    /// The live tasks by name, when the agent names them (typed asyncTasks
+    /// announce each spawn's metadata). Raw-mode connections only know the
+    /// count, so this stays empty and the frontend keeps the bare-count row.
+    pub tasks: Vec<SessionBackgroundHoldTask>,
+    pub branch_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
+/// One named background task in a [`SessionBackgroundHoldEvent`]. The id keys
+/// the per-task stop (`stop_session_async_task`); the rest is presentation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBackgroundHoldTask {
+    pub id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub output_file_path: Option<String>,
+}
+
+/// The hold a session is reporting right now, as `get_session_background_hold`
+/// answers it.
+///
+/// [`SessionBackgroundHoldEvent`] is emitted on *change*, so a pane that mounts
+/// mid-hold — a reloaded window, a newly opened peer window, a pane switched
+/// back to — has already missed every report and would render a plain
+/// "Thinking…" until the task set next changes (with one long task, that is the
+/// whole wait). This is the same payload minus the routing context, so a pane
+/// renders the snapshot exactly as it would have rendered the event it missed.
+///
+/// The cleared default (`holding: false`) is the answer for a session that
+/// isn't running, isn't holding, or has never connected.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBackgroundHoldSnapshot {
+    pub holding: bool,
+    pub live_tasks: usize,
+    pub tasks: Vec<SessionBackgroundHoldTask>,
+}
+
+impl From<acp_client::BackgroundHoldStatus> for SessionBackgroundHoldSnapshot {
+    fn from(status: acp_client::BackgroundHoldStatus) -> Self {
+        Self {
+            holding: status.holding,
+            live_tasks: status.live_tasks,
+            tasks: status
+                .tasks
+                .into_iter()
+                .map(|task| SessionBackgroundHoldTask {
+                    id: task.id,
+                    name: task.name,
+                    description: task.description,
+                    output_file_path: task.output_file_path,
+                })
+                .collect(),
+        }
+    }
+}
+
 // =============================================================================
 // Session registry — tracks running sessions for cancellation
 // =============================================================================
@@ -160,6 +234,17 @@ struct RegistryInner {
 struct RunningSession {
     token: CancellationToken,
     cancellation_completion_reason: std::sync::Mutex<Option<CompletionReason>>,
+    /// Per-task stop handle for the session's current ACP connection, set once
+    /// the connection is up (and replaced when a Pikchr correction
+    /// re-connects). `None` until then, or for sessions that never connect
+    /// (e.g. externally registered ones).
+    async_task_stop: std::sync::Mutex<Option<acp_client::AsyncTaskStopHandle>>,
+    /// The last background hold the session's connection reported, so a client
+    /// that mounts mid-hold can ask for the wait it missed. The hold is
+    /// reported on change only; the driver reports the cleared default on the
+    /// way out of every hold, so this returns to "not holding" without needing
+    /// its own reset.
+    background_hold: std::sync::Mutex<acp_client::BackgroundHoldStatus>,
 }
 
 impl RunningSession {
@@ -199,6 +284,8 @@ impl SessionRegistry {
         let running_session = Arc::new(RunningSession {
             token: token.clone(),
             cancellation_completion_reason: std::sync::Mutex::new(None),
+            async_task_stop: std::sync::Mutex::new(None),
+            background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
         });
         let mut inner = self.inner.lock().unwrap();
         // If a cancellation arrived while this session was still starting up
@@ -288,6 +375,56 @@ impl SessionRegistry {
     /// Returns true if the given session is currently tracked as running.
     pub fn is_running(&self, session_id: &str) -> bool {
         self.inner.lock().unwrap().running.contains_key(session_id)
+    }
+
+    /// Store the per-task stop handle for `session_id`'s current ACP
+    /// connection, replacing the previous connection's handle (a Pikchr
+    /// correction re-connects on the same session).
+    fn set_async_task_stop_handle(
+        &self,
+        session_id: &str,
+        handle: acp_client::AsyncTaskStopHandle,
+    ) {
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.async_task_stop.lock().unwrap() = Some(handle);
+        }
+    }
+
+    /// The per-task stop handle for `session_id`'s current ACP connection —
+    /// `None` when the session isn't running or hasn't connected yet.
+    pub fn async_task_stop_handle(
+        &self,
+        session_id: &str,
+    ) -> Option<acp_client::AsyncTaskStopHandle> {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .and_then(|running| running.async_task_stop.lock().unwrap().clone())
+    }
+
+    /// Retain the hold `session_id`'s connection just reported, so a client
+    /// that mounts after it was emitted can still learn about the wait.
+    /// Recorded before the event is emitted, so a client reacting to the event
+    /// by querying can never read a staler answer than the one it reacted to.
+    fn record_background_hold(&self, session_id: &str, status: acp_client::BackgroundHoldStatus) {
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.background_hold.lock().unwrap() = status;
+        }
+    }
+
+    /// The hold `session_id` is reporting right now, as its last report left
+    /// it. The cleared default for a session that isn't running (deregistered
+    /// on exit), hasn't connected, or was never holding.
+    pub fn background_hold(&self, session_id: &str) -> acp_client::BackgroundHoldStatus {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .map(|running| running.background_hold.lock().unwrap().clone())
+            .unwrap_or_default()
     }
 
     /// Register a session whose work is driven outside `start_session` (e.g. a
@@ -392,6 +529,15 @@ pub struct SessionConfig {
     /// repo sessions started with `expected_outcome="child_note"` attach their
     /// note to this parent. `None` for non-project sessions.
     pub parent_project_note_id: Option<String>,
+    /// Post-turn background hold (session-lifetime feature gate). When set,
+    /// the agent connection is held open after each prompt resolves until its
+    /// background tasks drain (or the configured hard cap expires), and
+    /// post-completion hooks fire on that settled event instead of on the
+    /// prompt resolving. `None` preserves the legacy teardown-immediately
+    /// behavior; see [`crate::session_commands::default_background_hold`],
+    /// which every construction site derives this from and which is now `Some`
+    /// unless overridden.
+    pub background_hold: Option<acp_client::BackgroundHoldConfig>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -499,9 +645,40 @@ pub fn start_session(
             .build()
             .expect("Failed to create runtime for session");
 
+        // How the last connection settled, recorded by the session loop below
+        // so the terminal completion reason can distinguish a clean turn from a
+        // hold the cap truncated. `Cell` because the async block only ever
+        // borrows it immutably.
+        let settle_reason: Cell<Option<acp_client::SessionSettleReason>> = Cell::new(None);
+
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
-            let driver = driver.with_extra_env(config.extra_env.clone());
+            let driver = driver
+                .with_extra_env(config.extra_env.clone())
+                .with_background_hold(config.background_hold.clone())
+                // Publish the hold so the UI can show "waiting on background
+                // task (N)" — the session stays `running` throughout, so this
+                // is a sub-state of running, not a terminal status.
+                .with_background_hold_observer(config.background_hold.as_ref().map(|_| {
+                    let app_handle = app_handle.clone();
+                    let session_id = config.session_id.clone();
+                    let branch_id = config.branch_id.clone();
+                    let project_id = config.project_id.clone();
+                    let registry = Arc::clone(&registry);
+                    Arc::new(move |status: acp_client::BackgroundHoldStatus| {
+                        // Retain before emitting: the report is a change
+                        // delta, so a pane that mounts mid-hold (or reloads
+                        // under one) has to ask for the wait it missed.
+                        registry.record_background_hold(&session_id, status.clone());
+                        emit_background_hold(
+                            &app_handle,
+                            &session_id,
+                            status,
+                            branch_id.clone(),
+                            project_id.clone(),
+                        );
+                    }) as acp_client::BackgroundHoldObserver
+                }));
 
             // For local sessions, hand the driver two env snapshots:
             // - the home/global snapshot, sanitized and PATH-extended, used
@@ -706,11 +883,23 @@ pub fn start_session(
                 };
                 include_images = false;
 
-                let turn_result = driver
-                    .run(
+                // Open a session-scoped connection, then send this turn's
+                // prompt over it. Without a background hold the connection
+                // still tears the bridge process down as soon as the prompt
+                // resolves (so a connection serves exactly one turn); with
+                // one, the prompt resolves at hold entry while the bridge
+                // keeps serving background work, so wait for the settled
+                // event before doing anything downstream — Pikchr
+                // validation, post-completion hooks, and the terminal status
+                // must all fire on actual teardown, not on the prompt
+                // resolving.
+                //
+                // A Pikchr correction re-connects, so only the last
+                // connection's settle reason describes how the session ended.
+                settle_reason.set(None);
+                let turn_result = match driver
+                    .connect(
                         &config.session_id,
-                        &prompt,
-                        images,
                         &config.working_dir,
                         &store_trait,
                         &writer_trait,
@@ -718,7 +907,54 @@ pub fn start_session(
                         agent_session_id.as_deref(),
                         &selected_acp_config_options,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(mut connection) => {
+                        // Expose the connection's per-task stop where the
+                        // `stop_session_async_task` command (another thread)
+                        // can reach it; requests are only served while the
+                        // connection holds for background work.
+                        registry.set_async_task_stop_handle(
+                            &config.session_id,
+                            connection.async_task_stop_handle(),
+                        );
+                        let settled_rx = connection.take_settled_receiver();
+                        let turn_result = connection.prompt(&prompt, images).await;
+                        match settled_rx {
+                            Some(rx) => match rx.await {
+                                Ok(settled) => {
+                                    settle_reason.set(Some(settled.reason));
+                                    match settled.reason {
+                                        acp_client::SessionSettleReason::HeldUntilCap => {
+                                            log::warn!(
+                                                "Session {}: background hold cap expired before \
+                                                 quiescence; post-completion hooks run \
+                                                 best-effort",
+                                                config.session_id
+                                            );
+                                        }
+                                        acp_client::SessionSettleReason::HoldStopped => {
+                                            log::info!(
+                                                "Session {}: background hold stopped before \
+                                                 quiescence; the completed turn stands and \
+                                                 post-completion hooks run best-effort",
+                                                config.session_id
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                    settled.fold_turn_result(turn_result)
+                                }
+                                // The connection task died without settling;
+                                // the turn result is the best information
+                                // available.
+                                Err(_) => turn_result,
+                            },
+                            None => turn_result,
+                        }
+                    }
+                    Err(e) => Err(e),
+                };
 
                 if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
                     return turn_result;
@@ -804,10 +1040,21 @@ pub fn start_session(
                 ("cancelled", None, cancellation_completion_reason.clone())
             }
             Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
-            Ok(AgentRunOutcome::Completed) if cancel_token.is_cancelled() => {
+            // A cancel that landed on a turn which had already completed and
+            // held for its background work stopped only the *wait*. Fall
+            // through to the completed arm so the stop can't erase the turn's
+            // artifacts (commit detection, note generation, pr/push outcomes).
+            Ok(AgentRunOutcome::Completed)
+                if cancel_token.is_cancelled()
+                    && !completed_turn_survives_late_cancel(settle_reason.get()) =>
+            {
                 ("cancelled", None, cancellation_completion_reason.clone())
             }
-            Ok(AgentRunOutcome::Completed) => ("completed", None, CompletionReason::TurnComplete),
+            Ok(AgentRunOutcome::Completed) => (
+                "completed",
+                None,
+                completed_turn_completion_reason(settle_reason.get()),
+            ),
             Err(ref e) if cancel_token.is_cancelled() => {
                 log::info!(
                     "Session {session_id_for_status} cancelled (error during teardown: {e})"
@@ -829,6 +1076,11 @@ pub fn start_session(
 
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
+        //
+        // `result` only materializes once the connection *settles* (the agent
+        // is torn down) — under a background hold that is quiescence or the
+        // hold cap, not the prompt resolving — so a commit made by an
+        // out-of-turn background continuation is visible to these hooks.
         if completed_successfully {
             run_post_completion_hooks(
                 &config.session_id,
@@ -882,7 +1134,34 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            let should_drain_queued_message = completed_successfully;
+            // Read the token again rather than reusing what the terminal-state
+            // match saw, to catch a Stop that reached the registry before the
+            // `deregister` above but only fires the token after that match read
+            // it: `cancel_with_completion_reason` clones the
+            // `Arc<RunningSession>` out from under the registry lock and calls
+            // `apply_cancellation` after releasing it, so the flip can land any
+            // time after the clone — including once the session has left the
+            // map.
+            //
+            // A Stop landing *later* — during the seconds-long post-completion
+            // hooks, say — never reaches this token at all: `apply_cancellation`
+            // is only reachable through the registry map, and the session was
+            // deregistered before those hooks ran. Such a Stop takes
+            // `session_commands::cancel_session_impl`'s `!was_running` branch,
+            // writes `Cancelled` straight to the DB, and so makes
+            // `transition_from_running` above return false — it is
+            // `transitioned`, not this gate, that suppresses the follow-up over
+            // that longer window. Moving the deregister after the hooks would
+            // hand this gate that job instead.
+            //
+            // Naming the shared body rather than a command is the point: the
+            // Tauri command and the web dispatcher's `cancel_session` arm both
+            // route through it, so this holds whichever transport the Stop
+            // arrived on. A transport that cancelled through the registry alone
+            // would leave the row `running`, let the transition win, and drain
+            // the follow-up anyway.
+            let should_drain_queued_message =
+                queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
             let session_id_for_follow_up = session_id_for_status.clone();
             let action_executor_for_follow_up = config
                 .action_executor
@@ -1232,6 +1511,7 @@ pub fn start_pipeline_session(
                     // server (mcp_project_id is None above), so there is no parent
                     // project note for a `child_note` outcome to attach to.
                     parent_project_note_id: None,
+                    background_hold: crate::session_commands::default_background_hold(),
                 };
                 if let Err(e) = start_session(
                     ai_config,
@@ -2743,12 +3023,97 @@ fn run_post_completion_hooks(
     }
 }
 
+/// Completion reason for a session whose last turn completed, given how its
+/// agent connection settled.
+///
+/// A truncated wait is the one case a completed turn is *not* `TurnComplete`:
+/// background work was still unconfirmed when the wait was cut off — by the
+/// hard cap (`HeldUntilCap`), or by a Stop / agent exit during the hold
+/// (`HoldStopped`) — so the session records the truncation, resumable so the
+/// user can nudge it, while post-completion hooks still run best-effort.
+/// Every other way of settling (no hold at all, or a confirmed-quiescent one)
+/// is a clean turn.
+fn completed_turn_completion_reason(
+    settle_reason: Option<acp_client::SessionSettleReason>,
+) -> CompletionReason {
+    match settle_reason {
+        Some(acp_client::SessionSettleReason::HeldUntilCap) => CompletionReason::HeldUntilCap,
+        Some(acp_client::SessionSettleReason::HoldStopped) => CompletionReason::HoldStopped,
+        _ => CompletionReason::TurnComplete,
+    }
+}
+
+/// Whether a completed turn stays completed when a cancel is observed at
+/// teardown, rather than being recorded `cancelled`.
+///
+/// Settling is not instantaneous: after the connection reports its outcome the
+/// task still finalizes the writer and gracefully stops the child (seconds, for
+/// a remote session). A Stop pressed in that window cancels the token but has
+/// nothing left to stop — the turn finished and the hold already reached its
+/// own outcome. Recording `cancelled` there would erase a fully-drained turn's
+/// artifacts and skip its post-completion hooks: exactly what the background
+/// hold exists to prevent.
+///
+/// So every reason reached *through* a hold survives a late cancel:
+/// - `HoldStopped` — the connection settled knowing about the cancel; it
+///   applied to the wait, not the turn (a cancel during the hold can only
+///   settle this way, never `Quiescent`).
+/// - `Quiescent` — the background set drained and the agent confirmed idle.
+/// - `HeldUntilCap` — the cap truncated the wait before the cancel arrived.
+///
+/// `Immediate` (the connection tore down as the prompt resolved, so there was
+/// no hold) and a connection that never reported a settle reason keep the
+/// legacy semantics: they have no post-turn window of their own, and a cancel
+/// racing their teardown has always recorded `cancelled`.
+fn completed_turn_survives_late_cancel(
+    settle_reason: Option<acp_client::SessionSettleReason>,
+) -> bool {
+    matches!(
+        settle_reason,
+        Some(
+            acp_client::SessionSettleReason::Quiescent
+                | acp_client::SessionSettleReason::HeldUntilCap
+                | acp_client::SessionSettleReason::HoldStopped
+        )
+    )
+}
+
+/// Whether a finished turn should immediately start the next queued message.
+///
+/// Recording finished work and *starting new work* are separate decisions, so
+/// this is deliberately stricter than
+/// [`terminal_state_completed_successfully`] alone. Since a turn that held for
+/// background work survives a late cancel (see
+/// [`completed_turn_survives_late_cancel`]), a Stop pressed in the teardown
+/// window records `completed` — and a session with a queued follow-up would
+/// then launch it. From the user's side they pressed Stop on a session the UI
+/// still showed as running and got a new turn instead of a stop.
+///
+/// So the completed turn keeps everything it earned — its status, its hooks,
+/// its commit detection, its pr/push outcomes — and the Stop keeps its one
+/// meaning: no further work starts.
+fn queued_follow_up_should_start(completed_successfully: bool, cancel_requested: bool) -> bool {
+    completed_successfully && !cancel_requested
+}
+
+/// Whether a terminal state is "the agent did the work" — the gate for
+/// post-completion hooks, auto-review, and (with
+/// [`queued_follow_up_should_start`] on top) draining a queued follow-up.
+///
+/// `HeldUntilCap` and `HoldStopped` count: the turn itself completed and only
+/// the *wait* for its background work was truncated, so artifacts it produced
+/// are still worth detecting (best-effort, per the background-hold plan).
 fn terminal_state_completed_successfully(
     status: &str,
     completion_reason: &CompletionReason,
 ) -> bool {
     status == SessionStatus::Completed.as_str()
-        && *completion_reason == CompletionReason::TurnComplete
+        && matches!(
+            completion_reason,
+            CompletionReason::TurnComplete
+                | CompletionReason::HeldUntilCap
+                | CompletionReason::HoldStopped
+        )
 }
 
 /// Extract note content from a single assistant message.
@@ -3224,6 +3589,40 @@ fn emit_status(
     crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
 
+/// Emit a `session-background-hold` event: the session is (or is no longer)
+/// held open past turn end for background work.
+///
+/// Deliberately *not* a status change — the session stays `running` while it
+/// holds, so this only carries the presentational sub-state the frontend
+/// renders in place of its running indicator ("waiting on background task
+/// (N)", with a stop affordance). Keeping it off `SessionStatus` avoids a
+/// schema migration for a state that is never terminal.
+///
+/// Emitted on *change*, so a client that wasn't listening yet asks for the
+/// current hold instead — see [`SessionBackgroundHoldSnapshot`].
+fn emit_background_hold(
+    app_handle: &AppHandle,
+    session_id: &str,
+    status: acp_client::BackgroundHoldStatus,
+    branch_id: Option<String>,
+    project_id: Option<String>,
+) {
+    let SessionBackgroundHoldSnapshot {
+        holding,
+        live_tasks,
+        tasks,
+    } = status.into();
+    let event = SessionBackgroundHoldEvent {
+        session_id: session_id.to_string(),
+        holding,
+        live_tasks,
+        tasks,
+        branch_id,
+        project_id,
+    };
+    crate::web_server::emit_to_all(app_handle, "session-background-hold", &event);
+}
+
 /// Emit a `session-status-changed` event with `"running"` status and branch/project
 /// context. Called by the MCP tool when it starts a repo session on behalf of a project
 /// session, so the frontend can register the session in its state stores and refresh
@@ -3262,6 +3661,184 @@ mod tests {
             image_ids: vec![],
             acp: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_cap_truncated_hold_completes_with_its_own_reason() {
+        use acp_client::SessionSettleReason;
+
+        assert_eq!(
+            completed_turn_completion_reason(Some(SessionSettleReason::HeldUntilCap)),
+            CompletionReason::HeldUntilCap
+        );
+        // A stop (or agent exit) during the hold truncates the wait the same
+        // way — the turn completed, only its background work went unconfirmed.
+        assert_eq!(
+            completed_turn_completion_reason(Some(SessionSettleReason::HoldStopped)),
+            CompletionReason::HoldStopped
+        );
+        // Teardown right after the prompt (no hold), a confirmed-quiescent
+        // hold, and a connection that never reported a settle reason are all
+        // clean turns.
+        for settle in [
+            None,
+            Some(SessionSettleReason::Immediate),
+            Some(SessionSettleReason::Quiescent),
+        ] {
+            assert_eq!(
+                completed_turn_completion_reason(settle),
+                CompletionReason::TurnComplete,
+                "{settle:?} should be a clean turn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cap_truncated_hold_still_runs_post_completion_hooks() {
+        // The turn completed; only the wait for its background work was cut
+        // short, so artifacts it produced are still worth detecting.
+        assert!(terminal_state_completed_successfully(
+            "completed",
+            &CompletionReason::HeldUntilCap
+        ));
+        assert!(terminal_state_completed_successfully(
+            "completed",
+            &CompletionReason::HoldStopped
+        ));
+        assert!(terminal_state_completed_successfully(
+            "completed",
+            &CompletionReason::TurnComplete
+        ));
+        for reason in [
+            CompletionReason::Interrupted,
+            CompletionReason::ProjectSessionInterrupted,
+            CompletionReason::Crashed,
+            CompletionReason::AppQuit,
+            CompletionReason::Unknown,
+        ] {
+            assert!(
+                !terminal_state_completed_successfully("completed", &reason),
+                "{reason:?} is not a successful turn"
+            );
+        }
+        assert!(!terminal_state_completed_successfully(
+            "cancelled",
+            &CompletionReason::HeldUntilCap
+        ));
+    }
+
+    #[test]
+    fn a_turn_that_settled_after_holding_survives_a_cancel_at_teardown() {
+        use acp_client::SessionSettleReason;
+
+        // Every reason reached through a hold: a Stop landing in the teardown
+        // window can't turn a finished, drained turn into a cancellation.
+        for settle in [
+            SessionSettleReason::HoldStopped,
+            SessionSettleReason::Quiescent,
+            SessionSettleReason::HeldUntilCap,
+        ] {
+            assert!(
+                completed_turn_survives_late_cancel(Some(settle)),
+                "{settle:?} settled after a real hold and must survive a late cancel"
+            );
+        }
+    }
+
+    #[test]
+    fn a_turn_that_never_held_keeps_the_legacy_cancel_semantics() {
+        use acp_client::SessionSettleReason;
+
+        // No hold means no post-turn window of its own, so a cancel racing
+        // teardown still records `cancelled` — as it did before the hold.
+        assert!(!completed_turn_survives_late_cancel(Some(
+            SessionSettleReason::Immediate
+        )));
+        // A connection that died without settling reported nothing to trust.
+        assert!(!completed_turn_survives_late_cancel(None));
+    }
+
+    #[test]
+    fn a_stop_at_teardown_keeps_the_turn_but_starts_no_queued_follow_up() {
+        use acp_client::SessionSettleReason;
+
+        // A held turn that settled cleanly and then caught a Stop in the
+        // teardown window: it still records as a completed, hook-running turn…
+        let settle = Some(SessionSettleReason::Quiescent);
+        assert!(completed_turn_survives_late_cancel(settle));
+        let completed_successfully = terminal_state_completed_successfully(
+            "completed",
+            &completed_turn_completion_reason(settle),
+        );
+        assert!(completed_successfully);
+        // …but the Stop still means "no more work": the queued message waits
+        // for the user to send it rather than opening a turn they didn't ask
+        // for on a session the UI was still showing as running.
+        assert!(!queued_follow_up_should_start(completed_successfully, true));
+    }
+
+    #[test]
+    fn an_uncancelled_completed_turn_still_drains_its_queued_follow_up() {
+        // The ordinary path is untouched: every completion the hooks run for
+        // keeps draining, including a turn whose background wait was truncated.
+        for reason in [
+            CompletionReason::TurnComplete,
+            CompletionReason::HeldUntilCap,
+            CompletionReason::HoldStopped,
+        ] {
+            let completed_successfully =
+                terminal_state_completed_successfully("completed", &reason);
+            assert!(
+                queued_follow_up_should_start(completed_successfully, false),
+                "{reason:?} completed the turn, so its queued follow-up should start"
+            );
+        }
+        // And a turn that didn't complete never drained, cancel or no cancel.
+        for cancel_requested in [false, true] {
+            assert!(!queued_follow_up_should_start(false, cancel_requested));
+        }
+    }
+
+    #[test]
+    fn every_completed_settle_reason_agrees_on_the_reason_it_records() {
+        use acp_client::SessionSettleReason;
+
+        // The two helpers are read together in the terminal-state match, so a
+        // reason exempted from the late cancel must also name a completed
+        // turn — an exemption that recorded `interrupted` would be incoherent.
+        let mut exempted = 0;
+        for settle in [
+            SessionSettleReason::Immediate,
+            SessionSettleReason::Quiescent,
+            SessionSettleReason::HeldUntilCap,
+            SessionSettleReason::HoldStopped,
+        ] {
+            if completed_turn_survives_late_cancel(Some(settle)) {
+                exempted += 1;
+                assert!(
+                    terminal_state_completed_successfully(
+                        "completed",
+                        &completed_turn_completion_reason(Some(settle))
+                    ),
+                    "{settle:?} survives a late cancel, so its reason must run the hooks"
+                );
+            }
+        }
+        // Everything above is conditional on the exemption, so an emptied
+        // exemption set would satisfy the invariant vacuously. Count the
+        // reasons that took the branch — the three reached through a hold —
+        // so the test still fails if the exemption it describes goes away.
+        assert!(
+            exempted >= 3,
+            "expected every hold-reached reason to be exempt from the late cancel, found {exempted}"
+        );
+    }
+
+    #[test]
+    fn a_cap_truncated_hold_is_resumable_but_a_clean_turn_is_not() {
+        assert!(CompletionReason::HeldUntilCap.is_resumable());
+        assert!(CompletionReason::HoldStopped.is_resumable());
+        assert!(!CompletionReason::TurnComplete.is_resumable());
     }
 
     #[test]
@@ -3610,6 +4187,54 @@ mod tests {
             registry.cancellation_completion_reason("session-3"),
             Some(CompletionReason::Interrupted)
         );
+    }
+
+    #[test]
+    fn the_registry_answers_the_hold_a_pane_mounting_mid_hold_missed() {
+        let registry = SessionRegistry::new();
+        registry.register("session-holding");
+
+        // Nothing reported yet: not holding, so a pane mounting before the
+        // hold begins renders its usual running indicator.
+        assert!(!registry.background_hold("session-holding").holding);
+
+        let holding = acp_client::BackgroundHoldStatus {
+            holding: true,
+            live_tasks: 1,
+            tasks: vec![acp_client::BackgroundHoldTask {
+                id: "task-1".to_string(),
+                name: Some("Run the tests".to_string()),
+                description: None,
+                output_file_path: None,
+            }],
+        };
+        registry.record_background_hold("session-holding", holding.clone());
+
+        // The report is a change delta and the pane wasn't listening for it,
+        // so the retained answer is the whole wait — count and named tasks.
+        assert_eq!(registry.background_hold("session-holding"), holding);
+        let snapshot: SessionBackgroundHoldSnapshot =
+            registry.background_hold("session-holding").into();
+        assert!(snapshot.holding);
+        assert_eq!(snapshot.live_tasks, 1);
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.tasks[0].id, "task-1");
+        assert_eq!(snapshot.tasks[0].name.as_deref(), Some("Run the tests"));
+
+        // The driver reports the cleared default on the way out of every hold,
+        // so no separate reset is needed to stop advertising the wait.
+        registry.record_background_hold(
+            "session-holding",
+            acp_client::BackgroundHoldStatus::default(),
+        );
+        assert!(!registry.background_hold("session-holding").holding);
+
+        // A deregistered (finished) session, and one that never existed, both
+        // answer "not holding" rather than a not-found the client must handle.
+        registry.record_background_hold("session-holding", holding);
+        registry.deregister("session-holding");
+        assert!(!registry.background_hold("session-holding").holding);
+        assert!(!registry.background_hold("session-never-seen").holding);
     }
 
     #[test]

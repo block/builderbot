@@ -179,4 +179,16 @@ describe('sessionEndMessage', () => {
       'You stopped this session.'
     );
   });
+
+  it('explains a truncated background wait', () => {
+    expect(sessionEndMessage({ completionReason: 'held_until_cap' })).toBe(
+      'Staged stopped waiting for this session’s background work.'
+    );
+  });
+
+  it('explains a stopped background wait', () => {
+    expect(sessionEndMessage({ completionReason: 'hold_stopped' })).toBe(
+      'The wait for this session’s background work was stopped.'
+    );
+  });
 });

@@ -49,6 +49,12 @@ export function sessionEndMessage(current: Pick<Session, 'completionReason'>): s
   if (current.completionReason === 'interrupted') {
     return 'You stopped this session.';
   }
+  if (current.completionReason === 'held_until_cap') {
+    return 'Staged stopped waiting for this session’s background work.';
+  }
+  if (current.completionReason === 'hold_stopped') {
+    return 'The wait for this session’s background work was stopped.';
+  }
   return 'This session can be resumed.';
 }
 

@@ -405,4 +405,54 @@ mod tests {
         assert_eq!(boundaries[1].content, "new assistant text");
         assert_eq!(boundaries[1].acp_message_id.as_deref(), Some("msg-2"));
     }
+
+    #[test]
+    fn replay_boundaries_keep_a_background_continuation_out_of_the_turn_it_followed() {
+        // Text streamed while the session was held open for background work
+        // lands on its own ACP message id, so resuming the session replays two
+        // messages instead of one run-on assistant turn.
+        let continuation_id = "background-continuation-1";
+        let boundaries = replay_boundaries_from_messages(vec![
+            message(
+                1,
+                MessageRole::Assistant,
+                "build running",
+                Default::default(),
+            ),
+            message(
+                2,
+                MessageRole::Assistant,
+                "",
+                acp_text_chunk("agent_message_chunk", "msg-1", "build running"),
+            ),
+            message(
+                3,
+                MessageRole::Assistant,
+                "build finished",
+                Default::default(),
+            ),
+            message(
+                4,
+                MessageRole::Assistant,
+                "",
+                AcpMessageMetadata {
+                    acp_origin: Some("background-continuation:task-notification".to_string()),
+                    ..acp_text_chunk("agent_message_chunk", continuation_id, "build finished")
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            boundaries.len(),
+            2,
+            "the continuation must not coalesce into the turn: {boundaries:?}"
+        );
+        assert_eq!(boundaries[0].content, "build running");
+        assert_eq!(boundaries[0].acp_message_id.as_deref(), Some("msg-1"));
+        assert_eq!(boundaries[1].content, "build finished");
+        assert_eq!(
+            boundaries[1].acp_message_id.as_deref(),
+            Some(continuation_id)
+        );
+    }
 }

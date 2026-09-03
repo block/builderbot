@@ -384,22 +384,65 @@ export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'canc
 
 export type CompletionReason =
   | 'turn_complete'
+  /**
+   * The turn finished but the session was held open for background work, and
+   * the hold's hard cap expired before that work could be confirmed drained —
+   * the wait was truncated, so the session is worth nudging.
+   */
+  | 'held_until_cap'
+  /**
+   * The turn finished but the wait for its background work was stopped before
+   * it could be confirmed drained — the user pressed Stop mid-hold, or the
+   * agent process exited under it. Same truncated-wait semantics as
+   * `held_until_cap`.
+   */
+  | 'hold_stopped'
   | 'interrupted'
   | 'project_session_interrupted'
   | 'crashed'
   | 'app_quit'
   | 'unknown';
 
-/** Completion reasons that indicate a session can be resumed. */
+/**
+ * Completion reasons that indicate a session can be resumed.
+ *
+ * Mirrors `CompletionReason::is_resumable` in `src-tauri/src/store/models.rs`.
+ * `turn_complete` is absent on purpose: the agent said it was done.
+ */
 export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
   'crashed',
   'app_quit',
   'interrupted',
   'project_session_interrupted',
+  'held_until_cap',
+  'hold_stopped',
 ]);
 
 export function isResumableReason(reason: string | null | undefined): boolean {
   return !!reason && RESUMABLE_REASONS.has(reason as CompletionReason);
+}
+
+/**
+ * Completion reasons whose *turn* finished — the agent did the work, whatever
+ * happened to the wait that followed it.
+ *
+ * Mirrors `terminal_state_completed_successfully` in
+ * `src-tauri/src/session_runner.rs`, which is what gates the backend's own
+ * post-completion hooks. `held_until_cap` and `hold_stopped` belong here even
+ * though they are also resumable: the two sets deliberately overlap, because a
+ * truncated background wait leaves a turn both complete (its output is real)
+ * and worth nudging (its background work went unconfirmed). Use this — not an
+ * equality check against `turn_complete` — for anything gated on the agent
+ * having produced output.
+ */
+export const COMPLETED_TURN_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
+  'turn_complete',
+  'held_until_cap',
+  'hold_stopped',
+]);
+
+export function isCompletedTurnReason(reason: string | null | undefined): boolean {
+  return !!reason && COMPLETED_TURN_REASONS.has(reason as CompletionReason);
 }
 
 export interface AcpConfigValueSelection {
@@ -522,6 +565,32 @@ export interface SessionMessage {
   acpSessionInfo?: unknown;
   acpConfigOptions?: unknown;
   acpSessionModeState?: unknown;
+  /**
+   * Attribution for rows the agent produced outside a live user turn — a
+   * background continuation while the session was held open. Absent means the
+   * row belongs to a turn the user prompted.
+   *
+   * Only the ACP *metadata* rows carry it — the `content: ''` rows from
+   * `getSessionAcpMetadataMessages`, written alongside each chunk. The visible
+   * transcript row is appended separately and has no ACP metadata of its own,
+   * so reading this field off assistant text always yields `undefined`. To
+   * badge visible output as a continuation, join the text to its metadata row
+   * through `acpMessageId`; for a continuation that id is the synthesized
+   * `background-continuation-<n>` when the agent named no message of its own.
+   *
+   * The value is `background-continuation`, optionally refined with the
+   * bridge's own cycle kind and the name of the task that woke it
+   * (`background-continuation:task-notification:Run the tests`), so match on
+   * the `background-continuation` prefix rather than the whole string.
+   *
+   * The task name is the agent's — for a background shell it is the command —
+   * so it can contain colons of its own and may be a clipped prefix ending in
+   * `…`. Neither `split(':')` nor `split(':', 3)` reads it back (the latter
+   * drops everything past the third field rather than keeping it); match
+   * `/^([^:]+):([^:]+):(.*)$/` or slice at the second `indexOf(':')`. Treat
+   * the recovered name as a hint, not a key to match a task by.
+   */
+  acpOrigin?: string;
 }
 
 // =============================================================================
@@ -611,6 +680,51 @@ export interface PushCompletedPayload {
   branchId: string;
   sessionId: string;
   outcome: PushCompletedOutcome;
+}
+
+/**
+ * The background hold a session is reporting right now, as
+ * `get_session_background_hold` answers it.
+ *
+ * A presentational sub-state of `running`, not a status: the session stays
+ * `running` while its agent is held open past turn end for background work.
+ *
+ * The event below is emitted on *change*, so a pane that mounts mid-hold has
+ * already missed every report for it and asks for this instead — otherwise it
+ * would render a plain running indicator for the rest of the wait.
+ */
+export interface SessionBackgroundHoldSnapshot {
+  /** False withdraws the wait — a new turn took over, or teardown started. */
+  holding: boolean;
+  /** Live background tasks the agent is reporting; 0 when not holding. */
+  liveTasks: number;
+  /**
+   * The live tasks by name, when the agent names them (typed asyncTasks
+   * announce each spawn's metadata). Older bridges only report the count, so
+   * this stays empty and the wait renders as the bare-count row.
+   */
+  tasks: SessionBackgroundHoldTask[];
+}
+
+/**
+ * Payload emitted by the `session-background-hold` Tauri event: a
+ * `SessionBackgroundHoldSnapshot` plus the routing context clients filter on.
+ */
+export interface SessionBackgroundHoldPayload extends SessionBackgroundHoldSnapshot {
+  sessionId: string;
+  branchId?: string | null;
+  projectId?: string | null;
+}
+
+/**
+ * One named background task in a `SessionBackgroundHoldPayload`. The id keys
+ * the per-task stop (`stop_session_async_task`); the rest is presentation.
+ */
+export interface SessionBackgroundHoldTask {
+  id: string;
+  name?: string | null;
+  description?: string | null;
+  outputFilePath?: string | null;
 }
 
 // =============================================================================

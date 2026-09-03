@@ -9,7 +9,7 @@ const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at
     acp_event_kind, acp_protocol_version, acp_agent_capabilities, acp_auth_methods,
     acp_agent_info, acp_message_id, acp_tool_call_id, acp_tool_kind, acp_tool_status,
     acp_raw_input, acp_raw_output, acp_content, acp_locations, acp_usage,
-    acp_session_info, acp_config_options, acp_session_mode_state";
+    acp_session_info, acp_config_options, acp_session_mode_state, acp_origin";
 const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
 
 /// Parse a JSON array string into a Vec<String>, returning an empty vec on
@@ -63,6 +63,7 @@ fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
             acp_session_info: parse_json_value(row.get(20)?),
             acp_config_options: parse_json_value(row.get(21)?),
             acp_session_mode_state: parse_json_value(row.get(22)?),
+            acp_origin: row.get(23)?,
         },
     })
 }
@@ -236,8 +237,9 @@ impl Store {
                  acp_usage = COALESCE(?14, acp_usage),
                  acp_session_info = COALESCE(?15, acp_session_info),
                  acp_config_options = COALESCE(?16, acp_config_options),
-                 acp_session_mode_state = COALESCE(?17, acp_session_mode_state)
-             WHERE id = ?18",
+                 acp_session_mode_state = COALESCE(?17, acp_session_mode_state),
+                 acp_origin = COALESCE(?18, acp_origin)
+             WHERE id = ?19",
             params![
                 metadata.acp_event_kind.as_deref(),
                 metadata.acp_protocol_version.as_deref(),
@@ -256,6 +258,7 @@ impl Store {
                 session_info,
                 config_options,
                 session_mode_state,
+                metadata.acp_origin.as_deref(),
                 id
             ],
         )?;
@@ -301,9 +304,9 @@ impl Store {
                  acp_tool_call_id, acp_tool_kind, acp_tool_status,
                  acp_raw_input, acp_raw_output, acp_content, acp_locations,
                  acp_usage, acp_session_info, acp_config_options,
-                 acp_session_mode_state
+                 acp_session_mode_state, acp_origin
              )
-             VALUES (?1, ?2, '', ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+             VALUES (?1, ?2, '', ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 session_id,
                 role.as_str(),
@@ -324,7 +327,8 @@ impl Store {
                 usage,
                 session_info,
                 config_options,
-                session_mode_state
+                session_mode_state,
+                metadata.acp_origin.as_deref()
             ],
         )?;
         Ok(conn.last_insert_rowid())

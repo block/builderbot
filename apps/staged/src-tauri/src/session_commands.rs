@@ -64,7 +64,11 @@ enum RemotePikchrGrammarStaging {
 // consider extracting a shared `state.rs`.
 // =============================================================================
 
-fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
+/// Takes the store slot itself rather than the `tauri::State` wrapper, so the
+/// web dispatcher — which pulls the slot off the `AppHandle` and has no
+/// `State` to hand — can call the same shared command bodies. Command
+/// arguments deref-coerce, so `get_store(&store)` on a `State` is unchanged.
+fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
         .unwrap()
@@ -241,6 +245,92 @@ pub(crate) fn local_note_pikchr_tools_available(
     workspace_name: Option<&str>,
 ) -> bool {
     is_note_session && workspace_name.is_none()
+}
+
+/// Opt out of the post-turn background hold entirely (`0`/`false`/`no`/`off`),
+/// restoring the legacy teardown-on-prompt-resolve behavior.
+const BACKGROUND_HOLD_ENV: &str = "STAGED_BACKGROUND_HOLD";
+
+/// Override the background hold's hard cap, in seconds.
+const BACKGROUND_HOLD_CAP_SECS_ENV: &str = "STAGED_BACKGROUND_HOLD_CAP_SECS";
+
+/// Feature gate for the post-turn background hold
+/// (`SessionConfig::background_hold`).
+///
+/// When set, a session's agent connection is held open after each prompt
+/// resolves until its background tasks drain (or the hard cap expires), and
+/// post-completion hooks fire on that settled event — so a background shell's
+/// out-of-turn continuation, and any commit it makes, is no longer lost to the
+/// teardown that used to follow the prompt resolving.
+///
+/// On in every build: the managed bridge install floats on the npm latest and
+/// upgrades on every launch, so it is comfortably past the version that keys
+/// `tool_progress` and Bash terminal metadata to the announced tool-call id
+/// (claude-agent-acp #916/#917) — which is what the live background-task
+/// tracking the hold keys off reads.
+///
+/// Overridable without a rebuild, since a hold that misbehaves in the field
+/// needs an escape hatch that isn't "ship a new binary":
+/// - `STAGED_BACKGROUND_HOLD=0` (or `false`/`no`/`off`) disables it.
+/// - `STAGED_BACKGROUND_HOLD_CAP_SECS=<n>` replaces the 10-minute default cap.
+///
+/// Every `SessionConfig` construction site derives the value here so the policy
+/// lives in one place.
+pub(crate) fn default_background_hold() -> Option<acp_client::BackgroundHoldConfig> {
+    background_hold_from_overrides(
+        std::env::var(BACKGROUND_HOLD_ENV).ok().as_deref(),
+        std::env::var(BACKGROUND_HOLD_CAP_SECS_ENV).ok().as_deref(),
+    )
+}
+
+/// Resolve the background-hold config from raw override values.
+///
+/// Split out from [`default_background_hold`] so the policy is testable
+/// without mutating the process environment. An unparseable override is a
+/// typo, not an instruction: it is warned about and ignored, because guessing
+/// either way — silently disabling the hold, or silently uncapping it — is
+/// worse than the documented default.
+fn background_hold_from_overrides(
+    enabled: Option<&str>,
+    cap_secs: Option<&str>,
+) -> Option<acp_client::BackgroundHoldConfig> {
+    if let Some(raw) = enabled {
+        let value = raw.trim();
+        match value {
+            _ if value.eq_ignore_ascii_case("0")
+                || value.eq_ignore_ascii_case("false")
+                || value.eq_ignore_ascii_case("no")
+                || value.eq_ignore_ascii_case("off") =>
+            {
+                log::info!("{BACKGROUND_HOLD_ENV}={raw}: post-turn background hold disabled");
+                return None;
+            }
+            _ if value.eq_ignore_ascii_case("1")
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on") => {}
+            _ => log::warn!(
+                "Ignoring {BACKGROUND_HOLD_ENV}={raw}: expected one of 1/true/yes/on or 0/false/no/off"
+            ),
+        }
+    }
+
+    let mut config = acp_client::BackgroundHoldConfig::default();
+    if let Some(raw) = cap_secs {
+        match raw.trim().parse::<u64>() {
+            // A zero cap would tear the session down the instant it started
+            // holding — indistinguishable from disabling the feature, which
+            // BACKGROUND_HOLD_ENV already expresses unambiguously.
+            Ok(0) | Err(_) => log::warn!(
+                "Ignoring {BACKGROUND_HOLD_CAP_SECS_ENV}={raw}: expected a positive number of seconds"
+            ),
+            Ok(secs) => {
+                config.hold_cap = std::time::Duration::from_secs(secs);
+                log::info!("{BACKGROUND_HOLD_CAP_SECS_ENV}={raw}: background hold cap set to {secs}s");
+            }
+        }
+    }
+    Some(config)
 }
 
 fn pikchr_note_guidance(reference: &str, pikchr_tools_available: bool) -> String {
@@ -1108,6 +1198,7 @@ pub async fn start_session(
             project_id: None,
             expose_pikchr_tools: false,
             parent_project_note_id: None,
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -1365,6 +1456,7 @@ pub(crate) async fn resume_session_for_store(
             // When resuming a project session, keep its parent project note in
             // scope so `child_note` repo sessions still attach to it.
             parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+            background_hold: default_background_hold(),
         },
         Arc::clone(&store),
         app_handle,
@@ -1606,33 +1698,48 @@ pub(crate) fn build_note_followup_message_impl(
     ))
 }
 
-#[tauri::command]
-pub fn cancel_session(
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    app_handle: tauri::AppHandle,
-    session_id: String,
+/// A user Stop, for every transport that can carry one.
+///
+/// The registry is the fast path: a session whose cancellation token is
+/// registered gets it fired, and the session runner records the terminal state
+/// itself. The `!was_running` fallback covers the rest — a session that is
+/// `running` or `queued` in the store but has no live token to fire, either
+/// because it never started one or because it was deregistered before its
+/// terminal write. Without it the row would sit at `running` forever.
+///
+/// Both the `cancel_session` Tauri command and the web dispatcher's arm of the
+/// same name call this. They must not diverge: `session_runner` relies on this
+/// fallback's store write to make `transition_from_running` lose, which is what
+/// suppresses a queued follow-up when a Stop lands during the post-completion
+/// hooks (see the comment on that gate). A transport that cancelled through the
+/// registry alone would flip no token and write no status, so that Stop would
+/// be silently dropped and the follow-up would start anyway.
+pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
+    registry: &session_runner::SessionRegistry,
+    store: &Mutex<Option<Arc<Store>>>,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
 ) -> Result<(), String> {
-    let was_running = registry.cancel(&session_id);
+    let was_running = registry.cancel(session_id);
     if !was_running {
-        let store = get_store(&store)?;
-        if let Ok(Some(session)) = store.get_session(&session_id) {
+        let store = get_store(store)?;
+        if let Ok(Some(session)) = store.get_session(session_id) {
             if session.status == store::SessionStatus::Running
                 || session.status == store::SessionStatus::Queued
             {
                 let _ = store.update_session_status(
-                    &session_id,
+                    session_id,
                     store::SessionStatus::Cancelled,
                     None,
                     Some(&store::CompletionReason::Interrupted),
                 );
-                let branch_id = store.get_branch_id_for_session(&session_id).ok().flatten();
-                let project_id = store.get_project_id_for_session(&session_id).ok().flatten();
+                let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
+                let project_id = store.get_project_id_for_session(session_id).ok().flatten();
                 crate::web_server::emit_to_all(
-                    &app_handle,
+                    app_handle,
                     "session-status-changed",
                     session_runner::SessionStatusEvent {
-                        session_id: session_id.clone(),
+                        session_id: session_id.to_string(),
                         status: "cancelled".to_string(),
                         error_message: None,
                         completion_reason: Some("interrupted".to_string()),
@@ -1645,6 +1752,53 @@ pub fn cancel_session(
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_session(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<(), String> {
+    cancel_session_impl(&registry, &store, &app_handle, &session_id)
+}
+
+/// Stop one background task on a held session without cancelling the session
+/// itself — the hold then settles on its own quiescence path once the rest of
+/// the task set drains. Contrast `cancel_session`, which stops the whole wait.
+///
+/// Returns the agent's own `{stopped}` answer: `false` means it didn't stop
+/// the task (unknown id, already terminal, or a stop already in flight).
+/// Errors when the session has no connection to serve the stop or isn't
+/// holding for background work.
+#[tauri::command]
+pub async fn stop_session_async_task(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    session_id: String,
+    task_id: String,
+) -> Result<bool, String> {
+    let handle = registry
+        .async_task_stop_handle(&session_id)
+        .ok_or_else(|| "Session is not running".to_string())?;
+    handle.stop(&task_id).await
+}
+
+/// The background hold a session is reporting right now — the wait, its live
+/// task count, and the named tasks a client can stop one at a time.
+///
+/// `session-background-hold` is emitted on change, so a client that starts
+/// listening mid-hold (a reloaded window, a newly opened peer window, a pane
+/// switched back to) has missed every report for that hold and would show a
+/// plain running indicator for the rest of it. This is how it catches up.
+/// Answers the cleared default for a session that isn't running or isn't
+/// holding, so there is no not-found case to handle.
+#[tauri::command]
+pub fn get_session_background_hold(
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    session_id: String,
+) -> session_runner::SessionBackgroundHoldSnapshot {
+    registry.background_hold(&session_id).into()
 }
 
 #[tauri::command]
@@ -2326,6 +2480,7 @@ pub async fn start_project_session(
             // This project session's note is the parent for any `child_note`
             // repo sessions it spawns.
             parent_project_note_id: Some(note_id.clone()),
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -2720,6 +2875,7 @@ fn launch_running_branch_session(
             project_id: Some(project_id),
             expose_pikchr_tools,
             parent_project_note_id: None,
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -3242,6 +3398,7 @@ async fn start_queued_session_for_branch(
                 branch.workspace_name.as_deref(),
             ),
             parent_project_note_id: None,
+            background_hold: default_background_hold(),
         },
         store,
         app_handle,
@@ -5230,6 +5387,113 @@ mod tests {
         assert!(get_active_sessions_impl(&store).unwrap().is_empty());
     }
 
+    /// A mock app so [`cancel_session_impl`]'s status event has somewhere to
+    /// go. Nothing listens, so the emit is a no-op — the point is to drive the
+    /// real shared body rather than a test-only reimplementation of it.
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app")
+    }
+
+    fn cancel_through_shared_body(
+        registry: &session_runner::SessionRegistry,
+        store: &Arc<Store>,
+        session_id: &str,
+    ) {
+        let app = mock_app();
+        let slot = Mutex::new(Some(Arc::clone(store)));
+        cancel_session_impl(registry, &slot, app.handle(), session_id).unwrap();
+    }
+
+    /// The store-write fallback, exercised through the body the **web**
+    /// dispatcher calls — `web_server::dispatch`'s `cancel_session` arm hands
+    /// this function the registry, the store slot off the `AppHandle`, and the
+    /// session id, so this is that transport's cancel behaviour.
+    ///
+    /// It used to cancel through the registry alone, which for a session no
+    /// longer registered (deregistered before its post-completion hooks ran)
+    /// flipped no token and wrote no status. `session_runner` reads this write
+    /// back as a lost `transition_from_running`, which is what suppresses the
+    /// queued follow-up over that window — so without it the Stop was dropped
+    /// and the follow-up started anyway.
+    #[test]
+    fn cancelling_an_unregistered_session_records_the_stop_in_the_store() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = session_runner::SessionRegistry::new();
+        assert!(!registry.is_running(&session.id));
+
+        cancel_through_shared_body(&registry, &store, &session.id);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+    }
+
+    /// Same for a session still `queued`: it has no token either, and leaving
+    /// it would strand the row.
+    #[test]
+    fn cancelling_an_unregistered_queued_session_records_the_stop_in_the_store() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Queued);
+
+        cancel_through_shared_body(&session_runner::SessionRegistry::new(), &store, &session.id);
+
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Cancelled
+        );
+    }
+
+    /// The fallback is only for rows with no live token. A registered session
+    /// gets its token fired and its status left alone, so the session runner
+    /// still owns the terminal write.
+    #[test]
+    fn cancelling_a_registered_session_fires_the_token_and_leaves_the_status() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = Arc::new(session_runner::SessionRegistry::new());
+        let registration = registry.register_external(&session.id);
+
+        cancel_through_shared_body(&registry, &store, &session.id);
+
+        assert!(registration.token().is_cancelled());
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
+    /// A Stop that lands after the session already settled must not rewrite a
+    /// finished row as cancelled — the terminal-state match, not this, decides
+    /// how a completed turn is recorded.
+    #[test]
+    fn cancelling_an_already_terminal_session_leaves_it_completed() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        store
+            .update_session_status(
+                &session.id,
+                store::SessionStatus::Completed,
+                None,
+                Some(&store::CompletionReason::TurnComplete),
+            )
+            .unwrap();
+
+        cancel_through_shared_body(&session_runner::SessionRegistry::new(), &store, &session.id);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Completed);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::TurnComplete)
+        );
+    }
+
     #[test]
     fn branch_start_decision_queues_local_branch_without_workdir() {
         let (store, branch) = setup_branch_store();
@@ -7069,5 +7333,73 @@ mod tests {
             .expect("standalone note missing from branch history");
         assert!(!standalone_entry.content.contains("Child note"));
         assert!(!standalone_entry.content.contains("#project-note:"));
+    }
+
+    #[test]
+    fn background_hold_is_on_by_default_with_the_documented_cap() {
+        let config = background_hold_from_overrides(None, None)
+            .expect("background hold is enabled without overrides");
+
+        assert_eq!(config, acp_client::BackgroundHoldConfig::default());
+        assert_eq!(config.hold_cap, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn background_hold_env_can_disable_it() {
+        for raw in ["0", "false", "FALSE", "no", "off", " off "] {
+            assert_eq!(
+                background_hold_from_overrides(Some(raw), None),
+                None,
+                "{raw} should disable the hold"
+            );
+        }
+    }
+
+    #[test]
+    fn background_hold_env_can_enable_it_explicitly() {
+        for raw in ["1", "true", "TRUE", "yes", "on"] {
+            assert_eq!(
+                background_hold_from_overrides(Some(raw), None),
+                Some(acp_client::BackgroundHoldConfig::default()),
+                "{raw} should keep the hold enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn background_hold_env_ignores_unparseable_values() {
+        // A typo must not silently disable the feature.
+        assert_eq!(
+            background_hold_from_overrides(Some("maybe"), None),
+            Some(acp_client::BackgroundHoldConfig::default())
+        );
+    }
+
+    #[test]
+    fn background_hold_cap_override_replaces_the_default_cap() {
+        let config = background_hold_from_overrides(None, Some("90"))
+            .expect("cap override leaves the hold enabled");
+
+        assert_eq!(config.hold_cap, std::time::Duration::from_secs(90));
+        // Only the cap moves; the rest of the policy is untouched.
+        assert_eq!(
+            config.debounce,
+            acp_client::BackgroundHoldConfig::default().debounce
+        );
+    }
+
+    #[test]
+    fn background_hold_cap_override_ignores_zero_and_garbage() {
+        let default_cap = acp_client::BackgroundHoldConfig::default().hold_cap;
+        for raw in ["0", "-5", "soon", ""] {
+            let config = background_hold_from_overrides(None, Some(raw))
+                .expect("a bad cap must not disable the hold");
+            assert_eq!(config.hold_cap, default_cap, "{raw} should be ignored");
+        }
+    }
+
+    #[test]
+    fn background_hold_cap_override_is_not_read_when_disabled() {
+        assert_eq!(background_hold_from_overrides(Some("0"), Some("90")), None);
     }
 }

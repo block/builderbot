@@ -125,6 +125,23 @@ export async function invokeCommand<T>(
 
 export type UnlistenFn = () => void;
 
+export interface ListenOptions {
+  /**
+   * Called each time the delivery channel for this listener becomes active.
+   * Events emitted before a given call may have been missed, so a consumer
+   * that pairs this event with a snapshot should take — or retake — the
+   * snapshot inside it, rather than beside the `listenToEvent` call.
+   *
+   * Always asynchronous, so it cannot run before the caller has stored the
+   * returned unlisten. Fires once in Tauri mode (its in-process bus loses
+   * nothing after registration) and once per web-socket connect, including
+   * every reconnect: events emitted while the socket was down are gone for
+   * good. Not called when the unlisten precedes establishment, or when Tauri
+   * registration fails.
+   */
+  onEstablished?: () => void;
+}
+
 /**
  * Listen to a backend event. In Tauri mode this delegates to the Tauri event
  * API; in web mode it connects to the shared WebSocket event stream.
@@ -134,10 +151,18 @@ export type UnlistenFn = () => void;
  * the eventual listener is torn down on arrival. This makes the helper safe to
  * use directly in `onMount` cleanup blocks without an intermediate
  * `Promise<UnlistenFn>` reference that could race the unmount.
+ *
+ * Because registration is asynchronous, an event emitted between the call and
+ * the listener going live is lost. `opts.onEstablished` is the hook for
+ * consumers that can't tolerate that gap; see its own doc comment.
  */
-export function listenToEvent<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+export function listenToEvent<T>(
+  event: string,
+  callback: (payload: T) => void,
+  opts?: ListenOptions
+): UnlistenFn {
   if (!isTauri) {
-    return webSocketListen<T>(event, callback);
+    return webSocketListen<T>(event, callback, opts?.onEstablished);
   }
 
   let cancelled = false;
@@ -146,8 +171,12 @@ export function listenToEvent<T>(event: string, callback: (payload: T) => void):
   void (async () => {
     const { listen } = await import('@tauri-apps/api/event');
     const u = await listen<T>(event, (e) => callback(e.payload));
-    if (cancelled) u();
-    else unlisten = u;
+    if (cancelled) {
+      u();
+      return;
+    }
+    unlisten = u;
+    opts?.onEstablished?.();
   })().catch((e) => {
     console.error(`[transport] Failed to register listener for event "${event}":`, e);
   });
@@ -196,6 +225,7 @@ export function listenToWindowEvent<T>(event: string, callback: (payload: T) => 
 interface WebSocketListener {
   event: string;
   callback: (payload: unknown) => void;
+  onEstablished?: () => void;
 }
 
 const WEB_SOCKET_HEARTBEAT_MS = 30_000;
@@ -291,6 +321,17 @@ function recoverAfterEventGap(): void {
   revalidateAfterEventGap();
 }
 
+/**
+ * Tell every registered listener its delivery channel is live. Iterates a copy
+ * because a callback is free to unlisten — its own registration, or another's.
+ */
+function notifyListenersEstablished(): void {
+  for (const listener of [...wsListeners]) {
+    if (!wsListeners.includes(listener)) continue;
+    listener.onEstablished?.();
+  }
+}
+
 async function ensureWebSocket(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -320,6 +361,7 @@ async function ensureWebSocket(): Promise<void> {
       clearTimeout(wsReconnectTimer);
       wsReconnectTimer = null;
     }
+    notifyListenersEstablished();
   };
 
   socket.onmessage = (messageEvent) => {
@@ -362,16 +404,32 @@ async function ensureWebSocket(): Promise<void> {
   };
 }
 
-function webSocketListen<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+function webSocketListen<T>(
+  event: string,
+  callback: (payload: T) => void,
+  onEstablished?: () => void
+): UnlistenFn {
   const listener: WebSocketListener = {
     event,
     callback: callback as (payload: unknown) => void,
+    onEstablished,
   };
 
   wsListeners.push(listener);
   void ensureWebSocket().catch((e) => {
     console.error('[transport] Failed to connect WebSocket:', e);
   });
+
+  // A socket that is still connecting will notify this listener along with the
+  // rest from `onopen`; one that is already open has no such moment left, so
+  // establishment is announced here. Deferred to a microtask so the callback
+  // can never run before the caller has stored the unlisten below, and skipped
+  // if that unlisten has already been called.
+  if (onEstablished && ws?.readyState === WebSocket.OPEN) {
+    queueMicrotask(() => {
+      if (wsListeners.includes(listener)) onEstablished();
+    });
+  }
 
   return () => {
     wsListeners = wsListeners.filter((l) => l !== listener);

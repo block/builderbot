@@ -178,6 +178,95 @@ describe('web transport', () => {
     unlisten();
   });
 
+  it('announces establishment when the event socket opens, not when the listener registers', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const callback = vi.fn();
+    const unlisten = listenToEvent('session-background-hold', callback, { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    // Registration is not delivery. The socket is still connecting, the server
+    // keeps no per-client queue, and an event emitted now would reach nobody —
+    // so a snapshot taken here could be stale for the rest of the hold.
+    expect(onEstablished).not.toHaveBeenCalled();
+
+    sockets[0].open();
+    expect(onEstablished).toHaveBeenCalledTimes(1);
+
+    // What the hook promises: everything from here on is delivered.
+    sockets[0].emit({
+      event: 'session-background-hold',
+      payload: { sessionId: 'session-1', holding: true },
+    });
+    expect(callback).toHaveBeenCalledWith({ sessionId: 'session-1', holding: true });
+
+    unlisten();
+  });
+
+  it('announces establishment to a listener that joins an already-open socket, asynchronously', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket);
+
+    const { listenToEvent } = await import('./transport');
+    const unlistenFirst = listenToEvent('pr-refresh-state', vi.fn());
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0].open();
+
+    const onEstablished = vi.fn();
+    const unlistenSecond = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+
+    // There is no later `onopen` to ride, so this listener is announced on its
+    // own — but never synchronously, since the caller has not stored its
+    // unlisten yet and a snapshot request must be cancellable.
+    expect(onEstablished).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(onEstablished).toHaveBeenCalledTimes(1));
+
+    unlistenSecond();
+    unlistenFirst();
+  });
+
+  it('stays silent for a listener that unlistened before the socket opened', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const unlisten = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    unlisten();
+    sockets[0].open();
+
+    expect(onEstablished).not.toHaveBeenCalled();
+  });
+
+  it('announces establishment again on every reconnect', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const unlisten = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0].open();
+    expect(onEstablished).toHaveBeenCalledTimes(1);
+
+    // A report emitted while the socket was down is gone for good, which is
+    // the same loss as the registration gap with a different trigger — so the
+    // surviving listener is announced to again rather than once per lifetime.
+    sockets[0].close();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+
+    sockets[1].open();
+    expect(onEstablished).toHaveBeenCalledTimes(2);
+
+    unlisten();
+  });
+
   it('recovers when the server reports dropped events without reconnecting', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
@@ -197,6 +286,64 @@ describe('web transport', () => {
     expect(sockets).toHaveLength(1);
 
     unlisten();
+  });
+});
+
+describe('tauri listener establishment', () => {
+  let resolveListen: ((unlisten: () => void) => void) | undefined;
+  let listen: ReturnType<typeof vi.fn>;
+  let tauriUnlisten: ReturnType<typeof vi.fn<() => void>>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubGlobal('__TAURI__', {});
+    resolveListen = undefined;
+    tauriUnlisten = vi.fn<() => void>();
+    listen = vi.fn(
+      () =>
+        new Promise<() => void>((resolve) => {
+          resolveListen = resolve;
+        })
+    );
+    vi.doMock('@tauri-apps/api/event', () => ({ listen }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('@tauri-apps/api/event');
+    vi.unstubAllGlobals();
+  });
+
+  it('announces establishment only once the Tauri registration resolves', async () => {
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const unlisten = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+
+    await vi.waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+    // The gap this hook exists for: `listenToEvent` returned synchronously, but
+    // registration is an awaited IPC roundtrip, and events emitted before it
+    // lands are never delivered.
+    expect(onEstablished).not.toHaveBeenCalled();
+
+    resolveListen?.(tauriUnlisten);
+    await vi.waitFor(() => expect(onEstablished).toHaveBeenCalledTimes(1));
+
+    unlisten();
+    expect(tauriUnlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays silent when the unlisten precedes registration', async () => {
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const unlisten = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+
+    await vi.waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+    unlisten();
+    resolveListen?.(tauriUnlisten);
+
+    // The late arrival is torn down rather than announced: there is no consumer
+    // left to take a snapshot for.
+    await vi.waitFor(() => expect(tauriUnlisten).toHaveBeenCalledTimes(1));
+    expect(onEstablished).not.toHaveBeenCalled();
   });
 });
 

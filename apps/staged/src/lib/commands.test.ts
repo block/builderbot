@@ -399,6 +399,7 @@ describe('cached mutation command wrappers', () => {
       invokeCommand,
     }));
     vi.doMock('./cache', () => ({
+      CACHE_SCHEMA_VERSION: 1,
       cachedCommand,
       cachedInvoke: vi.fn(),
       invalidateCache,
@@ -630,5 +631,116 @@ describe('cached mutation command wrappers', () => {
       force: false,
       selectedModelValue: 'opus',
     });
+  });
+});
+
+describe('timeline boot snapshot', () => {
+  /** Deliberately not the real value — the snapshot must track whatever the shared constant says. */
+  const SCHEMA_VERSION = 7;
+
+  const stale = {
+    commits: [{ sha: 'pending-1', subject: 'Rebase onto main', pipelineKind: 'rebase' }],
+    notes: [],
+    reviews: [],
+    images: [],
+  };
+  const fetched = {
+    commits: [{ sha: 'abc123', subject: 'Fix the thing' }],
+    notes: [],
+    reviews: [],
+    images: [],
+  };
+
+  let storage: Record<string, string>;
+  let cachedInvoke: ReturnType<typeof vi.fn>;
+  let snapshotKey: string;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    storage = {};
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage[key] ?? null,
+      setItem: (key: string, value: string) => {
+        storage[key] = value;
+      },
+      removeItem: (key: string) => {
+        delete storage[key];
+      },
+    });
+    cachedInvoke = vi.fn(async function* () {
+      yield { data: fetched, source: 'network', fetchedAt: Date.now() };
+    });
+
+    vi.doMock('./transport', () => ({ isTauri: false, invokeCommand: vi.fn() }));
+    vi.doMock('./cache', () => ({
+      CACHE_SCHEMA_VERSION: SCHEMA_VERSION,
+      cachedCommand: vi.fn(),
+      cachedInvoke,
+      invalidateCache: vi.fn(),
+      invalidateCacheByCommand: vi.fn(),
+      invalidateCacheByArgs: vi.fn(),
+    }));
+
+    ({
+      SNAPSHOT_KEYS: { timelines: snapshotKey },
+    } = await import('./shared/webSnapshot'));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('./transport');
+    vi.doUnmock('./cache');
+    vi.unstubAllGlobals();
+  });
+
+  it('discards a snapshot written before the payload carried a version', async () => {
+    // Pre-versioning format: a bare branchId -> entry record.
+    storage[snapshotKey] = JSON.stringify({
+      'branch-1': { timeline: stale, fetchedAt: Date.now() },
+    });
+
+    const { getBranchTimelineWithRevalidation } = await import('./commands');
+    const { cached, fresh } = getBranchTimelineWithRevalidation('branch-1');
+
+    expect(cached).toBeNull();
+    await expect(fresh).resolves.toEqual(fetched);
+    expect(storage[snapshotKey]).toBeUndefined();
+  });
+
+  it('discards a snapshot stamped by a previous build', async () => {
+    storage[snapshotKey] = JSON.stringify({
+      schemaVersion: SCHEMA_VERSION - 1,
+      timelines: { 'branch-1': { timeline: stale, fetchedAt: Date.now() } },
+    });
+
+    const { getBranchTimelineWithRevalidation } = await import('./commands');
+    const { cached, fresh } = getBranchTimelineWithRevalidation('branch-1');
+
+    expect(cached).toBeNull();
+    await expect(fresh).resolves.toEqual(fetched);
+    expect(storage[snapshotKey]).toBeUndefined();
+  });
+
+  it('round-trips the timeline cache through a snapshot on the current version', async () => {
+    const beforeReload = await import('./commands');
+    await expect(beforeReload.getBranchTimeline('branch-1')).resolves.toEqual(fetched);
+    beforeReload.persistTimelineSnapshot();
+
+    expect(JSON.parse(storage[snapshotKey])).toEqual({
+      schemaVersion: SCHEMA_VERSION,
+      timelines: { 'branch-1': { timeline: fetched, fetchedAt: expect.any(Number) } },
+    });
+
+    cachedInvoke.mockClear();
+    vi.resetModules();
+    const afterReload = await import('./commands');
+
+    // A just-seeded entry is inside TIMELINE_FRESH_MS, so this read is served
+    // with no fetch behind it — the window a mismatched payload shape would
+    // otherwise reach the UI through uncorrected.
+    expect(afterReload.getBranchTimelineWithRevalidation('branch-1')).toEqual({
+      cached: fetched,
+      fresh: null,
+    });
+    expect(cachedInvoke).not.toHaveBeenCalled();
   });
 });

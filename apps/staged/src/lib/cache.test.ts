@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createStore, set } from 'idb-keyval';
 
 // Mock transport — web mode (isTauri = false) with controllable invokeCommand
 const mockInvoke = vi.fn();
@@ -16,8 +17,8 @@ import {
   invalidateCacheByCommand,
   markAllStale,
   clearAllCache,
+  CACHE_SCHEMA_VERSION,
   _cacheKey,
-  _CACHE_SCHEMA_VERSION,
   _MAX_CACHE_ENTRIES,
   _evictIfNeeded,
 } from './cache';
@@ -48,6 +49,45 @@ describe('cacheKey', () => {
 
   it('handles undefined args', () => {
     expect(_cacheKey('cmd')).toBe('cmd:');
+  });
+});
+
+describe('schema version', () => {
+  /** Write an entry the way a build one schema version behind would have. */
+  async function writePreviousVersionEntry(command: string, data: unknown): Promise<void> {
+    const key = _cacheKey(command);
+    await set(
+      key,
+      { key, data, fetchedAt: Date.now(), schemaVersion: CACHE_SCHEMA_VERSION - 1 },
+      createStore('staged-cache', 'responses')
+    );
+  }
+
+  it('never yields an entry written under a previous schema version', async () => {
+    await writePreviousVersionEntry('cmd', 'old-shape');
+    mockInvoke.mockResolvedValue('new-shape');
+
+    const results = [];
+    for await (const r of cachedInvoke('cmd', undefined, { ttl: 60_000 })) {
+      results.push(r);
+    }
+
+    // A within-TTL entry would normally short-circuit the fetch entirely; the
+    // version mismatch has to demote it to a miss, or the deploy that changed
+    // the payload serves the old shape with no network correction.
+    expect(results).toEqual([
+      { data: 'new-shape', source: 'network', fetchedAt: expect.any(Number) },
+    ]);
+  });
+
+  it('treats a previous-version entry as a miss in cachedCommand', async () => {
+    await writePreviousVersionEntry('cmd', 'old-shape');
+    mockInvoke.mockResolvedValue('new-shape');
+
+    await expect(cachedCommand('cmd', undefined, { ttl: 60_000 })).resolves.toEqual({
+      data: 'new-shape',
+      revalidating: null,
+    });
   });
 });
 

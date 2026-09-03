@@ -1,7 +1,21 @@
 import { get, set, del, keys, entries, clear, createStore } from 'idb-keyval';
 import { invokeCommand, isTauri } from './transport';
 
-const CACHE_SCHEMA_VERSION = 1;
+/**
+ * Stamped on every persisted cache entry and checked on read. Bump it whenever
+ * the shape of any cached command response changes — otherwise the first load
+ * after a deploy serves entries written by the previous build, and a field the
+ * new UI depends on reads as `undefined` (e.g. `CommitTimelineItem.pipelineKind`,
+ * whose absence silently re-enables the Rebase button mid-rebase).
+ *
+ * Entries that fail the check read as misses and sit inert in IndexedDB until
+ * they're overwritten or LRU-evicted. The cost of a bump is one cold-cache boot
+ * per client.
+ *
+ * The timeline boot snapshot in `commands.ts` is versioned by this same
+ * constant, so one bump covers both layers that survive a deploy.
+ */
+export const CACHE_SCHEMA_VERSION = 2;
 const MAX_CACHE_ENTRIES = 200;
 
 /**
@@ -369,7 +383,6 @@ export async function clearAllCache(): Promise<void> {
 // Exported for testing
 export {
   cacheKey as _cacheKey,
-  CACHE_SCHEMA_VERSION as _CACHE_SCHEMA_VERSION,
   MAX_CACHE_ENTRIES as _MAX_CACHE_ENTRIES,
   evictIfNeeded as _evictIfNeeded,
 };

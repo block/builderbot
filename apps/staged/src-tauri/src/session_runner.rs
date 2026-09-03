@@ -263,6 +263,32 @@ impl RunningSession {
         }
         self.token.cancel();
     }
+
+    /// The cancellation this entry has already accepted, if any.
+    ///
+    /// `Some` is a commitment, not a status read: the registry answered `true`
+    /// to the `cancel` that recorded it, so
+    /// [`cancel_session_impl`](crate::session_commands::cancel_session_impl)
+    /// took the fast path and wrote no status, leaving this entry's observer
+    /// to record the terminal state. Any path that drops the entry without an
+    /// observer has to hand that commitment on — see
+    /// [`SessionRegistry::register`] and
+    /// [`SessionRegistry::register_for_startup`].
+    fn accepted_cancellation(&self) -> Option<CompletionReason> {
+        self.cancellation_completion_reason.lock().unwrap().clone()
+    }
+}
+
+/// A session startup that failed, and the cancellation (if any) the registry
+/// accepted for it while it was running.
+///
+/// The cancellation has nowhere else to go: the session thread that would
+/// normally observe the fired token and write the terminal state never spawns
+/// on this path. See [`SessionRegistry::register_for_startup`].
+#[derive(Debug)]
+struct StartupFailure {
+    error: String,
+    accepted_cancellation: Option<CompletionReason>,
 }
 
 impl Default for SessionRegistry {
@@ -279,6 +305,30 @@ impl SessionRegistry {
     }
 
     /// Register a new session and return a `CancellationToken` for it.
+    ///
+    /// A cancellation already recorded for this session id carries onto the new
+    /// entry, from either of the two places one can be waiting:
+    ///
+    /// - `pending_cancellations`, where [`cancel_or_defer`](Self::cancel_or_defer)
+    ///   parks an intent for a session that hasn't registered yet (DB already
+    ///   `running`, token not yet registered).
+    /// - the entry this call *replaces*. `start_pipeline_session` deliberately
+    ///   skips `deregister` on an AI handoff so this insert swaps the token with
+    ///   no gap (see [`PipelineOutcome::HandedOffToAi`]), and a cancel landing in
+    ///   that swap window fires the pipeline's token — which the pipeline, past
+    ///   its own cancellation checkpoints, will never observe — and answers
+    ///   `true`, so no status is written. Dropping it here would leave the id in
+    ///   shutdown's cancel snapshot with nothing that can honour the cancel:
+    ///   `wait_for_sessions` would block on it for the whole `SHUTDOWN_BUDGET`
+    ///   and `app.exit(0)` would orphan the agent child.
+    ///
+    /// Only one can be set at a time — `cancel_or_defer` parks an intent only
+    /// when nothing is registered — so the pending intent is simply preferred.
+    ///
+    /// Finding a *live* entry to replace means the handoff: the thread of an
+    /// ordinary session deregisters before its terminal DB write, so while its
+    /// entry is present the row is still `running` and `transition_to_running`
+    /// refuses to start another turn on it.
     fn register(&self, session_id: &str) -> CancellationToken {
         let token = CancellationToken::new();
         let running_session = Arc::new(RunningSession {
@@ -288,10 +338,14 @@ impl SessionRegistry {
             background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
         });
         let mut inner = self.inner.lock().unwrap();
-        // If a cancellation arrived while this session was still starting up
-        // (DB already `running` but the token not yet registered), apply it now
-        // so the startup race can't drop it.
-        if let Some(completion_reason) = inner.pending_cancellations.remove(session_id) {
+        let pending = inner.pending_cancellations.remove(session_id);
+        let carried = pending.or_else(|| {
+            inner
+                .running
+                .get(session_id)
+                .and_then(|previous| previous.accepted_cancellation())
+        });
+        if let Some(completion_reason) = carried {
             running_session.apply_cancellation(completion_reason);
         }
         inner
@@ -304,6 +358,22 @@ impl SessionRegistry {
     /// on exit, regardless of success/failure/cancellation).
     fn deregister(&self, session_id: &str) {
         self.inner.lock().unwrap().running.remove(session_id);
+    }
+
+    /// Remove a session from the registry and report the cancellation it had
+    /// accepted, for a caller that is taking over the entry's job of recording
+    /// the terminal state.
+    ///
+    /// Not what an ordinary [`deregister`](Self::deregister) wants: the session
+    /// thread deregisters *because* it observed the cancel and is about to write
+    /// the terminal state itself.
+    fn deregister_reporting_cancellation(&self, session_id: &str) -> Option<CompletionReason> {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .remove(session_id)
+            .and_then(|running| running.accepted_cancellation())
     }
 
     /// Register `session_id` around its fallible startup work: the token
@@ -326,18 +396,29 @@ impl SessionRegistry {
     /// session thread that normally deregisters never spawns on that path,
     /// and a stale entry would hold shutdown's `wait_for_sessions` open for
     /// its full budget and misreport `is_running`.
+    ///
+    /// That deregister is also where a cancellation would go missing, so the
+    /// failure reports it instead of dropping it: the cancel that fired this
+    /// token was answered `true` and wrote no status, and the thread that would
+    /// have recorded the terminal state never spawns. The caller records it —
+    /// see [`finish_cancelled_startup`].
+    ///
+    /// The report is as tight as the removal: a `cancel` that cloned the entry
+    /// under the lock but hasn't applied yet lands on an `Arc` already out of
+    /// the map and goes unreported, the same window
+    /// `start_session`'s post-`deregister` token re-read documents.
     fn register_for_startup<T>(
         &self,
         session_id: &str,
         startup: impl FnOnce() -> Result<T, String>,
-    ) -> Result<(CancellationToken, T), String> {
+    ) -> Result<(CancellationToken, T), StartupFailure> {
         let token = self.register(session_id);
         match startup() {
             Ok(value) => Ok((token, value)),
-            Err(e) => {
-                self.deregister(session_id);
-                Err(e)
-            }
+            Err(error) => Err(StartupFailure {
+                error,
+                accepted_cancellation: self.deregister_reporting_cancellation(session_id),
+            }),
         }
     }
 
@@ -613,6 +694,58 @@ pub struct SessionConfig {
     pub background_hold: Option<acp_client::BackgroundHoldConfig>,
 }
 
+/// Record the terminal state for a session that was cancelled while its
+/// startup was still running and whose startup then failed.
+///
+/// Nothing else can. `cancel_session_impl` took the registry's fast path — the
+/// token was registered, so `cancel` answered `true` — and wrote no status,
+/// leaving the session to record its own terminal state; on a failed startup
+/// the thread that would have done that never spawns. Left unrecorded, the
+/// Stop produces nothing the user can see: on the pipeline-handoff path
+/// `finish_failed_pipeline_handoff_start` wins `transition_from_running` and
+/// the row reads `error`/`Crashed`, and on the queued-branch path the `Err`
+/// reaches nothing but a log line — or a `let _` — in
+/// `drain_queued_sessions_for_branch`'s callers, leaving the row `running`
+/// under our pid for the next launch to report as an errored session.
+///
+/// Writing `Cancelled` first is also what restores the ordering the
+/// pre-registration code had by accident: the `!was_running` fallback wrote it
+/// at cancel time, so the startup failure's own `error` transition lost. The
+/// error is still returned to the caller and still emitted by it — only the
+/// persisted status differs.
+///
+/// The event is emitted whether or not the transition won, matching the
+/// session thread's terminal emit: a row already moved on (deleted, say) still
+/// needs the client's `running` state cleaned up.
+fn finish_cancelled_startup(
+    config: &SessionConfig,
+    store: &Store,
+    app_handle: &AppHandle,
+    completion_reason: CompletionReason,
+) {
+    let transitioned = store
+        .transition_from_running(
+            &config.session_id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&completion_reason),
+        )
+        .unwrap_or(false);
+    log::info!(
+        "Session {} was cancelled during startup (transition won: {transitioned})",
+        config.session_id
+    );
+    emit_status(
+        app_handle,
+        &config.session_id,
+        SessionStatus::Cancelled.as_str(),
+        None,
+        Some(&completion_reason),
+        config.branch_id.clone(),
+        config.project_id.clone(),
+    );
+}
+
 /// Start a session: persist the user message, spawn the agent, stream to DB.
 ///
 /// Returns immediately — the actual agent work happens on a background task.
@@ -635,7 +768,7 @@ pub fn start_session(
     // pipeline handoff's token-replacement contract (see
     // `PipelineOutcome::HandedOffToAi`) is preserved: the replacement just
     // happens before the slow work instead of after it.
-    let (cancel_token, (driver, resolved_provider_id)) = registry
+    let started = registry
         .register_for_startup(&config.session_id, || {
             // Create the driver eagerly so we fail fast if the agent isn't found.
             // Local sessions without an explicit provider resolve the first available
@@ -715,7 +848,16 @@ pub fn start_session(
             }
 
             Ok((driver, resolved_provider_id))
-        })?;
+        });
+    let (cancel_token, (driver, resolved_provider_id)) = match started {
+        Ok(started) => started,
+        Err(failure) => {
+            if let Some(completion_reason) = failure.accepted_cancellation {
+                finish_cancelled_startup(&config, &store, &app_handle, completion_reason);
+            }
+            return Err(failure.error);
+        }
+    };
 
     let selected_acp_config_options =
         crate::acp_config::selected_acp_config_options(config.acp_config_selection.as_ref());
@@ -1558,7 +1700,11 @@ pub fn start_pipeline_session(
                 // We intentionally skip deregister here: start_session's register()
                 // call will atomically replace the old cancel token. This avoids a
                 // window where the session has no token registered (during which a
-                // cancel request would be silently lost).
+                // cancel request would be silently lost). A cancel that lands on
+                // the pipeline's entry *before* that replacement isn't lost either
+                // — `register` carries a cancelled predecessor's reason onto the
+                // new entry — which matters because this thread is already past
+                // every point that would have observed the pipeline's token.
                 let pre_head_sha = pre_head_for_pipeline_handoff(&config);
                 let extra_env = if store_for_status
                     .get_commit_by_session(&session_id)
@@ -4447,14 +4593,94 @@ mod tests {
     fn register_for_startup_deregisters_when_startup_fails() {
         let registry = SessionRegistry::new();
 
-        let result: Result<(CancellationToken, ()), String> =
+        let result: Result<(CancellationToken, ()), StartupFailure> =
             registry.register_for_startup("session-failing", || Err("no agent found".to_string()));
 
-        assert_eq!(result.unwrap_err(), "no agent found");
+        let failure = result.unwrap_err();
+        assert_eq!(failure.error, "no agent found");
+        assert_eq!(
+            failure.accepted_cancellation, None,
+            "a startup nobody cancelled has no cancellation to hand back"
+        );
         assert!(!registry.is_running("session-failing"));
         assert!(
             registry.wait_for_sessions(&["session-failing".to_string()], Duration::ZERO),
             "shutdown must not wait on a session whose startup failed"
+        );
+    }
+
+    /// A Stop landing while the driver resolves, on a resolve that then fails:
+    /// `cancel` answered `true` and so wrote no status, and the session thread
+    /// that would record the terminal state never spawns. The failure hands the
+    /// cancellation back rather than dropping it, so the caller can write
+    /// `cancelled` instead of letting the startup's own error be the only
+    /// outcome the user's Stop produced.
+    #[test]
+    fn register_for_startup_reports_a_cancellation_that_landed_during_startup() {
+        let registry = SessionRegistry::new();
+
+        let result: Result<(CancellationToken, ()), StartupFailure> = registry
+            .register_for_startup("session-cancelled-mid-startup", || {
+                assert!(
+                    registry.cancel_with_completion_reason(
+                        "session-cancelled-mid-startup",
+                        CompletionReason::AppQuit
+                    ),
+                    "the cancel must take the registry's fast path, which writes no status"
+                );
+                Err("No ACP agent found.".to_string())
+            });
+
+        let failure = result.unwrap_err();
+        assert_eq!(failure.error, "No ACP agent found.");
+        assert_eq!(
+            failure.accepted_cancellation,
+            Some(CompletionReason::AppQuit)
+        );
+        assert!(!registry.is_running("session-cancelled-mid-startup"));
+    }
+
+    /// The pipeline handoff replaces a live entry rather than deregistering it,
+    /// so the replacement has to inherit a cancel the predecessor accepted: the
+    /// pipeline thread is past every point that would observe its own token, and
+    /// `cancel` already answered `true`, so nothing else will honour the Stop.
+    #[test]
+    fn register_carries_a_cancelled_predecessors_state_onto_its_replacement() {
+        let registry = SessionRegistry::new();
+
+        let pipeline_token = registry.register("session-handoff");
+        assert!(
+            registry.cancel_with_completion_reason("session-handoff", CompletionReason::AppQuit)
+        );
+        assert!(pipeline_token.is_cancelled());
+
+        let ai_token = registry.register("session-handoff");
+
+        assert!(
+            ai_token.is_cancelled(),
+            "the handed-off session must start already cancelled"
+        );
+        assert_eq!(
+            registry.cancellation_completion_reason("session-handoff"),
+            Some(CompletionReason::AppQuit),
+            "and must keep the reason its terminal write has to persist"
+        );
+    }
+
+    /// The carry-forward is scoped to a cancelled predecessor: an ordinary
+    /// handoff hands over a live session, and starting it pre-cancelled would
+    /// kill the AI turn the pipeline just asked for.
+    #[test]
+    fn register_starts_clean_when_the_entry_it_replaces_was_not_cancelled() {
+        let registry = SessionRegistry::new();
+
+        registry.register("session-handoff");
+        let ai_token = registry.register("session-handoff");
+
+        assert!(!ai_token.is_cancelled());
+        assert_eq!(
+            registry.cancellation_completion_reason("session-handoff"),
+            None
         );
     }
 

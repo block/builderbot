@@ -389,8 +389,21 @@ impl SessionRegistry {
     /// deregister, and a user cancel only reaches a token the registry can
     /// find. Unregistered, both land nowhere while the startup goes on to
     /// spawn an agent child; registered, they fire this token, which the
-    /// connect path checks before protocol setup, so the child is stopped by
-    /// the connection teardown right after it spawns.
+    /// session thread takes a last look at before it connects — so a cancel
+    /// that lands during the startup spawns no agent child at all, and one
+    /// that lands after that look meets the post-spawn check and
+    /// `graceful_stop`.
+    ///
+    /// What registration does *not* buy is a stop bounded by
+    /// `SHUTDOWN_BUDGET`. The startup it now covers is blocking and not
+    /// token-aware — `doctor` gives each login-shell probe a 10s timeout, and
+    /// the unpinned branch pays that per provider — so a cancel is only
+    /// *observed* once that work ends, routinely past the 2s budget. Shutdown
+    /// then times out on this session, warns, sweeps its row to
+    /// cancelled/`app_quit`, and exits, killing the still-probing thread with
+    /// the process. That is a clean end rather than a leak precisely because
+    /// of the gate before `connect`: the thread has spawned no agent child,
+    /// and now never will.
     ///
     /// Deregistering on failure is the other half of the contract: the
     /// session thread that normally deregisters never spawns on that path,
@@ -1110,6 +1123,26 @@ pub fn start_session(
                     &[]
                 };
                 include_images = false;
+
+                // Last look before an agent process exists. Everything from the
+                // token's registration to here is blocking and not token-aware
+                // (driver construction's login-shell probes, then the env
+                // snapshot capture), so a cancel that landed during it — a
+                // Stop, or a quit whose `SHUTDOWN_BUDGET` has since run out —
+                // is first observable at this point. `connect` spawns the
+                // child unconditionally: its own check sits *after* the spawn,
+                // ahead of `initialize`, and leaves `graceful_stop` to take
+                // the child back down, which only beats a quit's `app.exit(0)`
+                // if the startup fit in the budget too. Bailing here leaves
+                // nothing to take down. The `generate_pikchr` worker gates its
+                // `driver.run` the same way.
+                //
+                // Past this check the path is synchronous into `cmd.spawn()`,
+                // so what remains is a cancel landing inside those statements
+                // — and that one the post-spawn check still answers.
+                if cancel_token.is_cancelled() {
+                    return Ok(AgentRunOutcome::Cancelled);
+                }
 
                 // Open a session-scoped connection, then send this turn's
                 // prompt over it. Without a background hold the connection

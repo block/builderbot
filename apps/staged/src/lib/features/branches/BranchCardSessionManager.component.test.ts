@@ -37,15 +37,15 @@ function createManager() {
   });
 }
 
-describe('BranchCardSessionManager referring open', () => {
-  beforeEach(() => {
-    writer.scheduleSave.mockClear();
-    writer.saveNow.mockClear();
-    writer.flush.mockClear();
-    loadDraftMock.mockReset();
-    loadDraftMock.mockImplementation(async () => null);
-  });
+beforeEach(() => {
+  writer.scheduleSave.mockClear();
+  writer.saveNow.mockClear();
+  writer.flush.mockClear();
+  loadDraftMock.mockReset();
+  loadDraftMock.mockImplementation(async () => null);
+});
 
+describe('BranchCardSessionManager referring open', () => {
   it("does not leak another mode's held draft into a commit open racing the referring load", async () => {
     // Regression: openNewSessionReferring used to set newSessionMode='commit'
     // before its awaited flush+read, so a concurrent openNewSession('commit')
@@ -83,7 +83,7 @@ describe('BranchCardSessionManager referring open', () => {
 
   it('still builds the referring prompt from the stored commit draft when unraced', async () => {
     const mgr = createManager();
-    mgr.handleNewSessionClose({ prompt: 'note text', mode: 'note', imageIds: [] });
+    mgr.handleNewSessionClose({ prompt: 'note text', mode: 'note', imageIds: ['note-img'] });
 
     loadDraftMock.mockImplementation(async () => 'stored commit draft');
     await mgr.openNewSessionReferring('#note:abc123');
@@ -93,5 +93,46 @@ describe('BranchCardSessionManager referring open', () => {
     expect(mgr.draftPrompt).toContain('stored commit draft');
     expect(mgr.draftPrompt).toContain('#note:abc123');
     expect(mgr.draftPrompt).not.toContain('note text');
+    // Images aren't persisted, but the held ones belong to note mode and must
+    // not seed the commit modal.
+    expect(mgr.draftImageIds).toEqual([]);
+  });
+
+  it('keeps held commit-mode images across a referring open', async () => {
+    const mgr = createManager();
+    mgr.handleNewSessionClose({ prompt: 'commit text', mode: 'commit', imageIds: ['commit-img'] });
+
+    await mgr.openNewSessionReferring('#note:abc123');
+
+    expect(mgr.newSessionMode).toBe('commit');
+    expect(mgr.draftPrompt).toContain('commit text');
+    expect(mgr.draftImageIds).toEqual(['commit-img']);
+  });
+});
+
+describe('BranchCardSessionManager per-mode image drafts', () => {
+  it("clears another mode's held images when opening a different mode", () => {
+    // Regression: openNewSession cleared draftPrompt when opening a different
+    // mode but left draftImageIds, so images attached while drafting a note
+    // seeded the commit modal via initialImageIds.
+    const mgr = createManager();
+    mgr.handleNewSessionClose({ prompt: 'note text', mode: 'note', imageIds: ['note-img'] });
+
+    mgr.openNewSession('commit');
+
+    expect(mgr.showNewSession).toBe(true);
+    expect(mgr.newSessionMode).toBe('commit');
+    expect(mgr.draftPrompt).toBe('');
+    expect(mgr.draftImageIds).toEqual([]);
+  });
+
+  it('keeps held images when reopening the same mode', () => {
+    const mgr = createManager();
+    mgr.handleNewSessionClose({ prompt: 'note text', mode: 'note', imageIds: ['note-img'] });
+
+    mgr.openNewSession('note');
+
+    expect(mgr.draftPrompt).toBe('note text');
+    expect(mgr.draftImageIds).toEqual(['note-img']);
   });
 });

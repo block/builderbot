@@ -137,9 +137,10 @@ export default class BranchCardSessionManager {
     // Open synchronously — the modal fetches the stored draft itself (via
     // loadDraftForMode) so the click isn't gated on store IPC. Seed it with
     // the draft held in memory only when that draft belongs to the mode being
-    // opened, or another mode's text would leak in.
+    // opened, or another mode's text or images would leak in.
     if (mode !== this.newSessionMode) {
       this.draftPrompt = '';
+      this.draftImageIds = [];
     }
     this.newSessionMode = mode;
     this.showNewSession = true;
@@ -160,6 +161,11 @@ export default class BranchCardSessionManager {
       const draft = await this.loadNewSessionDraftForMode('commit');
       if (request !== this.openNewSessionRequest) return;
       this.draftPrompt = this.resolveOpenPrompt('commit', draft, heldMode, heldPrompt);
+      // Images aren't persisted to the store, so the held ones survive only
+      // when they already belong to commit mode — same rule as the prompt.
+      if (heldMode !== 'commit') {
+        this.draftImageIds = [];
+      }
     }
     this.draftPrompt = buildReferringPrompt(this.draftPrompt, hashtagRef);
     if (!wasOpen || !hadContent) {

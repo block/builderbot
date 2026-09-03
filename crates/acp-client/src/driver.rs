@@ -4969,8 +4969,8 @@ async fn apply_or_record_session_config_options(
 
     let mut model_selection_applied = false;
     for selection in selections {
-        let config_id = match resolve_session_config_option_selection(&latest_options, selection) {
-            Ok(config_id) => config_id,
+        let resolved = match resolve_session_config_option_selection(&latest_options, selection) {
+            Ok(resolved) => resolved,
             Err(e)
                 if model_selection_applied
                     && selection.category == SessionConfigOptionCategory::ThoughtLevel =>
@@ -4983,8 +4983,8 @@ async fn apply_or_record_session_config_options(
         let response = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 agent_session_id.to_string(),
-                config_id,
-                selection.value_id.as_str(),
+                resolved.config_id,
+                resolved.value_id.as_str(),
             ))
             .block_task()
             .await
@@ -5004,18 +5004,31 @@ async fn apply_or_record_session_config_options(
     Ok(())
 }
 
+/// A stored selection matched against the agent's live config options: the
+/// option to set, and the value to set it to. The value can differ from the
+/// stored one when [`resolve_config_option_value`] falls back to a
+/// hint-stripped match.
+#[derive(Debug)]
+struct ResolvedConfigSelection {
+    config_id: String,
+    value_id: String,
+}
+
 fn resolve_session_config_option_selection(
     options: &[SessionConfigOption],
     selection: &AcpSessionConfigOptionSelection,
-) -> Result<String, String> {
+) -> Result<ResolvedConfigSelection, String> {
     let label = config_selection_label(&selection.category);
 
     if let Some(option) = options
         .iter()
         .find(|option| option.id.to_string() == selection.config_id)
     {
-        ensure_config_option_has_value(option, &selection.value_id, label)?;
-        return Ok(option.id.to_string());
+        let value_id = resolve_config_option_value(option, &selection.value_id, label)?;
+        return Ok(ResolvedConfigSelection {
+            config_id: option.id.to_string(),
+            value_id,
+        });
     }
 
     let Some(option) = options.iter().find(|option| {
@@ -5027,26 +5040,66 @@ fn resolve_session_config_option_selection(
         ));
     };
 
-    ensure_config_option_has_value(option, &selection.value_id, label)?;
-    Ok(option.id.to_string())
+    let value_id = resolve_config_option_value(option, &selection.value_id, label)?;
+    Ok(ResolvedConfigSelection {
+        config_id: option.id.to_string(),
+        value_id,
+    })
 }
 
-fn ensure_config_option_has_value(
+/// Which of `option`'s values a stored `value_id` selects.
+///
+/// An exact match wins. Failing that, a stored value carrying a bracketed
+/// hint suffix falls back to the row for its base id: Claude Code advertises
+/// Fable as `claude-fable-5[1m]` on `session/new` but resolves it to the bare
+/// `claude-fable-5`, and `session/load` rebuilds the picker around that
+/// resolved id — so the value we pinned is gone from the list on the first
+/// follow-up, and the turn dies before `session/prompt`. Matching the base id
+/// keeps the pin an explicit assertion rather than leaving the model to
+/// whatever the agent restores from its own transcript.
+///
+/// The fallback is deliberately one-way. A stored bare id never matches a
+/// hinted row, since that would silently promote a pin to a context window the
+/// user never chose.
+fn resolve_config_option_value(
     option: &SessionConfigOption,
     value_id: &str,
     label: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     match select_option_has_value(option, value_id) {
-        Some(true) => Ok(()),
-        Some(false) => Err(format!(
-            "{CONFIG_SELECTION_STALE_PREFIX}{label} value '{value_id}'{CONFIG_SELECTION_STALE_UNAVAILABLE} for config option '{}'",
-            option.id
-        )),
-        None => Err(format!(
-            "{CONFIG_SELECTION_STALE_PREFIX}{label} config option '{}'{CONFIG_SELECTION_STALE_NOT_SELECT}",
-            option.id
-        )),
+        Some(true) => return Ok(value_id.to_string()),
+        Some(false) => {}
+        None => {
+            return Err(format!(
+                "{CONFIG_SELECTION_STALE_PREFIX}{label} config option '{}'{CONFIG_SELECTION_STALE_NOT_SELECT}",
+                option.id
+            ))
+        }
     }
+
+    if let Some(base_value_id) = strip_config_value_hint(value_id) {
+        if select_option_has_value(option, base_value_id) == Some(true) {
+            log::warn!(
+                "Selected ACP {label} value '{value_id}' is no longer offered by config option \
+                 '{}'; falling back to '{base_value_id}'",
+                option.id
+            );
+            return Ok(base_value_id.to_string());
+        }
+    }
+
+    Err(format!(
+        "{CONFIG_SELECTION_STALE_PREFIX}{label} value '{value_id}'{CONFIG_SELECTION_STALE_UNAVAILABLE} for config option '{}'",
+        option.id
+    ))
+}
+
+/// The base id of a config value carrying a trailing bracketed hint, e.g.
+/// `claude-fable-5` for `claude-fable-5[1m]`. `None` when there is no such
+/// suffix, or when stripping it would leave nothing behind.
+fn strip_config_value_hint(value_id: &str) -> Option<&str> {
+    let (base, _hint) = value_id.strip_suffix(']')?.rsplit_once('[')?;
+    (!base.is_empty()).then_some(base)
 }
 
 fn is_select_option(option: &SessionConfigOption) -> bool {
@@ -5606,7 +5659,54 @@ mod tests {
         let resolved =
             resolve_session_config_option_selection(&options, &selection).expect("resolved config");
 
-        assert_eq!(resolved, "model-v2");
+        assert_eq!(resolved.config_id, "model-v2");
+        assert_eq!(resolved.value_id, "opus");
+    }
+
+    #[test]
+    fn resolves_hint_stripped_config_value_when_the_pinned_value_is_gone() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-fable-5",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5", "Fable"),
+                SessionConfigSelectOption::new("claude-opus-5[1m]", "Opus"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        };
+
+        let resolved =
+            resolve_session_config_option_selection(&options, &selection).expect("resolved config");
+
+        assert_eq!(resolved.config_id, "model");
+        assert_eq!(resolved.value_id, "claude-fable-5");
+    }
+
+    #[test]
+    fn does_not_promote_a_bare_config_value_to_a_hinted_one() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-opus-5[1m]",
+            vec![SessionConfigSelectOption::new("claude-opus-5[1m]", "Opus")],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-opus-5".to_string(),
+        };
+
+        let error = resolve_session_config_option_selection(&options, &selection)
+            .expect_err("a bare value must not match a hinted row");
+
+        assert!(error.contains("Selected ACP model value 'claude-opus-5' is no longer available"));
     }
 
     #[test]
@@ -5819,6 +5919,82 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
         assert!(calls.lock().unwrap().is_empty());
         assert!(writer.config_option_updates.lock().unwrap().is_empty());
+    }
+
+    /// The Fable resume failure end to end: `session/new` advertised
+    /// `claude-fable-5[1m]` and we pinned it, but `session/load` comes back
+    /// offering only the resolved `claude-fable-5`. Re-applying the pin must
+    /// land on that row instead of aborting the turn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn applies_hint_stripped_model_value_when_load_drops_the_hint() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler.lock().unwrap().push((
+                    request.config_id.to_string(),
+                    request
+                        .value
+                        .as_value_id()
+                        .expect("selected config value should be a value ID")
+                        .to_string(),
+                ));
+                responder.respond(SetSessionConfigOptionResponse::new(vec![
+                    SessionConfigOption::select(
+                        "model",
+                        "Model",
+                        "claude-fable-5",
+                        vec![
+                            SessionConfigSelectOption::new("claude-fable-5", "Fable"),
+                            SessionConfigSelectOption::new("claude-opus-5[1m]", "Opus"),
+                        ],
+                    )
+                    .category(SessionConfigOptionCategory::Model),
+                ]))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let loaded_options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-fable-5",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5", "Fable"),
+                SessionConfigSelectOption::new("claude-opus-5[1m]", "Opus"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selections = vec![AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        }];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    Some(&loaded_options),
+                    &selections,
+                    &message_writer,
+                    true,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("claude-fable-5"))]
+        );
+        assert_eq!(writer.config_option_updates.lock().unwrap().len(), 1);
     }
 
     fn write_executable(path: &Path, content: &str) {

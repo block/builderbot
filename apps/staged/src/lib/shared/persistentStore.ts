@@ -134,6 +134,25 @@ export async function setStoreValue<T>(key: string, value: T): Promise<void> {
 }
 
 /**
+ * List every key currently held in the persistent store.
+ *
+ * Needed by maintenance passes (e.g. expiring cached drafts) that must find
+ * keys they never recorded anywhere else.
+ */
+export async function listStoreKeys(): Promise<string[]> {
+  if (!backend) {
+    console.warn('[PersistentStore] Store not initialized, call initPersistentStore() first');
+    return [];
+  }
+
+  if (backend.kind === 'tauri') {
+    return backend.store.keys();
+  }
+
+  return (await invokeCommand<string[]>('list_preference_keys')) ?? [];
+}
+
+/**
  * Delete a value from the persistent store.
  */
 export async function deleteStoreValue(key: string): Promise<void> {

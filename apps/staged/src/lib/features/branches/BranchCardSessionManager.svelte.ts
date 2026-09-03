@@ -133,10 +133,12 @@ export default class BranchCardSessionManager {
       return;
     }
     const request = ++this.openNewSessionRequest;
+    const heldMode = this.newSessionMode;
+    const heldPrompt = this.draftPrompt;
     this.newSessionMode = mode;
     const draft = await this.loadNewSessionDraftForMode(mode);
     if (request !== this.openNewSessionRequest) return;
-    this.draftPrompt = draft ?? '';
+    this.draftPrompt = this.resolveOpenPrompt(mode, draft, heldMode, heldPrompt);
     this.showNewSession = true;
   }
 
@@ -145,10 +147,12 @@ export default class BranchCardSessionManager {
     const wasOpen = this.showNewSession;
     const hadContent = wasOpen && this.draftPrompt.trim();
     if (!wasOpen) {
+      const heldMode = this.newSessionMode;
+      const heldPrompt = this.draftPrompt;
       this.newSessionMode = 'commit';
       const draft = await this.loadNewSessionDraftForMode('commit');
       if (request !== this.openNewSessionRequest) return;
-      this.draftPrompt = draft ?? this.draftPrompt;
+      this.draftPrompt = this.resolveOpenPrompt('commit', draft, heldMode, heldPrompt);
     }
     this.draftPrompt = buildReferringPrompt(this.draftPrompt, hashtagRef);
     if (!wasOpen || !hadContent) {
@@ -176,11 +180,33 @@ export default class BranchCardSessionManager {
     // Never reject: openNewSession callers fire-and-forget, so a failed store
     // read should degrade to an empty draft instead of blocking the modal.
     try {
+      // Settle queued writes first. Closing the modal and switching modes both
+      // save immediately, so reading the store straight away can return the
+      // value from before that write landed.
+      await this.draftWriter.flush();
       return await loadDraft(this.draftKeyForMode(mode));
     } catch (e) {
       console.error('[BranchCard] Failed to load session draft:', e);
       return null;
     }
+  }
+
+  /**
+   * Prompt to show when opening the modal for `mode`.
+   *
+   * `loadNewSessionDraftForMode` returns null both when nothing is stored and
+   * when the store read fails, so fall back to the draft this manager still
+   * holds in memory rather than blanking it — but only when that draft belongs
+   * to the mode being opened, or another mode's text would leak in.
+   */
+  private resolveOpenPrompt(
+    mode: BranchSessionType,
+    loaded: string | null,
+    heldMode: BranchSessionType,
+    heldPrompt: string
+  ): string {
+    if (loaded !== null) return loaded;
+    return mode === heldMode ? heldPrompt : '';
   }
 
   handleNewSessionDraftChange(

@@ -153,6 +153,7 @@ fn emit_cancelled<R: tauri::Runtime>(
         SessionStatus::Cancelled.as_str(),
         None,
         Some(&CompletionReason::Interrupted),
+        None,
         Some(branch.id.clone()),
         Some(branch.project_id.clone()),
     );

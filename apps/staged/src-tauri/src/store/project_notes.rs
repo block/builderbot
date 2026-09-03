@@ -279,6 +279,8 @@ impl Store {
             completion_reason: None,
             last_chat_message_at: None,
             chat_read_at: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
         })
     }
 
@@ -291,6 +293,8 @@ impl Store {
         let resolved = self.resolve_session_status(note.session_id.as_deref());
         note.session_status = resolved.status;
         note.completion_reason = resolved.completion_reason;
+        note.rate_limit_resets_at = resolved.rate_limit_resets_at;
+        note.rate_limit_kind = resolved.rate_limit_kind;
         (note.last_chat_message_at, note.chat_read_at) = note
             .session_id
             .as_deref()

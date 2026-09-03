@@ -1565,9 +1565,98 @@ pub(crate) async fn resume_or_queue_session_for_store(
         branch_id,
         acp_config_selection,
         None,
+        ResumeClaim::Transition,
     )
     .await
     .map(|()| ResumeSessionOutcome::Started)
+}
+
+/// A rate-limited session already claimed for one auto-resume attempt.
+///
+/// The scheduler builds this under the branch launch lock, so by the time the
+/// resume runs the session row is already `running`. It carries everything the
+/// resume still needs from before the claim: the message the user queued during
+/// the backoff (preferred over the synthetic retry prompt because it carries
+/// their actual intent and saves a turn), and the rate-limit fields the claim
+/// cleared, so a failed start can park the session exactly as it was found.
+pub(crate) struct RateLimitResumeTicket {
+    pub session_id: String,
+    pub queued_message: Option<store::QueuedSessionMessage>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
+}
+
+pub(crate) async fn auto_resume_rate_limited_session(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    ticket: RateLimitResumeTicket,
+) -> Result<(), String> {
+    // The post-success drain cascade delivers any remaining queued messages.
+    let (prompt, image_ids, branch_id, queued_message_id) = match &ticket.queued_message {
+        Some(message) => (
+            message.content.clone(),
+            Some(message.image_ids.clone()),
+            message.branch_id.clone(),
+            Some(message.id.clone()),
+        ),
+        None => (
+            crate::rate_limit_scheduler::AUTO_RETRY_RESUME_PROMPT.to_string(),
+            None,
+            None,
+            None,
+        ),
+    };
+
+    let result = resume_session_for_store(
+        Arc::clone(&store),
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        ticket.session_id.clone(),
+        prompt,
+        image_ids,
+        branch_id,
+        None,
+        queued_message_id,
+        ResumeClaim::AlreadyClaimed,
+    )
+    .await;
+
+    if let Err(ref e) = result {
+        // The claim already moved the row to `running`, so releasing it is this
+        // path's job: park the session again with the limit metadata it had
+        // before the attempt, then hand the queued message back so the next
+        // attempt (or the user) can send it.
+        let _ = store.transition_running_to_rate_limited(
+            &ticket.session_id,
+            Some(e),
+            ticket.rate_limit_resets_at.as_deref(),
+            ticket.rate_limit_kind.as_deref(),
+        );
+        if let Some(message) = &ticket.queued_message {
+            let _ = store.release_queued_session_message(&message.id, Some(e));
+        }
+    }
+
+    result
+}
+
+/// How the caller of [`resume_session_for_store`] takes ownership of the
+/// session row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeClaim {
+    /// Claim the row here, refusing the resume if it is already running. This
+    /// is the safe default for every user-initiated resume.
+    Transition,
+    /// The caller already claimed the row and owns parking it again if the
+    /// start fails. Rate-limit auto-resume claims under the branch launch lock
+    /// so no branch launch can slip a second agent into the worktree between
+    /// its busy check and its claim.
+    AlreadyClaimed,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1583,6 +1672,7 @@ pub(crate) async fn resume_session_for_store(
     branch_id: Option<String>,
     acp_config_selection: Option<store::AcpConfigSelection>,
     queued_message_id: Option<String>,
+    claim: ResumeClaim,
 ) -> Result<(), String> {
     let session = store
         .get_session(&session_id)
@@ -1602,14 +1692,16 @@ pub(crate) async fn resume_session_for_store(
     // Live from before the `running` write until the runner has registered
     // (see `SessionRegistry::hold`); released when this function returns.
     let _liveness = registry.hold(&session_id);
-    let transitioned = store
-        .transition_to_running_clearing_agent_id(
-            &session_id,
-            plan.pending_start_agent_id.as_deref(),
-        )
-        .map_err(|e| e.to_string())?;
-    if !transitioned {
-        return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+    if claim == ResumeClaim::Transition {
+        let transitioned = store
+            .transition_to_running_clearing_agent_id(
+                &session_id,
+                plan.pending_start_agent_id.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+        if !transitioned {
+            return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+        }
     }
 
     launch_resume(
@@ -1972,6 +2064,8 @@ fn launch_resume(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: event_branch_id,
             project_id: event_project_id.or(mcp_project_id.clone()),
             session_type,
@@ -2461,7 +2555,8 @@ pub(crate) async fn route_continue_session(
             }
             store::SessionStatus::Completed
             | store::SessionStatus::Cancelled
-            | store::SessionStatus::Error => {
+            | store::SessionStatus::Error
+            | store::SessionStatus::Paused => {
                 if stopped == StoppedSessionPolicy::Refuse {
                     return Ok(ContinueRoute::Delivered(ContinueOutcome::not_running(
                         format!("the session is {}", session.status.as_str()),
@@ -2901,6 +2996,7 @@ pub(crate) async fn send_queued_session_message_for_store(
         message.branch_id.clone(),
         None,
         Some(message.id.clone()),
+        ResumeClaim::Transition,
     )
     .await;
 
@@ -2939,6 +3035,7 @@ pub(crate) async fn drain_queued_message_for_session(
         message.branch_id.clone(),
         None,
         Some(message.id.clone()),
+        ResumeClaim::Transition,
     )
     .await;
 
@@ -3115,6 +3212,8 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                         status: "cancelled".to_string(),
                         error_message: None,
                         completion_reason: Some("interrupted".to_string()),
+                        rate_limit_resets_at: None,
+                        rate_limit_kind: None,
                         branch_id: branch_id.clone(),
                         project_id,
                         session_type: None,
@@ -3186,6 +3285,8 @@ pub(crate) fn cancel_queued_session_of_deleted_artifact<R: tauri::Runtime>(
             status: "cancelled".to_string(),
             error_message: None,
             completion_reason: Some("interrupted".to_string()),
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id,
             project_id,
             session_type: None,
@@ -3880,6 +3981,7 @@ pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
                 store::SessionStatus::Error.as_str(),
                 Some(error.clone()),
                 Some(&store::CompletionReason::Crashed),
+                None,
                 Some(branch_id.to_string()),
                 Some(project_id.to_string()),
             );
@@ -3942,6 +4044,7 @@ fn fail_queued_start_before_claim<R: tauri::Runtime>(
                 store::SessionStatus::Error.as_str(),
                 Some(error),
                 Some(&store::CompletionReason::Crashed),
+                None,
                 Some(branch.id.clone()),
                 Some(branch.project_id.clone()),
             );
@@ -4621,6 +4724,8 @@ pub async fn start_project_session_for_store(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: None,
             project_id: Some(project_id.clone()),
             session_type: None,
@@ -5124,6 +5229,8 @@ fn insert_queued_branch_session(
                 status: "queued".to_string(),
                 error_message: None,
                 completion_reason: None,
+                rate_limit_resets_at: None,
+                rate_limit_kind: None,
                 branch_id: Some(branch_id.to_string()),
                 project_id,
                 session_type: Some(session_type.as_str().to_string()),
@@ -6269,7 +6376,8 @@ fn forced_start_precheck(
         store::SessionStatus::Disconnected
         | store::SessionStatus::Completed
         | store::SessionStatus::Error
-        | store::SessionStatus::Cancelled => {
+        | store::SessionStatus::Cancelled
+        | store::SessionStatus::Paused => {
             return Err(format!("Session {session_id} is no longer queued"));
         }
     }
@@ -6583,6 +6691,8 @@ async fn start_queued_session_for_branch(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            rate_limit_resets_at: None,
+            rate_limit_kind: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),

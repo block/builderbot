@@ -254,6 +254,8 @@ export interface CommitTimelineItem {
    * ACP title can replace mid-pipeline.
    */
   pipelineKind?: PipelineKind | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
   /** Whether this commit was authored by the current git user. */
   isOwnCommit: boolean;
 }
@@ -270,6 +272,8 @@ export interface NoteTimelineItem {
    * workstation reads differently from a crash).
    */
   sessionErrorMessage?: string | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -326,6 +330,8 @@ export interface ReviewTimelineItem {
    * workstation reads differently from a crash).
    */
   sessionErrorMessage?: string | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
   title: string | null;
   /** Active non-`information` comments (what the detail view lists as comments). */
   commentCount: number;
@@ -346,6 +352,8 @@ export interface ImageTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
   createdAt: number;
 }
 
@@ -670,6 +678,8 @@ export interface ProjectNote {
   lastChatMessageAt: number | null;
   /** When the user last read the session's chat. */
   chatReadAt: number | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
 }
 
 export interface ProjectSessionResponse {
@@ -700,7 +710,7 @@ export interface ProjectSearchItem {
 // =============================================================================
 
 export type SessionStatus =
-  'queued' | 'running' | 'disconnected' | 'completed' | 'error' | 'cancelled';
+  'queued' | 'running' | 'disconnected' | 'paused' | 'completed' | 'error' | 'cancelled';
 
 export type CompletionReason =
   | 'turn_complete'
@@ -725,6 +735,7 @@ export type CompletionReason =
    * ended, or bloxlet reports it stopped. The error message names the cause.
    */
   | 'remote_agent_lost'
+  | 'rate_limited'
   | 'app_quit'
   | 'unknown';
 
@@ -737,6 +748,7 @@ export type CompletionReason =
 export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
   'crashed',
   'remote_agent_lost',
+  'rate_limited',
   'app_quit',
   'interrupted',
   'project_session_interrupted',
@@ -791,6 +803,9 @@ export interface Session {
   agentId: string | null;
   errorMessage: string | null;
   completionReason: CompletionReason | null;
+  providerMetadata?: Record<string, unknown> | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
   createdAt: number;
   updatedAt: number;
   /** Pipeline execution state. Present when the session was started via a command pipeline. */
@@ -1061,6 +1076,8 @@ export interface SessionStatusPayload {
   status: SessionStatus;
   errorMessage?: string | null;
   completionReason?: CompletionReason | null;
+  rateLimitResetsAt?: string | null;
+  rateLimitKind?: string | null;
   branchId?: string;
   projectId?: string;
   sessionType?: string;

@@ -2168,6 +2168,7 @@ fn test_completion_reason_round_trips() {
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
         CompletionReason::RemoteAgentLost,
+        CompletionReason::RateLimited,
         CompletionReason::AppQuit,
         CompletionReason::Unknown,
     ] {
@@ -2198,6 +2199,7 @@ fn test_completion_reason_resumability() {
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
         CompletionReason::RemoteAgentLost,
+        CompletionReason::RateLimited,
         CompletionReason::AppQuit,
     ] {
         assert!(reason.is_resumable(), "{reason:?} should be resumable");
@@ -2205,6 +2207,259 @@ fn test_completion_reason_resumability() {
     for reason in [CompletionReason::TurnComplete, CompletionReason::Unknown] {
         assert!(!reason.is_resumable(), "{reason:?} should not be resumable");
     }
+}
+
+#[test]
+fn test_session_provider_metadata_round_trips() {
+    let store = Store::in_memory().unwrap();
+
+    let mut session = Session::new_running("test metadata", Path::new("/tmp"));
+    session.provider_metadata = Some(serde_json::json!({
+        "acp": {
+            "promptResponse": {
+                "stopReason": "end_turn"
+            }
+        }
+    }));
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(
+        fetched
+            .provider_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/acp/promptResponse/stopReason"))
+            .and_then(|value| value.as_str()),
+        Some("end_turn")
+    );
+}
+
+#[test]
+fn test_session_provider_metadata_merges_protocol_fragments() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("merge metadata", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    store
+        .merge_session_provider_metadata(
+            &session.id,
+            &serde_json::json!({
+                "acp": {
+                    "usageUpdate": {
+                        "used": 100,
+                        "_meta": {
+                            "_claude/rateLimit": {
+                                "status": "rejected",
+                                "resetsAt": "2026-06-24T15:45:00Z"
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+    store
+        .merge_session_provider_metadata(
+            &session.id,
+            &serde_json::json!({
+                "acp": {
+                    "promptError": {
+                        "code": -32603,
+                        "message": "rate limited",
+                        "data": {
+                            "errorKind": "rate_limit"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    let metadata = fetched.provider_metadata.as_ref().unwrap();
+    assert_eq!(
+        metadata
+            .pointer("/acp/usageUpdate/_meta")
+            .and_then(|meta| meta.get("_claude/rateLimit"))
+            .and_then(|rate_limit| rate_limit.get("resetsAt"))
+            .and_then(|value| value.as_str()),
+        Some("2026-06-24T15:45:00Z")
+    );
+    assert_eq!(
+        metadata
+            .pointer("/acp/promptError/data/errorKind")
+            .and_then(|value| value.as_str()),
+        Some("rate_limit")
+    );
+}
+
+#[test]
+fn test_transition_running_to_rate_limited_pauses_with_recovery_metadata() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("rate limited", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    assert!(store
+        .transition_running_to_rate_limited(
+            &session.id,
+            Some("rate limit"),
+            Some("2026-06-24T15:45:00Z"),
+            Some("claude_pro")
+        )
+        .unwrap());
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Paused);
+    assert_eq!(fetched.error_message.as_deref(), Some("rate limit"));
+    assert_eq!(
+        fetched.completion_reason,
+        Some(CompletionReason::RateLimited)
+    );
+    assert_eq!(
+        fetched.rate_limit_resets_at.as_deref(),
+        Some("2026-06-24T15:45:00Z")
+    );
+    assert_eq!(fetched.rate_limit_kind.as_deref(), Some("claude_pro"));
+}
+
+#[test]
+fn test_transition_to_running_clears_stale_recovery_metadata() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("retry metadata", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .merge_session_provider_metadata(
+            &session.id,
+            &serde_json::json!({
+                "acp": {
+                    "promptError": {
+                        "data": {
+                            "errorKind": "rate_limit"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+    store
+        .transition_running_to_rate_limited(
+            &session.id,
+            Some("rate limit"),
+            Some("2026-06-24T15:45:00Z"),
+            Some("rate_limit"),
+        )
+        .unwrap();
+
+    assert!(store.transition_to_running(&session.id).unwrap());
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Running);
+    assert!(fetched.error_message.is_none());
+    assert!(fetched.completion_reason.is_none());
+    assert!(fetched.provider_metadata.is_none());
+    assert!(fetched.rate_limit_resets_at.is_none());
+    assert!(fetched.rate_limit_kind.is_none());
+}
+
+#[test]
+fn test_transition_to_running_can_preserve_selected_provider_metadata() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("retry metadata", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .merge_session_provider_metadata(
+            &session.id,
+            &serde_json::json!({
+                "acp": {
+                    "promptError": {
+                        "data": {
+                            "errorKind": "rate_limit"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+    store
+        .transition_running_to_rate_limited(
+            &session.id,
+            Some("rate limit"),
+            Some("2026-06-24T15:45:00Z"),
+            Some("rate_limit"),
+        )
+        .unwrap();
+
+    assert!(store
+        .transition_to_running_with_provider_metadata(
+            &session.id,
+            Some(&serde_json::json!({
+                "staged": {
+                    "rateLimitAutoRecovery": {
+                        "attempt": 1
+                    }
+                }
+            })),
+        )
+        .unwrap());
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Running);
+    let metadata = fetched.provider_metadata.as_ref().unwrap();
+    assert!(metadata.pointer("/acp/promptError").is_none());
+    assert_eq!(
+        metadata
+            .pointer("/staged/rateLimitAutoRecovery/attempt")
+            .and_then(|value| value.as_i64()),
+        Some(1)
+    );
+    assert!(fetched.rate_limit_resets_at.is_none());
+    assert!(fetched.rate_limit_kind.is_none());
+}
+
+#[test]
+fn test_auto_resume_claim_requires_rate_limited_paused_session() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("claim race", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // Still running: the auto-resume claim must not match.
+    assert!(!store
+        .transition_to_running_with_provider_metadata(&session.id, None)
+        .unwrap());
+
+    // Completed between the scheduler's scan and the claim: must not match
+    // either, or the claim would resurrect a finished session.
+    store
+        .update_session_status(
+            &session.id,
+            SessionStatus::Completed,
+            None,
+            Some(&CompletionReason::TurnComplete),
+        )
+        .unwrap();
+    assert!(!store
+        .transition_to_running_with_provider_metadata(&session.id, None)
+        .unwrap());
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Completed);
+
+    // Only the paused/rate-limited state is claimable.
+    store
+        .update_session_status(&session.id, SessionStatus::Running, None, None)
+        .unwrap();
+    store
+        .transition_running_to_rate_limited(&session.id, Some("rate limit"), None, None)
+        .unwrap();
+    assert!(store
+        .transition_to_running_with_provider_metadata(&session.id, None)
+        .unwrap());
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Running);
 }
 
 #[test]

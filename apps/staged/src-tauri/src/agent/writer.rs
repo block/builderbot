@@ -128,6 +128,20 @@ fn acp_event_role(metadata: &AcpMessageMetadata) -> MessageRole {
     }
 }
 
+/// Session-level provider metadata fragment for an ACP event, if the event
+/// carries state that recovery logic reads back after the run ends (rate-limit
+/// status from usage updates, structured prompt errors, stop reasons).
+fn provider_metadata_for_acp_event(metadata: &AcpEventMetadata) -> Option<serde_json::Value> {
+    let key = match metadata.event_kind.as_deref() {
+        Some("usage_update") => "usageUpdate",
+        Some("prompt_response") => "promptResponse",
+        Some("prompt_error") => "promptError",
+        _ => return None,
+    };
+    let content = metadata.content.clone()?;
+    Some(serde_json::json!({ "acp": { key: content } }))
+}
+
 impl MessageWriter {
     pub fn new(session_id: String, store: Arc<Store>) -> Self {
         Self {
@@ -620,6 +634,14 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
+        if let Some(provider_metadata) = provider_metadata_for_acp_event(&metadata) {
+            if let Err(e) = self
+                .store
+                .merge_session_provider_metadata(&self.session_id, &provider_metadata)
+            {
+                log::warn!("Failed to persist provider metadata: {e}");
+            }
+        }
         let metadata = acp_event_metadata(metadata);
         let role = acp_event_role(&metadata);
         if let Err(e) =

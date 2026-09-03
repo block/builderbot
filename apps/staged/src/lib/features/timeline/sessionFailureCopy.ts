@@ -27,12 +27,14 @@ const RECONCILE_INTERRUPTIONS: ReadonlySet<string> = new Set([
 /**
  * The subtitle of a timeline row whose session ended without producing its
  * artifact. `errorMessage` is the session's: reconcile's messages say more
- * than its completion reason does.
+ * than its completion reason does. `rateLimitResetsAt` dates a rate-limit
+ * pause's subtitle.
  */
 export function failedArtifactSubtitle(
   completionReason: string | null | undefined,
   kind: ArtifactKind,
-  errorMessage?: string | null
+  errorMessage?: string | null,
+  rateLimitResetsAt?: string | null
 ): string {
   const noun = artifactNoun[kind];
   if (errorMessage === RECONCILE_WORKSTATION_GONE) {
@@ -46,6 +48,8 @@ export function failedArtifactSubtitle(
       return `Session crashed — no ${noun} created`;
     case 'remote_agent_lost':
       return `Workspace agent lost — no ${noun} created`;
+    case 'rate_limited':
+      return rateLimitPausedSubtitle(rateLimitResetsAt) ?? `Paused by API limit — no ${noun} yet`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;
     case 'project_session_interrupted':
@@ -58,4 +62,21 @@ export function failedArtifactSubtitle(
     default:
       return `Session finished — no ${noun} created`;
   }
+}
+
+export function rateLimitPausedSubtitle(rateLimitResetsAt?: string | null): string | null {
+  const resetTime = formatRateLimitResetTime(rateLimitResetsAt);
+  if (resetTime) return `Paused by API limit — resets around ${resetTime}`;
+  return null;
+}
+
+export function formatRateLimitResetTime(rateLimitResetsAt?: string | null): string | null {
+  if (!rateLimitResetsAt) return null;
+  const date = new Date(rateLimitResetsAt);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return date.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }

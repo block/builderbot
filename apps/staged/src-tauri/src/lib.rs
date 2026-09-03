@@ -42,6 +42,8 @@ pub mod project_mcp;
 pub mod project_search;
 pub mod project_transfer;
 pub mod prs;
+pub(crate) mod rate_limit_metrics;
+pub mod rate_limit_scheduler;
 pub mod review_commands;
 pub mod session_commands;
 pub mod session_completion;
@@ -185,6 +187,8 @@ pub struct CommitTimelineItem {
     /// apart from a plain commit session, since the subject is a display label
     /// an agent-pushed ACP title can replace mid-pipeline.
     pub pipeline_kind: Option<store::PipelineKind>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     /// Whether this commit was authored by the current git user.
     pub is_own_commit: bool,
 }
@@ -202,6 +206,8 @@ pub struct NoteTimelineItem {
     /// The session's `error_message`, for the copy a failed row shows (a
     /// deleted workstation reads differently from a crash).
     pub session_error_message: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
@@ -232,6 +238,8 @@ pub struct ReviewTimelineItem {
     /// The session's `error_message`, for the copy a failed row shows (a
     /// deleted workstation reads differently from a crash).
     pub session_error_message: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     pub title: Option<String>,
     /// Active non-`information` comments (what the detail view lists as comments).
     pub comment_count: usize,
@@ -255,6 +263,8 @@ pub struct ImageTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     pub created_at: i64,
 }
 
@@ -1079,6 +1089,8 @@ async fn get_repo_default_branch_timeline(
                     completion_reason: None,
                     session_error_message: None,
                     pipeline_kind: None,
+                    rate_limit_resets_at: None,
+                    rate_limit_kind: None,
                     is_own_commit: false,
                 })
             })
@@ -1994,6 +2006,9 @@ pub fn run() {
             // during the needs-reset prompt); the tick loop is spawned once the
             // store is ready, either below or after a confirmed reset.
             let pr_scheduler = Arc::new(pr_poll_scheduler::PrPollScheduler::new());
+            let rate_limit_scheduler = Arc::new(rate_limit_scheduler::RateLimitScheduler::new());
+            let action_executor = Arc::new(actions::ActionExecutor::new());
+            let action_registry = Arc::new(actions::ActionRegistry::new());
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
@@ -2028,6 +2043,14 @@ pub fn run() {
                         Arc::clone(&store_arc),
                         Arc::clone(&pr_scheduler),
                         Arc::clone(&session_registry),
+                        app.handle().clone(),
+                    );
+                    rate_limit_scheduler::spawn(
+                        Arc::clone(&rate_limit_scheduler),
+                        Arc::clone(&store_arc),
+                        Arc::clone(&session_registry),
+                        Arc::clone(&action_executor),
+                        Arc::clone(&action_registry),
                         app.handle().clone(),
                     );
                     // `fsmonitor-v1` only flips `.git/config` flags on stale
@@ -2087,8 +2110,9 @@ pub fn run() {
             app.manage(pr_scheduler);
             app.manage(window_commands::NewWindowState::new());
             app.manage(window_commands::UpdaterWindowState::default());
-            app.manage(Arc::new(actions::ActionExecutor::new()));
-            app.manage(Arc::new(actions::ActionRegistry::new()));
+            app.manage(rate_limit_scheduler);
+            app.manage(action_executor);
+            app.manage(action_registry);
             app.manage(app_lifecycle::QuitState::default());
             app.manage(launch_resume::LaunchResumeState::default());
             app.manage(DbState {

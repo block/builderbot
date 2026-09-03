@@ -1,0 +1,1015 @@
+//! Jittered auto-recovery for sessions paused by provider API limits.
+//!
+//! Retry bookkeeping is stored under `provider_metadata.staged` so it survives
+//! restarts without widening the stable session schema. The scheduler only
+//! resumes ACP sessions that can be replayed safely via `load_session`; sessions
+//! that stopped with an unmatched tool call stay paused for manual review.
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tauri::AppHandle;
+
+use crate::actions::{ActionExecutor, ActionRegistry};
+use crate::store::{MessageRole, Session, Store};
+
+pub(crate) const AUTO_RETRY_RESUME_PROMPT: &str = "Continue where you left off.";
+
+const TICK_INTERVAL_SECS: u64 = 15;
+const MAX_AUTO_RETRY_ATTEMPTS: u32 = 8;
+const GIVE_UP_AFTER_MS: i64 = 24 * 60 * 60 * 1_000;
+const BASE_BACKOFF_MS: i64 = 60_000;
+const MAX_BACKOFF_MS: i64 = 30 * 60_000;
+const MIN_RETRY_DELAY_MS: i64 = 5_000;
+const RESET_GRACE_MS: i64 = 30_000;
+const RESET_JITTER_MS: i64 = 5 * 60_000;
+const MAX_RESUMES_PER_TICK: usize = 2;
+
+#[derive(Default)]
+pub struct RateLimitScheduler {
+    in_flight: Mutex<HashSet<String>>,
+}
+
+impl RateLimitScheduler {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn try_mark_in_flight(&self, session_id: &str) -> bool {
+        self.in_flight
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string())
+    }
+
+    fn clear_in_flight(&self, session_id: &str) {
+        self.in_flight.lock().unwrap().remove(session_id);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitAutoRecovery {
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub next_retry_at: Option<i64>,
+    pub first_limited_at: i64,
+    pub updated_at: i64,
+    pub gave_up_at: Option<i64>,
+    pub unsafe_to_auto_resume: bool,
+    pub reason: Option<String>,
+}
+
+pub fn spawn(
+    scheduler: Arc<RateLimitScheduler>,
+    store: Arc<Store>,
+    registry: Arc<crate::session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: AppHandle,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(TICK_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            interval.tick().await;
+            run_tick(
+                Arc::clone(&scheduler),
+                Arc::clone(&store),
+                Arc::clone(&registry),
+                Arc::clone(&action_executor),
+                Arc::clone(&action_registry),
+                app_handle.clone(),
+            )
+            .await;
+        }
+    });
+}
+
+async fn run_tick(
+    scheduler: Arc<RateLimitScheduler>,
+    store: Arc<Store>,
+    registry: Arc<crate::session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: AppHandle,
+) {
+    let sessions = match store.get_rate_limited_paused_sessions() {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            log::warn!("[rate_limit_recovery] failed to list paused sessions: {e}");
+            return;
+        }
+    };
+    crate::rate_limit_metrics::record_scheduled_resume_backlog(sessions.len());
+    let now = crate::store::now_timestamp();
+    let mut started = 0usize;
+    let mut drained_branches: HashSet<String> = HashSet::new();
+
+    for session in sessions {
+        if started >= MAX_RESUMES_PER_TICK {
+            break;
+        }
+        if !scheduler.try_mark_in_flight(&session.id) {
+            continue;
+        }
+
+        let state = match ensure_auto_recovery_state(&store, &session, now) {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                scheduler.clear_in_flight(&session.id);
+                continue;
+            }
+            Err(e) => {
+                log::warn!(
+                    "[rate_limit_recovery] failed to prepare session {}: {e}",
+                    session.id
+                );
+                scheduler.clear_in_flight(&session.id);
+                continue;
+            }
+        };
+
+        if !is_due(&state, now) {
+            scheduler.clear_in_flight(&session.id);
+            continue;
+        }
+
+        let ticket = match claim_for_auto_resume(&store, &session.id) {
+            Ok(AutoResumeClaim::Claimed(ticket)) => *ticket,
+            Ok(AutoResumeClaim::Deferred {
+                reason,
+                drainable_branch_id,
+            }) => {
+                log::info!(
+                    "[rate_limit_recovery] deferring auto-resume for session {}: {reason}",
+                    session.id
+                );
+                scheduler.clear_in_flight(&session.id);
+                if let Some(branch_id) = drainable_branch_id {
+                    if drained_branches.insert(branch_id.clone()) {
+                        spawn_queue_drain(&app_handle, &branch_id);
+                    }
+                }
+                continue;
+            }
+            Ok(AutoResumeClaim::Lost) => {
+                log::info!(
+                    "[rate_limit_recovery] skipping auto-resume for session {}: no longer paused by a rate limit",
+                    session.id
+                );
+                scheduler.clear_in_flight(&session.id);
+                continue;
+            }
+            Err(e) => {
+                log::warn!(
+                    "[rate_limit_recovery] failed to claim session {} for auto-resume: {e}",
+                    session.id
+                );
+                scheduler.clear_in_flight(&session.id);
+                continue;
+            }
+        };
+
+        started += 1;
+        crate::rate_limit_metrics::record_recovery_retry_attempt(
+            &session.id,
+            session.provider.as_deref(),
+            session.rate_limit_kind.as_deref(),
+            state.attempt,
+            state.max_attempts,
+        );
+        let scheduler_for_task = Arc::clone(&scheduler);
+        let store_for_task = Arc::clone(&store);
+        let registry_for_task = Arc::clone(&registry);
+        let executor_for_task = Arc::clone(&action_executor);
+        let action_registry_for_task = Arc::clone(&action_registry);
+        let app_for_task = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let session_id = session.id.clone();
+            log::info!(
+                "[rate_limit_recovery] auto-resuming session {} (attempt {}/{})",
+                session_id,
+                state.attempt,
+                state.max_attempts
+            );
+            let result = crate::session_commands::auto_resume_rate_limited_session(
+                Arc::clone(&store_for_task),
+                registry_for_task,
+                executor_for_task,
+                action_registry_for_task,
+                app_for_task,
+                ticket,
+            )
+            .await;
+            if let Err(e) = result {
+                log::warn!("[rate_limit_recovery] auto-resume failed for {session_id}: {e}");
+                crate::rate_limit_metrics::record_recovery_start_failed(
+                    &session_id,
+                    "resume_start_failed",
+                );
+                if let Ok(Some(session)) = store_for_task.get_session(&session_id) {
+                    if session.status.as_str() == "paused" {
+                        let _ = mark_gave_up(
+                            &store_for_task,
+                            &session,
+                            crate::store::now_timestamp(),
+                            "resume_start_failed",
+                        );
+                    }
+                }
+            }
+            scheduler_for_task.clear_in_flight(&session_id);
+        });
+    }
+}
+
+/// Start whatever the branch has queued instead of waiting for it to finish.
+///
+/// Queued sessions only start when something drains them, and the pause path
+/// deliberately skips the terminal-hook drain cascade — a paused session has
+/// not finished. So a session that pauses with work queued behind it leaves the
+/// branch deadlocked: the queue never drains (no terminal hook ran) and the
+/// pause never resumes (the queue is non-empty). Until an unrelated drain fired
+/// — project open, workspace ready, post-pull — nothing moved, which is exactly
+/// the unattended overnight recovery this feature exists for.
+///
+/// Draining breaks the deadlock in either direction: the drained session
+/// completes and its terminal hook restarts the cascade, or it hits the same
+/// limit and joins recovery with its own backoff.
+/// Ask the queue kicker to drain the branch's queued work while the
+/// rate-limited session waits to auto-resume. Only the kicker may run a drain
+/// (it serialises per branch), so this is a kick, not a drain of our own.
+fn spawn_queue_drain(app_handle: &AppHandle, branch_id: &str) {
+    log::info!(
+        "[rate_limit_recovery] kicking queued work for branch {branch_id} while a session waits to auto-resume"
+    );
+    crate::session_queue::kick(
+        app_handle,
+        branch_id,
+        crate::session_queue::KickSource::RateLimitRecovery,
+    );
+}
+
+fn is_due(state: &RateLimitAutoRecovery, now: i64) -> bool {
+    if state.unsafe_to_auto_resume || state.gave_up_at.is_some() {
+        return false;
+    }
+    state
+        .next_retry_at
+        .map(|next_retry_at| next_retry_at <= now)
+        .unwrap_or(false)
+}
+
+fn ensure_auto_recovery_state(
+    store: &Store,
+    session: &Session,
+    now: i64,
+) -> Result<Option<RateLimitAutoRecovery>, String> {
+    if let Some(state) = auto_recovery_from_metadata(session.provider_metadata.as_ref()) {
+        return Ok(Some(state));
+    }
+
+    record_rate_limit_pause_for_session(store, session, now)?;
+    Ok(store
+        .get_session(&session.id)
+        .map_err(|e| e.to_string())?
+        .and_then(|session| auto_recovery_from_metadata(session.provider_metadata.as_ref())))
+}
+
+pub(crate) fn record_rate_limit_pause(
+    store: &Store,
+    session_id: &str,
+    now: i64,
+) -> Result<(), String> {
+    let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    record_rate_limit_pause_for_session(store, &session, now)
+}
+
+fn record_rate_limit_pause_for_session(
+    store: &Store,
+    session: &Session,
+    now: i64,
+) -> Result<(), String> {
+    let blocker = auto_resume_blocker(store, session)?;
+    let existing = auto_recovery_from_metadata(session.provider_metadata.as_ref());
+    let jitter_ms = jitter_ms(jitter_bound_for(
+        session.rate_limit_resets_at.as_deref(),
+        now,
+    ));
+    let state = build_recovery_state(
+        existing.as_ref(),
+        session.rate_limit_resets_at.as_deref(),
+        now,
+        blocker.as_deref(),
+        jitter_ms,
+    );
+    store
+        .merge_session_provider_metadata(&session.id, &metadata_for_state(&state))
+        .map_err(|e| e.to_string())?;
+
+    if state.unsafe_to_auto_resume {
+        log::info!(
+            "[rate_limit_recovery] session {} requires manual resume ({})",
+            session.id,
+            state.reason.as_deref().unwrap_or("unsafe")
+        );
+        crate::rate_limit_metrics::record_recovery_manual_required(
+            &session.id,
+            session.provider.as_deref(),
+            session.rate_limit_kind.as_deref(),
+            state.reason.as_deref(),
+        );
+    } else if state.gave_up_at.is_some() {
+        log::warn!(
+            "[rate_limit_recovery] session {} gave up after {} attempts ({})",
+            session.id,
+            state.attempt,
+            state.reason.as_deref().unwrap_or("retry_limit")
+        );
+        crate::rate_limit_metrics::record_recovery_give_up(
+            &session.id,
+            session.provider.as_deref(),
+            session.rate_limit_kind.as_deref(),
+            state.attempt,
+            state.reason.as_deref(),
+        );
+    } else if let Some(next_retry_at) = state.next_retry_at {
+        log::info!(
+            "[rate_limit_recovery] scheduled session {} retry attempt {}/{} at {}",
+            session.id,
+            state.attempt,
+            state.max_attempts,
+            next_retry_at
+        );
+        crate::rate_limit_metrics::record_recovery_scheduled(
+            &session.id,
+            session.provider.as_deref(),
+            session.rate_limit_kind.as_deref(),
+            state.attempt,
+            state.max_attempts,
+            next_retry_at,
+            state.reason.as_deref(),
+        );
+    }
+
+    Ok(())
+}
+
+fn mark_gave_up(store: &Store, session: &Session, now: i64, reason: &str) -> Result<(), String> {
+    let existing = auto_recovery_from_metadata(session.provider_metadata.as_ref());
+    let state = RateLimitAutoRecovery {
+        attempt: existing.as_ref().map(|s| s.attempt).unwrap_or(0),
+        max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+        next_retry_at: None,
+        first_limited_at: existing
+            .as_ref()
+            .map(|s| s.first_limited_at)
+            .unwrap_or(session.updated_at),
+        updated_at: now,
+        gave_up_at: Some(now),
+        unsafe_to_auto_resume: false,
+        reason: Some(reason.to_string()),
+    };
+    store
+        .merge_session_provider_metadata(&session.id, &metadata_for_state(&state))
+        .map_err(|e| e.to_string())?;
+    crate::rate_limit_metrics::record_recovery_give_up(
+        &session.id,
+        session.provider.as_deref(),
+        session.rate_limit_kind.as_deref(),
+        state.attempt,
+        state.reason.as_deref(),
+    );
+    Ok(())
+}
+
+fn build_recovery_state(
+    existing: Option<&RateLimitAutoRecovery>,
+    resets_at: Option<&str>,
+    now: i64,
+    blocker: Option<&str>,
+    jitter_ms: i64,
+) -> RateLimitAutoRecovery {
+    let first_limited_at = existing.map(|s| s.first_limited_at).unwrap_or(now);
+
+    if let Some(reason) = blocker {
+        return RateLimitAutoRecovery {
+            attempt: existing.map(|s| s.attempt).unwrap_or(0),
+            max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+            next_retry_at: None,
+            first_limited_at,
+            updated_at: now,
+            gave_up_at: None,
+            unsafe_to_auto_resume: true,
+            reason: Some(reason.to_string()),
+        };
+    }
+
+    let attempt = existing.map(|s| s.attempt.saturating_add(1)).unwrap_or(1);
+    if attempt > MAX_AUTO_RETRY_ATTEMPTS {
+        return RateLimitAutoRecovery {
+            attempt,
+            max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+            next_retry_at: None,
+            first_limited_at,
+            updated_at: now,
+            gave_up_at: Some(now),
+            unsafe_to_auto_resume: false,
+            reason: Some("retry_cap_exceeded".to_string()),
+        };
+    }
+    if now.saturating_sub(first_limited_at) > GIVE_UP_AFTER_MS {
+        return RateLimitAutoRecovery {
+            attempt,
+            max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+            next_retry_at: None,
+            first_limited_at,
+            updated_at: now,
+            gave_up_at: Some(now),
+            unsafe_to_auto_resume: false,
+            reason: Some("retry_window_elapsed".to_string()),
+        };
+    }
+
+    let reset_retry_at = resets_at
+        .and_then(parse_rfc3339_millis)
+        .filter(|reset_at| *reset_at > now)
+        .map(|reset_at| {
+            reset_at
+                .saturating_add(RESET_GRACE_MS)
+                .saturating_add(jitter_ms)
+        });
+
+    let (next_retry_at, reason) = if let Some(next_retry_at) = reset_retry_at {
+        (next_retry_at, "reset_at")
+    } else {
+        let bounded_jitter_ms = jitter_ms.min(retry_delay_bound_ms(attempt));
+        (
+            now.saturating_add(bounded_jitter_ms.max(MIN_RETRY_DELAY_MS)),
+            "backoff",
+        )
+    };
+
+    RateLimitAutoRecovery {
+        attempt,
+        max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+        next_retry_at: Some(next_retry_at),
+        first_limited_at,
+        updated_at: now,
+        gave_up_at: None,
+        unsafe_to_auto_resume: false,
+        reason: Some(reason.to_string()),
+    }
+}
+
+/// The outcome of trying to take ownership of a rate-limited session for one
+/// auto-resume attempt.
+enum AutoResumeClaim {
+    /// The session row is `running` and this attempt owns it.
+    Claimed(Box<crate::session_commands::RateLimitResumeTicket>),
+    /// The branch has other work in flight, so resuming now would run two
+    /// agents in the same worktree. `drainable_branch_id` is set when that work
+    /// is queued-only.
+    Deferred {
+        reason: String,
+        drainable_branch_id: Option<String>,
+    },
+    /// The row is no longer a paused rate-limited session: a manual resume, a
+    /// cancel, or a delete won the race, and it keeps the session.
+    Lost,
+}
+
+/// Claim a rate-limited session for auto-resume, or explain why not.
+///
+/// A rate-limited session must not auto-resume while its branch has other
+/// active work: the user may have launched or queued new sessions during the
+/// backoff, and resuming would run two agents in the same branch worktree. So
+/// this asks the same question the branch launch path asks before starting git
+/// work ([`crate::prs::branch_work_in_flight`]) under the same per-branch
+/// launch lock.
+///
+/// The claim itself happens under that same lock, because checking there and
+/// claiming afterwards only narrows the race: a branch launch does its own
+/// check *and* its row insert under the lock, so it would legitimately start a
+/// session in the window between the two while the paused row still looks
+/// dormant. Once the row is `running`, every `has_running_session_for_branch`
+/// check — launch, queue drain, branch move — sees this session.
+///
+/// Unlike [`auto_resume_blocker`], a busy branch is transient, so a deferral
+/// leaves the retry state untouched for the next tick rather than marking the
+/// session unsafe to auto-resume. Note the branch stays free to rebase or
+/// squash underneath a paused conversation (#902 only queues git actions behind
+/// running or queued sessions); auto-resume then replays a conversation that
+/// predates the rewritten SHAs, exactly as a manual resume after a rebase does
+/// today, and #901's commit reassociation repairs the recorded artifacts.
+fn claim_for_auto_resume(store: &Arc<Store>, session_id: &str) -> Result<AutoResumeClaim, String> {
+    let branch_id = store
+        .get_branch_id_for_session(session_id)
+        .map_err(|e| e.to_string())?;
+
+    let launch_lock = branch_id
+        .as_deref()
+        .map(crate::session_commands::branch_session_launch_lock_for);
+    let _guard = launch_lock.as_ref().map(|lock| lock.lock().unwrap());
+
+    if let Some(branch_id) = branch_id.as_deref() {
+        match crate::prs::branch_work_in_flight(store, branch_id)? {
+            crate::prs::BranchWorkInFlight::Running => {
+                return Ok(AutoResumeClaim::Deferred {
+                    reason: format!("branch {branch_id} has a running session"),
+                    drainable_branch_id: None,
+                });
+            }
+            crate::prs::BranchWorkInFlight::Queued => {
+                return Ok(AutoResumeClaim::Deferred {
+                    reason: format!("branch {branch_id} has queued work"),
+                    drainable_branch_id: Some(branch_id.to_string()),
+                });
+            }
+            crate::prs::BranchWorkInFlight::None => {}
+        }
+    }
+
+    // Re-read under the lock: `ensure_auto_recovery_state` may have just
+    // written the retry bookkeeping this claim has to carry forward, and the
+    // rate-limit fields have to be captured before the claim clears them.
+    let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
+        return Ok(AutoResumeClaim::Lost);
+    };
+
+    // Claim any message the user queued during the backoff before claiming the
+    // row: `claim_oldest_queued_session_message` skips running sessions, so the
+    // reverse order would always fall back to the synthetic retry prompt.
+    // (Messages can only be queued before the pause today — enqueueing requires
+    // a running session — but claiming here keeps the auto path correct if that
+    // guard is ever relaxed to accept paused sessions.)
+    let queued_message = store
+        .claim_oldest_queued_session_message(session_id)
+        .map_err(|e| e.to_string())?;
+
+    let preserved_metadata = preserved_auto_recovery_metadata(session.provider_metadata.as_ref());
+    let claimed = store
+        .transition_to_running_with_provider_metadata(session_id, preserved_metadata.as_ref())
+        .map_err(|e| e.to_string())?;
+    if !claimed {
+        if let Some(message) = &queued_message {
+            let _ = store.release_queued_session_message(&message.id, None);
+        }
+        return Ok(AutoResumeClaim::Lost);
+    }
+
+    Ok(AutoResumeClaim::Claimed(Box::new(
+        crate::session_commands::RateLimitResumeTicket {
+            session_id: session_id.to_string(),
+            queued_message,
+            rate_limit_resets_at: session.rate_limit_resets_at.clone(),
+            rate_limit_kind: session.rate_limit_kind.clone(),
+        },
+    )))
+}
+
+fn auto_resume_blocker(store: &Store, session: &Session) -> Result<Option<String>, String> {
+    if session.agent_id.is_none() {
+        return Ok(Some("missing_agent_session_id".to_string()));
+    }
+
+    let messages = store
+        .get_session_messages(&session.id)
+        .map_err(|e| e.to_string())?;
+    let mut unmatched_tool_call = false;
+    for message in messages {
+        match message.role {
+            MessageRole::ToolCall => unmatched_tool_call = true,
+            MessageRole::ToolResult => unmatched_tool_call = false,
+            MessageRole::User | MessageRole::Assistant => {}
+        }
+    }
+    if unmatched_tool_call {
+        Ok(Some("pending_tool_call".to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn preserved_auto_recovery_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    auto_recovery_from_metadata(metadata.as_ref().copied()).map(|state| metadata_for_state(&state))
+}
+
+pub(crate) fn auto_recovery_from_metadata(
+    metadata: Option<&serde_json::Value>,
+) -> Option<RateLimitAutoRecovery> {
+    metadata
+        .and_then(|metadata| metadata.pointer("/staged/rateLimitAutoRecovery"))
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
+fn metadata_for_state(state: &RateLimitAutoRecovery) -> serde_json::Value {
+    json!({
+        "staged": {
+            "rateLimitAutoRecovery": state
+        }
+    })
+}
+
+fn jitter_bound_for(resets_at: Option<&str>, now: i64) -> i64 {
+    let has_future_reset = resets_at
+        .and_then(parse_rfc3339_millis)
+        .map(|reset_at| reset_at > now)
+        .unwrap_or(false);
+    if has_future_reset {
+        RESET_JITTER_MS
+    } else {
+        MAX_BACKOFF_MS
+    }
+}
+
+fn jitter_ms(bound_ms: i64) -> i64 {
+    if bound_ms <= MIN_RETRY_DELAY_MS {
+        return MIN_RETRY_DELAY_MS;
+    }
+    let span = (bound_ms - MIN_RETRY_DELAY_MS + 1) as u64;
+    MIN_RETRY_DELAY_MS + (rand::random::<u64>() % span) as i64
+}
+
+fn retry_delay_bound_ms(attempt: u32) -> i64 {
+    let exponent = attempt.saturating_sub(1).min(10);
+    BASE_BACKOFF_MS
+        .saturating_mul(1_i64 << exponent)
+        .min(MAX_BACKOFF_MS)
+}
+
+fn parse_rfc3339_millis(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (date, time_and_offset) = value.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i32 = date_parts.next()?.parse().ok()?;
+    let month: u8 = date_parts.next()?.parse().ok()?;
+    let day: u8 = date_parts.next()?.parse().ok()?;
+
+    let (time, offset_seconds) = if let Some(time) = time_and_offset.strip_suffix('Z') {
+        (time, 0)
+    } else if let Some(pos) = time_and_offset.rfind(['+', '-']) {
+        let sign = if time_and_offset.as_bytes().get(pos) == Some(&b'-') {
+            -1
+        } else {
+            1
+        };
+        let time = &time_and_offset[..pos];
+        let offset = &time_and_offset[pos + 1..];
+        let (hours, minutes) = offset.split_once(':')?;
+        let hours: i32 = hours.parse().ok()?;
+        let minutes: i32 = minutes.parse().ok()?;
+        (time, sign * (hours * 3600 + minutes * 60))
+    } else {
+        return None;
+    };
+
+    let mut time_parts = time.split(':');
+    let hour: u8 = time_parts.next()?.parse().ok()?;
+    let minute: u8 = time_parts.next()?.parse().ok()?;
+    let seconds_raw = time_parts.next()?;
+    let (second_raw, millis) = match seconds_raw.split_once('.') {
+        Some((second, fraction)) => {
+            let mut fraction = fraction.chars().take(3).collect::<String>();
+            while fraction.len() < 3 {
+                fraction.push('0');
+            }
+            let millis = fraction.parse::<u16>().ok().unwrap_or(0);
+            (second, millis)
+        }
+        None => (seconds_raw, 0),
+    };
+    let second: u8 = second_raw.parse().ok()?;
+
+    let month = time::Month::try_from(month).ok()?;
+    let date = time::Date::from_calendar_date(year, month, day).ok()?;
+    let time = time::Time::from_hms_milli(hour, minute, second, millis).ok()?;
+    let offset_datetime = time::PrimitiveDateTime::new(date, time)
+        .assume_utc()
+        .checked_sub(time::Duration::seconds(offset_seconds.into()))?;
+    Some(offset_datetime.unix_timestamp().saturating_mul(1_000) + i64::from(millis))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{MessageRole, Session};
+    use std::path::Path;
+
+    #[test]
+    fn schedules_reset_retry_after_reset_with_grace_and_jitter() {
+        let now = parse_rfc3339_millis("2026-06-24T15:00:00Z").unwrap();
+        let reset = "2026-06-24T15:45:00Z";
+
+        let state = build_recovery_state(None, Some(reset), now, None, 12_000);
+
+        assert_eq!(state.attempt, 1);
+        assert_eq!(state.reason.as_deref(), Some("reset_at"));
+        assert_eq!(
+            state.next_retry_at,
+            Some(parse_rfc3339_millis(reset).unwrap() + RESET_GRACE_MS + 12_000)
+        );
+    }
+
+    #[test]
+    fn schedules_unknown_reset_with_capped_backoff_jitter() {
+        let state = build_recovery_state(None, None, 1_000_000, None, 4_000);
+
+        assert_eq!(state.attempt, 1);
+        assert_eq!(state.reason.as_deref(), Some("backoff"));
+        assert_eq!(state.next_retry_at, Some(1_000_000 + MIN_RETRY_DELAY_MS));
+    }
+
+    #[test]
+    fn gives_up_after_retry_cap() {
+        let existing = RateLimitAutoRecovery {
+            attempt: MAX_AUTO_RETRY_ATTEMPTS,
+            max_attempts: MAX_AUTO_RETRY_ATTEMPTS,
+            next_retry_at: Some(1),
+            first_limited_at: 0,
+            updated_at: 0,
+            gave_up_at: None,
+            unsafe_to_auto_resume: false,
+            reason: Some("backoff".to_string()),
+        };
+
+        let state = build_recovery_state(Some(&existing), None, 10_000, None, 5_000);
+
+        assert_eq!(state.attempt, MAX_AUTO_RETRY_ATTEMPTS + 1);
+        assert_eq!(state.gave_up_at, Some(10_000));
+        assert_eq!(state.reason.as_deref(), Some("retry_cap_exceeded"));
+        assert!(state.next_retry_at.is_none());
+    }
+
+    #[test]
+    fn marks_missing_agent_session_as_manual_only() {
+        let state =
+            build_recovery_state(None, None, 10_000, Some("missing_agent_session_id"), 5_000);
+
+        assert!(state.unsafe_to_auto_resume);
+        assert_eq!(state.reason.as_deref(), Some("missing_agent_session_id"));
+        assert!(state.next_retry_at.is_none());
+    }
+
+    #[test]
+    fn detects_unmatched_tool_call_as_auto_resume_blocker() {
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("test", Path::new("/tmp")).with_agent("agent-session");
+        store.create_session(&session).unwrap();
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "{}")
+            .unwrap();
+
+        assert_eq!(
+            auto_resume_blocker(&store, &session).unwrap(),
+            Some("pending_tool_call".to_string())
+        );
+
+        store
+            .add_session_message(&session.id, MessageRole::ToolResult, "{}")
+            .unwrap();
+        assert_eq!(auto_resume_blocker(&store, &session).unwrap(), None);
+    }
+
+    /// A branch whose only session is running, linked to a commit.
+    fn branch_with_running_session(store: &Arc<Store>) -> (crate::store::Branch, Session) {
+        use crate::store::{Branch, Commit, Project};
+
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        let session = Session::new_running("rate limited", Path::new("/tmp"))
+            .with_agent("agent-1")
+            .with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+        store
+            .create_commit(&Commit::new_with_sha(&branch.id, "abc123").with_session(&session.id))
+            .unwrap();
+
+        (branch, session)
+    }
+
+    fn pause_with_rate_limit(store: &Store, session_id: &str) {
+        assert!(store
+            .transition_running_to_rate_limited(session_id, Some("rate limit"), Some("later"), None)
+            .unwrap());
+    }
+
+    /// A branch with one rate-limited paused session linked to a commit.
+    fn branch_with_paused_session(store: &Arc<Store>) -> (crate::store::Branch, Session) {
+        let (branch, session) = branch_with_running_session(store);
+        pause_with_rate_limit(store, &session.id);
+        (branch, session)
+    }
+
+    #[test]
+    fn defers_auto_resume_while_branch_has_a_running_session() {
+        use crate::store::{Commit, CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (branch, paused) = branch_with_paused_session(&store);
+
+        let running =
+            Session::new_running("new branch work", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&running).unwrap();
+        store
+            .create_commit(&Commit::new_with_sha(&branch.id, "def456").with_session(&running.id))
+            .unwrap();
+
+        // A running session finishes on its own, so there is nothing to drain.
+        match claim_for_auto_resume(&store, &paused.id).unwrap() {
+            AutoResumeClaim::Deferred {
+                drainable_branch_id,
+                ..
+            } => assert_eq!(drainable_branch_id, None),
+            _ => panic!("expected a deferral while the branch has a running session"),
+        }
+        assert_eq!(
+            store.get_session(&paused.id).unwrap().unwrap().status,
+            SessionStatus::Paused
+        );
+
+        store
+            .update_session_status(
+                &running.id,
+                SessionStatus::Completed,
+                None,
+                Some(&CompletionReason::TurnComplete),
+            )
+            .unwrap();
+        assert!(matches!(
+            claim_for_auto_resume(&store, &paused.id).unwrap(),
+            AutoResumeClaim::Claimed(_)
+        ));
+    }
+
+    #[test]
+    fn drains_queued_branch_work_instead_of_waiting_for_it() {
+        use crate::store::Commit;
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (branch, paused) = branch_with_paused_session(&store);
+
+        // Queued sessions never start on their own, and the pause path skipped
+        // the drain cascade, so deferring alone would deadlock the branch.
+        let queued = Session::new_queued("queued branch work").with_branch(&branch.id);
+        store.create_session(&queued).unwrap();
+        store
+            .create_commit(&Commit::new_with_sha(&branch.id, "0789abc").with_session(&queued.id))
+            .unwrap();
+
+        match claim_for_auto_resume(&store, &paused.id).unwrap() {
+            AutoResumeClaim::Deferred {
+                drainable_branch_id,
+                ..
+            } => assert_eq!(drainable_branch_id.as_deref(), Some(branch.id.as_str())),
+            _ => panic!("expected a deferral while the branch has queued work"),
+        }
+    }
+
+    #[test]
+    fn claims_the_paused_row_and_carries_its_limit_metadata() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, paused) = branch_with_paused_session(&store);
+        record_rate_limit_pause(&store, &paused.id, 10_000).unwrap();
+
+        let ticket = match claim_for_auto_resume(&store, &paused.id).unwrap() {
+            AutoResumeClaim::Claimed(ticket) => ticket,
+            _ => panic!("expected the idle branch to yield a claim"),
+        };
+        assert_eq!(ticket.rate_limit_resets_at.as_deref(), Some("later"));
+        assert!(ticket.queued_message.is_none());
+
+        // The claim is the whole point: the row is running before the resume is
+        // handed off, so a concurrent launch or drain can see it.
+        let claimed = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(claimed.status, crate::store::SessionStatus::Running);
+        assert_eq!(claimed.rate_limit_resets_at, None);
+        assert_eq!(
+            auto_recovery_from_metadata(claimed.provider_metadata.as_ref())
+                .map(|state| state.attempt),
+            Some(1)
+        );
+
+        // A second tick sees its own claim as the branch's running work.
+        assert!(matches!(
+            claim_for_auto_resume(&store, &paused.id).unwrap(),
+            AutoResumeClaim::Deferred { .. }
+        ));
+    }
+
+    #[test]
+    fn refuses_to_claim_a_session_that_left_the_paused_state() {
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, paused) = branch_with_paused_session(&store);
+
+        // A manual resume that ran to completion between the scheduler's scan
+        // and its claim keeps the session: nothing yanks it back to running.
+        store
+            .update_session_status(
+                &paused.id,
+                SessionStatus::Completed,
+                None,
+                Some(&CompletionReason::TurnComplete),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            claim_for_auto_resume(&store, &paused.id).unwrap(),
+            AutoResumeClaim::Lost
+        ));
+        assert_eq!(
+            store.get_session(&paused.id).unwrap().unwrap().status,
+            SessionStatus::Completed
+        );
+    }
+
+    #[test]
+    fn claims_a_backoff_queued_message_before_the_row() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_running_session(&store);
+        // Enqueueing requires a running session, so the message lands before
+        // the limit does.
+        store
+            .add_queued_session_message(&session.id, "actually do this instead", &[], None)
+            .unwrap();
+        pause_with_rate_limit(&store, &session.id);
+
+        let ticket = match claim_for_auto_resume(&store, &session.id).unwrap() {
+            AutoResumeClaim::Claimed(ticket) => ticket,
+            _ => panic!("expected the idle branch to yield a claim"),
+        };
+
+        // Claiming the row first would have made the message unclaimable:
+        // `claim_oldest_queued_session_message` skips running sessions.
+        assert_eq!(
+            ticket
+                .queued_message
+                .as_ref()
+                .map(|message| message.content.as_str()),
+            Some("actually do this instead")
+        );
+    }
+
+    #[test]
+    fn preserves_only_staged_auto_recovery_metadata() {
+        let metadata = json!({
+            "acp": {
+                "promptError": {
+                    "data": {
+                        "errorKind": "rate_limit"
+                    }
+                }
+            },
+            "staged": {
+                "rateLimitAutoRecovery": {
+                    "attempt": 2,
+                    "maxAttempts": 8,
+                    "nextRetryAt": 123,
+                    "firstLimitedAt": 1,
+                    "updatedAt": 2,
+                    "gaveUpAt": null,
+                    "unsafeToAutoResume": false,
+                    "reason": "backoff"
+                }
+            }
+        });
+
+        let preserved = preserved_auto_recovery_metadata(Some(&metadata)).unwrap();
+        assert!(preserved.pointer("/acp/promptError").is_none());
+        assert_eq!(
+            preserved
+                .pointer("/staged/rateLimitAutoRecovery/attempt")
+                .and_then(|value| value.as_u64()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn parses_offsets_to_utc_millis() {
+        assert_eq!(
+            parse_rfc3339_millis("2026-06-24T15:45:00+10:00"),
+            parse_rfc3339_millis("2026-06-24T05:45:00Z")
+        );
+    }
+
+    #[test]
+    fn retry_delay_bound_caps_exponential_backoff() {
+        assert_eq!(retry_delay_bound_ms(1), BASE_BACKOFF_MS);
+        assert_eq!(retry_delay_bound_ms(2), BASE_BACKOFF_MS * 2);
+        assert_eq!(retry_delay_bound_ms(99), MAX_BACKOFF_MS);
+    }
+}

@@ -275,7 +275,15 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     return;
   }
 
-  if (status === 'completed' || status === 'error' || status === 'cancelled') {
+  // `paused` is terminal for busy-state purposes: a session parked by a
+  // provider rate limit is no longer running, and the snapshot in
+  // `get_active_sessions` won't report it either.
+  if (
+    status === 'completed' ||
+    status === 'paused' ||
+    status === 'error' ||
+    status === 'cancelled'
+  ) {
     if (hydrationFetchesInFlight > 0) {
       terminalWhileFetching.set(sessionId, Date.now());
     }
@@ -738,7 +746,7 @@ function handlePrCompletion(branchId: string, status: SessionStatus) {
   } else {
     prStateStore.setPrError(
       branchId,
-      `PR creation session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+      `PR creation session ${interruptedSessionStatusLabel(status)}.`
     );
   }
 }
@@ -760,9 +768,12 @@ function handlePushCompletion(branchId: string, status: SessionStatus) {
       }, 1_500);
     }
   } else {
-    pushStateStore.setPushError(
-      branchId,
-      `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
-    );
+    pushStateStore.setPushError(branchId, `Push session ${interruptedSessionStatusLabel(status)}.`);
   }
+}
+
+function interruptedSessionStatusLabel(status: SessionStatus): string {
+  if (status === 'paused') return 'paused because of an API limit';
+  if (status === 'error') return 'failed';
+  return 'was cancelled';
 }

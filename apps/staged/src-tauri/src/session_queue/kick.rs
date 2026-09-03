@@ -58,6 +58,9 @@ pub(crate) enum KickSource {
     /// A project-note session in the branch's project reached a terminal
     /// state; a deferred push on the branch may have been waiting for it.
     ProjectSessionEnded,
+    /// A rate-limited session paused on the branch and is waiting to
+    /// auto-resume; its queued work must not wait with it.
+    RateLimitRecovery,
 }
 
 impl KickSource {
@@ -82,6 +85,7 @@ impl KickSource {
             Self::ProjectTransferred => "project transferred",
             Self::TransferFailed => "transfer failed",
             Self::ProjectSessionEnded => "project session ended",
+            Self::RateLimitRecovery => "rate limit recovery",
         }
     }
 }

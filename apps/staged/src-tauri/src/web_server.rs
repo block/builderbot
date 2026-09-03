@@ -1702,6 +1702,8 @@ pub(crate) async fn dispatch(
                             completion_reason: None,
                             session_error_message: None,
                             pipeline_kind: None,
+                            rate_limit_resets_at: None,
+                            rate_limit_kind: None,
                             is_own_commit: false,
                         })
                     })

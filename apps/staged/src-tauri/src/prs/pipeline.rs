@@ -173,22 +173,47 @@ pub(super) fn find_queued_pipeline(
         .map(|session| session.id))
 }
 
-/// Whether the branch already has work in flight, and a new request therefore
-/// has to join the queue instead of starting now.
+/// The work a branch has in flight, for callers that need to tell work which
+/// finishes on its own (running) from work that only moves when something
+/// drains it (queued).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BranchWorkInFlight {
+    None,
+    Queued,
+    Running,
+}
+
+/// What the branch is busy with, if anything.
 ///
 /// Callers must hold the branch launch lock: the answer is only meaningful for
 /// as long as no session can start or be enqueued underneath them.
+pub(crate) fn branch_work_in_flight(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<BranchWorkInFlight, String> {
+    if store
+        .has_running_session_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(BranchWorkInFlight::Running);
+    }
+    if !store
+        .get_queued_sessions_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .is_empty()
+    {
+        return Ok(BranchWorkInFlight::Queued);
+    }
+    Ok(BranchWorkInFlight::None)
+}
+
+/// Whether the branch already has work in flight, and a new request therefore
+/// has to join the queue instead of starting now.
 pub(super) fn branch_has_work_in_flight(
     store: &Arc<Store>,
     branch_id: &str,
 ) -> Result<bool, String> {
-    Ok(store
-        .has_running_session_for_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        || !store
-            .get_queued_sessions_for_branch(branch_id)
-            .map_err(|e| e.to_string())?
-            .is_empty())
+    Ok(branch_work_in_flight(store, branch_id)? != BranchWorkInFlight::None)
 }
 
 /// The rows a run-now pipeline needs before the session runner can pick it up.

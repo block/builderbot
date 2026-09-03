@@ -80,6 +80,8 @@ function projectNote(overrides: Partial<ProjectNote> = {}): ProjectNote {
     lastChatMessageAt: null,
     chatReadAt: null,
     readAt: null,
+    rateLimitResetsAt: null,
+    rateLimitKind: null,
     ...overrides,
   };
 }

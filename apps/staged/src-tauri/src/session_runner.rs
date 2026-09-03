@@ -139,6 +139,8 @@ pub struct SessionStatusEvent {
     pub status: String,
     pub error_message: Option<String>,
     pub completion_reason: Option<String>,
+    pub rate_limit_resets_at: Option<String>,
+    pub rate_limit_kind: Option<String>,
     /// The branch the session runs on. Invariant the frontend load-bears on:
     /// *every* repo-session event carries this — queue-drain, immediate launch,
     /// resume, and terminal emits alike — and a project-session event never
@@ -229,6 +231,14 @@ impl From<acp_client::BackgroundHoldStatus> for SessionBackgroundHoldSnapshot {
                 .collect(),
         }
     }
+}
+
+/// The reset time and limit kind a paused session recovers from, as classified
+/// out of the provider's error payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RateLimitRecovery {
+    resets_at: Option<String>,
+    kind: Option<String>,
 }
 
 // =============================================================================
@@ -1385,6 +1395,7 @@ fn finish_cancelled_before_run<R: tauri::Runtime>(
         SessionStatus::Cancelled.as_str(),
         None,
         Some(&completion_reason),
+        None,
         branch_id,
         project_id,
     );
@@ -1457,6 +1468,7 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
             SessionStatus::Error.as_str(),
             Some(error.to_string()),
             Some(&CompletionReason::Crashed),
+            None,
             branch_id,
             project_id,
         );
@@ -2425,6 +2437,7 @@ fn finish_disconnected_run(
             SessionStatus::Disconnected.as_str(),
             None,
             None,
+            None,
             config.branch_id.clone(),
             config.project_id.clone(),
         );
@@ -2478,10 +2491,13 @@ fn finish_session_run(
     // need to agree on what "cancelled before the run settled" means.
     let cancel_requested = cancel_token.is_cancelled();
     let cancelled_for_quit = cancellation_completion_reason == CompletionReason::AppQuit;
-    let (new_status, error_msg, completion_reason) = match result {
-        Ok(AgentRunOutcome::Cancelled) if cancel_requested => {
-            ("cancelled", None, cancellation_completion_reason.clone())
-        }
+    let (new_status, error_msg, completion_reason, rate_limit_recovery) = match result {
+        Ok(AgentRunOutcome::Cancelled) if cancel_requested => (
+            "cancelled",
+            None,
+            cancellation_completion_reason.clone(),
+            None,
+        ),
         // Ended without a Stop: the agent cancelled the turn itself, or a
         // detach landed before the prompt was sent and recorded why.
         Ok(AgentRunOutcome::Cancelled) => (
@@ -2490,6 +2506,7 @@ fn finish_session_run(
             registry
                 .detach_reason_of(&session_id_for_status, registration)
                 .unwrap_or(CompletionReason::Interrupted),
+            None,
         ),
         // A cancel that landed on a turn which had already completed and
         // held for its background work stopped only the *wait*. Fall
@@ -2499,20 +2516,62 @@ fn finish_session_run(
             if cancel_requested
                 && !completed_turn_survives_late_cancel(settlement.settle_reason) =>
         {
-            ("cancelled", None, cancellation_completion_reason.clone())
+            (
+                "cancelled",
+                None,
+                cancellation_completion_reason.clone(),
+                None,
+            )
         }
         Ok(AgentRunOutcome::Completed) => (
             "completed",
             None,
             completed_turn_completion_reason(settlement.settle_reason),
+            None,
         ),
         Err(ref e) if cancel_requested => {
             log::info!("Session {session_id_for_status} cancelled (error during teardown: {e})");
-            ("cancelled", None, cancellation_completion_reason)
+            ("cancelled", None, cancellation_completion_reason, None)
         }
         Err(ref e) => {
             log::error!("Session {session_id_for_status} failed: {e}");
-            ("error", Some(e.clone()), failed_run_completion_reason(e))
+            let session_snapshot = store_for_status
+                .get_session(&session_id_for_status)
+                .ok()
+                .flatten();
+            let provider_metadata = session_snapshot
+                .as_ref()
+                .and_then(|session| session.provider_metadata.as_ref());
+            let provider = session_snapshot
+                .as_ref()
+                .and_then(|session| session.provider.as_deref())
+                .or(config.provider.as_deref());
+            // A rate limit pauses the session; anything else fails it, as a
+            // lost remote agent when that is what the error says.
+            let completion_reason = match completion_reason_for_driver_error(e, provider_metadata) {
+                CompletionReason::Crashed => failed_run_completion_reason(e),
+                reason => reason,
+            };
+            let rate_limit_recovery = (completion_reason == CompletionReason::RateLimited)
+                .then(|| rate_limit_recovery_details(e, provider_metadata));
+            if let Some(recovery) = rate_limit_recovery.as_ref() {
+                crate::rate_limit_metrics::record_rate_limit_hit(
+                    &session_id_for_status,
+                    provider,
+                    recovery.kind.as_deref(),
+                    recovery.resets_at.is_some(),
+                );
+            }
+            (
+                if completion_reason == CompletionReason::RateLimited {
+                    "paused"
+                } else {
+                    "error"
+                },
+                Some(e.clone()),
+                completion_reason,
+                rate_limit_recovery,
+            )
         }
     };
 
@@ -2616,14 +2675,25 @@ fn finish_session_run(
     // inherit a Stop that was aimed at this turn (see `mark_finished`).
     registry.mark_finished(&session_id_for_status, registration);
     let status_enum = SessionStatus::parse(new_status).unwrap();
-    let transitioned = store_for_status
-        .transition_from_running(
-            &session_id_for_status,
-            status_enum,
-            error_msg.as_deref(),
-            Some(&completion_reason),
-        )
-        .unwrap_or(false);
+    let transitioned = if let Some(recovery) = rate_limit_recovery.as_ref() {
+        store_for_status
+            .transition_running_to_rate_limited(
+                &session_id_for_status,
+                error_msg.as_deref(),
+                recovery.resets_at.as_deref(),
+                recovery.kind.as_deref(),
+            )
+            .unwrap_or(false)
+    } else {
+        store_for_status
+            .transition_from_running(
+                &session_id_for_status,
+                status_enum.clone(),
+                error_msg.as_deref(),
+                Some(&completion_reason),
+            )
+            .unwrap_or(false)
+    };
 
     // Deregister only now that the terminal state is written: a `running`
     // row this process owns with no registry entry is what the
@@ -2656,11 +2726,32 @@ fn finish_session_run(
         new_status,
         error_msg,
         Some(&completion_reason),
+        rate_limit_recovery.as_ref(),
         config.branch_id.clone(),
         config.project_id.clone(),
     );
 
     if transitioned {
+        if status_enum == SessionStatus::Paused {
+            if let Err(e) = crate::rate_limit_scheduler::record_rate_limit_pause(
+                &store_for_status,
+                &session_id_for_status,
+                crate::store::now_timestamp(),
+            ) {
+                log::warn!(
+                    "Failed to schedule rate-limit recovery for session {session_id_for_status}: {e}"
+                );
+            }
+            // Fall through to the branch queue drain below. A paused
+            // session is not running, so work the user queued behind it has
+            // to be released or the branch deadlocks: the queue waits for a
+            // terminal hook that never fires, while auto-resume waits for
+            // the queue to empty. Only the branch queue drains —
+            // `completed_successfully` is false for a pause, so this
+            // session's own queued follow-up messages keep waiting for the
+            // resume that can actually deliver them.
+        }
+
         let branch_id = config.branch_id.clone();
         // Read the token again rather than reusing what the terminal-state
         // match saw: the entry stayed registered through the hooks and up
@@ -2977,6 +3068,7 @@ pub fn start_pipeline_session(
                     status_str,
                     None,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -3130,6 +3222,7 @@ pub fn start_pipeline_session(
                     status_str,
                     error,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -3166,6 +3259,7 @@ pub fn start_pipeline_session(
                     "cancelled",
                     None,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -3251,6 +3345,7 @@ fn finish_failed_pipeline_handoff_start<R: tauri::Runtime>(
             SessionStatus::Error.as_str(),
             Some(error.to_string()),
             Some(&CompletionReason::Crashed),
+            None,
             config.branch_id.clone(),
             config.project_id.clone(),
         );
@@ -4074,6 +4169,169 @@ fn format_step_output_for_prompt(label: &str, command: &str, output: &str, faile
     format!("### {label}{status}\nCommand: {command}\n```\n{output}\n```")
 }
 
+fn completion_reason_for_driver_error(
+    error: &str,
+    provider_metadata: Option<&serde_json::Value>,
+) -> CompletionReason {
+    if is_rate_limit_error(error, provider_metadata) {
+        CompletionReason::RateLimited
+    } else {
+        CompletionReason::Crashed
+    }
+}
+
+fn rate_limit_recovery_details(
+    error: &str,
+    provider_metadata: Option<&serde_json::Value>,
+) -> RateLimitRecovery {
+    let mut details = RateLimitRecovery::default();
+
+    if let Some(metadata) = provider_metadata {
+        if let Some(rate_limit) = metadata
+            .pointer("/acp/usageUpdate/_meta")
+            .and_then(|meta| meta.get("_claude/rateLimit"))
+        {
+            details.resets_at = string_field(rate_limit, &["resetsAt", "resetAt"]);
+            details.kind = string_field(rate_limit, &["rateLimitType", "type", "status"]);
+        }
+
+        if details.resets_at.is_none() {
+            details.resets_at = metadata
+                .pointer("/acp/promptError/data")
+                .and_then(|data| string_field(data, &["resetsAt", "resetAt", "retryAt"]));
+        }
+
+        if details.kind.is_none() {
+            details.kind = metadata
+                .pointer("/acp/promptError/data")
+                .and_then(|data| string_field(data, &["errorKind", "kind", "type"]));
+        }
+    }
+
+    if details.kind.is_none() {
+        let normalized = error.to_ascii_lowercase();
+        details.kind = if normalized.contains("overloaded") {
+            Some("overloaded".to_string())
+        } else if normalized.contains("usage limit") || normalized.contains("quota") {
+            Some("usage_limit".to_string())
+        } else {
+            Some("rate_limit".to_string())
+        };
+    }
+
+    details
+}
+
+fn string_field(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(|field| field.as_str()))
+        .map(str::to_string)
+}
+
+fn is_rate_limit_error(error: &str, provider_metadata: Option<&serde_json::Value>) -> bool {
+    let normalized = error.to_ascii_lowercase();
+
+    if provider_metadata
+        .map(metadata_has_non_retryable_limit)
+        .unwrap_or(false)
+        || has_non_retryable_limit_marker(&normalized)
+    {
+        return false;
+    }
+
+    if provider_metadata
+        .map(metadata_has_rate_limit)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    has_rate_limit_marker(&normalized)
+}
+
+fn metadata_has_non_retryable_limit(metadata: &serde_json::Value) -> bool {
+    metadata
+        .pointer("/acp/promptError/data/errorKind")
+        .and_then(|kind| kind.as_str())
+        .map(|kind| {
+            let kind = kind.to_ascii_lowercase();
+            kind == "billing_error" || kind == "credits_exhausted"
+        })
+        .unwrap_or(false)
+}
+
+fn metadata_has_rate_limit(metadata: &serde_json::Value) -> bool {
+    if metadata
+        .pointer("/acp/promptError/data/errorKind")
+        .and_then(|kind| kind.as_str())
+        .map(|kind| {
+            let kind = kind.to_ascii_lowercase();
+            kind == "rate_limit" || kind == "overloaded"
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let Some(rate_limit) = metadata
+        .pointer("/acp/usageUpdate/_meta")
+        .and_then(|meta| meta.get("_claude/rateLimit"))
+    else {
+        return false;
+    };
+
+    rate_limit
+        .get("status")
+        .and_then(|status| status.as_str())
+        .map(|status| {
+            let status = status.to_ascii_lowercase();
+            status == "rejected" || status == "limited" || status == "rate_limited"
+        })
+        .unwrap_or(false)
+}
+
+fn has_non_retryable_limit_marker(normalized: &str) -> bool {
+    // Auth and hard billing/credit failures need user action, not retry/resume.
+    let non_retryable_markers = [
+        "please run /login",
+        "run /login",
+        "not authenticated",
+        "auth login",
+        "billing_error",
+        "billing error",
+        "credits exhausted",
+        "credit exhausted",
+        "insufficient_quota",
+        "insufficient quota",
+    ];
+    non_retryable_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+fn has_rate_limit_marker(normalized: &str) -> bool {
+    let rate_limit_markers = [
+        "rate limit",
+        "ratelimit",
+        "rate_limit",
+        "too many requests",
+        "429",
+        "resource_exhausted",
+        "resource exhausted",
+        "usage limit",
+        "usage_limit",
+        "usagelimit",
+        "quota",
+        "overloaded",
+        "resetsat",
+        "resets at",
+    ];
+    rate_limit_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
 fn spawn_pipe_reader<R>(mut pipe: R) -> tokio::task::JoinHandle<io::Result<Vec<u8>>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -4301,6 +4559,7 @@ fn recover_dead_session<R: tauri::Runtime>(
         status.as_str(),
         None,
         reason.as_ref(),
+        None,
         recovered_branch_id.clone(),
         recovered_project_id,
     );
@@ -6093,12 +6352,14 @@ fn find_closing_fence(text: &str) -> Option<usize> {
 /// runs (see [`finish_cancelled_before_run`]) and the stranded-session sweep
 /// can be driven by a mock app in tests. Every production caller passes the
 /// concrete handle.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_status<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     session_id: &str,
     status: &str,
     error: Option<String>,
     completion_reason: Option<&CompletionReason>,
+    rate_limit_recovery: Option<&RateLimitRecovery>,
     branch_id: Option<String>,
     project_id: Option<String>,
 ) {
@@ -6107,6 +6368,8 @@ pub(crate) fn emit_status<R: tauri::Runtime>(
         status: status.to_string(),
         error_message: error,
         completion_reason: completion_reason.map(|r| r.as_str().to_string()),
+        rate_limit_resets_at: rate_limit_recovery.and_then(|details| details.resets_at.clone()),
+        rate_limit_kind: rate_limit_recovery.and_then(|details| details.kind.clone()),
         branch_id,
         project_id,
         session_type: None,
@@ -6173,6 +6436,8 @@ pub fn emit_session_running(
         status: "running".to_string(),
         error_message: None,
         completion_reason: None,
+        rate_limit_resets_at: None,
+        rate_limit_kind: None,
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
@@ -7204,6 +7469,140 @@ mod tests {
         assert!(prompt_output.contains("```\ndone\n```"));
         assert!(!prompt_output.contains("10%"));
         assert!(!prompt_output.contains("20%"));
+    }
+
+    #[test]
+    fn driver_error_completion_reason_detects_rate_limits() {
+        assert_eq!(
+            completion_reason_for_driver_error(
+                r#"Prompt failed: Error { code: InternalError, message: "rate limit exceeded", data: Some(Object {"errorKind": String("rate_limit")}) }"#,
+                None,
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: RequestError(429, \"Rate limit exceeded. Try again later.\")",
+                None,
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: UsageLimitReached { resets_at: Some(2026-06-24T15:45:00Z) }",
+                None,
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("RESOURCE_EXHAUSTED: quota exceeded", None),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("upstream overloaded; retry later", None),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed",
+                Some(&serde_json::json!({
+                    "acp": {
+                        "promptError": {
+                            "code": -32603,
+                            "message": "provider failed",
+                            "data": {
+                                "errorKind": "rate_limit"
+                            }
+                        }
+                    }
+                })),
+            ),
+            CompletionReason::RateLimited
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed",
+                Some(&serde_json::json!({
+                    "acp": {
+                        "usageUpdate": {
+                            "used": 123,
+                            "size": 200000,
+                            "_meta": {
+                                "_claude/rateLimit": {
+                                    "status": "rejected",
+                                    "rateLimitType": "subscription",
+                                    "resetsAt": "2026-06-24T15:45:00Z"
+                                }
+                            }
+                        }
+                    }
+                })),
+            ),
+            CompletionReason::RateLimited
+        );
+    }
+
+    #[test]
+    fn rate_limit_recovery_details_extracts_reset_metadata() {
+        let details = rate_limit_recovery_details(
+            "Prompt failed",
+            Some(&serde_json::json!({
+                "acp": {
+                    "usageUpdate": {
+                        "_meta": {
+                            "_claude/rateLimit": {
+                                "status": "rejected",
+                                "rateLimitType": "subscription",
+                                "resetsAt": "2026-06-24T15:45:00Z"
+                            }
+                        }
+                    }
+                }
+            })),
+        );
+
+        assert_eq!(details.resets_at.as_deref(), Some("2026-06-24T15:45:00Z"));
+        assert_eq!(details.kind.as_deref(), Some("subscription"));
+    }
+
+    #[test]
+    fn driver_error_completion_reason_leaves_actionable_failures_as_crashes() {
+        assert_eq!(
+            completion_reason_for_driver_error("Please run /login before continuing", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                r#"Prompt failed: Error { data: Some(Object {"errorKind": String("billing_error")}) }"#,
+                None,
+            ),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("Credits exhausted for this account", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("agent process exited unexpectedly", None),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: rate limit",
+                Some(&serde_json::json!({
+                    "acp": {
+                        "promptError": {
+                            "code": -32603,
+                            "message": "billing failed",
+                            "data": {
+                                "errorKind": "billing_error"
+                            }
+                        }
+                    }
+                })),
+            ),
+            CompletionReason::Crashed
+        );
     }
 
     /// A session at its AI handoff: the row is `running` and the handoff step

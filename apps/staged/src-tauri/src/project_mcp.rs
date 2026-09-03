@@ -347,6 +347,7 @@ impl ProjectToolsHandler {
             SessionStatus::Queued => "queued",
             SessionStatus::Running => "running",
             SessionStatus::Disconnected => "disconnected",
+            SessionStatus::Paused => "paused",
             SessionStatus::Completed => "completed",
             SessionStatus::Cancelled => "cancelled",
             SessionStatus::Error => "failed",
@@ -884,6 +885,8 @@ impl ProjectToolsHandler {
                                 .as_str()
                                 .to_string(),
                         ),
+                        rate_limit_resets_at: None,
+                        rate_limit_kind: None,
                         branch_id: Some(branch_id.clone()),
                         project_id: Some(self.project_id.clone()),
                         session_type: None,

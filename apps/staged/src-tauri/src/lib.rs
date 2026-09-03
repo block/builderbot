@@ -2227,7 +2227,9 @@ pub fn run() {
                         log::warn!("Failed to open window from menu: {e}");
                     }
                 }
-                MenuDispatch::RequestQuit => app_lifecycle::request_quit(app, false),
+                MenuDispatch::RequestQuit => {
+                    app_lifecycle::request_quit(app, app_lifecycle::QuitTrigger::Explicit)
+                }
                 MenuDispatch::ShowWindow => app_lifecycle::show_a_window(app),
                 MenuDispatch::Drop => {}
             }

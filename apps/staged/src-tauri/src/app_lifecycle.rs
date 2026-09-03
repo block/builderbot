@@ -11,7 +11,9 @@
 //! the window hidden, so sessions keep streaming; the Dock icon
 //! (`RunEvent::Reopen`) or `Window ▸ Staged` brings it back. Other platforms
 //! have no Dock/tray to recover a hidden window, so closing the last window
-//! still quits there — but through the same confirmation gate as `Cmd+Q`.
+//! still quits there — but through the same confirmation gate as `Cmd+Q`, and
+//! clicking the close button again asks again instead of forcing the quit (see
+//! [`QuitTrigger`]).
 //!
 //! **Quitting with sessions running asks first, then stops them cleanly.**
 //! [`request_quit`] gates on active sessions and asks; [`shutdown_cleanup`]
@@ -96,9 +98,11 @@ pub struct QuitState {
     /// Set by the first caller into [`shutdown_cleanup`], so the cleanup runs
     /// exactly once however many exit events follow it.
     quit_in_progress: AtomicBool,
-    /// Set while a confirmation alert is unanswered. A quit request arriving
-    /// while it is set forces the quit, so an alert that never appeared or never
-    /// came back can't trap the app: a second `Cmd+Q` always gets out.
+    /// Set while a confirmation alert is unanswered. An
+    /// [`Explicit`](QuitTrigger::Explicit) quit arriving while it is set forces
+    /// the quit, so an alert that never appeared or never came back can't trap
+    /// the app: a second `Cmd+Q` always gets out. A repeated window close does
+    /// not force — it asks again. See [`QuitTrigger`].
     prompt_pending: AtomicBool,
 }
 
@@ -173,9 +177,10 @@ fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
 
     // No Dock or tray icon elsewhere, so a hidden window would be unreachable —
     // closing the last window still quits, with the confirmation gate in front
-    // of it.
+    // of it. Clicking the X again re-raises that question rather than forcing
+    // the quit — see `QuitTrigger::may_force`.
     #[cfg(not(target_os = "macos"))]
-    request_quit(app, false);
+    request_quit(app, QuitTrigger::WindowClose);
 }
 
 /// Hide the window and drop its PR-poll client to the unfocused tier.
@@ -242,17 +247,56 @@ fn set_native_focus(app: &AppHandle, window_label: &str, focused: bool) {
 // Quit gate
 // =============================================================================
 
+/// What asked the app to quit.
+///
+/// A first request is a first request whatever raised it; the trigger decides
+/// what a *repeat* means while the confirmation alert is still unanswered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitTrigger {
+    /// A quit aimed at the application: the app menu's Quit item (`Cmd+Q`), or
+    /// the store-incompatibility screens' Close button.
+    Explicit,
+    /// The last window's close button — or `Alt+F4`, which takes the same
+    /// `CloseRequested` path — off macOS, where closing the last window quits.
+    WindowClose,
+}
+
+impl QuitTrigger {
+    /// Whether repeating this trigger while the alert is unanswered quits
+    /// without an answer.
+    ///
+    /// Only an [`Explicit`](Self::Explicit) quit may: a second `Cmd+Q` is a
+    /// deliberate second attempt at quitting, and it has to get out in case the
+    /// alert never appeared or never came back. A close button carries no such
+    /// intent. Off macOS it is the only interactive quit trigger there is, and
+    /// it is the thing users click twice in a second when a window won't shut —
+    /// reflex, aimed at the window, not an answer to a question they may not
+    /// have noticed. Killing running agents on that reflex is the opposite of
+    /// what the gate exists for.
+    ///
+    /// Asking again covers the trapped case just as well, without the damage:
+    /// clicking the X puts an answerable question back on screen — a second
+    /// copy of it if the first is still up, which is a cheap thing to dismiss
+    /// next to a forced quit — and if the sessions have finished in the
+    /// meantime, the repeat quits with nothing left to warn about.
+    fn may_force(self) -> bool {
+        matches!(self, Self::Explicit)
+    }
+}
+
 /// Handle a quit request from the app menu, `Cmd+Q`, or (off macOS) the last
 /// window's close. Cheap enough for the main thread: it snapshots blockers and
 /// either hands off to a background quit or raises the alert.
-pub fn request_quit(app: &AppHandle, force: bool) {
+pub fn request_quit(app: &AppHandle, trigger: QuitTrigger) {
     let quit_state = app.state::<QuitState>();
 
-    // A quit arriving while the alert is unanswered (a second `Cmd+Q`) is the
-    // escape hatch from a prompt that never appeared or never came back. The
-    // system alert isn't app-modal, so that second `Cmd+Q` is still dispatchable
-    // with the alert on screen.
-    if force || quit_state.take_prompt() {
+    // An explicit quit arriving while the alert is unanswered (a second
+    // `Cmd+Q`) is the escape hatch from a prompt that never appeared or never
+    // came back. The system alert isn't app-modal, so that second `Cmd+Q` is
+    // still dispatchable with the alert on screen. A repeated window close
+    // deliberately doesn't take this path and falls through to the gate below,
+    // which asks again.
+    if trigger.may_force() && quit_state.take_prompt() {
         spawn_quit(app);
         return;
     }
@@ -270,6 +314,9 @@ pub fn request_quit(app: &AppHandle, force: bool) {
         return;
     }
 
+    // A prompt already pending here means a repeated window close: the flag is
+    // already set, so setting it again is a no-op, and the alert goes back up
+    // describing whatever is running *now*.
     quit_state.set_prompt_pending();
     ask_before_quitting(app, &blockers);
 }
@@ -321,7 +368,7 @@ fn quit_confirmed(result: &MessageDialogResult) -> bool {
 /// must not be able to terminate the desktop host.
 #[tauri::command]
 pub fn quit_app(app_handle: AppHandle) {
-    request_quit(&app_handle, false);
+    request_quit(&app_handle, QuitTrigger::Explicit);
 }
 
 /// Run the quit sequence off the main thread so the bounded waits never freeze
@@ -639,8 +686,18 @@ mod tests {
         assert!(!should_prompt(&QuitBlockers::default()));
     }
 
-    /// The pending flag turns the next quit into a force-quit, so answering the
-    /// alert has to disarm it — otherwise the next `Cmd+Q` quits without asking.
+    /// A second `Cmd+Q` forces the quit; a second click on a close button asks
+    /// again, because that click is aimed at the window and is exactly the one
+    /// users repeat by reflex.
+    #[test]
+    fn only_an_explicit_quit_can_force_past_the_prompt() {
+        assert!(QuitTrigger::Explicit.may_force());
+        assert!(!QuitTrigger::WindowClose.may_force());
+    }
+
+    /// The pending flag turns the next explicit quit into a force-quit, so
+    /// answering the alert has to disarm it — otherwise the next `Cmd+Q` quits
+    /// without asking.
     #[test]
     fn answering_the_prompt_disarms_the_force_path() {
         let state = QuitState::default();

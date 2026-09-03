@@ -235,29 +235,43 @@
     void ensureHashtagItems();
   });
 
+  /**
+   * Read the stored project draft, settling queued writes first: submit
+   * clears the stored draft and close saves immediately through the writer,
+   * so reading the store straight away could return the value from before
+   * that write lands and resurrect a just-cleared prompt.
+   *
+   * Never rejects — the modal calls this fire-and-forget on mount, so a
+   * failed store read degrades to keeping the seeded draft.
+   */
+  async function loadStoredProjectDraft(): Promise<string | null> {
+    const projectId = project.id;
+    try {
+      await projectDraftWriter.flush();
+      return await loadDraft(projectDraftKey(projectId));
+    } catch (err) {
+      console.error('[ProjectSection] Failed to load project draft:', err);
+      return null;
+    }
+  }
+
   async function loadProjectSessionDraft() {
     const promptWhenLoadStarted = draftProjectPrompt;
     if (promptWhenLoadStarted.trim()) return;
 
     const projectId = project.id;
     const generation = ++projectDraftLoadGeneration;
-    try {
-      // Settle queued writes first. Submit clears the stored draft and close
-      // saves immediately through the writer, so a quick reopen could read the
-      // store before that write lands and resurrect the just-cleared prompt.
-      await projectDraftWriter.flush();
-      const draft = await loadDraft(projectDraftKey(projectId));
-      if (generation !== projectDraftLoadGeneration || project.id !== projectId) return;
-      if (draftProjectPrompt === promptWhenLoadStarted) {
-        draftProjectPrompt = draft ?? '';
-      }
-    } catch (err) {
-      console.error('[ProjectSection] Failed to load project draft:', err);
+    const draft = await loadStoredProjectDraft();
+    if (generation !== projectDraftLoadGeneration || project.id !== projectId) return;
+    if (draftProjectPrompt === promptWhenLoadStarted) {
+      draftProjectPrompt = draft ?? '';
     }
   }
 
-  async function openProjectSessionModal() {
-    await loadProjectSessionDraft();
+  function openProjectSessionModal() {
+    // Open synchronously seeded with the held draft — the modal fetches the
+    // authoritative stored draft itself (via loadDraftForMode) so the click
+    // isn't gated on store IPC (a flush plus a read; HTTP hops in web mode).
     showProjectSessionModal = true;
     void ensureHashtagItems();
   }
@@ -740,6 +754,7 @@
     initialImageIds={draftProjectImageIds}
     {hashtagItems}
     submitDisabledReason={preferredProvider ? null : 'No AI agent available'}
+    loadDraftForMode={() => loadStoredProjectDraft()}
     onDraftChange={(draft, opts) => {
       handleProjectSessionDraftChange(draft, opts);
     }}

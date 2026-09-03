@@ -152,7 +152,11 @@ export default class BranchCardSessionManager {
     if (!wasOpen) {
       const heldMode = this.newSessionMode;
       const heldPrompt = this.draftPrompt;
-      this.newSessionMode = 'commit';
+      // newSessionMode is only assigned after the generation guard below:
+      // setting it to 'commit' before the awaited read would let a concurrent
+      // openNewSession('commit') see mode === newSessionMode and keep a
+      // draftPrompt that actually belongs to heldMode, seeding commit mode
+      // with another mode's text.
       const draft = await this.loadNewSessionDraftForMode('commit');
       if (request !== this.openNewSessionRequest) return;
       this.draftPrompt = this.resolveOpenPrompt('commit', draft, heldMode, heldPrompt);

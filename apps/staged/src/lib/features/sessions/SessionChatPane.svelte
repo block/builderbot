@@ -309,6 +309,10 @@
   // otherwise a keystroke typed during the load window is never scheduled.
   let loadedDraftSessionId = $state<string | null>(null);
   let draftLoadGeneration = 0;
+  // One-shot: set when a failed load re-opens the save gate while the composer
+  // may still hold the previously shown session's text; the save effect skips
+  // exactly that run so inherited text isn't filed under this session's key.
+  let suppressNextReplySave = false;
 
   function replyDraftKey(id: string): string {
     return `draft:session-reply:${id}`;
@@ -336,8 +340,15 @@
     } catch (err) {
       console.error('[SessionChatPane] Failed to load reply draft:', err);
       // Leave the composer as the user left it, but re-enable saving so
-      // further keystrokes still reach the store.
+      // further keystrokes still reach the store. Re-enabling fires the save
+      // effect once immediately: when the composer still holds exactly the
+      // text from before this load began, that text was inherited from the
+      // previously shown session (a switch A → B where B's load failed), and
+      // letting that run through would overwrite B's stored draft with A's
+      // text. Suppress it — text typed during the load window was written
+      // while this session was displayed, so it still saves.
       if (generation === draftLoadGeneration && active && sessionId === id) {
+        suppressNextReplySave = inputText === textWhenLoadStarted;
         loadedDraftSessionId = id;
       }
     }
@@ -809,6 +820,7 @@
 
     const generation = ++draftLoadGeneration;
     const inputTextWhenLoadStarted = untrack(() => inputText);
+    suppressNextReplySave = false;
     loadedDraftSessionId = null;
     void loadReplyDraft(id, generation, inputTextWhenLoadStarted);
   });
@@ -818,6 +830,10 @@
     const id = sessionId;
     const text = inputText;
     if (!isActive || !id || loadedDraftSessionId !== id) return;
+    if (suppressNextReplySave) {
+      suppressNextReplySave = false;
+      return;
+    }
     replyDraftWriter.scheduleSave(replyDraftKey(id), text);
   });
 

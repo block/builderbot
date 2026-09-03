@@ -3116,6 +3116,19 @@ pub async fn drain_queued_sessions_for_branch(
     branch_id: String,
     provider: Option<String>,
 ) -> Result<bool, String> {
+    // A quit cancels every running session, and every terminal transition drains
+    // the branch queue — including those cancels. Left ungated, shutdown feeds
+    // itself: it claims queued rows and spawns fresh agent children that
+    // `app.exit(0)` then orphans, since they run in their own process groups and
+    // an exit runs no `kill_on_drop` destructors. The sweep would put the DB rows
+    // right; nothing would put the processes right.
+    if app_handle
+        .try_state::<crate::app_lifecycle::QuitState>()
+        .is_some_and(|quit_state| quit_state.is_quitting())
+    {
+        return Ok(false);
+    }
+
     let queued = store
         .get_queued_sessions_for_branch(&branch_id)
         .map_err(|e| e.to_string())?;

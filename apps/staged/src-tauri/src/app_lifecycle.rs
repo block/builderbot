@@ -20,7 +20,10 @@
 //! cancels sessions with [`CompletionReason::AppQuit`] and stops actions. That
 //! cancel is the only thing that shuts an agent down: ACP children are spawned
 //! with `process_group(0)` and `kill_on_drop`, and `process::exit` runs no
-//! destructors, so a bare exit leaves the agent CLIs running.
+//! destructors, so a bare exit leaves the agent CLIs running. Once a shutdown is
+//! claimed the branch queue stops draining ([`QuitState::is_quitting`]), so
+//! those cancels — terminal transitions like any other — can't feed fresh agent
+//! children into an exit that would orphan them.
 //!
 //! The question is asked by a native alert with **no parent window**, not by a
 //! dialog in a webview. Quitting is scoped to the application, and the case the
@@ -102,9 +105,9 @@ pub struct QuitState {
     cleanup_done: Mutex<bool>,
     /// Cheap "a shutdown is under way" signal, published by the caller that
     /// claims the cleanup. Separate from `cleanup_done` because its readers
-    /// ([`request_quit`], [`on_close_requested`]) run on the main thread while a
-    /// cleanup may be in flight and must not block on the lock. The mutex
-    /// claims; this atomic publishes.
+    /// ([`request_quit`] and [`on_close_requested`] on the main thread, the
+    /// queue drain on the tokio runtime) run while a cleanup may be in flight
+    /// and must not block on the lock. The mutex claims; this atomic publishes.
     quit_in_progress: AtomicBool,
     /// Set while a confirmation alert is unanswered. An
     /// [`Explicit`](QuitTrigger::Explicit) quit arriving while it is set forces
@@ -115,6 +118,15 @@ pub struct QuitState {
 }
 
 impl QuitState {
+    /// Whether a shutdown has been claimed. Non-blocking by construction — see
+    /// [`quit_in_progress`](Self::quit_in_progress).
+    ///
+    /// Read by the queue drain to stop starting new work mid-shutdown, and by
+    /// [`on_close_requested`] to stay out of the way of the exit's own closes.
+    pub(crate) fn is_quitting(&self) -> bool {
+        self.quit_in_progress.load(Ordering::SeqCst)
+    }
+
     fn set_prompt_pending(&self) {
         self.prompt_pending.store(true, Ordering::SeqCst);
     }
@@ -198,7 +210,7 @@ fn on_close_requested(window: &Window, api: &tauri::CloseRequestApi) {
     // Mid-shutdown, closes are the exit tearing windows down — stay out of the
     // way.
     if let Some(quit_state) = app.try_state::<QuitState>() {
-        if quit_state.quit_in_progress.load(Ordering::SeqCst) {
+        if quit_state.is_quitting() {
             return;
         }
     }
@@ -347,7 +359,7 @@ pub fn request_quit(app: &AppHandle, trigger: QuitTrigger) {
     // Already shutting down, and the alert dismissed on click while cleanup runs
     // out its budget — so there is nothing on screen saying so, and a `Cmd+Q`
     // here means "I already answered", not "ask me again".
-    if quit_state.quit_in_progress.load(Ordering::SeqCst) {
+    if quit_state.is_quitting() {
         return;
     }
 
@@ -640,28 +652,39 @@ fn sweep_active_sessions(app: &AppHandle) {
         return;
     };
 
-    let swept = owned_active_sessions(&store)
+    let swept = sweep_sessions(&store);
+    if swept > 0 {
+        log::info!("Marked {swept} session(s) cancelled (app_quit) during shutdown");
+    }
+}
+
+/// The sweep itself: snapshot what we own, then CAS each row to cancelled.
+/// Returns how many rows it actually moved.
+fn sweep_sessions(store: &Store) -> usize {
+    let owner_pid = std::process::id();
+
+    owned_active_sessions(store)
         .iter()
         .filter(|session| {
-            // Guarded CAS per row: a session thread that wrote its own terminal
-            // status while we were waiting keeps that status.
+            // Guarded CAS per row, on liveness *and* ownership. A session thread
+            // that wrote its own terminal status while we were waiting keeps
+            // that status; so does a row another instance claimed since the
+            // snapshot, which stamped its pid in the same statement that took
+            // the row off `queued`.
             store
-                .transition_from_active(
+                .transition_from_owned_active(
                     &session.id,
                     SessionStatus::Cancelled,
                     None,
                     Some(&CompletionReason::AppQuit),
+                    owner_pid,
                 )
                 .unwrap_or_else(|e| {
                     log::warn!("Failed to cancel session {} on quit: {e}", session.id);
                     false
                 })
         })
-        .count();
-
-    if swept > 0 {
-        log::info!("Marked {swept} session(s) cancelled (app_quit) during shutdown");
-    }
+        .count()
 }
 
 /// Running and queued sessions **this process owns**.
@@ -671,6 +694,10 @@ fn sweep_active_sessions(app: &AppHandle) {
 /// nor cancel another instance's work. Queued rows carry no owner yet, so they
 /// count as ours: claiming one (`transition_queued_to_running`) stamps a pid
 /// atomically, which is what takes another instance's claim out of this set.
+///
+/// A claim can also land *after* this snapshot, which is why the sweep's CAS
+/// (`transition_from_owned_active`) re-checks the same ownership rule at write
+/// time rather than trusting the list this returns.
 fn owned_active_sessions(store: &Store) -> Vec<Session> {
     let sessions = match store.get_active_sessions() {
         Ok(sessions) => sessions,
@@ -808,23 +835,23 @@ mod tests {
         assert!(!runs.load(Ordering::SeqCst));
     }
 
-    /// `request_quit`'s "already shutting down" early return and
-    /// `on_close_requested`'s stay-out-of-the-way check both read this from the
-    /// main thread while a cleanup is in flight, so it has to be published
-    /// before the work starts rather than after it.
+    /// `request_quit`'s "already shutting down" early return,
+    /// `on_close_requested`'s stay-out-of-the-way check, and the queue drain's
+    /// gate all read this while a cleanup is in flight, so it has to be
+    /// published before the work starts rather than after it.
     #[test]
     fn quit_in_progress_is_published_while_the_cleanup_runs() {
         let state = QuitState::default();
-        assert!(!state.quit_in_progress.load(Ordering::SeqCst));
+        assert!(!state.is_quitting());
 
         state.run_cleanup_once(|| {
             assert!(
-                state.quit_in_progress.load(Ordering::SeqCst),
+                state.is_quitting(),
                 "shutdown was under way but the flag still read false"
             );
         });
 
-        assert!(state.quit_in_progress.load(Ordering::SeqCst));
+        assert!(state.is_quitting());
     }
 
     /// Poisoning is taken over rather than propagated, so a cleanup that
@@ -985,16 +1012,7 @@ mod tests {
         let queued = Session::new_queued("queued");
         store.create_session(&queued).unwrap();
 
-        for session in owned_active_sessions(&store) {
-            assert!(store
-                .transition_from_active(
-                    &session.id,
-                    SessionStatus::Cancelled,
-                    None,
-                    Some(&CompletionReason::AppQuit),
-                )
-                .unwrap());
-        }
+        assert_eq!(sweep_sessions(&store), 2);
 
         for id in [&running.id, &queued.id] {
             let session = store.get_session(id).unwrap().unwrap();
@@ -1019,14 +1037,7 @@ mod tests {
             .unwrap();
 
         assert!(owned_active_sessions(&store).is_empty());
-        assert!(!store
-            .transition_from_active(
-                &completed.id,
-                SessionStatus::Cancelled,
-                None,
-                Some(&CompletionReason::AppQuit),
-            )
-            .unwrap());
+        assert_eq!(sweep_sessions(&store), 0);
 
         let session = store.get_session(&completed.id).unwrap().unwrap();
         assert_eq!(session.status, SessionStatus::Completed);
@@ -1034,5 +1045,33 @@ mod tests {
             session.completion_reason,
             Some(CompletionReason::TurnComplete)
         );
+    }
+
+    /// Another instance's live session survives our quit. The snapshot already
+    /// filters it out; this asserts the CAS does too, which is what covers a
+    /// claim landing *after* the snapshot — the interleaving the sweep can't
+    /// otherwise see.
+    #[test]
+    fn sweep_leaves_another_instances_running_session_alone() {
+        let store = Store::in_memory().unwrap();
+
+        let mut theirs = Session::new_running("theirs", Path::new("/tmp"));
+        theirs.owner_pid = Some(std::process::id().wrapping_add(1));
+        store.create_session(&theirs).unwrap();
+
+        assert_eq!(sweep_sessions(&store), 0);
+        assert!(!store
+            .transition_from_owned_active(
+                &theirs.id,
+                SessionStatus::Cancelled,
+                None,
+                Some(&CompletionReason::AppQuit),
+                std::process::id(),
+            )
+            .unwrap());
+
+        let session = store.get_session(&theirs.id).unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(session.completion_reason, None);
     }
 }

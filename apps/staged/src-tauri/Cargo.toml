@@ -65,14 +65,9 @@ tauri-plugin-store = "2.4.2"
 # MCP server for project sessions
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 axum = { version = "0.8", features = ["ws"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["fs", "cors"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
-rand = "0.9"
-hex = "0.4"
-subtle = "2.6"
-time = "0.3"
 pikchr = "0.1.4"
 
 # Pikchr preview MCP tool: render Pikchr source to SVG (same C engine as the
@@ -81,9 +76,11 @@ resvg = "0.47"
 usvg = "0.47"
 tiny-skia = "0.12"
 
-# Managed Node.js runtime: tarball extraction for runtime installs
+# Managed Node.js runtime: tarball extraction and checksum verification for
+# runtime installs
 tar = "0.4"
 flate2 = "1"
+hex = "0.4"
 
 [dev-dependencies]
 # test-util: `#[tokio::test(start_paused = true)]` for the store-events

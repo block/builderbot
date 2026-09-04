@@ -2176,21 +2176,17 @@ pub fn run() {
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
 
-            // Web server startup is stubbed out in this build.
-            // TODO(web): restore web server startup from the `mobile-web` branch.
+            // Start the Axum web server only when opted-in via environment variable.
+            // This avoids exposing an HTTP server on all interfaces for users who
+            // don't need browser-based access.
             let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
 
             if web_server_enabled {
-                let auth_token = web_server::generate_token();
                 web_server::start(web_server::WebAppState {
                     app_handle: app.handle().clone(),
                     event_tx,
-                    auth_token,
-                    sessions: std::sync::Arc::new(std::sync::Mutex::new(
-                        std::collections::HashSet::new(),
-                    )),
                 });
             }
 

@@ -5234,22 +5234,7 @@ fn is_select_option(option: &SessionConfigOption) -> bool {
 }
 
 fn select_option_has_value(option: &SessionConfigOption, value_id: &str) -> Option<bool> {
-    let SessionConfigKind::Select(select) = &option.kind else {
-        return None;
-    };
-
-    Some(match &select.options {
-        SessionConfigSelectOptions::Ungrouped(options) => options
-            .iter()
-            .any(|option| option.value.to_string() == value_id),
-        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
-            group
-                .options
-                .iter()
-                .any(|option| option.value.to_string() == value_id)
-        }),
-        _ => false,
-    })
+    select_option_values(option).map(|mut values| values.any(|(value, _)| value == value_id))
 }
 
 fn config_selection_label(category: &SessionConfigOptionCategory) -> &'static str {

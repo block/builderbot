@@ -1049,19 +1049,41 @@ accepted a render, so the diagram run was cancelled.",
                     timeout_cancel.cancel();
                 });
                 // A Stop pressed in the child diagram session fires the token
-                // registered in the SessionRegistry; forward it to the
-                // worker's token so the run actually terminates. A quit fires
-                // the same token — `cancel_owned_sessions` walks every
-                // registered id — so this is also how a shutdown reaches the
-                // specialist, and the `is_cancelled` check `generate_pikchr_source`
-                // takes before each `driver.run` is what keeps it from starting
-                // an agent the exit would then orphan. Both watcher tasks are
-                // dropped with this LocalSet.
+                // registered in the SessionRegistry; forward it to the worker's
+                // token so the run actually terminates. A quit fires the same
+                // token — `cancel_owned_sessions` walks every registered id —
+                // so this is also how a shutdown reaches the specialist. Both
+                // watcher tasks are dropped with this LocalSet.
                 tokio::task::spawn_local(forward_user_cancel(
-                    user_cancel,
+                    user_cancel.clone(),
                     Arc::clone(&worker_cancel_reason),
                     worker_cancel.clone(),
                 ));
+                // The forwarder cannot be what covers the *first* attempt,
+                // which is the one a shutdown races. `LocalSet` polls the main
+                // future first and ticks spawned tasks only once it returns
+                // Pending, and nothing between here and the `is_cancelled`
+                // check `generate_pikchr_source` takes before each `driver.run`
+                // yields — nor does `AcpDriver::connect`, which spawns the
+                // agent child before its first await. So the forwarder is first
+                // polled with the specialist's process already running: the
+                // spawn-then-teardown shape `89c821c3` removed from the main
+                // session loop, whose gate reads its registered token directly.
+                // Usually harmless (the forwarder fires at connect's first
+                // await, the run aborts, `graceful_stop` kills the child, and
+                // `wait_for_sessions` holds the exit open for it) — but the
+                // case this gate exists for is exactly the one where that
+                // teardown outruns `SHUTDOWN_BUDGET` and the exit orphans the
+                // child: own process group, and an exit runs no `kill_on_drop`
+                // destructors.
+                //
+                // So take a synchronous look at the registered token too. That
+                // covers every cancel up to this point, including the seconds
+                // `AcpDriver::new` spends probing login shells above — the bulk
+                // of the startup a quit can land in. A cancel arriving in the
+                // few statements after it is back to the forwarder and that
+                // teardown race, which is the residual, not the common case.
+                arm_worker_if_user_cancelled(&user_cancel, &worker_cancel_reason, &worker_cancel);
                 crate::pikchr_subsession::generate_pikchr_source(
                     &driver,
                     worker_store,
@@ -1172,18 +1194,46 @@ const USER_STOP_CANCEL_MESSAGE: &str =
     "The diagram session was stopped before the specialist accepted a render, so the \
 generate_pikchr call was cancelled.";
 
+/// Arm the worker's token for a cancellation the SessionRegistry has already
+/// delivered, recording the reason first so the cancelled session row and the
+/// parent tool error read as a deliberate stop rather than caller abandonment.
+///
+/// The worker's synchronous pre-check and [`forward_user_cancel`] both go
+/// through here, so a Stop caught before the first `driver.run` and one caught
+/// during it tell the same story. Which of them gets here first doesn't matter:
+/// the first reason wins and a second `cancel` is a no-op.
+///
+/// A quit takes this same path — `cancel_owned_sessions` fires the registered
+/// token exactly as `cancel_session` does — so the message is the one a Stop
+/// gets. Nothing here can tell them apart, and the async forwarder couldn't
+/// either.
+fn arm_worker_if_user_cancelled(
+    user_cancel: &CancellationToken,
+    reason: &CancelReason,
+    worker_cancel: &CancellationToken,
+) {
+    if !user_cancel.is_cancelled() {
+        return;
+    }
+    reason.record(USER_STOP_CANCEL_MESSAGE.to_string());
+    worker_cancel.cancel();
+}
+
 /// Wait for a user Stop on the child diagram session — `cancel_session` fires
 /// `user_cancel`, the token registered in the SessionRegistry — and forward it
-/// to the worker's own token, recording the reason first so the cancelled
-/// session and the parent tool error read as a deliberate stop.
+/// to the worker's own token.
+///
+/// This covers a cancellation arriving once the run is under way. One that
+/// arrived before it is the worker's synchronous pre-check to catch, because
+/// this task is not polled until the main future yields, which it first does
+/// with the specialist's process already spawned.
 async fn forward_user_cancel(
     user_cancel: CancellationToken,
     reason: Arc<CancelReason>,
     worker_cancel: CancellationToken,
 ) {
     user_cancel.cancelled().await;
-    reason.record(USER_STOP_CANCEL_MESSAGE.to_string());
-    worker_cancel.cancel();
+    arm_worker_if_user_cancelled(&user_cancel, &reason, &worker_cancel);
 }
 
 /// Build the child diagram session row, unpersisted.
@@ -1716,6 +1766,109 @@ arrow from COLL.e to SNOW.w"#;
             })
             .await;
 
+        assert_eq!(result.err().as_deref(), Some(USER_STOP_CANCEL_MESSAGE));
+
+        let persisted = store
+            .get_session(&session.id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(persisted.status, SessionStatus::Cancelled);
+        assert_eq!(
+            persisted.error_message.as_deref(),
+            Some(USER_STOP_CANCEL_MESSAGE)
+        );
+        assert_eq!(
+            persisted.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
+    }
+
+    /// Stands in for a specialist that must never be launched. A real
+    /// `driver.run` spawns the agent child before its first await, so "was this
+    /// called" is the closest a test gets to "was a process started".
+    #[derive(Default)]
+    struct NeverRunDriver {
+        ran: std::cell::Cell<bool>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl crate::agent::AgentDriver for NeverRunDriver {
+        async fn run(
+            &self,
+            _session_id: &str,
+            _prompt: &str,
+            _images: &[(String, String)],
+            _working_dir: &std::path::Path,
+            _store: &Arc<dyn acp_client::Store>,
+            _writer: &Arc<dyn acp_client::MessageWriter>,
+            _cancel_token: &CancellationToken,
+            _agent_session_id: Option<&str>,
+            _config_options: &[acp_client::AcpSessionConfigOptionSelection],
+        ) -> Result<acp_client::AgentRunOutcome, String> {
+            self.ran.set(true);
+            Ok(acp_client::AgentRunOutcome::Completed)
+        }
+    }
+
+    /// A cancellation that lands before the worker starts — a quit's
+    /// `cancel_owned_sessions` reaching the reservation while `AcpDriver::new`
+    /// is still probing login shells — must stop the specialist from launching
+    /// at all, not launch it and race the teardown against `SHUTDOWN_BUDGET`.
+    ///
+    /// The forwarder can't be what does that: spawned tasks are ticked only
+    /// after the main future returns Pending, and the first yield on the way to
+    /// `driver.run` is inside the driver, past the spawn. Hence the synchronous
+    /// look, which this drives in the same order the worker does.
+    #[tokio::test]
+    async fn a_cancel_landing_before_the_forwarder_runs_never_starts_the_specialist() {
+        let registry = Arc::new(SessionRegistry::new());
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session = new_pikchr_child_session("fake-agent");
+        persist_pikchr_child_session(&store, &session).expect("persist child session");
+
+        let registration = registry.register_external(&session.id);
+        let user_cancel = registration.token().clone();
+        let worker_cancel = CancellationToken::new();
+        let reason = Arc::new(CancelReason::new());
+        let driver = NeverRunDriver::default();
+        let slot = LastRenderSlot::new();
+
+        // The shutdown fires the reserved token while the worker is still
+        // getting to the lines below.
+        assert!(registry.cancel(&session.id));
+
+        let local = tokio::task::LocalSet::new();
+        let result = local
+            .run_until(async {
+                tokio::task::spawn_local(forward_user_cancel(
+                    user_cancel.clone(),
+                    Arc::clone(&reason),
+                    worker_cancel.clone(),
+                ));
+                arm_worker_if_user_cancelled(&user_cancel, &reason, &worker_cancel);
+                crate::pikchr_subsession::generate_pikchr_source(
+                    &driver,
+                    Arc::clone(&store),
+                    &session.id,
+                    Some("test grammar body"),
+                    "a friendly box",
+                    None,
+                    &[],
+                    None,
+                    &slot,
+                    &worker_cancel,
+                    &reason,
+                )
+                .await
+            })
+            .await;
+
+        assert!(
+            !driver.ran.get(),
+            "the specialist's agent must never be started once the token has fired"
+        );
+        // And the refusal still reads as the stop it was, on both the row and
+        // the tool error — the same story the forwarder would have told.
         assert_eq!(result.err().as_deref(), Some(USER_STOP_CANCEL_MESSAGE));
 
         let persisted = store

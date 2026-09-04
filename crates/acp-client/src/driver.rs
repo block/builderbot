@@ -478,8 +478,9 @@ pub struct BackgroundHoldConfig {
     /// Bounds every hold regardless of signals — background shells can hang
     /// forever, so an unbounded wait is never safe. On expiry the session
     /// tears down flagged [`SessionSettleReason::HeldUntilCap`]. Defaults to
-    /// 10 minutes, matching the Bash tool's own max timeout so a single
-    /// blocking shell can't outlive its own ceiling by much.
+    /// 30 minutes — three times the Bash tool's own max timeout, so a chain
+    /// of blocking shells and the continuations they wake have room to
+    /// finish, while a hung one still can't hold the session open forever.
     pub hold_cap: Duration,
     /// Quiet window that must elapse — no notifications at all — with the
     /// task set empty before the session is declared quiescent, once a
@@ -524,7 +525,7 @@ pub struct BackgroundHoldConfig {
 impl Default for BackgroundHoldConfig {
     fn default() -> Self {
         Self {
-            hold_cap: Duration::from_secs(600),
+            hold_cap: Duration::from_secs(1800),
             debounce: Duration::from_secs(10),
             taskless_debounce: Duration::from_secs(1),
             idle_latch_staleness: Duration::from_secs(120),
@@ -8058,7 +8059,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         // The poisoned-connection case: a busy frame's trailing idle was
         // lost, so the latch reads busy at hold entry and nothing will ever
         // release it. Without a staleness bound this hold — and every later
-        // hold on the connection — would run to the 10-minute cap.
+        // hold on the connection — would run to the full hold cap.
         let mut state = HoldingState::new(
             test_hold_config(),
             TaskTrackingMode::Raw,

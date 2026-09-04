@@ -272,7 +272,7 @@ const BACKGROUND_HOLD_CAP_SECS_ENV: &str = "STAGED_BACKGROUND_HOLD_CAP_SECS";
 /// Overridable without a rebuild, since a hold that misbehaves in the field
 /// needs an escape hatch that isn't "ship a new binary":
 /// - `STAGED_BACKGROUND_HOLD=0` (or `false`/`no`/`off`) disables it.
-/// - `STAGED_BACKGROUND_HOLD_CAP_SECS=<n>` replaces the 10-minute default cap.
+/// - `STAGED_BACKGROUND_HOLD_CAP_SECS=<n>` replaces the 30-minute default cap.
 ///
 /// Every `SessionConfig` construction site derives the value here so the policy
 /// lives in one place.
@@ -7341,7 +7341,7 @@ mod tests {
             .expect("background hold is enabled without overrides");
 
         assert_eq!(config, acp_client::BackgroundHoldConfig::default());
-        assert_eq!(config.hold_cap, std::time::Duration::from_secs(600));
+        assert_eq!(config.hold_cap, std::time::Duration::from_secs(1800));
     }
 
     #[test]

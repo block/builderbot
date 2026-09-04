@@ -105,6 +105,15 @@ pub trait MessageWriter: Send + Sync {
     /// Called when session configuration options change.
     async fn on_config_option_update(&self, _options: &[SessionConfigOption]) {}
 
+    /// Announce that a stored selection was applied as a different value
+    /// because the agent no longer offers the pinned one — a model generation
+    /// renamed underneath the pin, say. Implementations that surface a
+    /// transcript put `notice` in it verbatim.
+    ///
+    /// Defaulted to a no-op: one-shot callers parse the writer's buffer as
+    /// JSON, so they must not receive prose they did not ask for.
+    async fn on_config_option_fallback(&self, _notice: &str) {}
+
     /// Called after ACP initialization has negotiated agent capabilities.
     async fn on_initialize(&self, _metadata: &AcpInitializeMetadata) {}
 
@@ -4985,7 +4994,7 @@ async fn apply_or_record_session_config_options(
             .send_request(SetSessionConfigOptionRequest::new(
                 agent_session_id.to_string(),
                 resolved.config_id,
-                resolved.value_id.as_str(),
+                resolved.value.value_id.as_str(),
             ))
             .block_task()
             .await
@@ -4995,6 +5004,11 @@ async fn apply_or_record_session_config_options(
                     config_selection_label(&selection.category)
                 )
             })?;
+        // Announced only once the agent has accepted the substitute, so the
+        // transcript never claims a fallback that did not take effect.
+        if let Some(notice) = resolved.value.fallback_notice {
+            writer.on_config_option_fallback(&notice).await;
+        }
         latest_options = response.config_options;
         if selection.category == SessionConfigOptionCategory::Model {
             model_selection_applied = true;
@@ -5008,11 +5022,32 @@ async fn apply_or_record_session_config_options(
 /// A stored selection matched against the agent's live config options: the
 /// option to set, and the value to set it to. The value can differ from the
 /// stored one when [`resolve_config_option_value`] falls back to a
-/// hint-stripped match.
+/// hint-stripped or digit-insensitive match.
 #[derive(Debug)]
 struct ResolvedConfigSelection {
     config_id: String,
+    value: ResolvedConfigValue,
+}
+
+/// The value a stored selection resolves to, plus the announcement owed to the
+/// transcript when the agent is about to run something other than what was
+/// pinned.
+#[derive(Debug)]
+struct ResolvedConfigValue {
     value_id: String,
+    /// User-facing notice, set only for the digit-insensitive fallback — the
+    /// one case where the pin lands on a genuinely different value. See
+    /// [`resolve_config_option_value`].
+    fallback_notice: Option<String>,
+}
+
+impl ResolvedConfigValue {
+    fn exact(value_id: &str) -> Self {
+        Self {
+            value_id: value_id.to_string(),
+            fallback_notice: None,
+        }
+    }
 }
 
 fn resolve_session_config_option_selection(
@@ -5025,10 +5060,10 @@ fn resolve_session_config_option_selection(
         .iter()
         .find(|option| option.id.to_string() == selection.config_id)
     {
-        let value_id = resolve_config_option_value(option, &selection.value_id, label)?;
+        let value = resolve_config_option_value(option, &selection.value_id, label)?;
         return Ok(ResolvedConfigSelection {
             config_id: option.id.to_string(),
-            value_id,
+            value,
         });
     }
 
@@ -5041,34 +5076,52 @@ fn resolve_session_config_option_selection(
         ));
     };
 
-    let value_id = resolve_config_option_value(option, &selection.value_id, label)?;
+    let value = resolve_config_option_value(option, &selection.value_id, label)?;
     Ok(ResolvedConfigSelection {
         config_id: option.id.to_string(),
-        value_id,
+        value,
     })
 }
 
 /// Which of `option`'s values a stored `value_id` selects.
 ///
-/// An exact match wins. Failing that, a stored value carrying a bracketed
-/// hint suffix falls back to the row for its base id: Claude Code advertises
-/// Fable as `claude-fable-5[1m]` on `session/new` but resolves it to the bare
-/// `claude-fable-5`, and `session/load` rebuilds the picker around that
-/// resolved id — so the value we pinned is gone from the list on the first
-/// follow-up, and the turn dies before `session/prompt`. Matching the base id
-/// keeps the pin an explicit assertion rather than leaving the model to
-/// whatever the agent restores from its own transcript.
+/// Three tiers, tried in order.
 ///
-/// The fallback is deliberately one-way. A stored bare id never matches a
-/// hinted row, since that would silently promote a pin to a context window the
-/// user never chose.
+/// 1. An exact match.
+/// 2. A stored value carrying a bracketed hint suffix falls back to the row for
+///    its base id: Claude Code advertises Fable as `claude-fable-5[1m]` on
+///    `session/new` but resolves it to the bare `claude-fable-5`, and
+///    `session/load` rebuilds the picker around that resolved id — so the value
+///    we pinned is gone from the list on the first follow-up, and the turn dies
+///    before `session/prompt`. Matching the base id keeps the pin an explicit
+///    assertion rather than leaving the model to whatever the agent restores
+///    from its own transcript. This one fires on every follow-up of such a
+///    session, so it stays log-only; the same model is still being run.
+/// 3. The unique row from the pin's family — same letters once digits,
+///    punctuation and any bracketed hint are dropped, see
+///    [`config_value_family`]. Model generations get renamed underneath a
+///    stable pin (`claude-fable-5[1m]` became `claude-fable-5-1[1m]` when Fable
+///    5.1 rolled out, and the catalog served both for a while), which strands
+///    every stored selection naming the old id. Dropping the hint before
+///    comparing letters is what lets one rung cover both catalog shapes a
+///    renamed generation is served under: `session/new`'s
+///    `claude-fable-5-1[1m]` and the bare `claude-fable-5-1` that
+///    `session/load` rebuilds the picker around, which tier 2 cannot reach once
+///    the id itself has moved. This tier does land on a different value, so it
+///    is announced in the transcript rather than only the log.
+///
+/// Tiers 2 and 3 are deliberately one-way with respect to the bracketed hint. A
+/// stored bare id never matches a hinted row, since that would promote a pin to
+/// a context window the user never chose. Tier 3 enforces that as an explicit
+/// condition on the row's hint — it has to, having just dropped the hint from
+/// the letters it compares.
 fn resolve_config_option_value(
     option: &SessionConfigOption,
     value_id: &str,
     label: &str,
-) -> Result<String, String> {
+) -> Result<ResolvedConfigValue, String> {
     match select_option_has_value(option, value_id) {
-        Some(true) => return Ok(value_id.to_string()),
+        Some(true) => return Ok(ResolvedConfigValue::exact(value_id)),
         Some(false) => {}
         None => {
             return Err(format!(
@@ -5085,8 +5138,29 @@ fn resolve_config_option_value(
                  '{}'; falling back to '{base_value_id}'",
                 option.id
             );
-            return Ok(base_value_id.to_string());
+            return Ok(ResolvedConfigValue::exact(base_value_id));
         }
+    }
+
+    if let Some((fallback_value_id, fallback_label)) =
+        sole_config_value_family_match(option, value_id)
+    {
+        log::warn!(
+            "Selected ACP {label} value '{value_id}' is no longer offered by config option '{}'; \
+             falling back to '{fallback_value_id}'",
+            option.id
+        );
+        let named = if fallback_label.is_empty() || fallback_label == fallback_value_id {
+            fallback_value_id.clone()
+        } else {
+            format!("{fallback_value_id} ({fallback_label})")
+        };
+        return Ok(ResolvedConfigValue {
+            value_id: fallback_value_id,
+            fallback_notice: Some(format!(
+                "Selected {label} {value_id} was not available, falling back to {named}."
+            )),
+        });
     }
 
     Err(format!(
@@ -5095,12 +5169,130 @@ fn resolve_config_option_value(
     ))
 }
 
+/// A config value split into its base id and trailing bracketed hint, e.g.
+/// `("claude-fable-5", Some("1m"))` for `claude-fable-5[1m]`. The hint is
+/// `None` when there is no such suffix, and also when stripping it would leave
+/// nothing behind — an id that is only a hint is its own base.
+fn split_config_value_hint(value_id: &str) -> (&str, Option<&str>) {
+    let Some((base, hint)) = value_id
+        .strip_suffix(']')
+        .and_then(|rest| rest.rsplit_once('['))
+        .filter(|(base, _)| !base.is_empty())
+    else {
+        return (value_id, None);
+    };
+    (base, Some(hint))
+}
+
 /// The base id of a config value carrying a trailing bracketed hint, e.g.
 /// `claude-fable-5` for `claude-fable-5[1m]`. `None` when there is no such
 /// suffix, or when stripping it would leave nothing behind.
 fn strip_config_value_hint(value_id: &str) -> Option<&str> {
-    let (base, _hint) = value_id.strip_suffix(']')?.rsplit_once('[')?;
-    (!base.is_empty()).then_some(base)
+    let (base, hint) = split_config_value_hint(value_id);
+    hint.map(|_| base)
+}
+
+/// The one value of `option` from the same family as `value_id`, as
+/// `(value id, display name)`.
+///
+/// A family is the base id's letters ([`config_value_family`]), so a renamed
+/// generation matches its pin whether the catalog still carries the hint
+/// (`claude-fable-5-1[1m]`, what `session/new` advertises) or has resolved it
+/// away (`claude-fable-5-1`, what `session/load` rebuilds the picker around).
+///
+/// Dropping the hint from the letters means the one-way rule the caller
+/// documents has to be stated outright: a row may only match a pin when it
+/// carries the pin's hint or no hint at all. A bare pin therefore still never
+/// reaches a hinted row — and now that holds for a letterless hint like `[200]`
+/// too, which the letters alone could never have caught.
+///
+/// A catalog serving both shapes of the same renamed generation yields two
+/// allowed matches, so hint-exact rows win over hint-less ones; the user's
+/// `[1m]` survives a catalog that offers it. Beyond that, `None` when nothing
+/// matches and — importantly — also when more than one row in the preferred
+/// group does. Two candidates mean the rename is not a rename we can read (say,
+/// Fable 5.1 and 5.2 both on offer for a pin naming Fable 5), so the caller
+/// reports the pin as unavailable instead of guessing which generation was
+/// meant. There is no looser rung below this one to fall through to.
+fn sole_config_value_family_match(
+    option: &SessionConfigOption,
+    value_id: &str,
+) -> Option<(String, String)> {
+    let (_, pinned_hint) = split_config_value_hint(value_id);
+    let family = config_value_family(value_id);
+    if family.is_empty() {
+        return None;
+    }
+
+    let mut hint_exact = Vec::new();
+    let mut hint_less = Vec::new();
+    for (candidate, name) in select_option_values(option)? {
+        let (base, hint) = split_config_value_hint(&candidate);
+        if alphabetic_skeleton(base) != family {
+            continue;
+        }
+        let matches_pinned_hint = hint == pinned_hint;
+        let is_hint_less = hint.is_none();
+
+        if matches_pinned_hint {
+            hint_exact.push((candidate, name));
+        } else if is_hint_less {
+            hint_less.push((candidate, name));
+        }
+    }
+
+    let preferred = if hint_exact.is_empty() {
+        hint_less
+    } else {
+        hint_exact
+    };
+    let mut preferred = preferred.into_iter();
+    let sole = preferred.next()?;
+    preferred.next().is_none().then_some(sole)
+}
+
+/// The letters of a config value's base id, ignoring any bracketed hint, so
+/// that ids naming the same model generation compare equal:
+/// `claude-fable-5[1m]`, `claude-fable-5-1[1m]` and `claude-fable-5-1` all
+/// become `claudefable`.
+fn config_value_family(value_id: &str) -> String {
+    alphabetic_skeleton(split_config_value_hint(value_id).0)
+}
+
+/// A config value reduced to its lowercase ASCII letters, so that ids differing
+/// only in digits and punctuation compare equal: `claude-fable-5` and
+/// `claude-fable-5-1` both become `claudefable`.
+fn alphabetic_skeleton(value_id: &str) -> String {
+    value_id
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Every selectable `(value id, display name)` of a select-style option, across
+/// both the grouped and ungrouped shapes.
+fn select_option_values(
+    option: &SessionConfigOption,
+) -> Option<impl Iterator<Item = (String, String)> + '_> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+
+    let values: Vec<_> = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    Some(
+        values
+            .into_iter()
+            .map(|option| (option.value.to_string(), option.name.to_string())),
+    )
 }
 
 fn is_select_option(option: &SessionConfigOption) -> bool {
@@ -5108,22 +5300,7 @@ fn is_select_option(option: &SessionConfigOption) -> bool {
 }
 
 fn select_option_has_value(option: &SessionConfigOption, value_id: &str) -> Option<bool> {
-    let SessionConfigKind::Select(select) = &option.kind else {
-        return None;
-    };
-
-    Some(match &select.options {
-        SessionConfigSelectOptions::Ungrouped(options) => options
-            .iter()
-            .any(|option| option.value.to_string() == value_id),
-        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
-            group
-                .options
-                .iter()
-                .any(|option| option.value.to_string() == value_id)
-        }),
-        _ => false,
-    })
+    select_option_values(option).map(|mut values| values.any(|(value, _)| value == value_id))
 }
 
 fn config_selection_label(category: &SessionConfigOptionCategory) -> &'static str {
@@ -5661,7 +5838,7 @@ mod tests {
             resolve_session_config_option_selection(&options, &selection).expect("resolved config");
 
         assert_eq!(resolved.config_id, "model-v2");
-        assert_eq!(resolved.value_id, "opus");
+        assert_eq!(resolved.value.value_id, "opus");
     }
 
     #[test]
@@ -5686,7 +5863,218 @@ mod tests {
             resolve_session_config_option_selection(&options, &selection).expect("resolved config");
 
         assert_eq!(resolved.config_id, "model");
-        assert_eq!(resolved.value_id, "claude-fable-5");
+        assert_eq!(resolved.value.value_id, "claude-fable-5");
+        // The same model is still being run, and this fires on every follow-up
+        // of such a session — nothing to announce.
+        assert_eq!(resolved.value.fallback_notice, None);
+    }
+
+    /// Fable 5 became Fable 5.1 under a stable pin: `claude-fable-5[1m]` left
+    /// the catalog and `claude-fable-5-1[1m]` took its place. Only the digits
+    /// moved, so the pin resolves to the renamed row instead of killing the
+    /// turn.
+    #[test]
+    fn resolves_a_renamed_model_generation_by_its_digit_insensitive_match() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5-1[1m]", "Fable"),
+                SessionConfigSelectOption::new("opus[1m]", "Opus (1M context)"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        };
+
+        let resolved =
+            resolve_session_config_option_selection(&options, &selection).expect("resolved config");
+
+        assert_eq!(resolved.value.value_id, "claude-fable-5-1[1m]");
+        assert_eq!(
+            resolved.value.fallback_notice.as_deref(),
+            Some(
+                "Selected model claude-fable-5[1m] was not available, falling back to \
+                 claude-fable-5-1[1m] (Fable)."
+            )
+        );
+    }
+
+    /// The rename and the hint resolution stacked: a session pinned to
+    /// `claude-fable-5[1m]` is resumed after Fable 5.1 rolled out, so
+    /// `session/load` offers only the bare `claude-fable-5-1`. Neither the pin
+    /// nor its base id is in the catalog, and the family match is the only
+    /// thing standing between that session and a dead first follow-up.
+    #[test]
+    fn resolves_a_renamed_model_generation_when_load_drops_the_hint() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-fable-5-1",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5-1", "Fable"),
+                SessionConfigSelectOption::new("claude-opus-5[1m]", "Opus"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        };
+
+        let resolved =
+            resolve_session_config_option_selection(&options, &selection).expect("resolved config");
+
+        assert_eq!(resolved.value.value_id, "claude-fable-5-1");
+        assert_eq!(
+            resolved.value.fallback_notice.as_deref(),
+            Some(
+                "Selected model claude-fable-5[1m] was not available, falling back to \
+                 claude-fable-5-1 (Fable)."
+            )
+        );
+    }
+
+    /// A catalog carrying both shapes of the renamed generation is not
+    /// ambiguous: the row still holding the pin's `[1m]` is the one the user
+    /// chose, so it wins over the hint-less one rather than being called a tie.
+    #[test]
+    fn prefers_the_hinted_row_when_a_renamed_generation_is_served_both_ways() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-fable-5-1",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5-1", "Fable"),
+                SessionConfigSelectOption::new("claude-fable-5-1[1m]", "Fable (1M context)"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        };
+
+        let resolved =
+            resolve_session_config_option_selection(&options, &selection).expect("resolved config");
+
+        assert_eq!(resolved.value.value_id, "claude-fable-5-1[1m]");
+    }
+
+    /// Two generations on offer for a pin naming a third is not a rename we can
+    /// read, so the pin is reported unavailable rather than guessed at.
+    #[test]
+    fn does_not_guess_between_two_digit_insensitive_matches() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5-1[1m]", "Fable 5.1"),
+                SessionConfigSelectOption::new("claude-fable-5-2[1m]", "Fable 5.2"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        };
+
+        let error = resolve_session_config_option_selection(&options, &selection)
+            .expect_err("an ambiguous rename must not be guessed");
+
+        assert!(
+            error.contains("Selected ACP model value 'claude-fable-5[1m]' is no longer available")
+        );
+    }
+
+    /// Ambiguity is terminal in the hint-less group too — there is no
+    /// hint-exact row to prefer here and nothing looser below to fall through
+    /// to, so the pin is reported unavailable.
+    #[test]
+    fn does_not_guess_between_two_hint_less_renamed_generations() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "claude-fable-5-1",
+            vec![
+                SessionConfigSelectOption::new("claude-fable-5-1", "Fable 5.1"),
+                SessionConfigSelectOption::new("claude-fable-5-2", "Fable 5.2"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        };
+
+        let error = resolve_session_config_option_selection(&options, &selection)
+            .expect_err("an ambiguous rename must not be guessed");
+
+        assert!(
+            error.contains("Selected ACP model value 'claude-fable-5[1m]' is no longer available")
+        );
+    }
+
+    /// A hint carrying no letters was invisible to the old skeleton comparison,
+    /// so a bare pin could be promoted onto it. The guard is on the hint
+    /// itself, not on whether it happens to spell anything.
+    #[test]
+    fn does_not_promote_a_bare_pin_onto_a_letterless_hinted_row() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "default",
+            vec![SessionConfigSelectOption::new(
+                "claude-opus-5[200]",
+                "Opus (200K context)",
+            )],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-opus-5".to_string(),
+        };
+
+        let error = resolve_session_config_option_selection(&options, &selection)
+            .expect_err("a bare pin must not reach a letterless-hinted row");
+
+        assert!(error.contains("Selected ACP model value 'claude-opus-5' is no longer available"));
+    }
+
+    /// The family match drops the bracketed hint before comparing letters, so
+    /// the one-way rule rests entirely on the guard tested here: a row may only
+    /// match a pin when it carries the pin's hint or none at all. Without it a
+    /// bare pin would be promoted onto a 1M row.
+    #[test]
+    fn does_not_promote_a_bare_pin_onto_a_hinted_row_by_digit_insensitive_match() {
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "default",
+            vec![SessionConfigSelectOption::new(
+                "opus[1m]",
+                "Opus (1M context)",
+            )],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "opus".to_string(),
+        };
+
+        resolve_session_config_option_selection(&options, &selection)
+            .expect_err("a bare pin must not reach a hinted row");
     }
 
     #[test]
@@ -5996,6 +6384,153 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &[(String::from("model"), String::from("claude-fable-5"))]
         );
         assert_eq!(writer.config_option_updates.lock().unwrap().len(), 1);
+        assert!(writer.config_option_fallbacks.lock().unwrap().is_empty());
+    }
+
+    /// The rename and the hint resolution stacked, end to end: a pre-existing
+    /// session pinned to `claude-fable-5[1m]` is resumed after Fable 5.1 rolled
+    /// out, so `session/load` offers only the bare `claude-fable-5-1`. Before
+    /// the family match dropped the hint before comparing letters, this turn
+    /// died before `session/prompt` and the pin was cleared.
+    #[tokio::test(flavor = "current_thread")]
+    async fn applies_a_renamed_model_value_when_load_drops_the_hint() {
+        let renamed_options = || {
+            vec![SessionConfigOption::select(
+                "model",
+                "Model",
+                "claude-fable-5-1",
+                vec![
+                    SessionConfigSelectOption::new("claude-fable-5-1", "Fable"),
+                    SessionConfigSelectOption::new("claude-opus-5[1m]", "Opus"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model)]
+        };
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler.lock().unwrap().push((
+                    request.config_id.to_string(),
+                    request
+                        .value
+                        .as_value_id()
+                        .expect("selected config value should be a value ID")
+                        .to_string(),
+                ));
+                responder.respond(SetSessionConfigOptionResponse::new(renamed_options()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let selections = vec![AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        }];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    Some(&renamed_options()),
+                    &selections,
+                    &message_writer,
+                    true,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("claude-fable-5-1"))]
+        );
+        assert_eq!(
+            writer.config_option_fallbacks.lock().unwrap().as_slice(),
+            &[String::from(
+                "Selected model claude-fable-5[1m] was not available, falling back to \
+                 claude-fable-5-1 (Fable)."
+            )]
+        );
+    }
+
+    /// The Fable rename end to end: the pinned `claude-fable-5[1m]` is gone and
+    /// only `claude-fable-5-1[1m]` remains. The renamed row is what gets set,
+    /// and the transcript is told why.
+    #[tokio::test(flavor = "current_thread")]
+    async fn announces_a_digit_insensitive_model_fallback_to_the_transcript() {
+        let renamed_options = || {
+            vec![SessionConfigOption::select(
+                "model",
+                "Model",
+                "default",
+                vec![
+                    SessionConfigSelectOption::new("claude-fable-5-1[1m]", "Fable"),
+                    SessionConfigSelectOption::new("opus[1m]", "Opus (1M context)"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model)]
+        };
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler.lock().unwrap().push((
+                    request.config_id.to_string(),
+                    request
+                        .value
+                        .as_value_id()
+                        .expect("selected config value should be a value ID")
+                        .to_string(),
+                ));
+                responder.respond(SetSessionConfigOptionResponse::new(renamed_options()))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let selections = vec![AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "claude-fable-5[1m]".to_string(),
+        }];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    Some(&renamed_options()),
+                    &selections,
+                    &message_writer,
+                    false,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("claude-fable-5-1[1m]"))]
+        );
+        assert_eq!(
+            writer.config_option_fallbacks.lock().unwrap().as_slice(),
+            &[String::from(
+                "Selected model claude-fable-5[1m] was not available, falling back to \
+                 claude-fable-5-1[1m] (Fable)."
+            )]
+        );
     }
 
     fn write_executable(path: &Path, content: &str) {
@@ -6054,6 +6589,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     struct RecordingMessageWriter {
         events: Mutex<Vec<AcpEventMetadata>>,
         config_option_updates: Mutex<Vec<Vec<SessionConfigOption>>>,
+        config_option_fallbacks: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -6089,6 +6625,13 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 .lock()
                 .unwrap()
                 .push(options.to_vec());
+        }
+
+        async fn on_config_option_fallback(&self, notice: &str) {
+            self.config_option_fallbacks
+                .lock()
+                .unwrap()
+                .push(notice.to_string());
         }
     }
 

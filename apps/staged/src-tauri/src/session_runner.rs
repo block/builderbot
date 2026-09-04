@@ -707,8 +707,105 @@ pub struct SessionConfig {
     pub background_hold: Option<acp_client::BackgroundHoldConfig>,
 }
 
-/// Record the terminal state for a session that was cancelled while its
-/// startup was still running and whose startup then failed.
+/// What a start request did with the session it was handed.
+///
+/// A start is not always a start: [`start_session`] and
+/// [`start_pipeline_session`] refuse one outright when a shutdown has already
+/// been claimed. That refusal is not an error — see
+/// [`refuse_start_during_shutdown`] — so it needs a way to say "nothing is
+/// running" that no caller can turn into a failed session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStartOutcome {
+    /// A runner thread has the session.
+    Started,
+    /// A shutdown was already under way, so nothing was started and the row was
+    /// recorded `cancelled`/`app_quit`.
+    RefusedShuttingDown,
+}
+
+impl SessionStartOutcome {
+    /// Whether a runner thread actually took the session. What the queue drain
+    /// reports as "started" — a refusal leaves the branch exactly as idle as a
+    /// claim that lost its race.
+    pub fn started(self) -> bool {
+        matches!(self, Self::Started)
+    }
+}
+
+/// Refuse to start `session_id` because a shutdown has been claimed, leaving
+/// the row in the state the quit sweep would have given it.
+///
+/// The gate this serves is the coverage boundary the drain's own gates leave
+/// open. `is_quitting` used to be read only on the queue-drain path, so every
+/// other way into a session — the `start_session` and `resume_session`
+/// commands, `start_branch_session`, `start_project_session` (all four also
+/// dispatchable in web mode), and the four `start_pipeline_session` sites in
+/// `prs` — could still enter inside `SHUTDOWN_BUDGET`, *after*
+/// `cancel_owned_sessions` took its registry snapshot. Such a session
+/// registers, so `sweep_active_sessions` puts its row right, but it is neither
+/// cancelled nor waited on: `app.exit(0)` orphans its agent child, and a child
+/// in its own process group is the one thing the sweep cannot fix. Every agent
+/// start funnels through [`start_session`] and every pipeline through
+/// [`start_pipeline_session`], so those two gates cover all of them — including
+/// the project-MCP `start_repo_session`, which only ever enqueues a row and
+/// drains.
+///
+/// Writing the row here rather than leaving it to the sweep is what makes the
+/// refusal self-contained. The sweep is `shutdown_cleanup`'s *last* step, so a
+/// refusal arriving after it — the window between the sweep and `app.exit(0)`
+/// — would strand a `running` row under our pid for the next launch to report
+/// as an errored session, which is the artifact this branch exists to prevent.
+///
+/// Dropping the registry entry matters on one path: the pipeline handoff skips
+/// `deregister` so [`start_session`]'s `register` can swap the token with no
+/// gap (see [`PipelineOutcome::HandedOffToAi`]). A refusal never reaches that
+/// `register`, so without this the pipeline's entry would outlive the thread
+/// that owned it — `is_running` true forever, and shutdown's
+/// `wait_for_sessions` burning its whole budget on a session nothing can stop.
+/// Taking the entry out also means taking over its job, so a cancellation it
+/// had already accepted becomes the reason we persist, in preference to
+/// `AppQuit`: the `cancel` that recorded it was answered `true` and wrote no
+/// status.
+fn refuse_start_during_shutdown<R: tauri::Runtime>(
+    session_id: &str,
+    branch_id: Option<String>,
+    project_id: Option<String>,
+    store: &Store,
+    app_handle: &AppHandle<R>,
+    registry: &SessionRegistry,
+) -> SessionStartOutcome {
+    log::info!("Refusing to start session {session_id}: a shutdown is under way");
+    finish_cancelled_before_run(
+        session_id,
+        branch_id,
+        project_id,
+        store,
+        app_handle,
+        refused_start_completion_reason(registry, session_id),
+    );
+    SessionStartOutcome::RefusedShuttingDown
+}
+
+/// The registry half of a refused start: drop the entry the session already
+/// had, if any, and answer with the reason its terminal write should carry.
+///
+/// A cancellation the dropped entry had accepted wins over `AppQuit` — see
+/// [`RunningSession::accepted_cancellation`] for why an entry leaving the
+/// registry without an observer has to hand its cancellation on. Only the
+/// pipeline handoff has an entry to find here; every other caller reaches
+/// [`start_session`] with nothing registered, and gets `AppQuit`.
+fn refused_start_completion_reason(
+    registry: &SessionRegistry,
+    session_id: &str,
+) -> CompletionReason {
+    registry
+        .deregister_reporting_cancellation(session_id)
+        .unwrap_or(CompletionReason::AppQuit)
+}
+
+/// Record the terminal state for a session that never reached its run: one
+/// cancelled while its startup was still going and whose startup then failed,
+/// or one [`refuse_start_during_shutdown`] turned away.
 ///
 /// Nothing else can. `cancel_session_impl` took the registry's fast path — the
 /// token was registered, so `cancel` answered `true` — and wrote no status,
@@ -730,32 +827,34 @@ pub struct SessionConfig {
 /// The event is emitted whether or not the transition won, matching the
 /// session thread's terminal emit: a row already moved on (deleted, say) still
 /// needs the client's `running` state cleaned up.
-fn finish_cancelled_startup(
-    config: &SessionConfig,
+fn finish_cancelled_before_run<R: tauri::Runtime>(
+    session_id: &str,
+    branch_id: Option<String>,
+    project_id: Option<String>,
     store: &Store,
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<R>,
     completion_reason: CompletionReason,
 ) {
     let transitioned = store
         .transition_from_running(
-            &config.session_id,
+            session_id,
             SessionStatus::Cancelled,
             None,
             Some(&completion_reason),
         )
         .unwrap_or(false);
     log::info!(
-        "Session {} was cancelled during startup (transition won: {transitioned})",
-        config.session_id
+        "Session {session_id} was cancelled before its run started (transition won: \
+         {transitioned})"
     );
     emit_status(
         app_handle,
-        &config.session_id,
+        session_id,
         SessionStatus::Cancelled.as_str(),
         None,
         Some(&completion_reason),
-        config.branch_id.clone(),
-        config.project_id.clone(),
+        branch_id,
+        project_id,
     );
 }
 
@@ -772,7 +871,23 @@ pub fn start_session(
     store: Arc<Store>,
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
-) -> Result<(), String> {
+) -> Result<SessionStartOutcome, String> {
+    // The gate every agent start passes, whatever raised it — see
+    // `refuse_start_during_shutdown`. It sits ahead of the registration
+    // deliberately: a session registered here would have to be deregistered
+    // again on the way out, and this is the one point where a start can still
+    // be declined without anything having been spawned.
+    if crate::app_lifecycle::is_quitting(&app_handle) {
+        return Ok(refuse_start_during_shutdown(
+            &config.session_id,
+            config.branch_id.clone(),
+            config.project_id.clone(),
+            &store,
+            &app_handle,
+            &registry,
+        ));
+    }
+
     // Registered before the driver is constructed, not after — see
     // `register_for_startup` for why the slow construction must run with the
     // token already in the registry (a shutdown or user cancel landing during
@@ -866,7 +981,14 @@ pub fn start_session(
         Ok(started) => started,
         Err(failure) => {
             if let Some(completion_reason) = failure.accepted_cancellation {
-                finish_cancelled_startup(&config, &store, &app_handle, completion_reason);
+                finish_cancelled_before_run(
+                    &config.session_id,
+                    config.branch_id.clone(),
+                    config.project_id.clone(),
+                    &store,
+                    &app_handle,
+                    completion_reason,
+                );
             }
             return Err(failure.error);
         }
@@ -1124,18 +1246,24 @@ pub fn start_session(
                 };
                 include_images = false;
 
-                // Last look before an agent process exists. Everything from the
-                // token's registration to here is blocking and not token-aware
-                // (driver construction's login-shell probes, then the env
-                // snapshot capture), so a cancel that landed during it — a
-                // Stop, or a quit whose `SHUTDOWN_BUDGET` has since run out —
-                // is first observable at this point. `connect` spawns the
-                // child unconditionally: its own check sits *after* the spawn,
-                // ahead of `initialize`, and leaves `graceful_stop` to take
-                // the child back down, which only beats a quit's `app.exit(0)`
-                // if the startup fit in the budget too. Bailing here leaves
-                // nothing to take down. The `generate_pikchr` worker gates its
-                // `driver.run` the same way.
+                // Last look before an agent process exists. Nothing between the
+                // token's registration and here observes it: first the blocking,
+                // non-token-aware half of startup (driver construction's
+                // login-shell probes, then the env snapshot capture), then a run
+                // of awaits — the project MCP server, the pikchr MCP server, and
+                // reading plus base64-encoding the attached images. So a cancel
+                // that landed anywhere in there — a Stop, or a quit whose
+                // `SHUTDOWN_BUDGET` has since run out — is first observable at
+                // this point. A session cancelled as early as its registration
+                // therefore still stands both localhost MCP servers up on its way
+                // here; they are tasks on this thread's runtime, so they go down
+                // with it once the terminal handling below finishes. `connect`
+                // spawns the child unconditionally: its own check sits *after*
+                // the spawn, ahead of `initialize`, and leaves `graceful_stop`
+                // to take the child back down, which only beats a quit's
+                // `app.exit(0)` if the startup fit in the budget too. Bailing
+                // here leaves nothing to take down. The `generate_pikchr` worker
+                // gates its `driver.run` the same way.
                 //
                 // Past this check the path is synchronous into `cmd.spawn()`,
                 // so what remains is a cancel landing inside those statements
@@ -1489,7 +1617,7 @@ pub fn start_session(
         }
     });
 
-    Ok(())
+    Ok(SessionStartOutcome::Started)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1662,7 +1790,26 @@ pub fn start_pipeline_session(
     store: Arc<Store>,
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
-) -> Result<(), String> {
+) -> Result<SessionStartOutcome, String> {
+    // The pipeline half of the shutdown gate — see
+    // `refuse_start_during_shutdown`. A pipeline spawns no agent child of its
+    // own, but it runs command steps in their own process groups and can hand
+    // off to an AI session, so an exit through the middle of one leaves the
+    // same mess by a longer route. The artifact resolution matches the
+    // `PipelineOutcome::Cancelled` arm below, because that is what this is: a
+    // pipeline cancelled before it ran a step.
+    if crate::app_lifecycle::is_quitting(&app_handle) {
+        resolve_pipeline_artifacts_without_ai(&config, &store, false);
+        return Ok(refuse_start_during_shutdown(
+            &config.session_id,
+            config.branch_id.clone(),
+            config.project_id.clone(),
+            &store,
+            &app_handle,
+            &registry,
+        ));
+    }
+
     let cancel_token = registry.register(&config.session_id);
     let session_id = config.session_id.clone();
     let store_for_status = Arc::clone(&store);
@@ -1778,12 +1925,22 @@ pub fn start_pipeline_session(
                     parent_project_note_id: None,
                     background_hold: crate::session_commands::default_background_hold(),
                 };
-                if let Err(e) = start_session(
+                let handoff = start_session(
                     ai_config,
                     store_for_status.clone(),
                     app_handle.clone(),
                     Arc::clone(&registry),
-                ) {
+                );
+                // A refusal has already taken over this session's registry
+                // entry — the one this handoff deliberately left in place for
+                // `register` to swap — and written the row
+                // cancelled/`app_quit`. What it can't know about is the
+                // pipeline's own artifact, which still needs the resolution a
+                // cancelled pipeline gives it.
+                if matches!(handoff, Ok(SessionStartOutcome::RefusedShuttingDown)) {
+                    resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
+                }
+                if let Err(e) = handoff {
                     log::error!("Failed to start AI session after pipeline handoff: {e}");
                     // If the handoff came from an explicit AiHandoff step, mark
                     // it as failed so the UI doesn't show a perpetual spinner.
@@ -1930,7 +2087,7 @@ pub fn start_pipeline_session(
         }
     });
 
-    Ok(())
+    Ok(SessionStartOutcome::Started)
 }
 
 fn finish_failed_pipeline_handoff_start(
@@ -3833,8 +3990,11 @@ fn find_closing_fence(text: &str) -> Option<usize> {
     None
 }
 
-fn emit_status(
-    app_handle: &AppHandle,
+/// Generic over the runtime purely so the paths that end a session *before* it
+/// runs (see [`finish_cancelled_before_run`]) can be driven by a mock app in
+/// tests. Every production caller passes the concrete handle.
+fn emit_status<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
     session_id: &str,
     status: &str,
     error: Option<String>,
@@ -4715,6 +4875,95 @@ mod tests {
             registry.cancellation_completion_reason("session-handoff"),
             None
         );
+    }
+
+    /// Every way into a session but the pipeline handoff arrives at
+    /// `start_session` with nothing registered, so an ordinary refusal has only
+    /// the quit's own reason to record.
+    #[test]
+    fn a_refused_start_with_nothing_registered_records_the_quit() {
+        assert_eq!(
+            refused_start_completion_reason(&SessionRegistry::new(), "session-never-registered"),
+            CompletionReason::AppQuit
+        );
+    }
+
+    /// The handoff is the one path that arrives with a live entry: it skips
+    /// `deregister` so `register` can swap the token with no gap. A refusal
+    /// never reaches that `register`, so it has to take the entry out itself —
+    /// left behind, it would hold shutdown's `wait_for_sessions` open for the
+    /// whole budget on a session no thread is driving.
+    #[test]
+    fn a_refused_start_frees_the_handoff_predecessors_entry() {
+        let registry = SessionRegistry::new();
+        registry.register("session-handoff");
+
+        assert_eq!(
+            refused_start_completion_reason(&registry, "session-handoff"),
+            CompletionReason::AppQuit
+        );
+        assert!(!registry.is_running("session-handoff"));
+        assert!(
+            registry.wait_for_sessions(&["session-handoff".to_string()], Duration::ZERO),
+            "shutdown must not wait on a session the refusal took over"
+        );
+    }
+
+    /// And when a Stop had already landed on that entry, the refusal is what
+    /// takes over its job of recording the terminal state: `cancel` answered
+    /// `true` and so wrote no status, which makes its reason the one the row
+    /// has to carry rather than the quit's.
+    #[test]
+    fn a_refused_start_persists_a_cancellation_the_predecessor_accepted() {
+        let registry = SessionRegistry::new();
+        registry.register("session-handoff");
+        assert!(registry.cancel("session-handoff"));
+
+        assert_eq!(
+            refused_start_completion_reason(&registry, "session-handoff"),
+            CompletionReason::Interrupted
+        );
+    }
+
+    /// A mock app so the refusal's status event has somewhere to go. Nothing
+    /// listens, so the emit is a no-op — the point is to drive the real
+    /// refusal rather than a test-only copy of it.
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app")
+    }
+
+    /// The whole refusal against a real store. Every caller has already moved
+    /// its row to `running` by the time it gets here, and the refusal writes
+    /// the terminal state itself rather than leaving it to the quit sweep —
+    /// the sweep is `shutdown_cleanup`'s last step, so a refusal landing after
+    /// it would strand a `running` row under our pid for the next launch to
+    /// report as an errored session.
+    #[test]
+    fn a_refused_start_records_the_row_the_sweep_would_have() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("prompt", &PathBuf::from("/tmp"));
+        store.create_session(&session).unwrap();
+        let app = mock_app();
+
+        let outcome = refuse_start_during_shutdown(
+            &session.id,
+            None,
+            None,
+            &store,
+            app.handle(),
+            &SessionRegistry::new(),
+        );
+
+        assert_eq!(outcome, SessionStartOutcome::RefusedShuttingDown);
+        assert!(
+            !outcome.started(),
+            "a refusal must not read as a start to the queue drain"
+        );
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Cancelled);
+        assert_eq!(row.completion_reason, Some(CompletionReason::AppQuit));
     }
 
     fn make_git_repo(test_name: &str) -> PathBuf {

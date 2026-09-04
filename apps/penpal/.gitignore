@@ -1,5 +1,6 @@
 # Binary
 /penpal
+/penpal-cli
 /penpal-server
 /birdseye
 .penpal.pid

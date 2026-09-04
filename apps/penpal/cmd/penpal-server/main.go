@@ -85,7 +85,7 @@ func runServe(port int, rootOverride string) {
 	defer w.Stop()
 
 	am := agents.New(c, cs, port)
-	mcpHandler := mcpserver.NewHandler(cs, c)
+	mcpHandler := mcpserver.NewHandler(cs, c, am.AgentName)
 	srv := server.New(c, w, cs, mcpHandler, am, act, cfg, cfgPath)
 	// E-PENPAL-LOCAL-ONLY: bind to loopback only — no network exposure.
 	addr := fmt.Sprintf("127.0.0.1:%d", port)

@@ -105,6 +105,35 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Insert a visible message that Staged itself authored, tagged with the
+    /// ACP event kind that explains where it came from.
+    ///
+    /// Unlike [`Self::add_acp_metadata_message`] the row keeps its content, so
+    /// it renders as ordinary transcript prose. The event kind is what lets
+    /// replay-boundary construction tell it apart from text the agent actually
+    /// produced — see `agent::replay_boundaries_from_messages`.
+    pub fn add_authored_session_message(
+        &self,
+        session_id: &str,
+        role: MessageRole,
+        content: &str,
+        event_kind: &str,
+    ) -> Result<i64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO session_messages (session_id, role, content, created_at, acp_event_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                role.as_str(),
+                content,
+                now_timestamp(),
+                event_kind
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
     /// Insert a user message and atomically mark a claimed queued follow-up as sent.
     pub fn add_session_message_with_images_from_queue(
         &self,

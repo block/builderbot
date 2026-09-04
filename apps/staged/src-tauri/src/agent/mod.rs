@@ -71,7 +71,7 @@ fn replay_boundaries_from_messages(
             continue;
         }
 
-        if is_hidden_acp_metadata(&message) {
+        if is_hidden_acp_metadata(&message) || is_staged_authored_row(&message) {
             continue;
         }
 
@@ -213,6 +213,15 @@ fn is_hidden_acp_metadata(message: &SessionMessage) -> bool {
     message.content.is_empty() && message.acp.acp_event_kind.is_some()
 }
 
+/// Whether a visible row was written by Staged rather than streamed from the
+/// agent. Such a row is real transcript content, but the agent cannot reproduce
+/// it on `session/load`, so it must not become a replay boundary: the match
+/// cursor advances only past boundaries the replay reproduces, and one that can
+/// never match would stall it for the rest of the session.
+fn is_staged_authored_row(message: &SessionMessage) -> bool {
+    message.acp.acp_event_kind.as_deref() == Some(writer::CONFIG_OPTION_FALLBACK_EVENT)
+}
+
 fn is_acp_message_chunk_with_id(message: &SessionMessage) -> bool {
     matches!(
         message.acp.acp_event_kind.as_deref(),
@@ -297,6 +306,31 @@ mod tests {
         assert_eq!(boundaries[0].acp_message_id.as_deref(), Some("msg-1"));
         assert_eq!(boundaries[1].role, "tool_call");
         assert_eq!(boundaries[1].acp_tool_call_id.as_deref(), Some("tool-1"));
+    }
+
+    /// The model-fallback notice is real transcript content, but Staged wrote
+    /// it — no `session/load` replay will ever reproduce it, so leaving it in
+    /// the boundary list would stall the match cursor on it forever.
+    #[test]
+    fn replay_boundaries_skip_staged_authored_config_fallback_notices() {
+        let boundaries = replay_boundaries_from_messages(vec![
+            message(1, MessageRole::User, "do the thing", Default::default()),
+            message(
+                2,
+                MessageRole::Assistant,
+                "Selected model claude-fable-5[1m] was not available, falling back to \
+                 claude-fable-5-1[1m] (Fable).",
+                AcpMessageMetadata {
+                    acp_event_kind: Some(writer::CONFIG_OPTION_FALLBACK_EVENT.to_string()),
+                    ..Default::default()
+                },
+            ),
+            message(3, MessageRole::Assistant, "done", Default::default()),
+        ]);
+
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0].role, "user");
+        assert_eq!(boundaries[1].content, "done");
     }
 
     #[test]

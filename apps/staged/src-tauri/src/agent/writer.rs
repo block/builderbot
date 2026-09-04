@@ -24,6 +24,13 @@ use acp_client::{
 };
 use agent_client_protocol::schema::MaybeUndefined;
 
+/// ACP event kind tagging a visible transcript row Staged authored itself
+/// rather than received from the agent: the announcement that a pinned config
+/// value was unavailable and a substitute was applied. Rows carrying it are
+/// excluded from replay boundaries — see
+/// [`super::replay_boundaries_from_messages`].
+pub(crate) const CONFIG_OPTION_FALLBACK_EVENT: &str = "config_option_fallback";
+
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
 /// when many sessions stream concurrently. [`MessageWriter::finalize`]
@@ -376,6 +383,28 @@ impl acp_client::MessageWriter for MessageWriter {
             .add_acp_metadata_message(&self.session_id, &metadata)
         {
             log::error!("Failed to persist ACP config options update: {e}");
+        }
+    }
+
+    /// Substituting a model out from under a pinned selection is not something
+    /// to bury in the log, so it lands as an ordinary assistant row: the
+    /// transcript already renders those, and the reader sees why the session is
+    /// not running what they picked.
+    ///
+    /// Tagged [`CONFIG_OPTION_FALLBACK_EVENT`] because the agent never said it.
+    /// Replay boundaries are matched against what the agent reproduces on
+    /// `session/load`, and a boundary it can never produce would stall the
+    /// match cursor — so boundary construction drops rows carrying this kind.
+    async fn on_config_option_fallback(&self, notice: &str) {
+        self.finalize().await;
+
+        if let Err(e) = self.store.add_authored_session_message(
+            &self.session_id,
+            MessageRole::Assistant,
+            notice,
+            CONFIG_OPTION_FALLBACK_EVENT,
+        ) {
+            log::error!("Failed to persist ACP config fallback notice: {e}");
         }
     }
 

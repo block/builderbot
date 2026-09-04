@@ -244,13 +244,18 @@ pub(crate) enum InstalledProbe<'a> {
 }
 
 /// Pick the installed-version probe for a readout from its install source.
-/// `Npm` installs read `package.json`; everything else uses the CLI
-/// `--version` probe.
+/// `Npm`/`Pnpm`/`Bun` installs read `package.json` — all three link the bin
+/// entry into a `node_modules/` tree the walk can canonicalize into, and
+/// npm-distributed bridges don't reliably honor `--version`. Everything else
+/// uses the CLI `--version` probe.
 pub(crate) fn select_installed_probe<'a>(
     install_source: Option<&InstallSource>,
     package_id: Option<&'a str>,
 ) -> InstalledProbe<'a> {
-    if matches!(install_source, Some(InstallSource::Npm)) {
+    if matches!(
+        install_source,
+        Some(InstallSource::Npm | InstallSource::Pnpm | InstallSource::Bun)
+    ) {
         InstalledProbe::NpmPackageJson { package_id }
     } else {
         InstalledProbe::Cli(&["--version"])
@@ -282,7 +287,10 @@ impl InstalledProbe<'_> {
 /// `bin/`), then walk up a bounded number of levels looking for the first
 /// `package.json`. When the package id is known, the file's `name` must match
 /// it — otherwise we keep walking, so a dependency's `package.json` nested
-/// below the real one is never mistaken for the target.
+/// below the real one is never mistaken for the target. When the walk misses
+/// entirely, fall back to pnpm's global layout: pnpm bin entries are generated
+/// shim scripts rather than symlinks, so canonicalizing never lands inside a
+/// `node_modules/` tree even though the package sits right next door.
 fn installed_version_from_package_json(
     binary_path: &Path,
     expected_pkg: Option<&str>,
@@ -290,24 +298,100 @@ fn installed_version_from_package_json(
     let resolved = std::fs::canonicalize(binary_path).ok()?;
     let mut dir = resolved.parent();
     for _ in 0..6 {
-        let d = dir?;
+        let Some(d) = dir else { break };
         let pj = d.join("package.json");
         if pj.is_file() {
-            if let Ok(bytes) = std::fs::read(&pj) {
-                if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                    let name_ok = expected_pkg
-                        .map(|p| v.get("name").and_then(|n| n.as_str()) == Some(p))
-                        .unwrap_or(true);
-                    if name_ok {
-                        return v
-                            .get("version")
-                            .and_then(|x| x.as_str())
-                            .map(str::to_string);
+            if let Some(version) = read_package_json_version(&pj, expected_pkg) {
+                return Some(version);
+            }
+        }
+        dir = d.parent();
+    }
+    let expected = expected_pkg?;
+    pnpm_shim_package_json(&resolved, expected)
+        .or_else(|| pnpm_global_package_json(resolved.parent()?, expected))
+}
+
+/// Parse a `package.json` and return its `version`, or `None` when the file is
+/// unreadable, malformed, or names a different package than expected.
+fn read_package_json_version(pj: &Path, expected_pkg: Option<&str>) -> Option<String> {
+    let bytes = std::fs::read(pj).ok()?;
+    let v = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let name_ok = expected_pkg
+        .map(|p| v.get("name").and_then(|n| n.as_str()) == Some(p))
+        .unwrap_or(true);
+    if !name_ok {
+        return None;
+    }
+    v.get("version")
+        .and_then(|x| x.as_str())
+        .map(str::to_string)
+}
+
+/// Extract the target package's version out of a pnpm shim script. pnpm shims
+/// embed the resolved entrypoint path (e.g.
+/// `"$basedir/global/5/.pnpm/<pkg>@<version>_.../node_modules/<pkg>/dist/cli.js"`),
+/// which pins exactly the install the shim runs — preferred over scanning the
+/// layout, which can hold several `global/<layout-version>/` trees after a
+/// pnpm major upgrade.
+fn pnpm_shim_package_json(shim: &Path, expected_pkg: &str) -> Option<String> {
+    let text = std::fs::read_to_string(shim).ok()?;
+    let needle = format!("node_modules/{expected_pkg}/");
+    for quoted in text.split('"') {
+        let Some(idx) = quoted.find(&needle) else {
+            continue;
+        };
+        // Everything up to (and including) `node_modules/<pkg>` is the
+        // package dir, either relative to the shim's own dir or absolute.
+        let pkg_dir_str = &quoted[..idx + needle.len() - 1];
+        let pkg_dir = if let Some(rest) = pkg_dir_str.strip_prefix("$basedir/") {
+            shim.parent()?.join(rest)
+        } else if Path::new(pkg_dir_str).is_absolute() {
+            PathBuf::from(pkg_dir_str)
+        } else {
+            continue;
+        };
+        if let Some(version) =
+            read_package_json_version(&pkg_dir.join("package.json"), Some(expected_pkg))
+        {
+            return Some(version);
+        }
+    }
+    None
+}
+
+/// Resolve an installed version out of pnpm's global layout. The global bin
+/// dir (`$PNPM_HOME`) holds shim scripts while the packages live under
+/// `global/<layout-version>/node_modules/` (pnpm ≤10) or
+/// `global/<layout-version>/<hash>/node_modules/` (pnpm 11), so scan those
+/// trees for the expected package. Also checks the bin dir's parent to cover a
+/// `global-bin-dir` pointed one level down (e.g. `$PNPM_HOME/bin`).
+fn pnpm_global_package_json(bin_dir: &Path, expected_pkg: &str) -> Option<String> {
+    let mut bases = vec![bin_dir];
+    if let Some(parent) = bin_dir.parent() {
+        bases.push(parent);
+    }
+    for base in bases {
+        let Ok(layouts) = std::fs::read_dir(base.join("global")) else {
+            continue;
+        };
+        for layout in layouts.flatten() {
+            let mut candidates = vec![layout.path()];
+            if let Ok(hashed) = std::fs::read_dir(layout.path()) {
+                candidates.extend(hashed.flatten().map(|e| e.path()));
+            }
+            for candidate in candidates {
+                let pj = candidate
+                    .join("node_modules")
+                    .join(expected_pkg)
+                    .join("package.json");
+                if pj.is_file() {
+                    if let Some(version) = read_package_json_version(&pj, Some(expected_pkg)) {
+                        return Some(version);
                     }
                 }
             }
         }
-        dir = d.parent();
     }
     None
 }
@@ -770,6 +854,8 @@ mod tests {
         assert!(is_self_updating(Some(&InstallSource::CurlPipe)));
         assert!(is_self_updating(Some(&InstallSource::Bundled)));
         assert!(!is_self_updating(Some(&InstallSource::Npm)));
+        assert!(!is_self_updating(Some(&InstallSource::Pnpm)));
+        assert!(!is_self_updating(Some(&InstallSource::Bun)));
         assert!(!is_self_updating(Some(&InstallSource::Brew)));
         assert!(!is_self_updating(None));
     }
@@ -935,12 +1021,179 @@ mod tests {
     }
 
     #[test]
+    fn package_json_pnpm_shim_reads_global_layout() {
+        let root = scratch_dir("pj-pnpm-shim");
+        // pnpm's global bin entry is a generated shim script, not a symlink,
+        // so the walk-up never reaches a node_modules tree; the package lives
+        // under global/<layout-version>/node_modules/ next to the shim.
+        let pkg = root.join("global/5/node_modules/@earendil-works/pi-coding-agent");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name": "@earendil-works/pi-coding-agent", "version": "0.82.1"}"#,
+        )
+        .unwrap();
+        let shim = root.join("pi");
+        std::fs::write(&shim, "#!/bin/sh\nexec node dist/cli.js\n").unwrap();
+
+        assert_eq!(
+            installed_version_from_package_json(&shim, Some("@earendil-works/pi-coding-agent"))
+                .as_deref(),
+            Some("0.82.1"),
+        );
+        // Without a known package id there is nothing to scan for.
+        assert_eq!(installed_version_from_package_json(&shim, None), None);
+    }
+
+    #[test]
+    fn package_json_pnpm_shim_in_bin_subdir_reads_parent_global_layout() {
+        let root = scratch_dir("pj-pnpm-bin-subdir");
+        // A global-bin-dir pointed at $PNPM_HOME/bin keeps packages one level
+        // up from the shims.
+        let pkg = root.join("global/5/node_modules/pi-acp");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name": "pi-acp", "version": "0.0.32"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let shim = root.join("bin/pi-acp");
+        std::fs::write(&shim, "#!/bin/sh\nexec node dist/index.js\n").unwrap();
+
+        assert_eq!(
+            installed_version_from_package_json(&shim, Some("pi-acp")).as_deref(),
+            Some("0.0.32"),
+        );
+    }
+
+    #[test]
+    fn package_json_pnpm_v11_bin_shim_reads_hashed_layout() {
+        let root = scratch_dir("pj-pnpm-v11");
+        // pnpm 11 puts shims in $PNPM_HOME/bin and packages under a hashed
+        // project dir: global/v11/<hash>/node_modules/<pkg>. The shim embeds
+        // the entrypoint relative to its own dir via `$basedir/..`.
+        let pkg = root.join("global/v11/68ba-19fcaecfd18/node_modules/pi-acp");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name": "pi-acp", "version": "0.0.33"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let shim = root.join("bin/pi-acp");
+        std::fs::write(
+            &shim,
+            concat!(
+                "#!/bin/sh\n",
+                "basedir=$(dirname \"$0\")\n",
+                "exec node  \"$basedir/../global/v11/68ba-19fcaecfd18/",
+                "node_modules/pi-acp/dist/index.js\" \"$@\"\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            installed_version_from_package_json(&shim, Some("pi-acp")).as_deref(),
+            Some("0.0.33"),
+        );
+
+        // The hashed layout is also reachable by the scan fallback alone
+        // (shim formats can change; the scan must not depend on parsing).
+        assert_eq!(
+            pnpm_global_package_json(&root.join("bin"), "pi-acp").as_deref(),
+            Some("0.0.33"),
+        );
+    }
+
+    #[test]
+    fn package_json_pnpm_shim_path_wins_over_second_layout_tree() {
+        let root = scratch_dir("pj-pnpm-two-layouts");
+        // After a pnpm major upgrade two layout trees can coexist (e.g.
+        // `global/5` and `global/v11`). The shim script embeds the exact
+        // entrypoint it runs, so that version must win over a layout scan.
+        for (layout, version) in [("5", "0.82.1"), ("v11", "0.83.0")] {
+            let pkg = root.join(format!(
+                "global/{layout}/node_modules/@earendil-works/pi-coding-agent"
+            ));
+            std::fs::create_dir_all(&pkg).unwrap();
+            std::fs::write(
+                pkg.join("package.json"),
+                format!(r#"{{"name": "@earendil-works/pi-coding-agent", "version": "{version}"}}"#),
+            )
+            .unwrap();
+        }
+        let shim = root.join("pi");
+        std::fs::write(
+            &shim,
+            concat!(
+                "#!/bin/sh\n",
+                "basedir=$(dirname \"$0\")\n",
+                "exec node  \"$basedir/global/5/.pnpm/@earendil-works+pi-coding-agent@0.82.1_x/",
+                "node_modules/@earendil-works/pi-coding-agent/dist/cli.js\" \"$@\"\n",
+            ),
+        )
+        .unwrap();
+        // The .pnpm store path in the shim: mirror the package.json there too,
+        // matching pnpm's real layout (global/<v>/node_modules symlinks into it).
+        let store_pkg = root.join(
+            "global/5/.pnpm/@earendil-works+pi-coding-agent@0.82.1_x/node_modules/@earendil-works/pi-coding-agent",
+        );
+        std::fs::create_dir_all(&store_pkg).unwrap();
+        std::fs::write(
+            store_pkg.join("package.json"),
+            br#"{"name": "@earendil-works/pi-coding-agent", "version": "0.82.1"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            installed_version_from_package_json(&shim, Some("@earendil-works/pi-coding-agent"))
+                .as_deref(),
+            Some("0.82.1"),
+            "shim-embedded path must beat the newer layout tree",
+        );
+    }
+
+    #[test]
+    fn package_json_pnpm_layout_mismatched_name_returns_none() {
+        let root = scratch_dir("pj-pnpm-mismatch");
+        let pkg = root.join("global/5/node_modules/pi-acp");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name": "someone-else", "version": "9.9.9"}"#,
+        )
+        .unwrap();
+        let shim = root.join("pi-acp");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+
+        assert_eq!(
+            installed_version_from_package_json(&shim, Some("pi-acp")),
+            None
+        );
+    }
+
+    #[test]
     fn select_probe_npm_reads_package_json() {
         match select_installed_probe(Some(&InstallSource::Npm), Some("amp-acp")) {
             InstalledProbe::NpmPackageJson { package_id } => {
                 assert_eq!(package_id, Some("amp-acp"));
             }
             _ => panic!("npm install source should select NpmPackageJson probe"),
+        }
+    }
+
+    /// pnpm/bun global installs are npm-registry packages linked through
+    /// `node_modules/` trees — the package.json probe applies to them too.
+    #[test]
+    fn select_probe_pnpm_and_bun_read_package_json() {
+        for src in [InstallSource::Pnpm, InstallSource::Bun] {
+            match select_installed_probe(Some(&src), Some("@earendil-works/pi-coding-agent")) {
+                InstalledProbe::NpmPackageJson { package_id } => {
+                    assert_eq!(package_id, Some("@earendil-works/pi-coding-agent"));
+                }
+                _ => panic!("{src:?} install source should select NpmPackageJson probe"),
+            }
         }
     }
 

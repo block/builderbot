@@ -420,11 +420,17 @@ fn resolve_package(
 /// source-aware `update_command` + `update_fix_type` from the readout's install
 /// source and the supplied package id. The flat (non-agent) slot never gets an
 /// update command — non-agent updates are out of scope.
+///
+/// `npm_prefix` is the npm prefix that owns this readout's binary (see
+/// [`resolve::npm_prefix_for_binary`]), so an emitted npm recipe updates the
+/// install this readout is about rather than whichever prefix npm happens to be
+/// configured with.
 fn apply_freshness(
     readout: &mut AgentVersionInfo,
     info: &freshness::VersionInfo,
     slot: ReadoutSlot,
     package_id: Option<&str>,
+    npm_prefix: Option<&Path>,
 ) {
     readout.installed_version = info.installed.clone();
     readout.latest_version = info.latest.clone();
@@ -446,7 +452,9 @@ fn apply_freshness(
         ReadoutSlot::Flat => None,
     };
     if let (true, Some(fix_type)) = (actionable, slot_fix_type) {
-        if let Some(cmd) = derive_update_command(readout.install_source.as_ref(), package_id) {
+        let command =
+            derive_update_command(readout.install_source.as_ref(), package_id, npm_prefix);
+        if let Some(cmd) = command {
             readout.update_command = Some(cmd);
             readout.update_fix_type = Some(fix_type);
         }
@@ -610,15 +618,38 @@ async fn populate_freshness(
         let is_agent = check.main.is_some() || check.bridge.is_some();
         if is_agent {
             let mut freshness_timeouts = Vec::new();
+            // Each readout's update recipe is pinned to the prefix owning *its*
+            // binary: main and bridge can be installed under different prefixes
+            // (e.g. `pi` under `~/.local`, `pi-acp` under the global one).
+            let main_prefix = check
+                .path
+                .as_deref()
+                .and_then(|path| resolve::npm_prefix_for_binary(Path::new(path)));
+            let bridge_prefix = check
+                .bridge_path
+                .as_deref()
+                .and_then(|path| resolve::npm_prefix_for_binary(Path::new(path)));
             if let Some((info, pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Main)) {
                 if let Some(readout) = check.main.as_mut() {
-                    apply_freshness(readout, &info, ReadoutSlot::Main, pkg.as_deref());
+                    apply_freshness(
+                        readout,
+                        &info,
+                        ReadoutSlot::Main,
+                        pkg.as_deref(),
+                        main_prefix.as_deref(),
+                    );
                 }
                 freshness_timeouts.extend(info.command_timeouts);
             }
             if let Some((info, pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Bridge)) {
                 if let Some(readout) = check.bridge.as_mut() {
-                    apply_freshness(readout, &info, ReadoutSlot::Bridge, pkg.as_deref());
+                    apply_freshness(
+                        readout,
+                        &info,
+                        ReadoutSlot::Bridge,
+                        pkg.as_deref(),
+                        bridge_prefix.as_deref(),
+                    );
                 }
                 freshness_timeouts.extend(info.command_timeouts);
             }
@@ -1377,10 +1408,43 @@ mod tests {
             &info,
             ReadoutSlot::Main,
             Some("@agentclientprotocol/claude-agent-acp"),
+            None,
         );
         assert_eq!(
             readout.update_command.as_deref(),
             Some("npm install -g @agentclientprotocol/claude-agent-acp@latest"),
+        );
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+    }
+
+    /// The npm prefix owning the readout's binary reaches the emitted recipe, so
+    /// an agent installed under a non-default prefix is upgraded where it lives
+    /// instead of a second copy landing in npm's configured prefix.
+    #[tokio::test]
+    async fn apply_freshness_npm_main_pins_update_to_owning_prefix() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Npm),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.82.1".into()),
+            latest: Some("0.83.0".into()),
+            update_available: Some(true),
+            command_timeouts: Vec::new(),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("@earendil-works/pi-coding-agent"),
+            Some(Path::new("/Users/test/.local")),
+        );
+        assert_eq!(
+            readout.update_command.as_deref(),
+            Some(
+                "npm install -g --prefix '/Users/test/.local' \
+                 @earendil-works/pi-coding-agent@latest"
+            ),
         );
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
     }
@@ -1398,7 +1462,13 @@ mod tests {
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("ampcode"));
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("ampcode"),
+            None,
+        );
         assert_eq!(
             readout.update_command.as_deref(),
             Some("brew upgrade ampcode"),
@@ -1422,7 +1492,7 @@ mod tests {
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, None);
+        apply_freshness(&mut readout, &info, ReadoutSlot::Main, None, None);
         assert_eq!(readout.installed_version.as_deref(), Some("2.1.205"));
         assert!(readout.update_available.is_none());
         assert!(readout.update_command.is_none());
@@ -1483,13 +1553,13 @@ mod tests {
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Bridge, Some("amp"));
+        apply_freshness(&mut readout, &info, ReadoutSlot::Bridge, Some("amp"), None);
         assert_eq!(readout.update_command.as_deref(), Some("brew upgrade amp"),);
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateBridge));
     }
 
-    /// Self-updating (CurlPipe) readouts never get an update command, even when
-    /// upstream reports a newer version — `is_self_updating` suppresses both
+    /// A CurlPipe readout never gets an update command, even when upstream
+    /// reports a newer version — `is_self_updating` suppresses both
     /// `update_available` and the derived update command.
     #[tokio::test]
     async fn apply_freshness_curl_pipe_never_emits_update_command() {
@@ -1508,6 +1578,7 @@ mod tests {
             &info,
             ReadoutSlot::Main,
             Some("getcursor/cursor"),
+            None,
         );
         assert!(readout.update_command.is_none());
         assert!(readout.update_fix_type.is_none());
@@ -1531,7 +1602,13 @@ mod tests {
             update_available: Some(false),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("amp-acp"));
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("amp-acp"),
+            None,
+        );
         assert!(readout.update_command.is_none());
         assert!(readout.update_fix_type.is_none());
     }

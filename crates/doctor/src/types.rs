@@ -54,6 +54,16 @@ pub enum AuthStatus {
 pub enum InstallSource {
     Brew,
     Npm,
+    /// pnpm global install (`pnpm add -g`), resolved from the pnpm global dir
+    /// (`$PNPM_HOME`; defaults `~/Library/pnpm` on macOS, `~/.local/share/pnpm`
+    /// on Linux). Distinct from [`InstallSource::Npm`] even though the binary
+    /// canonicalizes into a `node_modules/` tree: `npm install -g` neither owns
+    /// nor updates these binaries.
+    Pnpm,
+    /// Bun global install (`bun add -g`), resolved from `$BUN_INSTALL/bin`
+    /// (default `~/.bun/bin`). Distinct from [`InstallSource::Npm`] for the
+    /// same reason as [`InstallSource::Pnpm`].
+    Bun,
     Cargo,
     Mise,
     Asdf,

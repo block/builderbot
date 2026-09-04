@@ -105,25 +105,92 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
             Role::Any,
         )],
     ),
+    // ai-agent-pi: every install method is npm-under-the-hood, so `latest`
+    // always comes from the npm registry. The main CLI ships as
+    // `@earendil-works/pi-coding-agent` via npm/pnpm/bun; the pi.dev curl
+    // installer is npm too (`npm install -g --ignore-scripts --prefix`), so its
+    // `~/.local` fallback layout classifies `Npm` and updates through the npm
+    // recipe like any other. The `CurlPipe` entry is only a display fallback —
+    // should a Pi ever fingerprint as a native install, the readout still shows
+    // a latest version (report-only, no nag). The ACP bridge is the
+    // separately-maintained `pi-acp` npm package.
     (
         "ai-agent-pi",
-        &[(
-            InstallSource::Npm,
-            "pi-acp",
-            LatestSource::Npm,
-            Role::Bridge,
-        )],
+        &[
+            (
+                InstallSource::Npm,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::Pnpm,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::Bun,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::CurlPipe,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::Npm,
+                "pi-acp",
+                LatestSource::Npm,
+                Role::Bridge,
+            ),
+            (
+                InstallSource::Pnpm,
+                "pi-acp",
+                LatestSource::Npm,
+                Role::Bridge,
+            ),
+            (
+                InstallSource::Bun,
+                "pi-acp",
+                LatestSource::Npm,
+                Role::Bridge,
+            ),
+        ],
     ),
     (
         "ai-agent-amp",
         &[
-            // Bridge: npm. Main: brew. Main curl-pipe install is `CurlPipe`,
-            // not present in the table (self-updating, report-only).
+            // Bridge: npm. Main: npm or brew. Main curl-pipe install is
+            // `CurlPipe`, not present in the table (self-updating, report-only).
             (
                 InstallSource::Npm,
                 "amp-acp",
                 LatestSource::Npm,
                 Role::Bridge,
+            ),
+            // Amp's own npm package. `@ampcode/cli` is canonical (bin `amp`);
+            // `@sourcegraph/amp` is the renamed alias that re-exports it and was
+            // slated for removal on 2026-06-15.
+            //
+            // CAVEAT: correct but inert behind a mirror that filters by version
+            // age. Amp publishes continuously (a new version every few minutes),
+            // so a mirror that withholds young versions serves the package with
+            // no `latest` dist-tag at all — Block's Artifactory currently
+            // reports `{"placeholder": "0.0.0-placeholder"}` for `@ampcode/cli`
+            // and `{"next": …}` for `@sourcegraph/amp`, though upstream npm has
+            // `latest` for both. There, `npm view … version` comes back empty →
+            // `latest_version: None` → no nag, and the update command would fail
+            // `ETARGET`. Pi is unaffected because its releases age past the
+            // filter.
+            (
+                InstallSource::Npm,
+                "@ampcode/cli",
+                LatestSource::Npm,
+                Role::Main,
             ),
             // Sourcegraph Amp ships from the `ampcode/tap` tap as `ampcode`.
             // WARNING: homebrew-core's `amp` formula is an unrelated GPL-3.0
@@ -312,6 +379,56 @@ mod tests {
                 .expect("cursor curl-pipe entry");
         assert_eq!(pkg, "getcursor/cursor");
         assert_eq!(latest, LatestSource::GitHubReleases);
+    }
+
+    /// Pi's main CLI ships from the npm registry through every install method
+    /// (npm, pnpm, bun, and the curl installer's npm-under-the-hood layout) —
+    /// each source must resolve the same package with an npm latest lookup.
+    #[test]
+    fn pi_main_resolves_for_all_npm_backed_sources() {
+        for source in [
+            InstallSource::Npm,
+            InstallSource::Pnpm,
+            InstallSource::Bun,
+            InstallSource::CurlPipe,
+        ] {
+            assert_eq!(
+                lookup_package_id("ai-agent-pi", source.clone(), Role::Main),
+                Some(("@earendil-works/pi-coding-agent", LatestSource::Npm)),
+                "{source:?}",
+            );
+        }
+    }
+
+    /// The pi-acp bridge is registry-installed only (npm/pnpm/bun) — there is
+    /// no curl install of the bridge, so CurlPipe must miss.
+    #[test]
+    fn pi_bridge_resolves_for_registry_sources_only() {
+        for source in [InstallSource::Npm, InstallSource::Pnpm, InstallSource::Bun] {
+            assert_eq!(
+                lookup_package_id("ai-agent-pi", source.clone(), Role::Bridge),
+                Some(("pi-acp", LatestSource::Npm)),
+                "{source:?}",
+            );
+        }
+        assert_eq!(
+            lookup_package_id("ai-agent-pi", InstallSource::CurlPipe, Role::Bridge),
+            None,
+        );
+    }
+
+    /// Role tagging keeps the two Pi binaries from answering each other's
+    /// lookups even though both ship via npm.
+    #[test]
+    fn pi_roles_do_not_cross_answer() {
+        assert_eq!(
+            lookup_package_id("ai-agent-pi", InstallSource::Npm, Role::Main),
+            Some(("@earendil-works/pi-coding-agent", LatestSource::Npm)),
+        );
+        assert_eq!(
+            lookup_package_id("ai-agent-pi", InstallSource::Npm, Role::Bridge),
+            Some(("pi-acp", LatestSource::Npm)),
+        );
     }
 
     #[test]

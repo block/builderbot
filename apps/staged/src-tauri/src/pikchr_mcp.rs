@@ -61,7 +61,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, Peer, RoleServe
 
 use crate::agent::AcpDriver;
 use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
-use crate::session_runner::SessionRegistry;
+use crate::session_runner::{ExternalSessionRegistration, SessionRegistry};
 use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus, Store};
 
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
@@ -102,6 +102,19 @@ const PIKCHR_CHILD_SESSION_PROMPT: &str = "Generate Pikchr diagram";
 /// only names the child session once the specialist finishes, so this early
 /// announcement is what lets the UI offer "open diagram session" mid-run.
 const PIKCHR_SESSION_STARTED_EVENT: &str = "pikchr_session_started";
+/// Handed back when a `generate_pikchr` call arrives after a shutdown has been
+/// claimed (see [`reserve_child_session`]).
+///
+/// There is no MCP way to say "stop your turn", so this is a failed tool call
+/// like any other and the calling agent may well retry it. That's tolerable
+/// because the refusal is free — no store row, no registry entry left behind,
+/// and above all no agent child — so a retry loop spins on an atomic load and
+/// spawns nothing, while the parent session, cancelled by the same shutdown, is
+/// being torn down underneath it. The wording still says not to bother, since
+/// the only thing an agent can usefully do here is stop asking.
+const SHUTDOWN_REFUSAL_MESSAGE: &str =
+    "Staged is shutting down, so no diagram session was started. Retrying will not help; \
+write the Pikchr by hand or generate the diagram after restarting.";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GeneratePikchrParams {
@@ -838,9 +851,36 @@ rendered PNG preview you may open as an optional final check."
             ),
             None => (self.provider_id.clone(), Vec::new(), None),
         };
-        let session = create_pikchr_child_session(&self.store, &provider_id)
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let session = new_pikchr_child_session(&provider_id);
+
+        // Claim the child session's slot in the SessionRegistry, or refuse the
+        // call because a shutdown has already been claimed.
+        //
+        // The slot is what makes the child session cancellable at all: the Stop
+        // control in the opened diagram session — and, identically, a quit's
+        // `cancel_owned_sessions` — fires the registered token, which the worker
+        // forwards onto its own (recording the reason first), instead of taking
+        // `cancel_session`'s fallback of writing Cancelled to a store row this
+        // worker never re-reads.
+        //
+        // Refusing is the other half. Past the shutdown's registry snapshot
+        // nothing would ever fire this token, so the worker below would spawn an
+        // agent child that `app.exit(0)` orphans — own process group, and an
+        // exit runs no `kill_on_drop` destructors. See `reserve_child_session`
+        // for why the claim has to come before the question.
+        let Some(registration) = reserve_child_session(&self.registry, &session.id, || {
+            crate::app_lifecycle::is_quitting(&self.app_handle)
+        }) else {
+            return Err(ErrorData::internal_error(
+                SHUTDOWN_REFUSAL_MESSAGE.to_string(),
+                None,
+            ));
+        };
+        let user_cancel = registration.token().clone();
+
         let inner_session_id = session.id.clone();
+        persist_pikchr_child_session(&self.store, &session)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
         announce_pikchr_child_session(&self.store, &self.parent_session_id, &inner_session_id);
         let store = Arc::clone(&self.store);
         // The full grammar text is inlined into the sub-agent's prompt rather
@@ -865,16 +905,6 @@ rendered PNG preview you may open as an optional final check."
         let worker_cancel_reason = Arc::new(CancelReason::new());
         let _cancel_on_drop = cancel.drop_guard();
 
-        // Register the child session in the SessionRegistry under its own
-        // token so the Stop control in the opened diagram session terminates
-        // the actual work: `cancel_session` fires the registered token, which
-        // the worker forwards onto its own token (recording the reason first)
-        // — instead of taking the fallback path that just writes Cancelled to
-        // a store row this worker never re-reads. The registration guard
-        // deregisters when this call ends, however it ends.
-        let registration = self.registry.register_external(&inner_session_id);
-        let user_cancel = registration.token().clone();
-
         // The ACP driver spawns tasks via `spawn_local`, which requires a
         // `LocalSet`; the MCP server's request tasks don't run inside one. So
         // drive the whole generation loop on a dedicated thread with its own
@@ -883,6 +913,19 @@ rendered PNG preview you may open as an optional final check."
         let worker_store = Arc::clone(&store);
         let worker_session_id = inner_session_id.clone();
         std::thread::spawn(move || {
+            // Declared first so it drops *last* — after this thread's runtime
+            // and every task on it, which is where the specialist's agent child
+            // actually lives.
+            //
+            // The registry entry is what `wait_for_sessions` polls, so it has to
+            // span this worker rather than the parent MCP request future that
+            // opened it. That future only *awaits* the work, and it is dropped
+            // the moment the parent session's runtime goes down — which on the
+            // quit path runs in parallel with this teardown, not after it. Held
+            // over there, a parent that finished first would retire the entry
+            // while the agent CLI here was still being stopped, and the exit
+            // would proceed straight over the top of it.
+            let _registration = registration;
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1007,8 +1050,13 @@ accepted a render, so the diagram run was cancelled.",
                 });
                 // A Stop pressed in the child diagram session fires the token
                 // registered in the SessionRegistry; forward it to the
-                // worker's token so the run actually terminates. Both watcher
-                // tasks are dropped with this LocalSet.
+                // worker's token so the run actually terminates. A quit fires
+                // the same token — `cancel_owned_sessions` walks every
+                // registered id — so this is also how a shutdown reaches the
+                // specialist, and the `is_cancelled` check `generate_pikchr_source`
+                // takes before each `driver.run` is what keeps it from starting
+                // an agent the exit would then orphan. Both watcher tasks are
+                // dropped with this LocalSet.
                 tokio::task::spawn_local(forward_user_cancel(
                     user_cancel,
                     Arc::clone(&worker_cancel_reason),
@@ -1138,15 +1186,69 @@ async fn forward_user_cancel(
     worker_cancel.cancel();
 }
 
-fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Session, String> {
-    let mut session = Session::new_running(PIKCHR_CHILD_SESSION_PROMPT, &std::env::temp_dir());
-    if !provider_id.is_empty() {
-        session = session.with_provider(provider_id);
+/// Build the child diagram session row, unpersisted.
+///
+/// Split from persisting it so its id can be reserved in the registry first —
+/// see [`reserve_child_session`], which is what a refusal that has written
+/// nothing depends on.
+fn new_pikchr_child_session(provider_id: &str) -> Session {
+    let session = Session::new_running(PIKCHR_CHILD_SESSION_PROMPT, &std::env::temp_dir());
+    if provider_id.is_empty() {
+        session
+    } else {
+        session.with_provider(provider_id)
     }
+}
+
+fn persist_pikchr_child_session(store: &Store, session: &Session) -> Result<(), String> {
     store
-        .create_session(&session)
-        .map_err(|e| format!("Failed to create Pikchr child session: {e}"))?;
-    Ok(session)
+        .create_session(session)
+        .map_err(|e| format!("Failed to create Pikchr child session: {e}"))
+}
+
+/// Reserve `session_id`'s slot in the [`SessionRegistry`], or report that a
+/// shutdown has been claimed and this diagram session must not start.
+///
+/// Registering *before* asking is the whole mechanism, and it is why the gate
+/// can't just sit at the top of the tool call.
+/// [`crate::app_lifecycle::shutdown_cleanup`] publishes `quit_in_progress` and
+/// *then* snapshots the registry, so:
+///
+/// - a reservation that lands before that snapshot is in it — shutdown fires
+///   this token, the worker's pre-`driver.run` check refuses to start an agent,
+///   and `wait_for_sessions` holds the exit open until the worker deregisters;
+/// - a reservation that lands after it reads a flag already published, and
+///   refuses here.
+///
+/// Both can only fail together if this register landed after the snapshot *and*
+/// this read landed before the publish, which the two program orders (publish
+/// → snapshot, register → read) and the registry mutex's total order rule out.
+/// So this closes the window rather than narrowing it, unlike the funnel gates
+/// in `start_session` / `start_pipeline_session`, which read the flag with
+/// nothing yet registered for a snapshot to find.
+///
+/// Holding a registry entry for an id whose row doesn't exist yet is
+/// deliberate. Nothing can ask about the id in that gap — the store row and the
+/// parent-transcript announcement are what publish it, and both come after —
+/// and the shutdown that can reach it (which walks every registered id) only
+/// fires the token and waits for the entry to go. A refusal therefore leaves
+/// nothing behind at all: no row for the sweep to chase, and no diagram session
+/// in the parent's transcript that never drew anything.
+///
+/// `quitting` is a parameter rather than an inline `app_lifecycle::is_quitting`
+/// so the ordering is testable without an `AppHandle`.
+fn reserve_child_session(
+    registry: &Arc<SessionRegistry>,
+    session_id: &str,
+    quitting: impl FnOnce() -> bool,
+) -> Option<ExternalSessionRegistration> {
+    let registration = registry.register_external(session_id);
+    if quitting() {
+        // Dropping the guard deregisters, so a shutdown that did catch this
+        // entry in its snapshot stops waiting on it immediately.
+        return None;
+    }
+    Some(registration)
 }
 
 /// Write a hidden metadata row into the parent session's transcript naming the
@@ -1457,8 +1559,8 @@ arrow from COLL.e to SNOW.w"#;
     fn create_pikchr_child_session_persists_running_provider_session() {
         let store = Store::in_memory().expect("in-memory store");
 
-        let session =
-            create_pikchr_child_session(&store, "fake-agent").expect("create child session");
+        let session = new_pikchr_child_session("fake-agent");
+        persist_pikchr_child_session(&store, &session).expect("persist child session");
 
         assert_eq!(session.prompt, PIKCHR_CHILD_SESSION_PROMPT);
         assert_eq!(session.status, SessionStatus::Running);
@@ -1472,6 +1574,45 @@ arrow from COLL.e to SNOW.w"#;
         assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
         assert_eq!(persisted.status, SessionStatus::Running);
         assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+    }
+
+    /// The reservation is in the registry *before* the quit gate reads, which
+    /// is what makes the refusal airtight rather than narrow: a shutdown that
+    /// snapshots the registry at any point up to this read finds the entry and
+    /// cancels it, and one that snapshots later has already published the flag
+    /// this read sees.
+    #[test]
+    fn a_reserved_child_session_is_registered_before_the_quit_gate_reads() {
+        let registry = Arc::new(SessionRegistry::new());
+        let snapshot = std::cell::RefCell::new(Vec::new());
+
+        let registration = reserve_child_session(&registry, "diagram-child", || {
+            // Stands in for `cancel_owned_sessions` snapshotting the registry
+            // at the last instant this gate could still say "carry on".
+            *snapshot.borrow_mut() = registry.running_session_ids();
+            false
+        })
+        .expect("no shutdown claimed, so the reservation stands");
+
+        assert_eq!(snapshot.into_inner(), vec!["diagram-child".to_string()]);
+        assert!(registry.is_running("diagram-child"));
+
+        // And the guard is what holds it: the worker owning it is what makes
+        // shutdown's wait span the specialist rather than the MCP request.
+        drop(registration);
+        assert!(!registry.is_running("diagram-child"));
+    }
+
+    /// A refusal leaves nothing behind — in particular no registry entry, so a
+    /// shutdown that did catch it in its snapshot stops waiting on it.
+    #[test]
+    fn refusing_a_child_session_releases_the_slot_it_claimed() {
+        let registry = Arc::new(SessionRegistry::new());
+
+        let refused = reserve_child_session(&registry, "diagram-child", || true);
+
+        assert!(refused.is_none());
+        assert!(registry.running_session_ids().is_empty());
     }
 
     #[test]
@@ -1539,8 +1680,8 @@ arrow from COLL.e to SNOW.w"#;
     async fn registry_stop_terminates_the_run_and_reads_as_a_user_stop() {
         let registry = Arc::new(SessionRegistry::new());
         let store = Arc::new(Store::in_memory().expect("in-memory store"));
-        let session =
-            create_pikchr_child_session(&store, "fake-agent").expect("create child session");
+        let session = new_pikchr_child_session("fake-agent");
+        persist_pikchr_child_session(&store, &session).expect("persist child session");
 
         let registration = registry.register_external(&session.id);
         let worker_cancel = CancellationToken::new();

@@ -666,6 +666,19 @@ impl SessionRegistry {
     /// `cancel_session`'s store-write fallback, which the worker never
     /// observes. Returns a guard exposing the session's cancellation token;
     /// dropping the guard deregisters the session.
+    ///
+    /// The entry carries the same shutdown contract as a `start_session` one,
+    /// because `cancel_owned_sessions` and `wait_for_sessions` walk the whole
+    /// registry rather than the sessions the runner started. Two obligations
+    /// follow, and a caller that spawns an agent process owes both:
+    ///
+    /// - Hold the guard on whatever owns that process, for as long as it lives.
+    ///   Released early — by, say, a request future that merely *awaits* the
+    ///   work — the exit is free to proceed over a child still being stopped.
+    /// - Claim the slot *before* consulting `app_lifecycle::is_quitting`, never
+    ///   after, so the claim is either in the shutdown's snapshot or made
+    ///   against a flag it has already published. See
+    ///   `pikchr_mcp::reserve_child_session`.
     pub fn register_external(self: &Arc<Self>, session_id: &str) -> ExternalSessionRegistration {
         ExternalSessionRegistration {
             token: self.register(session_id),

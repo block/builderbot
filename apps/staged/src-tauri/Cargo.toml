@@ -27,12 +27,12 @@ tauri-plugin-log = "2.8.0"
 # Git integration
 thiserror = "2.0"
 anyhow = "1.0"
-base64 = "0.22"
+base64 = "0.23"
 tempfile = "3"
 sha2 = "0.11"
 
 # Review storage
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = { version = "2.5.0", features = ["from-directory"] }
 include_dir = "0.7.4"
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -66,10 +66,10 @@ tauri-plugin-store = "2.4.2"
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 axum = { version = "0.8", features = ["ws"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+tower-http = { version = "0.7", features = ["fs", "cors"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
-rand = "0.9"
+rand = "0.10"
 hex = "0.4"
 subtle = "2.6"
 time = "0.3"
@@ -77,8 +77,8 @@ pikchr = "0.1.4"
 
 # Pikchr preview MCP tool: render Pikchr source to SVG (same C engine as the
 # frontend's pikchr-js) and rasterize to PNG for the note-writing agent.
-resvg = "0.47"
-usvg = "0.47"
+resvg = "0.48"
+usvg = "0.48"
 tiny-skia = "0.12"
 
 # Managed Node.js runtime: tarball extraction for runtime installs

@@ -86,12 +86,15 @@ see-also:
 | Suggested Replies (P-PENPAL-SUGGESTED-REPLIES) | — | CommentsPanel.test.tsx | — | review-workflow.spec.ts |
 | MCP Tools (P-PENPAL-MCP) | — | — | mcpserver/tools_test.go, transport_test.go, worktree_test.go | review-workflow.spec.ts |
 | Wait for Changes (P-PENPAL-WAIT-CHANGES) | — | — | tools_test.go (TestWaitForChanges_Triggered) | — |
-| Agent Management (P-PENPAL-AGENT-LAUNCH, STATUS) | stream_test.go | FilePage.test.tsx (auto-start) | api_agents_test.go | — |
+| Agent Management (P-PENPAL-AGENT-LAUNCH, STATUS, P-PENPAL-CLI-CONTENTION) | stream_test.go, session_test.go | FilePage.test.tsx (auto-start) | api_agents_test.go | — |
+| CLI Attach & Sessions (P-PENPAL-CLI-ATTACH, P-PENPAL-CLI-CONTENTION, E-PENPAL-CLI-ATTACH, E-PENPAL-SESSION-MGMT, E-PENPAL-AGENT-ACTIVE-UNIFIED) | session_test.go (Attach, ValidateSession, HasActiveAgent, StopAny, Detach, RecordSessionHeartbeat) | — | api_agents_test.go (attach success/conflict/force/missing/noManager, wait invalid/missing, stop ok, maybeStartAgent skip) | — |
+| Agent Parity (P-PENPAL-AGENT-PARITY, E-PENPAL-AGENT-PARITY, E-PENPAL-SHARED-CODEPATHS) | session_test.go (claimSession for both SessionSpawned and SessionCLI) | — | api_agents_test.go | — |
+| Agent Self-ID (P-PENPAL-AGENT-SELF-ID, E-PENPAL-AGENT-SELF-ID) | session_test.go (Attach stores AgentName) | — | api_agents_test.go (attach with agent name, author override) | — |
+| CLI Agent Tools (P-PENPAL-CLI-AGENT-TOOLS, E-PENPAL-CLI-AGENT-CMDS) | — | — | api_agents_test.go | — |
 | Agent Detection (P-PENPAL-AGENT-PRESENCE) | — | — | — | — |
 | Review Workflow (P-PENPAL-PROJECT-IN-REVIEW, P-PENPAL-GLOBAL-IN-REVIEW) | — | InReviewPage.test.tsx | api_projects_test.go (TestAPIInReview) | — |
 | Publishing (P-PENPAL-PUBLISH) | blockcell_test.go, render_test.go, state_test.go | — | — | — |
 | Tabs (P-PENPAL-TABS) | — | useTabs.test.ts, Layout.test.tsx | — | tab-navigation.spec.ts |
-| Search (P-PENPAL-SEARCH) | — | SearchPage.test.tsx | — | react-app.spec.ts |
 | Recent Files (P-PENPAL-PROJECT-RECENT, P-PENPAL-GLOBAL-RECENT, E-PENPAL-ACTIVITY-PERSIST) | activity_test.go | RecentPage.test.tsx | integration_test.go | — |
 | CLI Open (P-PENPAL-CLI-OPEN) | — | — | api_manage_test.go | cli-open.spec.ts |
 | Manual Source Management (E-PENPAL-SRC-MANUAL, E-PENPAL-SRC-ALL-MD) | — | — | api_manage_test.go (TestAPISources_AddFileNotBlockedByAllMarkdown) | — |

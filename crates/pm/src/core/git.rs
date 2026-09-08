@@ -136,7 +136,6 @@ pub fn add_worktree(bare_path: &Path, worktree_path: &Path, branch: &str) -> Res
 }
 
 /// Remove a worktree
-#[allow(dead_code)]
 pub fn remove_worktree(bare_path: &Path, worktree_path: &Path) -> Result<()> {
     let output = Command::new("git")
         .args(["worktree", "remove", "--force"])

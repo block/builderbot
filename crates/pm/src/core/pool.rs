@@ -250,12 +250,44 @@ pub fn grow_and_acquire(
     Ok(idx)
 }
 
-/// Release all slots owned by a project
+/// Release all slots owned by a project.
+///
+/// Removes each owned slot's worktree from disk and from git's worktree list,
+/// then clears the slot's owner/branch in state. Worktree removal is best-effort:
+/// a slot whose directory was already deleted manually must not cause an error.
 pub fn release_project(state: &mut State, project_name: &str) {
+    // Collect (repo_name, slot_index) pairs owned by this project first, so we can
+    // do the git/disk work without holding a mutable borrow of state.pool.slots.
+    let owned: Vec<(String, usize)> = state
+        .pool
+        .slots
+        .iter()
+        .flat_map(|(repo_name, slots)| {
+            slots
+                .iter()
+                .filter(|s| s.owner.as_deref() == Some(project_name))
+                .map(move |s| (repo_name.clone(), s.index))
+        })
+        .collect();
+
+    for (repo_name, slot_index) in &owned {
+        if let Some(slot) = state
+            .pool
+            .slots
+            .get(repo_name)
+            .and_then(|slots| slots.iter().find(|s| s.index == *slot_index))
+            .cloned()
+        {
+            // Best-effort: don't let an already-removed worktree break removal.
+            let _ = remove_slot_worktree(state, repo_name, &slot);
+        }
+    }
+
     for slots in state.pool.slots.values_mut() {
         for slot in slots.iter_mut() {
             if slot.owner.as_deref() == Some(project_name) {
                 slot.owner = None;
+                slot.branch = None;
             }
         }
     }
@@ -267,7 +299,6 @@ pub fn default_max_slots() -> usize {
 }
 
 /// Remove a worktree slot from disk and prune
-#[allow(dead_code)]
 pub fn remove_slot_worktree(state: &State, repo_name: &str, slot: &Slot) -> Result<()> {
     if slot.path.exists() {
         if let Some(repo) = state.repos.get(repo_name) {

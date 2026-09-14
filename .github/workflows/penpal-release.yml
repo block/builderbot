@@ -140,7 +140,7 @@ jobs:
       # a cross-repo workflow_dispatch (GITHUB_TOKEN is repo-scoped).
       - name: Generate token for tap release
         id: generate_token
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           app-id: ${{ secrets.BLOCK_HOMEBREW_TAP_APP_ID }}
           private-key: ${{ secrets.BLOCK_HOMEBREW_TAP_PRIVATE_KEY }}

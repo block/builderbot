@@ -95,6 +95,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1174,7 +1180,7 @@ dependencies = [
 name = "git-diff"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "git2",
  "log",
  "serde",
@@ -1183,17 +1189,15 @@ dependencies = [
 
 [[package]]
 name = "git2"
-version = "0.20.4"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
+checksum = "ddddbf932745a6be37109b6112d3ee09696106f848449069d3a57bba937ab82e"
 dependencies = [
  "bitflags 2.11.0",
  "libc",
  "libgit2-sys",
  "log",
- "openssl-probe",
  "openssl-sys",
- "url",
 ]
 
 [[package]]
@@ -1830,13 +1834,12 @@ checksum = "52ff2c0fe9bc6cb6b14a0592c2ff4fa9ceb83eea9db979b0487cd054946a2b8f"
 
 [[package]]
 name = "libgit2-sys"
-version = "0.18.3+1.9.2"
+version = "0.18.8+1.9.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9b3acc4b91781bb0b3386669d325163746af5f6e4f73e6d2d630e09a35f3487"
+checksum = "7f7c568b25d7489bc3fb2988ed69ab111d2944d2f5fec3d5c987fe545ea97b50"
 dependencies = [
  "cc",
  "libc",
- "libssh2-sys",
  "libz-sys",
  "openssl-sys",
  "pkg-config",
@@ -1859,20 +1862,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "libssh2-sys"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "220e4f05ad4a218192533b300327f5150e809b54c4ec83b5a1d91833601811b9"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "openssl-sys",
- "pkg-config",
- "vcpkg",
 ]
 
 [[package]]
@@ -2226,12 +2215,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "openssl-probe"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
 name = "openssl-src"
@@ -3068,9 +3051,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
  "itoa",
  "memchr",
@@ -3600,9 +3583,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-store"
-version = "2.4.2"
+version = "2.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca1a8ff83c269b115e98726ffc13f9e548a10161544a92ad121d6d0a96e16ea"
+checksum = "6708afbe549f176b712066e71648ba8fafba20789453718260c7ca356733cb0c"
 dependencies = [
  "dunce",
  "serde",
@@ -4497,7 +4480,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

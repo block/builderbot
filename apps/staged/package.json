@@ -25,7 +25,7 @@
     "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/cli": "^2.11.4",
     "@tsconfig/svelte": "^5.0.8",
-    "@types/d3-selection": "3.0.11",
+    "@types/d3-selection": "3.0.12",
     "@types/d3-zoom": "3.0.8",
     "@types/node": "^24.11.0",
     "bits-ui": "^2.18.1",
@@ -66,6 +66,6 @@
     "shiki": "^4.3.0"
   },
   "overrides": {
-    "ajv": "8.18.0"
+    "ajv": "8.20.0"
   }
 }

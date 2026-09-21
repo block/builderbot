@@ -251,14 +251,17 @@ pub(crate) fn local_note_pikchr_tools_available(
 /// restoring the legacy teardown-on-prompt-resolve behavior.
 const BACKGROUND_HOLD_ENV: &str = "STAGED_BACKGROUND_HOLD";
 
-/// Override the background hold's hard cap, in seconds.
+/// Override the background hold's per-task cap, in seconds.
 const BACKGROUND_HOLD_CAP_SECS_ENV: &str = "STAGED_BACKGROUND_HOLD_CAP_SECS";
+
+/// Override the absolute ceiling on a whole background hold, in seconds.
+const BACKGROUND_HOLD_CEILING_SECS_ENV: &str = "STAGED_BACKGROUND_HOLD_CEILING_SECS";
 
 /// Feature gate for the post-turn background hold
 /// (`SessionConfig::background_hold`).
 ///
 /// When set, a session's agent connection is held open after each prompt
-/// resolves until its background tasks drain (or the hard cap expires), and
+/// resolves until its background tasks drain (or the cap expires), and
 /// post-completion hooks fire on that settled event — so a background shell's
 /// out-of-turn continuation, and any commit it makes, is no longer lost to the
 /// teardown that used to follow the prompt resolving.
@@ -272,7 +275,12 @@ const BACKGROUND_HOLD_CAP_SECS_ENV: &str = "STAGED_BACKGROUND_HOLD_CAP_SECS";
 /// Overridable without a rebuild, since a hold that misbehaves in the field
 /// needs an escape hatch that isn't "ship a new binary":
 /// - `STAGED_BACKGROUND_HOLD=0` (or `false`/`no`/`off`) disables it.
-/// - `STAGED_BACKGROUND_HOLD_CAP_SECS=<n>` replaces the 30-minute default cap.
+/// - `STAGED_BACKGROUND_HOLD_CAP_SECS=<n>` replaces the 30-minute default
+///   per-task cap — how long any one background task may keep the session
+///   open past its own start.
+/// - `STAGED_BACKGROUND_HOLD_CEILING_SECS=<n>` replaces the 4-hour default
+///   ceiling — how long the whole post-turn hold may last, however many tasks
+///   the session goes on to spawn.
 ///
 /// Every `SessionConfig` construction site derives the value here so the policy
 /// lives in one place.
@@ -280,6 +288,9 @@ pub(crate) fn default_background_hold() -> Option<acp_client::BackgroundHoldConf
     background_hold_from_overrides(
         std::env::var(BACKGROUND_HOLD_ENV).ok().as_deref(),
         std::env::var(BACKGROUND_HOLD_CAP_SECS_ENV).ok().as_deref(),
+        std::env::var(BACKGROUND_HOLD_CEILING_SECS_ENV)
+            .ok()
+            .as_deref(),
     )
 }
 
@@ -293,6 +304,7 @@ pub(crate) fn default_background_hold() -> Option<acp_client::BackgroundHoldConf
 fn background_hold_from_overrides(
     enabled: Option<&str>,
     cap_secs: Option<&str>,
+    ceiling_secs: Option<&str>,
 ) -> Option<acp_client::BackgroundHoldConfig> {
     if let Some(raw) = enabled {
         let value = raw.trim();
@@ -326,7 +338,26 @@ fn background_hold_from_overrides(
             ),
             Ok(secs) => {
                 config.hold_cap = std::time::Duration::from_secs(secs);
-                log::info!("{BACKGROUND_HOLD_CAP_SECS_ENV}={raw}: background hold cap set to {secs}s");
+                log::info!(
+                    "{BACKGROUND_HOLD_CAP_SECS_ENV}={raw}: background hold per-task cap set to \
+                     {secs}s"
+                );
+            }
+        }
+    }
+    if let Some(raw) = ceiling_secs {
+        match raw.trim().parse::<u64>() {
+            // A zero ceiling bounds the whole hold at the instant it starts —
+            // same objection as a zero cap, same unambiguous alternative.
+            Ok(0) | Err(_) => log::warn!(
+                "Ignoring {BACKGROUND_HOLD_CEILING_SECS_ENV}={raw}: expected a positive number of seconds"
+            ),
+            Ok(secs) => {
+                config.hold_ceiling = std::time::Duration::from_secs(secs);
+                log::info!(
+                    "{BACKGROUND_HOLD_CEILING_SECS_ENV}={raw}: background hold ceiling set to \
+                     {secs}s"
+                );
             }
         }
     }
@@ -7337,18 +7368,19 @@ mod tests {
 
     #[test]
     fn background_hold_is_on_by_default_with_the_documented_cap() {
-        let config = background_hold_from_overrides(None, None)
+        let config = background_hold_from_overrides(None, None, None)
             .expect("background hold is enabled without overrides");
 
         assert_eq!(config, acp_client::BackgroundHoldConfig::default());
         assert_eq!(config.hold_cap, std::time::Duration::from_secs(1800));
+        assert_eq!(config.hold_ceiling, std::time::Duration::from_secs(14400));
     }
 
     #[test]
     fn background_hold_env_can_disable_it() {
         for raw in ["0", "false", "FALSE", "no", "off", " off "] {
             assert_eq!(
-                background_hold_from_overrides(Some(raw), None),
+                background_hold_from_overrides(Some(raw), None, None),
                 None,
                 "{raw} should disable the hold"
             );
@@ -7359,7 +7391,7 @@ mod tests {
     fn background_hold_env_can_enable_it_explicitly() {
         for raw in ["1", "true", "TRUE", "yes", "on"] {
             assert_eq!(
-                background_hold_from_overrides(Some(raw), None),
+                background_hold_from_overrides(Some(raw), None, None),
                 Some(acp_client::BackgroundHoldConfig::default()),
                 "{raw} should keep the hold enabled"
             );
@@ -7370,14 +7402,14 @@ mod tests {
     fn background_hold_env_ignores_unparseable_values() {
         // A typo must not silently disable the feature.
         assert_eq!(
-            background_hold_from_overrides(Some("maybe"), None),
+            background_hold_from_overrides(Some("maybe"), None, None),
             Some(acp_client::BackgroundHoldConfig::default())
         );
     }
 
     #[test]
     fn background_hold_cap_override_replaces_the_default_cap() {
-        let config = background_hold_from_overrides(None, Some("90"))
+        let config = background_hold_from_overrides(None, Some("90"), None)
             .expect("cap override leaves the hold enabled");
 
         assert_eq!(config.hold_cap, std::time::Duration::from_secs(90));
@@ -7386,20 +7418,59 @@ mod tests {
             config.debounce,
             acp_client::BackgroundHoldConfig::default().debounce
         );
+        assert_eq!(
+            config.hold_ceiling,
+            acp_client::BackgroundHoldConfig::default().hold_ceiling
+        );
     }
 
     #[test]
     fn background_hold_cap_override_ignores_zero_and_garbage() {
         let default_cap = acp_client::BackgroundHoldConfig::default().hold_cap;
         for raw in ["0", "-5", "soon", ""] {
-            let config = background_hold_from_overrides(None, Some(raw))
+            let config = background_hold_from_overrides(None, Some(raw), None)
                 .expect("a bad cap must not disable the hold");
             assert_eq!(config.hold_cap, default_cap, "{raw} should be ignored");
         }
     }
 
     #[test]
+    fn background_hold_ceiling_override_replaces_the_default_ceiling() {
+        let config = background_hold_from_overrides(None, None, Some("7200"))
+            .expect("ceiling override leaves the hold enabled");
+
+        assert_eq!(config.hold_ceiling, std::time::Duration::from_secs(7200));
+        // The per-task cap is a separate dial and must not move with it.
+        assert_eq!(
+            config.hold_cap,
+            acp_client::BackgroundHoldConfig::default().hold_cap
+        );
+
+        // Both dials together, since the two bound different things.
+        let both = background_hold_from_overrides(None, Some("60"), Some("600"))
+            .expect("both overrides leave the hold enabled");
+        assert_eq!(both.hold_cap, std::time::Duration::from_secs(60));
+        assert_eq!(both.hold_ceiling, std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn background_hold_ceiling_override_ignores_zero_and_garbage() {
+        let default_ceiling = acp_client::BackgroundHoldConfig::default().hold_ceiling;
+        for raw in ["0", "-5", "soon", ""] {
+            let config = background_hold_from_overrides(None, None, Some(raw))
+                .expect("a bad ceiling must not disable the hold");
+            assert_eq!(
+                config.hold_ceiling, default_ceiling,
+                "{raw} should be ignored"
+            );
+        }
+    }
+
+    #[test]
     fn background_hold_cap_override_is_not_read_when_disabled() {
-        assert_eq!(background_hold_from_overrides(Some("0"), Some("90")), None);
+        assert_eq!(
+            background_hold_from_overrides(Some("0"), Some("90"), Some("900")),
+            None
+        );
     }
 }

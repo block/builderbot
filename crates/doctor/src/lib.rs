@@ -834,6 +834,16 @@ impl FixStdin {
     fn close(&self) {
         *lock_fix_stdin_state(&self.state) = FixStdinState::Closed;
     }
+
+    /// Close a pipe whose execution never started, leaving one that another
+    /// execution already owns alone. The claim is the ownership test: it succeeds
+    /// only on a pipe no run has reserved, so a stale clone whose first run is
+    /// still live is never EOF'd out from under it.
+    fn close_if_unclaimed(&self) {
+        if self.claim().is_ok() {
+            self.close();
+        }
+    }
 }
 
 /// Cloneable handle for feeding lines to a fix subprocess's stdin. Dropping
@@ -872,8 +882,11 @@ impl FixStdinWriter {
     /// closed, or this pipe was never attached to a spawned fix.
     ///
     /// Lines sent before the fix spawns are queued and replayed at spawn, so
-    /// they return `Ok` before any pipe exists; if the fix never spawns they are
-    /// dropped.
+    /// they return `Ok` before any pipe exists — the one `Ok` that is not a
+    /// delivery guarantee, and unavoidable for a host that wants to prime the
+    /// input before the fix starts. Once a fix execution gives up without ever
+    /// spawning (an unresolved command, a spawn failure), the pipe is closed and
+    /// every later send fails.
     ///
     /// Completion is signalled by the fix's own `Result`, never by `send_line`.
     /// May block if the fix isn't reading and the pipe buffer fills, so a host
@@ -1069,6 +1082,11 @@ pub async fn execute_fix_streaming_with_env_options<F>(
 where
     F: FnMut(&str) + Send + 'static,
 {
+    // Armed ahead of the lookup so every exit that never reaches the runner closes
+    // the pipe. Once the runner claims, this is a no-op — the claim is spent, and
+    // the runner's own `FixStdinCloser` owns the close from there.
+    let _unlaunched_closer = opts.stdin.as_ref().map(UnlaunchedFixStdinCloser);
+
     let command = match opts.command_override {
         Some(cmd) => cmd,
         None => lookup_fix_command(&check_id, &fix_type)
@@ -1087,7 +1105,9 @@ where
     // these are user-triggered install/auth/update actions and can reasonably
     // be interactive or long-running, so they get the far more generous
     // `FixTimeout` bound instead of a probe timeout.
-    run_command_streaming(command, opts.env, opts.stdin, opts.timeout, on_line).await
+    // Cloned rather than moved because `_unlaunched_closer` borrows it: an `Arc`
+    // bump, and the runner holds its own handle to the same shared state.
+    run_command_streaming(command, opts.env, opts.stdin.clone(), opts.timeout, on_line).await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
@@ -1297,6 +1317,21 @@ struct FixStdinCloser<'a>(&'a FixStdin);
 impl Drop for FixStdinCloser<'_> {
     fn drop(&mut self) {
         self.0.close();
+    }
+}
+
+/// Closes the pipe when a fix never reaches `run_command_streaming_blocking`: an
+/// unresolved command, a panic in the `on_line` preamble, a blocking task dropped
+/// before it ran. Distinct from [`FixStdinCloser`], which closes unconditionally
+/// because by then the claim is that run's own — this one must not touch a pipe
+/// another execution has claimed, since `FixStdin` clones share one state and
+/// EOF'ing a live login out from under the user would be worse than the bogus
+/// `Ok` it is here to prevent.
+struct UnlaunchedFixStdinCloser<'a>(&'a FixStdin);
+
+impl Drop for UnlaunchedFixStdinCloser<'_> {
+    fn drop(&mut self) {
+        self.0.close_if_unclaimed();
     }
 }
 
@@ -1793,6 +1828,109 @@ mod tests {
             captured.is_empty(),
             "second run must not spawn; captured: {captured:?}",
         );
+    }
+
+    /// A fix that never resolves to a command returns before the runner ever sees
+    /// the pipe, so the entry point has to close it: otherwise a host still
+    /// holding its writer keeps getting `Ok` from `send_line` for a fix that will
+    /// never spawn. `UpdateMain` against a real check id is the honest reachable
+    /// path — `lookup_fix_command` returns `None` for both `Update*` variants, so
+    /// dispatching one without a `command_override` misses.
+    #[tokio::test]
+    async fn execute_fix_streaming_unknown_fix_closes_the_stdin_pipe() {
+        let (writer, stdin) = FixStdin::pipe();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            ExecuteFixOptions {
+                stdin: Some(stdin),
+                ..Default::default()
+            },
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("an UpdateMain with no command_override should fail");
+        assert!(
+            err.contains("Unknown check") || err.contains("UpdateMain"),
+            "error should name the unresolved fix; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.is_empty(),
+            "the fix must not run: no `$ command` preamble; captured: {captured:?}",
+        );
+        let send_err = writer
+            .send_line("doctor-stdin-after-unknown-fix")
+            .expect_err("the first send after an unresolved fix should fail");
+        assert!(
+            send_err.contains("no longer accepting input"),
+            "error should say the input is closed; got {send_err:?}",
+        );
+    }
+
+    /// The guard's non-vacuity test, and the reason it closes only an *unclaimed*
+    /// pipe: `FixStdin` clones share one state, so a bare `close()` in the
+    /// unresolved-command arm would EOF a login the user is mid-way through. A
+    /// second execution handed a clone must error without disturbing the live run.
+    ///
+    /// The live fix runs on a plain thread rather than through
+    /// `run_command_streaming`: the test has to block on `recv_timeout` to know
+    /// the child is up, and that would starve `#[tokio::test]`'s current-thread
+    /// runtime before a spawned task ever reached its `spawn_blocking`.
+    #[tokio::test]
+    async fn execute_fix_streaming_unknown_fix_leaves_a_live_run_alone() {
+        let (writer, stdin) = FixStdin::pipe();
+        let stale_clone = stdin.clone();
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+
+        let live = std::thread::spawn(move || {
+            run_command_streaming_blocking(
+                "echo doctor-stdin-live; cat",
+                None,
+                Some(stdin),
+                FixTimeout::Standard,
+                move |line| {
+                    let _ = line_tx.send(line.to_string());
+                },
+            )
+        });
+
+        // Any output proves the child spawned, so the claim has landed.
+        let marker = line_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the live fix should print its marker");
+        assert_eq!(marker, "doctor-stdin-live");
+
+        let unresolved = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            ExecuteFixOptions {
+                stdin: Some(stale_clone),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        assert!(
+            unresolved.is_err(),
+            "an UpdateMain with no command_override should fail; got {unresolved:?}",
+        );
+
+        writer
+            .send_line("doctor-stdin-still-live")
+            .expect("the live fix's pipe must survive the unresolved execution");
+        let echoed = line_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the live `cat` should echo the line");
+        assert_eq!(echoed, "doctor-stdin-still-live");
+
+        drop(writer);
+        let result = live.join().expect("the live fix thread should not panic");
+        assert!(result.is_ok(), "`cat` should exit 0 on EOF; got {result:?}");
     }
 
     /// The default bound must stay at fix scale, not probe scale. A fix is an

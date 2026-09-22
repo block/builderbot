@@ -18,7 +18,6 @@ function action(name: string, actionType: string, pinned = false): ProjectAction
     command: name,
     actionType,
     sortOrder: 0,
-    autoCommit: false,
     pinned,
     icon: null,
     createdAt: 0,

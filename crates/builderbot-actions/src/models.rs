@@ -68,7 +68,6 @@ pub struct SuggestedAction {
     pub name: String,
     pub command: String,
     pub action_type: ActionType,
-    pub auto_commit: bool,
     pub source: String, // e.g., "justfile", "Makefile", "package.json"
 }
 
@@ -104,10 +103,5 @@ pub enum ExecutionEvent {
         exit_code: Option<i32>,
         started_at: Option<i64>,
         completed_at: Option<i64>,
-    },
-    /// Auto-commit was performed
-    AutoCommit {
-        execution_id: String,
-        action_name: String,
     },
 }

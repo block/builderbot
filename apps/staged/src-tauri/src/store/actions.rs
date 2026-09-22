@@ -240,8 +240,8 @@ impl Store {
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize run_detection_mode: {e}")))?;
         conn.execute(
-            "INSERT INTO repo_actions (id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, pinned, icon, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO repo_actions (id, context_id, name, command, action_type, sort_order, run_detection_mode, pinned, icon, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 action.id,
                 action.context_id,
@@ -249,7 +249,6 @@ impl Store {
                 action.command,
                 action.action_type.as_str(),
                 action.sort_order,
-                action.auto_commit as i32,
                 run_detection_mode_json,
                 action.pinned as i32,
                 action.icon,
@@ -263,7 +262,7 @@ impl Store {
     pub fn get_repo_action(&self, id: &str) -> Result<Option<RepoAction>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, pinned, icon, created_at, updated_at
+            "SELECT id, context_id, name, command, action_type, sort_order, run_detection_mode, pinned, icon, created_at, updated_at
              FROM repo_actions WHERE id = ?1",
             params![id],
             Self::row_to_repo_action,
@@ -275,7 +274,7 @@ impl Store {
     pub fn list_repo_actions(&self, context_id: &str) -> Result<Vec<RepoAction>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, context_id, name, command, action_type, sort_order, auto_commit, run_detection_mode, pinned, icon, created_at, updated_at
+            "SELECT id, context_id, name, command, action_type, sort_order, run_detection_mode, pinned, icon, created_at, updated_at
              FROM repo_actions WHERE context_id = ?1 ORDER BY sort_order ASC",
         )?;
         let rows = stmt.query_map(params![context_id], Self::row_to_repo_action)?;
@@ -291,15 +290,15 @@ impl Store {
     pub fn list_all_repo_actions(&self) -> Result<Vec<RepoContextActions>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.context_id, a.name, a.command, a.action_type, a.sort_order, a.auto_commit, a.run_detection_mode, a.pinned, a.icon, a.created_at, a.updated_at, c.github_repo, c.subpath
+            "SELECT a.id, a.context_id, a.name, a.command, a.action_type, a.sort_order, a.run_detection_mode, a.pinned, a.icon, a.created_at, a.updated_at, c.github_repo, c.subpath
              FROM repo_actions a
              JOIN action_contexts c ON a.context_id = c.id
              ORDER BY c.id ASC, a.sort_order ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let action = Self::row_to_repo_action(row)?;
-            let github_repo: String = row.get(12)?;
-            let subpath: Option<String> = row.get(13)?;
+            let github_repo: String = row.get(11)?;
+            let subpath: Option<String> = row.get(12)?;
             Ok((github_repo, subpath, action))
         })?;
 
@@ -334,13 +333,12 @@ impl Store {
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize run_detection_mode: {e}")))?;
         conn.execute(
-            "UPDATE repo_actions SET name = ?1, command = ?2, action_type = ?3, sort_order = ?4, auto_commit = ?5, run_detection_mode = ?6, pinned = ?7, icon = ?8, updated_at = ?9 WHERE id = ?10",
+            "UPDATE repo_actions SET name = ?1, command = ?2, action_type = ?3, sort_order = ?4, run_detection_mode = ?5, pinned = ?6, icon = ?7, updated_at = ?8 WHERE id = ?9",
             params![
                 action.name,
                 action.command,
                 action.action_type.as_str(),
                 action.sort_order,
-                action.auto_commit as i32,
                 run_detection_mode_json,
                 action.pinned as i32,
                 action.icon,
@@ -403,12 +401,11 @@ impl Store {
 
     fn row_to_repo_action(row: &rusqlite::Row) -> rusqlite::Result<RepoAction> {
         let action_type_str: String = row.get(4)?;
-        let auto_commit: i32 = row.get(6)?;
-        let run_detection_mode_str: Option<String> = row.get(7)?;
+        let run_detection_mode_str: Option<String> = row.get(6)?;
         let run_detection_mode: Option<RunDetectionMode> = run_detection_mode_str
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
-        let pinned: i32 = row.get(8)?;
+        let pinned: i32 = row.get(7)?;
         Ok(RepoAction {
             id: row.get(0)?,
             context_id: row.get(1)?,
@@ -416,12 +413,11 @@ impl Store {
             command: row.get(3)?,
             action_type: ActionType::parse(&action_type_str).unwrap_or(ActionType::Run),
             sort_order: row.get(5)?,
-            auto_commit: auto_commit != 0,
             run_detection_mode,
             pinned: pinned != 0,
-            icon: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            icon: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
         })
     }
 }

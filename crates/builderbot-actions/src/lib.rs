@@ -8,7 +8,6 @@
 //!
 //! - **Action Execution**: Spawn shell commands with real-time stdout/stderr streaming
 //! - **Process Management**: Track running processes, stop them, retrieve buffered output
-//! - **Git Integration**: Auto-commit changes after successful action execution
 //! - **AI Detection**: Detect available actions from build files using AI
 //! - **Framework Agnostic**: Works with any event system (Tauri, WebSockets, SSE, etc.)
 //!
@@ -21,7 +20,7 @@
 //! # Example Usage
 //!
 //! ```rust,no_run
-//! use builderbot_actions::{ActionExecutor, ActionMetadata, ExecutionListener, ExecutionEvent};
+//! use builderbot_actions::{ActionExecutor, ExecutionListener, ExecutionEvent};
 //! use std::sync::Arc;
 //! use async_trait::async_trait;
 //!
@@ -40,16 +39,9 @@
 //!     let executor = ActionExecutor::new();
 //!     let listener = Arc::new(MyListener);
 //!
-//!     let metadata = ActionMetadata {
-//!         action_id: "test-action".to_string(),
-//!         action_name: "Run Tests".to_string(),
-//!         auto_commit: false,
-//!     };
-//!
 //!     let execution_id = executor.execute(
 //!         "npm test".to_string(),
 //!         "/path/to/project".to_string(),
-//!         metadata,
 //!         listener,
 //!     ).await?;
 //!
@@ -61,11 +53,10 @@
 pub mod acp_provider;
 pub mod detector;
 pub mod executor;
-pub mod git;
 pub mod models;
 
 // Re-export main types for convenience
 pub use acp_provider::AcpAiProvider;
 pub use detector::{ActionDetector, AiProvider, FileExplorationMode, SuggestedAction};
-pub use executor::{ActionExecutor, ActionMetadata, ExecutionListener, StopOptions};
+pub use executor::{ActionExecutor, ExecutionListener, StopOptions};
 pub use models::{ActionStatus, ActionType, ExecutionEvent, OutputChunk, RunDetectionMode};

@@ -1609,7 +1609,6 @@ fn update_project_action(
     command: String,
     action_type: String,
     sort_order: i32,
-    auto_commit: bool,
     pinned: bool,
     icon: Option<String>,
 ) -> Result<(), String> {
@@ -1627,7 +1626,6 @@ fn update_project_action(
         action_type: builderbot_actions::ActionType::parse(&action_type)
             .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
         sort_order,
-        auto_commit,
         run_detection_mode: action.run_detection_mode,
         pinned,
         icon,
@@ -1694,7 +1692,6 @@ fn create_repo_action(
     command: String,
     action_type: String,
     sort_order: i32,
-    auto_commit: bool,
     pinned: bool,
     icon: Option<String>,
 ) -> Result<store::models::RepoAction, String> {
@@ -1705,7 +1702,6 @@ fn create_repo_action(
     let parsed_type = builderbot_actions::ActionType::parse(&action_type)
         .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
     let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
-        .with_auto_commit(auto_commit)
         .with_pinned(pinned)
         .with_icon(icon);
     store

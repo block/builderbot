@@ -21,7 +21,6 @@ describe('repo card bulk action hydration', () => {
       command: name,
       actionType: 'run',
       sortOrder: 0,
-      autoCommit: false,
       createdAt: 0,
       updatedAt: 0,
     };

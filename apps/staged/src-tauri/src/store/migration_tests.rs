@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -166,6 +166,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(!column_exists(&conn, "reviews", "is_auto"));
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
+    assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
     assert!(column_exists(&conn, "session_messages", "acp_origin"));
 
     let trigger_count: i64 = conn
@@ -230,8 +231,8 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             github_comment_type   TEXT,
             github_comment_stale  INTEGER NOT NULL DEFAULT 0
         );
-        -- Only the columns the 0024 and 0028 backfills read; the rest of the
-        -- real tables predates every migration below.
+        -- Only the columns the 0024 and 0028 backfills read and the 0030 drop
+        -- targets; the rest of the real tables predates every migration below.
         CREATE TABLE action_contexts (
             id                 TEXT PRIMARY KEY,
             detecting_actions  INTEGER NOT NULL DEFAULT 0
@@ -241,7 +242,8 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         ",
     )
@@ -255,7 +257,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -313,8 +315,8 @@ fn test_store_repairs_pipeline_user_version() {
             PRIMARY KEY (github_repo, subpath)
         );
         CREATE TABLE comments (id TEXT PRIMARY KEY);
-        -- Only the columns the 0024 and 0028 backfills read; the rest of the
-        -- real tables predates every migration below.
+        -- Only the columns the 0024 and 0028 backfills read and the 0030 drop
+        -- targets; the rest of the real tables predates every migration below.
         CREATE TABLE action_contexts (
             id                 TEXT PRIMARY KEY,
             detecting_actions  INTEGER NOT NULL DEFAULT 0
@@ -324,7 +326,8 @@ fn test_store_repairs_pipeline_user_version() {
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         ",
     )
@@ -338,7 +341,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -391,13 +394,14 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
             id       TEXT PRIMARY KEY,
             is_auto  INTEGER NOT NULL DEFAULT 0
         );
-        -- Only the columns the 0028 backfill reads.
+        -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
@@ -414,7 +418,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -458,13 +462,14 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
             ('auto-review', 1);
         -- Only the table the 0027 note column add targets.
         CREATE TABLE notes (id TEXT PRIMARY KEY, session_id TEXT);
-        -- Only the columns the 0028 backfill reads.
+        -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
@@ -481,7 +486,7 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     // Reviews the removed auto-review feature created in the background are
@@ -524,13 +529,14 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
             id       TEXT PRIMARY KEY,
             is_auto  INTEGER NOT NULL DEFAULT 0
         );
-        -- Only the columns the 0028 backfill reads.
+        -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
@@ -547,7 +553,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set
@@ -589,13 +595,14 @@ fn test_note_subtype_migration_backfills_session_less_notes() {
             id       TEXT PRIMARY KEY,
             is_auto  INTEGER NOT NULL DEFAULT 0
         );
-        -- Only the columns the 0028 backfill reads.
+        -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
@@ -612,7 +619,7 @@ fn test_note_subtype_migration_backfills_session_less_notes() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(column_exists(&conn, "notes", "subtype"));
 
     let subtype = |id: &str| -> Option<String> {
@@ -645,13 +652,14 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
             app_version TEXT NOT NULL
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
-        -- Only the columns the 0028 backfill reads.
+        -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
             context_id  TEXT NOT NULL,
             action_type TEXT NOT NULL,
             sort_order  INTEGER NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            auto_commit INTEGER NOT NULL DEFAULT 0
         );
         -- 'staged' is a context whose header button was the first run action;
         -- the build action ahead of it never had one, and the second run action
@@ -686,7 +694,7 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
 
@@ -711,6 +719,56 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
         )
         .unwrap();
     assert_eq!(icons, 0);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
+    let path = temp_db_path("auto-commit-removal");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 29;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- Only the column the 0030 drop targets; the rest of the real table
+        -- predates it.
+        CREATE TABLE repo_actions (
+            id          TEXT PRIMARY KEY,
+            auto_commit INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO repo_actions (id, auto_commit) VALUES
+            ('format', 1),
+            ('test',   0);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 30);
+    assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
+
+    // Only the flag goes: an action that had auto-commit enabled keeps running
+    // its command, it just no longer commits afterwards.
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM repo_actions ORDER BY id ASC")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(ids, vec!["format".to_string(), "test".to_string()]);
 
     cleanup_db(&path);
 }

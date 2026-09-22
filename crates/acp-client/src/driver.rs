@@ -6505,7 +6505,12 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             );
         let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
-        let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
 
         agent_client_protocol::Client
             .connect_with(agent, async |connection| {
@@ -6513,7 +6518,7 @@ mod tests {
                     connection: &connection,
                     working_dir: Path::new("/tmp"),
                     store: &store,
-                    writer: &writer,
+                    handler: &handler,
                     our_session_id: "local-session",
                     acp_session_id: None,
                     config_options: &[],

@@ -61,16 +61,6 @@ pub struct OutputChunk {
     pub timestamp: i64,
 }
 
-/// A suggested action detected from project files
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SuggestedAction {
-    pub name: String,
-    pub command: String,
-    pub action_type: ActionType,
-    pub source: String, // e.g., "justfile", "Makefile", "package.json"
-}
-
 /// How a "run" action detects whether the process is running and/or its endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]

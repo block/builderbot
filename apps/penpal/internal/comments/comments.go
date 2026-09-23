@@ -10,15 +10,17 @@ import (
 	"github.com/loganj/penpal/internal/cache"
 )
 
+// NOTE: Heartbeat-based agent presence tracking has been removed.
+// Agent presence is now determined solely by agents.Manager.HasActiveAgent(),
+// which checks both spawned processes and CLI sessions.
+
 // Store manages comment threads and reviews for project files.
 // It uses sidecar JSON files stored alongside the thoughts directory.
 type Store struct {
 	cache      *cache.Cache
 	activity   *activity.Tracker
-	mu         sync.Mutex           // serializes file writes per-project
-	heartbeats map[string]time.Time // key: "project:filePath" -> last agent poll time
-	heartMu    sync.RWMutex
-	changed    chan struct{} // closed on every Save, then replaced
+	mu        sync.Mutex   // serializes file writes per-project
+	changed   chan struct{} // closed on every Save, then replaced
 	changedMu  sync.Mutex
 	changeSeq  uint64 // monotonic counter incremented on each change
 	workingMu  sync.RWMutex
@@ -101,11 +103,10 @@ type FileInReview struct {
 // NewStore creates a new comment Store backed by the given cache.
 func NewStore(c *cache.Cache, act *activity.Tracker) *Store {
 	return &Store{
-		cache:      c,
-		activity:   act,
-		heartbeats: make(map[string]time.Time),
-		changed:    make(chan struct{}),
-		working:    make(map[string]workingEntry),
+		cache:    c,
+		activity: act,
+		changed:  make(chan struct{}),
+		working:  make(map[string]workingEntry),
 	}
 }
 
@@ -153,60 +154,6 @@ func (s *Store) WaitForChangeSince(ctx context.Context, sinceSeq uint64) (uint64
 		s.changedMu.Unlock()
 		return seq, ctx.Err()
 	}
-}
-
-// RecordHeartbeat records the current time as the last agent poll for the
-// given project and file path.
-// E-PENPAL-HEARTBEAT: records agent activity in in-memory heartbeats map.
-func (s *Store) RecordHeartbeat(projectName, filePath string) {
-	s.heartMu.Lock()
-	defer s.heartMu.Unlock()
-	if s.heartbeats == nil {
-		s.heartbeats = make(map[string]time.Time)
-	}
-	s.heartbeats[projectName+":"+filePath] = time.Now()
-}
-
-// IsAgentActive returns true if an agent has polled for the given file
-// within the last 60 seconds.
-// E-PENPAL-HEARTBEAT: returns true if heartbeat is <60s old.
-func (s *Store) IsAgentActive(projectName, filePath string) bool {
-	s.heartMu.RLock()
-	defer s.heartMu.RUnlock()
-	if s.heartbeats == nil {
-		return false
-	}
-	t, ok := s.heartbeats[projectName+":"+filePath]
-	if !ok {
-		return false
-	}
-	return time.Since(t) < 60*time.Second
-}
-
-// ClearProjectHeartbeats removes all heartbeat entries for a project.
-func (s *Store) ClearProjectHeartbeats(projectName string) {
-	prefix := projectName + ":"
-	s.heartMu.Lock()
-	defer s.heartMu.Unlock()
-	for key := range s.heartbeats {
-		if strings.HasPrefix(key, prefix) {
-			delete(s.heartbeats, key)
-		}
-	}
-}
-
-// IsProjectActive returns true if any agent has polled for any file (or the
-// project itself) within the last 60 seconds.
-func (s *Store) IsProjectActive(projectName string) bool {
-	s.heartMu.RLock()
-	defer s.heartMu.RUnlock()
-	prefix := projectName + ":"
-	for key, t := range s.heartbeats {
-		if strings.HasPrefix(key, prefix) && time.Since(t) < 60*time.Second {
-			return true
-		}
-	}
-	return false
 }
 
 // SetOnWorking sets a callback invoked when working state changes.

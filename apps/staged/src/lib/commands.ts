@@ -699,7 +699,6 @@ export interface ProjectAction {
   command: string;
   actionType: string;
   sortOrder: number;
-  autoCommit: boolean;
   /** Whether the action gets its own button in a card header. */
   pinned: boolean;
   /** Kebab-case Lucide icon name, or null for the action type's default. */
@@ -721,7 +720,6 @@ export function updateProjectAction(
   command: string,
   actionType: string,
   sortOrder: number,
-  autoCommit: boolean,
   pinned: boolean,
   icon: string | null
 ): Promise<void> {
@@ -731,7 +729,6 @@ export function updateProjectAction(
     command,
     actionType,
     sortOrder,
-    autoCommit,
     pinned,
     icon,
   });
@@ -771,8 +768,8 @@ export function repoActionScopeId(githubRepo: string, subpath?: string): string 
 
 /**
  * Run a repo-scoped action against the repo's local clone.
- * Requires the local clone to exist on disk, and always disables auto-commit
- * (the working dir is the user's default-branch checkout, not a worktree).
+ * Requires the local clone to exist on disk — the working dir is the user's
+ * default-branch checkout, not a worktree.
  * Returns an execution ID routed under `repoActionScopeId(githubRepo, subpath)`.
  */
 export function runRepoAction(
@@ -796,7 +793,6 @@ export function createRepoAction(
   command: string,
   actionType: string,
   sortOrder: number,
-  autoCommit: boolean,
   pinned: boolean,
   icon: string | null
 ): Promise<ProjectAction> {
@@ -807,7 +803,6 @@ export function createRepoAction(
     command,
     actionType,
     sortOrder,
-    autoCommit,
     pinned,
     icon,
   });

@@ -44,7 +44,6 @@ export interface ProjectAction {
   command: string;
   actionType: ActionType;
   sortOrder: number;
-  autoCommit: boolean;
   runDetectionMode?: RunDetectionMode;
   /** Whether the action gets its own button in a card header. */
   pinned: boolean;
@@ -79,13 +78,6 @@ export interface ActionStatusEvent {
   exitCode?: number;
   startedAt?: number;
   completedAt?: number;
-}
-
-/** Event payload for auto-commit notifications. */
-export interface ActionAutoCommitEvent {
-  executionId: string;
-  branchId: string;
-  actionName: string;
 }
 
 /** Event payload for repo action detection status (header badge). */
@@ -234,16 +226,6 @@ export function listenToActionOutput(callback: (event: ActionOutputEvent) => voi
  */
 export function listenToActionStatus(callback: (event: ActionStatusEvent) => void): UnlistenFn {
   return listenToEvent<ActionStatusEvent>('action_status', callback);
-}
-
-/**
- * Listen for action auto-commit events.
- * Returns an unlisten function to stop listening.
- */
-export function listenToActionAutoCommit(
-  callback: (event: ActionAutoCommitEvent) => void
-): UnlistenFn {
-  return listenToEvent<ActionAutoCommitEvent>('action_auto_commit', callback);
 }
 
 /** Listen for repo action detection start/stop updates. */

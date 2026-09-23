@@ -16,7 +16,6 @@ function action(
     contextId: 'context-1',
     name,
     command: name,
-    autoCommit: false,
     pinned: false,
     icon: null,
     createdAt: 0,

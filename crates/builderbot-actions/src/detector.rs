@@ -32,7 +32,6 @@ pub struct SuggestedAction {
     pub name: String,
     pub command: String,
     pub action_type: ActionType,
-    pub auto_commit: bool,
     pub source: String, // e.g., "justfile", "Makefile", "package.json"
 }
 
@@ -86,7 +85,6 @@ The response must be a JSON array of action objects. Each action object must hav
 - name: string (concise action name, e.g., "Test", "Lint", "Format")
 - command: string (exact shell command to run, e.g., "npm test", "just build")
 - actionType: string (one of: "prerun", "run", "build", "format", "check", "test", "cleanUp")
-- autoCommit: boolean (true if action modifies files and should auto-commit)
 - source: string (which file this was detected from, e.g., "package.json", "justfile", "subdir/justfile")
 
 Action type guidelines:
@@ -129,49 +127,42 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "name": "Install Dependencies",
     "command": "npm install",
     "actionType": "prerun",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Install Lefthook",
     "command": "lefthook install",
     "actionType": "prerun",
-    "autoCommit": false,
     "source": "lefthook.yml"
   },
   {
     "name": "Dev",
     "command": "npm run dev",
     "actionType": "run",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Test",
     "command": "npm test",
     "actionType": "test",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Build",
     "command": "npm run build",
     "actionType": "build",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Format",
     "command": "prettier --write .",
     "actionType": "format",
-    "autoCommit": true,
     "source": "package.json"
   },
   {
     "name": "Storybook",
     "command": "npm run storybook",
     "actionType": "run",
-    "autoCommit": false,
     "source": "package.json"
   }
 ]"#;
@@ -350,7 +341,7 @@ fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {
 mod tests {
     use super::*;
 
-    const TEST_ACTION: &str = r#"{"name": "Test", "command": "npm test", "actionType": "check", "autoCommit": false, "source": "package.json"}"#;
+    const TEST_ACTION: &str = r#"{"name": "Test", "command": "npm test", "actionType": "check", "source": "package.json"}"#;
 
     #[test]
     fn parses_array_surrounded_by_prose() {
@@ -394,7 +385,7 @@ mod tests {
     fn prefers_the_final_array_over_earlier_ones() {
         let text = format!(
             "Example of the shape I will return:\n\
-             [{{\"name\": \"Example\", \"command\": \"echo hi\", \"actionType\": \"run\", \"autoCommit\": false, \"source\": \"README.md\"}}]\n\
+             [{{\"name\": \"Example\", \"command\": \"echo hi\", \"actionType\": \"run\", \"source\": \"README.md\"}}]\n\
              Here is the real answer:\n\
              [{TEST_ACTION}]"
         );
@@ -427,7 +418,7 @@ mod tests {
     fn surfaces_the_shape_error_for_near_miss_arrays() {
         // One malformed actionType in an otherwise valid array: the serde
         // error should reach the caller instead of the generic message.
-        let text = r#"[{"name": "Lint", "command": "just lint", "actionType": "lintfix", "autoCommit": false, "source": "justfile"}]"#;
+        let text = r#"[{"name": "Lint", "command": "just lint", "actionType": "lintfix", "source": "justfile"}]"#;
 
         let err = parse_ai_response(text).expect_err("near-miss arrays should fail");
 
@@ -438,7 +429,7 @@ mod tests {
 
     #[test]
     fn near_miss_error_is_not_masked_by_trailing_junk_arrays() {
-        let text = r#"[{"name": "Lint", "command": "just lint", "actionType": "lintfix", "autoCommit": false, "source": "justfile"}]
+        let text = r#"[{"name": "Lint", "command": "just lint", "actionType": "lintfix", "source": "justfile"}]
 Exit codes seen: [1, 2]"#;
 
         let err = parse_ai_response(text).expect_err("near-miss arrays should fail");

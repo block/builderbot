@@ -61,17 +61,6 @@ pub struct OutputChunk {
     pub timestamp: i64,
 }
 
-/// A suggested action detected from project files
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SuggestedAction {
-    pub name: String,
-    pub command: String,
-    pub action_type: ActionType,
-    pub auto_commit: bool,
-    pub source: String, // e.g., "justfile", "Makefile", "package.json"
-}
-
 /// How a "run" action detects whether the process is running and/or its endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -104,10 +93,5 @@ pub enum ExecutionEvent {
         exit_code: Option<i32>,
         started_at: Option<i64>,
         completed_at: Option<i64>,
-    },
-    /// Auto-commit was performed
-    AutoCommit {
-        execution_id: String,
-        action_name: String,
     },
 }

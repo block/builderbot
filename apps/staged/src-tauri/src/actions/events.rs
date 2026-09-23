@@ -155,20 +155,6 @@ impl ExecutionListener for TauriExecutionListener {
                     },
                 );
             }
-            ExecutionEvent::AutoCommit {
-                execution_id,
-                action_name,
-            } => {
-                crate::web_server::emit_to_all(
-                    &self.app,
-                    "action_auto_commit",
-                    serde_json::json!({
-                        "executionId": execution_id,
-                        "branchId": self.branch_id,
-                        "actionName": action_name,
-                    }),
-                );
-            }
         }
     }
 }

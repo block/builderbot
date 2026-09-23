@@ -75,7 +75,6 @@
     name: '',
     command: '',
     actionType: 'run' as ActionType,
-    autoCommit: false,
     pinned: false,
     icon: null as string | null,
   });
@@ -352,7 +351,6 @@
       name: '',
       command: '',
       actionType: 'run',
-      autoCommit: false,
       // A context with nothing pinned has an empty card header, so the action
       // filling it in opts in by default — see shouldPinNewAction.
       pinned: shouldPinNewAction(actions),
@@ -366,7 +364,6 @@
       name: action.name,
       command: action.command,
       actionType: action.actionType as ActionType,
-      autoCommit: action.autoCommit,
       pinned: action.pinned,
       icon: action.icon,
     };
@@ -396,7 +393,6 @@
           editForm.command,
           editForm.actionType,
           nextSortOrder,
-          editForm.autoCommit,
           editForm.pinned,
           editForm.icon
         );
@@ -411,7 +407,6 @@
           editForm.command,
           editForm.actionType,
           editingAction.sortOrder,
-          editForm.autoCommit,
           editForm.pinned,
           editForm.icon
         );
@@ -422,7 +417,6 @@
                 name: editForm.name,
                 command: editForm.command,
                 actionType: editForm.actionType,
-                autoCommit: editForm.autoCommit,
                 pinned: editForm.pinned,
                 icon: editForm.icon,
               }
@@ -842,10 +836,6 @@
               {/each}
             </Select.Content>
           </Select.Root>
-          <div class="flex items-center gap-1.5">
-            <Checkbox id="auto-commit" bind:checked={editForm.autoCommit} />
-            <Label for="auto-commit" class="text-muted-foreground text-sm">Auto-commit</Label>
-          </div>
           <div class="flex items-center gap-1.5">
             <Checkbox id="pinned" bind:checked={editForm.pinned} />
             <Label for="pinned" class="text-muted-foreground text-sm">Show in card header</Label>

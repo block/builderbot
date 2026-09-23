@@ -6,7 +6,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Manager};
 
 use crate::actions::events::TauriExecutionListener;
-use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType};
+use crate::actions::{ActionExecutor, ActionRegistry, ActionType};
 use crate::blox;
 use crate::git;
 use crate::store::{self, Store};
@@ -3044,16 +3044,10 @@ async fn run_prerun_actions_for_branch(
             Arc::clone(act_registry),
         ));
 
-        let metadata = ActionMetadata {
-            action_id: action.id.clone(),
-            action_name: action.name.clone(),
-            auto_commit: action.auto_commit,
-        };
-
         // execute_and_wait runs the action and waits for it to finish,
         // regardless of success or failure (task requirement)
         match executor
-            .execute_and_wait(action.command, working_dir.clone(), metadata, listener)
+            .execute_and_wait(action.command, working_dir.clone(), listener)
             .await
         {
             Ok(_execution_id) => {

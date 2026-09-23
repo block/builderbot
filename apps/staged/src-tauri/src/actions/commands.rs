@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use builderbot_actions::{
-    ActionDetector, ActionExecutor, ActionMetadata, ActionType, FileExplorationMode,
-    RunDetectionMode, StopOptions, SuggestedAction,
+    ActionDetector, ActionExecutor, ActionType, FileExplorationMode, RunDetectionMode, StopOptions,
+    SuggestedAction,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -191,7 +191,6 @@ pub(crate) fn persist_suggested_actions(
             suggestion.action_type,
             next_sort_order,
         )
-        .with_auto_commit(suggestion.auto_commit)
         .with_pinned(pinned);
         store
             .create_repo_action(&action)
@@ -859,13 +858,6 @@ pub(crate) async fn run_branch_action_impl(
         Arc::clone(&registry),
     ));
 
-    // Create metadata
-    let metadata = ActionMetadata {
-        action_id: action.id.clone(),
-        action_name: action.name.clone(),
-        auto_commit: action.auto_commit,
-    };
-
     // Execute the action — local vs remote paths
     let (execution_id, working_dir_for_detection) = if is_remote {
         // Remote branch: execute via `sq blox ws exec`
@@ -948,15 +940,8 @@ pub(crate) async fn run_branch_action_impl(
             shell_command,
         ];
 
-        // Provide auto-commit context so that after a successful action,
-        // git commands run on the remote workspace via `sq blox ws exec`.
-        // When there's no resolved path we can't determine the git working
-        // directory, so auto-commit is skipped (unlikely for remote branches).
-        let auto_commit_info = resolved_repo_path
-            .map(|resolved| (sq_binary.clone(), workspace_name.to_string(), resolved));
-
         let eid = executor
-            .execute_remote(sq_binary, args, metadata, listener, auto_commit_info)
+            .execute_remote(sq_binary, args, listener)
             .await
             .map_err(|e| format!("Failed to execute remote action: {e}"))?;
 
@@ -980,7 +965,7 @@ pub(crate) async fn run_branch_action_impl(
 
         let wd = working_dir.clone();
         let eid = executor
-            .execute(action.command.clone(), working_dir, metadata, listener)
+            .execute(action.command.clone(), working_dir, listener)
             .await
             .map_err(|e| format!("Failed to execute action: {e}"))?;
 
@@ -1122,22 +1107,8 @@ pub(crate) async fn run_repo_action_impl(
         Arc::clone(&registry),
     ));
 
-    // Auto-commit is always stripped for repo runs: the executor would
-    // commit into the working dir, which here is the user's default-branch
-    // checkout rather than a disposable worktree.
-    let metadata = ActionMetadata {
-        action_id: action.id.clone(),
-        action_name: action.name.clone(),
-        auto_commit: false,
-    };
-
     let execution_id = executor
-        .execute(
-            action.command.clone(),
-            working_dir.clone(),
-            metadata,
-            listener,
-        )
+        .execute(action.command.clone(), working_dir.clone(), listener)
         .await
         .map_err(|e| format!("Failed to execute action: {e}"))?;
 
@@ -1413,14 +1384,8 @@ pub(crate) async fn run_prerun_actions_impl(
             Arc::clone(&registry),
         ));
 
-        let metadata = ActionMetadata {
-            action_id: action.id.clone(),
-            action_name: action.name.clone(),
-            auto_commit: action.auto_commit,
-        };
-
         let execution_id = executor
-            .execute_and_wait(action.command, working_dir.clone(), metadata, listener)
+            .execute_and_wait(action.command, working_dir.clone(), listener)
             .await
             .map_err(|e| format!("Failed to execute prerun action: {e}"))?;
 
@@ -1587,7 +1552,6 @@ mod tests {
             name: name.to_string(),
             command: command.to_string(),
             action_type,
-            auto_commit: false,
             source: "justfile".to_string(),
         }
     }

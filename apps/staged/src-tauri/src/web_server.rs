@@ -2146,7 +2146,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let command_str: String = arg(&args, "command")?;
             let action_type: String = arg(&args, "actionType")?;
             let sort_order: i32 = arg(&args, "sortOrder")?;
-            let auto_commit: bool = arg(&args, "autoCommit")?;
             let pinned: bool = arg(&args, "pinned")?;
             let icon: Option<String> = opt_arg(&args, "icon")?;
             let action = store
@@ -2161,7 +2160,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 action_type: builderbot_actions::ActionType::parse(&action_type)
                     .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
                 sort_order,
-                auto_commit,
                 run_detection_mode: action.run_detection_mode,
                 pinned,
                 icon,
@@ -2211,7 +2209,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let command_str: String = arg(&args, "command")?;
             let action_type: String = arg(&args, "actionType")?;
             let sort_order: i32 = arg(&args, "sortOrder")?;
-            let auto_commit: bool = arg(&args, "autoCommit")?;
             let pinned: bool = arg(&args, "pinned")?;
             let icon: Option<String> = opt_arg(&args, "icon")?;
             let context = store
@@ -2226,7 +2223,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 parsed_type,
                 sort_order,
             )
-            .with_auto_commit(auto_commit)
             .with_pinned(pinned)
             .with_icon(icon);
             store

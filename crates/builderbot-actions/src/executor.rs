@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
-use crate::git::{auto_commit_if_changes, auto_commit_if_changes_remote};
 use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
 
 // =============================================================================
@@ -98,14 +97,6 @@ pub trait ExecutionListener: Send + Sync {
     async fn on_event(&self, event: ExecutionEvent);
 }
 
-/// Metadata about an action being executed
-#[derive(Clone)]
-pub struct ActionMetadata {
-    pub action_id: String,
-    pub action_name: String,
-    pub auto_commit: bool,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct StopOptions {
     pub force_kill_after: Option<Duration>,
@@ -123,18 +114,6 @@ impl Default for StopOptions {
 struct RunningActionState {
     child_pid: Option<u32>,
     output_buffer: Arc<Mutex<Vec<OutputChunk>>>,
-}
-
-/// Context for auto-committing changes after a successful action execution.
-enum AutoCommitContext {
-    /// Local execution: run git commands directly against the worktree.
-    Local { working_dir: String },
-    /// Remote execution: run git commands via `sq blox ws exec`.
-    Remote {
-        sq_binary: PathBuf,
-        workspace_name: String,
-        working_dir: String,
-    },
 }
 
 /// Manages action execution with real-time output streaming
@@ -219,18 +198,13 @@ impl ActionExecutor {
     /// completion events. This is the shared implementation used by both local
     /// and remote execution paths.
     ///
-    /// If `auto_commit_ctx` is `Some`, auto-commit will be attempted after a
-    /// successful execution (local only).
-    ///
     /// If `pty_reader` is `Some`, it is used as the single output stream
     /// (tagged as `"stdout"`) instead of the child's piped stdout/stderr.
     /// This is used for local execution where a PTY merges both streams.
     async fn manage_child_process(
         &self,
         mut child: Child,
-        metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
-        auto_commit_ctx: Option<AutoCommitContext>,
         pty_reader: Option<std::fs::File>,
     ) -> Result<(String, oneshot::Receiver<()>)> {
         let execution_id = uuid::Uuid::new_v4().to_string();
@@ -311,8 +285,6 @@ impl ActionExecutor {
         let running_clone = self.running.clone();
         let completed_clone = self.completed.clone();
         let stopped_clone = self.stopped.clone();
-        let auto_commit = metadata.auto_commit;
-        let action_name = metadata.action_name.clone();
         let action_started_at = started_at;
 
         thread::spawn(move || {
@@ -360,42 +332,6 @@ impl ActionExecutor {
                         completed_at: Some(completed_at),
                     })
                     .await;
-
-                // If auto_commit is enabled and action succeeded, commit changes
-                if auto_commit && success && !was_stopped {
-                    if let Some(ctx) = &auto_commit_ctx {
-                        let result = match ctx {
-                            AutoCommitContext::Local { working_dir } => {
-                                auto_commit_if_changes(working_dir, &action_name)
-                            }
-                            AutoCommitContext::Remote {
-                                sq_binary,
-                                workspace_name,
-                                working_dir,
-                            } => auto_commit_if_changes_remote(
-                                sq_binary,
-                                workspace_name,
-                                working_dir,
-                                &action_name,
-                            ),
-                        };
-                        match result {
-                            Ok(true) => {
-                                // Emit auto-commit event
-                                listener
-                                    .on_event(ExecutionEvent::AutoCommit {
-                                        execution_id: exec_id.clone(),
-                                        action_name: action_name.clone(),
-                                    })
-                                    .await;
-                            }
-                            Ok(false) => {} // No changes to commit
-                            Err(e) => {
-                                eprintln!("Failed to auto-commit changes: {}", e);
-                            }
-                        }
-                    }
-                }
             });
 
             // Signal completion (ignore error if receiver was dropped)
@@ -411,7 +347,6 @@ impl ActionExecutor {
         &self,
         command: String,
         working_dir: String,
-        metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<(String, oneshot::Receiver<()>)> {
         // Determine which shell to use
@@ -532,10 +467,7 @@ impl ActionExecutor {
             });
         }
 
-        let auto_commit_ctx = AutoCommitContext::Local { working_dir };
-
-        self.manage_child_process(child, metadata, listener, Some(auto_commit_ctx), pty_reader)
-            .await
+        self.manage_child_process(child, listener, pty_reader).await
     }
 
     /// Execute a shell command in the specified working directory
@@ -546,12 +478,10 @@ impl ActionExecutor {
         &self,
         command: String,
         working_dir: String,
-        metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<String> {
-        let (execution_id, _completion_rx) = self
-            .execute_inner(command, working_dir, metadata, listener)
-            .await?;
+        let (execution_id, _completion_rx) =
+            self.execute_inner(command, working_dir, listener).await?;
         Ok(execution_id)
     }
 
@@ -563,12 +493,10 @@ impl ActionExecutor {
         &self,
         command: String,
         working_dir: String,
-        metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
     ) -> Result<String> {
-        let (execution_id, completion_rx) = self
-            .execute_inner(command, working_dir, metadata, listener)
-            .await?;
+        let (execution_id, completion_rx) =
+            self.execute_inner(command, working_dir, listener).await?;
 
         // Wait for the background thread to signal completion
         let _ = completion_rx.await;
@@ -583,18 +511,12 @@ impl ActionExecutor {
     /// Streaming output, stop, and completion tracking work identically to
     /// local execution since it is still a local child process under the hood.
     ///
-    /// If `auto_commit_info` is provided (sq binary path, workspace name,
-    /// working dir), auto-commit will be attempted after a successful
-    /// execution by running git commands on the remote workspace.
-    ///
     /// Returns a unique execution ID. The action runs in the background.
     pub async fn execute_remote(
         &self,
         program: PathBuf,
         args: Vec<String>,
-        metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
-        auto_commit_info: Option<(PathBuf, String, String)>,
     ) -> Result<String> {
         let mut cmd = Command::new(&program);
         cmd.args(&args)
@@ -620,17 +542,8 @@ impl ActionExecutor {
             .spawn()
             .context("Failed to spawn remote action process")?;
 
-        let auto_commit_ctx = auto_commit_info.map(|(sq_binary, workspace_name, working_dir)| {
-            AutoCommitContext::Remote {
-                sq_binary,
-                workspace_name,
-                working_dir,
-            }
-        });
-
-        let (execution_id, _completion_rx) = self
-            .manage_child_process(child, metadata, listener, auto_commit_ctx, None)
-            .await?;
+        let (execution_id, _completion_rx) =
+            self.manage_child_process(child, listener, None).await?;
         Ok(execution_id)
     }
 

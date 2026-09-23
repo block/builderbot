@@ -8,8 +8,18 @@
 
 import { invokeCommand, listenToEvent, type UnlistenFn } from '../../transport';
 
-/** Action types available for project actions. */
-export type ActionType = 'build' | 'test' | 'format' | 'check' | 'prerun' | 'run' | 'cleanUp';
+/** Action types available for project actions, in the order shown in the UI. */
+export const ACTION_TYPES = [
+  'run',
+  'prerun',
+  'build',
+  'test',
+  'format',
+  'check',
+  'cleanUp',
+] as const;
+
+export type ActionType = (typeof ACTION_TYPES)[number];
 
 /** Status of a running action. */
 export type ActionStatus = 'running' | 'completed' | 'failed' | 'stopped';

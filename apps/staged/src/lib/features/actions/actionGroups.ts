@@ -6,17 +6,17 @@
  */
 
 import type { ProjectAction } from '../../api/commands';
+import { ACTION_TYPES, type ActionType } from './actions';
 
-export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
-  const groups: Record<string, ProjectAction[]> = {
-    prerun: [],
-    run: [],
-    build: [],
-    format: [],
-    check: [],
-    test: [],
-    cleanUp: [],
-  };
+export function createActionGroups(): Record<ActionType, ProjectAction[]> {
+  return Object.fromEntries(ACTION_TYPES.map((type) => [type, [] as ProjectAction[]])) as Record<
+    ActionType,
+    ProjectAction[]
+  >;
+}
+
+export function groupActionsByType(actions: ProjectAction[]): Record<ActionType, ProjectAction[]> {
+  const groups = createActionGroups();
 
   for (const action of actions) {
     if (groups[action.actionType]) {

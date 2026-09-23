@@ -5,6 +5,7 @@
  */
 
 import { invokeCommand, isTauri } from './transport';
+import type { ActionType, ProjectAction } from './features/actions/actions';
 import {
   cachedCommand,
   cachedInvoke,
@@ -692,20 +693,7 @@ export function resetBranchToRemote(branchId: string): Promise<void> {
 // Actions
 // =============================================================================
 
-export interface ProjectAction {
-  id: string;
-  contextId: string;
-  name: string;
-  command: string;
-  actionType: string;
-  sortOrder: number;
-  /** Whether the action gets its own button in a card header. */
-  pinned: boolean;
-  /** Kebab-case Lucide icon name, or null for the action type's default. */
-  icon: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
+export type { ProjectAction } from './features/actions/actions';
 
 export function listProjectActions(
   projectId: string,
@@ -718,7 +706,7 @@ export function updateProjectAction(
   actionId: string,
   name: string,
   command: string,
-  actionType: string,
+  actionType: ActionType,
   sortOrder: number,
   pinned: boolean,
   icon: string | null
@@ -791,7 +779,7 @@ export function createRepoAction(
   subpath: string | undefined,
   name: string,
   command: string,
-  actionType: string,
+  actionType: ActionType,
   sortOrder: number,
   pinned: boolean,
   icon: string | null

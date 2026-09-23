@@ -8,7 +8,7 @@
 
 import Wand2 from '@lucide/svelte/icons/wand-2';
 import type { ProjectAction } from '../../api/commands';
-import type { ActionType } from './actions';
+import { ACTION_TYPES, type ActionType } from './actions';
 import { getActionTypeIcon, type IconComponent } from './lucideIcons';
 
 export type MenuIconComponent = IconComponent;
@@ -30,8 +30,6 @@ export type SubmenuMenuItem = {
   children: MenuItem[];
 };
 export type MenuItem = ActionMenuItem | SeparatorMenuItem | SubmenuMenuItem;
-
-const actionMenuTypes = ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as const;
 
 /**
  * Build the menu items for a scope's actions, leaving out every action already
@@ -56,7 +54,7 @@ export function buildActionMenuItems(
   const combineFormatCheck = formatItems.length + checkItems.length > 2;
 
   const groups: MenuItem[][] = [];
-  for (const type of actionMenuTypes) {
+  for (const type of ACTION_TYPES) {
     if (combineFormatCheck && type === 'check') continue;
     if (combineFormatCheck && type === 'format') {
       const children: MenuItem[] = [

@@ -7,7 +7,7 @@
   error if that save rejects, so a failed write never drops the user's input.
 -->
 <script lang="ts" module>
-  import type { ActionType } from './actions';
+  import { ACTION_TYPES, type ActionType } from './actions';
 
   /** The editable fields of an action, as the dialog hands them back. */
   export type ActionFormValues = {
@@ -17,16 +17,6 @@
     pinned: boolean;
     icon: string | null;
   };
-
-  const ACTION_TYPES: ActionType[] = [
-    'run',
-    'prerun',
-    'build',
-    'test',
-    'format',
-    'check',
-    'cleanUp',
-  ];
 
   let inputCounter = 0;
 </script>
@@ -79,7 +69,7 @@
         ? {
             name: action.name,
             command: action.command,
-            actionType: action.actionType as ActionType,
+            actionType: action.actionType,
             pinned: action.pinned,
             icon: action.icon,
           }
@@ -109,8 +99,13 @@
 
     saving = true;
     error = null;
+    const submitted: ActionFormValues = {
+      ...draft,
+      name: draft.name.trim(),
+      command: draft.command.trim(),
+    };
     try {
-      await onSave({ ...draft, name: draft.name.trim(), command: draft.command.trim() });
+      await onSave(submitted);
       open = false;
     } catch (e) {
       error = errorMessage(e);
@@ -120,16 +115,7 @@
   }
 </script>
 
-<Dialog.Root
-  {open}
-  onOpenChange={(nextOpen) => {
-    if (nextOpen) {
-      open = true;
-    } else {
-      requestClose();
-    }
-  }}
->
+<Dialog.Root bind:open={() => open, (nextOpen) => (nextOpen ? (open = true) : requestClose())}>
   <Dialog.Content class="sm:max-w-[460px] gap-4">
     <Dialog.Header>
       <Dialog.Title>{action ? 'Edit Action' : 'Add Action'}</Dialog.Title>

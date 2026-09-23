@@ -19,7 +19,7 @@
   import type { ActionContext, ProjectAction } from '../../api/commands';
   import * as commands from '../../api/commands';
   import { detectRepoActions, listenToRepoActionsDetection } from '../actions/actions';
-  import { shouldPinNewAction } from '../actions/actionGroups';
+  import { createActionGroups, shouldPinNewAction } from '../actions/actionGroups';
   import ActionIcon from '../actions/ActionIcon.svelte';
   import ActionEditDialog, { type ActionFormValues } from '../actions/ActionEditDialog.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
@@ -356,7 +356,8 @@
     const subpath = selectedContext.subpath ?? undefined;
     const entryKey = selectedRepoKey;
 
-    if (!editingAction) {
+    const actionToEdit = editingAction;
+    if (!actionToEdit) {
       const nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
       const newAction = await commands.createRepoAction(
         githubRepo,
@@ -372,17 +373,31 @@
         actions = [...actions, newAction];
       }
     } else {
-      const actionId = editingAction.id;
+      const actionId = actionToEdit.id;
+      const sortOrder = actionToEdit.sortOrder;
       await commands.updateProjectAction(
         actionId,
         values.name,
         values.command,
         values.actionType,
-        editingAction.sortOrder,
+        sortOrder,
         values.pinned,
         values.icon
       );
-      actions = actions.map((a) => (a.id === actionId ? { ...a, ...values } : a));
+      if (selectedRepoKey === entryKey) {
+        actions = actions.map((a) =>
+          a.id === actionId
+            ? {
+                ...a,
+                name: values.name,
+                command: values.command,
+                actionType: values.actionType,
+                pinned: values.pinned,
+                icon: values.icon,
+              }
+            : a
+        );
+      }
     }
 
     window.dispatchEvent(new CustomEvent('project-actions-changed'));
@@ -498,15 +513,7 @@
   });
 
   let groupedActions = $derived.by(() => {
-    const groups: Record<string, ProjectAction[]> = {
-      prerun: [],
-      run: [],
-      build: [],
-      test: [],
-      format: [],
-      check: [],
-      cleanUp: [],
-    };
+    const groups = createActionGroups();
     for (const action of actions) {
       const type = action.actionType;
       if (groups[type]) groups[type].push(action);

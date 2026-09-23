@@ -123,16 +123,7 @@
   }
 </script>
 
-<Dialog.Root
-  {open}
-  onOpenChange={(nextOpen) => {
-    if (nextOpen) {
-      open = true;
-    } else {
-      requestClose();
-    }
-  }}
->
+<Dialog.Root bind:open={() => open, (nextOpen) => (nextOpen ? (open = true) : requestClose())}>
   <Dialog.Content
     class="sm:max-w-[480px] p-0 gap-0 overflow-hidden flex flex-col"
     showCloseButton={false}

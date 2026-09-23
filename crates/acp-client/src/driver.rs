@@ -497,13 +497,16 @@ pub struct BackgroundHoldConfig {
     /// task's clock expires — bounded overall by
     /// [`BackgroundHoldConfig::hold_ceiling`].
     ///
-    /// Note that this is emphatically not "extend the cap on any activity": a
-    /// task that has been hung since the hold began is *not* reprieved by a
-    /// newer sibling, because its own deadline passes on schedule.
+    /// Note that this is emphatically not "extend the cap on any activity":
+    /// progress from a task that has been hung since the hold began does not
+    /// re-stamp its own deadline. A task settling does re-stamp the hold's
+    /// floor, though, because that terminal edge is what wakes the
+    /// continuation that may spawn the next task in the chain.
     ///
     /// Defaults to 30 minutes — three times the Bash tool's own max timeout,
-    /// so a blocking shell and the continuation it wakes have room to finish,
-    /// while a hung one still can't hold the session open forever.
+    /// so a blocking shell, the completion wake it triggers, and the
+    /// continuation that wake runs have room to finish, while a hung one still
+    /// can't hold the session open forever.
     pub hold_cap: Duration,
     /// Absolute bound on the whole post-turn hold, measured from hold entry.
     ///
@@ -3005,6 +3008,30 @@ fn sdk_message_mentions_task(message: &serde_json::Value) -> bool {
     }
 }
 
+/// Whether a raw SDK frame is itself a terminal edge for one task. This catches
+/// the common `task_notification` wake and terminal `task_updated` patches even
+/// when the matching start was missed and the live-set diff cannot prove a
+/// removal.
+fn sdk_message_settles_task(message: &serde_json::Value) -> bool {
+    if message.get("type").and_then(serde_json::Value::as_str) != Some("system") {
+        return false;
+    }
+    let has_task_id = message.get("task_id").is_some();
+    match message.get("subtype").and_then(serde_json::Value::as_str) {
+        Some("task_notification") => has_task_id,
+        Some("task_updated") => {
+            has_task_id
+                && matches!(
+                    message
+                        .pointer("/patch/status")
+                        .and_then(serde_json::Value::as_str),
+                    Some("completed" | "failed" | "killed" | "cancelled" | "stopped")
+                )
+        }
+        _ => false,
+    }
+}
+
 /// Snapshot of a connection's background-task signal, published by the
 /// notification handler over a `watch` channel and consumed by the post-turn
 /// holding wait.
@@ -3044,6 +3071,10 @@ struct BackgroundActivity {
     /// per hold (see [`BackgroundHoldConfig::idle_latch_staleness`]), so a
     /// lost trailing `idle` cannot cap-condemn every later hold.
     session_state: Option<SdkSessionState>,
+    /// Whether this observation carries a task terminal edge. Unlike
+    /// `ever_started_task`, this is an edge, not a latch: the holding wait
+    /// consumes it to re-stamp the floor once for the completion wake.
+    task_settled: bool,
     /// Monotonic counter bumped on every received notification; the holding
     /// debounce resets whenever it changes.
     activity_seq: u64,
@@ -3179,12 +3210,6 @@ impl AcpNotificationHandler {
     /// Subscribe to the connection's background-activity signal.
     fn subscribe_background_activity(&self) -> watch::Receiver<BackgroundActivity> {
         self.background_activity_tx.subscribe()
-    }
-
-    /// Count a received notification as activity for the holding debounce.
-    fn note_activity(&self) {
-        self.background_activity_tx
-            .send_modify(|activity| activity.activity_seq = activity.activity_seq.wrapping_add(1));
     }
 
     async fn finalize_replay_if_idle(&self, timeout: Duration) -> bool {
@@ -3523,13 +3548,16 @@ impl AcpNotificationHandler {
         // activity for the holding debounce. A frame that mentions a task
         // additionally latches `ever_started_task`, switching the holding
         // wait from the short taskless confirmation to the full drain
-        // debounce for the rest of the connection; a `session_state_changed`
+        // debounce for the rest of the connection; terminal edges re-stamp
+        // the hold floor for the completion wake; a `session_state_changed`
         // frame moves the idle latch.
         let mentions_task = sdk_message_mentions_task(message);
+        let task_settled = sdk_message_settles_task(message);
         let session_state = sdk_message_session_state(message);
         self.background_activity_tx.send_modify(|activity| {
             activity.sdk_frames_seen = true;
             activity.ever_started_task |= mentions_task || !snapshot.live_ids.is_empty();
+            activity.task_settled = task_settled;
             activity.live_tasks = snapshot.live_ids.len();
             activity.live_task_ids = snapshot.live_ids;
             activity.tasks = snapshot.tasks;
@@ -3584,9 +3612,14 @@ impl AcpNotificationHandler {
                 }
             }
         }
+        let task_settled = matches!(
+            &notification.update,
+            AsyncTaskUpdate::StateUpdate { state, .. } if !state.is_live()
+        );
         let snapshot = self.mode_selected_task_snapshot().await;
         self.background_activity_tx.send_modify(|activity| {
             activity.ever_started_task |= !snapshot.live_ids.is_empty();
+            activity.task_settled = task_settled;
             activity.live_tasks = snapshot.live_ids.len();
             activity.live_task_ids = snapshot.live_ids;
             activity.tasks = snapshot.tasks;
@@ -3602,7 +3635,12 @@ impl AcpNotificationHandler {
         // Every received update counts as activity for the post-turn holding
         // debounce — out-of-turn continuations stream as ordinary
         // session/updates, and the hold must not declare quiescence mid-burst.
-        self.note_activity();
+        // It is not a task terminal edge, so clear any edge bit left on the
+        // watch snapshot after the previous observation.
+        self.background_activity_tx.send_modify(|activity| {
+            activity.task_settled = false;
+            activity.activity_seq = activity.activity_seq.wrapping_add(1);
+        });
 
         // Session state updates are forwarded regardless of phase.
         match &notification.update {
@@ -4345,13 +4383,15 @@ impl std::fmt::Debug for HoldOutcome {
 ///   task parked in `paused`. It is assembled per task rather than armed once
 ///   at hold entry: each live id starts its own
 ///   [`BackgroundHoldConfig::hold_cap`] when this state first observes it, and
-///   the effective cap is the latest of the live tasks' deadlines (never
-///   earlier than the taskless `base_deadline`, never later than
-///   `ceiling_deadline`). An out-of-turn continuation chain is not one task —
-///   a shell spawned twenty-nine minutes in deserves the same budget as the
-///   first one — while a task hung since hold entry keeps its original
-///   deadline and so still gets torn down on schedule once its siblings
-///   settle. In raw mode, when no raw SDK frame has arrived
+///   the hold floor is re-stamped when any task settles so the completion wake
+///   has time to spawn the next batch. The effective cap is the latest of the
+///   live tasks' deadlines (never earlier than `base_deadline`, never later
+///   than `ceiling_deadline`). An out-of-turn continuation chain is not one
+///   task — a shell spawned twenty-nine minutes in deserves the same budget as
+///   the first one, and a wake landing after the original floor deserves time
+///   to run its continuation — while a task hung since hold entry still keeps
+///   its own deadline unless another task actually settles. In raw mode, when
+///   no raw SDK frame has arrived
 ///   the empty set is uninformative (an older bridge or a rejected filter
 ///   looks identical to "no background work ever started"), so quiescence is
 ///   never declared and the cap is the only clock — the fallback rule: never
@@ -4363,9 +4403,11 @@ struct HoldingState {
     config: BackgroundHoldConfig,
     /// How this connection tracks tasks — decides the quiescence predicate.
     mode: TaskTrackingMode,
-    /// The floor under the effective cap: hold entry + `hold_cap`. It is what
-    /// bounds a hold that never sees a task, and it keeps a hold that saw one
-    /// only briefly from settling earlier than it used to.
+    /// The floor under the effective cap: initially hold entry + `hold_cap`,
+    /// then advanced to `settle time + hold_cap` whenever a task leaves the
+    /// live set. It bounds a hold that never sees a task, and gives the
+    /// continuation woken by a terminal task edge time to spawn the next batch
+    /// even after the entry-time floor has passed.
     base_deadline: tokio::time::Instant,
     /// The absolute bound on the whole hold: hold entry + `hold_ceiling`.
     /// Without it, per-task deadlines let a chain that spawns one task per
@@ -4381,6 +4423,7 @@ struct HoldingState {
     live_tasks: usize,
     sdk_frames_seen: bool,
     ever_started_task: bool,
+    last_settle_seq: u64,
     session_state: Option<SdkSessionState>,
 }
 
@@ -4400,10 +4443,12 @@ impl HoldingState {
             live_tasks: initial.live_tasks,
             sdk_frames_seen: initial.sdk_frames_seen,
             ever_started_task: initial.ever_started_task || initial.live_tasks > 0,
+            last_settle_seq: 0,
             session_state: initial.session_state,
             config,
         };
-        state.track_task_deadlines(now, &initial.live_task_ids);
+        state.track_task_deadlines(now, &initial.live_task_ids, initial.task_settled);
+        state.last_settle_seq = initial.activity_seq;
         state
     }
 
@@ -4414,7 +4459,11 @@ impl HoldingState {
         self.quiet_since = now;
         self.live_tasks = activity.live_tasks;
         self.session_state = activity.session_state;
-        self.track_task_deadlines(now, &activity.live_task_ids);
+        let task_settled = activity.task_settled && activity.activity_seq != self.last_settle_seq;
+        self.track_task_deadlines(now, &activity.live_task_ids, task_settled);
+        if activity.task_settled {
+            self.last_settle_seq = activity.activity_seq;
+        }
         // Availability and task history latch: once frames have arrived on
         // this connection the stream is proven — and once a task has been
         // seen the taskless fast path is off — whatever later snapshots say.
@@ -4423,12 +4472,24 @@ impl HoldingState {
     }
 
     /// Reconcile the per-task deadlines against a live set: start the clock
-    /// on ids seen for the first time, forget the ones that have settled.
-    /// Dropping settled ids is what makes the cap collapse back onto a hung
-    /// survivor's (already past) deadline instead of trailing the newest task
-    /// the session ever ran.
-    fn track_task_deadlines(&mut self, now: tokio::time::Instant, live_ids: &BTreeSet<String>) {
+    /// on ids seen for the first time, forget the ones that have settled, and
+    /// re-stamp the hold floor on any terminal edge. Dropping settled ids is
+    /// what makes the cap collapse back toward a hung survivor's own deadline
+    /// instead of trailing every task the session ever ran; advancing the
+    /// floor keeps that collapse from killing the completion wake before it
+    /// can spawn follow-up work.
+    fn track_task_deadlines(
+        &mut self,
+        now: tokio::time::Instant,
+        live_ids: &BTreeSet<String>,
+        task_settled: bool,
+    ) {
+        let saw_settle =
+            task_settled || self.task_deadlines.keys().any(|id| !live_ids.contains(id));
         self.task_deadlines.retain(|id, _| live_ids.contains(id));
+        if saw_settle {
+            self.base_deadline = self.base_deadline.max(now + self.config.hold_cap);
+        }
         for id in live_ids {
             self.task_deadlines
                 .entry(id.clone())
@@ -4437,8 +4498,8 @@ impl HoldingState {
     }
 
     /// The instant the hold is torn down regardless of quiescence: the latest
-    /// live task's own deadline, floored at the taskless `base_deadline` and
-    /// clamped to the absolute `ceiling_deadline`.
+    /// live task's own deadline, floored at `base_deadline` and clamped to the
+    /// absolute `ceiling_deadline`.
     fn cap_deadline(&self) -> tokio::time::Instant {
         self.task_deadlines
             .values()
@@ -5876,20 +5937,21 @@ mod tests {
         permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
         resolve_acp_working_dir, resolve_session_config_option_selection,
         resolve_spawn_working_dir, sanitize_remote_acp_chunk, sdk_message_mentions_task,
-        sdk_message_origin_kind, sdk_message_session_state, shell_exec_line, shell_quote,
-        task_tracking_mode_from_initialize, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
-        AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
-        AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentRunOutcome,
-        AsyncTaskNotification, AsyncTaskState, AsyncTaskStopHandle, AsyncTaskUpdate,
-        BackgroundActivity, BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus,
-        BackgroundHoldTask, BackgroundTaskSet, BasicMessageWriter, HoldOutcome, HoldSettle,
-        HoldingState, IncomingSessionUpdate, MessageWriter, OutOfTurnPermissionPolicy,
-        QueuedSessionTurn, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
-        SdkSessionState, SessionLifetime, SessionSettleReason, SessionSettled,
-        StopAsyncTaskRequest, TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD,
-        AVAILABILITY_PROBE_SUBTYPE, BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES,
-        CLAUDE_SDK_MESSAGE_METHOD, CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS,
-        PERMISSION_ANNOUNCEMENT_GRACE, SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
+        sdk_message_origin_kind, sdk_message_session_state, sdk_message_settles_task,
+        shell_exec_line, shell_quote, task_tracking_mode_from_initialize, AcpDriver,
+        AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision, AcpPermissionOption,
+        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
+        AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
+        AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
+        BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BackgroundTaskSet,
+        BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState, IncomingSessionUpdate,
+        MessageWriter, OutOfTurnPermissionPolicy, QueuedSessionTurn, RemoteLineOutcome,
+        ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState, SessionLifetime,
+        SessionSettleReason, SessionSettled, StopAsyncTaskRequest, TaskTrackingMode,
+        TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
+        BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES, CLAUDE_SDK_MESSAGE_METHOD,
+        CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS, PERMISSION_ANNOUNCEMENT_GRACE,
+        SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, ContentChunk, ExtNotification, McpCapabilities, McpServer,
@@ -8556,6 +8618,33 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         })));
     }
 
+    #[test]
+    fn terminal_task_frames_count_as_settles_for_the_hold_floor() {
+        assert!(sdk_message_settles_task(&serde_json::json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "task-1",
+        })));
+        assert!(sdk_message_settles_task(&serde_json::json!({
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": "task-1",
+            "patch": { "status": "completed" },
+        })));
+
+        assert!(!sdk_message_settles_task(&serde_json::json!({
+            "type": "system",
+            "subtype": "task_updated",
+            "task_id": "task-1",
+            "patch": { "status": "running" },
+        })));
+        assert!(!sdk_message_settles_task(&serde_json::json!({
+            "type": "assistant",
+            "subtype": "task_notification",
+            "task_id": "task-1",
+        })));
+    }
+
     fn test_hold_config() -> BackgroundHoldConfig {
         BackgroundHoldConfig {
             hold_cap: Duration::from_secs(600),
@@ -8705,31 +8794,76 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     }
 
     #[test]
-    fn a_hung_task_is_not_extended_by_a_newer_one() {
+    fn a_settled_task_restamps_the_floor_so_its_wake_can_continue() {
         let start = tokio::time::Instant::now();
-        // The other direction: `A` is the wedged shell the cap exists for. A
-        // newer sibling stretches the hold only for as long as *it* is live —
-        // it must not buy `A` a second thirty minutes.
+        // `B` is the task spawned late in an out-of-turn continuation chain.
+        // Its own wait is honored by its per-task deadline; when it settles
+        // after the hold-entry floor, the terminal edge wakes the model to
+        // decide what comes next. That wake must not be cut off by the old
+        // floor before it can spawn `C`.
         let mut state = HoldingState::new(
             test_hold_config(),
             TaskTrackingMode::Raw,
             start,
             &seen_with_ids(["A"]),
         );
-        let spawn = start + Duration::from_secs(590);
-        state.observe(spawn, &seen_with_ids(["A", "B"]));
+        let spawn = start + Duration::from_secs(310);
+        state.observe(spawn, &seen_with_ids(["B"]));
         assert_eq!(state.cap_deadline(), spawn + Duration::from_secs(600));
 
-        // `B` settles at T+620, past `A`'s own deadline: the cap collapses
-        // back onto `A`'s, which has already passed, so the hold ends at once
-        // rather than riding out the rest of `B`'s budget.
-        let settle = start + Duration::from_secs(620);
-        state.observe(settle, &seen_with_ids(["A"]));
-        assert_eq!(state.cap_deadline(), start + Duration::from_secs(600));
+        let settle = start + Duration::from_secs(700);
+        state.observe(
+            settle,
+            &BackgroundActivity {
+                task_settled: true,
+                ..drained_in_state(SdkSessionState::Busy)
+            },
+        );
+
+        assert_eq!(state.cap_deadline(), settle + Duration::from_secs(600));
+        assert_eq!(
+            state.quiescence_deadline(),
+            Some(settle + Duration::from_secs(120)),
+            "the busy completion wake gets the idle-latch staleness window"
+        );
         assert_eq!(
             state.poll_settle(settle),
+            None,
+            "settling after the original floor must not tear the hold down immediately"
+        );
+    }
+
+    #[test]
+    fn a_sibling_settle_restamps_the_floor_even_with_an_older_task_live() {
+        let start = tokio::time::Instant::now();
+        // `OLD` is past its own deadline, but `B` was real work spawned later
+        // in the chain. When `B` settles, the wake it triggers needs time to
+        // run even though an older task is still live.
+        let mut state = HoldingState::new(
+            test_hold_config(),
+            TaskTrackingMode::Raw,
+            start,
+            &seen_with_ids(["OLD"]),
+        );
+        let spawn = start + Duration::from_secs(310);
+        state.observe(spawn, &seen_with_ids(["OLD", "B"]));
+        assert_eq!(state.cap_deadline(), spawn + Duration::from_secs(600));
+
+        let settle = start + Duration::from_secs(700);
+        state.observe(
+            settle,
+            &BackgroundActivity {
+                task_settled: true,
+                ..seen_with_ids(["OLD"])
+            },
+        );
+
+        assert_eq!(state.cap_deadline(), settle + Duration::from_secs(600));
+        assert_eq!(state.poll_settle(settle), None);
+        assert_eq!(
+            state.poll_settle(settle + Duration::from_secs(600)),
             Some(HoldSettle::HeldUntilCap),
-            "a hung task's own deadline still governs once its siblings are gone"
+            "without fresh work, the re-stamped floor still bounds the hold"
         );
     }
 
@@ -8796,20 +8930,27 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     }
 
     #[test]
-    fn a_task_that_settles_leaves_the_base_deadline_standing() {
+    fn an_early_task_settle_restamps_the_floor_from_the_settle_time() {
         let start = tokio::time::Instant::now();
-        // Dropping a settled task's deadline must not pull the cap in below
-        // where hold entry put it: a hold that briefly saw a task still gets
-        // the same floor as one that never saw any.
+        // The completion wake gets the same budget whether it lands before or
+        // after the hold-entry floor; ordinary quiescence still wins first if
+        // the wake goes idle.
         let mut state = HoldingState::new(
             test_hold_config(),
             TaskTrackingMode::Raw,
             start,
             &seen_with_ids(["task-1"]),
         );
-        state.observe(start + Duration::from_secs(5), &drained());
+        let settle = start + Duration::from_secs(5);
+        state.observe(
+            settle,
+            &BackgroundActivity {
+                task_settled: true,
+                ..drained()
+            },
+        );
 
-        assert_eq!(state.cap_deadline(), start + Duration::from_secs(600));
+        assert_eq!(state.cap_deadline(), settle + Duration::from_secs(600));
     }
 
     #[test]
@@ -9477,6 +9618,68 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             .await
             .expect("the newest task's cap must still bound the hold");
         assert!(matches!(outcome, HoldOutcome::HeldUntilCap));
+    }
+
+    #[tokio::test]
+    async fn holding_wait_keeps_the_completion_wake_after_a_post_floor_settle() {
+        let handler = hold_test_handler();
+        let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let child_exited = CancellationToken::new();
+        let hold_active = AtomicBool::new(false);
+
+        feed_sdk_frame(&handler, task_started("task-1")).await;
+
+        // The first task's cap is intentionally short. The second task gets
+        // its own budget; when it settles after the first floor has passed,
+        // the hold should remain open for the completion wake rather than
+        // returning HeldUntilCap immediately.
+        let config = BackgroundHoldConfig {
+            hold_cap: Duration::from_secs(1),
+            hold_ceiling: Duration::from_secs(60),
+            debounce: Duration::from_secs(60),
+            taskless_debounce: Duration::from_secs(60),
+            idle_latch_staleness: Duration::from_secs(60),
+            out_of_turn_permissions: OutOfTurnPermissionPolicy::Prompt,
+        };
+        let mut hold = std::pin::pin!(hold_for_background_quiescence(
+            &config,
+            TaskTrackingMode::Raw,
+            &handler,
+            &cancel,
+            &child_exited,
+            &mut prompt_rx,
+            &mut hold_control_rx,
+            &hold_active,
+            &|_| {},
+            "sess-1",
+            None,
+        ));
+
+        tokio::select! {
+            _ = &mut hold => panic!("must not settle before the first cap"),
+            _ = tokio::time::sleep(Duration::from_millis(600)) => {}
+        }
+        feed_sdk_frame(&handler, task_started("task-2")).await;
+
+        tokio::select! {
+            _ = &mut hold => panic!("task-2's own cap should carry the hold past task-1's floor"),
+            _ = tokio::time::sleep(Duration::from_millis(650)) => {}
+        }
+        feed_sdk_frame(&handler, empty_tasks_frame()).await;
+
+        tokio::select! {
+            _ = &mut hold => panic!("settling after the original floor must keep the wake alive"),
+            _ = tokio::time::sleep(HELD_OPEN_PROBE) => {}
+        }
+
+        // A follow-up task spawned by that wake should then get its own cap.
+        feed_sdk_frame(&handler, task_started("task-3")).await;
+        tokio::select! {
+            _ = &mut hold => panic!("task-3 should get a fresh per-task cap"),
+            _ = tokio::time::sleep(Duration::from_millis(600)) => {}
+        }
     }
 
     #[tokio::test]

@@ -3816,10 +3816,33 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let report = crate::doctor::run_doctor_freshness().await;
             Ok(serde_json::to_value(report).unwrap())
         }
+        "start_doctor_login" => {
+            let check_id: String = arg(&args, "checkId")?;
+            let start = crate::doctor::start_doctor_login(app_handle.clone(), check_id).await?;
+            Ok(serde_json::to_value(start).unwrap())
+        }
+        "cancel_doctor_login" => {
+            let check_id: String = arg(&args, "checkId")?;
+            let run_id: String = arg(&args, "runId")?;
+            let cancelled = crate::doctor::cancel_doctor_login(check_id, run_id).await;
+            Ok(Value::Bool(cancelled))
+        }
+        "doctor_login_status" => {
+            let check_id: String = arg(&args, "checkId")?;
+            let status = crate::doctor::doctor_login_status(check_id).await;
+            Ok(serde_json::to_value(status).unwrap())
+        }
+        "send_doctor_login_code" => {
+            let check_id: String = arg(&args, "checkId")?;
+            let run_id: String = arg(&args, "runId")?;
+            let code: String = arg(&args, "code")?;
+            crate::doctor::send_doctor_login_code(check_id, run_id, code).await?;
+            Ok(Value::Null)
+        }
         "run_doctor_fix" => {
             let check_id: String = arg(&args, "checkId")?;
             let fix_type: doctor::FixType = arg(&args, "fixType")?;
-            crate::doctor::run_doctor_fix(check_id, fix_type).await?;
+            crate::doctor::run_doctor_fix(app_handle.clone(), check_id, fix_type).await?;
             Ok(Value::Null)
         }
         "run_doctor_update" => {

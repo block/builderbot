@@ -351,6 +351,12 @@ pub fn check_single_ai_agent(
     );
 
     if let Some(ref path_str) = resolved_path {
+        // The binary resolved, so the provider's login command is runnable
+        // whatever the auth probe below concludes. It is surfaced on every
+        // branch from here on, independent of `auth_status` — see
+        // `DoctorCheck::login_command` for why the probe's verdict can't gate it.
+        let login_command = info.auth_command.map(str::to_string);
+
         if info.id == "ai-agent-goose" {
             let mut command = std::process::Command::new(path_str);
             command.arg("acp").arg("--help");
@@ -374,6 +380,7 @@ pub fn check_single_ai_agent(
                         bridge_path: None,
                         raw_output: Some(raw),
                         auth_status: None,
+                        login_command,
                         installed_version: None,
                         latest_version: None,
                         update_available: None,
@@ -404,6 +411,7 @@ pub fn check_single_ai_agent(
                         bridge_path: None,
                         raw_output: Some(raw),
                         auth_status: None,
+                        login_command,
                         installed_version: None,
                         latest_version: None,
                         update_available: None,
@@ -427,6 +435,7 @@ pub fn check_single_ai_agent(
                     .path(resolved_path)
                     .install_source(bridge_install_source.clone())
                     .main(version_readout(bridge_install_source.clone()))
+                    .login_command(login_command)
                     .raw_suffix(Some(&search)),
                 ),
                 Err(e) => DoctorCheck {
@@ -443,6 +452,7 @@ pub fn check_single_ai_agent(
                         "{header}\n$ goose acp --help\nerror: {e}\n{search}"
                     )),
                     auth_status: None,
+                    login_command,
                     installed_version: None,
                     latest_version: None,
                     update_available: None,
@@ -571,6 +581,7 @@ pub fn check_single_ai_agent(
                 bridge_path,
                 raw_output: Some(raw),
                 auth_status,
+                login_command,
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
@@ -614,6 +625,9 @@ pub fn check_single_ai_agent(
                 bridge_path: None,
                 raw_output: Some(format!("{header}\n{search}\n{main_search}")),
                 auth_status: None,
+                // The actionable problem here is the missing bridge; the agent
+                // can't run a session at all yet, so no login is offered.
+                login_command: None,
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
@@ -649,6 +663,7 @@ pub fn check_single_ai_agent(
             bridge_path: None,
             raw_output: Some(format!("{header}\n{search}{extra_search}")),
             auth_status: None,
+            login_command: None,
             installed_version: None,
             latest_version: None,
             update_available: None,
@@ -984,6 +999,211 @@ mod tests {
         );
         assert!(check.main.is_none());
         assert!(check.bridge.is_none());
+    }
+
+    const CLAUDE_LOGIN: &str = "claude-agent-acp --cli auth login";
+
+    /// Run the Claude check against a fake `claude-agent-acp` whose
+    /// `--cli auth status` exits with `status_exit`. The probe runs through a
+    /// login shell, so the shell gets a dotfile-free `HOME`/`ZDOTDIR` to keep
+    /// it fast and deterministic (the same reason the fix-runner tests do).
+    fn claude_check_with_auth_status_exit(name: &str, status_exit: i32) -> DoctorCheck {
+        let tmp = unique_tmp_dir(name);
+        let bin = tmp.join("bin");
+        let bridge = bin.join("claude-agent-acp");
+        write_executable(
+            &bridge,
+            &format!(
+                "#!/bin/sh\n\
+                 test \"$1\" = --cli || exit 44\n\
+                 test \"$2\" = auth || exit 45\n\
+                 test \"$3\" = status || exit 46\n\
+                 exit {status_exit}\n"
+            ),
+        );
+        let bridge_resolved = ResolvedBinary {
+            path: Some(bridge),
+            search_output: String::new(),
+            install_source: Some(InstallSource::Npm),
+        };
+        let env = DoctorEnv::new(vec![
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+        ]);
+
+        let check = check_single_ai_agent(
+            agent("ai-agent-claude"),
+            true,
+            std::slice::from_ref(&bridge_resolved),
+            None,
+            None,
+            Some(&env),
+        );
+        let _ = std::fs::remove_dir_all(tmp);
+        check
+    }
+
+    /// `login_command` is a capability of the resolved binary, not the probe's
+    /// verdict: a passing check carries it with no fix attached. This is the
+    /// expired-token shape — Claude's `auth status` exits 0 for a token the
+    /// vendor will reject — where a host that has just seen the agent fail to
+    /// authenticate needs to know a login exists although doctor sees nothing
+    /// to fix.
+    #[test]
+    fn authenticated_check_carries_login_command_without_a_fix() {
+        let check = claude_check_with_auth_status_exit("login-cmd-authenticated", 0);
+        assert_eq!(check.auth_status, Some(AuthStatus::Authenticated));
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(check.login_command.as_deref(), Some(CLAUDE_LOGIN));
+        assert_eq!(check.fix_type, None, "a passing check offers no fix");
+        assert_eq!(check.fix_command, None);
+    }
+
+    /// A positively signed-out agent carries the login command twice: as the
+    /// static capability and as the `Auth` fix, and the two agree.
+    #[test]
+    fn not_authenticated_check_carries_login_command_and_matching_auth_fix() {
+        let check = claude_check_with_auth_status_exit("login-cmd-not-authenticated", 1);
+        assert_eq!(check.auth_status, Some(AuthStatus::NotAuthenticated));
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.login_command.as_deref(), Some(CLAUDE_LOGIN));
+        assert_eq!(check.fix_type, Some(FixType::Auth));
+        assert_eq!(check.fix_command, check.login_command);
+    }
+
+    /// `Unknown` (here: the probe's exit 127) still carries the command. The
+    /// decision to withhold a login on `unknown` is the host's, made against
+    /// `auth_status`; doctor reports the capability uniformly rather than
+    /// encoding that policy, and still attaches no fix.
+    #[test]
+    fn unknown_auth_status_carries_login_command_without_a_fix() {
+        let check = claude_check_with_auth_status_exit("login-cmd-unknown", 127);
+        assert_eq!(check.auth_status, Some(AuthStatus::Unknown));
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.login_command.as_deref(), Some(CLAUDE_LOGIN));
+        assert_eq!(check.fix_type, None);
+        assert_eq!(check.fix_command, None);
+    }
+
+    /// A provider with a login command but no status probe reports
+    /// `NotApplicable` and still carries the command. Copilot runs without
+    /// shelling out.
+    #[test]
+    fn not_applicable_auth_status_carries_login_command() {
+        let single = resolved(Some("/n/bin/copilot"), Some(InstallSource::Npm));
+        let check = check_single_ai_agent(
+            agent("ai-agent-copilot"),
+            true,
+            std::slice::from_ref(&single),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(check.auth_status, Some(AuthStatus::NotApplicable));
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(check.login_command.as_deref(), Some("copilot login"));
+        assert_eq!(check.fix_type, None);
+    }
+
+    /// Providers without a login command never gain one, whatever branch the
+    /// check takes — the Doctor panel's "no button for Pi or Goose" rests on
+    /// this. Pi resolves both binaries without shelling out; Goose's
+    /// `acp --help` probe against a path that doesn't exist takes the
+    /// spawn-failure arm.
+    #[test]
+    fn provider_without_auth_command_has_no_login_command() {
+        let bridge = resolved(Some("/n/bin/pi-acp"), Some(InstallSource::Npm));
+        let main = resolved(Some("/c/bin/pi"), Some(InstallSource::Cargo));
+        let pi = check_single_ai_agent(
+            agent("ai-agent-pi"),
+            true,
+            std::slice::from_ref(&bridge),
+            Some(&main),
+            None,
+            None,
+        );
+        assert_eq!(pi.status, CheckStatus::Pass);
+        assert_eq!(pi.auth_status, None);
+        assert_eq!(pi.login_command, None);
+
+        let tmp = unique_tmp_dir("login-cmd-goose");
+        let missing_goose = tmp.join("goose");
+        let goose_resolved = resolved(
+            Some(&missing_goose.to_string_lossy()),
+            Some(InstallSource::Brew),
+        );
+        let goose = check_single_ai_agent(
+            agent("ai-agent-goose"),
+            true,
+            std::slice::from_ref(&goose_resolved),
+            None,
+            None,
+            None,
+        );
+        let _ = std::fs::remove_dir_all(tmp);
+        assert_eq!(goose.status, CheckStatus::Fail, "probe could not spawn");
+        assert_eq!(goose.login_command, None);
+    }
+
+    /// No resolved binary, no login command: neither an uninstalled agent nor
+    /// one whose bridge is missing (the actionable problem there is the
+    /// bridge) offers a login it could not run.
+    #[test]
+    fn unresolved_agent_has_no_login_command() {
+        let missing = resolved(None, None);
+        let uninstalled = check_single_ai_agent(
+            agent("ai-agent-claude"),
+            false,
+            std::slice::from_ref(&missing),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(uninstalled.fix_type, Some(FixType::Command));
+        assert_eq!(uninstalled.login_command, None);
+
+        let main = resolved(Some("/h/.local/bin/amp"), Some(InstallSource::Unknown));
+        let bridge_missing = check_single_ai_agent(
+            agent("ai-agent-amp"),
+            true,
+            std::slice::from_ref(&missing),
+            Some(&main),
+            None,
+            None,
+        );
+        assert_eq!(bridge_missing.fix_type, Some(FixType::Bridge));
+        assert_eq!(bridge_missing.login_command, None);
+    }
+
+    /// The field is additive on the wire: it serializes under its camelCase
+    /// name, and a payload from a doctor without it reads back as `None`.
+    #[test]
+    fn login_command_is_additive_on_the_wire() {
+        let single = resolved(Some("/n/bin/copilot"), Some(InstallSource::Npm));
+        let check = check_single_ai_agent(
+            agent("ai-agent-copilot"),
+            true,
+            std::slice::from_ref(&single),
+            None,
+            None,
+            None,
+        );
+        let json = serde_json::to_value(&check).expect("serialize check");
+        assert_eq!(json["loginCommand"], serde_json::json!("copilot login"));
+
+        let mut without = json.clone();
+        without
+            .as_object_mut()
+            .expect("check is an object")
+            .remove("loginCommand");
+        let parsed: DoctorCheck = serde_json::from_value(without).expect("older payload parses");
+        assert_eq!(parsed.login_command, None);
+        assert_eq!(parsed.id, check.id);
     }
 
     #[test]

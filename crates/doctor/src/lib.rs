@@ -18,8 +18,10 @@ pub use environment::DoctorEnv;
 pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixType};
 
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agents::{
     bundled_version_probe_args, check_single_ai_agent, derive_update_command, lookup_fix_command,
@@ -53,6 +55,7 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
         bridge_path: None,
         raw_output: None,
         auth_status: None,
+        login_command: None,
         installed_version: None,
         latest_version: None,
         update_available: None,
@@ -364,6 +367,7 @@ fn timeout_diagnostic_check(timeout: CommandTimeout, id: String) -> DoctorCheck 
             timeout.raw_output()
         )),
         auth_status: None,
+        login_command: None,
         installed_version: None,
         latest_version: None,
         update_available: None,
@@ -673,6 +677,507 @@ struct FreshnessTarget {
     version_args: Option<&'static [&'static str]>,
 }
 
+/// Opt-in piped stdin for a fix subprocess. Create with [`FixStdin::pipe`];
+/// keep the [`FixStdinWriter`], put the `FixStdin` in
+/// [`ExecuteFixOptions::stdin`].
+///
+/// Single-use: the first execution claims the pipe, and any later execution
+/// handed the same `FixStdin` — or a clone of it, including one carried along by
+/// a cloned [`ExecuteFixOptions`] — fails with an error instead of spawning.
+/// Retrying a fix needs a fresh pipe.
+#[derive(Debug, Clone)]
+pub struct FixStdin {
+    shared: Arc<FixStdinShared>,
+}
+
+/// The pipe state plus the latch saying the fix is over. The latch lives outside
+/// the mutex precisely so [`FixStdin::close`] never waits on it: a host thread
+/// parked in a `write_all` holds the mutex for as long as the pipe stays full,
+/// and the runner's return path — which is what [`FixTimeout`] promises is
+/// bounded — cannot be queued behind that.
+///
+/// The two are kept consistent by [`FixStdinGuard`]: whichever lock holder is
+/// last to leave performs the `Closed` transition.
+#[derive(Debug)]
+struct FixStdinShared {
+    state: Mutex<FixStdinState>,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+/// The pipe's whole life cycle: `Buffered` until the fix spawns, `Live` while it
+/// runs, then `Closed` — terminal, and reached when the fix ends, when the last
+/// writer drops, or when a write finds the read end gone. Holding the child's
+/// stdin handle here rather than in a thread of its own is what lets
+/// [`FixStdinWriter::send_line`] write through and report the real outcome.
+#[derive(Debug)]
+enum FixStdinState {
+    /// Before the fix spawns: lines the host queued, replayed at spawn.
+    /// `claimed` marks the execution that reserved this pipe, so a second one
+    /// is rejected before it spawns. `eof` records that every writer dropped
+    /// pre-spawn, so the replay is followed immediately by closing the pipe.
+    /// `queued_bytes` is what the replay will write, held under
+    /// [`MAX_QUEUED_FIX_STDIN_BYTES`].
+    Buffered {
+        lines: Vec<String>,
+        queued_bytes: usize,
+        eof: bool,
+        claimed: bool,
+    },
+    /// Fix running: writes go straight into the child's stdin.
+    Live(std::process::ChildStdin),
+    /// Fix finished, every writer gone, or a write hit a dead pipe.
+    Closed,
+}
+
+/// Rejection for an execution handed a `FixStdin` another one already claimed.
+const FIX_STDIN_REUSED: &str = "FixStdin already consumed by a previous fix execution; \
+     create a fresh pipe with FixStdin::pipe() for each run";
+
+/// Rejection for a line the pipe cannot deliver because it is closed.
+const FIX_STDIN_CLOSED: &str = "Fix is no longer accepting input";
+
+/// Rejection for a pre-spawn line that would push the queue past
+/// [`MAX_QUEUED_FIX_STDIN_BYTES`].
+const FIX_STDIN_QUEUE_FULL: &str = "Fix input queue is full before the fix started; \
+     send the rest once the fix is running";
+
+/// Ceiling on bytes queued through [`FixStdinWriter::send_line`] before the fix
+/// spawns. The replay in `FixStdin::attach` writes inline on the runner thread,
+/// before the deadline is armed and with nothing able to interrupt it, so it has
+/// to fit in a virgin pipe's capacity or the runner would park there — the one
+/// place [`FixTimeout`]'s bound could not reach. 4 KiB is the one-page floor of a
+/// pipe on any platform doctor runs on (macOS and Linux both measure 64 KiB in
+/// practice), and orders of magnitude above the auth code this exists to carry.
+pub const MAX_QUEUED_FIX_STDIN_BYTES: usize = 4096;
+
+/// Guard over the pipe state that applies the `closed` latch on release. Every
+/// lock holder therefore closes the pipe on its way out if the fix ended while it
+/// held the lock — including a host `send_line` that was mid-write, which is what
+/// lets [`FixStdin::close`] get away with never blocking.
+struct FixStdinGuard<'a> {
+    shared: &'a FixStdinShared,
+    guard: std::sync::MutexGuard<'a, FixStdinState>,
+}
+
+impl std::ops::Deref for FixStdinGuard<'_> {
+    type Target = FixStdinState;
+
+    fn deref(&self) -> &FixStdinState {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for FixStdinGuard<'_> {
+    fn deref_mut(&mut self) -> &mut FixStdinState {
+        &mut self.guard
+    }
+}
+
+impl Drop for FixStdinGuard<'_> {
+    fn drop(&mut self) {
+        if self
+            .shared
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.guard = FixStdinState::Closed;
+        }
+    }
+}
+
+impl FixStdinShared {
+    /// Locking the pipe state recovers from poisoning instead of propagating it:
+    /// no invariant spans the lock (the state is a plain enum, and the only work
+    /// done under it is a `Vec` push or a pipe write), while treating a poisoned
+    /// lock as a failure would cost `send_line` its delivery guarantee and leak
+    /// the child's stdin handle for the lifetime of the writer.
+    fn lock(&self) -> FixStdinGuard<'_> {
+        FixStdinGuard {
+            shared: self,
+            guard: self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+}
+
+impl FixStdinState {
+    /// Queue or write `line` — with the trailing newline the caller doesn't
+    /// supply — according to the current state. A failed write latches `Closed`
+    /// so later sends fail without re-discovering the dead pipe.
+    fn send_line(&mut self, line: String) -> Result<(), String> {
+        match self {
+            FixStdinState::Buffered {
+                lines,
+                queued_bytes,
+                ..
+            } => {
+                // The newline `send_line` appends is part of what enters the
+                // pipe, so charge for it.
+                let cost = line.len() + 1;
+                if *queued_bytes + cost > MAX_QUEUED_FIX_STDIN_BYTES {
+                    return Err(format!(
+                        "{FIX_STDIN_QUEUE_FULL} (limit {MAX_QUEUED_FIX_STDIN_BYTES} bytes)"
+                    ));
+                }
+                *queued_bytes += cost;
+                lines.push(line);
+                Ok(())
+            }
+            FixStdinState::Live(pipe) => {
+                use std::io::Write;
+                match pipe
+                    .write_all(format!("{line}\n").as_bytes())
+                    .and_then(|()| pipe.flush())
+                {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        *self = FixStdinState::Closed;
+                        Err(format!("{FIX_STDIN_CLOSED}: {e}"))
+                    }
+                }
+            }
+            FixStdinState::Closed => Err(FIX_STDIN_CLOSED.to_string()),
+        }
+    }
+}
+
+impl FixStdin {
+    /// Create a connected pair: a cloneable writer for the caller to keep and
+    /// the `FixStdin` to place in [`ExecuteFixOptions::stdin`]. Lines sent
+    /// before the fix subprocess spawns are queued and replayed once it does;
+    /// dropping every writer clone closes the child's stdin (EOF).
+    ///
+    /// Dropping the writers is the only way to say "no more input", and a fix
+    /// that reads *to EOF* rather than a fixed number of lines will not exit
+    /// until that happens — a host that leaves its input UI open pins the fix
+    /// until [`ExecuteFixOptions::timeout`] fires. Nothing else is at stake in
+    /// dropping them: the child's stdin handle lives with the fix and is
+    /// reclaimed when it ends, held writer or not.
+    ///
+    /// "No more input" is all EOF says. It is not a way to *stop* a fix: one that
+    /// is not reading stdin — the login CLI, waiting on its browser callback —
+    /// ignores it and runs on. Ending a fix early is [`FixCancellation`]'s job.
+    pub fn pipe() -> (FixStdinWriter, FixStdin) {
+        let shared = Arc::new(FixStdinShared {
+            state: Mutex::new(FixStdinState::Buffered {
+                lines: Vec::new(),
+                queued_bytes: 0,
+                eof: false,
+                claimed: false,
+            }),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
+        (
+            FixStdinWriter {
+                inner: Arc::new(FixStdinWriterInner {
+                    shared: shared.clone(),
+                }),
+            },
+            FixStdin { shared },
+        )
+    }
+
+    /// Reserve this pipe for a child about to be spawned. First caller wins;
+    /// `Err` on every later call (a clone already fed an execution), which the
+    /// caller surfaces instead of spawning a fix whose stdin is already dead.
+    fn claim(&self) -> Result<(), String> {
+        match &mut *self.shared.lock() {
+            FixStdinState::Buffered { claimed, .. } if !*claimed => {
+                *claimed = true;
+                Ok(())
+            }
+            _ => Err(FIX_STDIN_REUSED.to_string()),
+        }
+    }
+
+    /// Hand the spawned child's stdin to the pipe, replay whatever the host
+    /// queued before the spawn, and go live.
+    ///
+    /// Only ever reached after a successful [`FixStdin::claim`], which is what
+    /// guarantees the state is still `Buffered`; any other state means another
+    /// execution owns the pipe, and dropping the handle — an immediate EOF for
+    /// this child — is the only safe reading of that. A replay write that fails
+    /// is not the fix's failure (a command is free to exit successfully without
+    /// reading its stdin), so it only latches `Closed`; the host hears about it
+    /// from its next `send_line`.
+    ///
+    /// The replay writes inline on the runner's thread, ahead of the fix's
+    /// deadline, so it must not be able to park: that is what
+    /// [`MAX_QUEUED_FIX_STDIN_BYTES`] buys — the whole queue fits in a virgin
+    /// pipe's capacity, so these writes cannot block on a child that never reads.
+    fn attach(&self, child_stdin: std::process::ChildStdin) {
+        let mut state = self.shared.lock();
+        let FixStdinState::Buffered { lines, eof, .. } = &mut *state else {
+            return;
+        };
+        let queued = std::mem::take(lines);
+        let eof = *eof;
+        *state = FixStdinState::Live(child_stdin);
+        for line in queued {
+            if state.send_line(line).is_err() {
+                break;
+            }
+        }
+        if eof {
+            // Every writer was dropped before the spawn, so the queued lines
+            // above are all the input there will ever be and closing now is the
+            // EOF the fix is waiting for.
+            *state = FixStdinState::Closed;
+        }
+    }
+
+    /// The fix is over: close the pipe so every later send fails immediately.
+    /// A write hitting `EPIPE` cannot be the signal on its own — a backgrounded
+    /// grandchild that inherited the child's stdin keeps the read end open, and
+    /// writes into it go on succeeding long after the fix is gone.
+    ///
+    /// Never blocks, which is what keeps the runner's return path inside
+    /// [`FixTimeout`]'s bound: a host thread parked in a `write_all` into a full
+    /// pipe holds the state mutex for as long as the pipe stays full. The latch
+    /// goes up first, so the transition is guaranteed either way — here if the
+    /// lock is free, otherwise by the holder's [`FixStdinGuard`] on release.
+    fn close(&self) {
+        self.shared
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Not best-effort correctness: this arm is what reclaims the child's
+        // stdin handle in the ordinary case, where nobody will take the lock
+        // again to run the guard's transition.
+        match self.shared.state.try_lock() {
+            Ok(mut state) => *state = FixStdinState::Closed,
+            Err(std::sync::TryLockError::Poisoned(e)) => *e.into_inner() = FixStdinState::Closed,
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+    }
+
+    /// Close a pipe whose execution never started, leaving one that another
+    /// execution already owns alone. The claim is the ownership test: it succeeds
+    /// only on a pipe no run has reserved, so a stale clone whose first run is
+    /// still live is never EOF'd out from under it.
+    fn close_if_unclaimed(&self) {
+        if self.claim().is_ok() {
+            self.close();
+        }
+    }
+}
+
+/// Cloneable handle for feeding lines to a fix subprocess's stdin. Dropping
+/// every clone closes the fix's stdin (EOF) — "no more input", not "stop"; a
+/// fix that isn't reading stdin never notices. Stopping one is
+/// [`FixCancellation`]'s job.
+#[derive(Debug, Clone)]
+pub struct FixStdinWriter {
+    inner: Arc<FixStdinWriterInner>,
+}
+
+/// Shared by every [`FixStdinWriter`] clone so EOF is delivered exactly when
+/// the last one drops, which is what keeps the writer `Clone`.
+#[derive(Debug)]
+struct FixStdinWriterInner {
+    shared: Arc<FixStdinShared>,
+}
+
+impl Drop for FixStdinWriterInner {
+    fn drop(&mut self) {
+        // Nothing to signal once the fix is over, and this is the one place that
+        // must not skip the lock when it is contended: dropping the last writer
+        // *is* the EOF, and a fix reading to EOF would hang without it.
+        if self
+            .shared
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        match &mut *self.shared.lock() {
+            // Pre-spawn the queued lines still have to reach the child first, so
+            // record the EOF for `attach` to deliver after the replay.
+            FixStdinState::Buffered { eof, .. } => *eof = true,
+            // Otherwise dropping the state's `ChildStdin` *is* the EOF.
+            state => *state = FixStdinState::Closed,
+        }
+    }
+}
+
+impl FixStdinWriter {
+    /// Write one line to the fix's stdin; a trailing `\n` is appended and the
+    /// pipe is flushed.
+    ///
+    /// `Ok` means the bytes were handed to the child's stdin pipe — not that the
+    /// fix read them, since a fix can exit with bytes still buffered. `Err`
+    /// means the line was *not* delivered: the fix has finished, its stdin is
+    /// closed, or this pipe was never attached to a spawned fix.
+    ///
+    /// Lines sent before the fix spawns are queued and replayed at spawn, so
+    /// they return `Ok` before any pipe exists — the one `Ok` that is not a
+    /// delivery guarantee, and unavoidable for a host that wants to prime the
+    /// input before the fix starts. That queue is capped at
+    /// [`MAX_QUEUED_FIX_STDIN_BYTES`], so a bulk pre-spawn send fails rather than
+    /// wedging the runner's replay; send the rest once the fix is running. Once a
+    /// fix execution gives up without ever spawning (an unresolved command, a
+    /// spawn failure), the pipe is closed and every later send fails.
+    ///
+    /// Completion is signalled by the fix's own `Result`, never by `send_line`,
+    /// and a fix that has stopped wanting input is not thereby over: a host that
+    /// wants the run *ended* — an abandoned login, say — cancels it through
+    /// [`FixCancellation`], which is what makes the pipe close.
+    /// May block if the fix isn't reading and the pipe buffer fills, so a host
+    /// sending anything bulkier than a pasted code should call this off its
+    /// async runtime. Such a write also delays any other clone's `send_line` and
+    /// the last-writer EOF — though no longer the fix's own completion or `Err`,
+    /// which stay inside [`ExecuteFixOptions::timeout`].
+    pub fn send_line(&self, line: impl Into<String>) -> Result<(), String> {
+        // Ahead of the mutex, so a host is never queued behind another clone's
+        // parked write for a fix that has already finished.
+        if self
+            .inner
+            .shared
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(FIX_STDIN_CLOSED.to_string());
+        }
+        self.inner.shared.lock().send_line(line.into())
+    }
+}
+
+/// Opt-in cancellation for a fix subprocess. Create with
+/// [`FixCancellation::token`]; keep the [`FixCancelHandle`], put the
+/// `FixCancellation` in [`ExecuteFixOptions::cancellation`].
+///
+/// This is the only way a host can end a fix early. Closing the fix's stdin is
+/// not one: a fix that is not reading stdin — `claude-agent-acp --cli auth
+/// login` prints its URL and then waits on its browser callback, ignoring EOF —
+/// runs on until [`ExecuteFixOptions::timeout`] fires. The runner owns the
+/// child, so the kill has to come from inside it, and this is how a host asks.
+///
+/// Unlike [`FixStdin`] a token is not single-use — nothing about it is spent by
+/// a run — but a cancelled token stays cancelled, so a retry that reuses one is
+/// refused before it spawns. Attach a fresh token to each run.
+#[derive(Debug, Clone)]
+pub struct FixCancellation {
+    shared: Arc<FixCancellationShared>,
+}
+
+/// One latch shared by the handle and the token. An atomic rather than anything
+/// the runner has to lock: `cancel` is called from a UI thread in response to a
+/// click and must never wait on a runner mid-`write_all`, and the runner reads
+/// it once per output line without contending with anyone.
+#[derive(Debug)]
+struct FixCancellationShared {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl FixCancellation {
+    /// Create a connected pair: a cloneable handle for the caller to keep and
+    /// the `FixCancellation` to place in [`ExecuteFixOptions::cancellation`].
+    pub fn token() -> (FixCancelHandle, FixCancellation) {
+        let shared = Arc::new(FixCancellationShared {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        });
+        (
+            FixCancelHandle {
+                shared: shared.clone(),
+            },
+            FixCancellation { shared },
+        )
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.shared
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Cloneable, thread-safe handle for cancelling a fix subprocess from wherever
+/// the host learns the user gave up — a Tauri command, a UI callback, another
+/// task — while the run itself is awaited elsewhere.
+#[derive(Debug, Clone)]
+pub struct FixCancelHandle {
+    shared: Arc<FixCancellationShared>,
+}
+
+impl FixCancelHandle {
+    /// Ask the runner to stop the fix. Infallible and idempotent: the request is
+    /// recorded whatever state the run is in, and repeating it changes nothing.
+    ///
+    /// What happens next depends on where the run is. Before the fix has spawned,
+    /// the runner refuses to spawn it and returns `Err`. While it runs, the runner
+    /// notices within [`FIX_CANCEL_POLL_INTERVAL`] (sooner if the fix is
+    /// printing), kills the fix — its whole process tree where doctor owns the
+    /// process group, the direct child where it does not, exactly as the timeout
+    /// does — delivers any output already read, emits one `doctor: fix
+    /// cancelled` notice through `on_line`, and returns `Err` naming the
+    /// cancellation. After the run has returned this is a no-op: the fix's own
+    /// `Result` stands.
+    ///
+    /// A cancel that lands in the instant between the fix exiting and the runner
+    /// observing that exit is reported as a cancellation, the same way the
+    /// timeout is; the window is the runner's own reap latency, not a human's.
+    pub fn cancel(&self) {
+        self.shared
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called on this handle or any
+    /// clone of it. A host holding the run's `Err` can tell a cancellation it
+    /// asked for from a failure without parsing the message: the runner's error
+    /// type is unchanged, so this is where that distinction lives.
+    pub fn is_cancelled(&self) -> bool {
+        self.shared
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// How long a cancellable fix's runner blocks between looks at its
+/// [`FixCancellation`], so the bound on cancel latency while the fix is silent.
+/// A cancellable run that is *not* cancelled pays one wake-up per interval —
+/// nothing next to a login idling for minutes — and a run without a
+/// `FixCancellation` never polls at all.
+pub const FIX_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Wall-clock bound on a single fix execution.
+///
+/// Fixes are install/auth/update actions, so the bound has to clear a
+/// cold-cache `npm install -g` behind a corporate proxy and a human doing SSO
+/// in a browser — orders of magnitude above the probe timeouts in
+/// [`crate::command`]. This is an enum rather than `Option<Duration>` because
+/// `None` reads as both "use the default" and "no timeout"; here every literal
+/// has to say which it means, and `Unbounded` stays reachable for a caller
+/// that genuinely wants the old forever-wait.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FixTimeout {
+    /// [`DEFAULT_FIX_TIMEOUT`].
+    #[default]
+    Standard,
+    /// A caller-chosen bound.
+    After(Duration),
+    /// No bound at all: the fix runs until it exits on its own.
+    Unbounded,
+}
+
+impl FixTimeout {
+    /// The wall-clock bound, or `None` for [`FixTimeout::Unbounded`].
+    fn duration(self) -> Option<Duration> {
+        match self {
+            FixTimeout::Standard => Some(DEFAULT_FIX_TIMEOUT),
+            FixTimeout::After(duration) => Some(duration),
+            FixTimeout::Unbounded => None,
+        }
+    }
+}
+
+/// Deadline applied by [`FixTimeout::Standard`]. Deliberately generous: it
+/// exists to stop a wedged fix from pinning a blocking worker and a process
+/// tree for the lifetime of the host, not to police slow-but-honest installs
+/// or a leisurely browser login.
+pub const DEFAULT_FIX_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Options for executing a doctor fix command.
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteFixOptions {
@@ -682,11 +1187,52 @@ pub struct ExecuteFixOptions {
     pub npm_registry: Option<String>,
     /// Optional caller-provided environment snapshot for the fix subprocess.
     pub env: Option<DoctorEnv>,
+    /// Opt-in piped stdin for the fix subprocess (see [`FixStdin::pipe`]).
+    /// `None` keeps the child inheriting the host process's stdin, so
+    /// terminal hosts can still run interactive fixes directly.
+    ///
+    /// A `FixStdin` feeds exactly one execution, so a cached options struct
+    /// must have this field refreshed (or be rebuilt) before a fix is retried;
+    /// reusing it fails the run.
+    pub stdin: Option<FixStdin>,
+    /// Wall-clock bound on the fix. Defaults to [`FixTimeout::Standard`].
+    pub timeout: FixTimeout,
+    /// Opt-in cancellation for the fix subprocess (see
+    /// [`FixCancellation::token`]). `None` means nothing but the fix's own
+    /// exit or [`timeout`](Self::timeout) ends the run — closing a piped stdin
+    /// does not, since a fix that isn't reading it never notices.
+    ///
+    /// A cancelled token stays cancelled, so a cached options struct that was
+    /// cancelled must have this field refreshed before a fix is retried;
+    /// reusing it refuses the run before it spawns.
+    pub cancellation: Option<FixCancellation>,
 }
 
 impl ExecuteFixOptions {
     pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
         self.env = Some(DoctorEnv::new(vars));
+        self
+    }
+
+    /// Attach an opt-in stdin pipe (see [`FixStdin::pipe`]). The `FixStdin`
+    /// feeds exactly one execution: call this again with a fresh pipe for
+    /// every retry rather than reusing a built options struct.
+    pub fn with_stdin(mut self, stdin: FixStdin) -> Self {
+        self.stdin = Some(stdin);
+        self
+    }
+
+    /// Override the wall-clock bound on the fix (see [`FixTimeout`]).
+    pub fn with_timeout(mut self, timeout: FixTimeout) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Attach an opt-in cancellation token (see [`FixCancellation::token`]).
+    /// Attach a fresh one for every retry: a token cancelled during one run
+    /// refuses the next before it spawns.
+    pub fn with_cancellation(mut self, cancellation: FixCancellation) -> Self {
+        self.cancellation = Some(cancellation);
         self
     }
 }
@@ -722,7 +1268,7 @@ pub async fn execute_fix_with_options(
         ExecuteFixOptions {
             command_override,
             npm_registry: npm_registry.map(str::to_string),
-            env: None,
+            ..Default::default()
         },
     )
     .await
@@ -779,7 +1325,7 @@ where
         ExecuteFixOptions {
             command_override,
             npm_registry: npm_registry.map(str::to_string),
-            env: None,
+            ..Default::default()
         },
         on_line,
     )
@@ -797,6 +1343,11 @@ pub async fn execute_fix_streaming_with_env_options<F>(
 where
     F: FnMut(&str) + Send + 'static,
 {
+    // Armed ahead of the lookup so every exit that never reaches the runner closes
+    // the pipe. Once the runner claims, this is a no-op — the claim is spent, and
+    // the runner's own `FixStdinCloser` owns the close from there.
+    let _unlaunched_closer = opts.stdin.as_ref().map(UnlaunchedFixStdinCloser);
+
     let command = match opts.command_override {
         Some(cmd) => cmd,
         None => lookup_fix_command(&check_id, &fix_type)
@@ -813,21 +1364,49 @@ where
 
     // Fixes are intentionally not routed through the bounded probe runner:
     // these are user-triggered install/auth/update actions and can reasonably
-    // be interactive or long-running.
-    run_command_streaming(command, opts.env, on_line).await
+    // be interactive or long-running, so they get the far more generous
+    // `FixTimeout` bound instead of a probe timeout.
+    // Cloned rather than moved because `_unlaunched_closer` borrows it: an `Arc`
+    // bump, and the runner holds its own handle to the same shared state.
+    run_command_streaming(
+        command,
+        opts.env,
+        opts.stdin.clone(),
+        opts.timeout,
+        opts.cancellation,
+        on_line,
+    )
+    .await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
 pub(crate) async fn run_command_streaming<F>(
     command: String,
     env: Option<DoctorEnv>,
+    stdin: Option<FixStdin>,
+    timeout: FixTimeout,
+    cancellation: Option<FixCancellation>,
     on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
+    // Decided here, before `stdin` moves into the closure, and from the host's own
+    // fd 0 rather than the blocking worker's — they are the same descriptor, but
+    // reading it on this side keeps the runner's behavior a parameter that tests
+    // can set.
+    let process_group = FixProcessGroup::for_fix(stdin.as_ref(), std::io::stdin().is_terminal());
+
     tokio::task::spawn_blocking(move || {
-        run_command_streaming_blocking(&command, env.as_ref(), on_line)
+        run_command_streaming_blocking(
+            &command,
+            env.as_ref(),
+            stdin,
+            timeout,
+            cancellation,
+            process_group,
+            on_line,
+        )
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
@@ -1011,31 +1590,220 @@ pub(crate) fn execute_command_with_path_prefix_with_env(
     }
 }
 
+/// Closes the fix's stdin pipe when `run_command_streaming_blocking` leaves its
+/// body — normal return, error return, timeout, spawn failure, or a panic in
+/// `on_line`. Every path has to close it: a host that still holds a
+/// [`FixStdinWriter`] would otherwise keep getting `Ok` from `send_line` for a
+/// fix that is already over, and the child's stdin handle would live as long as
+/// that writer.
+struct FixStdinCloser<'a>(&'a FixStdin);
+
+impl Drop for FixStdinCloser<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+/// Closes the pipe when a fix never reaches `run_command_streaming_blocking`: an
+/// unresolved command, a panic in the `on_line` preamble, a blocking task dropped
+/// before it ran. Distinct from [`FixStdinCloser`], which closes unconditionally
+/// because by then the claim is that run's own — this one must not touch a pipe
+/// another execution has claimed, since `FixStdin` clones share one state and
+/// EOF'ing a live login out from under the user would be worse than the bogus
+/// `Ok` it is here to prevent.
+struct UnlaunchedFixStdinCloser<'a>(&'a FixStdin);
+
+impl Drop for UnlaunchedFixStdinCloser<'_> {
+    fn drop(&mut self) {
+        self.0.close_if_unclaimed();
+    }
+}
+
+/// Whether doctor puts the fix's shell in its own process group, which is what
+/// lets the timeout's `kill(-pid)` reach the fix's whole tree instead of just the
+/// direct child.
+///
+/// Staying in doctor's group is only worth its cost — descendants surviving the
+/// deadline, and a direct-child kill whose reach depends on whether zsh
+/// exec-optimized the payload away — when the child might read the host's
+/// terminal. That needs an actual tty on fd 0, so the decision is about fd 0 and
+/// nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixProcessGroup {
+    /// The child leads its own group: a timeout kill takes its descendants too.
+    Own,
+    /// The child stays in doctor's group so it can read the host's terminal
+    /// without stopping on SIGTTIN. A timeout kill reaches the child only.
+    Inherited,
+}
+
+impl FixProcessGroup {
+    /// `stdin_is_terminal` is `std::io::stdin().is_terminal()` in production;
+    /// tests pass it explicitly so the decision doesn't depend on how the test
+    /// binary was launched (cargo hands the terminal through, which would make a
+    /// tree-kill test exercise `Own` in CI and `Inherited` on a laptop).
+    fn for_fix(stdin: Option<&FixStdin>, stdin_is_terminal: bool) -> Self {
+        // Piped stdin: doctor owns fd 0. Inherited but non-tty stdin (a GUI host:
+        // /dev/null, a pipe, a closed fd): there is no terminal on fd 0 to raise
+        // SIGTTIN, and this runner always pipes stdout/stderr, so the child holds
+        // no tty descriptor at all and cannot be stopped for touching one.
+        //
+        // The residual case is a fix that opens `/dev/tty` itself while fd 0 is
+        // not a tty but the host does have a controlling terminal — Staged
+        // launched from a shell with stdin redirected. Under `Own` that fix stops
+        // on SIGTTIN, and is then killed at the deadline with an accurate notice:
+        // bounded rather than silent, and the price of the tree kill on the path
+        // every real fix takes.
+        if stdin.is_some() || !stdin_is_terminal {
+            Self::Own
+        } else {
+            Self::Inherited
+        }
+    }
+}
+
+/// Why a run stopped short of the fix's own exit. One reason per run: whichever
+/// the runner observes first wins, and the other is never reported, so a cancel
+/// landing on a fix that is timing out (or the reverse) yields one notice and
+/// one `Err`, not two of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixStop {
+    /// [`FixTimeout`]'s deadline passed.
+    TimedOut,
+    /// The host's [`FixCancelHandle`] was used.
+    Cancelled,
+}
+
+/// Prefix of the one notice line a cancelled fix emits through `on_line`;
+/// callers grep for it the way they do `doctor: fix timed out after `.
+const FIX_CANCELLED_NOTICE_PREFIX: &str = "doctor: fix cancelled";
+
+/// How long the runner may block before looking around again: until the
+/// deadline, or one cancellation poll interval, whichever is sooner. `None` is
+/// "indefinitely" — the run has neither a deadline nor a token, and keeps the
+/// plain blocking `recv()`/`wait()` it always had (`recv_timeout(Duration::MAX)`
+/// overflows instantly, so unbounded cannot be spelled as a very long slice).
+fn fix_wait_slice(deadline: Option<Instant>, poll: Option<Duration>) -> Option<Duration> {
+    let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+    match (remaining, poll) {
+        (None, None) => None,
+        (Some(remaining), None) => Some(remaining),
+        (None, Some(poll)) => Some(poll),
+        (Some(remaining), Some(poll)) => Some(remaining.min(poll)),
+    }
+}
+
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
-/// `on_line`, and return based on the process exit status. This path is
-/// deliberately unbounded: fix commands are user-triggered install/auth/update
-/// actions and may prompt or run package managers. Stderr lines are also
-/// accumulated so a non-zero exit can surface a useful error message (matching
-/// the non-streaming behavior of the previous `execute_command`).
+/// `on_line`, and return based on the process exit status. Bounded by
+/// `timeout`, which is generous rather than tight: fix commands are
+/// user-triggered install/auth/update actions and may prompt or run package
+/// managers. Stderr lines are also accumulated so a non-zero exit can surface a
+/// useful error message (matching the non-streaming behavior of the previous
+/// `execute_command`).
+///
+/// With a `cancellation` token the runner also stops on the host's say-so:
+/// before the spawn by refusing it, afterwards by killing the fix exactly as the
+/// timeout would. It learns of the request by checking the token before every
+/// blocking wait and bounding each wait by [`FIX_CANCEL_POLL_INTERVAL`], so a
+/// silent fix is still interrupted within one interval — including under
+/// [`FixTimeout::Unbounded`], whose waits are otherwise plain blocking calls
+/// that nothing wakes. Without a token no wait is sliced and nothing here
+/// changes.
 fn run_command_streaming_blocking<F>(
     command: &str,
     env: Option<&DoctorEnv>,
+    stdin: Option<FixStdin>,
+    timeout: FixTimeout,
+    cancellation: Option<FixCancellation>,
+    process_group: FixProcessGroup,
     mut on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
     use std::io::{BufRead, BufReader};
+    use std::sync::mpsc::RecvTimeoutError;
 
-    let mut command = build_shell_command(command, &[], env);
-    command
+    use wait_timeout::ChildExt;
+
+    fn consume<F: FnMut(&str)>(msg: StreamLine, on_line: &mut F, stderr_accum: &mut String) {
+        match msg {
+            StreamLine::Stdout(s) => {
+                on_line(&s);
+            }
+            StreamLine::Stderr(s) => {
+                on_line(&s);
+                if !stderr_accum.is_empty() {
+                    stderr_accum.push('\n');
+                }
+                stderr_accum.push_str(&s);
+            }
+        }
+    }
+
+    // Claim the pipe before anything is launched: a `FixStdin` another execution
+    // already consumed can never deliver a line, so the child would block
+    // forever on a pipe nobody writes — the exact hang this option exists to
+    // fix. Always a caller bug, so surface it at the call site rather than
+    // spawning a doomed subprocess.
+    if let Some(fix_stdin) = &stdin {
+        fix_stdin.claim()?;
+    }
+
+    let cancel_requested = || {
+        cancellation
+            .as_ref()
+            .is_some_and(FixCancellation::is_cancelled)
+    };
+    // Only a cancellable run pays for polling; without a token every wait below
+    // keeps the shape it always had.
+    let poll = cancellation.as_ref().map(|_| FIX_CANCEL_POLL_INTERVAL);
+
+    let mut shell_command = build_shell_command(command, &[], env);
+    shell_command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    command::configure_command(&mut command);
-    let mut child = command
+    // Opt-in only: without a `FixStdin` the child keeps inheriting the host
+    // process's stdin, so interactive fixes in terminal hosts are untouched.
+    if stdin.is_some() {
+        shell_command.stdin(std::process::Stdio::piped());
+    }
+    // Own the whole tree so a timeout can kill more than the login shell:
+    // `kill(-pid)` only reaches an `npm install` under `zsh -lc` if the shell
+    // leads its own group. See [`FixProcessGroup`] for when doctor declines it.
+    #[cfg(unix)]
+    if process_group == FixProcessGroup::Own {
+        use std::os::unix::process::CommandExt;
+        shell_command.process_group(0);
+    }
+    command::configure_command(&mut shell_command);
+
+    // Declared ahead of the spawn so a spawn failure closes the pipe too: the
+    // claim above is already spent, so the host must not keep getting `Ok` for a
+    // fix that never started.
+    let _stdin_closer = stdin.as_ref().map(FixStdinCloser);
+
+    // Last look before the point of no return. Placed after the claim and the
+    // closer so a pre-spawn cancel leaves the pipe closed like any other exit,
+    // and before the spawn so there is no child to kill or reap: an `Err` after
+    // `spawn` would drop the `Child`, whose `Drop` neither kills nor reaps.
+    if cancel_requested() {
+        return Err(format!("Fix cancelled before it started: {command}"));
+    }
+
+    let mut child = shell_command
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
 
+    // Armed at the spawn so the fix's wall clock measures the fix, not the setup
+    // below it — which is what `FixTimeout` claims. It bounds the recv loop and
+    // the reap; the replay in `attach` is kept unable to park by
+    // `MAX_QUEUED_FIX_STDIN_BYTES` rather than by this deadline, since nothing
+    // interrupts a `write_all` already in progress.
+    let limit = timeout.duration();
+    let deadline = limit.map(|limit| Instant::now() + limit);
+
+    let child_stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
@@ -1059,28 +1827,152 @@ where
         }
     });
 
-    let mut stderr_accum = String::new();
-    for msg in rx.iter() {
-        match msg {
-            StreamLine::Stdout(s) => {
-                on_line(&s);
-            }
-            StreamLine::Stderr(s) => {
-                on_line(&s);
-                if !stderr_accum.is_empty() {
-                    stderr_accum.push('\n');
-                }
-                stderr_accum.push_str(&s);
-            }
-        }
+    // Deliberately after the readers are running: the replay of pre-spawn lines
+    // writes inline on this thread, so a queue larger than the pipe buffer would
+    // deadlock against a child whose output nobody is draining yet.
+    // `MAX_QUEUED_FIX_STDIN_BYTES` is what actually rules that out — keeping the
+    // readers first means the ordering isn't the only thing standing between a
+    // raised cap and a wedged runner.
+    if let (Some(fix_stdin), Some(child_stdin)) = (&stdin, child_stdin) {
+        fix_stdin.attach(child_stdin);
     }
 
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
+    let mut stderr_accum = String::new();
+    let mut stop: Option<FixStop> = None;
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for command: {e}"))?;
+    loop {
+        // Checked on every pass, not only when a wait slice runs out: a fix that
+        // prints continuously never lets `recv_timeout` time out, and would
+        // otherwise be uncancellable for as long as it kept talking.
+        if cancel_requested() {
+            stop = Some(FixStop::Cancelled);
+            break;
+        }
+        let msg = match fix_wait_slice(deadline, poll) {
+            Some(wait) => match rx.recv_timeout(wait) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        stop = Some(FixStop::TimedOut);
+                        break;
+                    }
+                    // A cancellation poll tick: back to the top to look.
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
+        consume(msg, &mut on_line, &mut stderr_accum);
+    }
+
+    let status = if stop.is_some() {
+        None
+    } else {
+        // Both pipes hit EOF, so the readers are already done and joining is
+        // immediate. The process can still outlive its pipes, though, so the
+        // reap is bounded by the same deadline — and, for a cancellable run,
+        // sliced the same way, since a `wait` is the other call nothing wakes.
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        loop {
+            if cancel_requested() {
+                stop = Some(FixStop::Cancelled);
+                break None;
+            }
+            match fix_wait_slice(deadline, poll) {
+                Some(wait) => match child
+                    .wait_timeout(wait)
+                    .map_err(|e| format!("Failed to wait for command: {e}"))?
+                {
+                    Some(status) => break Some(status),
+                    None => {
+                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                            stop = Some(FixStop::TimedOut);
+                            break None;
+                        }
+                        // A cancellation poll tick.
+                    }
+                },
+                None => {
+                    break Some(
+                        child
+                            .wait()
+                            .map_err(|e| format!("Failed to wait for command: {e}"))?,
+                    )
+                }
+            }
+        }
+    };
+
+    let Some(status) = status else {
+        let stop = stop.expect("a missing exit status means the run was stopped");
+        // Anything the readers already queued is real output the user should
+        // see before the notice explaining why it stopped.
+        while let Ok(msg) = rx.try_recv() {
+            consume(msg, &mut on_line, &mut stderr_accum);
+        }
+        // Kill before phrasing the notice so it reports what was actually
+        // signalled rather than what we hoped: on the `Inherited` path the child
+        // is not a group leader, so `kill(-pid)` would fail with `ESRCH` and the
+        // fallback reaches the direct child only — and whether that is the fix
+        // itself or a login shell that kept it as a grandchild depends on the
+        // user's dotfiles. Skip the pointless negative-pid `kill` there, since
+        // its failure is known by construction.
+        let reach = match process_group {
+            FixProcessGroup::Own => command::kill_child_process_group_or_child(&mut child),
+            FixProcessGroup::Inherited => {
+                let _ = child.kill();
+                command::KillReach::ChildOnly
+            }
+        };
+        let _ = child.wait();
+        // Late lines the kill itself shook loose.
+        while let Ok(msg) = rx.try_recv() {
+            consume(msg, &mut on_line, &mut stderr_accum);
+        }
+        let survivors = match reach {
+            command::KillReach::ProcessGroup => "killed the fix and its child processes",
+            command::KillReach::ChildOnly => {
+                "killed the fix process; anything it started may still be running"
+            }
+        };
+        let (notice, mut err) = match stop {
+            FixStop::TimedOut => {
+                let limit = limit.expect("a deadline only exists when the fix is bounded");
+                (
+                    format!(
+                        "doctor: fix timed out after {} — {survivors}",
+                        format_duration(limit)
+                    ),
+                    format!(
+                        "Fix timed out after {} without finishing: {command}",
+                        format_duration(limit)
+                    ),
+                )
+            }
+            FixStop::Cancelled => (
+                format!("{FIX_CANCELLED_NOTICE_PREFIX} — {survivors}"),
+                format!("Fix cancelled before finishing: {command}"),
+            ),
+        };
+        on_line(&notice);
+        // The reader threads are deliberately not joined: a descendant that
+        // escaped the process group can hold the inherited stdout open long
+        // after the fix is dead, and waiting on that is the hang this timeout
+        // exists to end. Dropping `rx` retires them at their next send.
+        //
+        // A host that only logs the error string shouldn't be told the tree is
+        // dead when it isn't. Appended so the existing "names the timeout and the
+        // command" shape of the message survives.
+        if reach == command::KillReach::ChildOnly {
+            err.push_str(" (anything the fix started may still be running)");
+        }
+        return Err(err);
+    };
 
     if status.success() {
         Ok(())
@@ -1100,7 +1992,7 @@ mod tests {
 
     use std::path::Path;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn timeout(label: &str, command: &str) -> CommandTimeout {
         CommandTimeout::new(label, command, Duration::from_secs(15))
@@ -1198,6 +2090,9 @@ mod tests {
         let result = run_command_streaming(
             "echo doctor-streaming-marker-hello && echo doctor-streaming-marker-world".to_string(),
             None,
+            None,
+            FixTimeout::Standard,
+            None,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1217,6 +2112,1315 @@ mod tests {
                 .iter()
                 .any(|l| l == "doctor-streaming-marker-world"),
             "did not see 'world' marker; captured: {captured:?}",
+        );
+    }
+
+    /// A line sent through the `FixStdin` pipe must reach the child's stdin
+    /// and dropping the last writer must deliver EOF: `cat` echoes the line
+    /// and exits 0 only when its stdin closes. Sending before the child
+    /// spawns also exercises the pre-spawn buffering guarantee.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_round_trips_through_cat() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let (writer, stdin) = FixStdin::pipe();
+
+        writer.send_line("doctor-stdin-marker-echo").unwrap();
+        drop(writer);
+
+        let result = run_command_streaming(
+            "cat".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            None,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "cat should exit 0 on EOF; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-marker-echo"),
+            "cat should echo the line written to its piped stdin; captured: {captured:?}",
+        );
+    }
+
+    /// The paste-an-auth-code shape: the command prompts by blocking on a line
+    /// read, and the caller feeds the answer through the writer while the fix is
+    /// running. Sending from inside `on_line` — on the fix's own thread, in
+    /// response to the prompt the fix printed — pins the send to a moment when
+    /// the pipe is provably live, so the `Ok` asserted here is the delivery
+    /// guarantee and not the pre-spawn queueing one.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_feeds_prompt_style_read() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let live_send: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
+        let live_send_clone = live_send.clone();
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "echo doctor-stdin-prompt; read -r line && echo \"got-$line\"".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            None,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-stdin-prompt" {
+                    *live_send_clone.lock().unwrap() =
+                        Some(writer.send_line("doctor-stdin-auth-code"));
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "read/echo should exit 0; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        let sent = live_send
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the fix's prompt line should have reached on_line");
+        assert!(
+            sent.is_ok(),
+            "a send while the fix is live should report delivery; got {sent:?}",
+        );
+        assert!(
+            captured.iter().any(|l| l == "got-doctor-stdin-auth-code"),
+            "prompt-style read should see the sent line; captured: {captured:?}",
+        );
+    }
+
+    /// A writer held across the fix's completion must not hang the run, and the
+    /// *first* send after it must fail: the runner closes the pipe as it returns,
+    /// so `Ok` never means "queued for a fix that is already over". That is the
+    /// berd#99 shape — the login subprocess dies, the user pastes the auth code
+    /// a beat later — and a host keying off `Ok` would otherwise wait forever
+    /// with nothing in the log to explain it.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_rejects_sends_once_the_fix_finishes() {
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "echo doctor-stdin-done".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            None,
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_ok(), "echo fix should complete; got {result:?}");
+        let err = writer
+            .send_line("late-line")
+            .expect_err("the first send after the fix finished should fail");
+        assert!(
+            err.contains("no longer accepting input"),
+            "error should say the input is closed; got {err:?}",
+        );
+    }
+
+    /// `EPIPE` alone can't carry "the fix is over": a backgrounded grandchild
+    /// inherits the child's stdin and keeps the read end open, so a write into a
+    /// finished fix's pipe still succeeds. Only the runner's explicit close on
+    /// the way out makes this send fail. The grandchild's stdout is redirected so
+    /// it doesn't also hold the reader threads open — this test is about stdin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_rejects_sends_when_a_grandchild_holds_the_pipe() {
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "sleep 2 >/dev/null 2>&1 & echo doctor-stdin-done".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            None,
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_ok(), "echo fix should complete; got {result:?}");
+        assert!(
+            writer.send_line("late-line").is_err(),
+            "a grandchild holding the read end must not make a dead fix look writable",
+        );
+    }
+
+    /// A line whose cost divides the cap exactly, so filling the queue with these
+    /// leaves precisely nothing for the next byte.
+    fn queue_filling_chunk() -> String {
+        "x".repeat(MAX_QUEUED_FIX_STDIN_BYTES / 16 - 1)
+    }
+
+    /// A login shell with no user dotfiles. Faster (~0.2s of startup instead of
+    /// ~1.6s, and the same on any machine), and — what matters for the tests that
+    /// background a long-lived descendant — free of dotfiles that leak a
+    /// descriptor. A leaked duplicate of the inherited stderr keeps the reader
+    /// threads alive for as long as that descendant lives, which would turn "the
+    /// fix finished" into "the fix's last descendant exited". Measured locally:
+    /// under a real `$HOME`, a backgrounded `sleep` with both of its own output
+    /// streams redirected to `/dev/null` still held an extra pipe descriptor
+    /// inherited from the shell's startup.
+    fn dotfile_free_env(home: &Path) -> DoctorEnv {
+        DoctorEnv::new(vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), home.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+        ])
+    }
+
+    /// Queueing past the cap must fail rather than build a replay the runner
+    /// would park in. `Err` is the honest answer — not delivered, and not
+    /// silently held for a spawn that would then wedge the fix's own deadline.
+    #[test]
+    fn queued_fix_stdin_bytes_are_capped() {
+        let (writer, _stdin) = FixStdin::pipe();
+        let chunk = queue_filling_chunk();
+        let mut accepted = 0;
+        let err = loop {
+            match writer.send_line(chunk.clone()) {
+                Ok(()) => {
+                    accepted += chunk.len() + 1;
+                    assert!(
+                        accepted <= MAX_QUEUED_FIX_STDIN_BYTES,
+                        "queue took {accepted} bytes, past its {MAX_QUEUED_FIX_STDIN_BYTES}-byte cap",
+                    );
+                }
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(
+            accepted, MAX_QUEUED_FIX_STDIN_BYTES,
+            "the whole cap should be usable before a send is refused",
+        );
+        assert!(
+            err.contains("queue is full"),
+            "error should name the full queue; got {err:?}",
+        );
+        assert!(
+            writer.send_line("x").is_err(),
+            "not even a short line fits once the queue is full",
+        );
+
+        // An oversized single line is refused outright rather than truncated:
+        // half an auth code is worse than none.
+        let (writer, _stdin) = FixStdin::pipe();
+        assert!(
+            writer
+                .send_line("x".repeat(MAX_QUEUED_FIX_STDIN_BYTES))
+                .is_err(),
+            "one line over the cap must be refused, not sliced",
+        );
+    }
+
+    /// The cap exists to fit a *virgin* pipe's capacity, because the replay in
+    /// `attach` writes inline on the runner thread with no deadline armed and
+    /// nothing able to interrupt a `write_all` in progress. 4 KiB is the one-page
+    /// floor of a pipe on any platform doctor runs on (macOS and Linux both
+    /// measure 64 KiB in practice); raising it past that reintroduces a runner
+    /// that can park forever, so it must not pass silently. Checked at compile
+    /// time — the bound is on a constant, and a cap that can wedge the runner
+    /// should not build, let alone wait for someone to run this test.
+    #[test]
+    fn queued_fix_stdin_cap_fits_in_a_pipe() {
+        const {
+            assert!(
+                MAX_QUEUED_FIX_STDIN_BYTES <= 4096,
+                "the pre-spawn queue must fit in the smallest pipe doctor can get",
+            );
+            assert!(
+                MAX_QUEUED_FIX_STDIN_BYTES >= 256,
+                "the cap must stay far above any credential a fix prompts for",
+            );
+        }
+    }
+
+    /// A queue filled to the cap must replay without parking the runner: the
+    /// backgrounded `sleep` inherits stdin and never reads it, so the read end
+    /// stays open and the replay cannot short-circuit on `EPIPE` — the writes
+    /// really do land in the pipe's buffer. Both its output streams are redirected
+    /// by name so the reader threads still see EOF: zsh's `MULTIOS` leaves the
+    /// inherited stderr open under `>/dev/null 2>&1`, which would hold the run
+    /// here for the `sleep`'s whole duration.
+    ///
+    /// The elapsed bound is the real assertion, and what keeps a regression from
+    /// wedging the suite: a replay that parks is eventually released by the
+    /// backgrounded `sleep` exiting and closing the read end, so raising the cap
+    /// past a pipe's capacity turns this into a 30s `Ok` — verified locally at
+    /// 400 KiB — rather than a failure the timing check would otherwise miss.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_replays_a_full_queue_without_parking() {
+        let (writer, stdin) = FixStdin::pipe();
+        let chunk = queue_filling_chunk();
+        while writer.send_line(chunk.clone()).is_ok() {}
+        drop(writer);
+
+        let tmp = unique_tmp_dir("fix-stdin-full-queue-replay");
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let started = Instant::now();
+        let result = run_command_streaming(
+            "sleep 30 >/dev/null 2>/dev/null & echo doctor-stdin-replay-done".to_string(),
+            Some(dotfile_free_env(&tmp)),
+            Some(stdin),
+            FixTimeout::After(Duration::from_secs(30)),
+            None,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_ok(), "the fix should complete; got {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the replay parked until the backgrounded sleep freed the pipe",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-replay-done"),
+            "the fix should have run past the replay; captured: {captured:?}",
+        );
+    }
+
+    /// The hazard this bound exists for: a host thread parked in a `write_all`
+    /// into a full pipe holds the state mutex indefinitely, and the runner's
+    /// return path must not queue behind it. The `setsid` descendant inherits
+    /// stdin and escapes the process group, so the timeout's group kill does not
+    /// free the pipe — the parked write stays parked until that descendant exits,
+    /// well after the deadline.
+    ///
+    /// Driven on a plain thread with a bounded `recv_timeout` so a regression
+    /// *fails* rather than hanging the suite: the whole point is that the runner
+    /// returns at all. The receive window sits between the deadline and the
+    /// descendant's exit, so a runner that waits on the mutex misses it.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_streaming_returns_while_a_host_send_is_parked() {
+        let (writer, stdin) = FixStdin::pipe();
+        // A throwaway `HOME`: with real dotfiles a login shell takes over a
+        // second to start, long enough for the deadline to land before the fix
+        // printed anything to park on.
+        let tmp = unique_tmp_dir("fix-stdin-parked-send");
+        let env = dotfile_free_env(&tmp);
+
+        let (marker_tx, marker_rx) = std::sync::mpsc::channel::<()>();
+        let parked_writer = writer.clone();
+        // Far more than any pipe holds, so this parks mid-write holding the mutex.
+        std::thread::spawn(move || {
+            if marker_rx.recv_timeout(Duration::from_secs(10)).is_ok() {
+                let _ = parked_writer.send_line("x".repeat(1_000_000));
+            }
+        });
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = run_command_streaming_blocking(
+                "perl -MPOSIX=setsid -e 'setsid(); sleep 5' >/dev/null 2>&1 & \
+                 echo doctor-stdin-parked; sleep 30",
+                Some(&env),
+                Some(stdin),
+                FixTimeout::After(Duration::from_secs(1)),
+                None,
+                FixProcessGroup::Own,
+                move |line| {
+                    lines_clone.lock().unwrap().push(line.to_string());
+                    if line == "doctor-stdin-parked" {
+                        let _ = marker_tx.send(());
+                    }
+                },
+            );
+            let _ = result_tx.send(result);
+        });
+
+        let result = result_rx.recv_timeout(Duration::from_secs(3)).expect(
+            "the runner must return on its deadline while a host send holds the state mutex",
+        );
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out"),
+            "error should name the timeout; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-parked"),
+            "the host send never had a live pipe to park on, so this proves \
+             nothing; captured: {captured:?}",
+        );
+
+        // Still held by the parked write, so this can only be answered from the
+        // latch outside the mutex — the fast path that keeps a host from queueing
+        // behind another clone for a fix that is already over.
+        let (late_tx, late_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = late_tx.send(writer.send_line("doctor-stdin-late"));
+        });
+        let late = late_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a send after the fix must not wait on a parked write");
+        let late_err = late.expect_err("the fix is over, so the send should fail");
+        assert!(
+            late_err.contains("no longer accepting input"),
+            "error should say the input is closed; got {late_err:?}",
+        );
+
+        // The parked thread is deliberately not joined: it unparks when the
+        // escaped descendant exits and the read end closes, and its guard drop is
+        // what performs the `Closed` transition the contended `close()` skipped.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Reusing a `FixStdin` (or a clone) for a second execution must fail
+    /// loudly rather than hand the child an immediately-EOF'd stdin — the
+    /// receiver lives with the first run, so a second could only hang. The
+    /// second run must also never spawn: nothing reaches `on_line`.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_errors_when_reused() {
+        let (writer, stdin) = FixStdin::pipe();
+        let reused = stdin.clone();
+        writer.send_line("doctor-stdin-reuse-first").unwrap();
+        drop(writer);
+
+        let first = run_command_streaming(
+            "cat".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            None,
+            |_| {},
+        )
+        .await;
+        assert!(first.is_ok(), "first run should succeed; got {first:?}");
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let second = run_command_streaming(
+            "echo doctor-stdin-reuse-second".to_string(),
+            None,
+            Some(reused),
+            FixTimeout::Standard,
+            None,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = second.expect_err("reusing a consumed FixStdin should fail");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            err.contains("already consumed"),
+            "error should name the reuse; got {err:?}",
+        );
+        assert!(
+            captured.is_empty(),
+            "second run must not spawn; captured: {captured:?}",
+        );
+    }
+
+    /// A fix that never resolves to a command returns before the runner ever sees
+    /// the pipe, so the entry point has to close it: otherwise a host still
+    /// holding its writer keeps getting `Ok` from `send_line` for a fix that will
+    /// never spawn. `UpdateMain` against a real check id is the honest reachable
+    /// path — `lookup_fix_command` returns `None` for both `Update*` variants, so
+    /// dispatching one without a `command_override` misses.
+    #[tokio::test]
+    async fn execute_fix_streaming_unknown_fix_closes_the_stdin_pipe() {
+        let (writer, stdin) = FixStdin::pipe();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            ExecuteFixOptions {
+                stdin: Some(stdin),
+                ..Default::default()
+            },
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("an UpdateMain with no command_override should fail");
+        assert!(
+            err.contains("Unknown check") || err.contains("UpdateMain"),
+            "error should name the unresolved fix; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.is_empty(),
+            "the fix must not run: no `$ command` preamble; captured: {captured:?}",
+        );
+        let send_err = writer
+            .send_line("doctor-stdin-after-unknown-fix")
+            .expect_err("the first send after an unresolved fix should fail");
+        assert!(
+            send_err.contains("no longer accepting input"),
+            "error should say the input is closed; got {send_err:?}",
+        );
+    }
+
+    /// The guard's non-vacuity test, and the reason it closes only an *unclaimed*
+    /// pipe: `FixStdin` clones share one state, so a bare `close()` in the
+    /// unresolved-command arm would EOF a login the user is mid-way through. A
+    /// second execution handed a clone must error without disturbing the live run.
+    ///
+    /// The live fix runs on a plain thread rather than through
+    /// `run_command_streaming`: the test has to block on `recv_timeout` to know
+    /// the child is up, and that would starve `#[tokio::test]`'s current-thread
+    /// runtime before a spawned task ever reached its `spawn_blocking`.
+    #[tokio::test]
+    async fn execute_fix_streaming_unknown_fix_leaves_a_live_run_alone() {
+        let (writer, stdin) = FixStdin::pipe();
+        let stale_clone = stdin.clone();
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+
+        let live = std::thread::spawn(move || {
+            run_command_streaming_blocking(
+                "echo doctor-stdin-live; cat",
+                None,
+                Some(stdin),
+                FixTimeout::Standard,
+                None,
+                FixProcessGroup::Own,
+                move |line| {
+                    let _ = line_tx.send(line.to_string());
+                },
+            )
+        });
+
+        // Any output proves the child spawned, so the claim has landed.
+        let marker = line_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the live fix should print its marker");
+        assert_eq!(marker, "doctor-stdin-live");
+
+        let unresolved = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            ExecuteFixOptions {
+                stdin: Some(stale_clone),
+                ..Default::default()
+            },
+            |_| {},
+        )
+        .await;
+        assert!(
+            unresolved.is_err(),
+            "an UpdateMain with no command_override should fail; got {unresolved:?}",
+        );
+
+        writer
+            .send_line("doctor-stdin-still-live")
+            .expect("the live fix's pipe must survive the unresolved execution");
+        let echoed = line_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the live `cat` should echo the line");
+        assert_eq!(echoed, "doctor-stdin-still-live");
+
+        drop(writer);
+        let result = live.join().expect("the live fix thread should not panic");
+        assert!(result.is_ok(), "`cat` should exit 0 on EOF; got {result:?}");
+    }
+
+    /// The default bound must stay at fix scale, not probe scale. A fix is an
+    /// `npm install -g` behind a corporate proxy or a human doing SSO in a
+    /// browser; retuning this toward `DEFAULT_PROBE_TIMEOUT` would kill honest
+    /// work mid-flight.
+    #[test]
+    fn default_fix_timeout_stays_at_fix_scale() {
+        assert_eq!(DEFAULT_FIX_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(ExecuteFixOptions::default().timeout, FixTimeout::Standard);
+        assert_eq!(FixTimeout::Standard.duration(), Some(DEFAULT_FIX_TIMEOUT));
+        assert_eq!(FixTimeout::Unbounded.duration(), None);
+        assert!(
+            DEFAULT_FIX_TIMEOUT >= DEFAULT_PROBE_TIMEOUT * 30,
+            "fix timeout must stay far above probe scale",
+        );
+    }
+
+    /// A fix that never finishes must return on its deadline instead of
+    /// pinning the blocking worker forever — the whole point of the bound.
+    #[tokio::test]
+    async fn run_command_streaming_returns_when_the_fix_outlives_its_timeout() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let started = Instant::now();
+
+        let result = run_command_streaming(
+            "sleep 60".to_string(),
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(100)),
+            None,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out") && err.contains("sleep 60"),
+            "error should name the timeout and the command; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for the fix instead of its deadline",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured
+                .iter()
+                .any(|l| l.starts_with("doctor: fix timed out")),
+            "callers should see a notice line explaining the stop; captured: {captured:?}",
+        );
+    }
+
+    /// The group decision is about fd 0 and nothing else. `None` with a non-tty
+    /// stdin — every fix Staged runs today — must get `Own`, or the timeout's tree
+    /// kill only ever works on the piped-stdin path nothing uses yet; a terminal
+    /// host keeps `Inherited` so its fix isn't stopped by SIGTTIN.
+    #[test]
+    fn fix_process_group_decision_matrix() {
+        let (_writer, stdin) = FixStdin::pipe();
+
+        assert_eq!(
+            FixProcessGroup::for_fix(Some(&stdin), true),
+            FixProcessGroup::Own,
+            "piped stdin means doctor owns fd 0 whatever the host's tty is",
+        );
+        assert_eq!(
+            FixProcessGroup::for_fix(Some(&stdin), false),
+            FixProcessGroup::Own,
+        );
+        assert_eq!(
+            FixProcessGroup::for_fix(None, false),
+            FixProcessGroup::Own,
+            "a GUI host's inherited non-tty stdin cannot raise SIGTTIN",
+        );
+        assert_eq!(
+            FixProcessGroup::for_fix(None, true),
+            FixProcessGroup::Inherited,
+            "a terminal host's fix must keep reading the tty without stopping",
+        );
+    }
+
+    /// Let a fix time out with a backgrounded grandchild running, and report
+    /// whether that grandchild survived the kill.
+    ///
+    /// The grandchild records its own pid and then sleeps past every bound here,
+    /// so liveness by pid is the assertion — no waiting on a marker file the
+    /// survivor would write later. That matters because the payload does not start
+    /// the moment the fix does: this is a *login* shell, and a real `$HOME`'s
+    /// dotfiles take it over a second to start, long enough for a short deadline
+    /// to fire before the grandchild exists at all and "pass" no matter what the
+    /// kill reached. Hence both the throwaway `HOME` — no user dotfiles, so ~0.2s
+    /// of startup instead of ~1.6s, and the same on any machine — and reading the
+    /// pid file back, which turns that race into a loud failure.
+    ///
+    /// `sleep 60` is the shell's last command, so zsh exec-replaces itself with
+    /// it and the recorded `sleep 300` becomes the direct child's own child — out
+    /// of reach of `child.kill()`, in reach of `kill(-pgid)`.
+    #[cfg(unix)]
+    fn grandchild_survives_timeout_kill(
+        tag: &str,
+        stdin: Option<FixStdin>,
+        process_group: FixProcessGroup,
+    ) -> bool {
+        let tmp = unique_tmp_dir(tag);
+        let pid_file = tmp.join("grandchild-pid");
+        let env = dotfile_free_env(&tmp);
+
+        let result = run_command_streaming_blocking(
+            &format!(
+                "sleep 300 & printf %s $! > {}; sleep 60",
+                pid_file.display()
+            ),
+            Some(&env),
+            stdin,
+            // ~15x the dotfile-free login-shell startup, so the grandchild is up
+            // well before the deadline lands even under a loaded test run.
+            FixTimeout::After(Duration::from_secs(3)),
+            None,
+            process_group,
+            |_| {},
+        );
+        assert!(result.is_err(), "timed-out fix should fail; got {result:?}");
+
+        let survived = recorded_grandchild_survives(&pid_file);
+        let _ = std::fs::remove_dir_all(&tmp);
+        survived
+    }
+
+    /// Whether the process whose pid a payload wrote to `pid_file` is still
+    /// alive. The kill is asynchronous, so a doomed grandchild gets a moment to
+    /// go; one that is still there after that is put down so it doesn't outlive
+    /// the test. A missing or unparseable pid file is a loud failure rather than
+    /// a silent pass: it means the run was stopped before the payload had forked
+    /// anything, so whatever the kill reached proves nothing.
+    #[cfg(unix)]
+    fn recorded_grandchild_survives(pid_file: &Path) -> bool {
+        let recorded = std::fs::read_to_string(pid_file).unwrap_or_default();
+        let pid: i32 = recorded.trim().parse().unwrap_or_else(|_| {
+            panic!(
+                "grandchild never recorded a pid ({recorded:?}): the run was stopped \
+                 before the login shell got that far, so this proves nothing"
+            )
+        });
+        let pid = nix::unistd::Pid::from_raw(pid);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if nix::sys::signal::kill(pid, None).is_err() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        true
+    }
+
+    /// The tree kill has to work on the inherited-stdin path too — that is the one
+    /// every real fix takes. Driven through the blocking runner with an explicit
+    /// decision rather than `run_command_streaming`, because cargo passes the
+    /// terminal through to test binaries: going through the auto-detection would
+    /// exercise `Own` in CI and `Inherited` on a laptop, silently.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_kills_the_whole_process_tree_with_inherited_stdin() {
+        assert!(
+            !grandchild_survives_timeout_kill(
+                "fix-timeout-tree-no-stdin",
+                None,
+                FixProcessGroup::Own
+            ),
+            "backgrounded grandchild outlived the timeout kill",
+        );
+    }
+
+    /// Owning the group means the notice can promise the tree is gone.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_notice_reports_a_group_kill() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        // The payload only has to outlive the deadline: what the kill reaches is
+        // fixed by the group decision, not by the process shape.
+        let result = run_command_streaming_blocking(
+            "sleep 5",
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(200)),
+            None,
+            FixProcessGroup::Own,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        );
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            !err.contains("may still be running"),
+            "a group kill must not hedge; got {err:?}",
+        );
+        let notice = timeout_notice(&lines.lock().unwrap());
+        assert!(
+            notice.contains("killed the fix and its child processes"),
+            "notice should report the group kill; got {notice:?}",
+        );
+    }
+
+    /// Staying in doctor's group means descendants survive the deadline, so both
+    /// the notice and the error have to say so — `doctor: fix timed out after … —
+    /// terminating` claimed a tree kill that never happened on this path.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_notice_admits_survivors_when_the_group_is_inherited() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = run_command_streaming_blocking(
+            "sleep 5",
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(200)),
+            None,
+            FixProcessGroup::Inherited,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        );
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out") && err.contains("sleep 5"),
+            "error should still name the timeout and the command; got {err:?}",
+        );
+        assert!(
+            err.contains("may still be running"),
+            "error should admit the survivors; got {err:?}",
+        );
+        let notice = timeout_notice(&lines.lock().unwrap());
+        assert!(
+            notice.contains("may still be running"),
+            "notice should admit the survivors; got {notice:?}",
+        );
+    }
+
+    /// The one `doctor: fix timed out after …` line, which every timeout emits and
+    /// callers grep for.
+    fn timeout_notice(lines: &[String]) -> String {
+        lines
+            .iter()
+            .find(|l| l.starts_with("doctor: fix timed out after "))
+            .unwrap_or_else(|| panic!("no timeout notice in {lines:?}"))
+            .clone()
+    }
+
+    /// With piped stdin the shell leads its own process group, so the timeout
+    /// kill must take the whole tree — not just the login shell, leaving a
+    /// backgrounded installer running.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_kills_the_whole_process_tree_with_piped_stdin() {
+        let (_writer, stdin) = FixStdin::pipe();
+
+        assert!(
+            !grandchild_survives_timeout_kill(
+                "fix-timeout-tree",
+                Some(stdin),
+                FixProcessGroup::Own
+            ),
+            "backgrounded grandchild outlived the timeout kill",
+        );
+    }
+
+    /// A descendant that escaped the process group keeps the inherited
+    /// stdout/stderr open, so the reader threads never see EOF. The timeout
+    /// path must not join them — it must return on the deadline regardless
+    /// (the streaming twin of `command_runner_returns_when_escaped_descendant_
+    /// keeps_pipes_open`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_timeout_returns_when_escaped_descendant_keeps_pipes_open() {
+        let started = Instant::now();
+
+        let result = run_command_streaming(
+            "perl -MPOSIX=setsid -e 'setsid(); sleep 5' & wait".to_string(),
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(250)),
+            None,
+            |_| {},
+        )
+        .await;
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out"),
+            "error should name the timeout; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for the escaped descendant to close the pipes",
+        );
+    }
+
+    /// The one `doctor: fix cancelled …` line every cancelled fix emits and
+    /// callers grep for — exactly one, whatever else the run was doing when the
+    /// cancel landed.
+    fn cancel_notice(lines: &[String]) -> String {
+        let notices: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with(FIX_CANCELLED_NOTICE_PREFIX))
+            .collect();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a cancelled fix emits exactly one notice; got {notices:?} in {lines:?}",
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("doctor: fix timed out")),
+            "a cancelled fix must not also report a timeout; got {lines:?}",
+        );
+        notices[0].clone()
+    }
+
+    /// Drive the blocking runner on its own thread, forwarding every `on_line`
+    /// to the first receiver and the run's result to the second. The runner has
+    /// to live off the test thread whenever the test needs to *block* — on a
+    /// marker proving the fix is up, or on the result to time its return — since
+    /// the runner itself blocks for the fix's whole lifetime.
+    fn spawn_runner(
+        command: String,
+        env: Option<DoctorEnv>,
+        stdin: Option<FixStdin>,
+        timeout: FixTimeout,
+        cancellation: Option<FixCancellation>,
+        process_group: FixProcessGroup,
+    ) -> (
+        std::sync::mpsc::Receiver<String>,
+        std::sync::mpsc::Receiver<Result<(), String>>,
+    ) {
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = run_command_streaming_blocking(
+                &command,
+                env.as_ref(),
+                stdin,
+                timeout,
+                cancellation,
+                process_group,
+                move |line| {
+                    let _ = line_tx.send(line.to_string());
+                },
+            );
+            let _ = result_tx.send(result);
+        });
+        (line_rx, result_rx)
+    }
+
+    /// Block until the runner forwards `marker`, returning every line up to and
+    /// including it. Panics if the fix never gets there.
+    fn wait_for_marker(lines: &std::sync::mpsc::Receiver<String>, marker: &str) -> Vec<String> {
+        let mut seen = Vec::new();
+        loop {
+            let line = lines
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("the fix never printed {marker:?}; saw {seen:?}"));
+            seen.push(line);
+            if seen.last().is_some_and(|l| l == marker) {
+                return seen;
+            }
+        }
+    }
+
+    /// The berd#99 abandonment shape: a piped-stdin login that will never exit on
+    /// its own (the CLI ignores EOF and waits on its browser callback), given up
+    /// on by the user. Dropping the writer can't end it; the cancel has to kill
+    /// it — the whole tree, since doctor owns the group on this path — and hand
+    /// back an `Err` naming the cancellation, not the 600s timeout, promptly.
+    ///
+    /// Same payload shape as the timeout tree-kill tests, with a marker after
+    /// the pid write so the cancel is issued only once the grandchild provably
+    /// exists; issued from inside `on_line`, on the runner's own thread, so the
+    /// flag is set before the runner's next look and the test is deterministic.
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_kills_the_whole_process_tree_mid_run() {
+        let tmp = unique_tmp_dir("fix-cancel-tree");
+        let pid_file = tmp.join("grandchild-pid");
+        let env = dotfile_free_env(&tmp);
+        let (writer, stdin) = FixStdin::pipe();
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let cancel_from_fix = handle.clone();
+        let started = Instant::now();
+
+        let result = run_command_streaming_blocking(
+            &format!(
+                "sleep 300 & printf %s $! > {}; echo doctor-cancel-armed; sleep 60",
+                pid_file.display()
+            ),
+            Some(&env),
+            Some(stdin),
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Own,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-cancel-armed" {
+                    cancel_from_fix.cancel();
+                }
+            },
+        );
+
+        let survived = recorded_grandchild_survives(&pid_file);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 60"),
+            "error should name the cancellation and the command; got {err:?}",
+        );
+        assert!(
+            !err.contains("timed out"),
+            "the cancel, not the 600s timeout, must be what ended the run; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancel path waited on the fix instead of killing it",
+        );
+        assert!(handle.is_cancelled());
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-armed"),
+            "the fix's own output must survive the cancel; captured: {captured:?}",
+        );
+        let notice = cancel_notice(&captured);
+        assert!(
+            notice.contains("killed the fix and its child processes"),
+            "owning the group, the notice can promise the tree is gone; got {notice:?}",
+        );
+        assert!(
+            !survived,
+            "backgrounded grandchild outlived the cancel kill"
+        );
+        assert!(
+            writer.send_line("doctor-cancel-late").is_err(),
+            "the pipe must be closed on the cancel path like every other exit",
+        );
+    }
+
+    /// A cancel that lands before the runner spawns anything must refuse the
+    /// spawn: no child to kill or reap, nothing through `on_line` — the notice is
+    /// for a fix that ran — and the pipe closed like any other pre-spawn exit,
+    /// so the host's next `send_line` fails instead of queueing for a fix that
+    /// will never start.
+    #[tokio::test]
+    async fn fix_cancel_before_spawn_runs_nothing() {
+        let (writer, stdin) = FixStdin::pipe();
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        handle.cancel();
+        let result = run_command_streaming(
+            "echo doctor-cancel-never".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            Some(cancellation),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a fix cancelled before it started should fail");
+        assert!(
+            err.contains("cancelled before it started") && err.contains("echo doctor-cancel-never"),
+            "error should name the pre-spawn cancellation and the command; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.is_empty(),
+            "nothing must run and no notice is owed; captured: {captured:?}",
+        );
+        let send_err = writer
+            .send_line("doctor-cancel-never-sent")
+            .expect_err("the first send after a refused spawn should fail");
+        assert!(
+            send_err.contains("no longer accepting input"),
+            "error should say the input is closed; got {send_err:?}",
+        );
+    }
+
+    /// Once the run has returned, a cancel changes nothing: the fix's `Ok`
+    /// stands, no notice appears, and the handle still records the request —
+    /// `cancel` is infallible and idempotent whatever state the run is in.
+    /// Driven through the public entry point with the builder so the option's
+    /// whole path is covered, not just the runner.
+    #[tokio::test]
+    async fn fix_cancel_after_completion_is_a_no_op() {
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        assert!(!handle.is_cancelled(), "a fresh token is not cancelled");
+
+        let result = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::Auth,
+            ExecuteFixOptions {
+                command_override: Some("echo doctor-cancel-finished".to_string()),
+                ..Default::default()
+            }
+            .with_cancellation(cancellation),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+        assert!(result.is_ok(), "the fix should complete; got {result:?}");
+
+        handle.cancel();
+        handle.cancel();
+        assert!(
+            handle.is_cancelled(),
+            "the request is recorded even when late"
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-finished"),
+            "the fix should have run to completion; captured: {captured:?}",
+        );
+        assert!(
+            !captured.iter().any(|l| l.starts_with("doctor: fix")),
+            "a late cancel owes no notice; captured: {captured:?}",
+        );
+    }
+
+    /// A cancel that arrives on the fix's last line — the runner sees the flag
+    /// before it sees the readers disconnect — must still yield exactly one
+    /// notice and one `Err`, with the line that triggered it delivered. This is
+    /// the race between a cancel and a normal exit, pinned at the point where
+    /// the runner's observation order makes the outcome deterministic.
+    #[test]
+    fn fix_cancel_on_the_final_line_reports_once() {
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let cancel_from_fix = handle.clone();
+
+        let result = run_command_streaming_blocking(
+            "echo doctor-cancel-final",
+            None,
+            None,
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Own,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-cancel-final" {
+                    cancel_from_fix.cancel();
+                }
+            },
+        );
+
+        let err = result.expect_err("the runner saw the cancel before the exit");
+        assert!(
+            err.contains("cancelled"),
+            "error should name the cancellation; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-final"),
+            "the triggering line must not be lost; captured: {captured:?}",
+        );
+        cancel_notice(&captured);
+    }
+
+    /// `FixTimeout::Unbounded` has no deadline to slice its waits by, so before
+    /// this a silent fix parked the runner in a plain `recv()` nothing could
+    /// wake. The cancel arrives from another thread while the fix has been quiet
+    /// for longer than the poll interval, so it is the poll — not a line — that
+    /// lets the runner notice, and the return has to land within one interval
+    /// plus a kill.
+    #[test]
+    fn fix_cancel_wakes_an_unbounded_run_from_a_silent_wait() {
+        let tmp = unique_tmp_dir("fix-cancel-silent");
+        let (handle, cancellation) = FixCancellation::token();
+        let (lines, result) = spawn_runner(
+            "echo doctor-cancel-silent; sleep 60".to_string(),
+            Some(dotfile_free_env(&tmp)),
+            None,
+            FixTimeout::Unbounded,
+            Some(cancellation),
+            FixProcessGroup::Own,
+        );
+        let mut captured = wait_for_marker(&lines, "doctor-cancel-silent");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Well past the poll interval: the runner is parked in a wait slice with
+        // nothing arriving, so only the poll can deliver the cancel.
+        std::thread::sleep(FIX_CANCEL_POLL_INTERVAL * 3);
+        let cancelled_at = Instant::now();
+        handle.cancel();
+        let result = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("an unbounded run must still return on cancel");
+        let latency = cancelled_at.elapsed();
+        assert!(
+            latency < Duration::from_secs(1),
+            "cancel took {latency:?}: the runner missed its poll",
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 60"),
+            "error should name the cancellation and the command; got {err:?}",
+        );
+        captured.extend(lines.try_iter());
+        cancel_notice(&captured);
+    }
+
+    /// The opposite of silence: a fix that prints without pause never lets a
+    /// wait slice run out, so a runner that only looked at the token on poll
+    /// ticks would be uncancellable for as long as the fix kept talking. The
+    /// check on every pass through the loop is what bounds this case, and the
+    /// bound is the same one interval plus a kill.
+    #[test]
+    fn fix_cancel_interrupts_a_fix_that_never_goes_quiet() {
+        let tmp = unique_tmp_dir("fix-cancel-chatter");
+        let (handle, cancellation) = FixCancellation::token();
+        let (lines, result) = spawn_runner(
+            "echo doctor-cancel-chatter-start; while :; do echo doctor-cancel-chatter; done"
+                .to_string(),
+            Some(dotfile_free_env(&tmp)),
+            None,
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Own,
+        );
+        wait_for_marker(&lines, "doctor-cancel-chatter-start");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        std::thread::sleep(FIX_CANCEL_POLL_INTERVAL * 3);
+        let cancelled_at = Instant::now();
+        handle.cancel();
+        let result = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("a fix that never stops printing must still return on cancel");
+        let latency = cancelled_at.elapsed();
+        assert!(
+            latency < Duration::from_secs(1),
+            "cancel took {latency:?}: the runner only looks between lines",
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled"),
+            "error should name the cancellation; got {err:?}",
+        );
+        let captured: Vec<String> = lines.try_iter().collect();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-chatter"),
+            "the fix should have been mid-chatter when cancelled",
+        );
+        cancel_notice(&captured);
+    }
+
+    /// A fix can close both its pipes and keep running — the runner is then past
+    /// the recv loop and parked in the reap, a `wait` nothing else wakes. The
+    /// payload redirects its own stdout/stderr away from the pipes, records that
+    /// it has done so, and sleeps; the cancel is issued only once the readers
+    /// have provably seen EOF. Both the bounded (`wait_timeout`) and unbounded
+    /// (`wait`) reaps have to come back within a poll interval.
+    #[cfg(unix)]
+    fn cancel_during_the_reap_returns_promptly(tag: &str, timeout: FixTimeout) {
+        let tmp = unique_tmp_dir(tag);
+        let pipes_closed = tmp.join("pipes-closed");
+        let env = dotfile_free_env(&tmp);
+        let (handle, cancellation) = FixCancellation::token();
+
+        let (lines, result) = spawn_runner(
+            format!(
+                "echo doctor-cancel-reap; exec >/dev/null 2>/dev/null; touch {}; sleep 60",
+                pipes_closed.display()
+            ),
+            Some(env),
+            None,
+            timeout,
+            Some(cancellation),
+            FixProcessGroup::Own,
+        );
+        let mut captured = wait_for_marker(&lines, "doctor-cancel-reap");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pipes_closed.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the payload never got past redirecting its pipes",
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The readers hit EOF the instant the shell redirected, and joining them
+        // is immediate, so by now the runner is in the reap; a few poll intervals
+        // more and it has been parked there for the whole of one.
+        std::thread::sleep(FIX_CANCEL_POLL_INTERVAL * 3);
+        let cancelled_at = Instant::now();
+        handle.cancel();
+        let result = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("a run parked in its reap must still return on cancel");
+        let latency = cancelled_at.elapsed();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            latency < Duration::from_secs(1),
+            "cancel took {latency:?}: the reap missed its poll",
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 60"),
+            "error should name the cancellation and the command; got {err:?}",
+        );
+        captured.extend(lines.try_iter());
+        cancel_notice(&captured);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_returns_promptly_from_a_bounded_reap() {
+        cancel_during_the_reap_returns_promptly("fix-cancel-reap-bounded", FixTimeout::Standard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_returns_promptly_from_an_unbounded_reap() {
+        cancel_during_the_reap_returns_promptly("fix-cancel-reap-unbounded", FixTimeout::Unbounded);
+    }
+
+    /// The cancel path shares the timeout's honesty about reach: in doctor's
+    /// group the kill stops at the direct child, and both the notice and the
+    /// `Err` have to say so rather than claim a tree kill that never happened.
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_notice_admits_survivors_when_the_group_is_inherited() {
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let cancel_from_fix = handle.clone();
+
+        let result = run_command_streaming_blocking(
+            "echo doctor-cancel-inherited; sleep 5",
+            None,
+            None,
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Inherited,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-cancel-inherited" {
+                    cancel_from_fix.cancel();
+                }
+            },
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 5"),
+            "error should still name the cancellation and the command; got {err:?}",
+        );
+        assert!(
+            err.contains("may still be running"),
+            "error should admit the survivors; got {err:?}",
+        );
+        let notice = cancel_notice(&lines.lock().unwrap());
+        assert!(
+            notice.contains("may still be running"),
+            "notice should admit the survivors; got {notice:?}",
+        );
+    }
+
+    /// The handle is meant to be parked in a host's static map and used from a
+    /// UI command on another thread, so it has to be shareable; the option has
+    /// to keep `ExecuteFixOptions`'s derives; `None` has to stay the default so
+    /// existing callers are untouched; and the poll interval that bounds cancel
+    /// latency must stay well under what a user reads as a stuck button.
+    #[test]
+    fn fix_cancellation_contract() {
+        fn shareable<T: Send + Sync + Clone + std::fmt::Debug>() {}
+        shareable::<FixCancelHandle>();
+        shareable::<FixCancellation>();
+
+        assert!(ExecuteFixOptions::default().cancellation.is_none());
+        assert!(
+            FIX_CANCEL_POLL_INTERVAL <= Duration::from_millis(250),
+            "cancel latency must stay imperceptible",
+        );
+        assert!(
+            FIX_CANCEL_POLL_INTERVAL >= Duration::from_millis(10),
+            "a cancellable run must not spin",
         );
     }
 
@@ -1620,8 +3824,8 @@ mod tests {
             FixType::UpdateMain,
             ExecuteFixOptions {
                 command_override: Some(script_name.to_string()),
-                npm_registry: None,
                 env: Some(env),
+                ..Default::default()
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
@@ -1674,8 +3878,8 @@ mod tests {
             FixType::UpdateMain,
             ExecuteFixOptions {
                 command_override: Some(command.to_string()),
-                npm_registry: None,
                 env: Some(env),
+                ..Default::default()
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());

@@ -189,16 +189,33 @@ fn join_reader(handle: JoinHandle<Vec<u8>>) -> Vec<u8> {
 }
 
 fn clean_up_after_incomplete_wait(child: &mut Child) {
-    kill_child_process_group_or_child(child);
+    // The reach is irrelevant here: the probe runner always spawns with
+    // `process_group(0)`, so the group kill is the one that lands.
+    let _ = kill_child_process_group_or_child(child);
     let _ = child.wait();
 }
 
-fn kill_child_process_group_or_child(child: &mut Child) {
+/// How far a kill actually reached. Returned rather than discarded so a caller
+/// reporting the kill to a user can say what survived it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KillReach {
+    /// The child's process group — the shell and everything that stayed in it.
+    ProcessGroup,
+    /// The direct child only; anything it spawned is still running.
+    ChildOnly,
+}
+
+/// Best-effort kill: target the child's process group first so a shell's whole
+/// command tree goes with it, falling back to the direct child when the group
+/// lookup fails (the child wasn't spawned with `process_group(0)`, or it isn't
+/// Unix). Callers must still reap afterwards.
+pub(crate) fn kill_child_process_group_or_child(child: &mut Child) -> KillReach {
     if kill_child_process_group(child) {
-        return;
+        return KillReach::ProcessGroup;
     }
 
     let _ = child.kill();
+    KillReach::ChildOnly
 }
 
 #[cfg(unix)]

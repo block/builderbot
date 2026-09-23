@@ -1573,6 +1573,16 @@ export interface DoctorCheck {
   bridgePath: string | null;
   rawOutput: string | null;
   authStatus: 'authenticated' | 'notAuthenticated' | 'notApplicable' | 'unknown' | null;
+  /**
+   * The provider's interactive login command whenever its binary resolved,
+   * regardless of `authStatus` — a static capability, not doctor's verdict.
+   * Unlike `fixCommand`, which is set only when the probe positively reported
+   * a signed-out agent, this says a login *exists*: the probe can't see an
+   * expired Claude token, so a live authentication failure has to be able to
+   * offer one on a check the probe calls `authenticated`. `null` for providers
+   * without a login command (Pi, Goose) and for non-agent checks.
+   */
+  loginCommand: string | null;
   /** Flat version fields mirror the bridge readout (else main) for compat. */
   installedVersion: string | null;
   latestVersion: string | null;
@@ -1603,12 +1613,108 @@ export function runDoctorFreshness(): Promise<DoctorReport> {
   return invokeCommand('run_doctor_freshness');
 }
 
-/** Run a fix for a doctor check, identified by check ID and fix type. */
+/**
+ * Run a fix for a doctor check, identified by check ID and fix type.
+ *
+ * Resolves when the fix finishes. An `auth` fix is interactive, so the backend
+ * runs it on a piped stdin and streams it exactly as `startDoctorLogin` does —
+ * a caller that wants to show the sign-in URL or feed the code back should
+ * prefer `startDoctorLogin`, which resolves as soon as the fix is running
+ * rather than blocking until it ends.
+ */
 export function runDoctorFix(
   checkId: string,
   fixType: 'command' | 'bridge' | 'auth'
 ): Promise<void> {
   return invokeCommand('run_doctor_fix', { checkId, fixType });
+}
+
+/**
+ * What `startDoctorLogin` did — began a login, or found one already running for
+ * the check — and the run id of that login. The latter is not a failure: it is
+ * the same subprocess the caller wanted, reachable under that run id through
+ * `doctorLoginStatus`, the `doctor-login-output` stream and
+ * `sendDoctorLoginCode`.
+ *
+ * The run id is the login's identity, not the check id. The backend allows one
+ * login per check and releases the check's slot before the run's final event
+ * goes out, so a fresh start can land between the two and then see the earlier
+ * run's `done` under its own check id. Follow the run id instead.
+ */
+export interface DoctorLoginStart {
+  outcome: 'started' | 'alreadyRunning';
+  runId: string;
+}
+
+/**
+ * Start an interactive login fix, resolving once it is running with the run id
+ * its events carry. Its output and its completion are delivered through
+ * `doctor-login-output` events.
+ */
+export function startDoctorLogin(checkId: string): Promise<DoctorLoginStart> {
+  return invokeCommand('start_doctor_login', { checkId });
+}
+
+/**
+ * Ask run `runId` of `checkId`'s login to stop, resolving with whether it was
+ * found. Idempotent, and harmless when nothing is running; `false` also when a
+ * newer run now holds the check's slot, which is left alone. The end arrives as
+ * a `doctor-login-output` event with `done` and `cancelled` set — this only asks.
+ */
+export function cancelDoctorLogin(checkId: string, runId: string): Promise<boolean> {
+  return invokeCommand('cancel_doctor_login', { checkId, runId });
+}
+
+export interface DoctorLoginStatus {
+  running: boolean;
+  /** The running login's run id, which its events carry. Null when not running. */
+  runId: string | null;
+  /** The last lines the login printed, oldest first. Empty when not running. */
+  output: string[];
+  /**
+   * The `seq` the login's next line will carry; `output` covers the `seq`s from
+   * `nextSeq - output.length` up to but excluding `nextSeq`. Counted per run.
+   */
+  nextSeq: number;
+}
+
+/**
+ * Whether a login is running for `checkId`, under which run id, and what it has
+ * printed so far — for a client that lost its record of the login (a web
+ * refresh, a second client, a reloaded webview). Register the
+ * `doctor-login-output` listener before calling this, then follow the run id it
+ * names and merge that run's lines by `seq`: a line below `nextSeq` is in the
+ * snapshot, one at or above it arrived after the snapshot.
+ */
+export function doctorLoginStatus(checkId: string): Promise<DoctorLoginStatus> {
+  return invokeCommand('doctor_login_status', { checkId });
+}
+
+/**
+ * Submit a line — in practice the authentication code the agent CLI asked for —
+ * to run `runId` of a login started by `startDoctorLogin` or by `runDoctorFix`
+ * with an `auth` fix type. Rejects, saying so, when that run has ended — even
+ * if a newer login is running for the check, which does not get the code.
+ */
+export function sendDoctorLoginCode(checkId: string, runId: string, code: string): Promise<void> {
+  return invokeCommand('send_doctor_login_code', { checkId, runId, code });
+}
+
+export interface DoctorLoginOutput {
+  checkId: string;
+  /** The run this event belongs to. Drop events from any run but the one followed. */
+  runId: string;
+  line: string | null;
+  /**
+   * Position of `line` in the login's output, from zero; on the final event,
+   * the number of lines it printed. See `DoctorLoginStatus.nextSeq`.
+   */
+  seq: number;
+  done: boolean;
+  /** The login's failure. Null on a cancelled login, which is not a failure. */
+  error: string | null;
+  /** The login ended because `cancelDoctorLogin` was called on it. */
+  cancelled: boolean;
 }
 
 /**

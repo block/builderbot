@@ -80,6 +80,11 @@
     type AcpConfigSelector,
   } from '../../api/commands';
   import { listenToEvent, type UnlistenFn } from '../../transport';
+  import { openSettings } from '../layout/navigation.svelte';
+  import { doctorState, runChecks } from '../doctor/doctor.svelte';
+  import { agentLogin, attachAgentLogin, startAgentLogin } from '../doctor/agentLogin.svelte';
+  import AgentLoginPrompt from '../doctor/AgentLoginPrompt.svelte';
+  import { canOfferLogin, doctorCheckForProvider, isAuthenticationError } from './authRecovery';
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
   import { agentState } from '../agents/agent.svelte';
   import {
@@ -239,6 +244,65 @@
    * `noteTaskStopOutcome`.
    */
   let taskStopNotices = $state<Map<string, string>>(new Map());
+  /** Doctor check id for this session's agent — the login's identity. */
+  let loginCheckId = $derived(session?.provider ? `ai-agent-${session.provider}` : null);
+  let loginCheck = $derived(doctorCheckForProvider(session?.provider, doctorState.report));
+  let canLogin = $derived(canOfferLogin(loginCheck));
+  let loginRunning = $derived(agentLogin.running && agentLogin.checkId === loginCheckId);
+  /**
+   * Sessions whose authentication failure has already asked for a report, so a
+   * scan that fails (leaving `report` null) isn't retried on every flush.
+   */
+  let authReportRequestedFor: string | null = null;
+  /**
+   * `Log in` is the primary action on an authentication failure, but it depends
+   * on doctor's auth probe — and `doctorState.report` is otherwise filled in
+   * only by opening the Doctor settings panel. On a fresh launch that left
+   * every auth-failed session showing `Fix` alone until the user had visited
+   * that panel and come back, so run the checks the first time such a failure
+   * is displayed.
+   */
+  $effect(() => {
+    const id = sessionId;
+    const failed = session?.status === 'error' || session?.status === 'cancelled';
+    if (!active || !id || !failed || !isAuthenticationError(session?.errorMessage)) return;
+    if (doctorState.report || doctorState.loading || authReportRequestedFor === id) return;
+    authReportRequestedFor = id;
+    void runChecks();
+  });
+  /**
+   * Sessions whose authentication failure has already asked the backend about a
+   * running login, per open — see below.
+   */
+  let loginAttachRequestedFor: string | null = null;
+  /**
+   * A login for this agent may already be running on the backend — started from
+   * the Doctor panel, from another client, or before this webview reloaded — with
+   * the shared record here knowing nothing of it. Ask once per open when the
+   * alert shows, so its URL and code box come back instead of a `Log in` the
+   * backend would answer "already running". Not gated on `canLogin`: that needs
+   * the doctor report, and the login exists whether or not it has arrived.
+   */
+  $effect(() => {
+    const id = sessionId;
+    const checkId = loginCheckId;
+    if (!active) {
+      loginAttachRequestedFor = null;
+      return;
+    }
+    const failed = session?.status === 'error' || session?.status === 'cancelled';
+    if (!id || !checkId || !failed || !isAuthenticationError(session?.errorMessage)) return;
+    if (agentLogin.running || loginAttachRequestedFor === id) return;
+    loginAttachRequestedFor = id;
+    void attachAgentLogin(checkId)
+      .then((outcome) => {
+        // A signed-in agent changes the check the "Log in" button depends on.
+        if (outcome === 'completed') void runChecks();
+      })
+      .catch(() => {
+        // The failure is on the shared login record, which the alert renders.
+      });
+  });
 
   let inputText = $state('');
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
@@ -614,6 +678,9 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
+    // A login in flight is deliberately not torn down here: the subprocess
+    // outlives this pane, and its shared record is what the Doctor panel — or
+    // this pane on its next open — needs to keep feeding it a code.
   });
 
   // This pane can be mounted once and reused across opens (the `active` prop toggles
@@ -774,6 +841,18 @@
     backgroundHold = null;
     if (stoppingTaskIds.size > 0) stoppingTaskIds = new Set();
     if (taskStopNotices.size > 0) taskStopNotices = new Map();
+  }
+
+  async function startLogin() {
+    if (!loginCheckId || !canLogin || agentLogin.running) return;
+    try {
+      const outcome = await startAgentLogin(loginCheckId);
+      // A signed-in agent changes the check the "Log in" button depends on; a
+      // cancelled login changes nothing.
+      if (outcome === 'completed') void runChecks();
+    } catch {
+      // The failure is on the shared login record, which the alert renders.
+    }
   }
 
   function isComposerFocused(): boolean {
@@ -2308,10 +2387,30 @@
          was killed from outside with a recorded reason (e.g. a Pikchr child
          session whose generate_pikchr call timed out) and reads as an error. -->
     {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage}
+      {@const authError = isAuthenticationError(session.errorMessage)}
       <Alert.Root variant="destructive" class="mt-3">
         <AlertCircle />
         <Alert.Description>{session.errorMessage}</Alert.Description>
+        {#if authError}
+          <Alert.Action>
+            <!-- `Log in` leads when it is offered: this failure came from the
+                 agent itself, and the Doctor panel behind `Fix` may well call the
+                 check passing (its probe can't see an expired token), so `Fix`
+                 is the fallback, not the answer. -->
+            <div class="auth-actions">
+              {#if canLogin}
+                <Button variant="default" size="xs" disabled={loginRunning} onclick={startLogin}>
+                  {loginRunning ? 'Logging in…' : 'Log in'}
+                </Button>
+              {/if}
+              <Button variant="outline" size="xs" onclick={() => openSettings('doctor')}>
+                Fix
+              </Button>
+            </div>
+          </Alert.Action>
+        {/if}
       </Alert.Root>
+      <AgentLoginPrompt checkId={loginCheckId} />
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
         {@const isWarning =
@@ -2940,6 +3039,13 @@
   }
 
   /* ----- Input wrapper + queue popover ----------------------------------- */
+
+  .auth-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
 
   .input-wrapper {
     flex-shrink: 0;

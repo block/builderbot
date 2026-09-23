@@ -37,10 +37,10 @@
 //! hidden from PATH prepends so shims another build left in the shared tree
 //! cannot resolve.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncBufReadExt;
 
@@ -711,6 +711,162 @@ fn write_shim(bin_dir: &Path, binary: &str, contents: &str) -> std::io::Result<(
 }
 
 // =============================================================================
+// Doctor readouts — installed and latest versions of a managed bridge
+// =============================================================================
+
+/// The ACP package version installed in the live managed prefix for `tool`,
+/// read from the package's own `package.json` — the tree the shim actually
+/// execs. Falls back to the version `state.json` recorded at install time when
+/// that tree is unreadable; state is supporting information, not the
+/// authority, since it can be missing (a state write that failed after the
+/// swap) or stale (a tree swapped in by another Staged instance).
+pub fn installed_tool_version(packages_root: &Path, tool: &ManagedTool) -> Option<String> {
+    installed_version(&tool_install_dir(packages_root, tool.id), tool.package).or_else(|| {
+        read_state(packages_root)
+            .tools
+            .get(tool.id)
+            .map(|pin| pin.version.clone())
+            .filter(|version| !version.is_empty())
+    })
+}
+
+/// How long a registry answer is reused before the registry is asked again.
+/// Mirrors the doctor crate's freshness cache: a Doctor re-run within the
+/// hour costs no network, and a real release still shows up within one.
+const LATEST_VERSION_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A registry lookup that hangs must not hold the freshness pass open — the
+/// same bound the doctor crate puts on its own `npm view` probes.
+const LATEST_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Latest published versions by package, with the time each was fetched. Only
+/// answers are cached: a failed lookup is retried on the next pass rather than
+/// pinned as "unknown" for an hour.
+#[derive(Debug, Default)]
+struct LatestVersionCache {
+    entries: HashMap<String, (String, Instant)>,
+}
+
+impl LatestVersionCache {
+    fn get_fresh(&self, package: &str, now: Instant) -> Option<String> {
+        let (version, fetched_at) = self.entries.get(package)?;
+        (now.saturating_duration_since(*fetched_at) <= LATEST_VERSION_CACHE_TTL)
+            .then(|| version.clone())
+    }
+
+    fn insert(&mut self, package: &str, version: String, now: Instant) {
+        self.entries.insert(package.to_string(), (version, now));
+    }
+}
+
+fn latest_version_cache() -> &'static Mutex<LatestVersionCache> {
+    static CACHE: OnceLock<Mutex<LatestVersionCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(LatestVersionCache::default()))
+}
+
+/// The newest published version of `tool`'s npm package on the configured
+/// registry, or `None` when it cannot be determined — offline, registry
+/// unreachable, no `npm` to run, or the probe timed out. The caller must keep
+/// `None` as *unknown*, never read it as "up to date".
+///
+/// Runs `npm view <pkg> version` through the same env snapshot doctor's own
+/// probes use, so the managed runtime's `npm` is preferred and the lookup sees
+/// the registry/config the install itself will. Bounded by
+/// [`LATEST_VERSION_PROBE_TIMEOUT`] and cached for [`LATEST_VERSION_CACHE_TTL`].
+pub async fn latest_published_version(
+    tool: &ManagedTool,
+    env_vars: &[(String, String)],
+) -> Option<String> {
+    let now = Instant::now();
+    let cached = latest_version_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_fresh(tool.package, now);
+    if cached.is_some() {
+        return cached;
+    }
+    let npm = find_on_env_path(env_vars, "npm")?;
+    let version = npm_view_version(
+        &npm,
+        tool.package,
+        npm_registry(),
+        env_vars,
+        LATEST_VERSION_PROBE_TIMEOUT,
+    )
+    .await?;
+    latest_version_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(tool.package, version.clone(), now);
+    Some(version)
+}
+
+/// The first `<dir>/<name>` that is a file along the snapshot's `PATH` —
+/// resolved by hand because `Command::new("npm")` would search the *parent*
+/// process's PATH, not the snapshot's, and the snapshot is what puts the
+/// managed runtime's bin dir first.
+fn find_on_env_path(env_vars: &[(String, String)], name: &str) -> Option<PathBuf> {
+    let (_, path) = env_vars.iter().rev().find(|(key, _)| key == "PATH")?;
+    std::env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// `npm view <package> version [--registry <url>]` with `npm` at `npm_path`,
+/// under exactly the `env_vars` snapshot, killed at `timeout`. `Some` only for
+/// a clean exit whose stdout is a version-shaped token.
+async fn npm_view_version(
+    npm_path: &Path,
+    package: &str,
+    registry: Option<&str>,
+    env_vars: &[(String, String)],
+    timeout: Duration,
+) -> Option<String> {
+    let mut command = tokio::process::Command::new(npm_path);
+    command.args(["view", package, "version"]);
+    if let Some(registry) = registry {
+        command.args(["--registry", registry]);
+    }
+    command.env_clear();
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(timeout, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            log::debug!("npm view {package} version failed to run: {error}");
+            return None;
+        }
+        Err(_) => {
+            log::debug!(
+                "npm view {package} version timed out after {}s",
+                timeout.as_secs()
+            );
+            return None;
+        }
+    };
+    if !output.status.success() {
+        log::debug!(
+            "npm view {package} version exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    version
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_digit())
+        .then_some(version)
+}
+
+// =============================================================================
 // Reconcile epilogue — prune stale ids, record the outcome, gate the Node prune
 // =============================================================================
 
@@ -1237,6 +1393,244 @@ mod tests {
         // No scratch dirs are left behind for the next reconcile to trip over.
         assert!(!staging_install_dir(&packages_root, tool.id).exists());
         assert!(!install_dir.with_extension("old").exists());
+        // And the version Doctor reads is still the working install's.
+        assert_eq!(
+            installed_tool_version(&packages_root, &tool).as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    /// A managed update writes only under the packages root: nothing lands in
+    /// a global prefix, and the fixture's neighbours are left alone.
+    #[tokio::test]
+    async fn install_touches_only_the_packages_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        let node_install_dir = packages_root.join("node").join("v9.9.9").join("plat");
+        let tool = test_tool();
+
+        let template = dir.path().join("template");
+        std::fs::create_dir_all(&template).unwrap();
+        write_fixture_install(&template, &tool, "1.2.4");
+        write_fake_node_with_npm(&node_install_dir, &template, 0);
+        let outside = dir.path().join("global-bin");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            None,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+        let mut entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, vec!["global-bin", "packages", "template"]);
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        assert_eq!(
+            installed_tool_version(&packages_root, &tool).as_deref(),
+            Some("1.2.4")
+        );
+    }
+
+    // -- doctor readouts ------------------------------------------------------
+
+    /// The live tree's `package.json` is the authority for the installed ACP
+    /// version; `state.json` only stands in when that tree cannot be read.
+    #[test]
+    fn installed_tool_version_prefers_the_live_package_over_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path();
+        let tool = test_tool();
+
+        // Nothing installed, no state: unknown.
+        assert_eq!(installed_tool_version(packages_root, &tool), None);
+
+        // State alone (tree missing or unreadable): the recorded version.
+        let mut state = ManagedToolsState::default();
+        state.tools.insert(
+            tool.id.to_string(),
+            InstalledToolPin {
+                binary: tool.binary.to_string(),
+                version: "1.2.3".to_string(),
+                node_version: TEST_NODE_VERSION.to_string(),
+            },
+        );
+        write_state(packages_root, &state).unwrap();
+        assert_eq!(
+            installed_tool_version(packages_root, &tool).as_deref(),
+            Some("1.2.3")
+        );
+
+        // A live tree at another version wins over stale state.
+        write_fixture_install(&tool_install_dir(packages_root, tool.id), &tool, "1.3.0");
+        assert_eq!(
+            installed_tool_version(packages_root, &tool).as_deref(),
+            Some("1.3.0")
+        );
+
+        // An empty recorded version (unreadable package.json at install
+        // time) is not a version.
+        std::fs::remove_dir_all(tool_install_dir(packages_root, tool.id)).unwrap();
+        state.tools.get_mut(tool.id).unwrap().version.clear();
+        write_state(packages_root, &state).unwrap();
+        assert_eq!(installed_tool_version(packages_root, &tool), None);
+    }
+
+    /// A fake `npm` on a PATH dir: prints `version` for `npm view <pkg>
+    /// version`, exits `exit_code`, and refuses unless `--registry` is passed
+    /// exactly when `expect_registry` says so.
+    fn write_fake_npm(bin_dir: &Path, version: &str, exit_code: i32, expect_registry: bool) {
+        std::fs::create_dir_all(bin_dir).unwrap();
+        let registry_check = if expect_registry {
+            "case \" $* \" in *\" --registry \"*) ;; *) echo 'missing --registry' >&2; exit 43;; esac\n"
+        } else {
+            "case \" $* \" in *\" --registry \"*) echo 'unexpected --registry' >&2; exit 43;; esac\n"
+        };
+        std::fs::write(
+            bin_dir.join("npm"),
+            format!(
+                "#!/bin/sh\ntest \"$1\" = view || exit 44\ntest \"$3\" = version || exit 45\n{registry_check}echo '{version}'\nexit {exit_code}\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin_dir.join("npm"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+
+    fn path_env(bin_dir: &Path) -> Vec<(String, String)> {
+        vec![(
+            "PATH".to_string(),
+            format!("{}:/usr/bin:/bin", bin_dir.display()),
+        )]
+    }
+
+    #[tokio::test]
+    async fn npm_view_version_reads_the_registry_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        write_fake_npm(&bin, "4.5.6", 0, true);
+        let env = path_env(&bin);
+        let npm = find_on_env_path(&env, "npm").expect("npm resolves from the snapshot PATH");
+        assert_eq!(npm, bin.join("npm"));
+
+        let version = npm_view_version(
+            &npm,
+            "@agentclientprotocol/claude-agent-acp",
+            Some("https://registry.example.test/npm/"),
+            &env,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(version.as_deref(), Some("4.5.6"));
+    }
+
+    #[tokio::test]
+    async fn npm_view_version_omits_the_registry_flag_when_none_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        write_fake_npm(&bin, "4.5.6", 0, false);
+        let env = path_env(&bin);
+
+        let version = npm_view_version(
+            &bin.join("npm"),
+            "@agentclientprotocol/codex-acp",
+            None,
+            &env,
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(version.as_deref(), Some("4.5.6"));
+    }
+
+    /// Every failure mode reads as unknown — never as a version.
+    #[tokio::test]
+    async fn npm_view_version_is_unknown_on_failure_garbage_or_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let env = path_env(&bin);
+        let package = "@agentclientprotocol/claude-agent-acp";
+
+        // A registry error: npm exits non-zero.
+        write_fake_npm(&bin, "4.5.6", 1, false);
+        assert_eq!(
+            npm_view_version(
+                &bin.join("npm"),
+                package,
+                None,
+                &env,
+                Duration::from_secs(10)
+            )
+            .await,
+            None
+        );
+
+        // A clean exit with non-version output (an npm notice, an HTML page).
+        write_fake_npm(&bin, "npm notice: try again later", 0, false);
+        assert_eq!(
+            npm_view_version(
+                &bin.join("npm"),
+                package,
+                None,
+                &env,
+                Duration::from_secs(10)
+            )
+            .await,
+            None
+        );
+
+        // A hung lookup is cut off at the bound.
+        std::fs::write(bin.join("npm"), "#!/bin/sh\nsleep 30\necho 9.9.9\n").unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            npm_view_version(
+                &bin.join("npm"),
+                package,
+                None,
+                &env,
+                Duration::from_millis(200)
+            )
+            .await,
+            None
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        // No npm anywhere on the snapshot PATH: nothing to ask.
+        let empty = vec![("PATH".to_string(), "/nonexistent/dir".to_string())];
+        assert_eq!(find_on_env_path(&empty, "npm"), None);
+        assert_eq!(find_on_env_path(&[], "npm"), None);
+    }
+
+    #[test]
+    fn latest_version_cache_expires_after_the_ttl() {
+        let mut cache = LatestVersionCache::default();
+        let now = Instant::now();
+        assert_eq!(cache.get_fresh("pkg", now), None);
+
+        cache.insert("pkg", "1.2.3".to_string(), now);
+        assert_eq!(
+            cache
+                .get_fresh("pkg", now + Duration::from_secs(60))
+                .as_deref(),
+            Some("1.2.3")
+        );
+        assert_eq!(cache.get_fresh("other", now), None);
+        assert_eq!(
+            cache.get_fresh(
+                "pkg",
+                now + LATEST_VERSION_CACHE_TTL + Duration::from_secs(1)
+            ),
+            None
+        );
     }
 
     // -- reconcile epilogue --------------------------------------------------

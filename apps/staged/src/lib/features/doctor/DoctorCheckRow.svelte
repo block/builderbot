@@ -1,9 +1,11 @@
 <!--
   DoctorCheckRow.svelte — A single row in the doctor report.
 
-  Shows a status icon (✓ / ⚠ / ✗), the check label, a message,
-  and optional action buttons: an external-link icon to open an
-  install page, or a "Fix" button that runs a shell command.
+  Shows a status icon (✓ / ⚠ / ✗), the check label, a message, a version
+  readout per binary behind an agent check (main agent / ACP bridge, see
+  DoctorVersionReadout), and optional action buttons: an external-link icon
+  to open an install page, a "Fix" button that runs a shell command, or an
+  "Update" button for a readout with an actionable update.
 -->
 <script lang="ts">
   import CheckCircle from '@lucide/svelte/icons/check-circle';
@@ -13,13 +15,15 @@
   import Wrench from '@lucide/svelte/icons/wrench';
   import ArrowUpCircle from '@lucide/svelte/icons/arrow-up-circle';
   import { openUrl, runDoctorFix } from '../../api/commands';
-  import type { AgentVersionInfo, DoctorCheck } from '../../api/commands';
+  import type { DoctorCheck } from '../../api/commands';
   import {
     doctorState,
     updateCheck,
     isReadoutActionable,
     hasActionableUpdate,
   } from './doctor.svelte';
+  import DoctorVersionReadout from './DoctorVersionReadout.svelte';
+  import { updateBadge } from './versionReadout';
   import {
     agentLogin,
     attachAgentLogin,
@@ -59,15 +63,32 @@
       check.status !== 'pass'
   );
 
-  /** Whether a readout surfaces an update badge (under its own path line). */
-  function showsUpdateBadge(info: AgentVersionInfo | null): boolean {
-    return info?.updateAvailable === true;
-  }
-  const anyUpdateBadge = $derived(showsUpdateBadge(check.main) || showsUpdateBadge(check.bridge));
+  /**
+   * An agent check fronts one or two binaries — the agent CLI (`main`) and its
+   * ACP bridge (`bridge`) — each with its own version readout. Non-agent checks
+   * (git, gh, the Node runtime) have neither and show a plain path.
+   */
+  const isAgentCheck = $derived(!!check.main || !!check.bridge);
 
-  /** Update commands that will run when the user confirms (actionable only). */
-  const updateCommands = $derived(
-    [check.main, check.bridge].filter((r) => isReadoutActionable(r)).map((r) => r!.updateCommand!)
+  /** Whether a readout surfaces an update badge (under its own readout line). */
+  const anyUpdateBadge = $derived(
+    !!updateBadge('main', check.main) || !!updateBadge('bridge', check.bridge)
+  );
+
+  /** The readouts whose update runs when the user confirms (actionable only). */
+  const actionableReadouts = $derived(
+    [check.main, check.bridge].filter((r) => isReadoutActionable(r)).map((r) => r!)
+  );
+  /** What the confirmation shows: the command per readout, or for a Staged-
+   *  managed install the description of what the managed installer will do. */
+  const updateCommands = $derived(actionableReadouts.map((r) => r.updateCommand!));
+  /**
+   * Every actionable readout is Staged-managed: no shell command runs, the
+   * backend reinstalls Staged's private copy, so the dialog says so instead of
+   * asking to "run a command".
+   */
+  const managedUpdate = $derived(
+    actionableReadouts.length > 0 && actionableReadouts.every((r) => r.bundled === true)
   );
 
   const canUpdate = $derived(hasActionableUpdate(check));
@@ -252,16 +273,6 @@
   }
 </script>
 
-{#snippet updateBadge(slot: 'main' | 'bridge', info: AgentVersionInfo | null)}
-  {#if info?.updateAvailable === true}
-    <span class="update-badge" class:info-only={!info.updateCommand}>
-      <ArrowUpCircle size={11} />
-      {slot === 'bridge' ? 'Bridge update' : 'Update'} available:
-      {info.installedVersion ?? '?'} → {info.latestVersion ?? '?'}
-    </span>
-  {/if}
-{/snippet}
-
 <div
   class="check-row"
   class:pass={check.status === 'pass'}
@@ -286,23 +297,29 @@
       {check.label}
     </span>
     <span class="check-message">{check.message}</span>
-    <!-- "Managed by Staged": resolved from the managed bridge shim dir,
-         whose installs and updates Staged owns — no manual update nag. -->
-    {#if check.path}
-      {#if check.main?.bundled}
-        <span class="check-path">Managed by Staged</span>
-      {:else}
-        <span class="check-path">{check.path}</span>
+    <!-- One readout per resolved binary: label, "Managed by Staged" or the
+         path, the installed version, and the update badge. For a managed
+         Claude/Codex install both readouts describe the same executable — the
+         ACP package vendors the agent — and only the ACP one can update. -->
+    {#if isAgentCheck}
+      {#if check.path}
+        <DoctorVersionReadout
+          kind="main"
+          path={check.path}
+          info={check.main}
+          loading={doctorState.freshnessLoading}
+        />
       {/if}
-      {@render updateBadge('main', check.main)}
-    {/if}
-    {#if check.bridgePath}
-      {#if check.bridge?.bundled}
-        <span class="check-path">Managed by Staged</span>
-      {:else}
-        <span class="check-path">{check.bridgePath}</span>
+      {#if check.bridgePath}
+        <DoctorVersionReadout
+          kind="bridge"
+          path={check.bridgePath}
+          info={check.bridge}
+          loading={doctorState.freshnessLoading}
+        />
       {/if}
-      {@render updateBadge('bridge', check.bridge)}
+    {:else if check.path}
+      <span class="check-path">{check.path}</span>
     {/if}
   </div>
 
@@ -368,9 +385,13 @@
 <AlertDialog.Root bind:open={showUpdateDialog}>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title
-        >Run update command{updateCommands.length > 1 ? 's' : ''}?</AlertDialog.Title
-      >
+      <AlertDialog.Title>
+        {#if managedUpdate}
+          Update Staged's managed install?
+        {:else}
+          Run update command{updateCommands.length > 1 ? 's' : ''}?
+        {/if}
+      </AlertDialog.Title>
       <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
         {updateCommands.join('\n')}
       </AlertDialog.Description>
@@ -453,20 +474,5 @@
     font-family: monospace;
     overflow-wrap: break-word;
     word-wrap: break-word;
-  }
-
-  .update-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    align-self: flex-start;
-    margin-top: 2px;
-    font-size: 10px;
-    color: var(--color-warning, #d29922);
-  }
-
-  /* When there's no runnable command, the badge is informational only. */
-  .update-badge.info-only {
-    color: var(--text-muted);
   }
 </style>

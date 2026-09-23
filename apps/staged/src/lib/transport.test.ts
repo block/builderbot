@@ -287,6 +287,30 @@ describe('web transport', () => {
 
     unlisten();
   });
+
+  it('announces establishment again when the server reports dropped events', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const { listenToEvent } = await import('./transport');
+    const callback = vi.fn();
+    const onEstablished = vi.fn();
+    const unlisten = listenToEvent('doctor-login-output', callback, { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0].open();
+    expect(onEstablished).toHaveBeenCalledTimes(1);
+
+    // Events the server shed under load are as gone as ones emitted while the
+    // socket was down, so a consumer that catches up on `onEstablished` must
+    // hear about this gap the same way — there is no reconnect to prompt it.
+    sockets[0].emit({ event: 'transport:event-gap', payload: null });
+
+    expect(onEstablished).toHaveBeenCalledTimes(2);
+    expect(callback).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+
+    unlisten();
+  });
 });
 
 describe('tauri listener establishment', () => {

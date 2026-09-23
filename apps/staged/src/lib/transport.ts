@@ -136,8 +136,11 @@ export interface ListenOptions {
    * returned unlisten. Fires once in Tauri mode (its in-process bus loses
    * nothing after registration) and once per web-socket connect, including
    * every reconnect: events emitted while the socket was down are gone for
-   * good. Not called when the unlisten precedes establishment, or when
-   * registration fails — see `onRegistrationFailed` for that.
+   * good. Fires again, too, each time the server reports it dropped events for
+   * this socket (a client that lags the bounded broadcast channel is shed
+   * from, not queued for) — the same loss without a reconnect to mark it. Not
+   * called when the unlisten precedes establishment, or when registration
+   * fails — see `onRegistrationFailed` for that.
    */
   onEstablished?: () => void;
   /**
@@ -381,6 +384,10 @@ async function ensureWebSocket(): Promise<void> {
       const data = JSON.parse(messageEvent.data) as { event: string; payload: unknown };
       if (data.event === WEB_SOCKET_EVENT_GAP) {
         recoverAfterEventGap();
+        // The events the server shed are as gone as ones emitted during a
+        // reconnect, and a listener that pairs this stream with a snapshot
+        // has the same catching up to do — see `ListenOptions.onEstablished`.
+        notifyListenersEstablished();
         return;
       }
       for (const listener of wsListeners) {

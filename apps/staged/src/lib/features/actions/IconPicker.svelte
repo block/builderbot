@@ -57,7 +57,12 @@
   <Popover.Content align="start" sideOffset={6} class="w-[268px] p-2">
     <label class="icon-search">
       <Search size={13} />
-      <Input bind:value={query} placeholder="Search icons" aria-label="Search icons" />
+      <Input
+        class="bg-[var(--bg-primary)] dark:bg-[var(--bg-primary)]"
+        bind:value={query}
+        placeholder="Search icons"
+        aria-label="Search icons"
+      />
     </label>
 
     <button

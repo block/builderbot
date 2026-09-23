@@ -132,6 +132,7 @@
           />
           <Input
             id={nameId}
+            class="bg-[var(--bg-primary)] dark:bg-[var(--bg-primary)]"
             bind:ref={nameElement}
             bind:value={draft.name}
             placeholder="Action name"
@@ -144,6 +145,7 @@
         <Label for={commandId}>Command</Label>
         <Input
           id={commandId}
+          class="bg-[var(--bg-primary)] dark:bg-[var(--bg-primary)]"
           bind:value={draft.command}
           placeholder="Command"
           autocomplete="off"
@@ -162,7 +164,10 @@
           onValueChange={(v) => (draft.actionType = v as ActionType)}
           disabled={saving}
         >
-          <Select.Trigger id={typeId} class="w-full">
+          <Select.Trigger
+            id={typeId}
+            class="w-full bg-[var(--bg-primary)] dark:bg-[var(--bg-primary)] dark:hover:bg-[var(--bg-primary)]"
+          >
             {draft.actionType}
           </Select.Trigger>
           <Select.Content>
@@ -174,7 +179,12 @@
       </div>
 
       <div class="pinned-row">
-        <Checkbox id={pinnedId} bind:checked={draft.pinned} disabled={saving} />
+        <Checkbox
+          id={pinnedId}
+          class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
+          bind:checked={draft.pinned}
+          disabled={saving}
+        />
         <Label for={pinnedId} class="text-muted-foreground font-normal">Show in card header</Label>
       </div>
 

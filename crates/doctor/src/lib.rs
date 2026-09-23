@@ -685,7 +685,21 @@ struct FreshnessTarget {
 /// Retrying a fix needs a fresh pipe.
 #[derive(Debug, Clone)]
 pub struct FixStdin {
-    state: Arc<Mutex<FixStdinState>>,
+    shared: Arc<FixStdinShared>,
+}
+
+/// The pipe state plus the latch saying the fix is over. The latch lives outside
+/// the mutex precisely so [`FixStdin::close`] never waits on it: a host thread
+/// parked in a `write_all` holds the mutex for as long as the pipe stays full,
+/// and the runner's return path — which is what [`FixTimeout`] promises is
+/// bounded — cannot be queued behind that.
+///
+/// The two are kept consistent by [`FixStdinGuard`]: whichever lock holder is
+/// last to leave performs the `Closed` transition.
+#[derive(Debug)]
+struct FixStdinShared {
+    state: Mutex<FixStdinState>,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 /// The pipe's whole life cycle: `Buffered` until the fix spawns, `Live` while it
@@ -699,8 +713,11 @@ enum FixStdinState {
     /// `claimed` marks the execution that reserved this pipe, so a second one
     /// is rejected before it spawns. `eof` records that every writer dropped
     /// pre-spawn, so the replay is followed immediately by closing the pipe.
+    /// `queued_bytes` is what the replay will write, held under
+    /// [`MAX_QUEUED_FIX_STDIN_BYTES`].
     Buffered {
         lines: Vec<String>,
+        queued_bytes: usize,
         eof: bool,
         claimed: bool,
     },
@@ -717,15 +734,70 @@ const FIX_STDIN_REUSED: &str = "FixStdin already consumed by a previous fix exec
 /// Rejection for a line the pipe cannot deliver because it is closed.
 const FIX_STDIN_CLOSED: &str = "Fix is no longer accepting input";
 
-/// Locking the pipe state recovers from poisoning instead of propagating it: no
-/// invariant spans the lock (the state is a plain enum, and the only work done
-/// under it is a `Vec` push or a pipe write), while treating a poisoned lock as
-/// a failure would cost `send_line` its delivery guarantee and leak the child's
-/// stdin handle for the lifetime of the writer.
-fn lock_fix_stdin_state(state: &Mutex<FixStdinState>) -> std::sync::MutexGuard<'_, FixStdinState> {
-    state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Rejection for a pre-spawn line that would push the queue past
+/// [`MAX_QUEUED_FIX_STDIN_BYTES`].
+const FIX_STDIN_QUEUE_FULL: &str = "Fix input queue is full before the fix started; \
+     send the rest once the fix is running";
+
+/// Ceiling on bytes queued through [`FixStdinWriter::send_line`] before the fix
+/// spawns. The replay in `FixStdin::attach` writes inline on the runner thread,
+/// before the deadline is armed and with nothing able to interrupt it, so it has
+/// to fit in a virgin pipe's capacity or the runner would park there — the one
+/// place [`FixTimeout`]'s bound could not reach. 4 KiB is the one-page floor of a
+/// pipe on any platform doctor runs on (macOS and Linux both measure 64 KiB in
+/// practice), and orders of magnitude above the auth code this exists to carry.
+pub const MAX_QUEUED_FIX_STDIN_BYTES: usize = 4096;
+
+/// Guard over the pipe state that applies the `closed` latch on release. Every
+/// lock holder therefore closes the pipe on its way out if the fix ended while it
+/// held the lock — including a host `send_line` that was mid-write, which is what
+/// lets [`FixStdin::close`] get away with never blocking.
+struct FixStdinGuard<'a> {
+    shared: &'a FixStdinShared,
+    guard: std::sync::MutexGuard<'a, FixStdinState>,
+}
+
+impl std::ops::Deref for FixStdinGuard<'_> {
+    type Target = FixStdinState;
+
+    fn deref(&self) -> &FixStdinState {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for FixStdinGuard<'_> {
+    fn deref_mut(&mut self) -> &mut FixStdinState {
+        &mut self.guard
+    }
+}
+
+impl Drop for FixStdinGuard<'_> {
+    fn drop(&mut self) {
+        if self
+            .shared
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.guard = FixStdinState::Closed;
+        }
+    }
+}
+
+impl FixStdinShared {
+    /// Locking the pipe state recovers from poisoning instead of propagating it:
+    /// no invariant spans the lock (the state is a plain enum, and the only work
+    /// done under it is a `Vec` push or a pipe write), while treating a poisoned
+    /// lock as a failure would cost `send_line` its delivery guarantee and leak
+    /// the child's stdin handle for the lifetime of the writer.
+    fn lock(&self) -> FixStdinGuard<'_> {
+        FixStdinGuard {
+            shared: self,
+            guard: self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
 }
 
 impl FixStdinState {
@@ -734,7 +806,20 @@ impl FixStdinState {
     /// so later sends fail without re-discovering the dead pipe.
     fn send_line(&mut self, line: String) -> Result<(), String> {
         match self {
-            FixStdinState::Buffered { lines, .. } => {
+            FixStdinState::Buffered {
+                lines,
+                queued_bytes,
+                ..
+            } => {
+                // The newline `send_line` appends is part of what enters the
+                // pipe, so charge for it.
+                let cost = line.len() + 1;
+                if *queued_bytes + cost > MAX_QUEUED_FIX_STDIN_BYTES {
+                    return Err(format!(
+                        "{FIX_STDIN_QUEUE_FULL} (limit {MAX_QUEUED_FIX_STDIN_BYTES} bytes)"
+                    ));
+                }
+                *queued_bytes += cost;
                 lines.push(line);
                 Ok(())
             }
@@ -769,18 +854,22 @@ impl FixStdin {
     /// dropping them: the child's stdin handle lives with the fix and is
     /// reclaimed when it ends, held writer or not.
     pub fn pipe() -> (FixStdinWriter, FixStdin) {
-        let state = Arc::new(Mutex::new(FixStdinState::Buffered {
-            lines: Vec::new(),
-            eof: false,
-            claimed: false,
-        }));
+        let shared = Arc::new(FixStdinShared {
+            state: Mutex::new(FixStdinState::Buffered {
+                lines: Vec::new(),
+                queued_bytes: 0,
+                eof: false,
+                claimed: false,
+            }),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
         (
             FixStdinWriter {
                 inner: Arc::new(FixStdinWriterInner {
-                    state: state.clone(),
+                    shared: shared.clone(),
                 }),
             },
-            FixStdin { state },
+            FixStdin { shared },
         )
     }
 
@@ -788,7 +877,7 @@ impl FixStdin {
     /// `Err` on every later call (a clone already fed an execution), which the
     /// caller surfaces instead of spawning a fix whose stdin is already dead.
     fn claim(&self) -> Result<(), String> {
-        match &mut *lock_fix_stdin_state(&self.state) {
+        match &mut *self.shared.lock() {
             FixStdinState::Buffered { claimed, .. } if !*claimed => {
                 *claimed = true;
                 Ok(())
@@ -807,8 +896,13 @@ impl FixStdin {
     /// is not the fix's failure (a command is free to exit successfully without
     /// reading its stdin), so it only latches `Closed`; the host hears about it
     /// from its next `send_line`.
+    ///
+    /// The replay writes inline on the runner's thread, ahead of the fix's
+    /// deadline, so it must not be able to park: that is what
+    /// [`MAX_QUEUED_FIX_STDIN_BYTES`] buys — the whole queue fits in a virgin
+    /// pipe's capacity, so these writes cannot block on a child that never reads.
     fn attach(&self, child_stdin: std::process::ChildStdin) {
-        let mut state = lock_fix_stdin_state(&self.state);
+        let mut state = self.shared.lock();
         let FixStdinState::Buffered { lines, eof, .. } = &mut *state else {
             return;
         };
@@ -832,8 +926,24 @@ impl FixStdin {
     /// A write hitting `EPIPE` cannot be the signal on its own — a backgrounded
     /// grandchild that inherited the child's stdin keeps the read end open, and
     /// writes into it go on succeeding long after the fix is gone.
+    ///
+    /// Never blocks, which is what keeps the runner's return path inside
+    /// [`FixTimeout`]'s bound: a host thread parked in a `write_all` into a full
+    /// pipe holds the state mutex for as long as the pipe stays full. The latch
+    /// goes up first, so the transition is guaranteed either way — here if the
+    /// lock is free, otherwise by the holder's [`FixStdinGuard`] on release.
     fn close(&self) {
-        *lock_fix_stdin_state(&self.state) = FixStdinState::Closed;
+        self.shared
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Not best-effort correctness: this arm is what reclaims the child's
+        // stdin handle in the ordinary case, where nobody will take the lock
+        // again to run the guard's transition.
+        match self.shared.state.try_lock() {
+            Ok(mut state) => *state = FixStdinState::Closed,
+            Err(std::sync::TryLockError::Poisoned(e)) => *e.into_inner() = FixStdinState::Closed,
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
     }
 
     /// Close a pipe whose execution never started, leaving one that another
@@ -858,12 +968,22 @@ pub struct FixStdinWriter {
 /// the last one drops, which is what keeps the writer `Clone`.
 #[derive(Debug)]
 struct FixStdinWriterInner {
-    state: Arc<Mutex<FixStdinState>>,
+    shared: Arc<FixStdinShared>,
 }
 
 impl Drop for FixStdinWriterInner {
     fn drop(&mut self) {
-        match &mut *lock_fix_stdin_state(&self.state) {
+        // Nothing to signal once the fix is over, and this is the one place that
+        // must not skip the lock when it is contended: dropping the last writer
+        // *is* the EOF, and a fix reading to EOF would hang without it.
+        if self
+            .shared
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        match &mut *self.shared.lock() {
             // Pre-spawn the queued lines still have to reach the child first, so
             // record the EOF for `attach` to deliver after the replay.
             FixStdinState::Buffered { eof, .. } => *eof = true,
@@ -885,16 +1005,30 @@ impl FixStdinWriter {
     /// Lines sent before the fix spawns are queued and replayed at spawn, so
     /// they return `Ok` before any pipe exists — the one `Ok` that is not a
     /// delivery guarantee, and unavoidable for a host that wants to prime the
-    /// input before the fix starts. Once a fix execution gives up without ever
-    /// spawning (an unresolved command, a spawn failure), the pipe is closed and
-    /// every later send fails.
+    /// input before the fix starts. That queue is capped at
+    /// [`MAX_QUEUED_FIX_STDIN_BYTES`], so a bulk pre-spawn send fails rather than
+    /// wedging the runner's replay; send the rest once the fix is running. Once a
+    /// fix execution gives up without ever spawning (an unresolved command, a
+    /// spawn failure), the pipe is closed and every later send fails.
     ///
     /// Completion is signalled by the fix's own `Result`, never by `send_line`.
     /// May block if the fix isn't reading and the pipe buffer fills, so a host
     /// sending anything bulkier than a pasted code should call this off its
-    /// async runtime.
+    /// async runtime. Such a write also delays any other clone's `send_line` and
+    /// the last-writer EOF — though no longer the fix's own completion or `Err`,
+    /// which stay inside [`ExecuteFixOptions::timeout`].
     pub fn send_line(&self, line: impl Into<String>) -> Result<(), String> {
-        lock_fix_stdin_state(&self.inner.state).send_line(line.into())
+        // Ahead of the mutex, so a host is never queued behind another clone's
+        // parked write for a fix that has already finished.
+        if self
+            .inner
+            .shared
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(FIX_STDIN_CLOSED.to_string());
+        }
+        self.inner.shared.lock().send_line(line.into())
     }
 }
 
@@ -1467,6 +1601,14 @@ where
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
 
+    // Armed at the spawn so the fix's wall clock measures the fix, not the setup
+    // below it — which is what `FixTimeout` claims. It bounds the recv loop and
+    // the reap; the replay in `attach` is kept unable to park by
+    // `MAX_QUEUED_FIX_STDIN_BYTES` rather than by this deadline, since nothing
+    // interrupts a `write_all` already in progress.
+    let limit = timeout.duration();
+    let deadline = limit.map(|limit| Instant::now() + limit);
+
     let child_stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -1494,12 +1636,13 @@ where
     // Deliberately after the readers are running: the replay of pre-spawn lines
     // writes inline on this thread, so a queue larger than the pipe buffer would
     // deadlock against a child whose output nobody is draining yet.
+    // `MAX_QUEUED_FIX_STDIN_BYTES` is what actually rules that out — keeping the
+    // readers first means the ordering isn't the only thing standing between a
+    // raised cap and a wedged runner.
     if let (Some(fix_stdin), Some(child_stdin)) = (&stdin, child_stdin) {
         fix_stdin.attach(child_stdin);
     }
 
-    let limit = timeout.duration();
-    let deadline = limit.map(|limit| Instant::now() + limit);
     let mut stderr_accum = String::new();
     let mut expired = false;
 
@@ -1871,6 +2014,230 @@ mod tests {
         );
     }
 
+    /// A line whose cost divides the cap exactly, so filling the queue with these
+    /// leaves precisely nothing for the next byte.
+    fn queue_filling_chunk() -> String {
+        "x".repeat(MAX_QUEUED_FIX_STDIN_BYTES / 16 - 1)
+    }
+
+    /// A login shell with no user dotfiles. Faster (~0.2s of startup instead of
+    /// ~1.6s, and the same on any machine), and — what matters for the tests that
+    /// background a long-lived descendant — free of dotfiles that leak a
+    /// descriptor. A leaked duplicate of the inherited stderr keeps the reader
+    /// threads alive for as long as that descendant lives, which would turn "the
+    /// fix finished" into "the fix's last descendant exited". Measured locally:
+    /// under a real `$HOME`, a backgrounded `sleep` with both of its own output
+    /// streams redirected to `/dev/null` still held an extra pipe descriptor
+    /// inherited from the shell's startup.
+    fn dotfile_free_env(home: &Path) -> DoctorEnv {
+        DoctorEnv::new(vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), home.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+        ])
+    }
+
+    /// Queueing past the cap must fail rather than build a replay the runner
+    /// would park in. `Err` is the honest answer — not delivered, and not
+    /// silently held for a spawn that would then wedge the fix's own deadline.
+    #[test]
+    fn queued_fix_stdin_bytes_are_capped() {
+        let (writer, _stdin) = FixStdin::pipe();
+        let chunk = queue_filling_chunk();
+        let mut accepted = 0;
+        let err = loop {
+            match writer.send_line(chunk.clone()) {
+                Ok(()) => {
+                    accepted += chunk.len() + 1;
+                    assert!(
+                        accepted <= MAX_QUEUED_FIX_STDIN_BYTES,
+                        "queue took {accepted} bytes, past its {MAX_QUEUED_FIX_STDIN_BYTES}-byte cap",
+                    );
+                }
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(
+            accepted, MAX_QUEUED_FIX_STDIN_BYTES,
+            "the whole cap should be usable before a send is refused",
+        );
+        assert!(
+            err.contains("queue is full"),
+            "error should name the full queue; got {err:?}",
+        );
+        assert!(
+            writer.send_line("x").is_err(),
+            "not even a short line fits once the queue is full",
+        );
+
+        // An oversized single line is refused outright rather than truncated:
+        // half an auth code is worse than none.
+        let (writer, _stdin) = FixStdin::pipe();
+        assert!(
+            writer
+                .send_line("x".repeat(MAX_QUEUED_FIX_STDIN_BYTES))
+                .is_err(),
+            "one line over the cap must be refused, not sliced",
+        );
+    }
+
+    /// The cap exists to fit a *virgin* pipe's capacity, because the replay in
+    /// `attach` writes inline on the runner thread with no deadline armed and
+    /// nothing able to interrupt a `write_all` in progress. 4 KiB is the one-page
+    /// floor of a pipe on any platform doctor runs on (macOS and Linux both
+    /// measure 64 KiB in practice); raising it past that reintroduces a runner
+    /// that can park forever, so it must not pass silently. Checked at compile
+    /// time — the bound is on a constant, and a cap that can wedge the runner
+    /// should not build, let alone wait for someone to run this test.
+    #[test]
+    fn queued_fix_stdin_cap_fits_in_a_pipe() {
+        const {
+            assert!(
+                MAX_QUEUED_FIX_STDIN_BYTES <= 4096,
+                "the pre-spawn queue must fit in the smallest pipe doctor can get",
+            );
+            assert!(
+                MAX_QUEUED_FIX_STDIN_BYTES >= 256,
+                "the cap must stay far above any credential a fix prompts for",
+            );
+        }
+    }
+
+    /// A queue filled to the cap must replay without parking the runner: the
+    /// backgrounded `sleep` inherits stdin and never reads it, so the read end
+    /// stays open and the replay cannot short-circuit on `EPIPE` — the writes
+    /// really do land in the pipe's buffer. Both its output streams are redirected
+    /// by name so the reader threads still see EOF: zsh's `MULTIOS` leaves the
+    /// inherited stderr open under `>/dev/null 2>&1`, which would hold the run
+    /// here for the `sleep`'s whole duration.
+    ///
+    /// The elapsed bound is the real assertion, and what keeps a regression from
+    /// wedging the suite: a replay that parks is eventually released by the
+    /// backgrounded `sleep` exiting and closing the read end, so raising the cap
+    /// past a pipe's capacity turns this into a 30s `Ok` — verified locally at
+    /// 400 KiB — rather than a failure the timing check would otherwise miss.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_replays_a_full_queue_without_parking() {
+        let (writer, stdin) = FixStdin::pipe();
+        let chunk = queue_filling_chunk();
+        while writer.send_line(chunk.clone()).is_ok() {}
+        drop(writer);
+
+        let tmp = unique_tmp_dir("fix-stdin-full-queue-replay");
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let started = Instant::now();
+        let result = run_command_streaming(
+            "sleep 30 >/dev/null 2>/dev/null & echo doctor-stdin-replay-done".to_string(),
+            Some(dotfile_free_env(&tmp)),
+            Some(stdin),
+            FixTimeout::After(Duration::from_secs(30)),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_ok(), "the fix should complete; got {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the replay parked until the backgrounded sleep freed the pipe",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-replay-done"),
+            "the fix should have run past the replay; captured: {captured:?}",
+        );
+    }
+
+    /// The hazard this bound exists for: a host thread parked in a `write_all`
+    /// into a full pipe holds the state mutex indefinitely, and the runner's
+    /// return path must not queue behind it. The `setsid` descendant inherits
+    /// stdin and escapes the process group, so the timeout's group kill does not
+    /// free the pipe — the parked write stays parked until that descendant exits,
+    /// well after the deadline.
+    ///
+    /// Driven on a plain thread with a bounded `recv_timeout` so a regression
+    /// *fails* rather than hanging the suite: the whole point is that the runner
+    /// returns at all. The receive window sits between the deadline and the
+    /// descendant's exit, so a runner that waits on the mutex misses it.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_streaming_returns_while_a_host_send_is_parked() {
+        let (writer, stdin) = FixStdin::pipe();
+        // A throwaway `HOME`: with real dotfiles a login shell takes over a
+        // second to start, long enough for the deadline to land before the fix
+        // printed anything to park on.
+        let tmp = unique_tmp_dir("fix-stdin-parked-send");
+        let env = dotfile_free_env(&tmp);
+
+        let (marker_tx, marker_rx) = std::sync::mpsc::channel::<()>();
+        let parked_writer = writer.clone();
+        // Far more than any pipe holds, so this parks mid-write holding the mutex.
+        std::thread::spawn(move || {
+            if marker_rx.recv_timeout(Duration::from_secs(10)).is_ok() {
+                let _ = parked_writer.send_line("x".repeat(1_000_000));
+            }
+        });
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = run_command_streaming_blocking(
+                "perl -MPOSIX=setsid -e 'setsid(); sleep 5' >/dev/null 2>&1 & \
+                 echo doctor-stdin-parked; sleep 30",
+                Some(&env),
+                Some(stdin),
+                FixTimeout::After(Duration::from_secs(1)),
+                FixProcessGroup::Own,
+                move |line| {
+                    lines_clone.lock().unwrap().push(line.to_string());
+                    if line == "doctor-stdin-parked" {
+                        let _ = marker_tx.send(());
+                    }
+                },
+            );
+            let _ = result_tx.send(result);
+        });
+
+        let result = result_rx.recv_timeout(Duration::from_secs(3)).expect(
+            "the runner must return on its deadline while a host send holds the state mutex",
+        );
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out"),
+            "error should name the timeout; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-parked"),
+            "the host send never had a live pipe to park on, so this proves \
+             nothing; captured: {captured:?}",
+        );
+
+        // Still held by the parked write, so this can only be answered from the
+        // latch outside the mutex — the fast path that keeps a host from queueing
+        // behind another clone for a fix that is already over.
+        let (late_tx, late_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = late_tx.send(writer.send_line("doctor-stdin-late"));
+        });
+        let late = late_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a send after the fix must not wait on a parked write");
+        let late_err = late.expect_err("the fix is over, so the send should fail");
+        assert!(
+            late_err.contains("no longer accepting input"),
+            "error should say the input is closed; got {late_err:?}",
+        );
+
+        // The parked thread is deliberately not joined: it unparks when the
+        // escaped descendant exits and the read end closes, and its guard drop is
+        // what performs the `Closed` transition the contended `close()` skipped.
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Reusing a `FixStdin` (or a clone) for a second execution must fail
     /// loudly rather than hand the child an immediately-EOF'd stdin — the
     /// receiver lives with the first run, so a second could only hang. The
@@ -2123,11 +2490,7 @@ mod tests {
     ) -> bool {
         let tmp = unique_tmp_dir(tag);
         let pid_file = tmp.join("grandchild-pid");
-        let env = DoctorEnv::new(vec![
-            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
-            ("USER".to_string(), "doctor-test".to_string()),
-        ]);
+        let env = dotfile_free_env(&tmp);
 
         let result = run_command_streaming_blocking(
             &format!(

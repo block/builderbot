@@ -395,6 +395,56 @@ describe('web transport', () => {
     unlistenSecond();
     consoleError.mockRestore();
   });
+
+  it('keeps listeners without onRegistrationFailed registered across a WebSocket setup failure', async () => {
+    let fail = true;
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => {
+        if (fail) throw new Error('client id unavailable');
+        return 'web-client-1';
+      },
+      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { listenToEvent } = await import('./transport');
+    const plainCallback = vi.fn();
+    const loginCallback = vi.fn();
+    const loginFailed = vi.fn();
+
+    // A plain listener (session status, change feed, ...) has no way to be
+    // told about the failure and nothing to do about it, so it must survive
+    // for the next attempt. The login listener asked to hear about it and is
+    // dropped: its owner has already given the run up.
+    const unlistenPlain = listenToEvent('session-status-changed', plainCallback);
+    const unlistenLogin = listenToEvent('doctor-login-output', loginCallback, {
+      onRegistrationFailed: loginFailed,
+    });
+
+    await vi.waitFor(() => expect(loginFailed).toHaveBeenCalledTimes(1));
+    expect(sockets).toHaveLength(0);
+
+    fail = false;
+    const onEstablished = vi.fn();
+    const unlistenNext = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0].open();
+    await vi.waitFor(() => expect(onEstablished).toHaveBeenCalledTimes(1));
+
+    sockets[0].emit({ event: 'session-status-changed', payload: { sessionId: 's1' } });
+    expect(plainCallback).toHaveBeenCalledWith({ sessionId: 's1' });
+
+    sockets[0].emit({ event: 'doctor-login-output', payload: { line: 'late' } });
+    expect(loginCallback).not.toHaveBeenCalled();
+
+    unlistenPlain();
+    unlistenLogin();
+    unlistenNext();
+    expect(sockets[0].closed).toBe(true);
+    consoleError.mockRestore();
+  });
 });
 
 describe('tauri listener establishment', () => {

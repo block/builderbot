@@ -348,9 +348,19 @@ function notifyListenersEstablished(): void {
   }
 }
 
+/**
+ * Report a failed socket set-up to the listeners that asked to hear about it,
+ * and drop only those: a consumer told its registration failed has given up on
+ * it, and keeping the entry would let a later connect deliver events to a
+ * listener whose owner believes it dead. Every other listener stays registered
+ * and is picked up by the next `ensureWebSocket`, exactly as before this
+ * attempt — in Tauri mode a failed `listen()` costs only that one listener, and
+ * the shared socket should not widen that to everyone who happened to be
+ * waiting on the same connection.
+ */
 function notifyListenersRegistrationFailed(error: unknown): void {
-  const failed = [...wsListeners];
-  wsListeners = [];
+  const failed = wsListeners.filter((l) => l.onRegistrationFailed);
+  wsListeners = wsListeners.filter((l) => !l.onRegistrationFailed);
   for (const listener of failed) {
     listener.onRegistrationFailed?.(error);
   }
@@ -453,8 +463,10 @@ function webSocketListen<T>(
     // Only the socket set-up itself can reject here — a socket that opens and
     // then drops is retried from `onclose`, never surfaced this way — so this is
     // the one web-mode case where the listener provably never goes live. The
-    // setup attempt notifies all still-registered listeners before rejecting,
-    // including any that joined while the attempt was in flight.
+    // setup attempt notifies every still-registered listener that opted into
+    // `onRegistrationFailed` before rejecting, including any that joined while
+    // the attempt was in flight; listeners without the hook stay registered for
+    // the next attempt.
   });
 
   // A socket that is still connecting will notify this listener along with the

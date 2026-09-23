@@ -337,8 +337,12 @@ impl AcpAuthenticationSelection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+/// What kind of credential an advertised ACP auth method needs, which is what
+/// decides whether this client can act on it at all.
+///
+/// Deliberately not `Serialize`: nothing is threaded to the session layer yet,
+/// and a derive would advertise a wire shape no consumer has agreed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpAuthenticationMethodCategory {
     AgentManaged,
     EnvironmentBacked,
@@ -357,8 +361,7 @@ impl AcpAuthenticationMethodCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpAuthenticationMethod {
     pub id: String,
     pub display_name: String,
@@ -367,8 +370,7 @@ pub struct AcpAuthenticationMethod {
     pub can_handle: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpAuthenticationRequired {
     pub methods: Vec<AcpAuthenticationMethod>,
     pub attempted_method_id: Option<String>,
@@ -387,45 +389,58 @@ impl AcpAuthenticationRequired {
         self
     }
 
+    /// The sentence the user reads. This string lands in `session.errorMessage`
+    /// and is rendered verbatim in Staged's session alert, so the method
+    /// inventory behind the decision goes to [`Self::log_methods`] at debug
+    /// level rather than into the error.
     fn describe(&self, operation: &str) -> String {
-        let retry = self
-            .attempted_method_id
-            .as_deref()
-            .map(|method_id| {
-                format!(" after authenticating with explicitly selected method '{method_id}'")
-            })
-            .unwrap_or_default();
-        let methods = if self.methods.is_empty() {
-            "no advertised authentication methods".to_string()
-        } else {
-            self.methods
-                .iter()
-                .map(|method| {
-                    let support = if method.can_handle {
-                        "client-supported"
-                    } else {
-                        "unsupported by this client"
-                    };
-                    let description = method
-                        .description
-                        .as_deref()
-                        .filter(|description| !description.trim().is_empty())
-                        .map(|description| format!(", description: {description}"))
-                        .unwrap_or_default();
-                    format!(
-                        "{} (id: {}, category: {}, {support}{description})",
-                        method.display_name,
-                        method.id,
-                        method.category.label(),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ")
-        };
+        self.log_methods(&format!("required to {operation}"));
+        match self.attempted_method_id.as_deref() {
+            Some(method_id) => format!(
+                "ACP authentication is required to {operation}. Signing in with '{method_id}' did not clear it — sign this agent in again, then retry."
+            ),
+            None => format!(
+                "ACP authentication is required to {operation}. Sign this agent in, then retry."
+            ),
+        }
+    }
 
-        format!(
-            "ACP authentication is required to {operation}{retry}; not retrying automatically without an explicit supported authentication method. Advertised methods: {methods}"
-        )
+    /// Record the full advertised-method inventory, which is the diagnostic that
+    /// explains why the driver refused to pick one for the user.
+    fn log_methods(&self, context: &str) {
+        log::debug!(
+            "ACP authentication {context}; not retrying automatically without an explicit supported authentication method. Advertised methods: {}",
+            self.method_inventory()
+        );
+    }
+
+    fn method_inventory(&self) -> String {
+        if self.methods.is_empty() {
+            return "no advertised authentication methods".to_string();
+        }
+        self.methods
+            .iter()
+            .map(|method| {
+                let support = if method.can_handle {
+                    "client-supported"
+                } else {
+                    "unsupported by this client"
+                };
+                let description = method
+                    .description
+                    .as_deref()
+                    .filter(|description| !description.trim().is_empty())
+                    .map(|description| format!(", description: {description}"))
+                    .unwrap_or_default();
+                format!(
+                    "{} (id: {}, category: {}, {support}{description})",
+                    method.display_name,
+                    method.id,
+                    method.category.label(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -5963,21 +5978,25 @@ async fn authenticate_with_explicit_method(
         .iter()
         .find(|method| method.id().to_string() == selection.method_id)
         .ok_or_else(|| {
-            let required = AcpAuthenticationRequired::from_auth_methods(auth_methods);
+            // Both of these are integration bugs rather than something the user
+            // can fix, so the inventory that proves it goes to the log and the
+            // error stays the one sentence that reaches the session alert.
+            AcpAuthenticationRequired::from_auth_methods(auth_methods)
+                .log_methods("method selected explicitly but not advertised");
             format!(
-                "ACP authentication method '{}' was selected explicitly, but the agent did not advertise it. {}",
+                "ACP authentication method '{}' was selected explicitly, but the agent did not advertise it.",
                 selection.method_id,
-                required.describe("authenticate")
             )
         })?;
     let details = auth_method_details(method);
     if !details.can_handle {
+        AcpAuthenticationRequired::from_auth_methods(auth_methods)
+            .log_methods("selected method cannot be handled by this client");
         return Err(format!(
-            "ACP authentication method '{}' ({}) cannot be handled by this client because it is {}. Advertised methods: {}",
+            "ACP authentication method '{}' ({}) cannot be handled by this client because it is {}.",
             details.display_name,
             details.id,
             details.category.label(),
-            AcpAuthenticationRequired::from_auth_methods(auth_methods).describe("authenticate")
         ));
     }
 
@@ -6396,7 +6415,13 @@ mod tests {
             .expect_err("a second auth_required should terminate the setup");
 
         let error = format!("{error:?}");
-        assert!(error.contains("after authenticating with explicitly selected method 'chat-gpt'"));
+        // The user-facing sentence has to name the method that was tried, so
+        // "sign in again" doesn't read as a suggestion to repeat what just
+        // failed. The full advertised-method inventory stays in the debug log.
+        assert!(
+            error.contains("Signing in with 'chat-gpt' did not clear it"),
+            "error should say the selected method was already tried; got {error}",
+        );
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &["session/new", "authenticate:chat-gpt", "session/new"]

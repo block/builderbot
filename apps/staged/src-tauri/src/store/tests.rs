@@ -495,14 +495,21 @@ fn test_transition_from_running_keeps_message_for_cancelled() {
 }
 
 #[test]
-fn test_transition_from_active_succeeds_when_queued() {
+fn test_transition_from_owned_active_succeeds_when_queued() {
     let store = Store::in_memory().unwrap();
 
+    // Queued rows carry no owner, and count as the caller's by convention.
     let session = Session::new_queued("queued");
     store.create_session(&session).unwrap();
 
     let transitioned = store
-        .transition_from_active(&session.id, SessionStatus::Cancelled, None, None)
+        .transition_from_owned_active(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            None,
+            std::process::id(),
+        )
         .unwrap();
     assert!(transitioned);
 
@@ -511,7 +518,62 @@ fn test_transition_from_active_succeeds_when_queued() {
 }
 
 #[test]
-fn test_transition_from_active_does_not_overwrite_completed_session() {
+fn test_transition_from_owned_active_succeeds_for_our_running_session() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("ours", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let transitioned = store
+        .transition_from_owned_active(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+            std::process::id(),
+        )
+        .unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+    assert_eq!(
+        final_state.completion_reason,
+        Some(CompletionReason::AppQuit)
+    );
+}
+
+/// The race this guard exists for: between the quit sweep's snapshot and its
+/// write, another instance can claim a queued row — one statement that flips it
+/// to `running` and stamps *its* pid. Liveness alone still matches, so an
+/// ownership-blind CAS would cancel that instance's live session.
+#[test]
+fn test_transition_from_owned_active_leaves_another_instances_session_alone() {
+    let store = Store::in_memory().unwrap();
+
+    // What that claim leaves behind: running, with someone else's pid on it.
+    let mut theirs = Session::new_running("theirs", Path::new("/tmp"));
+    theirs.owner_pid = Some(std::process::id().wrapping_add(1));
+    store.create_session(&theirs).unwrap();
+
+    let transitioned = store
+        .transition_from_owned_active(
+            &theirs.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::AppQuit),
+            std::process::id(),
+        )
+        .unwrap();
+    assert!(!transitioned);
+
+    let final_state = store.get_session(&theirs.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Running);
+    assert_eq!(final_state.completion_reason, None);
+}
+
+#[test]
+fn test_transition_from_owned_active_does_not_overwrite_completed_session() {
     let store = Store::in_memory().unwrap();
 
     let session = Session::new_running("completed first", Path::new("/tmp"));
@@ -521,7 +583,13 @@ fn test_transition_from_active_does_not_overwrite_completed_session() {
         .unwrap();
 
     let transitioned = store
-        .transition_from_active(&session.id, SessionStatus::Cancelled, None, None)
+        .transition_from_owned_active(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            None,
+            std::process::id(),
+        )
         .unwrap();
     assert!(!transitioned);
 

@@ -110,17 +110,31 @@ impl Store {
         Ok(rows > 0)
     }
 
-    /// Transition session status only if it is currently `queued` or `running`.
+    /// Transition session status only if the row is still active *and ours*:
+    /// `queued`, or `running` under `owner_pid`.
     ///
     /// Returns `true` if the row was updated, `false` if the session already
-    /// moved to another state or didn't exist. This is the safe path for
-    /// cancelling work that may still be in the queue.
-    pub fn transition_from_active(
+    /// moved to another state, is running under a different pid, or didn't
+    /// exist. This is the app-quit sweep's path, and the guard mirrors the
+    /// filter that snapshot uses: the store is shared with any other Staged
+    /// instance pointed at the same data dir, queued rows carry no owner and
+    /// count as the caller's by convention, and running rows must carry the
+    /// caller's pid.
+    ///
+    /// Checking ownership *here* rather than only in the snapshot is what closes
+    /// the gap between the two. A claim landing in that gap
+    /// (`transition_queued_to_running`) flips a queued row to `running` and
+    /// stamps a pid atomically: another instance's claim now fails this
+    /// predicate and its live work is left alone, while our own drain's claim
+    /// still matches and is swept — right, because this process is exiting and
+    /// taking the session with it.
+    pub fn transition_from_owned_active(
         &self,
         id: &str,
         new_status: SessionStatus,
         error_message: Option<&str>,
         completion_reason: Option<&CompletionReason>,
+        owner_pid: u32,
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let error_msg = if new_status == SessionStatus::Error {
@@ -130,8 +144,8 @@ impl Store {
         };
         let rows = conn.execute(
             "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
-             WHERE id = ?5 AND status IN ('queued', 'running')",
-            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
+             WHERE id = ?5 AND (status = 'queued' OR (status = 'running' AND owner_pid = ?6))",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, owner_pid],
         )?;
         Ok(rows > 0)
     }

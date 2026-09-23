@@ -809,9 +809,9 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         store,
         app_handle,
         Arc::clone(&registry),
-    )?;
-
-    Ok(true)
+    )
+    // A shutdown refusal is not a start — see `start_queued_session_for_branch`.
+    .map(session_runner::SessionStartOutcome::started)
 }
 
 /// Insert the session row for a push that runs right now.
@@ -1002,9 +1002,9 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         store,
         app_handle,
         Arc::clone(&registry),
-    )?;
-
-    Ok(true)
+    )
+    // A shutdown refusal is not a start — see `start_queued_session_for_branch`.
+    .map(session_runner::SessionStartOutcome::started)
 }
 
 /// What the branch queue decided to do with a pull request.

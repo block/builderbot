@@ -1002,7 +1002,7 @@ pub struct ActiveSessionInfo {
 /// sessions (pr/push) link no artifact, so their branch comes from the
 /// session row's own `branch_id` and their type falls back to prompt
 /// inference.
-fn project_active_session(store: &Store, session: &store::Session) -> ActiveSessionInfo {
+pub(crate) fn project_active_session(store: &Store, session: &store::Session) -> ActiveSessionInfo {
     let project_note = store
         .get_project_note_by_session(&session.id)
         .ok()
@@ -3116,6 +3116,25 @@ pub async fn drain_queued_sessions_for_branch(
     branch_id: String,
     provider: Option<String>,
 ) -> Result<bool, String> {
+    // A quit cancels every running session, and every terminal transition drains
+    // the branch queue — including those cancels. Left ungated, shutdown feeds
+    // itself: it claims queued rows and spawns fresh agent children that
+    // `app.exit(0)` then orphans, since they run in their own process groups and
+    // an exit runs no `kill_on_drop` destructors. The sweep would put the DB rows
+    // right; nothing would put the processes right.
+    //
+    // `start_session` and `start_pipeline_session` now refuse a start of their
+    // own accord, so this gate is no longer what stops the children — but it is
+    // still what stops the *claims*. A row this returns without touching is
+    // still `queued`, carrying no owner, which is what leaves it available to
+    // another instance pointed at the same data dir right up until our sweep
+    // reaches it (the sweep's CAS is ownership-aware for exactly that reason).
+    // Claiming it and then refusing would stamp our pid on work we are about to
+    // throw away.
+    if crate::app_lifecycle::is_quitting(&app_handle) {
+        return Ok(false);
+    }
+
     let queued = store
         .get_queued_sessions_for_branch(&branch_id)
         .map_err(|e| e.to_string())?;
@@ -3130,6 +3149,17 @@ pub async fn drain_queued_sessions_for_branch(
         };
 
         if !can_start_with_active_branch_sessions(schedule.kind, &active) {
+            break;
+        }
+
+        // The entry gate, re-checked before each claim: every start below
+        // awaits, so a shutdown claimed mid-drain would otherwise keep being
+        // fed the rows the remaining iterations were about to take. Kept for
+        // the same reason as the entry gate now that the runner refuses starts
+        // itself — this is the last point at which a queued row can be left
+        // unclaimed, and the rows after it are the ones a drain would otherwise
+        // claim one by one on its way out.
+        if crate::app_lifecycle::is_quitting(&app_handle) {
             break;
         }
 
@@ -3354,6 +3384,13 @@ async fn start_queued_session_for_branch(
         .get_image_ids_for_session(&session_id)
         .unwrap_or_default();
 
+    // No last look before the spawn here any more: `start_session` takes one
+    // itself, a few statements further on (the status emit and the config it is
+    // handed) and for every caller rather than this one. Both fire after the
+    // claim, so the only difference between them is what they leave behind —
+    // this gate stranded a `running` row for the sweep to put right, which is
+    // fine while the sweep is still to come and wrong in the window between the
+    // sweep and `app.exit(0)`. The runner's gate records the row itself.
     let session_type_str = match session_type {
         BranchSessionType::Commit => "commit",
         BranchSessionType::Note => "note",
@@ -3403,9 +3440,12 @@ async fn start_queued_session_for_branch(
         store,
         app_handle,
         Arc::clone(&registry),
-    )?;
-
-    Ok(true)
+    )
+    // A start the runner refused because a shutdown is under way is not a
+    // start: report it like a claim that lost its race, so the drain loop
+    // re-reads the branch's active kinds instead of counting this session as
+    // running. Its next iteration stops on the pre-claim gate anyway.
+    .map(session_runner::SessionStartOutcome::started)
 }
 
 // =============================================================================

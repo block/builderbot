@@ -853,6 +853,10 @@ impl FixStdin {
     /// until [`ExecuteFixOptions::timeout`] fires. Nothing else is at stake in
     /// dropping them: the child's stdin handle lives with the fix and is
     /// reclaimed when it ends, held writer or not.
+    ///
+    /// "No more input" is all EOF says. It is not a way to *stop* a fix: one that
+    /// is not reading stdin — the login CLI, waiting on its browser callback —
+    /// ignores it and runs on. Ending a fix early is [`FixCancellation`]'s job.
     pub fn pipe() -> (FixStdinWriter, FixStdin) {
         let shared = Arc::new(FixStdinShared {
             state: Mutex::new(FixStdinState::Buffered {
@@ -958,7 +962,9 @@ impl FixStdin {
 }
 
 /// Cloneable handle for feeding lines to a fix subprocess's stdin. Dropping
-/// every clone closes the fix's stdin (EOF).
+/// every clone closes the fix's stdin (EOF) — "no more input", not "stop"; a
+/// fix that isn't reading stdin never notices. Stopping one is
+/// [`FixCancellation`]'s job.
 #[derive(Debug, Clone)]
 pub struct FixStdinWriter {
     inner: Arc<FixStdinWriterInner>,
@@ -1011,7 +1017,10 @@ impl FixStdinWriter {
     /// fix execution gives up without ever spawning (an unresolved command, a
     /// spawn failure), the pipe is closed and every later send fails.
     ///
-    /// Completion is signalled by the fix's own `Result`, never by `send_line`.
+    /// Completion is signalled by the fix's own `Result`, never by `send_line`,
+    /// and a fix that has stopped wanting input is not thereby over: a host that
+    /// wants the run *ended* — an abandoned login, say — cancels it through
+    /// [`FixCancellation`], which is what makes the pipe close.
     /// May block if the fix isn't reading and the pipe buffer fills, so a host
     /// sending anything bulkier than a pasted code should call this off its
     /// async runtime. Such a write also delays any other clone's `send_line` and
@@ -1031,6 +1040,104 @@ impl FixStdinWriter {
         self.inner.shared.lock().send_line(line.into())
     }
 }
+
+/// Opt-in cancellation for a fix subprocess. Create with
+/// [`FixCancellation::token`]; keep the [`FixCancelHandle`], put the
+/// `FixCancellation` in [`ExecuteFixOptions::cancellation`].
+///
+/// This is the only way a host can end a fix early. Closing the fix's stdin is
+/// not one: a fix that is not reading stdin — `claude-agent-acp --cli auth
+/// login` prints its URL and then waits on its browser callback, ignoring EOF —
+/// runs on until [`ExecuteFixOptions::timeout`] fires. The runner owns the
+/// child, so the kill has to come from inside it, and this is how a host asks.
+///
+/// Unlike [`FixStdin`] a token is not single-use — nothing about it is spent by
+/// a run — but a cancelled token stays cancelled, so a retry that reuses one is
+/// refused before it spawns. Attach a fresh token to each run.
+#[derive(Debug, Clone)]
+pub struct FixCancellation {
+    shared: Arc<FixCancellationShared>,
+}
+
+/// One latch shared by the handle and the token. An atomic rather than anything
+/// the runner has to lock: `cancel` is called from a UI thread in response to a
+/// click and must never wait on a runner mid-`write_all`, and the runner reads
+/// it once per output line without contending with anyone.
+#[derive(Debug)]
+struct FixCancellationShared {
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl FixCancellation {
+    /// Create a connected pair: a cloneable handle for the caller to keep and
+    /// the `FixCancellation` to place in [`ExecuteFixOptions::cancellation`].
+    pub fn token() -> (FixCancelHandle, FixCancellation) {
+        let shared = Arc::new(FixCancellationShared {
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+        });
+        (
+            FixCancelHandle {
+                shared: shared.clone(),
+            },
+            FixCancellation { shared },
+        )
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.shared
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Cloneable, thread-safe handle for cancelling a fix subprocess from wherever
+/// the host learns the user gave up — a Tauri command, a UI callback, another
+/// task — while the run itself is awaited elsewhere.
+#[derive(Debug, Clone)]
+pub struct FixCancelHandle {
+    shared: Arc<FixCancellationShared>,
+}
+
+impl FixCancelHandle {
+    /// Ask the runner to stop the fix. Infallible and idempotent: the request is
+    /// recorded whatever state the run is in, and repeating it changes nothing.
+    ///
+    /// What happens next depends on where the run is. Before the fix has spawned,
+    /// the runner refuses to spawn it and returns `Err`. While it runs, the runner
+    /// notices within [`FIX_CANCEL_POLL_INTERVAL`] (sooner if the fix is
+    /// printing), kills the fix — its whole process tree where doctor owns the
+    /// process group, the direct child where it does not, exactly as the timeout
+    /// does — delivers any output already read, emits one `doctor: fix
+    /// cancelled` notice through `on_line`, and returns `Err` naming the
+    /// cancellation. After the run has returned this is a no-op: the fix's own
+    /// `Result` stands.
+    ///
+    /// A cancel that lands in the instant between the fix exiting and the runner
+    /// observing that exit is reported as a cancellation, the same way the
+    /// timeout is; the window is the runner's own reap latency, not a human's.
+    pub fn cancel(&self) {
+        self.shared
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether [`cancel`](Self::cancel) has been called on this handle or any
+    /// clone of it. A host holding the run's `Err` can tell a cancellation it
+    /// asked for from a failure without parsing the message: the runner's error
+    /// type is unchanged, so this is where that distinction lives.
+    pub fn is_cancelled(&self) -> bool {
+        self.shared
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// How long a cancellable fix's runner blocks between looks at its
+/// [`FixCancellation`], so the bound on cancel latency while the fix is silent.
+/// A cancellable run that is *not* cancelled pays one wake-up per interval —
+/// nothing next to a login idling for minutes — and a run without a
+/// `FixCancellation` never polls at all.
+pub const FIX_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Wall-clock bound on a single fix execution.
 ///
@@ -1088,6 +1195,15 @@ pub struct ExecuteFixOptions {
     pub stdin: Option<FixStdin>,
     /// Wall-clock bound on the fix. Defaults to [`FixTimeout::Standard`].
     pub timeout: FixTimeout,
+    /// Opt-in cancellation for the fix subprocess (see
+    /// [`FixCancellation::token`]). `None` means nothing but the fix's own
+    /// exit or [`timeout`](Self::timeout) ends the run — closing a piped stdin
+    /// does not, since a fix that isn't reading it never notices.
+    ///
+    /// A cancelled token stays cancelled, so a cached options struct that was
+    /// cancelled must have this field refreshed before a fix is retried;
+    /// reusing it refuses the run before it spawns.
+    pub cancellation: Option<FixCancellation>,
 }
 
 impl ExecuteFixOptions {
@@ -1107,6 +1223,14 @@ impl ExecuteFixOptions {
     /// Override the wall-clock bound on the fix (see [`FixTimeout`]).
     pub fn with_timeout(mut self, timeout: FixTimeout) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Attach an opt-in cancellation token (see [`FixCancellation::token`]).
+    /// Attach a fresh one for every retry: a token cancelled during one run
+    /// refuses the next before it spawns.
+    pub fn with_cancellation(mut self, cancellation: FixCancellation) -> Self {
+        self.cancellation = Some(cancellation);
         self
     }
 }
@@ -1242,7 +1366,15 @@ where
     // `FixTimeout` bound instead of a probe timeout.
     // Cloned rather than moved because `_unlaunched_closer` borrows it: an `Arc`
     // bump, and the runner holds its own handle to the same shared state.
-    run_command_streaming(command, opts.env, opts.stdin.clone(), opts.timeout, on_line).await
+    run_command_streaming(
+        command,
+        opts.env,
+        opts.stdin.clone(),
+        opts.timeout,
+        opts.cancellation,
+        on_line,
+    )
+    .await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
@@ -1251,6 +1383,7 @@ pub(crate) async fn run_command_streaming<F>(
     env: Option<DoctorEnv>,
     stdin: Option<FixStdin>,
     timeout: FixTimeout,
+    cancellation: Option<FixCancellation>,
     on_line: F,
 ) -> Result<(), String>
 where
@@ -1268,6 +1401,7 @@ where
             env.as_ref(),
             stdin,
             timeout,
+            cancellation,
             process_group,
             on_line,
         )
@@ -1526,6 +1660,37 @@ impl FixProcessGroup {
     }
 }
 
+/// Why a run stopped short of the fix's own exit. One reason per run: whichever
+/// the runner observes first wins, and the other is never reported, so a cancel
+/// landing on a fix that is timing out (or the reverse) yields one notice and
+/// one `Err`, not two of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixStop {
+    /// [`FixTimeout`]'s deadline passed.
+    TimedOut,
+    /// The host's [`FixCancelHandle`] was used.
+    Cancelled,
+}
+
+/// Prefix of the one notice line a cancelled fix emits through `on_line`;
+/// callers grep for it the way they do `doctor: fix timed out after `.
+const FIX_CANCELLED_NOTICE_PREFIX: &str = "doctor: fix cancelled";
+
+/// How long the runner may block before looking around again: until the
+/// deadline, or one cancellation poll interval, whichever is sooner. `None` is
+/// "indefinitely" — the run has neither a deadline nor a token, and keeps the
+/// plain blocking `recv()`/`wait()` it always had (`recv_timeout(Duration::MAX)`
+/// overflows instantly, so unbounded cannot be spelled as a very long slice).
+fn fix_wait_slice(deadline: Option<Instant>, poll: Option<Duration>) -> Option<Duration> {
+    let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+    match (remaining, poll) {
+        (None, None) => None,
+        (Some(remaining), None) => Some(remaining),
+        (None, Some(poll)) => Some(poll),
+        (Some(remaining), Some(poll)) => Some(remaining.min(poll)),
+    }
+}
+
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
 /// `on_line`, and return based on the process exit status. Bounded by
 /// `timeout`, which is generous rather than tight: fix commands are
@@ -1533,11 +1698,21 @@ impl FixProcessGroup {
 /// managers. Stderr lines are also accumulated so a non-zero exit can surface a
 /// useful error message (matching the non-streaming behavior of the previous
 /// `execute_command`).
+///
+/// With a `cancellation` token the runner also stops on the host's say-so:
+/// before the spawn by refusing it, afterwards by killing the fix exactly as the
+/// timeout would. It learns of the request by checking the token before every
+/// blocking wait and bounding each wait by [`FIX_CANCEL_POLL_INTERVAL`], so a
+/// silent fix is still interrupted within one interval — including under
+/// [`FixTimeout::Unbounded`], whose waits are otherwise plain blocking calls
+/// that nothing wakes. Without a token no wait is sliced and nothing here
+/// changes.
 fn run_command_streaming_blocking<F>(
     command: &str,
     env: Option<&DoctorEnv>,
     stdin: Option<FixStdin>,
     timeout: FixTimeout,
+    cancellation: Option<FixCancellation>,
     process_group: FixProcessGroup,
     mut on_line: F,
 ) -> Result<(), String>
@@ -1573,6 +1748,15 @@ where
         fix_stdin.claim()?;
     }
 
+    let cancel_requested = || {
+        cancellation
+            .as_ref()
+            .is_some_and(FixCancellation::is_cancelled)
+    };
+    // Only a cancellable run pays for polling; without a token every wait below
+    // keeps the shape it always had.
+    let poll = cancellation.as_ref().map(|_| FIX_CANCEL_POLL_INTERVAL);
+
     let mut shell_command = build_shell_command(command, &[], env);
     shell_command
         .stdout(std::process::Stdio::piped())
@@ -1596,6 +1780,14 @@ where
     // claim above is already spent, so the host must not keep getting `Ok` for a
     // fix that never started.
     let _stdin_closer = stdin.as_ref().map(FixStdinCloser);
+
+    // Last look before the point of no return. Placed after the claim and the
+    // closer so a pre-spawn cancel leaves the pipe closed like any other exit,
+    // and before the spawn so there is no child to kill or reap: an `Err` after
+    // `spawn` would drop the `Child`, whose `Drop` neither kills nor reaps.
+    if cancel_requested() {
+        return Err(format!("Fix cancelled before it started: {command}"));
+    }
 
     let mut child = shell_command
         .spawn()
@@ -1644,22 +1836,29 @@ where
     }
 
     let mut stderr_accum = String::new();
-    let mut expired = false;
+    let mut stop: Option<FixStop> = None;
 
     loop {
-        let msg = match deadline {
-            Some(deadline) => {
-                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    Ok(msg) => msg,
-                    Err(RecvTimeoutError::Timeout) => {
-                        expired = true;
+        // Checked on every pass, not only when a wait slice runs out: a fix that
+        // prints continuously never lets `recv_timeout` time out, and would
+        // otherwise be uncancellable for as long as it kept talking.
+        if cancel_requested() {
+            stop = Some(FixStop::Cancelled);
+            break;
+        }
+        let msg = match fix_wait_slice(deadline, poll) {
+            Some(wait) => match rx.recv_timeout(wait) {
+                Ok(msg) => msg,
+                Err(RecvTimeoutError::Timeout) => {
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        stop = Some(FixStop::TimedOut);
                         break;
                     }
-                    Err(RecvTimeoutError::Disconnected) => break,
+                    // A cancellation poll tick: back to the top to look.
+                    continue;
                 }
-            }
-            // `recv_timeout(Duration::MAX)` overflows instantly, so the
-            // unbounded case keeps the plain blocking receive.
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
             None => match rx.recv() {
                 Ok(msg) => msg,
                 Err(_) => break,
@@ -1668,28 +1867,47 @@ where
         consume(msg, &mut on_line, &mut stderr_accum);
     }
 
-    let status = if expired {
+    let status = if stop.is_some() {
         None
     } else {
         // Both pipes hit EOF, so the readers are already done and joining is
         // immediate. The process can still outlive its pipes, though, so the
-        // reap is bounded by the same deadline.
+        // reap is bounded by the same deadline — and, for a cancellable run,
+        // sliced the same way, since a `wait` is the other call nothing wakes.
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
-        match deadline {
-            Some(deadline) => child
-                .wait_timeout(deadline.saturating_duration_since(Instant::now()))
-                .map_err(|e| format!("Failed to wait for command: {e}"))?,
-            None => Some(
-                child
-                    .wait()
-                    .map_err(|e| format!("Failed to wait for command: {e}"))?,
-            ),
+        loop {
+            if cancel_requested() {
+                stop = Some(FixStop::Cancelled);
+                break None;
+            }
+            match fix_wait_slice(deadline, poll) {
+                Some(wait) => match child
+                    .wait_timeout(wait)
+                    .map_err(|e| format!("Failed to wait for command: {e}"))?
+                {
+                    Some(status) => break Some(status),
+                    None => {
+                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                            stop = Some(FixStop::TimedOut);
+                            break None;
+                        }
+                        // A cancellation poll tick.
+                    }
+                },
+                None => {
+                    break Some(
+                        child
+                            .wait()
+                            .map_err(|e| format!("Failed to wait for command: {e}"))?,
+                    )
+                }
+            }
         }
     };
 
     let Some(status) = status else {
-        let limit = limit.expect("a deadline only exists when the fix is bounded");
+        let stop = stop.expect("a missing exit status means the run was stopped");
         // Anything the readers already queued is real output the user should
         // see before the notice explaining why it stopped.
         while let Ok(msg) = rx.try_recv() {
@@ -1720,18 +1938,31 @@ where
                 "killed the fix process; anything it started may still be running"
             }
         };
-        on_line(&format!(
-            "doctor: fix timed out after {} — {survivors}",
-            format_duration(limit)
-        ));
+        let (notice, mut err) = match stop {
+            FixStop::TimedOut => {
+                let limit = limit.expect("a deadline only exists when the fix is bounded");
+                (
+                    format!(
+                        "doctor: fix timed out after {} — {survivors}",
+                        format_duration(limit)
+                    ),
+                    format!(
+                        "Fix timed out after {} without finishing: {command}",
+                        format_duration(limit)
+                    ),
+                )
+            }
+            FixStop::Cancelled => (
+                format!("{FIX_CANCELLED_NOTICE_PREFIX} — {survivors}"),
+                format!("Fix cancelled before finishing: {command}"),
+            ),
+        };
+        on_line(&notice);
         // The reader threads are deliberately not joined: a descendant that
         // escaped the process group can hold the inherited stdout open long
         // after the fix is dead, and waiting on that is the hang this timeout
         // exists to end. Dropping `rx` retires them at their next send.
-        let mut err = format!(
-            "Fix timed out after {} without finishing: {command}",
-            format_duration(limit)
-        );
+        //
         // A host that only logs the error string shouldn't be told the tree is
         // dead when it isn't. Appended so the existing "names the timeout and the
         // command" shape of the message survives.
@@ -1859,6 +2090,7 @@ mod tests {
             None,
             None,
             FixTimeout::Standard,
+            None,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1899,6 +2131,7 @@ mod tests {
             None,
             Some(stdin),
             FixTimeout::Standard,
+            None,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1932,6 +2165,7 @@ mod tests {
             None,
             Some(stdin),
             FixTimeout::Standard,
+            None,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
                 if line == "doctor-stdin-prompt" {
@@ -1974,6 +2208,7 @@ mod tests {
             None,
             Some(stdin),
             FixTimeout::Standard,
+            None,
             |_| {},
         )
         .await;
@@ -2003,6 +2238,7 @@ mod tests {
             None,
             Some(stdin),
             FixTimeout::Standard,
+            None,
             |_| {},
         )
         .await;
@@ -2133,6 +2369,7 @@ mod tests {
             Some(dotfile_free_env(&tmp)),
             Some(stdin),
             FixTimeout::After(Duration::from_secs(30)),
+            None,
             move |line| lines_clone.lock().unwrap().push(line.to_string()),
         )
         .await;
@@ -2190,6 +2427,7 @@ mod tests {
                 Some(&env),
                 Some(stdin),
                 FixTimeout::After(Duration::from_secs(1)),
+                None,
                 FixProcessGroup::Own,
                 move |line| {
                     lines_clone.lock().unwrap().push(line.to_string());
@@ -2254,6 +2492,7 @@ mod tests {
             None,
             Some(stdin),
             FixTimeout::Standard,
+            None,
             |_| {},
         )
         .await;
@@ -2266,6 +2505,7 @@ mod tests {
             None,
             Some(reused),
             FixTimeout::Standard,
+            None,
             move |line| lines_clone.lock().unwrap().push(line.to_string()),
         )
         .await;
@@ -2345,6 +2585,7 @@ mod tests {
                 None,
                 Some(stdin),
                 FixTimeout::Standard,
+                None,
                 FixProcessGroup::Own,
                 move |line| {
                     let _ = line_tx.send(line.to_string());
@@ -2415,6 +2656,7 @@ mod tests {
             None,
             None,
             FixTimeout::After(Duration::from_millis(100)),
+            None,
             move |line| lines_clone.lock().unwrap().push(line.to_string()),
         )
         .await;
@@ -2502,22 +2744,34 @@ mod tests {
             // ~15x the dotfile-free login-shell startup, so the grandchild is up
             // well before the deadline lands even under a loaded test run.
             FixTimeout::After(Duration::from_secs(3)),
+            None,
             process_group,
             |_| {},
         );
         assert!(result.is_err(), "timed-out fix should fail; got {result:?}");
 
-        let recorded = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        let survived = recorded_grandchild_survives(&pid_file);
         let _ = std::fs::remove_dir_all(&tmp);
+        survived
+    }
+
+    /// Whether the process whose pid a payload wrote to `pid_file` is still
+    /// alive. The kill is asynchronous, so a doomed grandchild gets a moment to
+    /// go; one that is still there after that is put down so it doesn't outlive
+    /// the test. A missing or unparseable pid file is a loud failure rather than
+    /// a silent pass: it means the run was stopped before the payload had forked
+    /// anything, so whatever the kill reached proves nothing.
+    #[cfg(unix)]
+    fn recorded_grandchild_survives(pid_file: &Path) -> bool {
+        let recorded = std::fs::read_to_string(pid_file).unwrap_or_default();
         let pid: i32 = recorded.trim().parse().unwrap_or_else(|_| {
             panic!(
-                "grandchild never recorded a pid ({recorded:?}): the deadline beat \
-                 the login shell's startup, so this proves nothing"
+                "grandchild never recorded a pid ({recorded:?}): the run was stopped \
+                 before the login shell got that far, so this proves nothing"
             )
         });
         let pid = nix::unistd::Pid::from_raw(pid);
 
-        // The kill is asynchronous, so give a doomed grandchild a moment to go.
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if nix::sys::signal::kill(pid, None).is_err() {
@@ -2561,6 +2815,7 @@ mod tests {
             None,
             None,
             FixTimeout::After(Duration::from_millis(200)),
+            None,
             FixProcessGroup::Own,
             move |line| lines_clone.lock().unwrap().push(line.to_string()),
         );
@@ -2591,6 +2846,7 @@ mod tests {
             None,
             None,
             FixTimeout::After(Duration::from_millis(200)),
+            None,
             FixProcessGroup::Inherited,
             move |line| lines_clone.lock().unwrap().push(line.to_string()),
         );
@@ -2654,6 +2910,7 @@ mod tests {
             None,
             None,
             FixTimeout::After(Duration::from_millis(250)),
+            None,
             |_| {},
         )
         .await;
@@ -2666,6 +2923,502 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "timeout path waited for the escaped descendant to close the pipes",
+        );
+    }
+
+    /// The one `doctor: fix cancelled …` line every cancelled fix emits and
+    /// callers grep for — exactly one, whatever else the run was doing when the
+    /// cancel landed.
+    fn cancel_notice(lines: &[String]) -> String {
+        let notices: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with(FIX_CANCELLED_NOTICE_PREFIX))
+            .collect();
+        assert_eq!(
+            notices.len(),
+            1,
+            "a cancelled fix emits exactly one notice; got {notices:?} in {lines:?}",
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("doctor: fix timed out")),
+            "a cancelled fix must not also report a timeout; got {lines:?}",
+        );
+        notices[0].clone()
+    }
+
+    /// Drive the blocking runner on its own thread, forwarding every `on_line`
+    /// to the first receiver and the run's result to the second. The runner has
+    /// to live off the test thread whenever the test needs to *block* — on a
+    /// marker proving the fix is up, or on the result to time its return — since
+    /// the runner itself blocks for the fix's whole lifetime.
+    fn spawn_runner(
+        command: String,
+        env: Option<DoctorEnv>,
+        stdin: Option<FixStdin>,
+        timeout: FixTimeout,
+        cancellation: Option<FixCancellation>,
+        process_group: FixProcessGroup,
+    ) -> (
+        std::sync::mpsc::Receiver<String>,
+        std::sync::mpsc::Receiver<Result<(), String>>,
+    ) {
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = run_command_streaming_blocking(
+                &command,
+                env.as_ref(),
+                stdin,
+                timeout,
+                cancellation,
+                process_group,
+                move |line| {
+                    let _ = line_tx.send(line.to_string());
+                },
+            );
+            let _ = result_tx.send(result);
+        });
+        (line_rx, result_rx)
+    }
+
+    /// Block until the runner forwards `marker`, returning every line up to and
+    /// including it. Panics if the fix never gets there.
+    fn wait_for_marker(lines: &std::sync::mpsc::Receiver<String>, marker: &str) -> Vec<String> {
+        let mut seen = Vec::new();
+        loop {
+            let line = lines
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| panic!("the fix never printed {marker:?}; saw {seen:?}"));
+            seen.push(line);
+            if seen.last().is_some_and(|l| l == marker) {
+                return seen;
+            }
+        }
+    }
+
+    /// The berd#99 abandonment shape: a piped-stdin login that will never exit on
+    /// its own (the CLI ignores EOF and waits on its browser callback), given up
+    /// on by the user. Dropping the writer can't end it; the cancel has to kill
+    /// it — the whole tree, since doctor owns the group on this path — and hand
+    /// back an `Err` naming the cancellation, not the 600s timeout, promptly.
+    ///
+    /// Same payload shape as the timeout tree-kill tests, with a marker after
+    /// the pid write so the cancel is issued only once the grandchild provably
+    /// exists; issued from inside `on_line`, on the runner's own thread, so the
+    /// flag is set before the runner's next look and the test is deterministic.
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_kills_the_whole_process_tree_mid_run() {
+        let tmp = unique_tmp_dir("fix-cancel-tree");
+        let pid_file = tmp.join("grandchild-pid");
+        let env = dotfile_free_env(&tmp);
+        let (writer, stdin) = FixStdin::pipe();
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let cancel_from_fix = handle.clone();
+        let started = Instant::now();
+
+        let result = run_command_streaming_blocking(
+            &format!(
+                "sleep 300 & printf %s $! > {}; echo doctor-cancel-armed; sleep 60",
+                pid_file.display()
+            ),
+            Some(&env),
+            Some(stdin),
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Own,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-cancel-armed" {
+                    cancel_from_fix.cancel();
+                }
+            },
+        );
+
+        let survived = recorded_grandchild_survives(&pid_file);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 60"),
+            "error should name the cancellation and the command; got {err:?}",
+        );
+        assert!(
+            !err.contains("timed out"),
+            "the cancel, not the 600s timeout, must be what ended the run; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancel path waited on the fix instead of killing it",
+        );
+        assert!(handle.is_cancelled());
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-armed"),
+            "the fix's own output must survive the cancel; captured: {captured:?}",
+        );
+        let notice = cancel_notice(&captured);
+        assert!(
+            notice.contains("killed the fix and its child processes"),
+            "owning the group, the notice can promise the tree is gone; got {notice:?}",
+        );
+        assert!(
+            !survived,
+            "backgrounded grandchild outlived the cancel kill"
+        );
+        assert!(
+            writer.send_line("doctor-cancel-late").is_err(),
+            "the pipe must be closed on the cancel path like every other exit",
+        );
+    }
+
+    /// A cancel that lands before the runner spawns anything must refuse the
+    /// spawn: no child to kill or reap, nothing through `on_line` — the notice is
+    /// for a fix that ran — and the pipe closed like any other pre-spawn exit,
+    /// so the host's next `send_line` fails instead of queueing for a fix that
+    /// will never start.
+    #[tokio::test]
+    async fn fix_cancel_before_spawn_runs_nothing() {
+        let (writer, stdin) = FixStdin::pipe();
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        handle.cancel();
+        let result = run_command_streaming(
+            "echo doctor-cancel-never".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            Some(cancellation),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a fix cancelled before it started should fail");
+        assert!(
+            err.contains("cancelled before it started") && err.contains("echo doctor-cancel-never"),
+            "error should name the pre-spawn cancellation and the command; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.is_empty(),
+            "nothing must run and no notice is owed; captured: {captured:?}",
+        );
+        let send_err = writer
+            .send_line("doctor-cancel-never-sent")
+            .expect_err("the first send after a refused spawn should fail");
+        assert!(
+            send_err.contains("no longer accepting input"),
+            "error should say the input is closed; got {send_err:?}",
+        );
+    }
+
+    /// Once the run has returned, a cancel changes nothing: the fix's `Ok`
+    /// stands, no notice appears, and the handle still records the request —
+    /// `cancel` is infallible and idempotent whatever state the run is in.
+    /// Driven through the public entry point with the builder so the option's
+    /// whole path is covered, not just the runner.
+    #[tokio::test]
+    async fn fix_cancel_after_completion_is_a_no_op() {
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        assert!(!handle.is_cancelled(), "a fresh token is not cancelled");
+
+        let result = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::Auth,
+            ExecuteFixOptions {
+                command_override: Some("echo doctor-cancel-finished".to_string()),
+                ..Default::default()
+            }
+            .with_cancellation(cancellation),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+        assert!(result.is_ok(), "the fix should complete; got {result:?}");
+
+        handle.cancel();
+        handle.cancel();
+        assert!(
+            handle.is_cancelled(),
+            "the request is recorded even when late"
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-finished"),
+            "the fix should have run to completion; captured: {captured:?}",
+        );
+        assert!(
+            !captured.iter().any(|l| l.starts_with("doctor: fix")),
+            "a late cancel owes no notice; captured: {captured:?}",
+        );
+    }
+
+    /// A cancel that arrives on the fix's last line — the runner sees the flag
+    /// before it sees the readers disconnect — must still yield exactly one
+    /// notice and one `Err`, with the line that triggered it delivered. This is
+    /// the race between a cancel and a normal exit, pinned at the point where
+    /// the runner's observation order makes the outcome deterministic.
+    #[test]
+    fn fix_cancel_on_the_final_line_reports_once() {
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let cancel_from_fix = handle.clone();
+
+        let result = run_command_streaming_blocking(
+            "echo doctor-cancel-final",
+            None,
+            None,
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Own,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-cancel-final" {
+                    cancel_from_fix.cancel();
+                }
+            },
+        );
+
+        let err = result.expect_err("the runner saw the cancel before the exit");
+        assert!(
+            err.contains("cancelled"),
+            "error should name the cancellation; got {err:?}",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-final"),
+            "the triggering line must not be lost; captured: {captured:?}",
+        );
+        cancel_notice(&captured);
+    }
+
+    /// `FixTimeout::Unbounded` has no deadline to slice its waits by, so before
+    /// this a silent fix parked the runner in a plain `recv()` nothing could
+    /// wake. The cancel arrives from another thread while the fix has been quiet
+    /// for longer than the poll interval, so it is the poll — not a line — that
+    /// lets the runner notice, and the return has to land within one interval
+    /// plus a kill.
+    #[test]
+    fn fix_cancel_wakes_an_unbounded_run_from_a_silent_wait() {
+        let tmp = unique_tmp_dir("fix-cancel-silent");
+        let (handle, cancellation) = FixCancellation::token();
+        let (lines, result) = spawn_runner(
+            "echo doctor-cancel-silent; sleep 60".to_string(),
+            Some(dotfile_free_env(&tmp)),
+            None,
+            FixTimeout::Unbounded,
+            Some(cancellation),
+            FixProcessGroup::Own,
+        );
+        let mut captured = wait_for_marker(&lines, "doctor-cancel-silent");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Well past the poll interval: the runner is parked in a wait slice with
+        // nothing arriving, so only the poll can deliver the cancel.
+        std::thread::sleep(FIX_CANCEL_POLL_INTERVAL * 3);
+        let cancelled_at = Instant::now();
+        handle.cancel();
+        let result = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("an unbounded run must still return on cancel");
+        let latency = cancelled_at.elapsed();
+        assert!(
+            latency < Duration::from_secs(1),
+            "cancel took {latency:?}: the runner missed its poll",
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 60"),
+            "error should name the cancellation and the command; got {err:?}",
+        );
+        captured.extend(lines.try_iter());
+        cancel_notice(&captured);
+    }
+
+    /// The opposite of silence: a fix that prints without pause never lets a
+    /// wait slice run out, so a runner that only looked at the token on poll
+    /// ticks would be uncancellable for as long as the fix kept talking. The
+    /// check on every pass through the loop is what bounds this case, and the
+    /// bound is the same one interval plus a kill.
+    #[test]
+    fn fix_cancel_interrupts_a_fix_that_never_goes_quiet() {
+        let tmp = unique_tmp_dir("fix-cancel-chatter");
+        let (handle, cancellation) = FixCancellation::token();
+        let (lines, result) = spawn_runner(
+            "echo doctor-cancel-chatter-start; while :; do echo doctor-cancel-chatter; done"
+                .to_string(),
+            Some(dotfile_free_env(&tmp)),
+            None,
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Own,
+        );
+        wait_for_marker(&lines, "doctor-cancel-chatter-start");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        std::thread::sleep(FIX_CANCEL_POLL_INTERVAL * 3);
+        let cancelled_at = Instant::now();
+        handle.cancel();
+        let result = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("a fix that never stops printing must still return on cancel");
+        let latency = cancelled_at.elapsed();
+        assert!(
+            latency < Duration::from_secs(1),
+            "cancel took {latency:?}: the runner only looks between lines",
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled"),
+            "error should name the cancellation; got {err:?}",
+        );
+        let captured: Vec<String> = lines.try_iter().collect();
+        assert!(
+            captured.iter().any(|l| l == "doctor-cancel-chatter"),
+            "the fix should have been mid-chatter when cancelled",
+        );
+        cancel_notice(&captured);
+    }
+
+    /// A fix can close both its pipes and keep running — the runner is then past
+    /// the recv loop and parked in the reap, a `wait` nothing else wakes. The
+    /// payload redirects its own stdout/stderr away from the pipes, records that
+    /// it has done so, and sleeps; the cancel is issued only once the readers
+    /// have provably seen EOF. Both the bounded (`wait_timeout`) and unbounded
+    /// (`wait`) reaps have to come back within a poll interval.
+    #[cfg(unix)]
+    fn cancel_during_the_reap_returns_promptly(tag: &str, timeout: FixTimeout) {
+        let tmp = unique_tmp_dir(tag);
+        let pipes_closed = tmp.join("pipes-closed");
+        let env = dotfile_free_env(&tmp);
+        let (handle, cancellation) = FixCancellation::token();
+
+        let (lines, result) = spawn_runner(
+            format!(
+                "echo doctor-cancel-reap; exec >/dev/null 2>/dev/null; touch {}; sleep 60",
+                pipes_closed.display()
+            ),
+            Some(env),
+            None,
+            timeout,
+            Some(cancellation),
+            FixProcessGroup::Own,
+        );
+        let mut captured = wait_for_marker(&lines, "doctor-cancel-reap");
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !pipes_closed.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the payload never got past redirecting its pipes",
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The readers hit EOF the instant the shell redirected, and joining them
+        // is immediate, so by now the runner is in the reap; a few poll intervals
+        // more and it has been parked there for the whole of one.
+        std::thread::sleep(FIX_CANCEL_POLL_INTERVAL * 3);
+        let cancelled_at = Instant::now();
+        handle.cancel();
+        let result = result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("a run parked in its reap must still return on cancel");
+        let latency = cancelled_at.elapsed();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            latency < Duration::from_secs(1),
+            "cancel took {latency:?}: the reap missed its poll",
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 60"),
+            "error should name the cancellation and the command; got {err:?}",
+        );
+        captured.extend(lines.try_iter());
+        cancel_notice(&captured);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_returns_promptly_from_a_bounded_reap() {
+        cancel_during_the_reap_returns_promptly("fix-cancel-reap-bounded", FixTimeout::Standard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_returns_promptly_from_an_unbounded_reap() {
+        cancel_during_the_reap_returns_promptly("fix-cancel-reap-unbounded", FixTimeout::Unbounded);
+    }
+
+    /// The cancel path shares the timeout's honesty about reach: in doctor's
+    /// group the kill stops at the direct child, and both the notice and the
+    /// `Err` have to say so rather than claim a tree kill that never happened.
+    #[cfg(unix)]
+    #[test]
+    fn fix_cancel_notice_admits_survivors_when_the_group_is_inherited() {
+        let (handle, cancellation) = FixCancellation::token();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let cancel_from_fix = handle.clone();
+
+        let result = run_command_streaming_blocking(
+            "echo doctor-cancel-inherited; sleep 5",
+            None,
+            None,
+            FixTimeout::Standard,
+            Some(cancellation),
+            FixProcessGroup::Inherited,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-cancel-inherited" {
+                    cancel_from_fix.cancel();
+                }
+            },
+        );
+
+        let err = result.expect_err("a cancelled fix should fail");
+        assert!(
+            err.contains("cancelled") && err.contains("sleep 5"),
+            "error should still name the cancellation and the command; got {err:?}",
+        );
+        assert!(
+            err.contains("may still be running"),
+            "error should admit the survivors; got {err:?}",
+        );
+        let notice = cancel_notice(&lines.lock().unwrap());
+        assert!(
+            notice.contains("may still be running"),
+            "notice should admit the survivors; got {notice:?}",
+        );
+    }
+
+    /// The handle is meant to be parked in a host's static map and used from a
+    /// UI command on another thread, so it has to be shareable; the option has
+    /// to keep `ExecuteFixOptions`'s derives; `None` has to stay the default so
+    /// existing callers are untouched; and the poll interval that bounds cancel
+    /// latency must stay well under what a user reads as a stuck button.
+    #[test]
+    fn fix_cancellation_contract() {
+        fn shareable<T: Send + Sync + Clone + std::fmt::Debug>() {}
+        shareable::<FixCancelHandle>();
+        shareable::<FixCancellation>();
+
+        assert!(ExecuteFixOptions::default().cancellation.is_none());
+        assert!(
+            FIX_CANCEL_POLL_INTERVAL <= Duration::from_millis(250),
+            "cancel latency must stay imperceptible",
+        );
+        assert!(
+            FIX_CANCEL_POLL_INTERVAL >= Duration::from_millis(10),
+            "a cancellable run must not spin",
         );
     }
 

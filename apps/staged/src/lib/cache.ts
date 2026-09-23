@@ -8,15 +8,14 @@ import { invokeCommand, isTauri } from './transport';
  * new UI depends on reads as `undefined` (e.g. `CommitTimelineItem.pipelineKind`,
  * whose absence silently re-enables the Rebase button mid-rebase).
  *
- * Entries that fail the check read as misses and sit inert in IndexedDB until
- * they're overwritten or LRU-evicted. The cost of a bump is one cold-cache boot
- * per client.
+ * Entries that fail the check read as misses and are cleaned by the once-per-
+ * session cache sweep. The cost of a bump is one cold-cache boot per client.
  *
  * The timeline boot snapshot in `commands.ts` is versioned by this same
  * constant, so one bump covers both layers that survive a deploy.
  */
 export const CACHE_SCHEMA_VERSION = 2;
-const MAX_CACHE_ENTRIES = 200;
+const CACHE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Tracks the invalidation generation per cache key. When a read starts, it
@@ -267,43 +266,62 @@ export async function cachedCommand<T>(
   return { data, revalidating: null };
 }
 
-/**
- * Evict the oldest cache entries (by fetchedAt) until the store is under the
- * MAX_CACHE_ENTRIES limit. Called after writes and on quota errors.
- */
-async function evictIfNeeded(): Promise<void> {
-  try {
-    const store = getStore();
-    const allEntries = await entries<string, CacheEntry<unknown>>(store);
-    if (allEntries.length <= MAX_CACHE_ENTRIES) return;
+async function evictOldestHalf(): Promise<void> {
+  const store = getStore();
+  const allEntries = await entries<string, CacheEntry<unknown>>(store);
+  if (allEntries.length === 0) return;
 
-    // Sort by fetchedAt ascending (oldest first) and evict the excess
-    const sorted = allEntries.sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
-    const toEvict = sorted.slice(0, sorted.length - MAX_CACHE_ENTRIES);
-    await Promise.all(toEvict.map(([k]) => del(k, store)));
-  } catch {
-    // Best-effort eviction — don't let this block the caller
-  }
+  const sorted = allEntries.sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+  const toEvict = sorted.slice(0, Math.ceil(sorted.length / 2));
+  await Promise.all(toEvict.map(([k]) => del(k, store)));
+}
+
+function isQuotaExceededError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'QuotaExceededError';
 }
 
 /**
- * Write a cache entry, with quota-error recovery via LRU eviction.
+ * Write a cache entry, with quota-error recovery by evicting the oldest half
+ * and retrying once.
  */
 async function cacheSet<T>(key: string, entry: CacheEntry<T>): Promise<void> {
   const store = getStore();
   try {
     await set(key, entry, store);
   } catch (err) {
-    // On quota error, evict old entries and retry once
-    if (err instanceof DOMException && err.name === 'QuotaExceededError') {
-      await evictIfNeeded();
-      await set(key, entry, store).catch(() => {});
-      return;
+    if (isQuotaExceededError(err)) {
+      try {
+        await evictOldestHalf();
+        await set(key, entry, store);
+      } catch {
+        // Cache is best-effort.
+      }
     }
-    // Swallow other write errors — cache is best-effort
+    // Swallow write errors — cache is best-effort.
   }
-  // Proactive eviction after successful writes
-  evictIfNeeded();
+}
+
+/** Remove stale schema and week-old entries. Intended to run once per app session. */
+export async function sweepCache(): Promise<void> {
+  if (isTauri) return;
+  try {
+    const store = getStore();
+    const now = Date.now();
+    const allEntries = await entries<string, CacheEntry<unknown>>(store);
+    await Promise.all(
+      allEntries
+        .filter(([, entry]) => {
+          return (
+            entry.schemaVersion !== CACHE_SCHEMA_VERSION ||
+            typeof entry.fetchedAt !== 'number' ||
+            now - entry.fetchedAt > CACHE_SWEEP_MAX_AGE_MS
+          );
+        })
+        .map(([k]) => del(k, store))
+    );
+  } catch {
+    // Best-effort sweep — don't let cache maintenance block boot.
+  }
 }
 
 /** Invalidate a specific cache entry. */
@@ -381,8 +399,4 @@ export async function clearAllCache(): Promise<void> {
 }
 
 // Exported for testing
-export {
-  cacheKey as _cacheKey,
-  MAX_CACHE_ENTRIES as _MAX_CACHE_ENTRIES,
-  evictIfNeeded as _evictIfNeeded,
-};
+export { cacheKey as _cacheKey };

@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createStore, set } from 'idb-keyval';
+import { createStore, entries, set } from 'idb-keyval';
 
 // Mock transport — web mode (isTauri = false) with controllable invokeCommand
 const mockInvoke = vi.fn();
@@ -17,10 +17,9 @@ import {
   invalidateCacheByCommand,
   markAllStale,
   clearAllCache,
+  sweepCache,
   CACHE_SCHEMA_VERSION,
   _cacheKey,
-  _MAX_CACHE_ENTRIES,
-  _evictIfNeeded,
 } from './cache';
 
 function deferred<T>() {
@@ -847,40 +846,99 @@ describe('markAllStale', () => {
   });
 });
 
-describe('evictIfNeeded', () => {
-  it('evicts oldest entries when cache exceeds MAX_CACHE_ENTRIES', async () => {
-    // Fill cache beyond the limit
-    const total = _MAX_CACHE_ENTRIES + 10;
+describe('cache maintenance', () => {
+  it('does not evict readable entries by count', async () => {
+    const total = 250;
     for (let i = 0; i < total; i++) {
       mockInvoke.mockResolvedValue(`value-${i}`);
       await cachedCommand('cmd', { id: String(i) }, { ttl: 60_000 });
     }
 
-    // Explicit eviction (also triggered by cacheSet, but let's verify directly)
-    await _evictIfNeeded();
-
-    // Verify: the oldest entries should have been evicted.
-    // The first 10 entries (id 0-9) should be gone; entries 10+ should remain.
-    mockInvoke.mockResolvedValue('new');
-
-    // Entry 0 should be a cache miss (evicted)
-    const missResults = [];
-    for await (const r of cachedInvoke('cmd', { id: '0' }, { ttl: 60_000 })) {
-      missResults.push(r);
+    for (let i = 0; i < total; i++) {
+      const result = await cachedCommand<string>('cmd', { id: String(i) }, { ttl: 60_000 });
+      expect(result).toEqual({ data: `value-${i}`, revalidating: null });
     }
-    expect(missResults).toEqual([
-      { data: 'new', source: 'network', fetchedAt: expect.any(Number) },
-    ]);
+    expect(mockInvoke).toHaveBeenCalledTimes(total);
+  });
 
-    // Entry at the tail (most recent) should still be a cache hit
-    const hitResults = [];
-    for await (const r of cachedInvoke('cmd', { id: String(total - 1) }, { ttl: 60_000 })) {
-      hitResults.push(r);
+  it('sweepCache removes stale-schema and week-old entries while keeping fresh ones', async () => {
+    const store = createStore('staged-cache', 'responses');
+    const freshKey = _cacheKey('fresh');
+    const oldKey = _cacheKey('old');
+    const staleSchemaKey = _cacheKey('stale_schema');
+    const now = Date.now();
+
+    await set(
+      freshKey,
+      { key: freshKey, data: 'fresh', fetchedAt: now, schemaVersion: CACHE_SCHEMA_VERSION },
+      store
+    );
+    await set(
+      oldKey,
+      {
+        key: oldKey,
+        data: 'old',
+        fetchedAt: now - 8 * 24 * 60 * 60 * 1000,
+        schemaVersion: CACHE_SCHEMA_VERSION,
+      },
+      store
+    );
+    await set(
+      staleSchemaKey,
+      {
+        key: staleSchemaKey,
+        data: 'stale',
+        fetchedAt: now,
+        schemaVersion: CACHE_SCHEMA_VERSION - 1,
+      },
+      store
+    );
+
+    await sweepCache();
+
+    const remaining = new Map(await entries<string, unknown>(store));
+    expect(remaining.has(freshKey)).toBe(true);
+    expect(remaining.has(oldKey)).toBe(false);
+    expect(remaining.has(staleSchemaKey)).toBe(false);
+  });
+
+  it('evicts the older half and retries once on QuotaExceededError', async () => {
+    const store = createStore('staged-cache', 'responses');
+    const now = Date.now();
+    for (let i = 0; i < 4; i++) {
+      const key = _cacheKey('seed', { id: String(i) });
+      await set(
+        key,
+        { key, data: `seed-${i}`, fetchedAt: now + i, schemaVersion: CACHE_SCHEMA_VERSION },
+        store
+      );
     }
-    expect(hitResults[0]).toEqual({
-      data: `value-${total - 1}`,
-      source: 'cache',
-      fetchedAt: expect.any(Number),
+
+    const originalPut = IDBObjectStore.prototype.put;
+    let shouldThrow = true;
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
+      this: IDBObjectStore,
+      ...args
+    ) {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new DOMException('quota exceeded', 'QuotaExceededError');
+      }
+      return originalPut.apply(this, args as Parameters<IDBObjectStore['put']>);
     });
+
+    try {
+      mockInvoke.mockResolvedValue('fresh');
+      await cachedCommand('cmd', undefined, { ttl: 60_000 });
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    const remaining = new Map(await entries<string, { data: string }>(store));
+    expect(remaining.has(_cacheKey('seed', { id: '0' }))).toBe(false);
+    expect(remaining.has(_cacheKey('seed', { id: '1' }))).toBe(false);
+    expect(remaining.has(_cacheKey('seed', { id: '2' }))).toBe(true);
+    expect(remaining.has(_cacheKey('seed', { id: '3' }))).toBe(true);
+    expect(remaining.get(_cacheKey('cmd'))?.data).toBe('fresh');
   });
 });

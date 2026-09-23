@@ -5,7 +5,12 @@
  * They are lazily generated on first encounter and cached here.
  */
 
-import { getAllRepoBadges, ensureRepoBadges, updateRepoBadge } from '../commands';
+import {
+  getAllRepoBadges,
+  ensureRepoBadges,
+  updateRepoBadge,
+  type ForceRefreshOptions,
+} from '../commands';
 import { agentState } from '../features/agents/agent.svelte';
 import { getPreferredAgent } from '../features/settings/preferences.svelte';
 import type { RepoBadge } from '../types';
@@ -28,14 +33,23 @@ class RepoBadgeStore {
   }
 
   /** Load all badges from the backend. Call once on app startup. */
-  async loadAll(): Promise<void> {
-    try {
-      const all = await getAllRepoBadges();
+  async loadAll(options: ForceRefreshOptions = {}): Promise<void> {
+    const applyBadges = (all: RepoBadge[]) => {
       const next = new Map<string, RepoBadge>();
       for (const badge of all) {
         next.set(badgeKey(badge.githubRepo, badge.subpath), badge);
       }
       this.badges = next;
+    };
+
+    try {
+      const { data, revalidating } = await getAllRepoBadges(options);
+      applyBadges(data);
+      if (revalidating) {
+        revalidating.then(applyBadges).catch((e) => {
+          console.error('[RepoBadgeStore] Failed to revalidate badges:', e);
+        });
+      }
     } catch (e) {
       console.error('[RepoBadgeStore] Failed to load badges:', e);
     }

@@ -61,11 +61,9 @@
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let homeRepos = $derived(projectsDataStore.homeRepos);
-  // The grid paints every card complete or not at all, so it waits for each
-  // project's branches and repos — not just the project list `loaded` covers.
-  let loading = $derived(
-    projectsDataStore.loading || !projectsDataStore.loaded || !projectsDataStore.allProjectsHydrated
-  );
+  // The grid paints as soon as the project list lands. Per-card branch/repo
+  // details fill in behind as hydration finishes.
+  let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
@@ -159,12 +157,15 @@
   }
 
   $effect(() => {
+    const targetProjectId = projectsListViewState.returnTargetProjectId;
+    const targetHydrated = !targetProjectId || projectsDataStore.isProjectHydrated(targetProjectId);
     const readyToDecide =
       projectsListViewState.restorePending &&
       !restoreInProgress &&
       !loading &&
       !error &&
-      mainPanelEl;
+      mainPanelEl &&
+      targetHydrated;
 
     if (!readyToDecide) return;
 
@@ -391,7 +392,8 @@
               deletingProjectNames,
               projectBranches.get(project.id) || []
             )}
-            {@const prStatus = getProjectPrStatus(project.id)}
+            {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
+            {@const prStatus = hydrated ? getProjectPrStatus(project.id) : null}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
@@ -446,7 +448,9 @@
                       ></div>
                     {/if}
                     <div class="card-header">
-                      {#if project.location === 'remote'}
+                      {#if !hydrated}
+                        <span class="project-status-placeholder" aria-hidden="true"></span>
+                      {:else if project.location === 'remote'}
                         <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
                       {:else if prStatus === 'merged'}
                         <GitPullRequest size={16} class="pr-status-merged" />
@@ -711,6 +715,12 @@
   }
 
   .card-header :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .project-status-placeholder {
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
   }
 

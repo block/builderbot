@@ -49,6 +49,7 @@ export function listenForCacheInvalidation(): UnlistenFn {
   unlisteners.push(
     listenToEvent<ProjectChangedEvent>('project-changed', (payload) => {
       invalidateCacheByCommand('list_projects');
+      invalidateCacheByCommand('get_all_repo_badges');
       if (payload.projectId === null) {
         invalidateCacheByCommand('list_project_repos');
       } else {

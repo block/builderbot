@@ -273,7 +273,7 @@ describe('ensureLoaded', () => {
     expect(listProjects).toHaveBeenCalledTimes(1);
   });
 
-  it('resolves instantly once loaded and revalidates in the background', async () => {
+  it('resolves instantly once loaded and soft-revalidates in the background', async () => {
     const store = await importStore();
     await store.ensureLoaded();
 
@@ -295,6 +295,16 @@ describe('ensureLoaded', () => {
     });
     // New project's branch entry is seeded so consumers can render it.
     expect(store.branchesByProject.has('p2')).toBe(true);
+  });
+
+  it('whenLoaded on a loaded store does not revalidate', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    listProjects.mockClear();
+
+    await store.whenLoaded();
+
+    expect(listProjects).not.toHaveBeenCalled();
   });
 
   it('prunes branches, repos, and hydration state of projects removed by a revalidation', async () => {
@@ -476,6 +486,70 @@ describe('hydration readiness', () => {
 
     expect(listBranchesForProject).toHaveBeenCalledTimes(1);
     expect(store.isProjectHydrated('p1')).toBe(true);
+  });
+
+  it('keeps an in-flight hydration alive across an ensureLoaded re-entry', async () => {
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    let resolveRepos!: (value: SwrResult<ProjectRepo[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveBranches = resolve;
+      })
+    );
+    listProjectRepos.mockReturnValueOnce(
+      new Promise<SwrResult<ProjectRepo[]>>((resolve) => {
+        resolveRepos = resolve;
+      })
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const hydrating = store.hydrateProject('p1');
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(1));
+    await store.ensureLoaded();
+    resolveBranches(swr([branch({ branchName: 'kept' })]));
+    resolveRepos(swr([projectRepo()]));
+    await hydrating;
+
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(store.branchesByProject.get('p1')![0].branchName).toBe('kept');
+    expect(store.isProjectHydrated('p1')).toBe(true);
+  });
+
+  it('drops late hydration for a project removed by a soft revalidation', async () => {
+    const beta = project({ id: 'p2', name: 'Beta' });
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    let resolveRepos!: (value: SwrResult<ProjectRepo[]>) => void;
+    listProjects.mockResolvedValueOnce(swr([project(), beta]));
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    listBranchesForProject.mockImplementationOnce(
+      () =>
+        new Promise<SwrResult<Branch[]>>((resolve) => {
+          resolveBranches = resolve;
+        })
+    );
+    listProjectRepos.mockImplementationOnce(
+      () =>
+        new Promise<SwrResult<ProjectRepo[]>>((resolve) => {
+          resolveRepos = resolve;
+        })
+    );
+    const hydrating = store.hydrateProject('p2');
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledWith('p2'));
+
+    listProjects.mockResolvedValueOnce(swr([project()]));
+    await store.ensureLoaded();
+    await vi.waitFor(() => expect(store.projects.map((p) => p.id)).toEqual(['p1']));
+
+    resolveBranches(swr([branch({ id: 'b2', projectId: 'p2', branchName: 'late' })]));
+    resolveRepos(swr([projectRepo({ id: 'r2', projectId: 'p2' })]));
+    await hydrating;
+
+    expect(store.branchesByProject.has('p2')).toBe(false);
+    expect(store.reposByProject.has('p2')).toBe(false);
+    expect(store.isProjectHydrated('p2')).toBe(false);
   });
 });
 
@@ -827,6 +901,7 @@ describe('event listeners', () => {
       expect(store.projects[0].name).toBe('Renamed');
     });
     expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(badgeLoadAll).toHaveBeenLastCalledWith({ force: true });
   });
 
   it('registers a project created in another window on project-changed', async () => {
@@ -1048,6 +1123,7 @@ describe('event listeners', () => {
       expect(store.homeRepos[0].pinned).toBe(true);
     });
     expect(badgeLoadAll).toHaveBeenCalledTimes(1);
+    expect(badgeLoadAll).toHaveBeenCalledWith({ force: true });
   });
 
   it('does not fetch home repos on repos-changed before anyone loaded them', async () => {

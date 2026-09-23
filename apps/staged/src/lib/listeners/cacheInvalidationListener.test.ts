@@ -68,8 +68,11 @@ describe('project-changed cache invalidation', () => {
 
     emitProjectChanged({ projectId: 'p1' });
 
-    // list_projects takes no args, so the drop is command-wide either way.
-    expect(invalidateCacheByCommand.mock.calls).toEqual([['list_projects']]);
+    // list_projects and badges take no args, so the drop is command-wide either way.
+    expect(invalidateCacheByCommand.mock.calls).toEqual([
+      ['list_projects'],
+      ['get_all_repo_badges'],
+    ]);
     expect(invalidateCacheByArgs.mock.calls).toEqual([['list_project_repos', { projectId: 'p1' }]]);
   });
 
@@ -80,6 +83,7 @@ describe('project-changed cache invalidation', () => {
 
     expect(invalidateCacheByCommand.mock.calls).toEqual([
       ['list_projects'],
+      ['get_all_repo_badges'],
       ['list_project_repos'],
     ]);
     expect(invalidateCacheByArgs).not.toHaveBeenCalled();

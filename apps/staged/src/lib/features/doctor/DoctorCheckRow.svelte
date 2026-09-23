@@ -29,6 +29,7 @@
     type AgentLoginOutcome,
   } from './agentLogin.svelte';
   import AgentLoginPrompt from './AgentLoginPrompt.svelte';
+  import { closingFixDialogCancelsLogin } from './fixDialog';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import Spinner from '../../shared/Spinner.svelte';
@@ -96,11 +97,26 @@
    */
   const loginRunning = $derived(isAuthFix && agentLogin.running && agentLogin.checkId === check.id);
   const fixRunning = $derived(isAuthFix ? loginRunning : fixing);
+  /**
+   * This dialog started the login the record shows — its Run was confirmed —
+   * rather than attaching on open to one already running. Decides what leaving
+   * the dialog does to that login; see `closingFixDialogCancelsLogin`. Read only
+   * from handlers, never rendered, so plain state.
+   */
+  let loginStartedHere = false;
+  /**
+   * Opens of the fix dialog so far. A login follower from an earlier open — one
+   * this dialog detached from on close and, re-opened, attached to again — is
+   * waiting on the same login as the current open's; it stands down so the end
+   * is acted on once.
+   */
+  let fixDialogOpens = 0;
 
   async function promptFix() {
     if (!check.fixType) return;
     fixError = null;
     fixing = false;
+    fixDialogOpens += 1;
     if (!isAuthFix) {
       showFixDialog = true;
       return;
@@ -111,7 +127,8 @@
     // A login for this check may already be running — started from the
     // session pane, from another client, or before this view reloaded. Pick it
     // up so the dialog shows its URL and code box, instead of a Run the backend
-    // would answer "already running".
+    // would answer "already running". Not this dialog's login to end.
+    loginStartedHere = false;
     await followLogin(attachAgentLogin(check.id));
   }
 
@@ -122,6 +139,7 @@
       // the code that page hands back. Started through the shared login
       // record so the dialog can show both, instead of running blind and
       // expiring at the fix timeout.
+      loginStartedHere = true;
       await followLogin(startAgentLogin(check.id));
       return;
     }
@@ -142,37 +160,48 @@
   /**
    * Wait on a login from this dialog: close it when the login ends, and refresh
    * the report only if it signed in. `null` is an attach that found nothing
-   * running, which leaves the dialog offering Run.
+   * running, which leaves the dialog offering Run. A follower outlived by a
+   * re-open of the dialog leaves both to the current open's follower.
    */
   async function followLogin(login: Promise<AgentLoginOutcome | null>) {
+    const opened = fixDialogOpens;
     fixing = true;
     fixError = null;
+    let outcome: AgentLoginOutcome | null;
     try {
-      const outcome = await login;
-      if (outcome === null) return;
-      showFixDialog = false;
-      if (outcome === 'completed') onFixed?.();
+      outcome = await login;
     } catch (e) {
+      if (opened !== fixDialogOpens) return;
+      fixing = false;
       // A failed login is already rendered from the shared record — unless
       // another check's login owns that record, which is what a rejection
       // before the login even started means.
       if (agentLogin.checkId !== check.id) fixError = String(e);
-    } finally {
-      fixing = false;
+      return;
     }
+    if (opened !== fixDialogOpens) return;
+    fixing = false;
+    if (outcome === null) return;
+    showFixDialog = false;
+    if (outcome === 'completed') onFixed?.();
   }
 
   /**
-   * Leave the fix dialog. For a login this is also the abort: the footer's
-   * Cancel, Escape and a click outside all land here through `onOpenChange`,
-   * and a login nobody is watching must not hold the check's login slot until
-   * doctor's fix timeout — the CLI ignores a closed stdin, so only a kill ends
-   * it. An install can't be cancelled yet and keeps Cancel disabled while it
-   * runs; Escape still closes its dialog, and `fixing` clears when it ends.
+   * Leave the fix dialog. The footer's Cancel, Escape and a click outside all
+   * land here through `onOpenChange`. For a login this dialog started, leaving
+   * is also the abort: nothing else is watching that login, and it must not
+   * hold the check's login slot until doctor's fix timeout — the CLI ignores a
+   * closed stdin, so only a kill ends it. A login the dialog merely attached to
+   * on open is left running: the session pane that started it is still showing
+   * its URL and code box, and this was only a look. An install can't be
+   * cancelled yet and keeps Cancel disabled while it runs; Escape still closes
+   * its dialog, and `fixing` clears when it ends.
    */
   function cancelFix() {
     if (isAuthFix) {
-      if (loginRunning) void cancelAgentLogin();
+      if (closingFixDialogCancelsLogin({ running: loginRunning, startedHere: loginStartedHere })) {
+        void cancelAgentLogin();
+      }
       showFixDialog = false;
       return;
     }
@@ -287,7 +316,7 @@
 
 <!-- Every user-driven close (Cancel, Escape, a click outside) reports through
      `onOpenChange`; `cancelFix` is what decides whether a running login goes
-     with it. Programmatic closes don't fire it. -->
+     with it — only one this dialog started. Programmatic closes don't fire it. -->
 <AlertDialog.Root bind:open={showFixDialog} onOpenChange={(open) => !open && cancelFix()}>
   <AlertDialog.Content>
     <AlertDialog.Header>

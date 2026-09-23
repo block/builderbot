@@ -49,6 +49,20 @@ export function doctorCheckForProvider(
  * not look. Nothing about the user's sign-in state is stored or inferred here:
  * the live error, the static capability, and the probe used only to exclude
  * `unknown` are read and forgotten, and the vendor stays the sole authority.
+ *
+ * One `authenticated` shape is a known false positive: a login shell that
+ * exports `ANTHROPIC_API_KEY`. The Claude CLI reports itself logged in on that
+ * variable alone, whatever the OAuth state, and an OAuth login does nothing
+ * about the exported key — the agent's next session starts with the same
+ * environment and fails the same way, after a login that reported success. So
+ * `Log in` is offered there and cannot help. It is accepted rather than
+ * excluded because `authenticated` cannot be split: the probe's exit code is
+ * all doctor reports, and it is the same 0 for the expired token this gate
+ * exists for and for the exported key. The probe's own JSON does tell them
+ * apart (`apiKeySource: ANTHROPIC_API_KEY`, `authMethod: api_key` when no
+ * OAuth record exists at all), so a future fix would key on a doctor-side
+ * credential-source field lifted from that output — not on re-excluding
+ * `authenticated`, which would close the berd#99 route again.
  */
 export function canOfferLogin(check: DoctorCheck | null | undefined): boolean {
   if (!check?.loginCommand) return false;

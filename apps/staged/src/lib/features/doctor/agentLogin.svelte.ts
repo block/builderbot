@@ -172,9 +172,17 @@ interface Attempt {
   probing: boolean;
   /**
    * The backend has answered the start or the probe, so a re-sync on reconnect
-   * has a run to ask about. Before that the answer still to come covers it.
+   * has a run to ask about. Before that, a reconnect only records itself in
+   * `gapBeforeAnswer` for the answer to act on.
    */
   answered: boolean;
+  /**
+   * The event channel reconnected while the answer was still in flight, so
+   * events emitted in that gap were missed — possibly the run's first lines,
+   * the sign-in URL among them. A start's answer catches up from the backend
+   * when this is set; a probe's answer is a snapshot and needs nothing more.
+   */
+  gapBeforeAnswer: boolean;
   /** The lines shown, with the `seq` each arrived under. */
   lines: OutputLine[];
   /** `seq` of the next line expected; one below it was already shown or replayed. */
@@ -217,6 +225,7 @@ function newAttempt(checkId: string, probing: boolean): Attempt {
     pending: [],
     probing,
     answered: false,
+    gapBeforeAnswer: false,
     lines: [],
     nextSeq: 0,
     settled: false,
@@ -350,14 +359,27 @@ async function syncFromBackend(attempt: Attempt) {
   applySnapshot(attempt, status);
 }
 
-/** A reconnect of the event channel: events emitted in the gap were missed. */
-function resync(attempt: Attempt) {
-  if (!attempt.answered) return;
+/**
+ * `syncFromBackend` for a run the backend has confirmed, tolerating a failed
+ * status: the login is alive whether or not this client could ask about it, so
+ * a rejected sync is logged and the run kept — the next event or reconnect
+ * catches up — rather than reported as the login's failure.
+ */
+function catchUp(attempt: Attempt) {
   syncFromBackend(attempt).catch((e) => {
-    // Nothing to do but wait for the next event or reconnect; the record still
-    // describes a login the backend confirmed.
     console.warn(`[agentLogin] re-sync of ${attempt.checkId} failed:`, e);
   });
+}
+
+/** A reconnect of the event channel: events emitted in the gap were missed. */
+function resync(attempt: Attempt) {
+  if (!attempt.answered) {
+    // No run to ask about yet. Recorded for the answer, which otherwise would
+    // take the gap for a quiet stretch and never fetch what it dropped.
+    attempt.gapBeforeAnswer = true;
+    return;
+  }
+  catchUp(attempt);
 }
 
 function handleEvent(attempt: Attempt, output: DoctorLoginOutput) {
@@ -387,12 +409,19 @@ function handleEvent(attempt: Attempt, output: DoctorLoginOutput) {
  * `done` event immediately — lost in that gap, it would leave `running` true
  * with no way back. `onEstablished` also fires on every web-socket reconnect:
  * the start is latched to the first one, and each later one re-syncs the record
- * from the backend, since events emitted in the gap were missed.
+ * from the backend, since events emitted in the gap were missed. A reconnect
+ * that lands while the start's answer is still in flight can't ask yet — there
+ * is no run id to ask about — so it is noted, and the answer does the asking.
  *
  * A start the backend answers "already running" is a re-attach, not a failure:
  * the CLI is alive and waiting for exactly the code this record can send it, so
  * its output so far is replayed and the record follows it to its end. Either
  * way the answer names the run, and the record follows that run alone.
+ *
+ * A start answered "started" with no gap asks nothing more: this listener was
+ * live before the fix existed, so every line is on its way here — and a status
+ * that found the run already over would settle it as `completed` ahead of a
+ * `done` still in flight, trading a fast failure's error for a blank end.
  */
 export function startAgentLogin(checkId: string): Promise<AgentLoginOutcome> {
   if (current) {
@@ -425,18 +454,27 @@ export function startAgentLogin(checkId: string): Promise<AgentLoginOutcome> {
           return;
         }
         started = true;
-        startDoctorLogin(checkId)
-          .then(async (start) => {
+        startDoctorLogin(checkId).then(
+          (start) => {
             if (!live(attempt)) return;
             attempt.answered = true;
             adoptRun(attempt, start.runId);
-            if (start.outcome === 'alreadyRunning' && live(attempt)) {
-              await syncFromBackend(attempt);
+            if (!live(attempt)) return;
+            // A re-attach has the run's earlier output to fetch; a start only
+            // has something to fetch if a reconnect while the answer was in
+            // flight dropped lines. Tolerant of a failed status either way:
+            // the backend has just confirmed the run is alive.
+            if (start.outcome === 'alreadyRunning' || attempt.gapBeforeAnswer) {
+              catchUp(attempt);
             }
-          })
-          .catch((e) => {
+          },
+          (e) => {
+            // The start itself was refused or never spawned. Only that is the
+            // login's failure — hence the two-argument `then`, which keeps a
+            // rejection in the catch-up above out of this handler.
             if (live(attempt)) fail(attempt, errorText(e));
-          });
+          }
+        );
       },
     }
   );

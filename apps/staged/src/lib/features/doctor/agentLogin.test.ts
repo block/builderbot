@@ -750,4 +750,109 @@ describe('agentLogin', () => {
     await expect(settled).resolves.toBe('completed');
     expect(agentLogin.running).toBe(false);
   });
+
+  it('catches up from the backend when the channel reconnected before the start was answered', async () => {
+    let answer!: (start: DoctorLoginStart) => void;
+    startDoctorLogin.mockImplementation(
+      () =>
+        new Promise<DoctorLoginStart>((resolve) => {
+          answer = resolve;
+        })
+    );
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    expect(startDoctorLogin).toHaveBeenCalledTimes(1);
+
+    // The socket dropped and came back while the start's answer was in flight.
+    // There is no run id to ask about yet, so nothing can be fetched here —
+    // but the fix printed its first lines, the sign-in URL among them, into
+    // that gap.
+    registration.onEstablished?.();
+    await flush();
+    expect(startDoctorLogin).toHaveBeenCalledTimes(1);
+    expect(doctorLoginStatus).not.toHaveBeenCalled();
+
+    // The answer names the run; the gap is what makes it ask the backend.
+    doctorLoginStatus.mockResolvedValue(running(['Opening browser to sign in…', AUTHORIZE_LINE]));
+    answer(started());
+    await flush();
+    expect(doctorLoginStatus).toHaveBeenCalledWith('ai-agent-claude');
+    expect(agentLogin.runId).toBe(RUN);
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.url).toBe('https://claude.ai/oauth');
+    expect(agentLogin.output).toEqual(['Opening browser to sign in…', AUTHORIZE_LINE]);
+
+    // Lines after the snapshot keep arriving live, merged by `seq`.
+    registration.callback(line('ai-agent-claude', 'Paste code here if prompted >', 2));
+    expect(agentLogin.output).toHaveLength(3);
+
+    registration.callback(done('ai-agent-claude'));
+    await expect(settled).resolves.toBe('completed');
+  });
+
+  it('asks nothing after a start answered without a gap, so a fast failure keeps its error', async () => {
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    await flush();
+    expect(agentLogin.runId).toBe(RUN);
+
+    // The listener was live before the fix existed, so every line is on its
+    // way here and there is nothing to fetch. Asking anyway would race the
+    // fix's own end: the status mock answers "not running", and a sync would
+    // settle the record as `completed` — swallowing the `done` behind it and
+    // the error it carries.
+    expect(doctorLoginStatus).not.toHaveBeenCalled();
+    registration.callback(done('ai-agent-claude', 'spawn failed: zsh: command not found'));
+    await expect(settled).rejects.toThrow('spawn failed: zsh: command not found');
+    expect(agentLogin.error).toBe('spawn failed: zsh: command not found');
+    expect(agentLogin.running).toBe(false);
+  });
+
+  it('keeps following a re-attached login when the catch-up status fails', async () => {
+    startDoctorLogin.mockResolvedValue(alreadyRunning('run-7'));
+    doctorLoginStatus.mockRejectedValue(new Error('IPC channel closed'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { agentLogin, startAgentLogin, submitAgentLoginCode } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    await flush();
+
+    // The backend has just confirmed the login is alive; a status hiccup is not
+    // its failure. The record keeps the run and the listener, and only the
+    // tail is missing until the next event or reconnect.
+    expect(doctorLoginStatus).toHaveBeenCalledWith('ai-agent-claude');
+    expect(warn).toHaveBeenCalled();
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.runId).toBe('run-7');
+    expect(agentLogin.error).toBeNull();
+    expect(agentLogin.output).toEqual([]);
+    expect(registration.unlisten).not.toHaveBeenCalled();
+
+    // Still very much a login: lines show and a code goes to the run.
+    registration.callback(line('ai-agent-claude', AUTHORIZE_LINE, 1, 'run-7'));
+    expect(agentLogin.url).toBe('https://claude.ai/oauth');
+    agentLogin.code = 'abc-123';
+    await submitAgentLoginCode();
+    expect(sendDoctorLoginCode).toHaveBeenCalledWith('ai-agent-claude', 'run-7', 'abc-123');
+
+    // The next reconnect fetches what the failed catch-up could not.
+    doctorLoginStatus.mockResolvedValue(
+      running(['Opening browser to sign in…', AUTHORIZE_LINE], 'run-7')
+    );
+    registration.onEstablished?.();
+    await flush();
+    expect(agentLogin.output).toEqual(['Opening browser to sign in…', AUTHORIZE_LINE]);
+
+    registration.callback(done('ai-agent-claude', null, false, 'run-7'));
+    await expect(settled).resolves.toBe('completed');
+    warn.mockRestore();
+  });
 });

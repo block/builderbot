@@ -1635,46 +1635,60 @@ export function runDoctorFix(
 }
 
 /**
- * What `startDoctorLogin` did: began a login, or found one already running for
- * the check. The latter is not a failure — it is the same subprocess the caller
- * wanted, reachable through `doctorLoginStatus`, the `doctor-login-output`
- * stream and `sendDoctorLoginCode`.
+ * What `startDoctorLogin` did — began a login, or found one already running for
+ * the check — and the run id of that login. The latter is not a failure: it is
+ * the same subprocess the caller wanted, reachable under that run id through
+ * `doctorLoginStatus`, the `doctor-login-output` stream and
+ * `sendDoctorLoginCode`.
+ *
+ * The run id is the login's identity, not the check id. The backend allows one
+ * login per check and releases the check's slot before the run's final event
+ * goes out, so a fresh start can land between the two and then see the earlier
+ * run's `done` under its own check id. Follow the run id instead.
  */
-export type DoctorLoginStart = 'started' | 'alreadyRunning';
+export interface DoctorLoginStart {
+  outcome: 'started' | 'alreadyRunning';
+  runId: string;
+}
 
 /**
- * Start an interactive login fix, resolving once it is running. Its output and
- * its completion are delivered through `doctor-login-output` events.
+ * Start an interactive login fix, resolving once it is running with the run id
+ * its events carry. Its output and its completion are delivered through
+ * `doctor-login-output` events.
  */
 export function startDoctorLogin(checkId: string): Promise<DoctorLoginStart> {
   return invokeCommand('start_doctor_login', { checkId });
 }
 
 /**
- * Ask the login running for `checkId` to stop, resolving with whether there was
- * one. Idempotent, and harmless when nothing is running. The end arrives as a
- * `doctor-login-output` event with `done` and `cancelled` set — this only asks.
+ * Ask run `runId` of `checkId`'s login to stop, resolving with whether it was
+ * found. Idempotent, and harmless when nothing is running; `false` also when a
+ * newer run now holds the check's slot, which is left alone. The end arrives as
+ * a `doctor-login-output` event with `done` and `cancelled` set — this only asks.
  */
-export function cancelDoctorLogin(checkId: string): Promise<boolean> {
-  return invokeCommand('cancel_doctor_login', { checkId });
+export function cancelDoctorLogin(checkId: string, runId: string): Promise<boolean> {
+  return invokeCommand('cancel_doctor_login', { checkId, runId });
 }
 
 export interface DoctorLoginStatus {
   running: boolean;
+  /** The running login's run id, which its events carry. Null when not running. */
+  runId: string | null;
   /** The last lines the login printed, oldest first. Empty when not running. */
   output: string[];
   /**
    * The `seq` the login's next line will carry; `output` covers the `seq`s from
-   * `nextSeq - output.length` up to but excluding `nextSeq`.
+   * `nextSeq - output.length` up to but excluding `nextSeq`. Counted per run.
    */
   nextSeq: number;
 }
 
 /**
- * Whether a login is running for `checkId`, and what it has printed so far —
- * for a client that lost its record of the login (a web refresh, a second
- * client, a reloaded webview). Register the `doctor-login-output` listener
- * before calling this, then merge by `seq`: a line below `nextSeq` is in the
+ * Whether a login is running for `checkId`, under which run id, and what it has
+ * printed so far — for a client that lost its record of the login (a web
+ * refresh, a second client, a reloaded webview). Register the
+ * `doctor-login-output` listener before calling this, then follow the run id it
+ * names and merge that run's lines by `seq`: a line below `nextSeq` is in the
  * snapshot, one at or above it arrived after the snapshot.
  */
 export function doctorLoginStatus(checkId: string): Promise<DoctorLoginStatus> {
@@ -1683,15 +1697,18 @@ export function doctorLoginStatus(checkId: string): Promise<DoctorLoginStatus> {
 
 /**
  * Submit a line — in practice the authentication code the agent CLI asked for —
- * to a login started by `startDoctorLogin` or by `runDoctorFix` with an `auth`
- * fix type.
+ * to run `runId` of a login started by `startDoctorLogin` or by `runDoctorFix`
+ * with an `auth` fix type. Rejects, saying so, when that run has ended — even
+ * if a newer login is running for the check, which does not get the code.
  */
-export function sendDoctorLoginCode(checkId: string, code: string): Promise<void> {
-  return invokeCommand('send_doctor_login_code', { checkId, code });
+export function sendDoctorLoginCode(checkId: string, runId: string, code: string): Promise<void> {
+  return invokeCommand('send_doctor_login_code', { checkId, runId, code });
 }
 
 export interface DoctorLoginOutput {
   checkId: string;
+  /** The run this event belongs to. Drop events from any run but the one followed. */
+  runId: string;
   line: string | null;
   /**
    * Position of `line` in the login's output, from zero; on the final event,

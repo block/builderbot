@@ -17,14 +17,24 @@
  * mistyped code a way to be retried: the CLI re-prompts (again with no newline)
  * on a code it rejects locally.
  *
+ * The record follows one *run*, identified by the run id the backend mints when
+ * it claims the check's login slot and stamps on every event. The check id is
+ * the slot, not the run: the backend releases the slot before a run's `done`
+ * goes out, so a fresh start for the same check can be claimed between the two
+ * and would otherwise take the earlier run's `done` as its own end — and a code
+ * typed for the earlier run would go to the new one. Events from any other run
+ * are dropped, and codes and cancels name the run. Events that arrive before
+ * the backend has named the run (its answer to the start or the status is still
+ * in flight) are held, then replayed once it has.
+ *
  * The backend is the source of truth for whether a login is running, and this
  * record can lose it — a web client refreshed mid-login, a second client, a
  * reloaded webview. Both ways in re-attach rather than fail: a start the backend
  * answers "already running" adopts that run, and `attachAgentLogin` asks before
  * a UI offers to start one. Both replay the backend's output tail through
  * `doctorLoginStatus`, with the listener registered first; every line carries a
- * sequence number, so a line delivered live while the snapshot was in flight is
- * shown once whichever arrived first.
+ * sequence number, per run, so a line delivered live while the snapshot was in
+ * flight is shown once whichever arrived first.
  *
  * Ending a login early is `cancelAgentLogin`, which goes through doctor's
  * cancellation token and kills the CLI. Closing its stdin would not do: the CLI
@@ -49,6 +59,11 @@ export type AgentLoginOutcome = 'completed' | 'cancelled';
 export interface AgentLoginState {
   /** Check id of the login in flight, or of the last one that ran. */
   checkId: string | null;
+  /**
+   * Run id of that login — the identity its events, codes and cancel go by.
+   * Null until the backend has named the run it started or was found running.
+   */
+  runId: string | null;
   running: boolean;
   /**
    * The sign-in URL the CLI printed, when it printed one. The whole point of
@@ -70,6 +85,7 @@ export interface AgentLoginState {
 
 export const agentLogin: AgentLoginState = $state({
   checkId: null,
+  runId: null,
   running: false,
   url: null,
   output: [],
@@ -101,6 +117,7 @@ export function extractLoginUrl(line: string): string | null {
 
 function resetRecord(checkId: string | null, running: boolean) {
   agentLogin.checkId = checkId;
+  agentLogin.runId = null;
   agentLogin.running = running;
   agentLogin.url = null;
   agentLogin.output = [];
@@ -133,6 +150,20 @@ interface OutputLine {
  */
 interface Attempt {
   checkId: string;
+  /**
+   * The run followed, once the backend has named it: the start's answer names
+   * the run it began or found, the status snapshot the run it has. Until then
+   * events for the check are held in `pending`.
+   */
+  runId: string | null;
+  /**
+   * Resolves with the run id once it is known, or with null if the attempt
+   * ended first — for a code or a cancel asked for before the start answered.
+   */
+  runIdKnown: Promise<string | null>;
+  resolveRunId: (runId: string | null) => void;
+  /** Events received before `runId` was known, in arrival order. */
+  pending: DoctorLoginOutput[];
   /**
    * Still asking the backend whether a login is running. Until it says so the
    * record is left alone: nothing may be running, and a UI must not show a
@@ -174,8 +205,16 @@ function newAttempt(checkId: string, probing: boolean): Attempt {
     resolve = res;
     reject = rej;
   });
+  let resolveRunId!: Attempt['resolveRunId'];
+  const runIdKnown = new Promise<string | null>((res) => {
+    resolveRunId = res;
+  });
   const attempt: Attempt = {
     checkId,
+    runId: null,
+    runIdKnown,
+    resolveRunId,
+    pending: [],
     probing,
     answered: false,
     lines: [],
@@ -197,6 +236,10 @@ function live(attempt: Attempt): boolean {
 /** Give up the record and the listener. Every end goes through here. */
 function finish(attempt: Attempt) {
   attempt.settled = true;
+  attempt.pending = [];
+  // A no-op if the run was named; otherwise releases a code or cancel that was
+  // waiting for the name, which now has nothing to send to.
+  attempt.resolveRunId(null);
   stopWatching();
   if (current === attempt) current = null;
 }
@@ -268,10 +311,30 @@ function applySnapshot(attempt: Attempt, status: DoctorLoginStatus) {
 }
 
 /**
+ * The backend has named the run this attempt follows. From here on only that
+ * run's events count; the ones held while the name was in flight are replayed
+ * through the same filter, so an earlier run's late `done` in that window is
+ * dropped and the followed run's own lines are shown.
+ *
+ * The replay can end the attempt (a held `done` of the followed run), so a
+ * caller with more to do checks `live` afterwards.
+ */
+function adoptRun(attempt: Attempt, runId: string) {
+  attempt.runId = runId;
+  agentLogin.runId = runId;
+  attempt.resolveRunId(runId);
+  const held = attempt.pending;
+  attempt.pending = [];
+  for (const output of held) handleEvent(attempt, output);
+}
+
+/**
  * Bring a running attempt back in line with the backend: lines it missed are
  * replayed from the tail, and a login the backend no longer has is settled.
  *
- * That settle is `completed`, not because the login necessarily succeeded but
+ * "No longer has" includes a newer run holding the check's slot: the followed
+ * run's `done` was missed, and the newer run is someone else's login. That
+ * settle is `completed`, not because the login necessarily succeeded but
  * because its `done` is gone — it either passed before this client's listener
  * existed or was lost across a reconnect — and the record must not stay
  * `running` for a subprocess that has exited. Callers re-run the doctor checks
@@ -280,7 +343,7 @@ function applySnapshot(attempt: Attempt, status: DoctorLoginStatus) {
 async function syncFromBackend(attempt: Attempt) {
   const status = await doctorLoginStatus(attempt.checkId);
   if (!live(attempt)) return;
-  if (!status.running) {
+  if (!status.running || status.runId !== attempt.runId) {
     complete(attempt, 'completed');
     return;
   }
@@ -298,15 +361,18 @@ function resync(attempt: Attempt) {
 }
 
 function handleEvent(attempt: Attempt, output: DoctorLoginOutput) {
+  // The check id is only a cheap pre-filter; the run id is the identity.
   if (!live(attempt) || output.checkId !== attempt.checkId) return;
-  if (output.line !== null) applyLine(attempt, output.seq, output.line);
-  if (!output.done) return;
-  if (attempt.probing) {
-    // Ended before the backend confirmed it was running: this client never
-    // showed the login, so there is nothing to end.
-    abandon(attempt);
+  if (attempt.runId === null) {
+    // Which run this attempt follows isn't known yet. Held rather than judged
+    // by check id: this is exactly the window in which an earlier run's `done`
+    // can arrive for the check. Bounded to what could ever be shown.
+    attempt.pending = [...attempt.pending, output].slice(-MAX_OUTPUT_LINES);
     return;
   }
+  if (output.runId !== attempt.runId) return;
+  if (output.line !== null) applyLine(attempt, output.seq, output.line);
+  if (!output.done) return;
   if (output.cancelled) complete(attempt, 'cancelled');
   else if (output.error !== null) fail(attempt, output.error);
   else complete(attempt, 'completed');
@@ -325,7 +391,8 @@ function handleEvent(attempt: Attempt, output: DoctorLoginOutput) {
  *
  * A start the backend answers "already running" is a re-attach, not a failure:
  * the CLI is alive and waiting for exactly the code this record can send it, so
- * its output so far is replayed and the record follows it to its end.
+ * its output so far is replayed and the record follows it to its end. Either
+ * way the answer names the run, and the record follows that run alone.
  */
 export function startAgentLogin(checkId: string): Promise<AgentLoginOutcome> {
   if (current) {
@@ -362,7 +429,10 @@ export function startAgentLogin(checkId: string): Promise<AgentLoginOutcome> {
           .then(async (start) => {
             if (!live(attempt)) return;
             attempt.answered = true;
-            if (start === 'alreadyRunning') await syncFromBackend(attempt);
+            adoptRun(attempt, start.runId);
+            if (start.outcome === 'alreadyRunning' && live(attempt)) {
+              await syncFromBackend(attempt);
+            }
           })
           .catch((e) => {
             if (live(attempt)) fail(attempt, errorText(e));
@@ -383,12 +453,13 @@ function asOutcome(outcome: AgentLoginOutcome | null): AgentLoginOutcome {
  * started from the other entry point, from another client, or before this view
  * reloaded — so its URL and code box come back instead of a button the backend
  * would answer "already running". Resolves `null` straight away when nothing is
- * running, leaving the record untouched; otherwise it takes the record and
- * resolves like `startAgentLogin` when the login ends.
+ * running, leaving the record untouched; otherwise it takes the record, follows
+ * the run the status names, and resolves like `startAgentLogin` when that run
+ * ends.
  *
  * The listener is registered before the backend is asked, so nothing the login
- * prints after the snapshot can be missed; lines that arrive while the snapshot
- * is in flight are held and merged by `seq` once it lands.
+ * prints after the snapshot can be missed; events that arrive while the snapshot
+ * is in flight are held, then the run's own are merged by `seq` once it lands.
  */
 export function attachAgentLogin(checkId: string): Promise<AgentLoginOutcome | null> {
   if (current) {
@@ -418,13 +489,14 @@ export function attachAgentLogin(checkId: string): Promise<AgentLoginOutcome | n
           .then((status) => {
             if (!live(attempt)) return;
             attempt.answered = true;
-            if (!status.running) {
+            if (!status.running || status.runId === null) {
               abandon(attempt);
               return;
             }
             resetRecord(checkId, true);
             attempt.probing = false;
-            applySnapshot(attempt, status);
+            adoptRun(attempt, status.runId);
+            if (live(attempt)) applySnapshot(attempt, status);
           })
           .catch((e) => {
             if (!live(attempt)) return;
@@ -438,19 +510,35 @@ export function attachAgentLogin(checkId: string): Promise<AgentLoginOutcome | n
 }
 
 /**
- * Send the typed code to the running login.
+ * The attempt that owns the record while a login is shown as running, if any.
+ * A probe never owns it, and a settled attempt has let go.
+ */
+function runningAttempt(): Attempt | null {
+  const attempt = current;
+  if (!attempt || attempt.probing || !agentLogin.running) return null;
+  return attempt;
+}
+
+/**
+ * Send the typed code to the running login — to the run this record follows,
+ * so a code typed for a login that has since ended is refused by the backend
+ * (and the refusal shown) rather than delivered to a newer login for the check.
+ * A send made before the backend has named the run waits for the name.
  *
  * The input stays open afterwards — see the module docs on why nothing in the
  * stream announces a re-prompt — so only the sent text is cleared.
  */
 export async function submitAgentLoginCode(): Promise<void> {
-  const checkId = agentLogin.checkId;
+  const attempt = runningAttempt();
   const code = agentLogin.code.trim();
-  if (!checkId || !agentLogin.running || !code || agentLogin.sending) return;
+  if (!attempt || !code || agentLogin.sending) return;
   agentLogin.sending = true;
   agentLogin.error = null;
   try {
-    await sendDoctorLoginCode(checkId, code);
+    const runId = await attempt.runIdKnown;
+    // Ended before it was named: its end is already on the record.
+    if (runId === null || !live(attempt)) return;
+    await sendDoctorLoginCode(attempt.checkId, runId, code);
     agentLogin.code = '';
   } catch (e) {
     agentLogin.error = errorText(e);
@@ -460,23 +548,27 @@ export async function submitAgentLoginCode(): Promise<void> {
 }
 
 /**
- * Ask the backend to stop the running login. The end itself arrives as a
- * `done` event with `cancelled` set, which settles the record as a neutral end
- * — no error, code box gone, record cleared — so `cancelling` stays up until
- * then. Idempotent while that is pending.
+ * Ask the backend to stop the running login — the run this record follows. The
+ * end itself arrives as a `done` event with `cancelled` set, which settles the
+ * record as a neutral end — no error, code box gone, record cleared — so
+ * `cancelling` stays up until then. Idempotent while that is pending. A cancel
+ * asked for before the backend has named the run waits for the name.
  *
- * A backend that reports nothing running has already lost the login this
- * record still shows — its `done` was missed — so the record is re-synced
- * from it instead of waiting for an end that won't come.
+ * A backend that reports the run not found has already lost the login this
+ * record still shows — its `done` was missed, and any login now running for the
+ * check is a newer one — so the record is re-synced from it instead of waiting
+ * for an end that won't come.
  */
 export async function cancelAgentLogin(): Promise<void> {
-  const attempt = current;
-  const checkId = agentLogin.checkId;
-  if (!attempt || !checkId || !agentLogin.running || agentLogin.cancelling) return;
+  const attempt = runningAttempt();
+  if (!attempt || agentLogin.cancelling) return;
   agentLogin.cancelling = true;
   agentLogin.error = null;
   try {
-    const cancelled = await cancelDoctorLogin(checkId);
+    const runId = await attempt.runIdKnown;
+    // Ended before it was named: its end is already on the record.
+    if (runId === null || !live(attempt)) return;
+    const cancelled = await cancelDoctorLogin(attempt.checkId, runId);
     if (!cancelled && live(attempt)) await syncFromBackend(attempt);
   } catch (e) {
     if (!live(attempt)) return;

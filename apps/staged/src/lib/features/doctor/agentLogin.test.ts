@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DoctorLoginOutput, DoctorLoginStatus } from '../../api/commands';
+import type { DoctorLoginOutput, DoctorLoginStart, DoctorLoginStatus } from '../../api/commands';
 
 /** A registration made by the module under test through `listenToEvent`. */
 interface Registration {
@@ -10,6 +10,10 @@ interface Registration {
 }
 
 const AUTHORIZE_LINE = 'If the browser didn’t open, visit: https://claude.ai/oauth';
+/** The run the backend names unless a test says otherwise. */
+const RUN = 'run-1';
+/** An earlier run of the same check, whose events must not reach the record. */
+const EARLIER_RUN = 'run-0';
 
 describe('agentLogin', () => {
   let startDoctorLogin: ReturnType<typeof vi.fn>;
@@ -28,7 +32,7 @@ describe('agentLogin', () => {
 
     registrations = [];
     nextSeq = 0;
-    startDoctorLogin = vi.fn().mockResolvedValue('started');
+    startDoctorLogin = vi.fn().mockResolvedValue(started());
     sendDoctorLoginCode = vi.fn().mockResolvedValue(undefined);
     cancelDoctorLogin = vi.fn().mockResolvedValue(true);
     doctorLoginStatus = vi.fn().mockResolvedValue(idle());
@@ -68,24 +72,38 @@ describe('agentLogin', () => {
     return live[0];
   }
 
-  function line(checkId: string, text: string, seq: number = nextSeq++): DoctorLoginOutput {
-    return { checkId, line: text, seq, done: false, error: null, cancelled: false };
+  function started(runId = RUN): DoctorLoginStart {
+    return { outcome: 'started', runId };
+  }
+
+  function alreadyRunning(runId = RUN): DoctorLoginStart {
+    return { outcome: 'alreadyRunning', runId };
+  }
+
+  function line(
+    checkId: string,
+    text: string,
+    seq: number = nextSeq++,
+    runId = RUN
+  ): DoctorLoginOutput {
+    return { checkId, runId, line: text, seq, done: false, error: null, cancelled: false };
   }
 
   function done(
     checkId: string,
     error: string | null = null,
-    cancelled = false
+    cancelled = false,
+    runId = RUN
   ): DoctorLoginOutput {
-    return { checkId, line: null, seq: nextSeq, done: true, error, cancelled };
+    return { checkId, runId, line: null, seq: nextSeq, done: true, error, cancelled };
   }
 
   function idle(): DoctorLoginStatus {
-    return { running: false, output: [], nextSeq: 0 };
+    return { running: false, runId: null, output: [], nextSeq: 0 };
   }
 
-  function running(output: string[]): DoctorLoginStatus {
-    return { running: true, output, nextSeq: output.length };
+  function running(output: string[], runId = RUN): DoctorLoginStatus {
+    return { running: true, runId, output, nextSeq: output.length };
   }
 
   /** Let the promise chains behind a start or a status answer run to the end. */
@@ -115,12 +133,15 @@ describe('agentLogin', () => {
     // be lost, so nothing may be started until `onEstablished`.
     expect(startDoctorLogin).not.toHaveBeenCalled();
     expect(agentLogin.running).toBe(true);
+    expect(agentLogin.runId).toBeNull();
 
     const registration = only();
     expect(registration.event).toBe('doctor-login-output');
     registration.onEstablished?.();
     expect(startDoctorLogin).toHaveBeenCalledWith('ai-agent-claude');
     await flush();
+    // The start's answer names the run the record follows from here on.
+    expect(agentLogin.runId).toBe(RUN);
 
     // A web-socket reconnect re-establishes the same listener; the fix is
     // already running, and starting a second would be refused by the backend.
@@ -143,6 +164,7 @@ describe('agentLogin', () => {
     const settled = startAgentLogin('ai-agent-claude');
     const registration = only();
     registration.onEstablished?.();
+    await flush();
     registration.callback(line('ai-agent-claude', 'Opening browser to sign in…'));
     registration.callback(line('ai-agent-claude', AUTHORIZE_LINE));
     registration.callback(line('ai-agent-codex', 'https://auth.openai.com/other'));
@@ -155,6 +177,80 @@ describe('agentLogin', () => {
 
     registration.callback(done('ai-agent-claude'));
     await settled;
+  });
+
+  it('ignores a done for the same check from an earlier run', async () => {
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    await flush();
+    registration.callback(line('ai-agent-claude', AUTHORIZE_LINE));
+
+    // The earlier run of this check ended — with a failure, a cancel, and
+    // plainly — after this one was started. None of those ends is this run's.
+    registration.callback(done('ai-agent-claude', 'login failed', false, EARLIER_RUN));
+    registration.callback(done('ai-agent-claude', null, true, EARLIER_RUN));
+    registration.callback(done('ai-agent-claude', null, false, EARLIER_RUN));
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.error).toBeNull();
+    expect(agentLogin.url).toBe('https://claude.ai/oauth');
+
+    registration.callback(done('ai-agent-claude'));
+    await expect(settled).resolves.toBe('completed');
+  });
+
+  it('ignores output from an earlier run of the same check', async () => {
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    await flush();
+
+    // Sequence numbers are per run, so the earlier run's line 0 must not be
+    // mistaken for this run's — neither shown nor counted against `nextSeq`.
+    registration.callback(
+      line('ai-agent-claude', 'visit: https://claude.ai/oauth/stale', 0, EARLIER_RUN)
+    );
+    expect(agentLogin.output).toEqual([]);
+    expect(agentLogin.url).toBeNull();
+
+    registration.callback(line('ai-agent-claude', AUTHORIZE_LINE, 0));
+    expect(agentLogin.output).toEqual([AUTHORIZE_LINE]);
+    expect(agentLogin.url).toBe('https://claude.ai/oauth');
+
+    registration.callback(done('ai-agent-claude'));
+    await settled;
+  });
+
+  it('holds events that arrive before the start is answered and keeps only the new run’s', async () => {
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    expect(agentLogin.runId).toBeNull();
+
+    // The race this exists for: the earlier run released the check's slot, this
+    // start claimed it, and only then did the earlier run's `done` go out — so
+    // it lands here before the start's answer has named the new run. The new
+    // run's first line is right behind it.
+    registration.callback(done('ai-agent-claude', null, false, EARLIER_RUN));
+    registration.callback(line('ai-agent-claude', 'Opening browser to sign in…', 0));
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.output).toEqual([]);
+
+    await flush();
+    expect(agentLogin.runId).toBe(RUN);
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.output).toEqual(['Opening browser to sign in…']);
+
+    registration.callback(line('ai-agent-claude', AUTHORIZE_LINE, 1));
+    expect(agentLogin.url).toBe('https://claude.ai/oauth');
+    registration.callback(done('ai-agent-claude'));
+    await expect(settled).resolves.toBe('completed');
   });
 
   it('reports a failed login on the record and to the caller', async () => {
@@ -190,7 +286,8 @@ describe('agentLogin', () => {
 
     agentLogin.code = '  abc-123  ';
     await submitAgentLoginCode();
-    expect(sendDoctorLoginCode).toHaveBeenCalledWith('ai-agent-claude', 'abc-123');
+    // Sent to the run the start named, not just the check.
+    expect(sendDoctorLoginCode).toHaveBeenCalledWith('ai-agent-claude', RUN, 'abc-123');
     // Only the sent text is cleared: the CLI re-prompts on a code it rejects,
     // and nothing in the stream announces that prompt.
     expect(agentLogin.code).toBe('');
@@ -222,6 +319,44 @@ describe('agentLogin', () => {
 
     registration.callback(done('ai-agent-claude'));
     await settled;
+  });
+
+  it('refuses a code for a run the backend has replaced, and settles on the cancel', async () => {
+    const refusal =
+      'The login this code was typed for has ended; a newer login is running for ' +
+      'ai-agent-claude and the code was not delivered to it';
+    sendDoctorLoginCode.mockRejectedValue(new Error(refusal));
+    // This record's run ended and its `done` was missed; another client has
+    // since started a new run for the same check.
+    cancelDoctorLogin.mockResolvedValue(false);
+    doctorLoginStatus.mockResolvedValue(running([AUTHORIZE_LINE], 'run-2'));
+    const { agentLogin, cancelAgentLogin, startAgentLogin, submitAgentLoginCode } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    only().onEstablished?.();
+    await flush();
+    expect(agentLogin.runId).toBe(RUN);
+
+    // The code names this record's run, so the backend refuses rather than
+    // handing it to the newer login — and the refusal is what the user sees.
+    agentLogin.code = 'abc-123';
+    await submitAgentLoginCode();
+    expect(sendDoctorLoginCode).toHaveBeenCalledWith('ai-agent-claude', RUN, 'abc-123');
+    expect(agentLogin.error).toBe(refusal);
+    expect(agentLogin.code).toBe('abc-123');
+    expect(agentLogin.running).toBe(true);
+
+    // Cancelling names the run too: the newer login is left alone, and the
+    // backend not finding this run is the cue to re-sync — which finds a
+    // different run holding the slot and settles this one.
+    await cancelAgentLogin();
+    expect(cancelDoctorLogin).toHaveBeenCalledWith('ai-agent-claude', RUN);
+    await expect(settled).resolves.toBe('completed');
+    expect(agentLogin.running).toBe(false);
+    expect(agentLogin.cancelling).toBe(false);
+    // The newer run's tail was not adopted: it is someone else's login.
+    expect(agentLogin.output).toEqual([]);
+    expect(agentLogin.runId).toBe(RUN);
   });
 
   it('refuses a second login rather than taking the record from the first', async () => {
@@ -268,6 +403,7 @@ describe('agentLogin', () => {
     clearAgentLogin('ai-agent-claude');
     expect(agentLoginFor('ai-agent-claude')).toBeNull();
     expect(agentLogin.error).toBeNull();
+    expect(agentLogin.runId).toBeNull();
   });
 
   it('cancels through the backend and ends the record without an error', async () => {
@@ -279,7 +415,7 @@ describe('agentLogin', () => {
     registration.callback(line('ai-agent-claude', AUTHORIZE_LINE));
 
     await cancelAgentLogin();
-    expect(cancelDoctorLogin).toHaveBeenCalledWith('ai-agent-claude');
+    expect(cancelDoctorLogin).toHaveBeenCalledWith('ai-agent-claude', RUN);
     // The request only asks; the end comes from the backend once the CLI is
     // dead, so the code box stays up until then — marked as on its way out.
     expect(agentLogin.running).toBe(true);
@@ -297,7 +433,40 @@ describe('agentLogin', () => {
     // open to lead with.
     expect(agentLoginFor('ai-agent-claude')).toBeNull();
     expect(agentLogin.output).toEqual([]);
+    expect(agentLogin.runId).toBeNull();
     expect(registration.unlisten).toHaveBeenCalled();
+  });
+
+  it('waits for the run to be named before cancelling it', async () => {
+    let answer!: (start: DoctorLoginStart) => void;
+    startDoctorLogin.mockImplementation(
+      () =>
+        new Promise<DoctorLoginStart>((resolve) => {
+          answer = resolve;
+        })
+    );
+    const { agentLogin, cancelAgentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+
+    // Cancel clicked before the start answered: there is no run id to name yet,
+    // and cancelling "whatever is running for the check" could hit another
+    // client's newer login. The cancel waits for the name instead of being
+    // dropped — a dropped cancel would leave the CLI holding the slot until
+    // doctor's fix timeout.
+    const cancelling = cancelAgentLogin();
+    await flush();
+    expect(agentLogin.cancelling).toBe(true);
+    expect(cancelDoctorLogin).not.toHaveBeenCalled();
+
+    answer(started());
+    await cancelling;
+    expect(cancelDoctorLogin).toHaveBeenCalledWith('ai-agent-claude', RUN);
+
+    registration.callback(done('ai-agent-claude', null, true));
+    await expect(settled).resolves.toBe('cancelled');
   });
 
   it('treats a cancel from another client as the same neutral end', async () => {
@@ -334,9 +503,11 @@ describe('agentLogin', () => {
   });
 
   it('re-attaches when the backend already has this login running, replaying its tail', async () => {
-    startDoctorLogin.mockResolvedValue('alreadyRunning');
-    doctorLoginStatus.mockResolvedValue(running(['Opening browser to sign in…', AUTHORIZE_LINE]));
-    const { agentLogin, startAgentLogin } = await load();
+    startDoctorLogin.mockResolvedValue(alreadyRunning('run-7'));
+    doctorLoginStatus.mockResolvedValue(
+      running(['Opening browser to sign in…', AUTHORIZE_LINE], 'run-7')
+    );
+    const { agentLogin, startAgentLogin, submitAgentLoginCode } = await load();
 
     const settled = startAgentLogin('ai-agent-claude');
     const registration = only();
@@ -344,24 +515,30 @@ describe('agentLogin', () => {
     await flush();
 
     // Not a failure: the CLI is alive and waiting for exactly the code this
-    // record can send it. The listener stays, and the tail restores the URL.
+    // record can send it. The listener stays, the record takes the run id the
+    // backend named, and the tail restores the URL.
     expect(doctorLoginStatus).toHaveBeenCalledWith('ai-agent-claude');
+    expect(agentLogin.runId).toBe('run-7');
     expect(agentLogin.running).toBe(true);
     expect(agentLogin.error).toBeNull();
     expect(agentLogin.url).toBe('https://claude.ai/oauth');
     expect(agentLogin.output).toEqual(['Opening browser to sign in…', AUTHORIZE_LINE]);
     expect(registration.unlisten).not.toHaveBeenCalled();
 
-    // Lines after the snapshot keep arriving live.
-    registration.callback(line('ai-agent-claude', 'Paste code here if prompted >', 2));
+    // Lines after the snapshot keep arriving live — under that run id.
+    registration.callback(line('ai-agent-claude', 'Paste code here if prompted >', 2, 'run-7'));
     expect(agentLogin.output).toHaveLength(3);
+    // And a code goes to that run.
+    agentLogin.code = 'abc-123';
+    await submitAgentLoginCode();
+    expect(sendDoctorLoginCode).toHaveBeenCalledWith('ai-agent-claude', 'run-7', 'abc-123');
 
-    registration.callback(done('ai-agent-claude'));
+    registration.callback(done('ai-agent-claude', null, false, 'run-7'));
     await expect(settled).resolves.toBe('completed');
   });
 
   it('settles a re-attach whose login ended before the backend answered', async () => {
-    startDoctorLogin.mockResolvedValue('alreadyRunning');
+    startDoctorLogin.mockResolvedValue(alreadyRunning());
     const { agentLogin, startAgentLogin } = await load();
 
     const settled = startAgentLogin('ai-agent-claude');
@@ -373,8 +550,25 @@ describe('agentLogin', () => {
     expect(agentLogin.running).toBe(false);
   });
 
+  it('settles a re-attach whose run the backend has since replaced', async () => {
+    startDoctorLogin.mockResolvedValue(alreadyRunning());
+    // Between the start's answer and the status, that run ended and another
+    // client started a new one for the check.
+    doctorLoginStatus.mockResolvedValue(running([AUTHORIZE_LINE], 'run-2'));
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    only().onEstablished?.();
+
+    // The run this record was attached to is gone, and the one running is not
+    // this record's to show: its `done` was missed, so it is settled.
+    await expect(settled).resolves.toBe('completed');
+    expect(agentLogin.running).toBe(false);
+    expect(agentLogin.output).toEqual([]);
+  });
+
   it('shows a line delivered while the snapshot was in flight exactly once', async () => {
-    startDoctorLogin.mockResolvedValue('alreadyRunning');
+    startDoctorLogin.mockResolvedValue(alreadyRunning());
     let answer!: (status: DoctorLoginStatus) => void;
     doctorLoginStatus.mockImplementation(
       () =>
@@ -394,7 +588,12 @@ describe('agentLogin', () => {
     // before the snapshot was taken (so it is in it), seq 2 after.
     registration.callback(line('ai-agent-claude', AUTHORIZE_LINE, 1));
     registration.callback(line('ai-agent-claude', 'Paste code here if prompted >', 2));
-    answer({ running: true, output: ['Opening browser to sign in…', AUTHORIZE_LINE], nextSeq: 2 });
+    answer({
+      running: true,
+      runId: RUN,
+      output: ['Opening browser to sign in…', AUTHORIZE_LINE],
+      nextSeq: 2,
+    });
     await flush();
 
     expect(agentLogin.output).toEqual([
@@ -413,7 +612,7 @@ describe('agentLogin', () => {
   });
 
   it('attaches on open to a login the backend reports running', async () => {
-    doctorLoginStatus.mockResolvedValue(running([AUTHORIZE_LINE]));
+    doctorLoginStatus.mockResolvedValue(running([AUTHORIZE_LINE], 'run-7'));
     const { agentLogin, attachAgentLogin } = await load();
 
     const attached = attachAgentLogin('ai-agent-claude');
@@ -428,13 +627,49 @@ describe('agentLogin', () => {
     await flush();
     expect(startDoctorLogin).not.toHaveBeenCalled();
     expect(agentLogin.checkId).toBe('ai-agent-claude');
+    // The status names the run; the record follows it.
+    expect(agentLogin.runId).toBe('run-7');
     expect(agentLogin.running).toBe(true);
     expect(agentLogin.url).toBe('https://claude.ai/oauth');
     expect(agentLogin.output).toEqual([AUTHORIZE_LINE]);
 
-    registration.callback(done('ai-agent-claude'));
+    // An earlier run's late `done` for the check is not this run's end.
+    registration.callback(done('ai-agent-claude', null, false, EARLIER_RUN));
+    expect(agentLogin.running).toBe(true);
+
+    registration.callback(done('ai-agent-claude', null, false, 'run-7'));
     await expect(attached).resolves.toBe('completed');
     expect(agentLogin.running).toBe(false);
+  });
+
+  it('holds events that arrive during the probe and keeps only the found run’s', async () => {
+    let answer!: (status: DoctorLoginStatus) => void;
+    doctorLoginStatus.mockImplementation(
+      () =>
+        new Promise<DoctorLoginStatus>((resolve) => {
+          answer = resolve;
+        })
+    );
+    const { agentLogin, attachAgentLogin } = await load();
+
+    const attached = attachAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+
+    // While the status is in flight: an earlier run's `done`, then a line of
+    // the run the status is about to name that the snapshot won't cover.
+    registration.callback(done('ai-agent-claude', null, false, EARLIER_RUN));
+    registration.callback(line('ai-agent-claude', 'Paste code here if prompted >', 1));
+    expect(agentLogin.running).toBe(false);
+
+    answer({ running: true, runId: RUN, output: [AUTHORIZE_LINE], nextSeq: 1 });
+    await flush();
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.runId).toBe(RUN);
+    expect(agentLogin.output).toEqual([AUTHORIZE_LINE, 'Paste code here if prompted >']);
+
+    registration.callback(done('ai-agent-claude'));
+    await expect(attached).resolves.toBe('completed');
   });
 
   it('leaves the record alone when there is nothing to attach to', async () => {

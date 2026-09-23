@@ -3827,7 +3827,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
         "cancel_doctor_login" => {
             let check_id: String = arg(&args, "checkId")?;
-            let cancelled = crate::doctor::cancel_doctor_login(check_id).await;
+            let run_id: String = arg(&args, "runId")?;
+            let cancelled = crate::doctor::cancel_doctor_login(check_id, run_id).await;
             Ok(Value::Bool(cancelled))
         }
         "doctor_login_status" => {
@@ -3837,8 +3838,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
         "send_doctor_login_code" => {
             let check_id: String = arg(&args, "checkId")?;
+            let run_id: String = arg(&args, "runId")?;
             let code: String = arg(&args, "code")?;
-            crate::doctor::send_doctor_login_code(check_id, code).await?;
+            crate::doctor::send_doctor_login_code(check_id, run_id, code).await?;
             Ok(Value::Null)
         }
         "run_doctor_fix" => {

@@ -18,6 +18,7 @@ pub use environment::DoctorEnv;
 pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixType};
 
 use std::collections::{HashMap, HashSet};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1121,8 +1122,21 @@ pub(crate) async fn run_command_streaming<F>(
 where
     F: FnMut(&str) + Send + 'static,
 {
+    // Decided here, before `stdin` moves into the closure, and from the host's own
+    // fd 0 rather than the blocking worker's — they are the same descriptor, but
+    // reading it on this side keeps the runner's behavior a parameter that tests
+    // can set.
+    let process_group = FixProcessGroup::for_fix(stdin.as_ref(), std::io::stdin().is_terminal());
+
     tokio::task::spawn_blocking(move || {
-        run_command_streaming_blocking(&command, env.as_ref(), stdin, timeout, on_line)
+        run_command_streaming_blocking(
+            &command,
+            env.as_ref(),
+            stdin,
+            timeout,
+            process_group,
+            on_line,
+        )
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
@@ -1335,6 +1349,49 @@ impl Drop for UnlaunchedFixStdinCloser<'_> {
     }
 }
 
+/// Whether doctor puts the fix's shell in its own process group, which is what
+/// lets the timeout's `kill(-pid)` reach the fix's whole tree instead of just the
+/// direct child.
+///
+/// Staying in doctor's group is only worth its cost — descendants surviving the
+/// deadline, and a direct-child kill whose reach depends on whether zsh
+/// exec-optimized the payload away — when the child might read the host's
+/// terminal. That needs an actual tty on fd 0, so the decision is about fd 0 and
+/// nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixProcessGroup {
+    /// The child leads its own group: a timeout kill takes its descendants too.
+    Own,
+    /// The child stays in doctor's group so it can read the host's terminal
+    /// without stopping on SIGTTIN. A timeout kill reaches the child only.
+    Inherited,
+}
+
+impl FixProcessGroup {
+    /// `stdin_is_terminal` is `std::io::stdin().is_terminal()` in production;
+    /// tests pass it explicitly so the decision doesn't depend on how the test
+    /// binary was launched (cargo hands the terminal through, which would make a
+    /// tree-kill test exercise `Own` in CI and `Inherited` on a laptop).
+    fn for_fix(stdin: Option<&FixStdin>, stdin_is_terminal: bool) -> Self {
+        // Piped stdin: doctor owns fd 0. Inherited but non-tty stdin (a GUI host:
+        // /dev/null, a pipe, a closed fd): there is no terminal on fd 0 to raise
+        // SIGTTIN, and this runner always pipes stdout/stderr, so the child holds
+        // no tty descriptor at all and cannot be stopped for touching one.
+        //
+        // The residual case is a fix that opens `/dev/tty` itself while fd 0 is
+        // not a tty but the host does have a controlling terminal — Staged
+        // launched from a shell with stdin redirected. Under `Own` that fix stops
+        // on SIGTTIN, and is then killed at the deadline with an accurate notice:
+        // bounded rather than silent, and the price of the tree kill on the path
+        // every real fix takes.
+        if stdin.is_some() || !stdin_is_terminal {
+            Self::Own
+        } else {
+            Self::Inherited
+        }
+    }
+}
+
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
 /// `on_line`, and return based on the process exit status. Bounded by
 /// `timeout`, which is generous rather than tight: fix commands are
@@ -1347,6 +1404,7 @@ fn run_command_streaming_blocking<F>(
     env: Option<&DoctorEnv>,
     stdin: Option<FixStdin>,
     timeout: FixTimeout,
+    process_group: FixProcessGroup,
     mut on_line: F,
 ) -> Result<(), String>
 where
@@ -1389,17 +1447,14 @@ where
     // process's stdin, so interactive fixes in terminal hosts are untouched.
     if stdin.is_some() {
         shell_command.stdin(std::process::Stdio::piped());
-        // Own the whole tree so a timeout can kill more than the login shell:
-        // `kill(-pid)` only reaches an `npm install` under `zsh -lc` if the
-        // shell leads its own group. Gated on piped stdin because a child in
-        // its own group that reads the controlling terminal gets SIGTTIN and
-        // stops — impossible here precisely because doctor owns its stdin, but
-        // a real regression for a terminal host on the inherited-stdin path.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            shell_command.process_group(0);
-        }
+    }
+    // Own the whole tree so a timeout can kill more than the login shell:
+    // `kill(-pid)` only reaches an `npm install` under `zsh -lc` if the shell
+    // leads its own group. See [`FixProcessGroup`] for when doctor declines it.
+    #[cfg(unix)]
+    if process_group == FixProcessGroup::Own {
+        use std::os::unix::process::CommandExt;
+        shell_command.process_group(0);
     }
     command::configure_command(&mut shell_command);
 
@@ -1497,20 +1552,50 @@ where
         while let Ok(msg) = rx.try_recv() {
             consume(msg, &mut on_line, &mut stderr_accum);
         }
+        // Kill before phrasing the notice so it reports what was actually
+        // signalled rather than what we hoped: on the `Inherited` path the child
+        // is not a group leader, so `kill(-pid)` would fail with `ESRCH` and the
+        // fallback reaches the direct child only — and whether that is the fix
+        // itself or a login shell that kept it as a grandchild depends on the
+        // user's dotfiles. Skip the pointless negative-pid `kill` there, since
+        // its failure is known by construction.
+        let reach = match process_group {
+            FixProcessGroup::Own => command::kill_child_process_group_or_child(&mut child),
+            FixProcessGroup::Inherited => {
+                let _ = child.kill();
+                command::KillReach::ChildOnly
+            }
+        };
+        let _ = child.wait();
+        // Late lines the kill itself shook loose.
+        while let Ok(msg) = rx.try_recv() {
+            consume(msg, &mut on_line, &mut stderr_accum);
+        }
+        let survivors = match reach {
+            command::KillReach::ProcessGroup => "killed the fix and its child processes",
+            command::KillReach::ChildOnly => {
+                "killed the fix process; anything it started may still be running"
+            }
+        };
         on_line(&format!(
-            "doctor: fix timed out after {} — terminating",
+            "doctor: fix timed out after {} — {survivors}",
             format_duration(limit)
         ));
-        command::kill_child_process_group_or_child(&mut child);
-        let _ = child.wait();
         // The reader threads are deliberately not joined: a descendant that
         // escaped the process group can hold the inherited stdout open long
         // after the fix is dead, and waiting on that is the hang this timeout
         // exists to end. Dropping `rx` retires them at their next send.
-        return Err(format!(
+        let mut err = format!(
             "Fix timed out after {} without finishing: {command}",
             format_duration(limit)
-        ));
+        );
+        // A host that only logs the error string shouldn't be told the tree is
+        // dead when it isn't. Appended so the existing "names the timeout and the
+        // command" shape of the message survives.
+        if reach == command::KillReach::ChildOnly {
+            err.push_str(" (anything the fix started may still be running)");
+        }
+        return Err(err);
     };
 
     if status.success() {
@@ -1893,6 +1978,7 @@ mod tests {
                 None,
                 Some(stdin),
                 FixTimeout::Standard,
+                FixProcessGroup::Own,
                 move |line| {
                     let _ = line_tx.send(line.to_string());
                 },
@@ -1984,33 +2070,208 @@ mod tests {
         );
     }
 
+    /// The group decision is about fd 0 and nothing else. `None` with a non-tty
+    /// stdin — every fix Staged runs today — must get `Own`, or the timeout's tree
+    /// kill only ever works on the piped-stdin path nothing uses yet; a terminal
+    /// host keeps `Inherited` so its fix isn't stopped by SIGTTIN.
+    #[test]
+    fn fix_process_group_decision_matrix() {
+        let (_writer, stdin) = FixStdin::pipe();
+
+        assert_eq!(
+            FixProcessGroup::for_fix(Some(&stdin), true),
+            FixProcessGroup::Own,
+            "piped stdin means doctor owns fd 0 whatever the host's tty is",
+        );
+        assert_eq!(
+            FixProcessGroup::for_fix(Some(&stdin), false),
+            FixProcessGroup::Own,
+        );
+        assert_eq!(
+            FixProcessGroup::for_fix(None, false),
+            FixProcessGroup::Own,
+            "a GUI host's inherited non-tty stdin cannot raise SIGTTIN",
+        );
+        assert_eq!(
+            FixProcessGroup::for_fix(None, true),
+            FixProcessGroup::Inherited,
+            "a terminal host's fix must keep reading the tty without stopping",
+        );
+    }
+
+    /// Let a fix time out with a backgrounded grandchild running, and report
+    /// whether that grandchild survived the kill.
+    ///
+    /// The grandchild records its own pid and then sleeps past every bound here,
+    /// so liveness by pid is the assertion — no waiting on a marker file the
+    /// survivor would write later. That matters because the payload does not start
+    /// the moment the fix does: this is a *login* shell, and a real `$HOME`'s
+    /// dotfiles take it over a second to start, long enough for a short deadline
+    /// to fire before the grandchild exists at all and "pass" no matter what the
+    /// kill reached. Hence both the throwaway `HOME` — no user dotfiles, so ~0.2s
+    /// of startup instead of ~1.6s, and the same on any machine — and reading the
+    /// pid file back, which turns that race into a loud failure.
+    ///
+    /// `sleep 60` is the shell's last command, so zsh exec-replaces itself with
+    /// it and the recorded `sleep 300` becomes the direct child's own child — out
+    /// of reach of `child.kill()`, in reach of `kill(-pgid)`.
+    #[cfg(unix)]
+    fn grandchild_survives_timeout_kill(
+        tag: &str,
+        stdin: Option<FixStdin>,
+        process_group: FixProcessGroup,
+    ) -> bool {
+        let tmp = unique_tmp_dir(tag);
+        let pid_file = tmp.join("grandchild-pid");
+        let env = DoctorEnv::new(vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+        ]);
+
+        let result = run_command_streaming_blocking(
+            &format!(
+                "sleep 300 & printf %s $! > {}; sleep 60",
+                pid_file.display()
+            ),
+            Some(&env),
+            stdin,
+            // ~15x the dotfile-free login-shell startup, so the grandchild is up
+            // well before the deadline lands even under a loaded test run.
+            FixTimeout::After(Duration::from_secs(3)),
+            process_group,
+            |_| {},
+        );
+        assert!(result.is_err(), "timed-out fix should fail; got {result:?}");
+
+        let recorded = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pid: i32 = recorded.trim().parse().unwrap_or_else(|_| {
+            panic!(
+                "grandchild never recorded a pid ({recorded:?}): the deadline beat \
+                 the login shell's startup, so this proves nothing"
+            )
+        });
+        let pid = nix::unistd::Pid::from_raw(pid);
+
+        // The kill is asynchronous, so give a doomed grandchild a moment to go.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if nix::sys::signal::kill(pid, None).is_err() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        true
+    }
+
+    /// The tree kill has to work on the inherited-stdin path too — that is the one
+    /// every real fix takes. Driven through the blocking runner with an explicit
+    /// decision rather than `run_command_streaming`, because cargo passes the
+    /// terminal through to test binaries: going through the auto-detection would
+    /// exercise `Own` in CI and `Inherited` on a laptop, silently.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_kills_the_whole_process_tree_with_inherited_stdin() {
+        assert!(
+            !grandchild_survives_timeout_kill(
+                "fix-timeout-tree-no-stdin",
+                None,
+                FixProcessGroup::Own
+            ),
+            "backgrounded grandchild outlived the timeout kill",
+        );
+    }
+
+    /// Owning the group means the notice can promise the tree is gone.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_notice_reports_a_group_kill() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        // The payload only has to outlive the deadline: what the kill reaches is
+        // fixed by the group decision, not by the process shape.
+        let result = run_command_streaming_blocking(
+            "sleep 5",
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(200)),
+            FixProcessGroup::Own,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        );
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            !err.contains("may still be running"),
+            "a group kill must not hedge; got {err:?}",
+        );
+        let notice = timeout_notice(&lines.lock().unwrap());
+        assert!(
+            notice.contains("killed the fix and its child processes"),
+            "notice should report the group kill; got {notice:?}",
+        );
+    }
+
+    /// Staying in doctor's group means descendants survive the deadline, so both
+    /// the notice and the error have to say so — `doctor: fix timed out after … —
+    /// terminating` claimed a tree kill that never happened on this path.
+    #[cfg(unix)]
+    #[test]
+    fn fix_timeout_notice_admits_survivors_when_the_group_is_inherited() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = run_command_streaming_blocking(
+            "sleep 5",
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(200)),
+            FixProcessGroup::Inherited,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        );
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out") && err.contains("sleep 5"),
+            "error should still name the timeout and the command; got {err:?}",
+        );
+        assert!(
+            err.contains("may still be running"),
+            "error should admit the survivors; got {err:?}",
+        );
+        let notice = timeout_notice(&lines.lock().unwrap());
+        assert!(
+            notice.contains("may still be running"),
+            "notice should admit the survivors; got {notice:?}",
+        );
+    }
+
+    /// The one `doctor: fix timed out after …` line, which every timeout emits and
+    /// callers grep for.
+    fn timeout_notice(lines: &[String]) -> String {
+        lines
+            .iter()
+            .find(|l| l.starts_with("doctor: fix timed out after "))
+            .unwrap_or_else(|| panic!("no timeout notice in {lines:?}"))
+            .clone()
+    }
+
     /// With piped stdin the shell leads its own process group, so the timeout
     /// kill must take the whole tree — not just the login shell, leaving a
     /// backgrounded installer running.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn run_command_streaming_timeout_kills_the_whole_process_tree() {
-        let tmp = unique_tmp_dir("fix-timeout-tree");
-        let marker = tmp.join("grandchild-ran");
+    #[test]
+    fn fix_timeout_kills_the_whole_process_tree_with_piped_stdin() {
         let (_writer, stdin) = FixStdin::pipe();
 
-        let result = run_command_streaming(
-            format!("(sleep 2; touch {}) & sleep 60", marker.display()),
-            None,
-            Some(stdin),
-            FixTimeout::After(Duration::from_millis(300)),
-            |_| {},
-        )
-        .await;
-
-        assert!(result.is_err(), "timed-out fix should fail; got {result:?}");
-        // Past when the backgrounded grandchild would have written its marker
-        // had it survived the group kill.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let survived = marker.exists();
-        let _ = std::fs::remove_dir_all(&tmp);
         assert!(
-            !survived,
+            !grandchild_survives_timeout_kill(
+                "fix-timeout-tree",
+                Some(stdin),
+                FixProcessGroup::Own
+            ),
             "backgrounded grandchild outlived the timeout kill",
         );
     }

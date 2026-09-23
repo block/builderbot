@@ -462,6 +462,10 @@ class ProjectsDataStore {
     { scheduleHydration = true }: { scheduleHydration?: boolean } = {}
   ): void {
     if (generation !== this.loadGeneration) return;
+    const previousProjectIds = new Set(this._projects.map((project) => project.id));
+    const newlySeenProjectIds = projectList
+      .map((project) => project.id)
+      .filter((projectId) => !previousProjectIds.has(projectId));
     this._projects = projectList;
 
     const branchMap = new Map<string, Branch[]>();
@@ -499,6 +503,13 @@ class ProjectsDataStore {
         projectList.map((p) => p.id),
         generation
       );
+    } else {
+      // Soft revalidations do not restart the whole drip, but a project that
+      // only appears in the fresh result has no existing branch/repo fetch to
+      // join. Put just those new cards onto the background hydration queue.
+      for (const projectId of newlySeenProjectIds) {
+        void this.hydrateProject(projectId, { priority: 'background' });
+      }
     }
   }
 

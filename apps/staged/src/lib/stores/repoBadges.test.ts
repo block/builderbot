@@ -20,6 +20,10 @@ function swr<T>(data: T, revalidating: Promise<T> | null = null): SwrResult<T> {
   return { data, revalidating };
 }
 
+function tick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 let getAllRepoBadges: ReturnType<typeof vi.fn>;
 let ensureRepoBadges: ReturnType<typeof vi.fn>;
 let updateRepoBadge: ReturnType<typeof vi.fn>;
@@ -91,5 +95,71 @@ describe('repoBadgeStore', () => {
     await store.loadAll({ force: true });
 
     expect(getAllRepoBadges).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('ignores stale load results that resolve after a newer load', async () => {
+    let resolveStale!: (value: SwrResult<RepoBadge[]>) => void;
+    getAllRepoBadges.mockReturnValueOnce(
+      new Promise<SwrResult<RepoBadge[]>>((resolve) => {
+        resolveStale = resolve;
+      })
+    );
+    getAllRepoBadges.mockResolvedValueOnce(swr([badge({ shortName: 'fresh' })]));
+    const store = await importStore();
+
+    const staleLoad = store.loadAll();
+    await store.loadAll({ force: true });
+    expect(store.lookup('org/repo', '')?.shortName).toBe('fresh');
+
+    resolveStale(swr([badge({ shortName: 'stale' })]));
+    await staleLoad;
+
+    expect(store.lookup('org/repo', '')?.shortName).toBe('fresh');
+  });
+
+  it('ignores stale SWR revalidation results after a newer load', async () => {
+    let resolveStaleFresh!: (badges: RepoBadge[]) => void;
+    getAllRepoBadges.mockResolvedValueOnce(
+      swr(
+        [badge({ shortName: 'old' })],
+        new Promise<RepoBadge[]>((resolve) => {
+          resolveStaleFresh = resolve;
+        })
+      )
+    );
+    getAllRepoBadges.mockResolvedValueOnce(swr([badge({ shortName: 'fresh' })]));
+    const store = await importStore();
+
+    await store.loadAll();
+    await store.loadAll({ force: true });
+    expect(store.lookup('org/repo', '')?.shortName).toBe('fresh');
+
+    resolveStaleFresh([badge({ shortName: 'stale-swr' })]);
+    await tick();
+
+    expect(store.lookup('org/repo', '')?.shortName).toBe('fresh');
+  });
+
+  it('ignores stale load results after a badge update', async () => {
+    let resolveStaleFresh!: (badges: RepoBadge[]) => void;
+    getAllRepoBadges.mockResolvedValueOnce(
+      swr(
+        [badge({ shortName: 'old' })],
+        new Promise<RepoBadge[]>((resolve) => {
+          resolveStaleFresh = resolve;
+        })
+      )
+    );
+    updateRepoBadge.mockResolvedValueOnce(badge({ shortName: 'custom', hue: 180 }));
+    const store = await importStore();
+
+    await store.loadAll();
+    await store.update('org/repo', '', 'custom', 180);
+    expect(store.lookup('org/repo', '')?.shortName).toBe('custom');
+
+    resolveStaleFresh([badge({ shortName: 'stale-swr' })]);
+    await tick();
+
+    expect(store.lookup('org/repo', '')?.shortName).toBe('custom');
   });
 });

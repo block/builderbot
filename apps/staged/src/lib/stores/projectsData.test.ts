@@ -297,6 +297,30 @@ describe('ensureLoaded', () => {
     expect(store.branchesByProject.has('p2')).toBe(true);
   });
 
+  it('hydrates projects newly discovered by a soft revalidation', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    expect(store.isProjectHydrated('p2')).toBe(false);
+
+    listProjects.mockResolvedValueOnce(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    listBranchesForProject.mockImplementation((projectId: string) =>
+      Promise.resolve(swr([branch({ id: `${projectId}-b1`, projectId })]))
+    );
+    listProjectRepos.mockImplementation((projectId: string) =>
+      Promise.resolve(swr([projectRepo({ id: `${projectId}-r1`, projectId })]))
+    );
+
+    await store.ensureLoaded();
+
+    await vi.waitFor(() => {
+      expect(store.isProjectHydrated('p2')).toBe(true);
+    });
+    expect(listBranchesForProject).toHaveBeenCalledWith('p2');
+    expect(listProjectRepos).toHaveBeenCalledWith('p2');
+    expect(store.branchesByProject.get('p2')![0].branchName).toBe('feature');
+    expect(store.reposByProject.get('p2')).toHaveLength(1);
+  });
+
   it('whenLoaded on a loaded store does not revalidate', async () => {
     const store = await importStore();
     await store.ensureLoaded();

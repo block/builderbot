@@ -218,29 +218,6 @@ pub(crate) fn kill_child_process_group_or_child(child: &mut Child) -> KillReach 
     KillReach::ChildOnly
 }
 
-/// The same best-effort kill for a caller that has the pid but not the `Child`
-/// — a canceller running on another thread while the thread that spawned the
-/// fix is parked in `wait`. Reaping stays with that thread, which its `wait`
-/// does as soon as the signal lands.
-///
-/// Whether this reaches the child's whole command tree or only the login shell
-/// leading it is decided at spawn: `kill(-pid)` needs the child in its own
-/// process group, which the fix runner arranges only where it is safe to.
-pub(crate) fn kill_process_group_or_process(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let Ok(pid) = i32::try_from(pid) else {
-            return false;
-        };
-        kill_pid(-pid) || kill_pid(pid)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
 #[cfg(unix)]
 fn kill_child_process_group(child: &Child) -> bool {
     let Ok(pid) = i32::try_from(child.id()) else {

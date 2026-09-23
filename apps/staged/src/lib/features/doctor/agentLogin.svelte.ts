@@ -34,7 +34,9 @@
  * a UI offers to start one. Both replay the backend's output tail through
  * `doctorLoginStatus`, with the listener registered first; every line carries a
  * sequence number, per run, so a line delivered live while the snapshot was in
- * flight is shown once whichever arrived first.
+ * flight is shown once whichever arrived first. The record says which it did —
+ * began the run, or picked up one already running (`origin`) — for a UI that
+ * has to decide whether the login it shows is its own to end.
  *
  * Ending a login early is `cancelAgentLogin`, which goes through doctor's
  * cancellation token and kills the CLI. Closing its stdin would not do: the CLI
@@ -56,6 +58,14 @@ const MAX_OUTPUT_LINES = 40;
 /** How a login ended, short of failing. */
 export type AgentLoginOutcome = 'completed' | 'cancelled';
 
+/**
+ * How this record came to follow the run it shows: `started` if this client's
+ * `startAgentLogin` began it, `attached` if the run was already running when
+ * this client picked it up — a start the backend answered "already running", or
+ * an `attachAgentLogin` that found it.
+ */
+export type AgentLoginOrigin = 'started' | 'attached';
+
 export interface AgentLoginState {
   /** Check id of the login in flight, or of the last one that ran. */
   checkId: string | null;
@@ -64,6 +74,14 @@ export interface AgentLoginState {
    * Null until the backend has named the run it started or was found running.
    */
   runId: string | null;
+  /**
+   * Whether this client began that run or picked up one already running — see
+   * `AgentLoginOrigin`. Null until the backend has answered the start, and
+   * whenever nothing is followed. For a UI deciding whether the login it shows
+   * is its own to end on the way out: a start it confirmed may have re-attached
+   * to a login someone else is watching, and only the backend's answer says so.
+   */
+  origin: AgentLoginOrigin | null;
   running: boolean;
   /**
    * The sign-in URL the CLI printed, when it printed one. The whole point of
@@ -86,6 +104,7 @@ export interface AgentLoginState {
 export const agentLogin: AgentLoginState = $state({
   checkId: null,
   runId: null,
+  origin: null,
   running: false,
   url: null,
   output: [],
@@ -118,6 +137,7 @@ export function extractLoginUrl(line: string): string | null {
 function resetRecord(checkId: string | null, running: boolean) {
   agentLogin.checkId = checkId;
   agentLogin.runId = null;
+  agentLogin.origin = null;
   agentLogin.running = running;
   agentLogin.url = null;
   agentLogin.output = [];
@@ -179,8 +199,13 @@ interface Attempt {
   /**
    * The event channel reconnected while the answer was still in flight, so
    * events emitted in that gap were missed — possibly the run's first lines,
-   * the sign-in URL among them. A start's answer catches up from the backend
-   * when this is set; a probe's answer is a snapshot and needs nothing more.
+   * the sign-in URL among them. Either answer catches up from the backend when
+   * this is set. A probe's answer is itself a snapshot, but not necessarily one
+   * taken after the reconnect: in web mode the status is an HTTP fetch while
+   * events ride the socket, so the backend can take the snapshot, the socket
+   * can drop and come back, and the answer land last — with the lines emitted
+   * between the snapshot and the reconnect in neither, and the next live line
+   * moving `nextSeq` past them for good.
    */
   gapBeforeAnswer: boolean;
   /** The lines shown, with the `seq` each arrived under. */
@@ -457,15 +482,27 @@ export function startAgentLogin(checkId: string): Promise<AgentLoginOutcome> {
         startDoctorLogin(checkId).then(
           (start) => {
             if (!live(attempt)) return;
-            attempt.answered = true;
-            adoptRun(attempt, start.runId);
-            if (!live(attempt)) return;
-            // A re-attach has the run's earlier output to fetch; a start only
-            // has something to fetch if a reconnect while the answer was in
-            // flight dropped lines. Tolerant of a failed status either way:
-            // the backend has just confirmed the run is alive.
-            if (start.outcome === 'alreadyRunning' || attempt.gapBeforeAnswer) {
-              catchUp(attempt);
+            try {
+              attempt.answered = true;
+              // Which the backend says it did — began the run, or found one
+              // already running — is what a UI reads to tell its own login
+              // from one this click re-attached to.
+              agentLogin.origin = start.outcome === 'alreadyRunning' ? 'attached' : 'started';
+              adoptRun(attempt, start.runId);
+              if (!live(attempt)) return;
+              // A re-attach has the run's earlier output to fetch; a start only
+              // has something to fetch if a reconnect while the answer was in
+              // flight dropped lines. Tolerant of a failed status either way:
+              // the backend has just confirmed the run is alive.
+              if (start.outcome === 'alreadyRunning' || attempt.gapBeforeAnswer) {
+                catchUp(attempt);
+              }
+            } catch (e) {
+              // A throw in the answer's own handling — the held-events replay,
+              // say — is not the start's failure, but left uncaught it would
+              // escape as an unhandled rejection with the record still
+              // `running` for a login nothing follows.
+              if (live(attempt)) fail(attempt, errorText(e));
             }
           },
           (e) => {
@@ -498,6 +535,8 @@ function asOutcome(outcome: AgentLoginOutcome | null): AgentLoginOutcome {
  * The listener is registered before the backend is asked, so nothing the login
  * prints after the snapshot can be missed; events that arrive while the snapshot
  * is in flight are held, then the run's own are merged by `seq` once it lands.
+ * Unless the channel reconnected in the meantime — then the snapshot may predate
+ * the gap, and the answer catches up from the backend as well.
  */
 export function attachAgentLogin(checkId: string): Promise<AgentLoginOutcome | null> {
   if (current) {
@@ -532,9 +571,18 @@ export function attachAgentLogin(checkId: string): Promise<AgentLoginOutcome | n
               return;
             }
             resetRecord(checkId, true);
+            agentLogin.origin = 'attached';
             attempt.probing = false;
             adoptRun(attempt, status.runId);
-            if (live(attempt)) applySnapshot(attempt, status);
+            if (!live(attempt)) return;
+            applySnapshot(attempt, status);
+            // The snapshot is only current if the backend took it after the
+            // channel's last reconnect, and a reconnect while it was in flight
+            // says nothing about that (see `gapBeforeAnswer`). Asking again is
+            // redundant when it was — the merge is by `seq` — and the backend
+            // has just confirmed the run alive, so a failed catch-up is a
+            // warning, not the login's failure.
+            if (attempt.gapBeforeAnswer) catchUp(attempt);
           })
           .catch((e) => {
             if (!live(attempt)) return;

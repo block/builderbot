@@ -434,7 +434,67 @@ describe('agentLogin', () => {
     expect(agentLoginFor('ai-agent-claude')).toBeNull();
     expect(agentLogin.output).toEqual([]);
     expect(agentLogin.runId).toBeNull();
+    expect(agentLogin.origin).toBeNull();
     expect(registration.unlisten).toHaveBeenCalled();
+  });
+
+  it('records whether the start began the run or re-attached to one already running', async () => {
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    // Nothing is claimed until the backend answers: a start may yet turn out to
+    // be a re-attach, and a UI that assumed otherwise would end a login someone
+    // else is watching on its way out.
+    expect(agentLogin.origin).toBeNull();
+    registration.onEstablished?.();
+    await flush();
+    expect(agentLogin.origin).toBe('started');
+    registration.callback(done('ai-agent-claude'));
+    await settled;
+    // A finished login keeps its origin, like the rest of what it left behind.
+    expect(agentLogin.origin).toBe('started');
+
+    // The same start, answered "already running": a login this client did not
+    // begin, so not its caller's to end.
+    startDoctorLogin.mockResolvedValue(alreadyRunning('run-7'));
+    doctorLoginStatus.mockResolvedValue(running([AUTHORIZE_LINE], 'run-7'));
+    const reattached = startAgentLogin('ai-agent-claude');
+    const again = only();
+    expect(agentLogin.origin).toBeNull();
+    again.onEstablished?.();
+    await flush();
+    expect(agentLogin.origin).toBe('attached');
+    expect(agentLogin.runId).toBe('run-7');
+    expect(agentLogin.running).toBe(true);
+
+    again.callback(done('ai-agent-claude', null, false, 'run-7'));
+    await expect(reattached).resolves.toBe('completed');
+  });
+
+  it('reports a throw in the start answer’s own handling as the login’s failure', async () => {
+    // Fault injection: nothing on that path throws today, so the record itself
+    // is made to refuse the run id the answer hands it.
+    vi.stubGlobal(
+      '$state',
+      (initial: object) =>
+        new Proxy(initial, {
+          set(target, key, value) {
+            if (key === 'runId' && value === RUN) throw new Error('record refused the run');
+            return Reflect.set(target, key, value);
+          },
+        })
+    );
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    only().onEstablished?.();
+
+    // Left uncaught this escaped `then` as an unhandled rejection, with the
+    // record still `running` for a login nothing was following.
+    await expect(settled).rejects.toThrow('record refused the run');
+    expect(agentLogin.running).toBe(false);
+    expect(agentLogin.error).toBe('record refused the run');
   });
 
   it('waits for the run to be named before cancelling it', async () => {
@@ -627,11 +687,16 @@ describe('agentLogin', () => {
     await flush();
     expect(startDoctorLogin).not.toHaveBeenCalled();
     expect(agentLogin.checkId).toBe('ai-agent-claude');
-    // The status names the run; the record follows it.
+    // The status names the run; the record follows it, as a run this client
+    // picked up rather than began.
     expect(agentLogin.runId).toBe('run-7');
+    expect(agentLogin.origin).toBe('attached');
     expect(agentLogin.running).toBe(true);
     expect(agentLogin.url).toBe('https://claude.ai/oauth');
     expect(agentLogin.output).toEqual([AUTHORIZE_LINE]);
+    // No reconnect while the status was in flight, so the snapshot is current
+    // and nothing more is asked.
+    expect(doctorLoginStatus).toHaveBeenCalledTimes(1);
 
     // An earlier run's late `done` for the check is not this run's end.
     registration.callback(done('ai-agent-claude', null, false, EARLIER_RUN));
@@ -640,6 +705,50 @@ describe('agentLogin', () => {
     registration.callback(done('ai-agent-claude', null, false, 'run-7'));
     await expect(attached).resolves.toBe('completed');
     expect(agentLogin.running).toBe(false);
+  });
+
+  it('catches up after the probe when the channel reconnected while the status was in flight', async () => {
+    let answer!: (status: DoctorLoginStatus) => void;
+    doctorLoginStatus.mockImplementationOnce(
+      () =>
+        new Promise<DoctorLoginStatus>((resolve) => {
+          answer = resolve;
+        })
+    );
+    const { agentLogin, attachAgentLogin } = await load();
+
+    const attached = attachAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onEstablished?.();
+    expect(doctorLoginStatus).toHaveBeenCalledTimes(1);
+
+    // The socket dropped and came back while the status was in flight. In web
+    // mode the status is an HTTP fetch and events ride the socket, so the
+    // backend may have taken its snapshot before the drop: a line the login
+    // printed between the two is in neither, and the next live line would move
+    // `nextSeq` past it for good. Nothing can be asked yet — no run is named.
+    registration.onEstablished?.();
+    await flush();
+    expect(doctorLoginStatus).toHaveBeenCalledTimes(1);
+    expect(agentLogin.running).toBe(false);
+
+    // The snapshot from before the gap lands; the gap makes the answer ask
+    // again, and the second snapshot has the line the first predates.
+    doctorLoginStatus.mockResolvedValue(running(['Opening browser to sign in…', AUTHORIZE_LINE]));
+    answer(running(['Opening browser to sign in…']));
+    await flush();
+    expect(doctorLoginStatus).toHaveBeenCalledTimes(2);
+    expect(agentLogin.running).toBe(true);
+    expect(agentLogin.runId).toBe(RUN);
+    expect(agentLogin.output).toEqual(['Opening browser to sign in…', AUTHORIZE_LINE]);
+    expect(agentLogin.url).toBe('https://claude.ai/oauth');
+
+    // Lines after that keep arriving live, merged by `seq`.
+    registration.callback(line('ai-agent-claude', 'Paste code here if prompted >', 2));
+    expect(agentLogin.output).toHaveLength(3);
+
+    registration.callback(done('ai-agent-claude'));
+    await expect(attached).resolves.toBe('completed');
   });
 
   it('holds events that arrive during the probe and keeps only the found run’s', async () => {

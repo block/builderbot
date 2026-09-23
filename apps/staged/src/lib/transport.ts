@@ -136,10 +136,21 @@ export interface ListenOptions {
    * returned unlisten. Fires once in Tauri mode (its in-process bus loses
    * nothing after registration) and once per web-socket connect, including
    * every reconnect: events emitted while the socket was down are gone for
-   * good. Not called when the unlisten precedes establishment, or when Tauri
-   * registration fails.
+   * good. Not called when the unlisten precedes establishment, or when
+   * registration fails — see `onRegistrationFailed` for that.
    */
   onEstablished?: () => void;
+  /**
+   * Called when registration failed outright, so this listener will never go
+   * live and `onEstablished` will never fire. Lets a consumer that waits on
+   * `onEstablished` before acting (rather than merely tolerating a missed
+   * event) give up instead of waiting forever. In Tauri mode this is the
+   * `listen()` roundtrip rejecting; in web mode it is the socket failing to be
+   * set up at all — a connect attempt that merely fails is retried and is not
+   * reported. Always asynchronous, like `onEstablished`. Also logged, so a
+   * consumer only needs this to react, not to make the failure visible.
+   */
+  onRegistrationFailed?: (error: unknown) => void;
 }
 
 /**
@@ -162,7 +173,7 @@ export function listenToEvent<T>(
   opts?: ListenOptions
 ): UnlistenFn {
   if (!isTauri) {
-    return webSocketListen<T>(event, callback, opts?.onEstablished);
+    return webSocketListen<T>(event, callback, opts);
   }
 
   let cancelled = false;
@@ -179,6 +190,7 @@ export function listenToEvent<T>(
     opts?.onEstablished?.();
   })().catch((e) => {
     console.error(`[transport] Failed to register listener for event "${event}":`, e);
+    if (!cancelled) opts?.onRegistrationFailed?.(e);
   });
 
   return () => {
@@ -197,7 +209,7 @@ export function listenToEvent<T>(
  */
 export function listenToWindowEvent<T>(event: string, callback: (payload: T) => void): UnlistenFn {
   if (!isTauri) {
-    return webSocketListen<T>(event, callback);
+    return webSocketListen<T>(event, callback, undefined);
   }
 
   let cancelled = false;
@@ -407,8 +419,9 @@ async function ensureWebSocket(): Promise<void> {
 function webSocketListen<T>(
   event: string,
   callback: (payload: T) => void,
-  onEstablished?: () => void
+  opts: ListenOptions | undefined
 ): UnlistenFn {
+  const onEstablished = opts?.onEstablished;
   const listener: WebSocketListener = {
     event,
     callback: callback as (payload: unknown) => void,
@@ -418,6 +431,10 @@ function webSocketListen<T>(
   wsListeners.push(listener);
   void ensureWebSocket().catch((e) => {
     console.error('[transport] Failed to connect WebSocket:', e);
+    // Only the socket set-up itself can reject here — a socket that opens and
+    // then drops is retried from `onclose`, never surfaced this way — so this is
+    // the one web-mode case where the listener provably never goes live.
+    if (wsListeners.includes(listener)) opts?.onRegistrationFailed?.(e);
   });
 
   // A socket that is still connecting will notify this listener along with the

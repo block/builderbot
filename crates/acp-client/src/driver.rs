@@ -391,10 +391,10 @@ impl AcpAuthenticationRequired {
 
     /// The sentence the user reads. This string lands in `session.errorMessage`
     /// and is rendered verbatim in Staged's session alert, so the method
-    /// inventory behind the decision goes to [`Self::log_methods`] at debug
-    /// level rather than into the error.
+    /// inventory behind the decision is not part of it. Pure: the call site
+    /// that decides the error is final also calls [`Self::log_methods`], so the
+    /// inventory is recorded exactly once however often this is formatted.
     fn describe(&self, operation: &str) -> String {
-        self.log_methods(&format!("required to {operation}"));
         match self.attempted_method_id.as_deref() {
             Some(method_id) => format!(
                 "ACP authentication is required to {operation}. Signing in with '{method_id}' did not clear it — sign this agent in again, then retry."
@@ -5949,6 +5949,7 @@ where
         Err(error) if error.code == ErrorCode::AuthRequired => {
             let required = AcpAuthenticationRequired::from_auth_methods(auth_methods);
             let Some(selection) = auth_selection else {
+                required.log_methods(&format!("required to {operation}"));
                 return Err(required.describe(operation));
             };
 
@@ -5956,9 +5957,14 @@ where
             let attempted = selection.method_id.clone();
             match connection.send_request(make_request()).block_task().await {
                 Ok(response) => Ok(response),
-                Err(error) if error.code == ErrorCode::AuthRequired => Err(required
-                    .after_authentication_attempt(attempted)
-                    .describe(operation)),
+                Err(error) if error.code == ErrorCode::AuthRequired => {
+                    let required = required.after_authentication_attempt(attempted);
+                    required.log_methods(&format!(
+                        "still required to {operation} after authenticating with '{}'",
+                        selection.method_id
+                    ));
+                    Err(required.describe(operation))
+                }
                 Err(error) => Err(format!(
                     "Failed to {operation} after authentication with explicitly selected method '{}': {error:?}",
                     selection.method_id

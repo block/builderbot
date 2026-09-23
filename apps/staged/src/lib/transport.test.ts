@@ -291,24 +291,30 @@ describe('web transport', () => {
 
 describe('tauri listener establishment', () => {
   let resolveListen: ((unlisten: () => void) => void) | undefined;
+  let rejectListen: ((error: unknown) => void) | undefined;
   let listen: ReturnType<typeof vi.fn>;
   let tauriUnlisten: ReturnType<typeof vi.fn<() => void>>;
+  let consoleError: MockInstance<typeof console.error>;
 
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('__TAURI__', {});
     resolveListen = undefined;
+    rejectListen = undefined;
     tauriUnlisten = vi.fn<() => void>();
     listen = vi.fn(
       () =>
-        new Promise<() => void>((resolve) => {
+        new Promise<() => void>((resolve, reject) => {
           resolveListen = resolve;
+          rejectListen = reject;
         })
     );
     vi.doMock('@tauri-apps/api/event', () => ({ listen }));
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleError.mockRestore();
     vi.doUnmock('@tauri-apps/api/event');
     vi.unstubAllGlobals();
   });
@@ -344,6 +350,38 @@ describe('tauri listener establishment', () => {
     // left to take a snapshot for.
     await vi.waitFor(() => expect(tauriUnlisten).toHaveBeenCalledTimes(1));
     expect(onEstablished).not.toHaveBeenCalled();
+  });
+
+  it('reports a registration that fails instead of leaving the consumer waiting', async () => {
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const onRegistrationFailed = vi.fn();
+    listenToEvent('doctor-login-output', vi.fn(), { onEstablished, onRegistrationFailed });
+
+    await vi.waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+    const failure = new Error('ipc down');
+    rejectListen?.(failure);
+
+    // A consumer that waits for `onEstablished` before acting has no other way
+    // to learn that the wait will never end.
+    await vi.waitFor(() => expect(onRegistrationFailed).toHaveBeenCalledWith(failure));
+    expect(onEstablished).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report a failed registration the consumer already walked away from', async () => {
+    const { listenToEvent } = await import('./transport');
+    const onRegistrationFailed = vi.fn();
+    const unlisten = listenToEvent('doctor-login-output', vi.fn(), { onRegistrationFailed });
+
+    await vi.waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+    unlisten();
+    rejectListen?.(new Error('ipc down'));
+
+    // Still logged — the failure is real — but the hook stays silent, matching
+    // `onEstablished` after an early unlisten.
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(1));
+    expect(onRegistrationFailed).not.toHaveBeenCalled();
   });
 });
 

@@ -5195,7 +5195,7 @@ async fn run_prompt_turn(
 
     let prompt_response = tokio::select! {
         result = &mut prompt_task => {
-            result.map_err(|e| format!("Prompt failed: {e:?}"))?
+            result.map_err(|error| describe_prompt_error(error, &setup.auth_methods))?
         }
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
@@ -5222,6 +5222,29 @@ async fn run_prompt_turn(
     Ok(AgentRunOutcome::from_stop_reason(
         prompt_response.stop_reason,
     ))
+}
+
+/// The text a failed `session/prompt` surfaces to the user.
+///
+/// amp, claude, and goose with a native provider accept `session/new` while
+/// signed out and raise ACP `auth_required` only here, so this is the
+/// `session/prompt` counterpart of the `auth_required` arm in
+/// [`send_session_setup_request`]: the same one sentence from
+/// [`AcpAuthenticationRequired::describe`] instead of a nested Debug dump, and
+/// the same inventory in the log. There is no authenticate-and-retry: a prompt
+/// may already have streamed output, and the user's remedy is the same sign-in
+/// either way. Every other error keeps its Debug rendering.
+fn describe_prompt_error(
+    error: agent_client_protocol::Error,
+    auth_methods: &[AuthMethod],
+) -> String {
+    if error.code == ErrorCode::AuthRequired {
+        let operation = "run the prompt";
+        let required = AcpAuthenticationRequired::from_auth_methods(auth_methods);
+        required.log_methods(&format!("required to {operation}"));
+        return required.describe(operation);
+    }
+    format!("Prompt failed: {error:?}")
 }
 
 /// Whether the agent advertises support for the transport an MCP server needs.
@@ -5651,6 +5674,10 @@ struct AcpSessionSetup {
     /// How this connection tracks background tasks, negotiated at initialize
     /// (see [`task_tracking_mode_from_initialize`]).
     task_tracking_mode: TaskTrackingMode,
+    /// The authentication methods the agent advertised at initialize, kept so
+    /// an `auth_required` raised at `session/prompt` can log the same
+    /// inventory the setup path logs (see [`describe_prompt_error`]).
+    auth_methods: Vec<AuthMethod>,
 }
 
 struct AcpSessionSetupContext<'a> {
@@ -5846,6 +5873,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 agent_session_id: existing_id.to_string(),
                 agent_capabilities,
                 task_tracking_mode,
+                auth_methods: init_response.auth_methods.clone(),
             })
         }
         None => {
@@ -5885,6 +5913,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 agent_session_id: new_id,
                 agent_capabilities,
                 task_tracking_mode,
+                auth_methods: init_response.auth_methods.clone(),
             })
         }
     }
@@ -6183,39 +6212,41 @@ mod tests {
         async_task_stop_message, async_task_stop_outcome, autoapprove_permission_decision,
         background_continuation_origin, background_task_tracking_meta, build_prompt_content_blocks,
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
-        hold_for_background_quiescence, is_config_selection_unavailable_error,
-        is_missing_mcp_transport_error, labeled_background_continuation_origin,
-        mcp_server_transport_supported, origin_task_name_label, permission_response_for_decision,
-        permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
-        resolve_acp_working_dir, resolve_session_config_option_selection,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, sdk_message_mentions_task,
-        sdk_message_origin_kind, sdk_message_session_state, sdk_message_settles_task,
-        send_session_setup_request, setup_acp_session, shell_exec_line, shell_quote,
-        task_tracking_mode_from_initialize, AcpAuthenticationMethodCategory,
-        AcpAuthenticationRequired, AcpAuthenticationSelection, AcpDriver, AcpEventMetadata,
-        AcpNotificationHandler, AcpPermissionDecision, AcpPermissionOption,
-        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
-        AcpSessionSetupContext, AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification,
-        AsyncTaskState, AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity,
-        BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask,
-        BackgroundTaskSet, BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState,
-        IncomingSessionUpdate, MessageWriter, OutOfTurnPermissionPolicy, QueuedSessionTurn,
-        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState,
-        SessionLifetime, SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store,
-        TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
+        describe_prompt_error, hold_for_background_quiescence,
+        is_config_selection_unavailable_error, is_missing_mcp_transport_error,
+        labeled_background_continuation_origin, mcp_server_transport_supported,
+        origin_task_name_label, permission_response_for_decision, permission_response_for_options,
+        reject_queued_stop_requests, remote_acp_segments, resolve_acp_working_dir,
+        resolve_session_config_option_selection, resolve_spawn_working_dir, run_prompt_turn,
+        sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
+        sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
+        setup_acp_session, shell_exec_line, shell_quote, task_tracking_mode_from_initialize,
+        AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
+        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
+        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        AcpSessionConfigOptionSelection, AcpSessionSetup, AcpSessionSetupContext,
+        AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
+        AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
+        BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BackgroundTaskSet,
+        BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState, IncomingSessionUpdate,
+        MessageWriter, OutOfTurnPermissionPolicy, QueuedSessionTurn, RemoteLineOutcome,
+        ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState, SessionLifetime,
+        SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store, TaskTrackingMode,
+        TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
         BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES, CLAUDE_SDK_MESSAGE_METHOD,
         CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS, PERMISSION_ANNOUNCEMENT_GRACE,
         SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
     };
     use agent_client_protocol::schema::v1::{
-        AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
+        AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
         ContentBlock as AcpContentBlock, ContentChunk, ExtNotification, McpCapabilities, McpServer,
         McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
         PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, RequestPermissionOutcome, RequestPermissionRequest, SessionConfigOption,
-        SessionConfigOptionCategory, SessionConfigSelectOption, SessionNotification, SessionUpdate,
-        SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
-        ToolCall, ToolCallUpdate, ToolCallUpdateFields,
+        PlanEntryStatus, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+        SetSessionConfigOptionResponse, StopReason, TextContent, ToolCall, ToolCallUpdate,
+        ToolCallUpdateFields,
     };
     use agent_client_protocol::JsonRpcMessage;
     use std::ffi::OsString;
@@ -6311,7 +6342,92 @@ mod tests {
             .expect_err("auth_required should be surfaced without authenticate");
 
         assert!(format!("{error:?}").contains("ACP authentication is required"));
+        // The exact string the session alert shows once `run` has wrapped it;
+        // `authRecovery.test.ts` pins the same bytes on the frontend side.
+        assert_eq!(
+            format!("ACP protocol failed: {error:?}"),
+            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to create ACP session. Sign this agent in, then retry.")) }"#
+        );
         assert_eq!(calls.lock().unwrap().as_slice(), &["session/new"]);
+    }
+
+    /// The bridges that accept `session/new` signed out (amp, claude, goose
+    /// with a native provider) raise `-32000` at `session/prompt` instead. The
+    /// user must read the same one sentence the setup path produces, not the
+    /// Debug rendering of the ACP error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn prompt_auth_required_reads_like_the_session_setup_error() {
+        let auth_required = agent_client_protocol::Error::auth_required();
+        assert_eq!(i32::from(auth_required.code), -32000);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |_request: PromptRequest, responder, _cx| {
+                responder.respond_with_error(auth_required.clone())
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let setup = AcpSessionSetup {
+            agent_session_id: "session-1".to_string(),
+            agent_capabilities: AgentCapabilities::default(),
+            task_tracking_mode: TaskTrackingMode::Raw,
+            auth_methods: vec![AuthMethod::Agent(AuthMethodAgent::new(
+                "api-key", "API Key",
+            ))],
+        };
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+
+        let outcome = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(run_prompt_turn(
+                    &connection,
+                    &setup,
+                    &handler,
+                    "local-session",
+                    &CancellationToken::new(),
+                    "hello",
+                    &[],
+                )
+                .await)
+            })
+            .await
+            .expect("the connection itself stays healthy");
+
+        let error = outcome.expect_err("auth_required should fail the prompt");
+        assert_eq!(
+            error,
+            "ACP authentication is required to run the prompt. Sign this agent in, then retry."
+        );
+        assert!(error.contains("authentication"));
+
+        // `run` wraps every protocol failure the same way before it reaches
+        // the session alert; `authRecovery.test.ts` pins this exact string on
+        // the frontend side, so the two must agree byte for byte.
+        let wrapped = format!(
+            "ACP protocol failed: {:?}",
+            agent_client_protocol::util::internal_error(error)
+        );
+        assert_eq!(
+            wrapped,
+            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to run the prompt. Sign this agent in, then retry.")) }"#
+        );
+    }
+
+    #[test]
+    fn prompt_errors_other_than_auth_required_keep_their_debug_shape() {
+        let methods = vec![AuthMethod::Agent(AuthMethodAgent::new(
+            "api-key", "API Key",
+        ))];
+
+        let error = describe_prompt_error(agent_client_protocol::Error::internal_error(), &methods);
+
+        assert_eq!(
+            error,
+            r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

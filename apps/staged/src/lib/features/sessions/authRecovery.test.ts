@@ -72,6 +72,7 @@ describe('authentication recovery helpers', () => {
     expect(isAuthenticationError('npm install failed with exit code 1')).toBe(false);
   });
 
+<<<<<<< HEAD
   describe('canOfferLogin', () => {
     it('offers login for a positively signed-out agent', () => {
       expect(canOfferLogin(check())).toBe(true);
@@ -111,6 +112,55 @@ describe('authentication recovery helpers', () => {
       // login either: the static capability is the only thing that qualifies.
       expect(canOfferLogin(check({ loginCommand: null }))).toBe(false);
     });
+=======
+  // The exact strings the ACP driver produces for an ACP `-32000 auth_required`
+  // and the session runner stores verbatim as `session.errorMessage`. The inner
+  // sentence is `AcpAuthenticationRequired::describe` and the outer wrapper is
+  // `run`, both in `crates/acp-client/src/driver.rs`, whose own tests assert
+  // the same bytes. Pinned here so a change to either cannot silently drop the
+  // Log in action.
+  it.each([
+    {
+      stage: 'session/new',
+      message:
+        'ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to create ACP session. Sign this agent in, then retry.")) }',
+    },
+    {
+      stage: 'session/load',
+      message:
+        'ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to load ACP session. Sign this agent in, then retry.")) }',
+    },
+    {
+      stage: 'session/prompt',
+      message:
+        'ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to run the prompt. Sign this agent in, then retry.")) }',
+    },
+    {
+      // What session/prompt produced before the driver described it: the raw
+      // Debug rendering of the ACP error. Kept so recognition never comes to
+      // depend on that rewrite.
+      stage: 'session/prompt (pre-describe Debug shape)',
+      message:
+        'ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("Prompt failed: Error { code: -32000: Authentication required, message: \\"Authentication required\\", data: None }")) }',
+    },
+  ])('offers login for the driver error shape at $stage', ({ message }) => {
+    expect(isAuthenticationError(message)).toBe(true);
+  });
+
+  it("leaves goose's unconfigured native provider to the Fix action", () => {
+    // goose reports a missing native provider as an internal error carrying
+    // this phrase, not as `-32000`. Doctor has no login command for goose, so
+    // canOfferLogin is false for it regardless and the alert can only offer
+    // Fix; matching here would promise a Log in that cannot run.
+    expect(isAuthenticationError('ACP protocol failed: Provider is not configured')).toBe(false);
+  });
+
+  it('only offers login for a positively detected signed-out agent', () => {
+    expect(canOfferLogin(check())).toBe(true);
+    expect(canOfferLogin(check({ authStatus: 'unknown' }))).toBe(false);
+    expect(canOfferLogin(check({ authStatus: 'authenticated' }))).toBe(false);
+    expect(canOfferLogin(check({ fixType: null }))).toBe(false);
+>>>>>>> 4d9ae890 (fix(acp): describe auth_required at session/prompt and pin the error contract)
   });
 
   it('matches a session provider to the existing doctor report', () => {

@@ -11,6 +11,13 @@ import * as commands from '../../api/commands';
 import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { shouldQueueBranchSession } from './branchSessionQueue';
+import {
+  associateSessionStartTrace,
+  beginSessionStartTrace,
+  endSessionStartTrace,
+  markSessionStartTrace,
+  markSessionStartTraceAfterFrame,
+} from './sessionStartTrace';
 
 export type PendingSessionItemType =
   | 'pending-commit'
@@ -216,6 +223,7 @@ export async function startOrQueueBranchSessionWithPending({
   errorTitle = 'Unable to start session',
 }: StartOrQueueBranchSessionOptions): Promise<BranchSessionResponse | null> {
   const timeline = getTimeline?.() ?? null;
+  const trace = beginSessionStartTrace(branchId, mode);
   const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const pendingQueueMeta = queueMeta ?? queuedSessionMeta(timeline);
   const willQueue =
@@ -227,12 +235,15 @@ export async function startOrQueueBranchSessionWithPending({
       hasPendingQueuedSession: hasPendingQueuedSession(branchId),
     });
 
+  markSessionStartTrace(trace, 'submit', { willQueue });
   addPendingSession(branchId, {
     key: pendingKey,
     type: willQueue ? queuedSessionTypeForMode(mode) : pendingSessionTypeForMode(mode),
     title: pendingSessionTitleForMode(mode, prompt),
     secondaryMeta: willQueue ? pendingQueueMeta : pendingSessionMetaForMode(mode),
   });
+  markSessionStartTrace(trace, 'pending-added');
+  markSessionStartTraceAfterFrame(trace, 'pending-painted');
 
   try {
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
@@ -249,6 +260,8 @@ export async function startOrQueueBranchSessionWithPending({
     if (!result || !result.sessionId) {
       throw new Error('Failed to start session: no session ID returned');
     }
+    associateSessionStartTrace(trace, result.sessionId);
+    markSessionStartTrace(trace, 'invoke-returned', { sessionStatus: result.sessionStatus });
 
     updatePendingSession(
       branchId,
@@ -257,6 +270,7 @@ export async function startOrQueueBranchSessionWithPending({
       result.sessionStatus,
       pendingQueueMeta
     );
+    markSessionStartTrace(trace, 'pending-updated');
 
     try {
       await onTimelineRefresh?.();
@@ -264,13 +278,16 @@ export async function startOrQueueBranchSessionWithPending({
       console.warn('Failed to refresh branch timeline after session start:', e);
     }
 
+    endSessionStartTrace(trace);
     return result;
   } catch (e) {
+    markSessionStartTrace(trace, 'failed', { error: e instanceof Error ? e.message : String(e) });
     removePendingSession(branchId, pendingKey);
     toast.error(errorTitle, {
       description: e instanceof Error ? e.message : String(e),
       duration: Infinity,
     });
+    endSessionStartTrace(trace, { failed: true });
     return null;
   }
 }

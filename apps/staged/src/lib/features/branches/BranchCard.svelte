@@ -87,6 +87,11 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
+  import {
+    logSessionStartHandler,
+    markActiveSessionStartTrace,
+    markActiveSessionStartTraceAfterFrame,
+  } from './sessionStartTrace';
   import { toast } from 'svelte-sonner';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
@@ -619,7 +624,11 @@
     timeline = cached;
     loadedTimelineKey = timelineKey;
     loading = false;
+    markActiveSessionStartTrace(branch.id, 'timeline-fetched', { cached: true });
     prunedSessionIds = prunePendingSessionItems(branch.id, cached);
+    markActiveSessionStartTrace(branch.id, 'timeline-pruned', {
+      count: prunedSessionIds.size,
+    });
     if (fresh) {
       const version = ++revalidationVersion;
       fresh
@@ -742,7 +751,10 @@
         // it gets the sessionId — otherwise pruning can't match the pending item
         // and both the pending and real items briefly render simultaneously.
         if (!sessionMgr.isSessionStartPending) {
+          logSessionStartHandler('running handler reload', branchId, eventSessionId);
           loadTimeline();
+        } else {
+          logSessionStartHandler('running handler skip', branchId, eventSessionId);
         }
       }
     });
@@ -851,11 +863,17 @@
       const nextTimeline = await commands.getBranchTimeline(branch.id, {
         force: force || !isInitialLoad,
       });
+      markActiveSessionStartTrace(branch.id, 'timeline-fetched', { cached: false });
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;
       loadedTimelineKey = timelineKey;
       prunedSessionIds = prunePendingSessionItems(branch.id, nextTimeline);
+      markActiveSessionStartTrace(branch.id, 'timeline-pruned', {
+        count: prunedSessionIds.size,
+      });
       void loadTimelineReviewDetails(nextTimeline.reviews);
+      markActiveSessionStartTrace(branch.id, 'timeline-refreshed');
+      markActiveSessionStartTraceAfterFrame(branch.id, 'row-painted');
     } catch (e) {
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       error = e instanceof Error ? e.message : String(e);

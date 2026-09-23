@@ -42,7 +42,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -64,6 +64,38 @@ use crate::store::{
 
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
 const PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS: usize = 2;
+
+/// Lightweight wall-clock instrumentation for multi-stage startup paths.
+/// Laps are intentionally emitted through `log` so they remain useful in
+/// production without changing any API or persisted state.
+pub(crate) struct StageTimer {
+    label: &'static str,
+    started: Instant,
+    last: Instant,
+}
+
+impl StageTimer {
+    pub(crate) fn new(label: &'static str) -> Self {
+        let now = Instant::now();
+        Self {
+            label,
+            started: now,
+            last: now,
+        }
+    }
+
+    pub(crate) fn lap(&mut self, stage: &str) {
+        let now = Instant::now();
+        log::info!(
+            "[{}] stage={} lap_ms={} total_ms={}",
+            self.label,
+            stage,
+            now.duration_since(self.last).as_millis(),
+            now.duration_since(self.started).as_millis()
+        );
+        self.last = now;
+    }
+}
 
 pub fn git_identity_env_from_global_config() -> Vec<(String, String)> {
     let Some(name) = global_git_config_value("user.name") else {
@@ -961,6 +993,7 @@ pub fn start_session(
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
 ) -> Result<SessionStartOutcome, String> {
+    let mut startup_timer = StageTimer::new("session-start");
     // The gate every agent start passes, whatever raised it — see
     // `refuse_start_during_shutdown`. It sits ahead of the registration
     // deliberately: a session registered here would have to be deregistered
@@ -1025,6 +1058,7 @@ pub fn start_session(
                     }
                 };
 
+            startup_timer.lap("driver-new");
             // Persist the user message right away so it's visible immediately.
             // Include image IDs so the frontend can display them alongside the text.
             // We also mark attached images as session-scoped immediately after so they
@@ -1052,6 +1086,7 @@ pub fn start_session(
                     .map_err(|e| format!("Failed to persist user message: {e}"))?
             };
 
+            startup_timer.lap("persist-user-message");
             if !config.image_ids.is_empty() {
                 if let Err(e) = store.set_images_session_id(&config.image_ids, &config.session_id)
                 {
@@ -1102,6 +1137,7 @@ pub fn start_session(
         }
     };
 
+    startup_timer.lap("register-for-startup");
     let selected_acp_config_options =
         crate::acp_config::selected_acp_config_options(config.acp_config_selection.as_ref());
 
@@ -1110,6 +1146,7 @@ pub fn start_session(
     let session_id_for_status = config.session_id.clone();
     let store_for_status = Arc::clone(&store);
 
+    startup_timer.lap("spawn");
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4217,6 +4254,17 @@ pub fn emit_session_running(
     project_id: &str,
     session_type: &str,
 ) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    log::info!(
+        "[session-start] emit_session_running session={} branch={} project={} type={} timestamp_ms={timestamp_ms}",
+        session_id,
+        branch_id,
+        project_id,
+        session_type
+    );
     let event = SessionStatusEvent {
         session_id: session_id.to_string(),
         status: "running".to_string(),

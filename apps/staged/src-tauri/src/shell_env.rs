@@ -428,10 +428,19 @@ impl ShellEnvCache {
                 let mut map = self.inner.lock().unwrap();
                 match map.get(&key) {
                     Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
+                        log::debug!(
+                            "[shell-env] hit dir={} vars={}",
+                            key.display(),
+                            env.vars().len()
+                        );
                         return Ok(env.clone());
                     }
-                    Some(CachedEntry::InFlight(handle)) => Action::Wait(handle.clone()),
+                    Some(CachedEntry::InFlight(handle)) => {
+                        log::debug!("[shell-env] wait dir={}", key.display());
+                        Action::Wait(handle.clone())
+                    }
                     _ => {
+                        log::debug!("[shell-env] miss dir={}", key.display());
                         let promise = InFlightPromise::new();
                         let (tx, rx) = watch::channel(None);
                         map.insert(
@@ -528,10 +537,19 @@ impl ShellEnvCache {
                 let mut map = self.inner.lock().unwrap();
                 match map.get(&key) {
                     Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
+                        log::debug!(
+                            "[shell-env] hit dir={} vars={}",
+                            key.display(),
+                            env.vars().len()
+                        );
                         return Ok(env.clone());
                     }
-                    Some(CachedEntry::InFlight(handle)) => Action::Wait(handle.promise.clone()),
+                    Some(CachedEntry::InFlight(handle)) => {
+                        log::debug!("[shell-env] wait dir={}", key.display());
+                        Action::Wait(handle.promise.clone())
+                    }
                     _ => {
+                        log::debug!("[shell-env] miss dir={}", key.display());
                         let promise = InFlightPromise::new();
                         let (tx, rx) = watch::channel(None);
                         map.insert(
@@ -655,6 +673,7 @@ async fn capture_shell_env(
     shell: &Path,
     temp_root: &Path,
 ) -> io::Result<Vec<(String, String)>> {
+    let started = Instant::now();
     let dump_path = dump_path(temp_root);
     let script = dump_script(&dump_path);
 
@@ -715,7 +734,14 @@ async fn capture_shell_env(
     };
     let _ = tokio::fs::remove_file(&dump_path).await;
 
-    Ok(parse_env_dump(&bytes))
+    let vars = parse_env_dump(&bytes);
+    log::info!(
+        "[shell-env] capture dir={} duration_ms={} vars={}",
+        working_dir.display(),
+        started.elapsed().as_millis(),
+        vars.len()
+    );
+    Ok(vars)
 }
 
 /// Synchronous counterpart to [`capture_shell_env`].
@@ -727,6 +753,7 @@ fn capture_shell_env_blocking(
     shell: &Path,
     temp_root: &Path,
 ) -> io::Result<Vec<(String, String)>> {
+    let started = Instant::now();
     use std::io::Write as _;
 
     let dump_path = dump_path(temp_root);
@@ -784,7 +811,14 @@ fn capture_shell_env_blocking(
     };
     let _ = std::fs::remove_file(&dump_path);
 
-    Ok(parse_env_dump(&bytes))
+    let vars = parse_env_dump(&bytes);
+    log::info!(
+        "[shell-env] capture-blocking dir={} duration_ms={} vars={}",
+        working_dir.display(),
+        started.elapsed().as_millis(),
+        vars.len()
+    );
+    Ok(vars)
 }
 
 fn single_quote(value: &str) -> String {

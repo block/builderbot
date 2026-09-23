@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 use thiserror::Error;
 
 use super::strip_git_env;
@@ -91,7 +92,13 @@ fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String,
 
     let mut command = Command::new("git");
     command.args(["-C", repo_str]).args(args);
+    let env_started = Instant::now();
     apply_env(&mut command, repo, source);
+    log::debug!(
+        "[git] apply_env repo={} source={source:?} duration_ms={}",
+        repo.display(),
+        env_started.elapsed().as_millis()
+    );
     force_non_interactive(&mut command);
     detach_from_ctty(&mut command);
 

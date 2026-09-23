@@ -3,6 +3,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 // =============================================================================
 // Known agents — the registry of ACP-compatible providers
@@ -180,10 +181,23 @@ pub fn set_bundled_tools_dir(dir: PathBuf) {
 /// The app-bundled tools dir (if registered) wins; everything else delegates
 /// to doctor so ACP and Doctor share one binary resolution policy.
 pub fn find_command(cmd: &str) -> Option<PathBuf> {
+    let started_at = Instant::now();
     if let Some(path) = command_in_dir(BUNDLED_TOOLS_DIR.get().map(PathBuf::as_path), cmd) {
+        log::debug!(
+            "[acp-resolve] command={} strategy=managed-dir duration_ms={}",
+            cmd,
+            started_at.elapsed().as_millis()
+        );
         return Some(path);
     }
-    doctor::resolve::resolve_binary(cmd).path
+
+    let path = doctor::resolve::resolve_binary(cmd).path;
+    log::debug!(
+        "[acp-resolve] command={} strategy=doctor-resolution/fallback duration_ms={}",
+        cmd,
+        started_at.elapsed().as_millis()
+    );
+    path
 }
 
 /// Resolve `cmd` to an executable file inside an optional directory.

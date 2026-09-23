@@ -137,6 +137,19 @@ pub struct DoctorCheck {
     pub raw_output: Option<String>,
     /// Authentication status, when the check probes credentials.
     pub auth_status: Option<AuthStatus>,
+    /// The provider's interactive login command, whenever its binary resolved —
+    /// regardless of `auth_status`. A static per-provider capability, not a
+    /// verdict: `auth_status` comes from a probe that can report `Authenticated`
+    /// for credentials the vendor will reject (Claude's `auth status` exits 0 on
+    /// an expired token and never checks expiry), so a host that has just seen
+    /// an authentication failure from the live agent needs to know a login
+    /// *exists* without doctor having to agree that one is *needed*. `fix_type`
+    /// / `fix_command` keep their meaning — set only when the probe positively
+    /// reported a signed-out agent — so a passing check still offers no fix.
+    /// `None` for providers without a login command and for non-agent checks.
+    /// Additive on the wire: absent in older payloads, read back as `None`.
+    #[serde(default)]
+    pub login_command: Option<String>,
     /// Installed version string, if detected.
     pub installed_version: Option<String>,
     /// Latest available version string, if known.

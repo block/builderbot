@@ -2393,15 +2393,19 @@
         <Alert.Description>{session.errorMessage}</Alert.Description>
         {#if authError}
           <Alert.Action>
+            <!-- `Log in` leads when it is offered: this failure came from the
+                 agent itself, and the Doctor panel behind `Fix` may well call the
+                 check passing (its probe can't see an expired token), so `Fix`
+                 is the fallback, not the answer. -->
             <div class="auth-actions">
-              <Button variant="outline" size="xs" onclick={() => openSettings('doctor')}>
-                Fix
-              </Button>
               {#if canLogin}
-                <Button variant="outline" size="xs" disabled={loginRunning} onclick={startLogin}>
+                <Button variant="default" size="xs" disabled={loginRunning} onclick={startLogin}>
                   {loginRunning ? 'Logging in…' : 'Log in'}
                 </Button>
               {/if}
+              <Button variant="outline" size="xs" onclick={() => openSettings('doctor')}>
+                Fix
+              </Button>
             </div>
           </Alert.Action>
         {/if}

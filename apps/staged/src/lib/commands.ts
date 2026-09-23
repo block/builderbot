@@ -1578,6 +1578,16 @@ export interface DoctorCheck {
   bridgePath: string | null;
   rawOutput: string | null;
   authStatus: 'authenticated' | 'notAuthenticated' | 'notApplicable' | 'unknown' | null;
+  /**
+   * The provider's interactive login command whenever its binary resolved,
+   * regardless of `authStatus` — a static capability, not doctor's verdict.
+   * Unlike `fixCommand`, which is set only when the probe positively reported
+   * a signed-out agent, this says a login *exists*: the probe can't see an
+   * expired Claude token, so a live authentication failure has to be able to
+   * offer one on a check the probe calls `authenticated`. `null` for providers
+   * without a login command (Pi, Goose) and for non-agent checks.
+   */
+  loginCommand: string | null;
   /** Flat version fields mirror the bridge readout (else main) for compat. */
   installedVersion: string | null;
   latestVersion: string | null;

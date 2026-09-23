@@ -14,6 +14,7 @@ pub(crate) struct TimeoutCheck<'a> {
     bridge_path: Option<String>,
     install_source: Option<InstallSource>,
     auth_status: Option<AuthStatus>,
+    login_command: Option<String>,
     main: Option<AgentVersionInfo>,
     bridge: Option<AgentVersionInfo>,
     raw_suffix: Option<&'a str>,
@@ -39,6 +40,7 @@ impl<'a> TimeoutCheck<'a> {
             bridge_path: None,
             install_source: None,
             auth_status: None,
+            login_command: None,
             main: None,
             bridge: None,
             raw_suffix: None,
@@ -57,6 +59,13 @@ impl<'a> TimeoutCheck<'a> {
 
     pub(crate) fn main(mut self, main: Option<AgentVersionInfo>) -> Self {
         self.main = main;
+        self
+    }
+
+    /// The provider's static login command, for a timed-out check whose binary
+    /// did resolve. See [`DoctorCheck::login_command`].
+    pub(crate) fn login_command(mut self, login_command: Option<String>) -> Self {
+        self.login_command = login_command;
         self
     }
 
@@ -86,6 +95,7 @@ pub(crate) fn command_timeout_check(input: TimeoutCheck<'_>) -> DoctorCheck {
         bridge_path: input.bridge_path,
         raw_output: Some(raw),
         auth_status: input.auth_status,
+        login_command: input.login_command,
         installed_version: None,
         latest_version: None,
         update_available: None,

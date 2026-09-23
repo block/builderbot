@@ -826,6 +826,7 @@ fn node_runtime_doctor_check(
         bridge_path: None,
         raw_output,
         auth_status: None,
+        login_command: None,
         installed_version: None,
         latest_version: None,
         update_available: None,

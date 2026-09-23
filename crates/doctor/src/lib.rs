@@ -55,6 +55,7 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
         bridge_path: None,
         raw_output: None,
         auth_status: None,
+        login_command: None,
         installed_version: None,
         latest_version: None,
         update_available: None,
@@ -366,6 +367,7 @@ fn timeout_diagnostic_check(timeout: CommandTimeout, id: String) -> DoctorCheck 
             timeout.raw_output()
         )),
         auth_status: None,
+        login_command: None,
         installed_version: None,
         latest_version: None,
         update_available: None,

@@ -3071,10 +3071,11 @@ struct BackgroundActivity {
     /// per hold (see [`BackgroundHoldConfig::idle_latch_staleness`]), so a
     /// lost trailing `idle` cannot cap-condemn every later hold.
     session_state: Option<SdkSessionState>,
-    /// Whether this observation carries a task terminal edge. Unlike
-    /// `ever_started_task`, this is an edge, not a latch: the holding wait
-    /// consumes it to re-stamp the floor once for the completion wake.
-    task_settled: bool,
+    /// Connection-scoped counter bumped on each recognized task terminal
+    /// notification. Unlike a transient edge bit, this survives watch
+    /// coalescing with nonterminal updates. Each hold baselines it at entry
+    /// and consumes changes once to re-stamp the completion-wake floor.
+    settlement_seq: u64,
     /// Monotonic counter bumped on every received notification; the holding
     /// debounce resets whenever it changes.
     activity_seq: u64,
@@ -3557,7 +3558,9 @@ impl AcpNotificationHandler {
         self.background_activity_tx.send_modify(|activity| {
             activity.sdk_frames_seen = true;
             activity.ever_started_task |= mentions_task || !snapshot.live_ids.is_empty();
-            activity.task_settled = task_settled;
+            if task_settled {
+                activity.settlement_seq = activity.settlement_seq.wrapping_add(1);
+            }
             activity.live_tasks = snapshot.live_ids.len();
             activity.live_task_ids = snapshot.live_ids;
             activity.tasks = snapshot.tasks;
@@ -3619,7 +3622,9 @@ impl AcpNotificationHandler {
         let snapshot = self.mode_selected_task_snapshot().await;
         self.background_activity_tx.send_modify(|activity| {
             activity.ever_started_task |= !snapshot.live_ids.is_empty();
-            activity.task_settled = task_settled;
+            if task_settled {
+                activity.settlement_seq = activity.settlement_seq.wrapping_add(1);
+            }
             activity.live_tasks = snapshot.live_ids.len();
             activity.live_task_ids = snapshot.live_ids;
             activity.tasks = snapshot.tasks;
@@ -3635,10 +3640,9 @@ impl AcpNotificationHandler {
         // Every received update counts as activity for the post-turn holding
         // debounce — out-of-turn continuations stream as ordinary
         // session/updates, and the hold must not declare quiescence mid-burst.
-        // It is not a task terminal edge, so clear any edge bit left on the
-        // watch snapshot after the previous observation.
+        // Leave the settlement sequence intact: a pending terminal edge must
+        // survive ordinary updates coalescing into the same watch snapshot.
         self.background_activity_tx.send_modify(|activity| {
-            activity.task_settled = false;
             activity.activity_seq = activity.activity_seq.wrapping_add(1);
         });
 
@@ -4423,6 +4427,8 @@ struct HoldingState {
     live_tasks: usize,
     sdk_frames_seen: bool,
     ever_started_task: bool,
+    /// Settlement counter at entry or the last observation, independent of
+    /// ordinary activity so continuation traffic cannot renew the floor.
     last_settle_seq: u64,
     session_state: Option<SdkSessionState>,
 }
@@ -4443,12 +4449,11 @@ impl HoldingState {
             live_tasks: initial.live_tasks,
             sdk_frames_seen: initial.sdk_frames_seen,
             ever_started_task: initial.ever_started_task || initial.live_tasks > 0,
-            last_settle_seq: 0,
+            last_settle_seq: initial.settlement_seq,
             session_state: initial.session_state,
             config,
         };
-        state.track_task_deadlines(now, &initial.live_task_ids, initial.task_settled);
-        state.last_settle_seq = initial.activity_seq;
+        state.track_task_deadlines(now, &initial.live_task_ids, false);
         state
     }
 
@@ -4459,11 +4464,9 @@ impl HoldingState {
         self.quiet_since = now;
         self.live_tasks = activity.live_tasks;
         self.session_state = activity.session_state;
-        let task_settled = activity.task_settled && activity.activity_seq != self.last_settle_seq;
+        let task_settled = activity.settlement_seq != self.last_settle_seq;
         self.track_task_deadlines(now, &activity.live_task_ids, task_settled);
-        if activity.task_settled {
-            self.last_settle_seq = activity.activity_seq;
-        }
+        self.last_settle_seq = activity.settlement_seq;
         // Availability and task history latch: once frames have arrived on
         // this connection the stream is proven — and once a task has been
         // seen the taskless fast path is off — whatever later snapshots say.
@@ -5924,6 +5927,8 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod settlement;
+
     use std::collections::BTreeSet;
 
     use super::{
@@ -8812,13 +8817,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(state.cap_deadline(), spawn + Duration::from_secs(600));
 
         let settle = start + Duration::from_secs(700);
-        state.observe(
-            settle,
-            &BackgroundActivity {
-                task_settled: true,
-                ..drained_in_state(SdkSessionState::Busy)
-            },
-        );
+        state.observe(settle, &drained_in_state(SdkSessionState::Busy));
 
         assert_eq!(state.cap_deadline(), settle + Duration::from_secs(600));
         assert_eq!(
@@ -8850,13 +8849,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(state.cap_deadline(), spawn + Duration::from_secs(600));
 
         let settle = start + Duration::from_secs(700);
-        state.observe(
-            settle,
-            &BackgroundActivity {
-                task_settled: true,
-                ..seen_with_ids(["OLD"])
-            },
-        );
+        state.observe(settle, &seen_with_ids(["OLD"]));
 
         assert_eq!(state.cap_deadline(), settle + Duration::from_secs(600));
         assert_eq!(state.poll_settle(settle), None);
@@ -8942,13 +8935,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &seen_with_ids(["task-1"]),
         );
         let settle = start + Duration::from_secs(5);
-        state.observe(
-            settle,
-            &BackgroundActivity {
-                task_settled: true,
-                ..drained()
-            },
-        );
+        state.observe(settle, &drained());
 
         assert_eq!(state.cap_deadline(), settle + Duration::from_secs(600));
     }

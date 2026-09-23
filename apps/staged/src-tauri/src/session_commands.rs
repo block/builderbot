@@ -3966,6 +3966,7 @@ pub(crate) fn build_project_session_context(
         for branch in &repo_branches {
             lines.push(String::new());
             lines.push(format!("### Branch: {}", branch.branch_name));
+            lines.push(String::new());
 
             let timeline =
                 build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
@@ -3988,6 +3989,7 @@ pub(crate) fn build_project_session_context(
         for branch in &unlinked_branches {
             lines.push(String::new());
             lines.push(format!("### Branch: {}", branch.branch_name));
+            lines.push(String::new());
 
             let timeline =
                 build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
@@ -4006,13 +4008,15 @@ pub(crate) fn build_project_session_context(
         lines.push(String::new());
         lines.push("## Existing Project Notes".to_string());
         for note in &non_empty_notes {
-            let formatted = format_project_note_for_context(
+            // Blank line before each note: separates the first one from the
+            // section heading and the rest from each other.
+            lines.push(String::new());
+            lines.push(format_project_note_for_context(
                 &note.id,
                 &note.title,
                 &note.content,
                 workspace_name,
-            );
-            lines.push(formatted);
+            ));
         }
     }
 
@@ -4083,16 +4087,7 @@ fn build_branch_timeline_summary(
 
     timeline.sort_by_key(|e| (e.timestamp, e.order));
 
-    let mut section = String::new();
-    if let Some(err) = commit_error {
-        section.push_str(&err);
-        section.push('\n');
-    }
-    for entry in &timeline {
-        section.push_str(&entry.content);
-        section.push('\n');
-    }
-    section.trim_end().to_string()
+    join_timeline_entries(&timeline, commit_error.as_deref())
 }
 
 // =============================================================================
@@ -4106,6 +4101,22 @@ struct TimelineEntry {
     /// when multiple commits share the same second-level timestamp.
     order: i64,
     content: String,
+}
+
+/// Join timeline entries — and a leading commit-log error, when present — into
+/// one block, separated by a blank line.
+///
+/// Every item starts with its own `### ` heading, so the blank line between
+/// items is what tells the reader (and the agent) where one item ends. Both
+/// timeline builders go through here so branch- and project-level context can't
+/// drift apart on spacing again.
+fn join_timeline_entries(timeline: &[TimelineEntry], error: Option<&str>) -> String {
+    let mut blocks: Vec<&str> = Vec::new();
+    if let Some(err) = error {
+        blocks.push(err.trim());
+    }
+    blocks.extend(timeline.iter().map(|e| e.content.trim()));
+    blocks.join("\n\n")
 }
 
 /// Sort timeline entries and render them into a single section.
@@ -4122,15 +4133,9 @@ fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> S
 
     timeline.sort_by_key(|e| (e.timestamp, e.order));
 
-    let mut section = String::from("## Branch History (oldest first)\n");
-    if let Some(err) = error {
-        section.push_str(&format!("\n{err}\n"));
-    }
-    for entry in &timeline {
-        section.push('\n');
-        section.push_str(&entry.content);
-        section.push('\n');
-    }
+    let mut section = String::from("## Branch History (oldest first)\n\n");
+    section.push_str(&join_timeline_entries(&timeline, error.as_deref()));
+    section.push('\n');
     section
 }
 
@@ -4260,6 +4265,10 @@ fn write_note_to_remote(
 /// the note is written to a local temp file. Both produce the same
 /// `See: <path>` output format, keeping large notes out of the prompt.
 ///
+/// The pointer hugs its heading (single newline) so the blank line between
+/// items is the only blank line, making the grouping unambiguous. The inline
+/// fallback keeps its blank line — that body *is* the item, not a pointer.
+///
 /// Falls back to inlining if the write fails (remote or local).
 fn format_note_with_heading(
     id: &str,
@@ -4269,7 +4278,7 @@ fn format_note_with_heading(
     heading: &str,
 ) -> String {
     write_content_to_temp_file(id, content, workspace_name, "staged-note", |path| {
-        format!("### {heading}: {title}\n\nSee: `{path}`")
+        format!("### {heading}: {title}\nSee: `{path}`")
     })
     .unwrap_or_else(|| format!("### {heading}: {title}\n\n{content}"))
 }
@@ -4399,9 +4408,11 @@ fn write_image_to_temp_file(
 /// can connect it to the `#note:<id>` citations in the parent note's body.
 pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option<&str>) -> String {
     let heading = format!("### Note: {}", note.title);
+    // The reference line sits directly under the heading, with the pointer
+    // directly under that, so the whole item is one unbroken block.
     let reference = match &note.parent_project_note_id {
         Some(parent_id) => format!(
-            "\n\nChild note #note:{} of project note #project-note:{parent_id}.",
+            "\nChild note #note:{} of project note #project-note:{parent_id}.",
             note.id
         ),
         None => String::new(),
@@ -4412,7 +4423,7 @@ pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option
         &note.content,
         workspace_name,
         "staged-note",
-        |path| format!("{heading}{reference}\n\nSee: `{path}`"),
+        |path| format!("{heading}{reference}\nSee: `{path}`"),
     )
     .unwrap_or_else(|| format!("{heading}{reference}\n\n{}", note.content))
 }
@@ -4606,7 +4617,7 @@ fn review_timeline_entries(
                 &full_content,
                 workspace_name,
                 "staged-review",
-                |path| format!("### {heading_title} — {summary_suffix}\n\nSee: `{path}`"),
+                |path| format!("### {heading_title} — {summary_suffix}\nSee: `{path}`"),
             )
             .unwrap_or_else(|| {
                 // Fallback: inline if file write fails
@@ -4667,18 +4678,17 @@ fn image_timeline_entries(
                         .and_then(|e| e.to_str())
                         .unwrap_or("bin");
                     match write_image_to_temp_file(&source_path, &img.id, ext, workspace_name) {
-                        Some(temp_path) => format!(
-                            "### Image: {}\n\nSee: `{}`",
-                            img.filename, temp_path
-                        ),
+                        Some(temp_path) => {
+                            format!("### Image: {}\nSee: `{}`", img.filename, temp_path)
+                        }
                         None => format!(
-                            "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                            "### Image: {}\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                             img.filename, img.mime_type, size_label
                         ),
                     }
                 }
                 _ => format!(
-                    "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                    "### Image: {}\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label
                 ),
             };
@@ -7298,6 +7308,69 @@ mod tests {
                 review_id: None,
             })
         );
+    }
+
+    /// A note's `See:` pointer belongs to its heading, so the only blank line in
+    /// a timeline is the one separating one item from the next. Before this, the
+    /// heading and the pointer were split by the same blank line that separated
+    /// items in branch context — and by *nothing* in project context, where
+    /// entries ran together.
+    #[test]
+    fn timeline_items_hug_their_pointer_and_are_separated_by_one_blank_line() {
+        let (store, branch) = setup_branch_store();
+
+        let first = store::Note::new(&branch.id, "First", "first body");
+        store.create_note(&first).unwrap();
+        let second = store::Note::new(&branch.id, "Second", "second body");
+        store.create_note(&second).unwrap();
+
+        let entries = note_timeline_entries(&store, &branch.id, None);
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            let lines: Vec<&str> = entry.content.lines().collect();
+            assert_eq!(lines.len(), 2, "expected heading + pointer: {:?}", lines);
+            assert!(lines[0].starts_with("### Note: "));
+            assert!(lines[1].starts_with("See: `"));
+        }
+
+        // Both timeline builders separate items with exactly one blank line.
+        let summary = build_branch_timeline_summary(&store, &branch, None);
+        assert_eq!(summary.matches("\n\n").count(), 1);
+        assert!(!summary.contains("\n\n\n"));
+
+        let rendered = render_timeline(entries, None);
+        assert!(rendered.starts_with("## Branch History (oldest first)\n\n### Note: "));
+        assert_eq!(rendered.matches("\n\n").count(), 2);
+        assert!(!rendered.contains("\n\n\n"));
+    }
+
+    /// Section headings and project notes each get their own blank line, so a
+    /// project prompt no longer jams `### Branch:` against its first entry or
+    /// one project note against the next.
+    #[test]
+    fn project_context_separates_headings_and_project_notes() {
+        let (store, branch) = setup_branch_store();
+        let project = store
+            .get_project(&branch.project_id)
+            .unwrap()
+            .expect("project missing");
+
+        let note = store::Note::new(&branch.id, "Branch note", "branch body");
+        store.create_note(&note).unwrap();
+        for title in ["First project note", "Second project note"] {
+            let project_note = store::ProjectNote::new(&project.id, title, "project body");
+            store.create_project_note(&project_note).unwrap();
+        }
+
+        let context = build_project_session_context(&store, &project, None);
+
+        assert!(context.contains(&format!(
+            "### Branch: {}\n\n### Note: Branch note\nSee: `",
+            branch.branch_name
+        )));
+        assert!(context.contains("## Existing Project Notes\n\n### Project Note: "));
+        assert!(context.contains("\n\n### Project Note: Second project note\nSee: `"));
+        assert!(!context.contains("\n\n\n"));
     }
 
     #[test]

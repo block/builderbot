@@ -6,6 +6,7 @@ interface Registration {
   event: string;
   callback: (payload: DoctorLoginOutput) => void;
   onEstablished?: () => void;
+  onRegistrationFailed?: (error: unknown) => void;
   unlisten: ReturnType<typeof vi.fn>;
 }
 
@@ -46,10 +47,16 @@ describe('agentLogin', () => {
       listenToEvent: (
         event: string,
         callback: (payload: DoctorLoginOutput) => void,
-        opts?: { onEstablished?: () => void }
+        opts?: { onEstablished?: () => void; onRegistrationFailed?: (error: unknown) => void }
       ) => {
         const unlisten = vi.fn();
-        registrations.push({ event, callback, onEstablished: opts?.onEstablished, unlisten });
+        registrations.push({
+          event,
+          callback,
+          onEstablished: opts?.onEstablished,
+          onRegistrationFailed: opts?.onRegistrationFailed,
+          unlisten,
+        });
         return unlisten;
       },
     }));
@@ -275,6 +282,33 @@ describe('agentLogin', () => {
 
     await expect(settled).rejects.toThrow('No login fix available for ai-agent-goose');
     expect(agentLogin.running).toBe(false);
+  });
+
+  it('reports listener registration failure instead of leaving a start running forever', async () => {
+    const { agentLogin, startAgentLogin } = await load();
+
+    const settled = startAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onRegistrationFailed?.(new Error('ipc down'));
+
+    await expect(settled).rejects.toThrow('Could not subscribe to login output, try again');
+    expect(startDoctorLogin).not.toHaveBeenCalled();
+    expect(agentLogin.running).toBe(false);
+    expect(agentLogin.error).toBe('Could not subscribe to login output, try again');
+    expect(registration.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports listener registration failure instead of leaving an attach probe pending', async () => {
+    const { agentLogin, attachAgentLogin } = await load();
+
+    const attached = attachAgentLogin('ai-agent-claude');
+    const registration = only();
+    registration.onRegistrationFailed?.(new Error('ipc down'));
+
+    await expect(attached).rejects.toThrow('Could not subscribe to login output, try again');
+    expect(doctorLoginStatus).not.toHaveBeenCalled();
+    expect(agentLogin.running).toBe(false);
+    expect(registration.unlisten).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the code box open after a send, so a rejected code can be retried', async () => {

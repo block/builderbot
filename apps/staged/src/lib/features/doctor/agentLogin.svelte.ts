@@ -54,6 +54,7 @@ import { listenToEvent, type UnlistenFn } from '../../transport';
 
 /** Output lines kept for display, oldest first. */
 const MAX_OUTPUT_LINES = 40;
+const LOGIN_OUTPUT_SUBSCRIPTION_ERROR = 'Could not subscribe to login output, try again';
 
 /** How a login ended, short of failing. */
 export type AgentLoginOutcome = 'completed' | 'cancelled';
@@ -300,6 +301,16 @@ function fail(attempt: Attempt, error: string) {
   attempt.reject(new Error(error));
 }
 
+function failRegistration(attempt: Attempt) {
+  if (!live(attempt)) return;
+  if (attempt.probing) {
+    finish(attempt);
+    attempt.reject(new Error(LOGIN_OUTPUT_SUBSCRIPTION_ERROR));
+    return;
+  }
+  fail(attempt, LOGIN_OUTPUT_SUBSCRIPTION_ERROR);
+}
+
 /** A probe that found nothing — or was superseded — leaves the record alone. */
 function abandon(attempt: Attempt) {
   finish(attempt);
@@ -472,6 +483,7 @@ export function startAgentLogin(checkId: string): Promise<AgentLoginOutcome> {
     'doctor-login-output',
     (output) => handleEvent(attempt, output),
     {
+      onRegistrationFailed: () => failRegistration(attempt),
       onEstablished: () => {
         if (!live(attempt)) return;
         if (started) {
@@ -555,6 +567,7 @@ export function attachAgentLogin(checkId: string): Promise<AgentLoginOutcome | n
     'doctor-login-output',
     (output) => handleEvent(attempt, output),
     {
+      onRegistrationFailed: () => failRegistration(attempt),
       onEstablished: () => {
         if (!live(attempt)) return;
         if (asked) {

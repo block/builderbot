@@ -311,6 +311,90 @@ describe('web transport', () => {
 
     unlisten();
   });
+
+  it('reports WebSocket setup failure to every listener waiting on the same connection', async () => {
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => {
+        throw new Error('client id unavailable');
+      },
+      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { listenToEvent } = await import('./transport');
+    const firstFailed = vi.fn();
+    const secondFailed = vi.fn();
+    const firstEstablished = vi.fn();
+    const secondEstablished = vi.fn();
+
+    const unlistenFirst = listenToEvent('doctor-login-output', vi.fn(), {
+      onEstablished: firstEstablished,
+      onRegistrationFailed: firstFailed,
+    });
+    const unlistenSecond = listenToEvent('session-background-hold', vi.fn(), {
+      onEstablished: secondEstablished,
+      onRegistrationFailed: secondFailed,
+    });
+
+    await vi.waitFor(() => expect(firstFailed).toHaveBeenCalledTimes(1));
+    expect(secondFailed).toHaveBeenCalledTimes(1);
+    expect(firstFailed.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(secondFailed.mock.calls[0][0]).toBe(firstFailed.mock.calls[0][0]);
+    expect(firstEstablished).not.toHaveBeenCalled();
+    expect(secondEstablished).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+
+    unlistenFirst();
+    unlistenSecond();
+    consoleError.mockRestore();
+  });
+
+  it('continues after WebSocket setup failure and does not report listeners that left', async () => {
+    let fail = true;
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => {
+        if (fail) throw new Error('client id unavailable');
+        return 'web-client-1';
+      },
+      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { listenToEvent } = await import('./transport');
+    const staleFailed = vi.fn();
+    const currentFailed = vi.fn();
+    const onEstablished = vi.fn();
+
+    const unlistenStale = listenToEvent('doctor-login-output', vi.fn(), {
+      onRegistrationFailed: staleFailed,
+    });
+    unlistenStale();
+    const unlistenCurrent = listenToEvent('doctor-login-output', vi.fn(), {
+      onEstablished,
+      onRegistrationFailed: currentFailed,
+    });
+
+    await vi.waitFor(() => expect(currentFailed).toHaveBeenCalledTimes(1));
+    expect(staleFailed).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+
+    fail = false;
+    const onSecondEstablished = vi.fn();
+    const unlistenSecond = listenToEvent('session-background-hold', vi.fn(), {
+      onEstablished: onSecondEstablished,
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0].open();
+    await vi.waitFor(() => expect(onSecondEstablished).toHaveBeenCalledTimes(1));
+    expect(onEstablished).not.toHaveBeenCalled();
+
+    unlistenCurrent();
+    unlistenSecond();
+    consoleError.mockRestore();
+  });
 });
 
 describe('tauri listener establishment', () => {

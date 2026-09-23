@@ -241,6 +241,7 @@ interface WebSocketListener {
   event: string;
   callback: (payload: unknown) => void;
   onEstablished?: () => void;
+  onRegistrationFailed?: (error: unknown) => void;
 }
 
 const WEB_SOCKET_HEARTBEAT_MS = 30_000;
@@ -347,6 +348,14 @@ function notifyListenersEstablished(): void {
   }
 }
 
+function notifyListenersRegistrationFailed(error: unknown): void {
+  const failed = [...wsListeners];
+  wsListeners = [];
+  for (const listener of failed) {
+    listener.onRegistrationFailed?.(error);
+  }
+}
+
 async function ensureWebSocket(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -354,20 +363,25 @@ async function ensureWebSocket(): Promise<void> {
   if (wsConnecting) return;
 
   wsConnecting = true;
-  const url = await getWsUrl();
-  if (wsListeners.length === 0) {
+  let socket: WebSocket;
+  let isReconnect: boolean;
+  try {
+    const url = await getWsUrl();
+    if (wsListeners.length === 0) return;
+
+    isReconnect = wsHadSocket;
+    wsHadSocket = true;
+
+    socket = new WebSocket(url);
+    ws = socket;
+  } catch (e) {
+    notifyListenersRegistrationFailed(e);
+    throw e;
+  } finally {
     wsConnecting = false;
-    return;
   }
 
-  const isReconnect = wsHadSocket;
-  wsHadSocket = true;
-
-  const socket = new WebSocket(url);
-  ws = socket;
-
   socket.onopen = () => {
-    wsConnecting = false;
     startHeartbeat();
     replayCurrentPrPollInterestHints();
     if (isReconnect) recoverAfterEventGap();
@@ -401,7 +415,6 @@ async function ensureWebSocket(): Promise<void> {
   };
 
   socket.onclose = () => {
-    wsConnecting = false;
     stopHeartbeat();
     if (ws === socket) {
       ws = null;
@@ -418,9 +431,7 @@ async function ensureWebSocket(): Promise<void> {
     }
   };
 
-  socket.onerror = () => {
-    wsConnecting = false;
-  };
+  socket.onerror = () => {};
 }
 
 function webSocketListen<T>(
@@ -433,6 +444,7 @@ function webSocketListen<T>(
     event,
     callback: callback as (payload: unknown) => void,
     onEstablished,
+    onRegistrationFailed: opts?.onRegistrationFailed,
   };
 
   wsListeners.push(listener);
@@ -440,8 +452,9 @@ function webSocketListen<T>(
     console.error('[transport] Failed to connect WebSocket:', e);
     // Only the socket set-up itself can reject here — a socket that opens and
     // then drops is retried from `onclose`, never surfaced this way — so this is
-    // the one web-mode case where the listener provably never goes live.
-    if (wsListeners.includes(listener)) opts?.onRegistrationFailed?.(e);
+    // the one web-mode case where the listener provably never goes live. The
+    // setup attempt notifies all still-registered listeners before rejecting,
+    // including any that joined while the attempt was in flight.
   });
 
   // A socket that is still connecting will notify this listener along with the

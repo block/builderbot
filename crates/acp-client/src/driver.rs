@@ -374,6 +374,9 @@ pub struct AcpAuthenticationMethod {
 pub struct AcpAuthenticationRequired {
     pub methods: Vec<AcpAuthenticationMethod>,
     pub attempted_method_id: Option<String>,
+    /// What the agent itself said on its `-32000`, beyond the stock text; see
+    /// [`Self::with_agent_detail`].
+    pub agent_detail: Option<String>,
 }
 
 impl AcpAuthenticationRequired {
@@ -381,6 +384,7 @@ impl AcpAuthenticationRequired {
         Self {
             methods: auth_methods.iter().map(auth_method_details).collect(),
             attempted_method_id: None,
+            agent_detail: None,
         }
     }
 
@@ -389,20 +393,42 @@ impl AcpAuthenticationRequired {
         self
     }
 
+    /// Keep whatever the agent added to the `-32000` that made this error final.
+    ///
+    /// Most bridges send the schema's bare `auth_required` — stock "Authentication
+    /// required" and no data — and for those [`Self::describe`] is unchanged. pi-acp
+    /// answers `session/new` with "Configure an API key or log in with an OAuth
+    /// provider.", which names the remedy, so a `message` or string `data` that says
+    /// more than the stock text is appended to the sentence the user reads.
+    /// Replaces any earlier detail: after an authenticate-and-retry the error that
+    /// matters is the second one.
+    fn with_agent_detail(mut self, error: &agent_client_protocol::Error) -> Self {
+        self.agent_detail = agent_auth_required_detail(error);
+        self
+    }
+
     /// The sentence the user reads. This string lands in `session.errorMessage`
     /// and is rendered verbatim in Staged's session alert, so the method
     /// inventory behind the decision is not part of it. Pure: the call site
     /// that decides the error is final also calls [`Self::log_methods`], so the
     /// inventory is recorded exactly once however often this is formatted.
+    ///
+    /// Always opens with "ACP authentication is required", whatever the agent
+    /// added: the frontend recognises the error, and offers Log in, by that word.
     fn describe(&self, operation: &str) -> String {
-        match self.attempted_method_id.as_deref() {
+        let mut text = match self.attempted_method_id.as_deref() {
             Some(method_id) => format!(
                 "ACP authentication is required to {operation}. Signing in with '{method_id}' did not clear it — sign this agent in again, then retry."
             ),
             None => format!(
                 "ACP authentication is required to {operation}. Sign this agent in, then retry."
             ),
+        };
+        if let Some(detail) = &self.agent_detail {
+            text.push_str(" The agent said: ");
+            text.push_str(detail);
         }
+        text
     }
 
     /// Record the full advertised-method inventory, which is the diagnostic that
@@ -5240,11 +5266,48 @@ fn describe_prompt_error(
 ) -> String {
     if error.code == ErrorCode::AuthRequired {
         let operation = "run the prompt";
-        let required = AcpAuthenticationRequired::from_auth_methods(auth_methods);
+        let required =
+            AcpAuthenticationRequired::from_auth_methods(auth_methods).with_agent_detail(&error);
         required.log_methods(&format!("required to {operation}"));
         return required.describe(operation);
     }
     format!("Prompt failed: {error:?}")
+}
+
+/// What an agent said on a `-32000` beyond the schema's stock text, if anything.
+///
+/// `message` and a string `data` are both kept, once each and in that order,
+/// skipping either when it is empty or just the stock "Authentication required"
+/// (that comparison ignores case and a trailing period). Each part is made to
+/// end a sentence and internal whitespace is collapsed, so two parts read as
+/// two sentences and a multi-line `data` does not break the alert's one
+/// paragraph. Structured `data` is not rendered; it was never meant for a
+/// person to read.
+fn agent_auth_required_detail(error: &agent_client_protocol::Error) -> Option<String> {
+    let stock = ErrorCode::AuthRequired.to_string();
+    let is_stock = |text: &str| text.trim_end_matches('.').eq_ignore_ascii_case(&stock);
+    let mut parts: Vec<String> = Vec::new();
+    for candidate in [
+        Some(error.message.as_str()),
+        error.data.as_ref().and_then(serde_json::Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let text = candidate.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() || is_stock(&text) {
+            continue;
+        }
+        let sentence = if text.ends_with(['.', '!', '?']) {
+            text
+        } else {
+            format!("{text}.")
+        };
+        if !parts.contains(&sentence) {
+            parts.push(sentence);
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
 }
 
 /// Whether the agent advertises support for the transport an MCP server needs.
@@ -5976,7 +6039,8 @@ where
     match connection.send_request(make_request()).block_task().await {
         Ok(response) => Ok(response),
         Err(error) if error.code == ErrorCode::AuthRequired => {
-            let required = AcpAuthenticationRequired::from_auth_methods(auth_methods);
+            let required = AcpAuthenticationRequired::from_auth_methods(auth_methods)
+                .with_agent_detail(&error);
             let Some(selection) = auth_selection else {
                 required.log_methods(&format!("required to {operation}"));
                 return Err(required.describe(operation));
@@ -5987,7 +6051,9 @@ where
             match connection.send_request(make_request()).block_task().await {
                 Ok(response) => Ok(response),
                 Err(error) if error.code == ErrorCode::AuthRequired => {
-                    let required = required.after_authentication_attempt(attempted);
+                    let required = required
+                        .after_authentication_attempt(attempted)
+                        .with_agent_detail(&error);
                     required.log_methods(&format!(
                         "still required to {operation} after authenticating with '{}'",
                         selection.method_id
@@ -6208,45 +6274,45 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        acp_spawn_command, air_client_capabilities_meta, apply_or_record_session_config_options,
-        async_task_stop_message, async_task_stop_outcome, autoapprove_permission_decision,
-        background_continuation_origin, background_task_tracking_meta, build_prompt_content_blocks,
-        consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
-        describe_prompt_error, hold_for_background_quiescence,
-        is_config_selection_unavailable_error, is_missing_mcp_transport_error,
-        labeled_background_continuation_origin, mcp_server_transport_supported,
-        origin_task_name_label, permission_response_for_decision, permission_response_for_options,
-        reject_queued_stop_requests, remote_acp_segments, resolve_acp_working_dir,
-        resolve_session_config_option_selection, resolve_spawn_working_dir, run_prompt_turn,
-        sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
-        sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
-        setup_acp_session, shell_exec_line, shell_quote, task_tracking_mode_from_initialize,
-        AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
-        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
-        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
-        AcpSessionConfigOptionSelection, AcpSessionSetup, AcpSessionSetupContext,
-        AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
-        AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
-        BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BackgroundTaskSet,
-        BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState, IncomingSessionUpdate,
-        MessageWriter, OutOfTurnPermissionPolicy, QueuedSessionTurn, RemoteLineOutcome,
-        ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState, SessionLifetime,
-        SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store, TaskTrackingMode,
-        TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
-        BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES, CLAUDE_SDK_MESSAGE_METHOD,
-        CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS, PERMISSION_ANNOUNCEMENT_GRACE,
-        SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
+        acp_spawn_command, agent_auth_required_detail, air_client_capabilities_meta,
+        apply_or_record_session_config_options, async_task_stop_message, async_task_stop_outcome,
+        autoapprove_permission_decision, background_continuation_origin,
+        background_task_tracking_meta, build_prompt_content_blocks, consume_remote_acp_line,
+        decode_remote_acp_line, defensive_permission_decision, describe_prompt_error,
+        hold_for_background_quiescence, is_config_selection_unavailable_error,
+        is_missing_mcp_transport_error, labeled_background_continuation_origin,
+        mcp_server_transport_supported, origin_task_name_label, permission_response_for_decision,
+        permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
+        resolve_acp_working_dir, resolve_session_config_option_selection,
+        resolve_spawn_working_dir, run_prompt_turn, sanitize_remote_acp_chunk,
+        sdk_message_mentions_task, sdk_message_origin_kind, sdk_message_session_state,
+        sdk_message_settles_task, send_session_setup_request, setup_acp_session, shell_exec_line,
+        shell_quote, task_tracking_mode_from_initialize, AcpAuthenticationMethodCategory,
+        AcpAuthenticationRequired, AcpAuthenticationSelection, AcpDriver, AcpEventMetadata,
+        AcpNotificationHandler, AcpPermissionDecision, AcpPermissionOption,
+        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
+        AcpSessionSetup, AcpSessionSetupContext, AcpToolCallMetadata, AgentRunOutcome,
+        AsyncTaskNotification, AsyncTaskState, AsyncTaskStopHandle, AsyncTaskUpdate,
+        BackgroundActivity, BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus,
+        BackgroundHoldTask, BackgroundTaskSet, BasicMessageWriter, HoldOutcome, HoldSettle,
+        HoldingState, IncomingSessionUpdate, MessageWriter, OutOfTurnPermissionPolicy,
+        QueuedSessionTurn, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
+        SdkSessionState, SessionLifetime, SessionSettleReason, SessionSettled,
+        StopAsyncTaskRequest, Store, TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD,
+        AVAILABILITY_PROBE_SUBTYPE, BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES,
+        CLAUDE_SDK_MESSAGE_METHOD, CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS,
+        PERMISSION_ANNOUNCEMENT_GRACE, SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
     };
     use agent_client_protocol::schema::v1::{
         AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
-        ContentBlock as AcpContentBlock, ContentChunk, ExtNotification, McpCapabilities, McpServer,
-        McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest, NewSessionResponse,
-        PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
-        SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-        SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-        SetSessionConfigOptionResponse, StopReason, TextContent, ToolCall, ToolCallUpdate,
-        ToolCallUpdateFields,
+        ContentBlock as AcpContentBlock, ContentChunk, ExtNotification, LoadSessionRequest,
+        McpCapabilities, McpServer, McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest,
+        NewSessionResponse, PermissionOption, PermissionOptionKind, Plan, PlanEntry,
+        PlanEntryPriority, PlanEntryStatus, PromptRequest, RequestPermissionOutcome,
+        RequestPermissionRequest, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionNotification, SessionUpdate,
+        SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
+        ToolCall, ToolCallUpdate, ToolCallUpdateFields,
     };
     use agent_client_protocol::JsonRpcMessage;
     use std::ffi::OsString;
@@ -6427,6 +6493,130 @@ mod tests {
         assert_eq!(
             error,
             r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
+        );
+    }
+
+    /// A `-32000` with the bridge's own sentence on it, as pi-acp sends at
+    /// `session/new`; the stock `auth_required` is what every other surveyed
+    /// bridge sends.
+    fn auth_required_saying(message: &str) -> agent_client_protocol::Error {
+        let mut error = agent_client_protocol::Error::auth_required();
+        error.message = message.to_string();
+        error
+    }
+
+    /// pi-acp answers `session/new` signed out with "Configure an API key or log
+    /// in with an OAuth provider." on the `-32000`, which names the remedy
+    /// where the stock text does not. It is appended after the one sentence the
+    /// user already read, so the frontend's match on "authentication" holds.
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_setup_auth_required_appends_the_agents_own_message() {
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |_request: NewSessionRequest, responder, _cx| {
+                responder.respond_with_error(auth_required_saying(
+                    "Configure an API key or log in with an OAuth provider.",
+                ))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let methods = vec![AuthMethod::Agent(AuthMethodAgent::new(
+            "api-key", "API Key",
+        ))];
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                Ok(send_session_setup_request(
+                    &connection,
+                    || NewSessionRequest::new(PathBuf::from("/tmp")),
+                    &methods,
+                    None,
+                    "create ACP session",
+                )
+                .await
+                .map(|_| ()))
+            })
+            .await
+            .expect("the connection itself stays healthy")
+            .expect_err("auth_required should fail the setup");
+
+        assert_eq!(
+            error,
+            "ACP authentication is required to create ACP session. Sign this agent in, then retry. The agent said: Configure an API key or log in with an OAuth provider."
+        );
+        assert!(error.to_lowercase().contains("authentication"));
+    }
+
+    /// The prompt path appends the same detail the same way, so a bridge that
+    /// says more at `session/prompt` reads like one that says it at `session/new`.
+    #[test]
+    fn prompt_auth_required_appends_the_agents_own_message() {
+        let methods = vec![AuthMethod::Agent(AuthMethodAgent::new(
+            "api-key", "API Key",
+        ))];
+
+        let error = describe_prompt_error(
+            auth_required_saying("Configure an API key or log in with an OAuth provider."),
+            &methods,
+        );
+
+        assert_eq!(
+            error,
+            "ACP authentication is required to run the prompt. Sign this agent in, then retry. The agent said: Configure an API key or log in with an OAuth provider."
+        );
+    }
+
+    /// The stock `auth_required` — which is what amp, claude, codex and goose
+    /// send — must keep producing exactly the strings pinned in
+    /// `authRecovery.test.ts`; only text the agent added is appended.
+    #[test]
+    fn auth_required_detail_keeps_only_what_the_agent_added() {
+        let stock = agent_client_protocol::Error::auth_required();
+        assert_eq!(stock.message, "Authentication required");
+        assert_eq!(agent_auth_required_detail(&stock), None);
+
+        // The stock text restated in `data`, or with different case and a
+        // period, is still nothing the user has not already been told.
+        let mut restated = auth_required_saying("authentication required.");
+        restated.data = Some(serde_json::Value::String("Authentication required".into()));
+        assert_eq!(agent_auth_required_detail(&restated), None);
+
+        // Blank and structured data are not rendered.
+        let mut blank = agent_client_protocol::Error::auth_required();
+        blank.data = Some(serde_json::json!({ "reason": "expired" }));
+        assert_eq!(agent_auth_required_detail(&blank), None);
+        blank.data = Some(serde_json::Value::String("   \n".into()));
+        assert_eq!(agent_auth_required_detail(&blank), None);
+
+        // A remedy in `data` alone is kept.
+        let mut in_data = agent_client_protocol::Error::auth_required();
+        in_data.data = Some(serde_json::Value::String("Run `amp login` first".into()));
+        assert_eq!(
+            agent_auth_required_detail(&in_data).as_deref(),
+            Some("Run `amp login` first.")
+        );
+
+        // `message` and `data` both kept, in order, once each, as sentences;
+        // a multi-line `data` collapses onto the alert's one paragraph.
+        let mut both = auth_required_saying("Not signed in");
+        both.data = Some(serde_json::Value::String(
+            "Run `amp login`\n  first.".into(),
+        ));
+        assert_eq!(
+            agent_auth_required_detail(&both).as_deref(),
+            Some("Not signed in. Run `amp login` first.")
+        );
+        let mut same = auth_required_saying("Not signed in.");
+        same.data = Some(serde_json::Value::String("Not signed in".into()));
+        assert_eq!(
+            agent_auth_required_detail(&same).as_deref(),
+            Some("Not signed in.")
+        );
+
+        // And the sentence the user reads is unchanged for the stock error.
+        let required = AcpAuthenticationRequired::from_auth_methods(&[]).with_agent_detail(&stock);
+        assert_eq!(
+            required.describe("create ACP session"),
+            "ACP authentication is required to create ACP session. Sign this agent in, then retry."
         );
     }
 
@@ -6681,6 +6871,81 @@ mod tests {
             .expect("existing login should create a session without authenticate");
 
         assert_eq!(calls.lock().unwrap().as_slice(), &["session/new"]);
+    }
+
+    /// The `session/load` counterpart of the `session/new` and `session/prompt`
+    /// assertions: a resumed session on a bridge that raises `-32000` at load
+    /// reads the same sentence with its own operation. `authRecovery.test.ts`
+    /// pins this exact wrapped string on the frontend side, so the two must
+    /// agree byte for byte.
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_session_setup_surfaces_auth_required_at_session_load() {
+        use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_load = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version)
+                            .agent_capabilities(AgentCapabilities::default().load_session(true))
+                            .auth_methods(vec![AuthMethod::Agent(AuthMethodAgent::new(
+                                "claude-login",
+                                "Log in with Claude Code",
+                            ))]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: LoadSessionRequest, responder, _cx| {
+                    calls_for_load
+                        .lock()
+                        .unwrap()
+                        .push(format!("session/load:{}", request.session_id));
+                    responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            Arc::new(BasicMessageWriter::new()),
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+
+        let error = agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                setup_acp_session(AcpSessionSetupContext {
+                    connection: &connection,
+                    working_dir: Path::new("/tmp"),
+                    store: &store,
+                    handler: &handler,
+                    our_session_id: "local-session",
+                    acp_session_id: Some("session-1"),
+                    config_options: &[],
+                    mcp_servers: &[],
+                    agent_label: "Claude",
+                    auth_selection: None,
+                })
+                .await
+                .map(|_| ())
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect_err("auth_required at session/load should fail the setup");
+
+        assert_eq!(
+            format!("ACP protocol failed: {error:?}"),
+            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to load ACP session. Sign this agent in, then retry.")) }"#
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &["session/load:session-1"]
+        );
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

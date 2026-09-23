@@ -77,10 +77,13 @@ fn execute_fix_options(
     command_override: Option<String>,
     env_vars: Vec<(String, String)>,
 ) -> ExecuteFixOptions {
-    // Everything else stays at doctor's defaults: Staged's fixes are
-    // non-interactive, so nothing here feeds a prompt and the child keeps
-    // inheriting stdin rather than getting a piped one; the standard fix
-    // timeout is far above any install or login this runs. Spelled with
+    // Everything else stays at doctor's defaults: the fixes that reach this
+    // builder are the non-interactive ones (installs and updates), so nothing
+    // here feeds a prompt and the child keeps inheriting stdin rather than
+    // getting a piped one; the standard fix timeout is far above any install
+    // this runs. Interactive logins do *not* come through here — every
+    // `FixType::Auth` run goes through [`run_login_fix`], which pipes stdin so
+    // the code the CLI asks for can actually be delivered. Spelled with
     // `..Default::default()` so a new doctor option doesn't break this
     // workspace-excluded crate, which `cargo check` under `crates/` never
     // compiles but `staged-ci.yml` does.
@@ -135,81 +138,134 @@ async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
     report
 }
 
+/// Reserve the login slot for `check_id` and return the pipe the fix will read
+/// its code from. The writer half is parked in [`ACTIVE_LOGINS`] under the
+/// check id, which is also the "a login is running" flag: doctor's `FixStdin`
+/// is single-use, so a second concurrent login for one check is refused here
+/// rather than spawning a CLI nothing can type into.
+fn claim_login(check_id: &str) -> Result<FixStdin, String> {
+    doctor::agents::lookup_fix_command(check_id, &FixType::Auth)
+        .ok_or_else(|| format!("No login fix available for {check_id}"))?;
+    let (writer, stdin) = FixStdin::pipe();
+    let mut logins = active_logins().lock().unwrap_or_else(|e| e.into_inner());
+    if logins.contains_key(check_id) {
+        return Err(format!("A login is already running for {check_id}"));
+    }
+    logins.insert(check_id.to_string(), writer);
+    Ok(stdin)
+}
+
+/// Run a claimed login fix to completion on a piped stdin, streaming every
+/// output line to the frontend as a `doctor-login-output` event and releasing
+/// the slot afterwards.
+///
+/// The final `done` event carries the outcome *and* the outcome is returned, so
+/// this serves both entry points: [`start_doctor_login`], which spawns it and
+/// watches the stream, and [`run_doctor_fix`], which awaits it.
+async fn run_login_fix(
+    app_handle: tauri::AppHandle,
+    check_id: String,
+    stdin: FixStdin,
+) -> Result<(), String> {
+    let env_vars = doctor_env_vars().await;
+    let event_check_id = check_id.clone();
+    let event_app = app_handle.clone();
+    let result = doctor::execute_fix_streaming_with_env_options(
+        check_id.clone(),
+        FixType::Auth,
+        ExecuteFixOptions::default()
+            .with_env_snapshot(env_vars)
+            .with_stdin(stdin),
+        move |line| {
+            crate::web_server::emit_to_all(
+                &event_app,
+                "doctor-login-output",
+                DoctorLoginOutput {
+                    check_id: event_check_id.clone(),
+                    line: Some(line.to_string()),
+                    done: false,
+                    error: None,
+                },
+            );
+        },
+    )
+    .await;
+
+    active_logins()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&check_id);
+    crate::web_server::emit_to_all(
+        &app_handle,
+        "doctor-login-output",
+        DoctorLoginOutput {
+            check_id,
+            line: None,
+            done: true,
+            error: result.as_ref().err().cloned(),
+        },
+    );
+    result
+}
+
 /// Start an interactive login fix and stream its output to the frontend.
+///
+/// Returns as soon as the fix is claimed and spawned; the caller learns the
+/// outcome from the `done` event, which lets it feed a code through
+/// [`send_doctor_login_code`] while the fix is still running.
 #[tauri::command]
 pub async fn start_doctor_login(
     app_handle: tauri::AppHandle,
     check_id: String,
 ) -> Result<(), String> {
-    doctor::agents::lookup_fix_command(&check_id, &FixType::Auth)
-        .ok_or_else(|| format!("No login fix available for {check_id}"))?;
-    let env_vars = doctor_env_vars().await;
-    let (writer, stdin) = FixStdin::pipe();
-    {
-        let mut logins = active_logins().lock().unwrap_or_else(|e| e.into_inner());
-        if logins.contains_key(&check_id) {
-            return Err(format!("A login is already running for {check_id}"));
-        }
-        logins.insert(check_id.clone(), writer);
-    }
-
-    let event_check_id = check_id.clone();
-    let event_app = app_handle.clone();
+    let stdin = claim_login(&check_id)?;
     tokio::spawn(async move {
-        let result = doctor::execute_fix_streaming_with_env_options(
-            check_id.clone(),
-            FixType::Auth,
-            ExecuteFixOptions::default()
-                .with_env_snapshot(env_vars)
-                .with_stdin(stdin),
-            move |line| {
-                crate::web_server::emit_to_all(
-                    &event_app,
-                    "doctor-login-output",
-                    DoctorLoginOutput {
-                        check_id: event_check_id.clone(),
-                        line: Some(line.to_string()),
-                        done: false,
-                        error: None,
-                    },
-                );
-            },
-        )
-        .await;
-
-        active_logins()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&check_id);
-        crate::web_server::emit_to_all(
-            &app_handle,
-            "doctor-login-output",
-            DoctorLoginOutput {
-                check_id,
-                line: None,
-                done: true,
-                error: result.err(),
-            },
-        );
+        // A failure is reported to the frontend by the final `done` event; this
+        // handle has no caller to return it to.
+        let _ = run_login_fix(app_handle, check_id, stdin).await;
     });
     Ok(())
 }
 
+/// Deliver a line — in practice the authentication code the agent CLI asked
+/// for — to a login started by [`start_doctor_login`] or [`run_doctor_fix`].
+///
+/// `async` deliberately: `send_line` writes into the fix's stdin pipe inline
+/// and can block if the fix isn't reading, and under Tauri 2 a non-`async`
+/// command body runs on the main thread — the worst possible place to discover
+/// a full pipe. The write itself goes to a blocking thread for the same reason.
 #[tauri::command]
-pub fn send_doctor_login_code(check_id: String, code: String) -> Result<(), String> {
+pub async fn send_doctor_login_code(check_id: String, code: String) -> Result<(), String> {
     let writer = active_logins()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&check_id)
         .cloned()
         .ok_or_else(|| format!("No active login for {check_id}"))?;
-    writer.send_line(code)
+    tokio::task::spawn_blocking(move || writer.send_line(code))
+        .await
+        .map_err(|e| format!("Failed to deliver the login code for {check_id}: {e}"))?
 }
 
 #[tauri::command]
-pub async fn run_doctor_fix(check_id: String, fix_type: FixType) -> Result<(), String> {
+pub async fn run_doctor_fix(
+    app_handle: tauri::AppHandle,
+    check_id: String,
+    fix_type: FixType,
+) -> Result<(), String> {
     if check_id == NODE_RUNTIME_CHECK_ID {
         return ensure_managed_node_runtime_for_fix().await;
+    }
+    // An auth fix is the one interactive fix: it prints a verification URL and
+    // then blocks reading a code from stdin. Route it through the same piped,
+    // streamed path `start_doctor_login` uses so both entry points behave the
+    // same. On inherited stdin — `/dev/null` in the GUI — this printed its URL
+    // to a log nobody reads and could only ever finish through the CLI's own
+    // browser callback, otherwise dying at the fix timeout with no way to enter
+    // the code (block/berd#99).
+    if matches!(fix_type, FixType::Auth) {
+        let stdin = claim_login(&check_id)?;
+        return run_login_fix(app_handle, check_id, stdin).await;
     }
     if matches!(fix_type, FixType::Command | FixType::Bridge) {
         if let Some(tool_id) = managed_tool_for_check(&check_id) {

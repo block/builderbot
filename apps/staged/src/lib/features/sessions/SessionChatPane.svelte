@@ -78,17 +78,13 @@
     stopSessionAsyncTask,
     type AcpConfigDiscovery,
     type AcpConfigSelector,
-    type DoctorLoginOutput,
   } from '../../api/commands';
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import { openSettings } from '../layout/navigation.svelte';
   import { doctorState, runChecks } from '../doctor/doctor.svelte';
-  import {
-    canOfferLogin,
-    doctorCheckForProvider,
-    isAuthCodePrompt,
-    isAuthenticationError,
-  } from './authRecovery';
+  import { agentLogin, startAgentLogin } from '../doctor/agentLogin.svelte';
+  import AgentLoginPrompt from '../doctor/AgentLoginPrompt.svelte';
+  import { canOfferLogin, doctorCheckForProvider, isAuthenticationError } from './authRecovery';
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
   import { agentState } from '../agents/agent.svelte';
   import {
@@ -248,13 +244,32 @@
    * `noteTaskStopOutcome`.
    */
   let taskStopNotices = $state<Map<string, string>>(new Map());
-  let loginRunning = $state(false);
-  let loginError = $state<string | null>(null);
-  let loginCodePrompt = $state(false);
-  let loginCode = $state('');
-  let loginOutputUnlisten: UnlistenFn | null = null;
+  /** Doctor check id for this session's agent — the login's identity. */
+  let loginCheckId = $derived(session?.provider ? `ai-agent-${session.provider}` : null);
   let loginCheck = $derived(doctorCheckForProvider(session?.provider, doctorState.report));
   let canLogin = $derived(canOfferLogin(loginCheck));
+  let loginRunning = $derived(agentLogin.running && agentLogin.checkId === loginCheckId);
+  /**
+   * Sessions whose authentication failure has already asked for a report, so a
+   * scan that fails (leaving `report` null) isn't retried on every flush.
+   */
+  let authReportRequestedFor: string | null = null;
+  /**
+   * `Log in` is the primary action on an authentication failure, but it depends
+   * on doctor's auth probe — and `doctorState.report` is otherwise filled in
+   * only by opening the Doctor settings panel. On a fresh launch that left
+   * every auth-failed session showing `Fix` alone until the user had visited
+   * that panel and come back, so run the checks the first time such a failure
+   * is displayed.
+   */
+  $effect(() => {
+    const id = sessionId;
+    const failed = session?.status === 'error' || session?.status === 'cancelled';
+    if (!active || !id || !failed || !isAuthenticationError(session?.errorMessage)) return;
+    if (doctorState.report || doctorState.loading || authReportRequestedFor === id) return;
+    authReportRequestedFor = id;
+    void runChecks();
+  });
 
   let inputText = $state('');
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
@@ -630,7 +645,9 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
-    loginOutputUnlisten?.();
+    // A login in flight is deliberately not torn down here: the subprocess
+    // outlives this pane, and its shared record is what the Doctor panel — or
+    // this pane on its next open — needs to keep feeding it a code.
   });
 
   // This pane can be mounted once and reused across opens (the `active` prop toggles
@@ -794,41 +811,13 @@
   }
 
   async function startLogin() {
-    if (!session?.provider || !canLogin || loginRunning) return;
-    loginRunning = true;
-    loginError = null;
-    loginCodePrompt = false;
+    if (!loginCheckId || !canLogin || agentLogin.running) return;
     try {
-      const { startDoctorLogin } = await import('../../api/commands');
-      loginOutputUnlisten?.();
-      const unlisten = listenToEvent<DoctorLoginOutput>('doctor-login-output', (output) => {
-        if (output.checkId !== `ai-agent-${session?.provider}`) return;
-        if (output.line && isAuthCodePrompt(output.line)) loginCodePrompt = true;
-        if (output.done) {
-          loginRunning = false;
-          unlisten();
-          loginOutputUnlisten = null;
-          if (output.error) loginError = output.error;
-          else void runChecks();
-        }
-      });
-      loginOutputUnlisten = unlisten;
-      await startDoctorLogin(`ai-agent-${session.provider}`);
-    } catch (e) {
-      loginRunning = false;
-      loginError = e instanceof Error ? e.message : String(e);
-    }
-  }
-
-  async function submitLoginCode() {
-    if (!session?.provider || !loginCode.trim()) return;
-    try {
-      const { sendDoctorLoginCode } = await import('../../api/commands');
-      await sendDoctorLoginCode(`ai-agent-${session.provider}`, loginCode.trim());
-      loginCode = '';
-      loginCodePrompt = false;
-    } catch (e) {
-      loginError = e instanceof Error ? e.message : String(e);
+      await startAgentLogin(loginCheckId);
+      // A signed-in agent changes the check the "Log in" button depends on.
+      void runChecks();
+    } catch {
+      // The failure is on the shared login record, which the alert renders.
     }
   }
 
@@ -2383,28 +2372,7 @@
           </Alert.Action>
         {/if}
       </Alert.Root>
-      {#if loginError}
-        <p class="text-destructive text-sm">{loginError}</p>
-      {/if}
-      {#if loginCodePrompt}
-        <div class="login-code-row">
-          <input
-            class="login-code-input"
-            aria-label="Authentication code"
-            placeholder="Paste authentication code"
-            bind:value={loginCode}
-            onkeydown={(event) => event.key === 'Enter' && submitLoginCode()}
-          />
-          <Button
-            variant="outline"
-            size="xs"
-            onclick={submitLoginCode}
-            disabled={!loginCode.trim()}
-          >
-            Submit code
-          </Button>
-        </div>
-      {/if}
+      <AgentLoginPrompt checkId={loginCheckId} />
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
         {@const isWarning =
@@ -3034,22 +3002,11 @@
 
   /* ----- Input wrapper + queue popover ----------------------------------- */
 
-  .auth-actions,
-  .login-code-row {
+  .auth-actions {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-  }
-
-  .login-code-input {
-    min-width: 180px;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    padding: 4px 8px;
-    font-size: var(--size-xs);
   }
 
   .input-wrapper {

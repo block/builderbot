@@ -1,11 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DoctorCheck } from '../../api/commands';
-import {
-  canOfferLogin,
-  doctorCheckForProvider,
-  isAuthCodePrompt,
-  isAuthenticationError,
-} from './authRecovery';
+import { canOfferLogin, doctorCheckForProvider, isAuthenticationError } from './authRecovery';
 
 function check(overrides: Partial<DoctorCheck> = {}): DoctorCheck {
   return {
@@ -58,11 +53,4 @@ describe('authentication recovery helpers', () => {
     expect(doctorCheckForProvider('pi', report)).toBeNull();
     expect(doctorCheckForProvider(null, report)).toBeNull();
   });
-
-  it.each(['Enter authentication code:', 'Paste the code here', 'input your token'])(
-    'recognizes a code prompt: %s',
-    (line) => {
-      expect(isAuthCodePrompt(line)).toBe(true);
-    }
-  );
 });

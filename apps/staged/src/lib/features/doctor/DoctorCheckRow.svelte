@@ -20,6 +20,8 @@
     isReadoutActionable,
     hasActionableUpdate,
   } from './doctor.svelte';
+  import { agentLogin, clearAgentLogin, startAgentLogin } from './agentLogin.svelte';
+  import AgentLoginPrompt from './AgentLoginPrompt.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import Spinner from '../../shared/Spinner.svelte';
@@ -83,6 +85,8 @@
     if (!check.fixType) return;
     fixError = null;
     fixing = false;
+    // Don't open on the last attempt's leftovers.
+    if (check.fixType === 'auth') clearAgentLogin(check.id);
     showFixDialog = true;
   }
 
@@ -91,12 +95,23 @@
     fixing = true;
     fixError = null;
     try {
-      // canFix guarantees fixType is one of the non-update kinds here.
-      await runDoctorFix(check.id, check.fixType as 'command' | 'bridge' | 'auth');
+      if (check.fixType === 'auth') {
+        // The one interactive fix: it prints a sign-in URL and then waits for
+        // the code that page hands back. Started through the shared login
+        // record so the dialog can show both, instead of running blind and
+        // expiring at the fix timeout.
+        await startAgentLogin(check.id);
+      } else {
+        // canFix guarantees fixType is one of the non-update kinds here.
+        await runDoctorFix(check.id, check.fixType as 'command' | 'bridge');
+      }
       showFixDialog = false;
       onFixed?.();
     } catch (e) {
-      fixError = String(e);
+      // A failed login is already rendered from the shared record — unless
+      // another check's login owns that record, which is what a rejection
+      // before the login even started means.
+      if (check.fixType !== 'auth' || agentLogin.checkId !== check.id) fixError = String(e);
     } finally {
       fixing = false;
     }
@@ -220,6 +235,8 @@
         {check.fixCommand}
       </AlertDialog.Description>
     </AlertDialog.Header>
+    <!-- Sign-in URL and code entry, for an `auth` fix that is running. -->
+    <AgentLoginPrompt checkId={check.id} />
     {#if fixError}
       <p class="text-destructive text-sm">{fixError}</p>
     {/if}

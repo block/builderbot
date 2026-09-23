@@ -3828,13 +3828,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "send_doctor_login_code" => {
             let check_id: String = arg(&args, "checkId")?;
             let code: String = arg(&args, "code")?;
-            crate::doctor::send_doctor_login_code(check_id, code)?;
+            crate::doctor::send_doctor_login_code(check_id, code).await?;
             Ok(Value::Null)
         }
         "run_doctor_fix" => {
             let check_id: String = arg(&args, "checkId")?;
             let fix_type: doctor::FixType = arg(&args, "fixType")?;
-            crate::doctor::run_doctor_fix(check_id, fix_type).await?;
+            crate::doctor::run_doctor_fix(app_handle.clone(), check_id, fix_type).await?;
             Ok(Value::Null)
         }
         "run_doctor_update" => {

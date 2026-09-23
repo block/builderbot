@@ -1608,7 +1608,15 @@ export function runDoctorFreshness(): Promise<DoctorReport> {
   return invokeCommand('run_doctor_freshness');
 }
 
-/** Run a fix for a doctor check, identified by check ID and fix type. */
+/**
+ * Run a fix for a doctor check, identified by check ID and fix type.
+ *
+ * Resolves when the fix finishes. An `auth` fix is interactive, so the backend
+ * runs it on a piped stdin and streams it exactly as `startDoctorLogin` does —
+ * a caller that wants to show the sign-in URL or feed the code back should
+ * prefer `startDoctorLogin`, which resolves as soon as the fix is running
+ * rather than blocking until it ends.
+ */
 export function runDoctorFix(
   checkId: string,
   fixType: 'command' | 'bridge' | 'auth'
@@ -1616,12 +1624,19 @@ export function runDoctorFix(
   return invokeCommand('run_doctor_fix', { checkId, fixType });
 }
 
-/** Start an interactive login fix. Output is delivered through doctor-fix-output events. */
+/**
+ * Start an interactive login fix, resolving once it is running. Its output and
+ * its completion are delivered through `doctor-login-output` events.
+ */
 export function startDoctorLogin(checkId: string): Promise<void> {
   return invokeCommand('start_doctor_login', { checkId });
 }
 
-/** Submit a line to an interactive doctor login started by startDoctorLogin. */
+/**
+ * Submit a line — in practice the authentication code the agent CLI asked for —
+ * to a login started by `startDoctorLogin` or by `runDoctorFix` with an `auth`
+ * fix type.
+ */
 export function sendDoctorLoginCode(checkId: string, code: string): Promise<void> {
   return invokeCommand('send_doctor_login_code', { checkId, code });
 }

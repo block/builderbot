@@ -38,11 +38,3 @@ export function doctorCheckForProvider(
 export function canOfferLogin(check: DoctorCheck | null | undefined): boolean {
   return check?.authStatus === 'notAuthenticated' && check.fixType === 'auth' && !!check.fixCommand;
 }
-
-export function isAuthCodePrompt(line: string): boolean {
-  const text = line.toLowerCase();
-  return (
-    /\b(?:enter|paste|提供|input|type|write|submit)\b.{0,40}\b(?:code|token)\b/.test(text) ||
-    /\b(?:code|token)\b.{0,40}\b(?:enter|paste|input|type|write|submit)\b/.test(text)
-  );
-}

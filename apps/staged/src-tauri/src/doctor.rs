@@ -1,33 +1,176 @@
 //! Tauri command wrappers for the doctor health-check system.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 
 pub use doctor::types::{AuthStatus, InstallSource};
 pub use doctor::{
-    AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, ExecuteFixOptions, FixStdin,
-    FixStdinWriter, FixType, RunChecksOptions,
+    AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, ExecuteFixOptions, FixCancelHandle,
+    FixCancellation, FixStdin, FixStdinWriter, FixType, RunChecksOptions,
 };
 
-#[derive(Debug, Clone, Serialize)]
+/// One `doctor-login-output` event: a line of a running login's output, or
+/// its end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorLoginOutput {
     pub check_id: String,
     pub line: Option<String>,
+    /// Position of `line` in the run's output, counted from zero; on the final
+    /// event, the number of lines the run emitted. A client that attached late
+    /// compares it against [`DoctorLoginStatus::next_seq`] to tell a line its
+    /// snapshot already covered from one that arrived after the snapshot.
+    pub seq: u64,
     pub done: bool,
+    /// The fix's failure, when it failed. `None` on a cancelled run: doctor's
+    /// runner reports a cancellation as an `Err`, but a client should render
+    /// "cancelled", not a failure — that is what `cancelled` is for.
     pub error: Option<String>,
+    /// The run ended because [`cancel_doctor_login`] was called on it.
+    pub cancelled: bool,
 }
 
-/// Writers for login fixes currently owned by the UI. This is intentionally
-/// only a lifetime map for active subprocesses, not a cache of authentication
-/// state; doctor remains the source of truth for whether login is available.
-static ACTIVE_LOGINS: OnceLock<Mutex<HashMap<String, FixStdinWriter>>> = OnceLock::new();
+/// Answer to [`doctor_login_status`]: whether a login is running for the check,
+/// and what it has printed so far.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorLoginStatus {
+    pub running: bool,
+    /// The last [`LOGIN_OUTPUT_TAIL_LINES`] lines the run emitted, oldest
+    /// first. Empty when nothing is running.
+    pub output: Vec<String>,
+    /// The `seq` the run's next line will carry. `output` covers the `seq`s
+    /// from `next_seq - output.len()` up to but excluding `next_seq`, which is
+    /// how a client merges this snapshot with lines it received live.
+    pub next_seq: u64,
+}
 
-fn active_logins() -> &'static Mutex<HashMap<String, FixStdinWriter>> {
+impl DoctorLoginStatus {
+    fn idle() -> Self {
+        Self {
+            running: false,
+            output: Vec::new(),
+            next_seq: 0,
+        }
+    }
+}
+
+/// What [`start_doctor_login`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LoginStart {
+    Started,
+    /// A login for the check was already running. The caller can attach to it:
+    /// [`doctor_login_status`] has its output so far, the `doctor-login-output`
+    /// stream carries the rest, and [`send_doctor_login_code`] reaches it.
+    AlreadyRunning,
+}
+
+/// Lines of a login's output retained for a client that attaches after they
+/// were streamed — a web client refreshed mid-login, a second client, a
+/// reloaded webview. The same count the frontend keeps (`MAX_OUTPUT_LINES` in
+/// `agentLogin.svelte.ts`), so a replay restores exactly what a client that
+/// watched from the start is showing.
+const LOGIN_OUTPUT_TAIL_LINES: usize = 40;
+
+/// Bounded, oldest-first tail of a login's output, with a count of every line
+/// that went through it so each line's event can carry its position.
+#[derive(Debug, Default)]
+struct LoginOutputTail {
+    lines: VecDeque<String>,
+    /// Lines pushed so far — the `seq` the next one gets.
+    next_seq: u64,
+}
+
+impl LoginOutputTail {
+    /// Record `line`, dropping the oldest once the tail is full, and return the
+    /// `seq` the line's event carries.
+    fn push(&mut self, line: &str) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        if self.lines.len() == LOGIN_OUTPUT_TAIL_LINES {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line.to_string());
+        seq
+    }
+
+    /// The snapshot a late client replays, for a login that is running.
+    fn status(&self) -> DoctorLoginStatus {
+        DoctorLoginStatus {
+            running: true,
+            output: self.lines.iter().cloned().collect(),
+            next_seq: self.next_seq,
+        }
+    }
+}
+
+/// A login fix in flight, keyed by check id in [`ACTIVE_LOGINS`].
+struct ActiveLogin {
+    /// The write end of the fix's stdin. Held here for the whole run — this
+    /// entry is its only long-lived owner — because dropping the last
+    /// `FixStdinWriter` is what closes the pipe: the clone
+    /// [`send_doctor_login_code`] takes lives for one write. Without this one
+    /// the CLI would read EOF at spawn, before the user had a code to give it.
+    ///
+    /// The flip side: a fix that reads stdin *to EOF* never gets it while its
+    /// slot is held, which is until the run ends — so such a fix would sit
+    /// until doctor's `FixTimeout`. None of the login commands does that (each
+    /// reads one line), and closing stdin is not how a login is ended anyway:
+    /// the Claude CLI ignores EOF and keeps waiting on its browser callback.
+    /// Ending a run early is `cancel`'s job.
+    writer: FixStdinWriter,
+    /// Stops the run through doctor's runner, which owns the child and kills
+    /// its whole process tree. See [`cancel_doctor_login`].
+    cancel: FixCancelHandle,
+    /// The lines streamed so far, shared with the run's `on_line` callback,
+    /// which appends to it before emitting each event.
+    output: Arc<Mutex<LoginOutputTail>>,
+}
+
+/// Login fixes currently running, by check id. This is intentionally only a
+/// lifetime map for active subprocesses, not a cache of authentication state;
+/// doctor remains the source of truth for whether login is available.
+static ACTIVE_LOGINS: OnceLock<Mutex<HashMap<String, ActiveLogin>>> = OnceLock::new();
+
+fn active_logins() -> &'static Mutex<HashMap<String, ActiveLogin>> {
     ACTIVE_LOGINS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A claimed login slot in [`ACTIVE_LOGINS`], released when dropped.
+///
+/// The release is structural rather than a statement at the end of
+/// [`run_login_fix`]: a panic in `doctor_env_vars().await` or in the emit
+/// closure, or the awaiting future being dropped, would otherwise leave the
+/// entry in place — and with it [`claim_login`] refusing the check until Staged
+/// restarts.
+#[derive(Debug)]
+struct LoginSlot {
+    check_id: String,
+}
+
+impl Drop for LoginSlot {
+    fn drop(&mut self) {
+        active_logins()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.check_id);
+    }
+}
+
+/// Everything a claimed login needs to run: the pipe and token the fix is
+/// given, the handle and tail the entry keeps, and the slot whose drop
+/// releases the entry.
+#[derive(Debug)]
+struct ClaimedLogin {
+    stdin: FixStdin,
+    cancellation: FixCancellation,
+    cancel: FixCancelHandle,
+    output: Arc<Mutex<LoginOutputTail>>,
+    slot: LoginSlot,
 }
 
 /// Environment snapshot for doctor checks and fixes. Shaped through
@@ -138,21 +281,69 @@ async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
     report
 }
 
-/// Reserve the login slot for `check_id` and return the pipe the fix will read
-/// its code from. The writer half is parked in [`ACTIVE_LOGINS`] under the
-/// check id, which is also the "a login is running" flag: doctor's `FixStdin`
-/// is single-use, so a second concurrent login for one check is refused here
-/// rather than spawning a CLI nothing can type into.
-fn claim_login(check_id: &str) -> Result<FixStdin, String> {
+/// Reserve the login slot for `check_id`, returning what the run needs — or
+/// `Ok(None)` when a login for the check is already running. The entry parked
+/// in [`ACTIVE_LOGINS`] is also the "a login is running" flag: doctor's
+/// `FixStdin` is single-use, so a second concurrent login for one check is
+/// refused here rather than spawning a CLI nothing can type into.
+fn claim_login(check_id: &str) -> Result<Option<ClaimedLogin>, String> {
     doctor::agents::lookup_fix_command(check_id, &FixType::Auth)
         .ok_or_else(|| format!("No login fix available for {check_id}"))?;
     let (writer, stdin) = FixStdin::pipe();
+    // A fresh token per run: a cancelled one stays cancelled and would refuse
+    // the retry before it spawned.
+    let (cancel, cancellation) = FixCancellation::token();
+    let output = Arc::new(Mutex::new(LoginOutputTail::default()));
     let mut logins = active_logins().lock().unwrap_or_else(|e| e.into_inner());
     if logins.contains_key(check_id) {
-        return Err(format!("A login is already running for {check_id}"));
+        return Ok(None);
     }
-    logins.insert(check_id.to_string(), writer);
-    Ok(stdin)
+    logins.insert(
+        check_id.to_string(),
+        ActiveLogin {
+            writer,
+            cancel: cancel.clone(),
+            output: output.clone(),
+        },
+    );
+    Ok(Some(ClaimedLogin {
+        stdin,
+        cancellation,
+        cancel,
+        output,
+        slot: LoginSlot {
+            check_id: check_id.to_string(),
+        },
+    }))
+}
+
+/// The final `doctor-login-output` event for a run.
+///
+/// A cancelled run comes back from doctor's runner as an `Err`; `cancelled` is
+/// what lets a client tell it from a failure, and the runner's message is kept
+/// out of `error` so no client renders it as one. A cancel that landed after
+/// the fix had already finished changes nothing — the fix's own result stands,
+/// as the runner documents — so `cancelled` is only reported on a run that
+/// actually ended early.
+fn login_done_event(
+    check_id: String,
+    result: &Result<(), String>,
+    cancel_requested: bool,
+    lines_emitted: u64,
+) -> DoctorLoginOutput {
+    let cancelled = result.is_err() && cancel_requested;
+    DoctorLoginOutput {
+        check_id,
+        line: None,
+        seq: lines_emitted,
+        done: true,
+        error: if cancelled {
+            None
+        } else {
+            result.as_ref().err().cloned()
+        },
+        cancelled,
+    }
 }
 
 /// Run a claimed login fix to completion on a piped stdin, streaming every
@@ -165,46 +356,68 @@ fn claim_login(check_id: &str) -> Result<FixStdin, String> {
 async fn run_login_fix(
     app_handle: tauri::AppHandle,
     check_id: String,
-    stdin: FixStdin,
+    login: ClaimedLogin,
 ) -> Result<(), String> {
+    let ClaimedLogin {
+        stdin,
+        cancellation,
+        cancel,
+        output,
+        slot,
+    } = login;
     let env_vars = doctor_env_vars().await;
     let event_check_id = check_id.clone();
     let event_app = app_handle.clone();
+    let tail = output.clone();
     let result = doctor::execute_fix_streaming_with_env_options(
         check_id.clone(),
         FixType::Auth,
         ExecuteFixOptions::default()
             .with_env_snapshot(env_vars)
-            .with_stdin(stdin),
+            .with_stdin(stdin)
+            .with_cancellation(cancellation),
         move |line| {
+            // Recorded before it is emitted, so a `doctor_login_status`
+            // snapshot taken between the two already covers the line whose
+            // event is about to follow it — the client's `seq` comparison then
+            // drops the event rather than showing the line twice.
+            let seq = tail.lock().unwrap_or_else(|e| e.into_inner()).push(line);
             crate::web_server::emit_to_all(
                 &event_app,
                 "doctor-login-output",
                 DoctorLoginOutput {
                     check_id: event_check_id.clone(),
                     line: Some(line.to_string()),
+                    seq,
                     done: false,
                     error: None,
+                    cancelled: false,
                 },
             );
         },
     )
     .await;
 
-    active_logins()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&check_id);
-    crate::web_server::emit_to_all(
-        &app_handle,
-        "doctor-login-output",
-        DoctorLoginOutput {
-            check_id,
-            line: None,
-            done: true,
-            error: result.as_ref().err().cloned(),
-        },
+    let lines_emitted = output.lock().unwrap_or_else(|e| e.into_inner()).next_seq;
+    let done = login_done_event(
+        check_id.clone(),
+        &result,
+        cancel.is_cancelled(),
+        lines_emitted,
     );
+    if done.cancelled {
+        if let Err(message) = &result {
+            log::info!("[doctor login {check_id}] cancelled: {message}");
+        }
+    }
+    // Released *before* the `done` goes out. A client attaches by registering
+    // its listener and then asking `doctor_login_status`, so this order gives
+    // it a guarantee: a snapshot that says `running` was taken before the
+    // `done` was emitted, and the `done` is still ahead of the listener. The
+    // other order would let a snapshot report a run whose `done` had already
+    // passed, leaving that client waiting for an end it can never see.
+    drop(slot);
+    crate::web_server::emit_to_all(&app_handle, "doctor-login-output", done);
     result
 }
 
@@ -212,19 +425,73 @@ async fn run_login_fix(
 ///
 /// Returns as soon as the fix is claimed and spawned; the caller learns the
 /// outcome from the `done` event, which lets it feed a code through
-/// [`send_doctor_login_code`] while the fix is still running.
+/// [`send_doctor_login_code`] while the fix is still running. A login already
+/// running for the check is reported as [`LoginStart::AlreadyRunning`] rather
+/// than an error: it is the same subprocess the caller wanted, and it can
+/// attach to it (see [`doctor_login_status`]).
 #[tauri::command]
 pub async fn start_doctor_login(
     app_handle: tauri::AppHandle,
     check_id: String,
-) -> Result<(), String> {
-    let stdin = claim_login(&check_id)?;
+) -> Result<LoginStart, String> {
+    let Some(login) = claim_login(&check_id)? else {
+        return Ok(LoginStart::AlreadyRunning);
+    };
     tokio::spawn(async move {
         // A failure is reported to the frontend by the final `done` event; this
         // handle has no caller to return it to.
-        let _ = run_login_fix(app_handle, check_id, stdin).await;
+        let _ = run_login_fix(app_handle, check_id, login).await;
     });
-    Ok(())
+    Ok(LoginStart::Started)
+}
+
+/// Ask the login running for `check_id` to stop, reporting whether there was
+/// one. Idempotent, and harmless when nothing is running.
+///
+/// The stop goes through doctor's cancellation token, which makes the runner —
+/// the owner of the child — kill the fix's process tree, and the run then ends
+/// with a `done` event carrying `cancelled: true`. It is deliberately *not*
+/// done by dropping the stdin writer: the Claude CLI ignores EOF on stdin once
+/// it has printed its URL and keeps waiting on its browser callback (the
+/// stdin-vs-TTY experiments ran it with `< /dev/null` and killed it 25s later,
+/// still waiting), so a closed pipe would leave the slot held until the fix
+/// timeout with nothing to show for it.
+#[tauri::command]
+pub async fn cancel_doctor_login(check_id: String) -> bool {
+    let cancel = active_logins()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&check_id)
+        .map(|login| login.cancel.clone());
+    match cancel {
+        Some(cancel) => {
+            cancel.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Whether a login is running for `check_id`, and what it has printed so far —
+/// for a client that lost its own record of the login (a web refresh, a second
+/// client, a reloaded webview) and needs the sign-in URL and code entry back.
+///
+/// Register the `doctor-login-output` listener *before* calling this, then
+/// merge by `seq`: lines below [`DoctorLoginStatus::next_seq`] are in the
+/// snapshot, lines at or above it arrived after it.
+#[tauri::command]
+pub async fn doctor_login_status(check_id: String) -> DoctorLoginStatus {
+    // The map lock and the tail lock are never held together: the `on_line`
+    // callback takes only the tail's, the slot release only the map's.
+    let output = active_logins()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&check_id)
+        .map(|login| login.output.clone());
+    match output {
+        Some(output) => output.lock().unwrap_or_else(|e| e.into_inner()).status(),
+        None => DoctorLoginStatus::idle(),
+    }
 }
 
 /// Deliver a line — in practice the authentication code the agent CLI asked
@@ -240,7 +507,7 @@ pub async fn send_doctor_login_code(check_id: String, code: String) -> Result<()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&check_id)
-        .cloned()
+        .map(|login| login.writer.clone())
         .ok_or_else(|| format!("No active login for {check_id}"))?;
     tokio::task::spawn_blocking(move || writer.send_line(code))
         .await
@@ -264,8 +531,12 @@ pub async fn run_doctor_fix(
     // browser callback, otherwise dying at the fix timeout with no way to enter
     // the code (block/berd#99).
     if matches!(fix_type, FixType::Auth) {
-        let stdin = claim_login(&check_id)?;
-        return run_login_fix(app_handle, check_id, stdin).await;
+        // This entry point awaits the fix to its end, so there is no run to
+        // hand an "already running" answer to — the caller asked for a fix and
+        // there is one it can't have.
+        let login = claim_login(&check_id)?
+            .ok_or_else(|| format!("A login is already running for {check_id}"))?;
+        return run_login_fix(app_handle, check_id, login).await;
     }
     if matches!(fix_type, FixType::Command | FixType::Bridge) {
         if let Some(tool_id) = managed_tool_for_check(&check_id) {
@@ -703,5 +974,156 @@ mod tests {
         if !cfg!(feature = "no-block-npm-registry") {
             assert!(expected.is_some());
         }
+    }
+
+    /// The tail numbers every line from zero and keeps only the newest
+    /// `LOGIN_OUTPUT_TAIL_LINES`, and its snapshot states both — a client merges
+    /// live lines against `next_seq`, so a snapshot whose `output` did not sit
+    /// exactly below it would show lines twice or lose them.
+    #[test]
+    fn login_output_tail_numbers_lines_and_keeps_the_newest() {
+        let mut tail = LoginOutputTail::default();
+        assert_eq!(tail.push("Opening browser to sign in…"), 0);
+        assert_eq!(tail.push("If the browser didn't open, visit: https://x"), 1);
+        assert_eq!(
+            tail.status(),
+            DoctorLoginStatus {
+                running: true,
+                output: vec![
+                    "Opening browser to sign in…".to_string(),
+                    "If the browser didn't open, visit: https://x".to_string(),
+                ],
+                next_seq: 2,
+            }
+        );
+
+        for i in 2..(LOGIN_OUTPUT_TAIL_LINES as u64 + 10) {
+            assert_eq!(tail.push(&format!("line {i}")), i);
+        }
+        let status = tail.status();
+        assert_eq!(status.output.len(), LOGIN_OUTPUT_TAIL_LINES);
+        assert_eq!(status.next_seq, LOGIN_OUTPUT_TAIL_LINES as u64 + 10);
+        // `output[i]` carries seq `next_seq - output.len() + i`.
+        let first_seq = status.next_seq - status.output.len() as u64;
+        assert_eq!(status.output.first().unwrap(), &format!("line {first_seq}"));
+        assert_eq!(
+            status.output.last().unwrap(),
+            &format!("line {}", status.next_seq - 1)
+        );
+    }
+
+    /// A cancelled run is reported as cancelled and not as a failure; a run
+    /// that failed on its own keeps its error; and a cancel that only landed
+    /// after the fix had finished changes nothing about its result.
+    #[test]
+    fn login_done_event_tells_a_cancellation_from_a_failure() {
+        let cancelled_by_runner =
+            Err("Fix cancelled before finishing: claude-agent-acp --cli auth login".to_string());
+
+        let done = login_done_event("ai-agent-claude".into(), &cancelled_by_runner, true, 3);
+        assert_eq!(
+            done,
+            DoctorLoginOutput {
+                check_id: "ai-agent-claude".into(),
+                line: None,
+                seq: 3,
+                done: true,
+                error: None,
+                cancelled: true,
+            }
+        );
+
+        let failed = Err("Fix timed out after 10m without finishing: …".to_string());
+        let done = login_done_event("ai-agent-claude".into(), &failed, false, 3);
+        assert!(!done.cancelled);
+        assert_eq!(
+            done.error.as_deref(),
+            Some("Fix timed out after 10m without finishing: …")
+        );
+
+        let done = login_done_event("ai-agent-claude".into(), &Ok(()), true, 0);
+        assert!(done.done && !done.cancelled && done.error.is_none());
+    }
+
+    /// The slot lifecycle end to end: a claim holds the check, a second claim
+    /// is refused rather than an error, the status and cancel commands find
+    /// the run through the entry, dropping the claim releases the slot, and
+    /// the next claim gets a token the earlier cancel does not refuse.
+    ///
+    /// Uses `ai-agent-codex` because `ACTIVE_LOGINS` is process-global and the
+    /// other login test in this module claims `ai-agent-claude`.
+    #[tokio::test]
+    async fn login_slot_is_released_on_drop_and_the_cancel_reaches_the_run() {
+        let check_id = "ai-agent-codex";
+        let login = claim_login(check_id)
+            .expect("codex has a login fix")
+            .expect("the first claim takes the slot");
+        assert!(
+            claim_login(check_id)
+                .expect("still a valid check")
+                .is_none(),
+            "a second claim while the slot is held is `None`, not an error"
+        );
+
+        assert_eq!(
+            doctor_login_status(check_id.into()).await,
+            DoctorLoginStatus {
+                running: true,
+                output: Vec::new(),
+                next_seq: 0,
+            }
+        );
+        // What the run's `on_line` records is what a late client is shown.
+        login
+            .output
+            .lock()
+            .unwrap()
+            .push("Opening browser to sign in…");
+        assert_eq!(
+            doctor_login_status(check_id.into()).await.output,
+            vec!["Opening browser to sign in…".to_string()]
+        );
+
+        assert!(!login.cancel.is_cancelled());
+        assert!(cancel_doctor_login(check_id.into()).await);
+        assert!(
+            login.cancel.is_cancelled(),
+            "the command reaches the token the run was given"
+        );
+        assert!(
+            cancel_doctor_login(check_id.into()).await,
+            "repeating it is a no-op that still reports the running login"
+        );
+
+        drop(login);
+        assert_eq!(
+            doctor_login_status(check_id.into()).await,
+            DoctorLoginStatus::idle()
+        );
+        assert!(
+            !cancel_doctor_login(check_id.into()).await,
+            "nothing running: nothing to cancel"
+        );
+
+        let again = claim_login(check_id)
+            .expect("still a valid check")
+            .expect("a released slot can be claimed again");
+        assert!(
+            !again.cancel.is_cancelled(),
+            "each run gets a fresh token, so the earlier cancel can't refuse the retry"
+        );
+    }
+
+    #[test]
+    fn claim_login_refuses_a_check_with_no_login_fix() {
+        let err = claim_login("ai-agent-goose").expect_err("goose has no auth command");
+        assert!(
+            err.contains("No login fix available for ai-agent-goose"),
+            "{err}"
+        );
+        assert!(!active_logins()
+            .lock()
+            .unwrap()
+            .contains_key("ai-agent-goose"));
     }
 }

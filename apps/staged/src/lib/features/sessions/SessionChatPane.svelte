@@ -82,7 +82,7 @@
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import { openSettings } from '../layout/navigation.svelte';
   import { doctorState, runChecks } from '../doctor/doctor.svelte';
-  import { agentLogin, startAgentLogin } from '../doctor/agentLogin.svelte';
+  import { agentLogin, attachAgentLogin, startAgentLogin } from '../doctor/agentLogin.svelte';
   import AgentLoginPrompt from '../doctor/AgentLoginPrompt.svelte';
   import { canOfferLogin, doctorCheckForProvider, isAuthenticationError } from './authRecovery';
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
@@ -269,6 +269,39 @@
     if (doctorState.report || doctorState.loading || authReportRequestedFor === id) return;
     authReportRequestedFor = id;
     void runChecks();
+  });
+  /**
+   * Sessions whose authentication failure has already asked the backend about a
+   * running login, per open — see below.
+   */
+  let loginAttachRequestedFor: string | null = null;
+  /**
+   * A login for this agent may already be running on the backend — started from
+   * the Doctor panel, from another client, or before this webview reloaded — with
+   * the shared record here knowing nothing of it. Ask once per open when the
+   * alert shows, so its URL and code box come back instead of a `Log in` the
+   * backend would answer "already running". Not gated on `canLogin`: that needs
+   * the doctor report, and the login exists whether or not it has arrived.
+   */
+  $effect(() => {
+    const id = sessionId;
+    const checkId = loginCheckId;
+    if (!active) {
+      loginAttachRequestedFor = null;
+      return;
+    }
+    const failed = session?.status === 'error' || session?.status === 'cancelled';
+    if (!id || !checkId || !failed || !isAuthenticationError(session?.errorMessage)) return;
+    if (agentLogin.running || loginAttachRequestedFor === id) return;
+    loginAttachRequestedFor = id;
+    void attachAgentLogin(checkId)
+      .then((outcome) => {
+        // A signed-in agent changes the check the "Log in" button depends on.
+        if (outcome === 'completed') void runChecks();
+      })
+      .catch(() => {
+        // The failure is on the shared login record, which the alert renders.
+      });
   });
 
   let inputText = $state('');
@@ -813,9 +846,10 @@
   async function startLogin() {
     if (!loginCheckId || !canLogin || agentLogin.running) return;
     try {
-      await startAgentLogin(loginCheckId);
-      // A signed-in agent changes the check the "Log in" button depends on.
-      void runChecks();
+      const outcome = await startAgentLogin(loginCheckId);
+      // A signed-in agent changes the check the "Log in" button depends on; a
+      // cancelled login changes nothing.
+      if (outcome === 'completed') void runChecks();
     } catch {
       // The failure is on the shared login record, which the alert renders.
     }

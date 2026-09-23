@@ -1625,11 +1625,50 @@ export function runDoctorFix(
 }
 
 /**
+ * What `startDoctorLogin` did: began a login, or found one already running for
+ * the check. The latter is not a failure — it is the same subprocess the caller
+ * wanted, reachable through `doctorLoginStatus`, the `doctor-login-output`
+ * stream and `sendDoctorLoginCode`.
+ */
+export type DoctorLoginStart = 'started' | 'alreadyRunning';
+
+/**
  * Start an interactive login fix, resolving once it is running. Its output and
  * its completion are delivered through `doctor-login-output` events.
  */
-export function startDoctorLogin(checkId: string): Promise<void> {
+export function startDoctorLogin(checkId: string): Promise<DoctorLoginStart> {
   return invokeCommand('start_doctor_login', { checkId });
+}
+
+/**
+ * Ask the login running for `checkId` to stop, resolving with whether there was
+ * one. Idempotent, and harmless when nothing is running. The end arrives as a
+ * `doctor-login-output` event with `done` and `cancelled` set — this only asks.
+ */
+export function cancelDoctorLogin(checkId: string): Promise<boolean> {
+  return invokeCommand('cancel_doctor_login', { checkId });
+}
+
+export interface DoctorLoginStatus {
+  running: boolean;
+  /** The last lines the login printed, oldest first. Empty when not running. */
+  output: string[];
+  /**
+   * The `seq` the login's next line will carry; `output` covers the `seq`s from
+   * `nextSeq - output.length` up to but excluding `nextSeq`.
+   */
+  nextSeq: number;
+}
+
+/**
+ * Whether a login is running for `checkId`, and what it has printed so far —
+ * for a client that lost its record of the login (a web refresh, a second
+ * client, a reloaded webview). Register the `doctor-login-output` listener
+ * before calling this, then merge by `seq`: a line below `nextSeq` is in the
+ * snapshot, one at or above it arrived after the snapshot.
+ */
+export function doctorLoginStatus(checkId: string): Promise<DoctorLoginStatus> {
+  return invokeCommand('doctor_login_status', { checkId });
 }
 
 /**
@@ -1644,8 +1683,16 @@ export function sendDoctorLoginCode(checkId: string, code: string): Promise<void
 export interface DoctorLoginOutput {
   checkId: string;
   line: string | null;
+  /**
+   * Position of `line` in the login's output, from zero; on the final event,
+   * the number of lines it printed. See `DoctorLoginStatus.nextSeq`.
+   */
+  seq: number;
   done: boolean;
+  /** The login's failure. Null on a cancelled login, which is not a failure. */
   error: string | null;
+  /** The login ended because `cancelDoctorLogin` was called on it. */
+  cancelled: boolean;
 }
 
 /**

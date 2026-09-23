@@ -3,18 +3,30 @@
 
   Shows the sign-in URL the CLI printed (the CLI's own browser launch can fail
   silently, and a web-server client never had a browser on the host), a box for
-  the code the sign-in page hands back, and a tail of the fix's output so a
-  login that is waiting on something else isn't a bare spinner.
+  the code the sign-in page hands back, a tail of the fix's output so a login
+  that is waiting on something else isn't a bare spinner, and a Cancel — the CLI
+  ignores a closed stdin once it is waiting on its browser callback, so without
+  one an abandoned login holds the check's login slot until doctor's fix timeout.
 
   Renders nothing unless the shared record in `agentLogin.svelte.ts` belongs to
-  `checkId`, so it can be dropped beside any check without a guard.
+  `checkId`, so it can be dropped beside any check without a guard. A host whose
+  own chrome already offers the cancel (the Doctor panel's fix dialog) passes
+  `cancellable={false}` rather than showing two.
 -->
 <script lang="ts">
   import { openUrl } from '../../api/commands';
   import { Button } from '$lib/components/ui/button';
-  import { agentLogin, agentLoginFor, submitAgentLoginCode } from './agentLogin.svelte';
+  import {
+    agentLogin,
+    agentLoginFor,
+    cancelAgentLogin,
+    submitAgentLoginCode,
+  } from './agentLogin.svelte';
 
-  let { checkId }: { checkId: string | null | undefined } = $props();
+  let {
+    checkId,
+    cancellable = true,
+  }: { checkId: string | null | undefined; cancellable?: boolean } = $props();
 
   const login = $derived(agentLoginFor(checkId));
 </script>
@@ -48,6 +60,11 @@
         >
           {login.sending ? 'Sending…' : 'Submit code'}
         </Button>
+        {#if cancellable}
+          <Button variant="ghost" size="xs" onclick={cancelAgentLogin} disabled={login.cancelling}>
+            {login.cancelling ? 'Cancelling…' : 'Cancel'}
+          </Button>
+        {/if}
       </div>
       {#if login.output.length > 0}
         <pre class="login-output">{login.output.join('\n')}</pre>

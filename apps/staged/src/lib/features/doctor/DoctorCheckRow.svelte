@@ -20,7 +20,14 @@
     isReadoutActionable,
     hasActionableUpdate,
   } from './doctor.svelte';
-  import { agentLogin, clearAgentLogin, startAgentLogin } from './agentLogin.svelte';
+  import {
+    agentLogin,
+    attachAgentLogin,
+    cancelAgentLogin,
+    clearAgentLogin,
+    startAgentLogin,
+    type AgentLoginOutcome,
+  } from './agentLogin.svelte';
   import AgentLoginPrompt from './AgentLoginPrompt.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
@@ -81,43 +88,94 @@
   let showUpdateDialog = $state(false);
   let updateError = $state<string | null>(null);
 
-  function promptFix() {
+  const isAuthFix = $derived(check.fixType === 'auth');
+  /**
+   * Whether the shared login record is running this check's login — whichever
+   * entry point started it. For an `auth` fix this, not `fixing`, is what the
+   * dialog reports: `fixing` is only this dialog's wait on that record.
+   */
+  const loginRunning = $derived(isAuthFix && agentLogin.running && agentLogin.checkId === check.id);
+  const fixRunning = $derived(isAuthFix ? loginRunning : fixing);
+
+  async function promptFix() {
     if (!check.fixType) return;
     fixError = null;
     fixing = false;
+    if (!isAuthFix) {
+      showFixDialog = true;
+      return;
+    }
     // Don't open on the last attempt's leftovers.
-    if (check.fixType === 'auth') clearAgentLogin(check.id);
+    clearAgentLogin(check.id);
     showFixDialog = true;
+    // A login for this check may already be running — started from the
+    // session pane, from another client, or before this view reloaded. Pick it
+    // up so the dialog shows its URL and code box, instead of a Run the backend
+    // would answer "already running".
+    await followLogin(attachAgentLogin(check.id));
   }
 
   async function confirmFix() {
     if (!check.fixType) return;
+    if (isAuthFix) {
+      // The one interactive fix: it prints a sign-in URL and then waits for
+      // the code that page hands back. Started through the shared login
+      // record so the dialog can show both, instead of running blind and
+      // expiring at the fix timeout.
+      await followLogin(startAgentLogin(check.id));
+      return;
+    }
     fixing = true;
     fixError = null;
     try {
-      if (check.fixType === 'auth') {
-        // The one interactive fix: it prints a sign-in URL and then waits for
-        // the code that page hands back. Started through the shared login
-        // record so the dialog can show both, instead of running blind and
-        // expiring at the fix timeout.
-        await startAgentLogin(check.id);
-      } else {
-        // canFix guarantees fixType is one of the non-update kinds here.
-        await runDoctorFix(check.id, check.fixType as 'command' | 'bridge');
-      }
+      // canFix guarantees fixType is one of the non-update kinds here.
+      await runDoctorFix(check.id, check.fixType as 'command' | 'bridge');
       showFixDialog = false;
       onFixed?.();
     } catch (e) {
-      // A failed login is already rendered from the shared record — unless
-      // another check's login owns that record, which is what a rejection
-      // before the login even started means.
-      if (check.fixType !== 'auth' || agentLogin.checkId !== check.id) fixError = String(e);
+      fixError = String(e);
     } finally {
       fixing = false;
     }
   }
 
+  /**
+   * Wait on a login from this dialog: close it when the login ends, and refresh
+   * the report only if it signed in. `null` is an attach that found nothing
+   * running, which leaves the dialog offering Run.
+   */
+  async function followLogin(login: Promise<AgentLoginOutcome | null>) {
+    fixing = true;
+    fixError = null;
+    try {
+      const outcome = await login;
+      if (outcome === null) return;
+      showFixDialog = false;
+      if (outcome === 'completed') onFixed?.();
+    } catch (e) {
+      // A failed login is already rendered from the shared record — unless
+      // another check's login owns that record, which is what a rejection
+      // before the login even started means.
+      if (agentLogin.checkId !== check.id) fixError = String(e);
+    } finally {
+      fixing = false;
+    }
+  }
+
+  /**
+   * Leave the fix dialog. For a login this is also the abort: the footer's
+   * Cancel, Escape and a click outside all land here through `onOpenChange`,
+   * and a login nobody is watching must not hold the check's login slot until
+   * doctor's fix timeout — the CLI ignores a closed stdin, so only a kill ends
+   * it. An install can't be cancelled yet and keeps Cancel disabled while it
+   * runs; Escape still closes its dialog, and `fixing` clears when it ends.
+   */
   function cancelFix() {
+    if (isAuthFix) {
+      if (loginRunning) void cancelAgentLogin();
+      showFixDialog = false;
+      return;
+    }
     if (fixing) return;
     showFixDialog = false;
   }
@@ -227,7 +285,10 @@
   {/if}
 </div>
 
-<AlertDialog.Root bind:open={showFixDialog}>
+<!-- Every user-driven close (Cancel, Escape, a click outside) reports through
+     `onOpenChange`; `cancelFix` is what decides whether a running login goes
+     with it. Programmatic closes don't fire it. -->
+<AlertDialog.Root bind:open={showFixDialog} onOpenChange={(open) => !open && cancelFix()}>
   <AlertDialog.Content>
     <AlertDialog.Header>
       <AlertDialog.Title>Run fix command?</AlertDialog.Title>
@@ -235,22 +296,23 @@
         {check.fixCommand}
       </AlertDialog.Description>
     </AlertDialog.Header>
-    <!-- Sign-in URL and code entry, for an `auth` fix that is running. -->
-    <AgentLoginPrompt checkId={check.id} />
+    <!-- Sign-in URL and code entry, for an `auth` fix that is running. The
+         footer's Cancel is the abort here, so the prompt doesn't show its own. -->
+    <AgentLoginPrompt checkId={check.id} cancellable={false} />
     {#if fixError}
       <p class="text-destructive text-sm">{fixError}</p>
     {/if}
     <AlertDialog.Footer>
-      <AlertDialog.Cancel disabled={fixing} onclick={cancelFix}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Cancel disabled={!isAuthFix && fixing}>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action
         variant="outline"
-        disabled={fixing}
+        disabled={fixing || loginRunning}
         onclick={(e) => {
           e.preventDefault();
           confirmFix();
         }}
       >
-        {fixing ? 'Running' : fixError ? 'Retry' : 'Run'}
+        {fixRunning ? 'Running' : fixError ? 'Retry' : 'Run'}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

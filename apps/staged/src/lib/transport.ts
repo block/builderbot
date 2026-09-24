@@ -87,55 +87,36 @@ function reportMissingWindowLabel(): void {
  * Invoke a backend command. In Tauri mode this calls `invoke()` from the
  * Tauri API; in web mode it POSTs to `/api/invoke/{command}`.
  */
-function isFrontendTimingEnabled(): boolean {
-  if (import.meta.env.DEV) return true;
-  if (typeof window === 'undefined') return false;
-  try {
-    const value = window.localStorage.getItem('session-start-trace');
-    return value === '1' || value === 'true' || value === 'on';
-  } catch {
-    return false;
-  }
-}
-
 export async function invokeCommand<T>(
   command: string,
   args?: Record<string, unknown>
 ): Promise<T> {
-  const startedAt = performance.now();
-  try {
-    if (isTauri) {
-      const { invoke } = await import('@tauri-apps/api/core');
-      return await invoke<T>(command, args);
-    }
-
-    const response = await fetch(`/api/invoke/${encodeURIComponent(command)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(args ?? {}),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      let message = text;
-      try {
-        const body = JSON.parse(text) as { error?: unknown };
-        if (typeof body.error === 'string') {
-          message = body.error;
-        }
-      } catch {
-        // Non-JSON error bodies are reported as-is below.
-      }
-      throw new Error(message || `Command failed: ${command}`);
-    }
-
-    return (await response.json()) as T;
-  } finally {
-    const elapsedMs = performance.now() - startedAt;
-    if (elapsedMs >= 250 && isFrontendTimingEnabled()) {
-      console.debug(`[invoke] ${command} ${Math.round(elapsedMs)}ms`);
-    }
+  if (isTauri) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return invoke<T>(command, args);
   }
+
+  const response = await fetch(`/api/invoke/${encodeURIComponent(command)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args ?? {}),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text;
+    try {
+      const body = JSON.parse(text) as { error?: unknown };
+      if (typeof body.error === 'string') {
+        message = body.error;
+      }
+    } catch {
+      // Non-JSON error bodies are reported as-is below.
+    }
+    throw new Error(message || `Command failed: ${command}`);
+  }
+
+  return (await response.json()) as T;
 }
 
 // ---------------------------------------------------------------------------

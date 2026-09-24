@@ -2925,7 +2925,6 @@ async fn prepare_branch_session_start(
     provider: Option<String>,
     launch_context: Option<&BranchSessionLaunchContext>,
 ) -> Result<PreparedBranchSessionStart, String> {
-    let mut timer = session_runner::StageTimer::new("session-start");
     let branch = &target.branch;
     let project = &target.project;
     let working_dir = target.working_dir.clone();
@@ -2977,7 +2976,6 @@ async fn prepare_branch_session_start(
             local_pikchr_grammar_reference_for_session(app_handle, &session_type);
         (ctx, pikchr_grammar_reference)
     };
-    timer.lap("branch-context");
 
     let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
         commit_pre_head_sha(store, branch, &working_dir).await?
@@ -2990,11 +2988,9 @@ async fn prepare_branch_session_start(
     } else {
         None
     };
-    timer.lap("pre-head-sha");
 
     // Build the full prompt with action instructions + project information + branch context.
     let project_information = build_project_context(store, project, branch);
-    timer.lap("project-context");
     let full_prompt = build_full_prompt_with_pikchr_reference(
         prompt,
         &project_information,
@@ -3011,7 +3007,6 @@ async fn prepare_branch_session_start(
 
     // Resolve the actual workspace path for remote branches so the remote agent
     // starts in the correct repo directory (not the workspace default).
-    timer.lap(&format!("full-prompt bytes={}", full_prompt.len()));
     let remote_working_dir = if is_remote {
         let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
         let store_for_resolve = Arc::clone(store);
@@ -3258,7 +3253,6 @@ async fn complete_running_branch_session_start(
     image_ids: Vec<String>,
     launch_context: Option<BranchSessionLaunchContext>,
 ) {
-    let mut timer = session_runner::StageTimer::new("session-start");
     let session_id = created.session.id.clone();
     let branch_id = target.branch.id.clone();
     let project_id = target.branch.project_id.clone();
@@ -3274,7 +3268,6 @@ async fn complete_running_branch_session_start(
             launch_context.as_ref(),
         )
         .await?;
-        timer.lap("prepare");
 
         // The row went in with the raw prompt; swap in the full prompt now
         // that it exists. `working_dir` is unchanged — it was resolved for the
@@ -3291,7 +3284,6 @@ async fn complete_running_branch_session_start(
                 .update_review_commit_sha(&created.artifact_id, tip_sha)
                 .map_err(|e| e.to_string())?;
         }
-        timer.lap("store-prompt");
 
         if !branch_session_still_running(&store, &session_id)? {
             log::info!(
@@ -3309,7 +3301,6 @@ async fn complete_running_branch_session_start(
             created,
             image_ids,
         )?;
-        timer.lap("launch");
         Ok(())
     }
     .await;
@@ -3371,15 +3362,12 @@ pub async fn start_or_queue_branch_session_for_store(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
-    let mut timer = session_runner::StageTimer::new("session-start");
 
     let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
-    timer.lap("provider");
     let launch_lock = branch_session_launch_lock_for(&branch_id);
 
     let (target, created) = {
         let _guard = launch_lock.lock().unwrap();
-        timer.lap("lock-wait");
         if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
             return insert_queued_branch_session(
                 &store,
@@ -3392,9 +3380,7 @@ pub async fn start_or_queue_branch_session_for_store(
                 acp_config_selection,
             );
         }
-        timer.lap("queue-check");
         let target = resolve_branch_session_target(&store, &branch_id)?;
-        timer.lap("target");
         let created = insert_running_branch_session(
             &store,
             &target,
@@ -3405,7 +3391,6 @@ pub async fn start_or_queue_branch_session_for_store(
             launch_context.as_ref(),
             acp_config_selection,
         )?;
-        timer.lap("insert");
         (target, created)
     };
 
@@ -3416,7 +3401,6 @@ pub async fn start_or_queue_branch_session_for_store(
         &target.branch.project_id,
         session_type.as_str(),
     );
-    timer.lap("emit-running");
 
     let response = BranchSessionResponse {
         session_id: created.session.id.clone(),
@@ -3436,7 +3420,6 @@ pub async fn start_or_queue_branch_session_for_store(
         image_ids,
         launch_context,
     ));
-    timer.lap("respond");
 
     Ok(response)
 }
@@ -4324,7 +4307,6 @@ pub(crate) fn build_branch_context(
     branch_id: &str,
     project_id: &str,
 ) -> String {
-    let mut timer = session_runner::StageTimer::new("session-start");
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
@@ -4344,7 +4326,6 @@ pub(crate) fn build_branch_context(
             commit_error = Some(format!("(Error retrieving commit log: {e})"));
         }
     }
-    timer.lap(&format!("git-log count={}", visible_shas.len()));
 
     // Notes and reviews from DB
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
@@ -4357,16 +4338,12 @@ pub(crate) fn build_branch_context(
         &visible_shas,
     ));
     timeline.extend(image_timeline_entries(store, branch_id, None, project_id));
-    timer.lap("notes-reviews-images");
 
     // Project-level notes
     timeline.extend(project_note_timeline_entries(store, project_id, None));
-    timer.lap("project-notes");
 
     parts.push(render_timeline(timeline, commit_error));
-    let result = parts.join("\n\n");
-    timer.lap("full-prompt");
-    result
+    parts.join("\n\n")
 }
 
 /// Build the branch history context block for a remote branch.

@@ -2073,6 +2073,184 @@ fn can_start_with_active_branch_sessions(
     candidate.allows_parallel_instances() || !active.contains(&candidate)
 }
 
+/// Whether a forced start ("Start now") may run `candidate` beside the kinds
+/// already active on the branch.
+///
+/// This deliberately drops two of the rules
+/// `can_start_with_active_branch_sessions` enforces, because jumping them is the
+/// whole point of the action: queue order, and the one-instance-per-kind rule
+/// that keeps a second review or commit from starting beside a running one.
+/// Running a queued note or review beside a commit session is the main use case,
+/// and neither writes to the worktree.
+///
+/// Two rules stay. A git pipeline (push / pull) refuses every candidate: it is
+/// over in seconds, and a pull moves the worktree's HEAD under a review that
+/// has already recorded the tip SHA it will store as reviewed, so what it
+/// stores may not be what it read. Beside a commit session or commit pipeline
+/// only an exclusive candidate is refused, since two of those would have two
+/// agents editing the same tree. Reset-to-origin and discard move the tree the
+/// way a pull does but run outside the session queue, so the active set read
+/// here cannot carry them; they mark the branch instead (see
+/// [`BranchWorktreeOperationGuard`]) and the pre-check and claim refuse every
+/// candidate while the marker is set, alongside this function's rules.
+fn can_force_start_with_active(
+    candidate: BranchSessionScheduleKind,
+    active: &HashSet<BranchSessionScheduleKind>,
+) -> bool {
+    if active.contains(&BranchSessionScheduleKind::GitPipeline) {
+        return false;
+    }
+    !candidate.is_exclusive() || !active.iter().any(|kind| kind.is_exclusive())
+}
+
+/// The refusal a forced start reports when `can_force_start_with_active` or
+/// the worktree-operation marker would not let `candidate` run. A note or
+/// review can only be blocked by a git action — a push/pull pipeline or an
+/// in-flight reset/discard — all of which finish on their own; a commit may be
+/// waiting on a commit session the user would have to stop.
+fn force_start_blocked_message(candidate: BranchSessionScheduleKind) -> &'static str {
+    if candidate.is_exclusive() {
+        "A commit or git action is running on this branch. Stop it first."
+    } else {
+        "A git action is running on this branch. Try again once it finishes."
+    }
+}
+
+/// Which gate a queued row's claim must pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueuedSessionStartMode {
+    /// The branch drain: queue order, the worktree rule, and one instance per
+    /// kind (`can_start_with_active_branch_sessions`).
+    Drain,
+    /// "Start now": the worktree rules alone (`can_force_start_with_active`
+    /// plus the reset/discard marker, `branch_worktree_operation_in_flight`).
+    Force,
+}
+
+/// What a queued start path was left with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueuedSessionStart {
+    /// The row is claimed. From [`QueuedSessionClaim::claim`] that means it is
+    /// the caller's to launch; from a start path it means a runner thread has
+    /// it.
+    Started,
+    /// Nothing started and the row is not the caller's: it was no longer
+    /// queued (cancelled, or claimed by a concurrent start — possibly already
+    /// running as the very kind the caller was about to launch), or the runner
+    /// refused the launch because a shutdown is under way. Nothing about the
+    /// branch was checked or is implied, so a drain re-reads it and moves on.
+    Skipped,
+    /// Nothing started and the row was still queued when the claim looked:
+    /// the branch's live active kinds — none of them this row — refused it,
+    /// which the caller's earlier snapshot did not predict.
+    Blocked,
+}
+
+impl QueuedSessionStart {
+    /// A runner refusal (a shutdown is under way) is not a start: report it
+    /// like a claim that lost its race, so the drain loop re-reads the branch's
+    /// active kinds instead of counting this session as running. Its next
+    /// iteration stops on the pre-claim gate anyway.
+    pub(crate) fn from_runner(outcome: session_runner::SessionStartOutcome) -> Self {
+        if outcome.started() {
+            Self::Started
+        } else {
+            Self::Skipped
+        }
+    }
+}
+
+/// The claim a queued start path makes on its row.
+///
+/// Every queued start awaits between deciding the row may run and flipping it
+/// to `running` — branch context, a `spawn_blocking`, the review tip SHA — and
+/// another start on the same branch can land in that gap. A terminal-state
+/// drain fires the moment the session that made the branch busy finishes, and
+/// a forced start can be picked at any time; each would have read an idle
+/// branch and claimed a *different* exclusive row, leaving two agents editing
+/// one worktree. A forced start makes this reachable from a single click: with
+/// a review running and commits B and C queued, "Start now" on C is allowed,
+/// and if the review finishes before C's claim the drain starts B.
+///
+/// So the gate is re-read and the row claimed together, under the branch
+/// launch lock. That is the lock every fresh start already takes around its
+/// own check-and-insert, which is what makes a queued claim serialize against
+/// those too, not just against other queued claims.
+pub(crate) struct QueuedSessionClaim {
+    branch_id: String,
+    session_id: String,
+    kind: BranchSessionScheduleKind,
+    mode: QueuedSessionStartMode,
+}
+
+impl QueuedSessionClaim {
+    fn new(
+        branch_id: &str,
+        session_id: &str,
+        kind: BranchSessionScheduleKind,
+        mode: QueuedSessionStartMode,
+    ) -> Self {
+        Self {
+            branch_id: branch_id.to_string(),
+            session_id: session_id.to_string(),
+            kind,
+            mode,
+        }
+    }
+
+    /// Re-check the gate against the branch's live state and claim the row,
+    /// atomically with respect to every other start on the branch.
+    ///
+    /// `Started` means the row is now the caller's to launch. `Skipped` means
+    /// it was no longer queued; `Blocked` means it was, and the branch refused
+    /// it. The row is read before the branch so those two cannot be confused:
+    /// a concurrent start that took this exact row has put its kind into the
+    /// branch's running set, and an exclusive candidate gated first would be
+    /// refused because of itself — the drain would `break` on a barrier that
+    /// is not there, and the forced start would tell the user to stop a
+    /// commit that is the row they just clicked and watched start.
+    pub(crate) fn claim(&self, store: &Store) -> Result<QueuedSessionStart, String> {
+        let launch_lock = branch_session_launch_lock_for(&self.branch_id);
+        let _guard = launch_lock.lock().unwrap();
+
+        let status = store
+            .get_session(&self.session_id)
+            .map_err(|e| e.to_string())?
+            .map(|session| session.status);
+        if status != Some(store::SessionStatus::Queued) {
+            return Ok(QueuedSessionStart::Skipped);
+        }
+
+        let active = running_branch_session_kinds(store, &self.branch_id)?;
+        let allowed = match self.mode {
+            // The drain is deliberately not gated on the worktree-operation
+            // marker: it only fires on terminal states, so a refusal here
+            // would leave the queue stalled until something else drained it.
+            // Reset and discard take seconds; the forced start is the path a
+            // user can point at a moving tree, so it is the one refused.
+            QueuedSessionStartMode::Drain => {
+                can_start_with_active_branch_sessions(self.kind, &active)
+            }
+            QueuedSessionStartMode::Force => {
+                !branch_worktree_operation_in_flight(&self.branch_id)
+                    && can_force_start_with_active(self.kind, &active)
+            }
+        };
+        if !allowed {
+            return Ok(QueuedSessionStart::Blocked);
+        }
+
+        let claimed = store
+            .transition_queued_to_running(&self.session_id)
+            .map_err(|e| e.to_string())?;
+        Ok(if claimed {
+            QueuedSessionStart::Started
+        } else {
+            QueuedSessionStart::Skipped
+        })
+    }
+}
+
 fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
@@ -2211,6 +2389,59 @@ pub(crate) fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> 
             .entry(branch_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(()))),
     )
+}
+
+/// Branches with a reset-to-origin or discard-worktree-changes in flight.
+///
+/// Those two git actions run outside the session queue — no session row, no
+/// pipeline — so `running_branch_session_kinds` cannot see them, yet both move
+/// the tree under anything that starts beside them. They mark the branch here
+/// instead, keyed like the launch lock, and the forced-start gate consults the
+/// marker. A count rather than a set: each connected client can start one, and
+/// the first to finish must not clear the other's marker.
+fn branch_worktree_operations() -> &'static Mutex<HashMap<String, usize>> {
+    static OPERATIONS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    OPERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Marks a reset-to-origin or discard as in flight on a branch for as long as
+/// the value lives.
+///
+/// RAII so every way out of the operation — the validation refusals, a git
+/// failure, a panic — clears the marker; one left behind would withhold
+/// "Start now" on the branch until the app restarts.
+pub(crate) struct BranchWorktreeOperationGuard {
+    branch_id: String,
+}
+
+impl BranchWorktreeOperationGuard {
+    pub(crate) fn acquire(branch_id: &str) -> Self {
+        let mut operations = branch_worktree_operations().lock().unwrap();
+        *operations.entry(branch_id.to_string()).or_insert(0) += 1;
+        Self {
+            branch_id: branch_id.to_string(),
+        }
+    }
+}
+
+impl Drop for BranchWorktreeOperationGuard {
+    fn drop(&mut self) {
+        let mut operations = branch_worktree_operations().lock().unwrap();
+        if let Some(count) = operations.get_mut(&self.branch_id) {
+            *count -= 1;
+            if *count == 0 {
+                operations.remove(&self.branch_id);
+            }
+        }
+    }
+}
+
+/// Whether a reset-to-origin or discard is in flight on the branch.
+pub(crate) fn branch_worktree_operation_in_flight(branch_id: &str) -> bool {
+    branch_worktree_operations()
+        .lock()
+        .unwrap()
+        .contains_key(branch_id)
 }
 
 fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
@@ -3202,20 +3433,193 @@ pub async fn drain_queued_sessions_for_branch(
             session,
             schedule.clone(),
             provider.clone(),
+            QueuedSessionStartMode::Drain,
         )
         .await?;
 
-        if started {
-            started_any = true;
-            active.insert(schedule.kind);
-        } else {
-            active = running_branch_session_kinds(&store, &branch_id)?;
+        match started {
+            QueuedSessionStart::Started => {
+                started_any = true;
+                active.insert(schedule.kind);
+            }
+            // The claim re-read the branch under the launch lock and found
+            // something the snapshot above did not: a forced start or another
+            // drain landed while this one was building context. The row is
+            // still queued and still first in line, so stop where the pre-check
+            // would have — it and everything behind it wait for the next
+            // terminal-state drain, rather than the rows behind it jumping the
+            // barrier it puts up.
+            QueuedSessionStart::Blocked => break,
+            // The row left the queue under us — most often another drain
+            // claimed it and it is now running, so the branch's kinds have
+            // changed even though nothing here started. Re-read them and let
+            // the next row's pre-check decide.
+            QueuedSessionStart::Skipped => {
+                active = running_branch_session_kinds(&store, &branch_id)?;
+            }
         }
     }
 
     Ok(started_any)
 }
 
+/// Start one specific queued session now, ahead of the branch's queue.
+///
+/// The row the user picked, not the oldest one: this is what backs the "Start
+/// now" context-menu action, so it bypasses queue order and the FIFO barrier a
+/// queued commit puts in front of later rows. See `can_force_start_with_active`
+/// for the rules it keeps.
+///
+/// Returns whether the session was started — `false` means a concurrent drain
+/// claimed the row first, which is not an error.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_queued_session_now(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    let store = get_store(&store)?;
+    start_queued_session_now_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        session_id,
+        provider,
+    )
+    .await
+}
+
+/// Force-start a single queued branch session, skipping the queue.
+///
+/// Unlike the drain this reports refusals as errors rather than a silent
+/// `Ok(false)`: the user asked for this specific row, so "a commit is running"
+/// is something they need told. `Ok(false)` is kept for the outcome that is
+/// not a refusal — a concurrent drain started the row first — whichever side
+/// of this function's first look at the row the drain won on.
+pub async fn start_queued_session_now_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    // Same reasoning as the drain's gate: a shutdown must not claim queued rows
+    // and spawn agent children that `app.exit(0)` would orphan.
+    if crate::app_lifecycle::is_quitting(&app_handle) {
+        return Ok(false);
+    }
+
+    let (session, schedule) = match forced_start_precheck(&store, &branch_id, &session_id)? {
+        ForcedStartPrecheck::Proceed { session, schedule } => (*session, schedule),
+        ForcedStartPrecheck::AlreadyRunning => return Ok(false),
+    };
+    let kind = schedule.kind;
+
+    let started = start_queued_session_for_branch(
+        store,
+        registry,
+        app_handle,
+        branch_id,
+        session,
+        schedule,
+        provider,
+        QueuedSessionStartMode::Force,
+    )
+    .await?;
+
+    match started {
+        QueuedSessionStart::Started => Ok(true),
+        // The drain won after the pre-check: the row is running. (A cancel in
+        // the same window lands here too; the timeline reload shows it.)
+        QueuedSessionStart::Skipped => Ok(false),
+        // The row is still queued; what changed is the branch. Same refusal as
+        // the snapshot would have given had it seen the session that landed.
+        QueuedSessionStart::Blocked => Err(force_start_blocked_message(kind).to_string()),
+    }
+}
+
+/// What a forced start learns from the store before it builds any context.
+#[derive(Debug)]
+enum ForcedStartPrecheck {
+    /// The row is queued, belongs to the branch, and the branch's kinds as read
+    /// now would let it run. Provisional: the claim re-reads all of this under
+    /// the branch launch lock (see [`QueuedSessionClaim`]).
+    Proceed {
+        session: Box<store::Session>,
+        schedule: BranchSessionSchedule,
+    },
+    /// A concurrent drain claimed the row between the click and this read. It
+    /// is running, which is what the user asked for.
+    AlreadyRunning,
+}
+
+/// The forced start's first look at the row, before any context is built.
+///
+/// Refusals are errors, as the command's contract says — but a row that is
+/// already running is not a refusal. The user watched it start; "no longer
+/// queued" would be a toast about a race they did not lose. That is the same
+/// outcome the claim reports as `Skipped` when the drain wins after this
+/// read, and it gets the same quiet `Ok(false)`. Any other non-queued status
+/// (cancelled, finished) is still an error: nothing started and the row is not
+/// going to.
+///
+/// The running-kinds and worktree-operation checks at the end are an early
+/// answer for the common refusal, not the gate: the start path awaits before
+/// it claims the row, and a terminal-state drain can land in that window and
+/// take a different exclusive row, so the claim re-reads both under the
+/// branch launch lock.
+fn forced_start_precheck(
+    store: &Store,
+    branch_id: &str,
+    session_id: &str,
+) -> Result<ForcedStartPrecheck, String> {
+    if branch_session_start_waits_for_provisioning(store, branch_id)? {
+        return Err("Branch is still being set up".to_string());
+    }
+
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+    match session.status {
+        store::SessionStatus::Queued => {}
+        store::SessionStatus::Running => return Ok(ForcedStartPrecheck::AlreadyRunning),
+        store::SessionStatus::Completed
+        | store::SessionStatus::Error
+        | store::SessionStatus::Cancelled => {
+            return Err(format!("Session {session_id} is no longer queued"));
+        }
+    }
+
+    let schedule = resolve_branch_session_schedule(store, branch_id, &session, true)?
+        .ok_or_else(|| format!("Session {session_id} does not belong to branch {branch_id}"))?;
+
+    let active = running_branch_session_kinds(store, branch_id)?;
+    if branch_worktree_operation_in_flight(branch_id)
+        || !can_force_start_with_active(schedule.kind, &active)
+    {
+        return Err(force_start_blocked_message(schedule.kind).to_string());
+    }
+
+    Ok(ForcedStartPrecheck::Proceed {
+        session: Box::new(session),
+        schedule,
+    })
+}
+
+/// Start a queued row the caller has already decided may run.
+///
+/// That decision is provisional: the row is claimed by `claim`, which re-checks
+/// the `mode`'s gate under the branch launch lock right before flipping it to
+/// `running`, after every await this path and the pipeline paths take. Callers
+/// act on the outcome — the drain stops on `Blocked`, the forced start reports
+/// it.
 #[allow(clippy::too_many_arguments)]
 async fn start_queued_session_for_branch(
     store: Arc<Store>,
@@ -3225,17 +3629,20 @@ async fn start_queued_session_for_branch(
     session: store::Session,
     schedule: BranchSessionSchedule,
     provider: Option<String>,
-) -> Result<bool, String> {
+    mode: QueuedSessionStartMode,
+) -> Result<QueuedSessionStart, String> {
+    let claim = QueuedSessionClaim::new(&branch_id, &session.id, schedule.kind, mode);
+
     if matches!(schedule.kind, BranchSessionScheduleKind::CommitPipeline) {
         return crate::prs::start_queued_commit_pipeline_for_branch(
-            store, registry, app_handle, branch_id, session, provider,
+            store, registry, app_handle, branch_id, session, provider, claim,
         )
         .await;
     }
 
     if matches!(schedule.kind, BranchSessionScheduleKind::GitPipeline) {
         return crate::prs::start_queued_git_pipeline_for_branch(
-            store, registry, app_handle, branch_id, session, provider,
+            store, registry, app_handle, branch_id, session, provider, claim,
         )
         .await;
     }
@@ -3351,13 +3758,12 @@ async fn start_queued_session_for_branch(
         ),
     );
 
-    // Atomically transition session from queued to running.
-    // If another drain call already claimed this session, bail out.
-    let transitioned = store
-        .transition_queued_to_running(&session_id)
-        .map_err(|e| e.to_string())?;
-    if !transitioned {
-        return Ok(false);
+    // Claim the row: the gate re-checked and the queued→running flip, together
+    // under the branch launch lock. Anything but `Started` means the row is not
+    // ours — either it is no longer queued, or the branch changed under us.
+    let claimed = claim.claim(&store)?;
+    if claimed != QueuedSessionStart::Started {
+        return Ok(claimed);
     }
 
     store
@@ -3472,11 +3878,7 @@ async fn start_queued_session_for_branch(
         app_handle,
         Arc::clone(&registry),
     )
-    // A start the runner refused because a shutdown is under way is not a
-    // start: report it like a claim that lost its race, so the drain loop
-    // re-reads the branch's active kinds instead of counting this session as
-    // running. Its next iteration stops on the pre-claim gate anyway.
-    .map(session_runner::SessionStartOutcome::started)
+    .map(QueuedSessionStart::from_runner)
 }
 
 // =============================================================================
@@ -5874,6 +6276,602 @@ mod tests {
         let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
 
         assert_eq!(drainable, vec!["note-1".to_string(), "note-2".to_string()]);
+    }
+
+    #[test]
+    fn force_start_runs_note_or_review_beside_a_running_commit() {
+        let active = HashSet::from([BranchSessionScheduleKind::Commit]);
+
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Review,
+            &active
+        ));
+    }
+
+    #[test]
+    fn force_start_runs_a_second_note_or_review_beside_its_own_kind() {
+        let notes = HashSet::from([BranchSessionScheduleKind::Note]);
+        let reviews = HashSet::from([BranchSessionScheduleKind::Review]);
+
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Note,
+            &notes
+        ));
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Review,
+            &reviews
+        ));
+    }
+
+    #[test]
+    fn force_start_refuses_every_kind_beside_a_git_pipeline() {
+        let active = HashSet::from([BranchSessionScheduleKind::GitPipeline]);
+
+        for kind in [
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::CommitPipeline,
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            assert!(
+                !can_force_start_with_active(kind, &active),
+                "{kind:?} should be refused while a git pipeline runs"
+            );
+        }
+    }
+
+    #[test]
+    fn force_start_refuses_every_kind_when_a_git_pipeline_runs_beside_a_commit() {
+        let active = HashSet::from([
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::GitPipeline,
+        ]);
+
+        for kind in [
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            assert!(
+                !can_force_start_with_active(kind, &active),
+                "{kind:?} should be refused while a git pipeline runs, even beside a commit"
+            );
+        }
+    }
+
+    #[test]
+    fn force_start_refusal_names_only_what_can_block_the_row() {
+        assert!(force_start_blocked_message(BranchSessionScheduleKind::Commit).contains("commit"));
+        assert!(
+            force_start_blocked_message(BranchSessionScheduleKind::CommitPipeline)
+                .contains("commit")
+        );
+        for kind in [
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            let message = force_start_blocked_message(kind);
+            assert!(
+                !message.contains("commit"),
+                "{kind:?} cannot be blocked by a commit, got: {message}"
+            );
+            assert!(message.contains("git action"));
+        }
+    }
+
+    #[test]
+    fn force_start_refuses_a_commit_beside_exclusive_work() {
+        for active_kind in [
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::CommitPipeline,
+            BranchSessionScheduleKind::GitPipeline,
+        ] {
+            let active = HashSet::from([active_kind]);
+            assert!(
+                !can_force_start_with_active(BranchSessionScheduleKind::Commit, &active),
+                "commit should be refused beside {active_kind:?}"
+            );
+            assert!(
+                !can_force_start_with_active(BranchSessionScheduleKind::CommitPipeline, &active),
+                "rebase/squash should be refused beside {active_kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn force_start_runs_a_commit_beside_notes_and_reviews() {
+        let active = HashSet::from([
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ]);
+
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Commit,
+            &active
+        ));
+    }
+
+    #[test]
+    fn force_start_runs_anything_on_an_idle_branch() {
+        let active = HashSet::new();
+
+        for kind in [
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::CommitPipeline,
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            assert!(
+                can_force_start_with_active(kind, &active),
+                "{kind:?} should start on an idle branch"
+            );
+        }
+    }
+
+    fn session_status(store: &Store, session_id: &str) -> store::SessionStatus {
+        store.get_session(session_id).unwrap().unwrap().status
+    }
+
+    /// The review-R / commits-B-and-C case: the forced start's snapshot allowed
+    /// C beside the review, then R finished and a drain claimed B before C's
+    /// claim. The claim must answer from the branch as it is now, not from the
+    /// snapshot.
+    #[test]
+    fn force_claim_refuses_a_commit_when_exclusive_work_landed_after_the_snapshot() {
+        let (store, branch) = setup_branch_store();
+        let review =
+            create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+        let queued_c =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let snapshot = running_branch_session_kinds(&store, &branch.id).unwrap();
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Commit,
+            &snapshot
+        ));
+
+        store
+            .update_session_status(&review.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+        create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued_c.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Force,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Blocked);
+        assert_eq!(
+            session_status(&store, &queued_c.id),
+            store::SessionStatus::Queued
+        );
+    }
+
+    #[test]
+    fn force_claim_runs_a_note_beside_a_commit_that_landed_after_the_snapshot() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Note,
+            QueuedSessionStartMode::Force,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Started);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Running
+        );
+    }
+
+    /// The mirror image: the drain's snapshot saw an idle branch, then a forced
+    /// review start landed before the drain's claim on the queued commit.
+    #[test]
+    fn drain_claim_refuses_a_row_a_forced_start_overtook() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let snapshot = running_branch_session_kinds(&store, &branch.id).unwrap();
+        assert!(can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Commit,
+            &snapshot
+        ));
+
+        create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Drain,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Blocked);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Queued
+        );
+    }
+
+    #[test]
+    fn drain_claim_keeps_the_one_instance_rule_the_forced_claim_drops() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_review_session(&store, &branch.id, store::SessionStatus::Queued);
+        create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let drain = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Review,
+            QueuedSessionStartMode::Drain,
+        );
+        assert_eq!(drain.claim(&store).unwrap(), QueuedSessionStart::Blocked);
+
+        let force = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Review,
+            QueuedSessionStartMode::Force,
+        );
+        assert_eq!(force.claim(&store).unwrap(), QueuedSessionStart::Started);
+    }
+
+    #[test]
+    fn claim_on_an_idle_branch_takes_the_row() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Drain,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Started);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Running
+        );
+    }
+
+    #[test]
+    fn claim_on_a_row_no_longer_queued_is_skipped() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        // A concurrent start already took this exact row.
+        assert!(store.transition_queued_to_running(&queued.id).unwrap());
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Note,
+            QueuedSessionStartMode::Force,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Skipped);
+    }
+
+    /// The row above is a note, which the gate lets through beside anything but
+    /// a git pipeline — so it never showed the order the claim checks in. An
+    /// exclusive row a concurrent drain already claimed is *itself* the
+    /// exclusive kind now running on the branch. Gated before the row's status
+    /// is read, it is refused because of itself and reported `Blocked`: the
+    /// drain breaks on a barrier that is not there, and the forced start tells
+    /// the user to stop the commit they just clicked and watched start.
+    #[test]
+    fn claim_on_a_row_a_concurrent_start_took_is_skipped_not_blocked_by_itself() {
+        for mode in [QueuedSessionStartMode::Drain, QueuedSessionStartMode::Force] {
+            let (store, branch) = setup_branch_store();
+            let queued =
+                create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+            assert!(store.transition_queued_to_running(&queued.id).unwrap());
+
+            // The only thing running on the branch is the row being claimed.
+            let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+            assert_eq!(
+                active,
+                HashSet::from([BranchSessionScheduleKind::Commit]),
+                "{mode:?}"
+            );
+            let gate_alone = match mode {
+                QueuedSessionStartMode::Drain => can_start_with_active_branch_sessions(
+                    BranchSessionScheduleKind::Commit,
+                    &active,
+                ),
+                QueuedSessionStartMode::Force => {
+                    can_force_start_with_active(BranchSessionScheduleKind::Commit, &active)
+                }
+            };
+            assert!(
+                !gate_alone,
+                "{mode:?}: the gate alone would refuse the row because of itself"
+            );
+
+            let claim = QueuedSessionClaim::new(
+                &branch.id,
+                &queued.id,
+                BranchSessionScheduleKind::Commit,
+                mode,
+            );
+
+            assert_eq!(
+                claim.claim(&store).unwrap(),
+                QueuedSessionStart::Skipped,
+                "{mode:?}"
+            );
+            assert_eq!(
+                session_status(&store, &queued.id),
+                store::SessionStatus::Running,
+                "{mode:?}: the claim must not touch a row that is not its own"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_on_a_cancelled_row_is_skipped() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        store
+            .update_session_status(&queued.id, store::SessionStatus::Cancelled, None, None)
+            .unwrap();
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Drain,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Skipped);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Cancelled
+        );
+    }
+
+    /// `Blocked` promises the row was still queued. When the row is queued and
+    /// the branch is busy with something else, the gate — not the status read
+    /// — is what answers.
+    #[test]
+    fn claim_on_a_queued_row_still_reaches_the_gate() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Force,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Blocked);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Queued
+        );
+    }
+
+    /// Reset-to-origin and discard have no session row, so the running-kinds
+    /// read cannot see them; their guard marks the branch and the forced claim
+    /// refuses every candidate while it is set — the same treatment a running
+    /// git pipeline gets, because all of them move the tree under anything
+    /// that starts beside them.
+    #[test]
+    fn force_claim_refuses_every_kind_while_a_worktree_operation_is_in_flight() {
+        let (store, branch) = setup_branch_store();
+        let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let review = create_branch_review_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
+
+        for (session_id, kind) in [
+            (&commit.id, BranchSessionScheduleKind::Commit),
+            (&note.id, BranchSessionScheduleKind::Note),
+            (&review.id, BranchSessionScheduleKind::Review),
+        ] {
+            let claim = QueuedSessionClaim::new(
+                &branch.id,
+                session_id,
+                kind,
+                QueuedSessionStartMode::Force,
+            );
+            assert_eq!(
+                claim.claim(&store).unwrap(),
+                QueuedSessionStart::Blocked,
+                "{kind:?}"
+            );
+            assert_eq!(
+                session_status(&store, session_id),
+                store::SessionStatus::Queued,
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The drain is deliberately not gated on the marker: it only fires on
+    /// terminal states, so a refusal would leave the queue stalled until
+    /// something else drained it. Only the forced start is refused.
+    #[test]
+    fn drain_claim_ignores_a_worktree_operation_in_flight() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Drain,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Started);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Running
+        );
+    }
+
+    /// Two clients can each start one operation (the desktop app and a browser
+    /// via the web server); the first to finish must not clear the marker the
+    /// other still needs.
+    #[test]
+    fn worktree_operation_marker_counts_overlapping_operations() {
+        let branch_id = "worktree-operation-overlap-branch";
+        assert!(!branch_worktree_operation_in_flight(branch_id));
+
+        let first = BranchWorktreeOperationGuard::acquire(branch_id);
+        let second = BranchWorktreeOperationGuard::acquire(branch_id);
+        drop(first);
+        assert!(branch_worktree_operation_in_flight(branch_id));
+
+        drop(second);
+        assert!(!branch_worktree_operation_in_flight(branch_id));
+    }
+
+    /// The forced start's first look at the row, before any context is built.
+    /// A drain that won between the right-click and this read has left the row
+    /// running — the user watched it start — so this is the quiet `Ok(false)`
+    /// the claim path also gives, not a "no longer queued" toast.
+    #[test]
+    fn forced_start_precheck_reports_a_row_a_drain_already_started_as_running() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        assert!(store.transition_queued_to_running(&session.id).unwrap());
+
+        assert!(matches!(
+            forced_start_precheck(&store, &branch.id, &session.id).unwrap(),
+            ForcedStartPrecheck::AlreadyRunning
+        ));
+    }
+
+    /// A cancelled row is a refusal: nothing started and nothing is going to.
+    #[test]
+    fn forced_start_precheck_rejects_a_cancelled_row() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        store
+            .update_session_status(&session.id, store::SessionStatus::Cancelled, None, None)
+            .unwrap();
+
+        let err = forced_start_precheck(&store, &branch.id, &session.id).unwrap_err();
+        assert!(err.contains("no longer queued"), "{err}");
+    }
+
+    #[test]
+    fn forced_start_precheck_rejects_a_finished_row() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+        store
+            .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+
+        let err = forced_start_precheck(&store, &branch.id, &session.id).unwrap_err();
+        assert!(err.contains("no longer queued"), "{err}");
+    }
+
+    #[test]
+    fn forced_start_precheck_hands_a_queued_row_on_with_its_schedule() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        match forced_start_precheck(&store, &branch.id, &session.id).unwrap() {
+            ForcedStartPrecheck::Proceed {
+                session: found,
+                schedule,
+            } => {
+                assert_eq!(found.id, session.id);
+                assert_eq!(schedule.kind, BranchSessionScheduleKind::Commit);
+            }
+            other => panic!("expected Proceed, got {other:?}"),
+        }
+        assert_eq!(
+            session_status(&store, &session.id),
+            store::SessionStatus::Queued,
+            "the pre-check must not claim the row"
+        );
+    }
+
+    /// The early refusal is worded per candidate, like the claim's.
+    #[test]
+    fn forced_start_precheck_refuses_a_queued_commit_beside_a_running_one() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let err = forced_start_precheck(&store, &branch.id, &queued.id).unwrap_err();
+        assert_eq!(
+            err,
+            force_start_blocked_message(BranchSessionScheduleKind::Commit)
+        );
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Queued
+        );
+    }
+
+    /// The early refusal consults the reset/discard marker too, and a note or
+    /// review blocked by one gets the git-action wording — try again once it
+    /// finishes — not a pointer at a commit that was never the blocker.
+    #[test]
+    fn forced_start_precheck_refuses_every_kind_during_a_worktree_operation() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
+
+        let err = forced_start_precheck(&store, &branch.id, &note.id).unwrap_err();
+        assert_eq!(
+            err,
+            force_start_blocked_message(BranchSessionScheduleKind::Note)
+        );
+        assert!(err.contains("Try again once it finishes"), "{err}");
+
+        let err = forced_start_precheck(&store, &branch.id, &commit.id).unwrap_err();
+        assert_eq!(
+            err,
+            force_start_blocked_message(BranchSessionScheduleKind::Commit)
+        );
+    }
+
+    #[test]
+    fn forced_start_precheck_waits_for_provisioning() {
+        let (store, branch) = setup_branch_store();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let err = forced_start_precheck(&store, &branch.id, &session.id).unwrap_err();
+        assert!(err.contains("still being set up"), "{err}");
+    }
+
+    #[test]
+    fn runner_refusal_is_not_a_start() {
+        assert_eq!(
+            QueuedSessionStart::from_runner(session_runner::SessionStartOutcome::Started),
+            QueuedSessionStart::Started
+        );
+        assert_eq!(
+            QueuedSessionStart::from_runner(
+                session_runner::SessionStartOutcome::RefusedShuttingDown
+            ),
+            QueuedSessionStart::Skipped
+        );
     }
 
     #[test]

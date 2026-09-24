@@ -369,6 +369,24 @@ describe('browser-native command wrappers', () => {
       provider: null,
     });
   });
+
+  it('starts a queued session now without overriding the queued session provider or config', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(true);
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { startQueuedSessionNow } = await import('./commands');
+
+    await startQueuedSessionNow('branch-1', 'session-1');
+
+    expect(invokeCommand).toHaveBeenCalledWith('start_queued_session_now', {
+      branchId: 'branch-1',
+      sessionId: 'session-1',
+      provider: null,
+    });
+  });
 });
 
 describe('cached mutation command wrappers', () => {

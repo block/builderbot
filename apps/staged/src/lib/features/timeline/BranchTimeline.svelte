@@ -47,7 +47,7 @@
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
-  import { canStartQueuedSessions } from './queuedSessionStart';
+  import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
@@ -82,7 +82,8 @@
     onDeleteNote?: (noteId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeleteImage?: (imageId: string, opts?: { altKey: boolean }) => void;
-    onStartQueued?: () => void;
+    /** Start a specific queued session ahead of the branch queue. */
+    onStartQueuedNow?: (sessionId: string) => void;
     /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
     reviewCommentBreakdown?: Record<
       string,
@@ -178,7 +179,7 @@
     onDeleteNote,
     onDeleteReview,
     onDeleteImage,
-    onStartQueued,
+    onStartQueuedNow,
     reviewCommentBreakdown = {},
     onNewNote,
     onNewCommit,
@@ -350,11 +351,13 @@
       discardingWorktreeChanges
   );
 
-  /** Whether Start on a queued row would do anything — see `canStartQueuedSessions`. */
-  let queuedStartAvailable = $derived(
-    canStartQueuedSessions({ hasActiveSession, gitActionRunning })
-  );
-
+  /**
+   * A commit session owns the worktree for writing. Covers running rebase and
+   * squash pipelines too: each owns the pending-commit row it is rewriting.
+   *
+   * Kept apart from `gitActionRunning` because "Start now" treats them
+   * differently — see `canStartQueuedSessionNow`.
+   */
   let hasActiveCommitSession = $derived.by(() => {
     for (const commit of timeline.commits) {
       if (commit.sessionStatus === 'running') return true;
@@ -1003,8 +1006,34 @@
     return !!item.sessionId && isResumableReason(item.completionReason) && !item.deleting;
   }
 
+  /** The kind a queued row would start as, or null when the row isn't queued. */
+  function queuedKind(item: DisplayItem): QueuedSessionKind | null {
+    if (item.type === 'queued-commit') return 'commit';
+    if (item.type === 'queued-note') return 'note';
+    if (item.type === 'queued-review') return 'review';
+    return null;
+  }
+
+  function canStartNow(item: DisplayItem): boolean {
+    const kind = queuedKind(item);
+    if (!kind || !item.sessionId || item.deleting || !onStartQueuedNow) return false;
+    // A provisioning row means the branch has no worktree yet, so nothing on it
+    // can start — see `canStartQueuedSessionNow`.
+    return canStartQueuedSessionNow({
+      kind,
+      commitSessionRunning: hasActiveCommitSession,
+      gitActionRunning,
+      provisioning: !!provisioningLabel,
+    });
+  }
+
   function hasContextMenuAction(item: DisplayItem): boolean {
-    return !!item.commitSha || (!!item.hashtagRef && !!onNewSessionReferring) || isDeletable(item);
+    return (
+      !!item.commitSha ||
+      (!!item.hashtagRef && !!onNewSessionReferring) ||
+      canStartNow(item) ||
+      isDeletable(item)
+    );
   }
 
   function contextMenuActionForItem(item: DisplayItem): TimelineContextMenuAction | null {
@@ -1015,6 +1044,7 @@
       key: item.key,
       commitSha: item.commitSha,
       hashtagRef: item.hashtagRef,
+      onStartNow: canStartNow(item) ? () => onStartQueuedNow!(item.sessionId!) : undefined,
       onDelete:
         isDeletable(item) && !deleteDisabledReason
           ? (opts) => handleDeleteClick(item, opts)
@@ -1139,9 +1169,6 @@
             onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
               ? undefined
               : (opts) => handleDeleteClick(item, opts)}
-            onStartClick={item.type.startsWith('queued-') && queuedStartAvailable
-              ? onStartQueued
-              : undefined}
             onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
               ? () => onResumeClick!(item.sessionId!)
               : undefined}
@@ -1224,9 +1251,6 @@
             onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
               ? undefined
               : (opts) => handleDeleteClick(item, opts)}
-            onStartClick={item.type.startsWith('queued-') && queuedStartAvailable
-              ? onStartQueued
-              : undefined}
             onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
               ? () => onResumeClick!(item.sessionId!)
               : undefined}

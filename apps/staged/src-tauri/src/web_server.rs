@@ -3441,6 +3441,24 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             Ok(serde_json::to_value(result).unwrap())
         }
+        "start_queued_session_now" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
+
+            let result = session_commands::start_queued_session_now_for_branch(
+                store,
+                Arc::clone(session_registry),
+                app_handle.clone(),
+                branch_id,
+                session_id,
+                provider,
+            )
+            .await?;
+
+            Ok(serde_json::to_value(result).unwrap())
+        }
         "cancel_session" => {
             let session_id: String = arg(&args, "sessionId")?;
             // Shared with the Tauri command so a browser Stop also takes the

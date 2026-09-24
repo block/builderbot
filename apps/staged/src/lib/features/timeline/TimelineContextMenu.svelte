@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import Copy from '@lucide/svelte/icons/copy';
   import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
+  import Play from '@lucide/svelte/icons/play';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
@@ -9,6 +10,8 @@
     key: string;
     commitSha?: string;
     hashtagRef?: string;
+    /** Start this queued session ahead of the branch queue. */
+    onStartNow?: () => void;
     onDelete?: (opts?: { altKey: boolean }) => void;
   };
 
@@ -25,7 +28,10 @@
 
   function hasVisibleAction(action: TimelineContextMenuAction): boolean {
     return (
-      !!action.commitSha || (!!action.hashtagRef && !!onNewSessionReferring) || !!action.onDelete
+      !!action.commitSha ||
+      (!!action.hashtagRef && !!onNewSessionReferring) ||
+      !!action.onStartNow ||
+      !!action.onDelete
     );
   }
 
@@ -100,6 +106,10 @@
     }
   }
 
+  function handleStartNow() {
+    activeAction?.onStartNow?.();
+  }
+
   function handleDelete() {
     activeAction?.onDelete?.({ altKey: false });
   }
@@ -123,6 +133,11 @@
     </ContextMenu.Trigger>
     <ContextMenu.Content class="min-w-[180px]">
       {#if activeAction}
+        {#if activeAction.onStartNow}
+          <ContextMenu.Item onSelect={handleStartNow}>
+            <Play size={14} /> Start now
+          </ContextMenu.Item>
+        {/if}
         {#if activeAction.commitSha}
           <ContextMenu.Item onSelect={handleCopySha}>
             <Copy size={14} /> Copy SHA

@@ -84,14 +84,13 @@ describe('describeVersionReadout', () => {
     });
 
     expect(view.version).toBe('0.16.2');
-    expect(view.upToDate).toBe(false);
     expect(view.badge).toEqual({
       text: 'Bridge update available: 0.16.2 → 0.17.0',
       infoOnly: false,
     });
   });
 
-  it('marks an equal release as up to date with no badge', () => {
+  it('shows an equal release as a bare version with no badge or note', () => {
     const view = describeVersionReadout({
       kind: 'bridge',
       path: SHIM,
@@ -100,12 +99,25 @@ describe('describeVersionReadout', () => {
     });
 
     expect(view.version).toBe('0.16.2');
-    expect(view.upToDate).toBe(true);
+    expect(view.versionState).toBe('known');
     expect(view.badge).toBeNull();
+    // The badge is the only update signal: nothing else in the view says
+    // "up to date", so a current install and an unchecked one read the same.
+    expect(Object.keys(view).sort()).toEqual(
+      ['badge', 'label', 'location', 'managed', 'version', 'versionState'].sort()
+    );
   });
 
-  it('keeps an unknown or unavailable registry answer unknown, not up to date', () => {
-    // Lookup failed (offline, mirror down, timeout): installed still shows.
+  it('shows an unknown or unavailable registry answer the same as a current install', () => {
+    const current = describeVersionReadout({
+      kind: 'bridge',
+      path: SHIM,
+      info: managedBridge({ latestVersion: '0.16.2', updateAvailable: false }),
+      loading: false,
+    });
+
+    // Lookup failed (offline, mirror down, timeout): installed still shows,
+    // and nothing claims the install is either current or stale.
     const unknown = describeVersionReadout({
       kind: 'bridge',
       path: SHIM,
@@ -113,8 +125,8 @@ describe('describeVersionReadout', () => {
       loading: false,
     });
     expect(unknown.version).toBe('0.16.2');
-    expect(unknown.upToDate).toBe(false);
     expect(unknown.badge).toBeNull();
+    expect(unknown).toEqual(current);
 
     // Registry answered but the installed version could not be read.
     const noInstalled = describeVersionReadout({
@@ -125,12 +137,11 @@ describe('describeVersionReadout', () => {
     });
     expect(noInstalled.version).toBeNull();
     expect(noInstalled.versionState).toBe('unknown');
-    expect(noInstalled.upToDate).toBe(false);
     expect(noInstalled.badge).toBeNull();
 
     // The vendored agent's readout has its update suppressed by the shared
-    // bundled policy (null, not false): it is never called up to date, since
-    // the latest ACP package need not carry the latest standalone CLI.
+    // bundled policy (null, not false): it shows its own version and nothing
+    // more, since the latest ACP package need not carry the latest CLI.
     const main = describeVersionReadout({
       kind: 'main',
       path: SHIM,
@@ -138,7 +149,8 @@ describe('describeVersionReadout', () => {
       loading: false,
     });
     expect(main.version).toBe('2.1.205');
-    expect(main.upToDate).toBe(false);
+    expect(main.versionState).toBe('known');
+    expect(main.badge).toBeNull();
   });
 
   it('reads "checking" only while the freshness pass can still deliver a version', () => {

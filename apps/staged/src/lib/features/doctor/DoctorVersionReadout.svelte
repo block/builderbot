@@ -6,8 +6,10 @@
 
   Versions are shown whether or not an update is available; a version that has
   not been probed yet reads "checking", one the probe could not read "unknown".
-  What the readout describes is the install new launches use, not the code a
-  running agent session has already loaded.
+  A version with no badge is simply the installed version: the badge is the
+  only update signal, so its absence needs no "up to date" note. What the
+  readout describes is the install new launches use, not the code a running
+  agent session has already loaded.
 -->
 <script lang="ts">
   import ArrowUpCircle from '@lucide/svelte/icons/arrow-up-circle';
@@ -37,9 +39,6 @@
     <span class="readout-location">{view.location}</span>
     {#if view.version !== null}
       <span class="readout-version">{view.version}</span>
-      {#if view.upToDate}
-        <span class="readout-note">up to date</span>
-      {/if}
     {:else if view.versionState === 'checking'}
       <span class="readout-note">checking version…</span>
     {:else}

@@ -7,8 +7,10 @@
  * Staged manages (Claude, Codex) both readouts describe one executable — the
  * ACP package vendors the agent — and only the ACP readout carries an update,
  * because the package is the update unit. The row shows every installed
- * version it knows, whether or not an update is available, and never turns an
- * unknown or failed registry lookup into "up to date".
+ * version it knows, whether or not an update is available. The badge is the
+ * only update signal: a version without one is not annotated, so an unknown
+ * or failed registry lookup looks the same as a current install rather than
+ * being mislabelled either way.
  */
 import type { AgentVersionInfo } from '../../api/commands';
 
@@ -43,11 +45,6 @@ export interface VersionReadoutView {
    * it is still running, `unknown` once it has finished without one.
    */
   versionState: 'known' | 'checking' | 'unknown';
-  /**
-   * The latest release of the same package is known and is not newer. False
-   * whenever the lookup failed or was suppressed — unknown is not current.
-   */
-  upToDate: boolean;
   /** The update badge, when a newer release is known. */
   badge: UpdateBadge | null;
 }
@@ -69,7 +66,6 @@ export function describeVersionReadout(args: {
     managed,
     version,
     versionState,
-    upToDate: version !== null && info?.updateAvailable === false,
     badge: updateBadge(kind, info),
   };
 }

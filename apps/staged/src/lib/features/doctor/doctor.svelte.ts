@@ -61,6 +61,12 @@ const STATUS_ICONS: Record<DoctorCheck['status'], string> = {
   fail: '✗',
 };
 
+/** `<installed>`, plus `(latest <version>)` when the registry answered. */
+function formatVersions(readout: AgentVersionInfo): string {
+  const latest = readout.latestVersion ? ` (latest ${readout.latestVersion})` : '';
+  return `${readout.installedVersion}${latest}`;
+}
+
 /** Format the full doctor report as a plain-text debug dump for support. */
 export function formatDebugReport(report: DoctorReport): string {
   const lines: string[] = [
@@ -76,6 +82,11 @@ export function formatDebugReport(report: DoctorReport): string {
     lines.push(`  Message: ${check.message}`);
     if (check.path) lines.push(`  Path: ${check.path}`);
     if (check.bridgePath) lines.push(`  Bridge path: ${check.bridgePath}`);
+    // The versions the row shows, per binary — the install new launches use.
+    if (check.main?.installedVersion) lines.push(`  Main version: ${formatVersions(check.main)}`);
+    if (check.bridge?.installedVersion) {
+      lines.push(`  Bridge version: ${formatVersions(check.bridge)}`);
+    }
     if (check.fixUrl) lines.push(`  Fix URL: ${check.fixUrl}`);
     if (check.fixCommand) lines.push(`  Fix command: ${check.fixCommand}`);
     if (check.rawOutput) {

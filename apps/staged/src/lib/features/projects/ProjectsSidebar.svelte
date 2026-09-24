@@ -696,7 +696,8 @@
 
   .row-main {
     display: flex;
-    align-items: flex-start;
+    /* Single-line rows: centre the 14px icon on the label's line box. */
+    align-items: center;
     gap: 10px;
     flex: 1;
     min-width: 0;

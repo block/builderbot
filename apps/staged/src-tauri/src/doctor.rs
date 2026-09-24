@@ -727,15 +727,30 @@ fn managed_tool_for_check(check_id: &str) -> Option<&'static str> {
     crate::managed_acp_tools::managed_tool(managed_tool_id_for_check(check_id)?).map(|tool| tool.id)
 }
 
-/// The managed bridge a doctor *update* targets, when the request is the one
-/// the managed rows offer: the ACP readout's `UpdateBridge` on a check whose
-/// bridge this build manages. That readout is the only one
-/// [`apply_managed_bridge_readout`] attaches the managed action to — the main
-/// readout is the agent vendored *inside* the same package, so a second
-/// action there would reinstall it twice. Any other fix type, and every check
-/// when management is off, falls through to the command-validated path.
+/// The managed bridge a doctor *update* targets: on a build that manages these
+/// two packages, the managed installer is the only writer for them, so *every*
+/// update of the Claude and Codex checks goes to it — `UpdateBridge` from a
+/// managed row's ACP readout, and `UpdateMain` from a copy that resolved
+/// elsewhere (a user install found on PATH before the first reconcile lands,
+/// or while it keeps failing). Letting that `UpdateMain` take the
+/// command-validated path instead would run `npm install -g <pkg>@latest`
+/// under the fix env's `NPM_CONFIG_PREFIX`, landing a third, unowned copy in
+/// `~/.staged/packages/npm-prefix` that nothing prunes, updates or runs — and
+/// leaving the user's copy stale anyway.
+///
+/// There is still exactly one install per row, because the two update fix
+/// types never both carry an action on the same check:
+/// [`apply_managed_bridge_readout`] gives the managed row its `bridge` action
+/// while `main` stays bundled and update-free, and an unmanaged row has only
+/// the `main` action that
+/// [`redirect_unmanaged_update_to_managed_install`] rewrites — the crate emits
+/// no `bridge` readout for the single-binary Claude and Codex checks.
+///
+/// Non-update fix types, and every check when management is off (dev override,
+/// `no-managed-acp-tools`, unsupported target), fall through to the
+/// command-validated path.
 fn managed_update_target(check_id: &str, fix_type: &FixType) -> Option<&'static str> {
-    if !matches!(fix_type, FixType::UpdateBridge) {
+    if !matches!(fix_type, FixType::UpdateMain | FixType::UpdateBridge) {
         return None;
     }
     managed_tool_for_check(check_id)
@@ -780,16 +795,17 @@ pub async fn run_doctor_update(
     fix_type: FixType,
     command: String,
 ) -> Result<(), String> {
-    // The update a managed row's ACP readout offers (see
-    // `apply_managed_bridge_readout`) is the floating installer itself:
-    // `<pkg>@latest` staged, verified and swapped into `~/.staged/packages`
-    // on the managed runtime. No shell command runs, so the frontend-supplied
-    // `command` — the description the confirmation showed — needs no
-    // validation; what is validated is the target: a check whose bridge this
-    // build manages, on the one readout that carries the action. A copy that
-    // resolved elsewhere (a user install found on PATH before the first
-    // reconcile lands) gets the crate's source-aware `UpdateMain` command and
-    // takes the validated path below like any other unmanaged update.
+    // On a build that manages these two bridges, every update of their checks
+    // is the floating installer itself: `<pkg>@latest` staged, verified and
+    // swapped into `~/.staged/packages` on the managed runtime. That covers
+    // both the managed row's ACP readout (see `apply_managed_bridge_readout`)
+    // and a copy that resolved elsewhere, whose source-aware `UpdateMain` is
+    // rewritten into a managed-install description by
+    // `redirect_unmanaged_update_to_managed_install` — its own `npm install -g`
+    // would write into the private prefix and orphan a copy there. No shell
+    // command runs, so the frontend-supplied `command` — the description the
+    // confirmation showed — needs no validation; what is validated is the
+    // target: a check whose bridge this build manages, and an update fix type.
     if let Some(tool_id) = managed_update_target(&check_id, &fix_type) {
         return install_managed_tool_logged(tool_id, &check_id).await;
     }
@@ -924,7 +940,10 @@ async fn managed_bridge_versions(
 }
 
 /// Layer the managed ACP readout onto every check whose executable is one of
-/// the managed shims in `shim_bin_dir`. See [`apply_managed_bridge_readout`].
+/// the managed shims in `shim_bin_dir` (see [`apply_managed_bridge_readout`]),
+/// and point the rest of these checks' updates at the managed installer too
+/// (see [`redirect_unmanaged_update_to_managed_install`]) — on a managing
+/// build it is the only writer for these two packages.
 fn apply_managed_bridge_readouts(
     report: &mut DoctorReport,
     versions: &[ManagedBridgeVersions],
@@ -936,7 +955,9 @@ fn apply_managed_bridge_readouts(
             continue;
         };
         if let Some(versions) = versions.iter().find(|v| v.tool.id == tool_id) {
-            apply_managed_bridge_readout(check, versions, shim_bin_dir, check_freshness);
+            if !apply_managed_bridge_readout(check, versions, shim_bin_dir, check_freshness) {
+                redirect_unmanaged_update_to_managed_install(check, versions, shim_bin_dir);
+            }
         }
     }
 }
@@ -963,8 +984,10 @@ fn apply_managed_bridge_readouts(
 ///
 /// Nothing is touched unless the check's executable is the managed shim for
 /// this tool and the crate labeled it bundled: a copy that resolved elsewhere
-/// keeps its source-aware readout and update, and an unknown installed or
-/// latest version leaves `update_available` unknown rather than false.
+/// keeps its source-aware readout; its update is redirected to the managed
+/// install (see [`redirect_unmanaged_update_to_managed_install`]). An unknown
+/// installed or latest version leaves `update_available` unknown rather than
+/// false.
 fn apply_managed_bridge_readout(
     check: &mut DoctorCheck,
     versions: &ManagedBridgeVersions,
@@ -1012,6 +1035,53 @@ fn apply_managed_bridge_readout(
     true
 }
 
+/// Point a non-managed copy's update at the managed installer, and report
+/// whether it did.
+///
+/// Doctor can resolve one of these two checks to a copy of the bridge the user
+/// installed themselves (Homebrew, their own npm prefix, nvm) — before the
+/// launch reconcile has written the managed shim, or for as long as it keeps
+/// failing. On a managing build the crate's source-aware `UpdateMain` must not
+/// run: `npm install -g <pkg>@latest` under the fix env's `NPM_CONFIG_PREFIX`
+/// would install a third copy into `~/.staged/packages/npm-prefix` that
+/// nothing owns, and would not upgrade the user's copy the confirmation named.
+///
+/// So the action becomes the managed install, described as such, and only the
+/// action: `path`, `install_source`, both versions and `update_available` stay
+/// as the crate reported them, so the row keeps showing the copy that is
+/// actually on PATH, where it is, and how old it is. The fix type is set even
+/// when the crate derived no command (an `Unknown` source, say) — Staged can
+/// install its own copy where the crate had nothing to offer.
+///
+/// Only ever fires on the freshness pass, since `update_available` is unset
+/// until then, and never on a management-off build, where
+/// [`managed_bridge_versions`] returns nothing.
+fn redirect_unmanaged_update_to_managed_install(
+    check: &mut DoctorCheck,
+    versions: &ManagedBridgeVersions,
+    shim_bin_dir: &Path,
+) -> bool {
+    let Some(path) = check.path.clone() else {
+        return false;
+    };
+    if is_managed_shim_path(&path, shim_bin_dir, versions.tool.binary) {
+        return false;
+    }
+    let Some(main) = check.main.as_mut() else {
+        return false;
+    };
+    if main.update_available != Some(true) {
+        return false;
+    }
+    main.update_command = Some(managed_install_description(
+        &versions.tool,
+        main.latest_version.as_deref(),
+        &path,
+    ));
+    main.update_fix_type = Some(FixType::UpdateMain);
+    true
+}
+
 /// Whether `path` is the shim Staged writes for `binary` in `shim_bin_dir` —
 /// the executable of a managed install, as opposed to a same-named copy that
 /// resolved from anywhere else on PATH.
@@ -1028,6 +1098,21 @@ fn is_managed_shim_path(path: &str, shim_bin_dir: &Path, binary: &str) -> bool {
 fn managed_update_description(tool: &ManagedTool, latest: &str) -> String {
     format!(
         "update Staged's managed {} to {latest} in ~/.staged/packages",
+        tool.package
+    )
+}
+
+/// What the update confirmation shows when the row is a copy Staged does not
+/// manage: the managed copy is absent or stale, so the installer *installs*
+/// rather than updates, and the text is explicit that `replaced` — the copy on
+/// PATH, the one the version beside it was read from — is not touched.
+fn managed_install_description(tool: &ManagedTool, latest: Option<&str>, replaced: &str) -> String {
+    let version = latest
+        .map(|latest| format!(" {latest}"))
+        .unwrap_or_default();
+    format!(
+        "install Staged's managed {}{version} in ~/.staged/packages \
+         (the copy at {replaced} is left as is)",
         tool.package
     )
 }
@@ -1338,43 +1423,47 @@ mod tests {
         assert_eq!(managed_tool_for_check(NODE_RUNTIME_CHECK_ID), None);
     }
 
-    /// Only the ACP readout's `UpdateBridge` on a managed check dispatches to
-    /// the managed installer. Every other fix type — including `UpdateMain`,
-    /// which is what a copy that resolved outside the managed dir carries —
-    /// takes the command-validated path, and nothing is managed when bridge
-    /// management is off (dev override, `no-managed-acp-tools`, unsupported
-    /// target).
+    /// Both update fix types on a managed check dispatch to the managed
+    /// installer — `UpdateBridge` from the managed row's ACP readout, and the
+    /// `UpdateMain` a copy that resolved outside the managed dir carries, whose
+    /// own `npm install -g` would orphan a copy in the private prefix. Non-update
+    /// fix types take the command-validated path, and nothing is managed when
+    /// bridge management is off (dev override, `no-managed-acp-tools`,
+    /// unsupported target).
     #[test]
-    fn only_the_acp_readouts_update_dispatches_to_the_managed_installer() {
+    fn both_update_fix_types_dispatch_to_the_managed_installer() {
         let managed = crate::managed_acp_tools::managed_tools_enabled();
-        assert_eq!(
-            managed_update_target("ai-agent-claude", &FixType::UpdateBridge),
-            managed.then_some("claude-acp")
-        );
-        assert_eq!(
-            managed_update_target("ai-agent-codex", &FixType::UpdateBridge),
-            managed.then_some("codex-acp")
-        );
-        for fix_type in [
-            FixType::UpdateMain,
-            FixType::Command,
-            FixType::Bridge,
-            FixType::Auth,
-        ] {
+        for fix_type in [FixType::UpdateMain, FixType::UpdateBridge] {
+            assert_eq!(
+                managed_update_target("ai-agent-claude", &fix_type),
+                managed.then_some("claude-acp"),
+                "{fix_type:?}"
+            );
+            assert_eq!(
+                managed_update_target("ai-agent-codex", &fix_type),
+                managed.then_some("codex-acp"),
+                "{fix_type:?}"
+            );
+            // Checks whose bridge Staged never manages keep the crate's own
+            // fixes for both update types.
+            assert_eq!(
+                managed_update_target("ai-agent-amp", &fix_type),
+                None,
+                "{fix_type:?}"
+            );
+            assert_eq!(
+                managed_update_target("ai-agent-copilot", &fix_type),
+                None,
+                "{fix_type:?}"
+            );
+        }
+        for fix_type in [FixType::Command, FixType::Bridge, FixType::Auth] {
             assert_eq!(
                 managed_update_target("ai-agent-claude", &fix_type),
                 None,
                 "{fix_type:?}"
             );
         }
-        assert_eq!(
-            managed_update_target("ai-agent-amp", &FixType::UpdateBridge),
-            None
-        );
-        assert_eq!(
-            managed_update_target("ai-agent-copilot", &FixType::UpdateBridge),
-            None
-        );
     }
 
     // -- managed bridge readouts ---------------------------------------------
@@ -1431,6 +1520,62 @@ mod tests {
             .join("claude-agent-acp")
             .display()
             .to_string()
+    }
+
+    /// The ACP package version a copy the user installed themselves reports.
+    const USER_COPY_VERSION: &str = "0.16.2";
+
+    /// A Claude row as the doctor crate reports a copy the *user* installed —
+    /// found on PATH before the launch reconcile has written the managed shim,
+    /// or for as long as that reconcile keeps failing. Labeled by source rather
+    /// than bundled, with the crate's freshness fields: `latest` as the registry
+    /// answered it, and `command` the source-aware update the crate derived
+    /// (`None` for a source it cannot update, such as `Unknown`).
+    fn user_copy_claude_check(
+        path: &str,
+        source: &InstallSource,
+        latest: Option<&str>,
+        command: Option<&str>,
+    ) -> DoctorCheck {
+        let main = AgentVersionInfo {
+            install_source: Some(source.clone()),
+            bundled: None,
+            installed_version: Some(USER_COPY_VERSION.to_string()),
+            latest_version: latest.map(str::to_string),
+            update_available: latest.map(|latest| latest != USER_COPY_VERSION),
+            self_updating: Some(false),
+            update_command: command.map(str::to_string),
+            update_fix_type: command.map(|_| FixType::UpdateMain),
+        };
+        DoctorCheck {
+            installed_version: main.installed_version.clone(),
+            latest_version: main.latest_version.clone(),
+            update_available: main.update_available,
+            install_source: Some(source.clone()),
+            self_updating: Some(false),
+            main: Some(main),
+            ..managed_claude_check(path, true)
+        }
+    }
+
+    /// Run the report-wide pass over a single check, so the tests exercise the
+    /// managed-readout and redirect branches through the same dispatch the
+    /// report does.
+    fn apply_to(
+        check: DoctorCheck,
+        versions: &ManagedBridgeVersions,
+        check_freshness: bool,
+    ) -> DoctorCheck {
+        let mut report = DoctorReport {
+            checks: vec![check],
+        };
+        apply_managed_bridge_readouts(
+            &mut report,
+            std::slice::from_ref(versions),
+            Path::new(SHIM_BIN_DIR),
+            check_freshness,
+        );
+        report.checks.pop().unwrap()
     }
 
     fn versions(installed: Option<&str>, latest: Option<&str>) -> ManagedBridgeVersions {
@@ -1608,27 +1753,104 @@ mod tests {
         assert_eq!(check.bridge.as_ref().unwrap().update_available, None);
     }
 
-    /// Only the managed shim gets the managed readout. A same-named copy that
-    /// resolved elsewhere, a row with no executable, a row the crate did not
-    /// label bundled, another tool's versions, and a build with nothing
-    /// managed all leave the check exactly as the crate produced it.
+    /// A copy the user installed themselves never gets the managed readout, and
+    /// with nothing to update is left byte-identical: its own location, source
+    /// and version are the honest ones for what is on PATH.
+    #[test]
+    fn a_user_copy_without_an_update_is_left_untouched() {
+        let installed = versions(Some("0.16.2"), Some("0.17.0"));
+        let path = "/opt/homebrew/bin/claude-agent-acp";
+
+        // The registry answered, and the user copy is current.
+        let check =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        let before = json(&check);
+        assert_eq!(json(&apply_to(check, &installed, true)), before);
+
+        // The registry lookup failed: unknown, so no action is invented.
+        let check = user_copy_claude_check(path, &InstallSource::Brew, None, None);
+        let before = json(&check);
+        assert_eq!(json(&apply_to(check, &installed, true)), before);
+
+        // The initial (no-network) pass sets no update fields at all, so there
+        // is nothing to redirect there either.
+        let mut check = managed_claude_check(path, false);
+        check.main.as_mut().unwrap().bundled = None;
+        check.main.as_mut().unwrap().install_source = Some(InstallSource::Npm);
+        let before = json(&check);
+        assert_eq!(json(&apply_to(check, &installed, false)), before);
+    }
+
+    /// A user copy with a newer release keeps its readout but has its action
+    /// redirected: on a managing build the managed installer is the only writer
+    /// for these two packages, so the crate's `npm install -g` (which would
+    /// orphan a copy in the private prefix) and `brew upgrade` (which Staged
+    /// does not run for a copy it never uses) are replaced by a description of
+    /// the managed install. A source the crate cannot update gets the action it
+    /// had none for.
+    #[test]
+    fn a_user_copy_with_a_newer_release_is_redirected_to_the_managed_install() {
+        let installed = versions(Some("0.16.2"), Some("0.17.0"));
+        let cases = [
+            (
+                "/Users/u/.nvm/versions/node/v22.14.0/bin/claude-agent-acp",
+                InstallSource::Npm,
+                Some("npm install -g @agentclientprotocol/claude-agent-acp@latest"),
+            ),
+            (
+                "/opt/homebrew/bin/claude-agent-acp",
+                InstallSource::Brew,
+                Some("brew upgrade claude-agent-acp"),
+            ),
+            (
+                "/usr/local/bin/claude-agent-acp",
+                InstallSource::Unknown,
+                None,
+            ),
+        ];
+
+        for (path, source, command) in &cases {
+            let check = user_copy_claude_check(path, source, Some("0.17.0"), *command);
+            let before = json(&check);
+            let mut after = apply_to(check, &installed, true);
+
+            assert!(after.bridge.is_none(), "{source:?}");
+            assert!(after.bridge_path.is_none(), "{source:?}");
+            let main = after.main.as_ref().unwrap();
+            assert_eq!(
+                main.update_fix_type,
+                Some(FixType::UpdateMain),
+                "{source:?}"
+            );
+            let description = main.update_command.as_deref().expect("an action");
+            assert!(
+                description.contains("@agentclientprotocol/claude-agent-acp"),
+                "{description}"
+            );
+            assert!(description.contains("0.17.0"), "{description}");
+            assert!(description.contains("~/.staged/packages"), "{description}");
+            assert!(description.contains(path), "{description}");
+            assert!(!description.contains("npm install"), "{description}");
+            assert!(!description.contains("brew upgrade"), "{description}");
+
+            // The action is the *only* change: path, source, both versions and
+            // `updateAvailable` still describe the copy that is on PATH.
+            let main = after.main.as_mut().unwrap();
+            main.update_command = command.map(str::to_string);
+            main.update_fix_type = command.map(|_| FixType::UpdateMain);
+            assert_eq!(json(&after), before, "{source:?}");
+        }
+    }
+
+    /// Only the managed shim gets the managed readout. A row whose path sits
+    /// under the shim dir under another name, a row with no executable, a row
+    /// the crate did not label bundled, another tool's versions, and a build
+    /// with nothing managed all leave the check exactly as the crate produced
+    /// it.
     #[test]
     fn unmanaged_copies_and_other_checks_are_left_alone() {
         let shim_bin_dir = Path::new(SHIM_BIN_DIR);
         let installed = versions(Some("0.16.2"), Some("0.17.0"));
-
-        // A user install found on PATH (management on, reconcile not landed).
-        let mut check = managed_claude_check("/opt/homebrew/bin/claude-agent-acp", true);
-        check.main.as_mut().unwrap().bundled = None;
-        check.main.as_mut().unwrap().install_source = Some(InstallSource::Brew);
-        let before = json(&check);
-        assert!(!apply_managed_bridge_readout(
-            &mut check,
-            &installed,
-            shim_bin_dir,
-            true
-        ));
-        assert_eq!(json(&check), before);
 
         // Under the shim dir but a different binary name.
         let other = Path::new(SHIM_BIN_DIR)
@@ -1701,6 +1923,31 @@ mod tests {
         apply_managed_bridge_readouts(&mut report, &[installed], shim_bin_dir, true);
         assert!(report.checks[0].bridge.is_some());
         assert!(report.checks[1].bridge.is_none());
+    }
+
+    /// The redirected action's text names the package, the version, where the
+    /// managed copy goes, and the copy it leaves alone — an unknown latest
+    /// version drops the version rather than printing a placeholder.
+    #[test]
+    fn managed_install_description_names_the_package_version_and_replaced_copy() {
+        let description = managed_install_description(
+            &claude_tool(),
+            Some("0.17.0"),
+            "/opt/homebrew/bin/claude-agent-acp",
+        );
+        assert_eq!(
+            description,
+            "install Staged's managed @agentclientprotocol/claude-agent-acp 0.17.0 in \
+             ~/.staged/packages (the copy at /opt/homebrew/bin/claude-agent-acp is left as is)"
+        );
+
+        let description =
+            managed_install_description(&claude_tool(), None, "/opt/homebrew/bin/claude-agent-acp");
+        assert_eq!(
+            description,
+            "install Staged's managed @agentclientprotocol/claude-agent-acp in \
+             ~/.staged/packages (the copy at /opt/homebrew/bin/claude-agent-acp is left as is)"
+        );
     }
 
     #[test]

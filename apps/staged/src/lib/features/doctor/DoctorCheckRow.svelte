@@ -86,6 +86,14 @@
    * Every actionable readout is Staged-managed: no shell command runs, the
    * backend reinstalls Staged's private copy, so the dialog says so instead of
    * asking to "run a command".
+   *
+   * `bundled` misses one case on a build that manages the Claude and Codex
+   * bridges: a copy of one of them that resolved elsewhere on PATH (a user
+   * install, before the launch reconcile lands) is not bundled, yet the backend
+   * still routes its update to the managed installer and describes it that way
+   * in `updateCommand`. Such a row gets the "run update command?" header over a
+   * managed-install body. Telling the two apart needs a per-readout
+   * "managed action" flag on `AgentVersionInfo`, which is a doctor crate change.
    */
   const managedUpdate = $derived(
     actionableReadouts.length > 0 && actionableReadouts.every((r) => r.bundled === true)

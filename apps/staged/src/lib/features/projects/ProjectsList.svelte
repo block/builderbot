@@ -533,6 +533,11 @@
                         No repo attached
                       {/if}
                     </div>
+                    {#if activity}
+                      <div class="card-activity">
+                        {activity}
+                      </div>
+                    {/if}
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
@@ -551,11 +556,6 @@
                   </ContextMenu.Item>
                 </ContextMenu.Content>
               </ContextMenu.Root>
-              {#if activity}
-                <div class="card-location">
-                  {activity}
-                </div>
-              {/if}
             </div>
           {/each}
         </div>
@@ -669,17 +669,15 @@
   .project-card-wrapper {
     display: flex;
     flex-direction: column;
-    gap: 6px;
   }
 
   .project-card-wrapper .project-card {
     flex: 1;
   }
 
-  .card-location {
+  .card-activity {
     color: var(--text-faint);
     font-size: var(--size-xs);
-    padding: 0 4px;
   }
 
   .project-card {

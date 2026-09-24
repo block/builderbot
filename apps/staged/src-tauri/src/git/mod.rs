@@ -13,6 +13,7 @@ mod status_parse;
 mod types;
 mod worktree;
 
+pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
 pub(crate) use cli::run_smart as cli_run_smart;
 pub use cli::{EnvSource, GitError};

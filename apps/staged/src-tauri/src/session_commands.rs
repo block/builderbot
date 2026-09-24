@@ -2565,23 +2565,12 @@ fn resolve_branch_session_target(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-        let mut worktree_path = PathBuf::from(&workdir.path);
-        // Use the project_repo's subpath when the branch is attached to a specific
-        // repo (e.g. a secondary repo with no subpath), rather than always falling
-        // back to the project-level subpath which may belong to a different repo.
-        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            store
-                .get_project_repo(repo_id)
-                .ok()
-                .flatten()
-                .and_then(|repo| repo.subpath)
-        } else {
-            project.subpath.clone()
-        };
-        if let Some(ref subpath) = effective_subpath {
-            worktree_path = worktree_path.join(subpath);
-        }
-        worktree_path
+        crate::branches::local_branch_session_working_dir(
+            store,
+            &project,
+            &branch,
+            PathBuf::from(&workdir.path),
+        )
     };
 
     Ok(BranchSessionTarget {
@@ -3547,19 +3536,12 @@ async fn start_queued_session_for_branch(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-        let mut worktree_path = PathBuf::from(&workdir.path);
-        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            store
-                .get_project_repo(repo_id)
-                .ok()
-                .flatten()
-                .and_then(|repo| repo.subpath)
-        } else {
-            project.subpath.clone()
-        };
-        if let Some(ref subpath) = effective_subpath {
-            worktree_path = worktree_path.join(subpath);
-        }
+        let worktree_path = crate::branches::local_branch_session_working_dir(
+            &store,
+            &project,
+            &branch,
+            PathBuf::from(&workdir.path),
+        );
 
         let worktree_path_for_context = worktree_path.clone();
         let base_branch = branch.base_branch.clone();

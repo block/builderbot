@@ -65,6 +65,14 @@ pub fn run_smart(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     }
 }
 
+/// Fire-and-forget warm-up of the captured shell env for `repo`.
+///
+/// Use this when a caller has already resolved the directory a future
+/// captured-env operation will need, but has no git read to run there yet.
+pub(crate) fn prewarm_shell_env(repo: &Path) {
+    warm_shell_env_async(repo);
+}
+
 /// Which environment to pass to the spawned git process.
 ///
 /// Also surfaces at the `state::compute_local_branch_git_state` boundary as a

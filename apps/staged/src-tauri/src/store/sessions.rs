@@ -303,8 +303,13 @@ impl Store {
         Ok(())
     }
 
-    /// Update a queued session's working directory, prompt, and owner PID
-    /// when it is being drained (started for real).
+    /// Update a session's working directory, prompt, and owner PID once its
+    /// prompt context exists.
+    ///
+    /// Two callers: the branch queue drain, for a `queued` row it has just
+    /// claimed, and the immediate branch start, for the `running` row it
+    /// inserted with the raw prompt before building the context behind its
+    /// response (see `session_commands::complete_running_branch_session_start`).
     pub fn prepare_queued_session(
         &self,
         id: &str,

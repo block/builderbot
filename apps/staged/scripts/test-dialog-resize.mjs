@@ -38,6 +38,11 @@ before(async () => {
             await initPersistentStore();
             const width = createDialogWidth({ key: '${key}', minWidth: 700 });
             await width.ensureHydrated();
+            if (new URLSearchParams(location.search).has('pause-entrance')) {
+              const style = document.createElement('style');
+              style.textContent = '[data-slot="dialog-content"] { animation-play-state: paused !important; }';
+              document.head.append(style);
+            }
             mount(NoteModal, { target: document.body, props: {
               open: true, title: 'Resize regression', content: 'A note with a chat pane.',
               sessionId: 'resize-probe', onClose() {}
@@ -80,11 +85,11 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     });
     after(async () => browser?.close());
 
-    async function open() {
+    async function open({ savedWidth = 700, pauseEntrance = false } = {}) {
       await context?.close();
       context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
       page = await context.newPage();
-      stored = 700;
+      stored = savedWidth;
       writes = [];
       holdNextSave = false;
       pendingSave = null;
@@ -109,11 +114,21 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       });
       // The event stream is unrelated to these layout and HTTP ordering probes.
       await page.routeWebSocket('**/api/events*', () => {});
-      await page.goto(url);
+      await page.goto(pauseEntrance ? `${url}?pause-entrance` : url);
       await page.locator('[data-slot="dialog-resize-handle"]').waitFor();
-      await page.evaluate(async () => {
-        await Promise.all(document.getAnimations().map((animation) => animation.finished));
-      });
+      if (pauseEntrance) {
+        const scaledWidth = await page.locator('[data-slot="dialog-content"]').evaluate((el) => {
+          const animation = el.getAnimations().find((item) => item.animationName === 'enter');
+          if (!animation) throw new Error('Dialog entrance did not animate');
+          animation.currentTime = 25;
+          return el.getBoundingClientRect().width;
+        });
+        assert.ok(scaledWidth < savedWidth, `Expected entrance scale, got ${scaledWidth}`);
+      } else {
+        await page.evaluate(async () => {
+          await Promise.all(document.getAnimations().map((animation) => animation.finished));
+        });
+      }
       await page.locator('[data-slot="dialog-resize-handle"]').focus();
     }
 
@@ -138,6 +153,29 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       assert.ok(middle > 700 && middle < 1080, `Expected intermediate chat width, got ${middle}`);
       await page.locator('[data-slot="dialog-resize-handle"]').focus();
     }
+
+    it('resizes from the saved layout width during the entrance animation', async () => {
+      await open({ savedWidth: 1000, pauseEntrance: true });
+      const box = await page.locator('[data-slot="dialog-resize-handle"]').boundingBox();
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await expectWidth(1000);
+      await page.mouse.move(x + 20, y);
+      await expectWidth(1040);
+      await page.mouse.up();
+      await expect.poll(() => stored).toBe(1040);
+      assert.deepEqual(writes, [1040]);
+    });
+
+    it('applies keyboard steps to the layout width during the entrance animation', async () => {
+      await open({ savedWidth: 1000, pauseEntrance: true });
+      await page.keyboard.press('ArrowRight');
+      await expectWidth(1016);
+      await expect.poll(() => stored).toBe(1016);
+      assert.deepEqual(writes, [1016]);
+    });
 
     it('keeps End at the maximum when ArrowRight follows 35ms later', async () => {
       await open();

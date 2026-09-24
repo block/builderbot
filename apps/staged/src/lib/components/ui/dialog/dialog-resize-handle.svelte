@@ -56,7 +56,8 @@
   const resize = createDialogResize({
     geometry: () => ({
       ...resizeBounds(minWidth, window.innerWidth - DIALOG_VIEWPORT_GUTTER * 2),
-      width: dialog?.getBoundingClientRect().width ?? minWidth,
+      // Keep the entrance scale animation out of pointer and keyboard resize math.
+      width: dialog?.offsetWidth ?? minWidth,
     }),
     preview: (next) => onWidthChange(next, false),
     commit: (next) => onWidthChange(next, true),

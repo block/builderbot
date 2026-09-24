@@ -2680,10 +2680,11 @@ async fn review_tip_sha(
 /// notes and reviews, and for remote branches round-trips the workspace, so
 /// the immediate start runs it *after* answering the client (see
 /// [`complete_running_branch_session_start`]) and the queued drain runs it
-/// before claiming the row. Neither path should have it on a Tokio worker:
-/// both context builds run under `spawn_blocking` so a captured-env retry
-/// inside the git log (see `cli::run_smart`) pins a blocking thread, not an
-/// async one.
+/// before claiming the row. For both immediate and queued starts, the local
+/// and remote context builders run under `spawn_blocking`, so a captured-env
+/// retry inside the git log (see `cli::run_smart`) pins a blocking thread, not
+/// an async one. Other preparation work in this function still runs in the
+/// async task.
 #[allow(clippy::too_many_arguments)]
 async fn prepare_branch_session_start(
     store: &Arc<Store>,
@@ -3560,13 +3561,22 @@ async fn start_queued_session_for_branch(
             worktree_path = worktree_path.join(subpath);
         }
 
-        let ctx = build_branch_context(
-            &worktree_path,
-            &branch.base_branch,
-            &store,
-            &branch_id,
-            &branch.project_id,
-        );
+        let worktree_path_for_context = worktree_path.clone();
+        let base_branch = branch.base_branch.clone();
+        let store_for_context = Arc::clone(&store);
+        let branch_id_for_context = branch_id.clone();
+        let project_id_for_context = branch.project_id.clone();
+        let ctx = tauri::async_runtime::spawn_blocking(move || {
+            build_branch_context(
+                &worktree_path_for_context,
+                &base_branch,
+                &store_for_context,
+                &branch_id_for_context,
+                &project_id_for_context,
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to build branch context: {e}"))?;
         let pikchr_grammar_reference =
             local_pikchr_grammar_reference_for_session(&app_handle, &session_type);
         (worktree_path, ctx, pikchr_grammar_reference)

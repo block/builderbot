@@ -287,28 +287,192 @@ describe('web transport', () => {
 
     unlisten();
   });
+
+  it('announces establishment again when the server reports dropped events', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const { listenToEvent } = await import('./transport');
+    const callback = vi.fn();
+    const onEstablished = vi.fn();
+    const unlisten = listenToEvent('doctor-login-output', callback, { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0].open();
+    expect(onEstablished).toHaveBeenCalledTimes(1);
+
+    // Events the server shed under load are as gone as ones emitted while the
+    // socket was down, so a consumer that catches up on `onEstablished` must
+    // hear about this gap the same way — there is no reconnect to prompt it.
+    sockets[0].emit({ event: 'transport:event-gap', payload: null });
+
+    expect(onEstablished).toHaveBeenCalledTimes(2);
+    expect(callback).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+
+    unlisten();
+  });
+
+  it('reports WebSocket setup failure to every listener waiting on the same connection', async () => {
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => {
+        throw new Error('client id unavailable');
+      },
+      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { listenToEvent } = await import('./transport');
+    const firstFailed = vi.fn();
+    const secondFailed = vi.fn();
+    const firstEstablished = vi.fn();
+    const secondEstablished = vi.fn();
+
+    const unlistenFirst = listenToEvent('doctor-login-output', vi.fn(), {
+      onEstablished: firstEstablished,
+      onRegistrationFailed: firstFailed,
+    });
+    const unlistenSecond = listenToEvent('session-background-hold', vi.fn(), {
+      onEstablished: secondEstablished,
+      onRegistrationFailed: secondFailed,
+    });
+
+    await vi.waitFor(() => expect(firstFailed).toHaveBeenCalledTimes(1));
+    expect(secondFailed).toHaveBeenCalledTimes(1);
+    expect(firstFailed.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(secondFailed.mock.calls[0][0]).toBe(firstFailed.mock.calls[0][0]);
+    expect(firstEstablished).not.toHaveBeenCalled();
+    expect(secondEstablished).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+
+    unlistenFirst();
+    unlistenSecond();
+    consoleError.mockRestore();
+  });
+
+  it('continues after WebSocket setup failure and does not report listeners that left', async () => {
+    let fail = true;
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => {
+        if (fail) throw new Error('client id unavailable');
+        return 'web-client-1';
+      },
+      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { listenToEvent } = await import('./transport');
+    const staleFailed = vi.fn();
+    const currentFailed = vi.fn();
+    const onEstablished = vi.fn();
+
+    const unlistenStale = listenToEvent('doctor-login-output', vi.fn(), {
+      onRegistrationFailed: staleFailed,
+    });
+    unlistenStale();
+    const unlistenCurrent = listenToEvent('doctor-login-output', vi.fn(), {
+      onEstablished,
+      onRegistrationFailed: currentFailed,
+    });
+
+    await vi.waitFor(() => expect(currentFailed).toHaveBeenCalledTimes(1));
+    expect(staleFailed).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(0);
+
+    fail = false;
+    const onSecondEstablished = vi.fn();
+    const unlistenSecond = listenToEvent('session-background-hold', vi.fn(), {
+      onEstablished: onSecondEstablished,
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0].open();
+    await vi.waitFor(() => expect(onSecondEstablished).toHaveBeenCalledTimes(1));
+    expect(onEstablished).not.toHaveBeenCalled();
+
+    unlistenCurrent();
+    unlistenSecond();
+    consoleError.mockRestore();
+  });
+
+  it('keeps listeners without onRegistrationFailed registered across a WebSocket setup failure', async () => {
+    let fail = true;
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => {
+        if (fail) throw new Error('client id unavailable');
+        return 'web-client-1';
+      },
+      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+    }));
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { listenToEvent } = await import('./transport');
+    const plainCallback = vi.fn();
+    const loginCallback = vi.fn();
+    const loginFailed = vi.fn();
+
+    // A plain listener (session status, change feed, ...) has no way to be
+    // told about the failure and nothing to do about it, so it must survive
+    // for the next attempt. The login listener asked to hear about it and is
+    // dropped: its owner has already given the run up.
+    const unlistenPlain = listenToEvent('session-status-changed', plainCallback);
+    const unlistenLogin = listenToEvent('doctor-login-output', loginCallback, {
+      onRegistrationFailed: loginFailed,
+    });
+
+    await vi.waitFor(() => expect(loginFailed).toHaveBeenCalledTimes(1));
+    expect(sockets).toHaveLength(0);
+
+    fail = false;
+    const onEstablished = vi.fn();
+    const unlistenNext = listenToEvent('session-background-hold', vi.fn(), { onEstablished });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    sockets[0].open();
+    await vi.waitFor(() => expect(onEstablished).toHaveBeenCalledTimes(1));
+
+    sockets[0].emit({ event: 'session-status-changed', payload: { sessionId: 's1' } });
+    expect(plainCallback).toHaveBeenCalledWith({ sessionId: 's1' });
+
+    sockets[0].emit({ event: 'doctor-login-output', payload: { line: 'late' } });
+    expect(loginCallback).not.toHaveBeenCalled();
+
+    unlistenPlain();
+    unlistenLogin();
+    unlistenNext();
+    expect(sockets[0].closed).toBe(true);
+    consoleError.mockRestore();
+  });
 });
 
 describe('tauri listener establishment', () => {
   let resolveListen: ((unlisten: () => void) => void) | undefined;
+  let rejectListen: ((error: unknown) => void) | undefined;
   let listen: ReturnType<typeof vi.fn>;
   let tauriUnlisten: ReturnType<typeof vi.fn<() => void>>;
+  let consoleError: MockInstance<typeof console.error>;
 
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('__TAURI__', {});
     resolveListen = undefined;
+    rejectListen = undefined;
     tauriUnlisten = vi.fn<() => void>();
     listen = vi.fn(
       () =>
-        new Promise<() => void>((resolve) => {
+        new Promise<() => void>((resolve, reject) => {
           resolveListen = resolve;
+          rejectListen = reject;
         })
     );
     vi.doMock('@tauri-apps/api/event', () => ({ listen }));
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    consoleError.mockRestore();
     vi.doUnmock('@tauri-apps/api/event');
     vi.unstubAllGlobals();
   });
@@ -344,6 +508,38 @@ describe('tauri listener establishment', () => {
     // left to take a snapshot for.
     await vi.waitFor(() => expect(tauriUnlisten).toHaveBeenCalledTimes(1));
     expect(onEstablished).not.toHaveBeenCalled();
+  });
+
+  it('reports a registration that fails instead of leaving the consumer waiting', async () => {
+    const { listenToEvent } = await import('./transport');
+    const onEstablished = vi.fn();
+    const onRegistrationFailed = vi.fn();
+    listenToEvent('doctor-login-output', vi.fn(), { onEstablished, onRegistrationFailed });
+
+    await vi.waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+    const failure = new Error('ipc down');
+    rejectListen?.(failure);
+
+    // A consumer that waits for `onEstablished` before acting has no other way
+    // to learn that the wait will never end.
+    await vi.waitFor(() => expect(onRegistrationFailed).toHaveBeenCalledWith(failure));
+    expect(onEstablished).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not report a failed registration the consumer already walked away from', async () => {
+    const { listenToEvent } = await import('./transport');
+    const onRegistrationFailed = vi.fn();
+    const unlisten = listenToEvent('doctor-login-output', vi.fn(), { onRegistrationFailed });
+
+    await vi.waitFor(() => expect(listen).toHaveBeenCalledTimes(1));
+    unlisten();
+    rejectListen?.(new Error('ipc down'));
+
+    // Still logged — the failure is real — but the hook stays silent, matching
+    // `onEstablished` after an early unlisten.
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(1));
+    expect(onRegistrationFailed).not.toHaveBeenCalled();
   });
 });
 

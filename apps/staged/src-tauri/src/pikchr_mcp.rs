@@ -1713,6 +1713,7 @@ arrow from COLL.e to SNOW.w"#;
             cancel_token: &CancellationToken,
             _agent_session_id: Option<&str>,
             _config_options: &[acp_client::AcpSessionConfigOptionSelection],
+            _auth_selection: Option<&acp_client::AcpAuthenticationSelection>,
         ) -> Result<acp_client::AgentRunOutcome, String> {
             assert!(
                 self.registry.cancel(session_id),
@@ -1804,6 +1805,7 @@ arrow from COLL.e to SNOW.w"#;
             _cancel_token: &CancellationToken,
             _agent_session_id: Option<&str>,
             _config_options: &[acp_client::AcpSessionConfigOptionSelection],
+            _auth_selection: Option<&acp_client::AcpAuthenticationSelection>,
         ) -> Result<acp_client::AgentRunOutcome, String> {
             self.ran.set(true);
             Ok(acp_client::AgentRunOutcome::Completed)

@@ -218,6 +218,8 @@ pub(crate) fn kill_child_process_group_or_child(child: &mut Child) -> KillReach 
     KillReach::ChildOnly
 }
 
+/// `SIGKILL` the child's process group: `kill(2)` treats a negative pid as a
+/// process group ID.
 #[cfg(unix)]
 fn kill_child_process_group(child: &Child) -> bool {
     let Ok(pid) = i32::try_from(child.id()) else {

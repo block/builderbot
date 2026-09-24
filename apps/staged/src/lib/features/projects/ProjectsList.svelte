@@ -479,6 +479,11 @@
                       {/if}
                       <span>{projectDisplayName(project)}</span>
                     </div>
+                    {#if activity}
+                      <div class="card-activity">
+                        {activity}
+                      </div>
+                    {/if}
                     {#if status.kind === 'deleting'}
                       <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
                     {/if}
@@ -533,11 +538,6 @@
                         No repo attached
                       {/if}
                     </div>
-                    {#if activity}
-                      <div class="card-activity">
-                        {activity}
-                      </div>
-                    {/if}
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">

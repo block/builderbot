@@ -2088,9 +2088,11 @@ fn can_start_with_active_branch_sessions(
 /// has already recorded the tip SHA it will store as reviewed, so what it
 /// stores may not be what it read. Beside a commit session or commit pipeline
 /// only an exclusive candidate is refused, since two of those would have two
-/// agents editing the same tree. Reset-to-origin and discard run outside the
-/// session queue and so are invisible here — the frontend withholds the menu
-/// item during those.
+/// agents editing the same tree. Reset-to-origin and discard move the tree the
+/// way a pull does but run outside the session queue, so the active set read
+/// here cannot carry them; they mark the branch instead (see
+/// [`BranchWorktreeOperationGuard`]) and the pre-check and claim refuse every
+/// candidate while the marker is set, alongside this function's rules.
 fn can_force_start_with_active(
     candidate: BranchSessionScheduleKind,
     active: &HashSet<BranchSessionScheduleKind>,
@@ -2101,10 +2103,11 @@ fn can_force_start_with_active(
     !candidate.is_exclusive() || !active.iter().any(|kind| kind.is_exclusive())
 }
 
-/// The refusal a forced start reports when `can_force_start_with_active` would
-/// not let `candidate` run. A note or review can only be blocked by a git
-/// pipeline, which finishes on its own; a commit may be waiting on a commit
-/// session the user would have to stop.
+/// The refusal a forced start reports when `can_force_start_with_active` or
+/// the worktree-operation marker would not let `candidate` run. A note or
+/// review can only be blocked by a git action — a push/pull pipeline or an
+/// in-flight reset/discard — all of which finish on their own; a commit may be
+/// waiting on a commit session the user would have to stop.
 fn force_start_blocked_message(candidate: BranchSessionScheduleKind) -> &'static str {
     if candidate.is_exclusive() {
         "A commit or git action is running on this branch. Stop it first."
@@ -2119,7 +2122,8 @@ pub(crate) enum QueuedSessionStartMode {
     /// The branch drain: queue order, the worktree rule, and one instance per
     /// kind (`can_start_with_active_branch_sessions`).
     Drain,
-    /// "Start now": the worktree rules alone (`can_force_start_with_active`).
+    /// "Start now": the worktree rules alone (`can_force_start_with_active`
+    /// plus the reset/discard marker, `branch_worktree_operation_in_flight`).
     Force,
 }
 
@@ -2219,10 +2223,18 @@ impl QueuedSessionClaim {
 
         let active = running_branch_session_kinds(store, &self.branch_id)?;
         let allowed = match self.mode {
+            // The drain is deliberately not gated on the worktree-operation
+            // marker: it only fires on terminal states, so a refusal here
+            // would leave the queue stalled until something else drained it.
+            // Reset and discard take seconds; the forced start is the path a
+            // user can point at a moving tree, so it is the one refused.
             QueuedSessionStartMode::Drain => {
                 can_start_with_active_branch_sessions(self.kind, &active)
             }
-            QueuedSessionStartMode::Force => can_force_start_with_active(self.kind, &active),
+            QueuedSessionStartMode::Force => {
+                !branch_worktree_operation_in_flight(&self.branch_id)
+                    && can_force_start_with_active(self.kind, &active)
+            }
         };
         if !allowed {
             return Ok(QueuedSessionStart::Blocked);
@@ -2377,6 +2389,59 @@ pub(crate) fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> 
             .entry(branch_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(()))),
     )
+}
+
+/// Branches with a reset-to-origin or discard-worktree-changes in flight.
+///
+/// Those two git actions run outside the session queue — no session row, no
+/// pipeline — so `running_branch_session_kinds` cannot see them, yet both move
+/// the tree under anything that starts beside them. They mark the branch here
+/// instead, keyed like the launch lock, and the forced-start gate consults the
+/// marker. A count rather than a set: each connected client can start one, and
+/// the first to finish must not clear the other's marker.
+fn branch_worktree_operations() -> &'static Mutex<HashMap<String, usize>> {
+    static OPERATIONS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    OPERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Marks a reset-to-origin or discard as in flight on a branch for as long as
+/// the value lives.
+///
+/// RAII so every way out of the operation — the validation refusals, a git
+/// failure, a panic — clears the marker; one left behind would withhold
+/// "Start now" on the branch until the app restarts.
+pub(crate) struct BranchWorktreeOperationGuard {
+    branch_id: String,
+}
+
+impl BranchWorktreeOperationGuard {
+    pub(crate) fn acquire(branch_id: &str) -> Self {
+        let mut operations = branch_worktree_operations().lock().unwrap();
+        *operations.entry(branch_id.to_string()).or_insert(0) += 1;
+        Self {
+            branch_id: branch_id.to_string(),
+        }
+    }
+}
+
+impl Drop for BranchWorktreeOperationGuard {
+    fn drop(&mut self) {
+        let mut operations = branch_worktree_operations().lock().unwrap();
+        if let Some(count) = operations.get_mut(&self.branch_id) {
+            *count -= 1;
+            if *count == 0 {
+                operations.remove(&self.branch_id);
+            }
+        }
+    }
+}
+
+/// Whether a reset-to-origin or discard is in flight on the branch.
+pub(crate) fn branch_worktree_operation_in_flight(branch_id: &str) -> bool {
+    branch_worktree_operations()
+        .lock()
+        .unwrap()
+        .contains_key(branch_id)
 }
 
 fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
@@ -3503,10 +3568,11 @@ enum ForcedStartPrecheck {
 /// (cancelled, finished) is still an error: nothing started and the row is not
 /// going to.
 ///
-/// The running-kinds check at the end is an early answer for the common
-/// refusal, not the gate: the start path awaits before it claims the row, and
-/// a terminal-state drain can land in that window and take a different
-/// exclusive row, so the claim re-reads it under the branch launch lock.
+/// The running-kinds and worktree-operation checks at the end are an early
+/// answer for the common refusal, not the gate: the start path awaits before
+/// it claims the row, and a terminal-state drain can land in that window and
+/// take a different exclusive row, so the claim re-reads both under the
+/// branch launch lock.
 fn forced_start_precheck(
     store: &Store,
     branch_id: &str,
@@ -3535,7 +3601,9 @@ fn forced_start_precheck(
         .ok_or_else(|| format!("Session {session_id} does not belong to branch {branch_id}"))?;
 
     let active = running_branch_session_kinds(store, branch_id)?;
-    if !can_force_start_with_active(schedule.kind, &active) {
+    if branch_worktree_operation_in_flight(branch_id)
+        || !can_force_start_with_active(schedule.kind, &active)
+    {
         return Err(force_start_blocked_message(schedule.kind).to_string());
     }
 
@@ -6593,6 +6661,85 @@ mod tests {
         );
     }
 
+    /// Reset-to-origin and discard have no session row, so the running-kinds
+    /// read cannot see them; their guard marks the branch and the forced claim
+    /// refuses every candidate while it is set — the same treatment a running
+    /// git pipeline gets, because all of them move the tree under anything
+    /// that starts beside them.
+    #[test]
+    fn force_claim_refuses_every_kind_while_a_worktree_operation_is_in_flight() {
+        let (store, branch) = setup_branch_store();
+        let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let review = create_branch_review_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
+
+        for (session_id, kind) in [
+            (&commit.id, BranchSessionScheduleKind::Commit),
+            (&note.id, BranchSessionScheduleKind::Note),
+            (&review.id, BranchSessionScheduleKind::Review),
+        ] {
+            let claim = QueuedSessionClaim::new(
+                &branch.id,
+                session_id,
+                kind,
+                QueuedSessionStartMode::Force,
+            );
+            assert_eq!(
+                claim.claim(&store).unwrap(),
+                QueuedSessionStart::Blocked,
+                "{kind:?}"
+            );
+            assert_eq!(
+                session_status(&store, session_id),
+                store::SessionStatus::Queued,
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The drain is deliberately not gated on the marker: it only fires on
+    /// terminal states, so a refusal would leave the queue stalled until
+    /// something else drained it. Only the forced start is refused.
+    #[test]
+    fn drain_claim_ignores_a_worktree_operation_in_flight() {
+        let (store, branch) = setup_branch_store();
+        let queued = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
+
+        let claim = QueuedSessionClaim::new(
+            &branch.id,
+            &queued.id,
+            BranchSessionScheduleKind::Commit,
+            QueuedSessionStartMode::Drain,
+        );
+
+        assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Started);
+        assert_eq!(
+            session_status(&store, &queued.id),
+            store::SessionStatus::Running
+        );
+    }
+
+    /// Two clients can each start one operation (the desktop app and a browser
+    /// via the web server); the first to finish must not clear the marker the
+    /// other still needs.
+    #[test]
+    fn worktree_operation_marker_counts_overlapping_operations() {
+        let branch_id = "worktree-operation-overlap-branch";
+        assert!(!branch_worktree_operation_in_flight(branch_id));
+
+        let first = BranchWorktreeOperationGuard::acquire(branch_id);
+        let second = BranchWorktreeOperationGuard::acquire(branch_id);
+        drop(first);
+        assert!(branch_worktree_operation_in_flight(branch_id));
+
+        drop(second);
+        assert!(!branch_worktree_operation_in_flight(branch_id));
+    }
+
     /// The forced start's first look at the row, before any context is built.
     /// A drain that won between the right-click and this read has left the row
     /// running — the user watched it start — so this is the quiet `Ok(false)`
@@ -6675,6 +6822,31 @@ mod tests {
         assert_eq!(
             session_status(&store, &queued.id),
             store::SessionStatus::Queued
+        );
+    }
+
+    /// The early refusal consults the reset/discard marker too, and a note or
+    /// review blocked by one gets the git-action wording — try again once it
+    /// finishes — not a pointer at a commit that was never the blocker.
+    #[test]
+    fn forced_start_precheck_refuses_every_kind_during_a_worktree_operation() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
+
+        let err = forced_start_precheck(&store, &branch.id, &note.id).unwrap_err();
+        assert_eq!(
+            err,
+            force_start_blocked_message(BranchSessionScheduleKind::Note)
+        );
+        assert!(err.contains("Try again once it finishes"), "{err}");
+
+        let err = forced_start_precheck(&store, &branch.id, &commit.id).unwrap_err();
+        assert_eq!(
+            err,
+            force_start_blocked_message(BranchSessionScheduleKind::Commit)
         );
     }
 

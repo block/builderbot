@@ -25,9 +25,11 @@ export type QueuedSessionKind = 'commit' | 'note' | 'review';
  *   running commit is the action's main use case, and reading a tree mid-edit
  *   is the trade it makes.
  *
- * Reset-to-origin and discard run outside the session queue, so the backend's
- * own guard cannot see them; this frontend check is the only thing withholding
- * the action during those.
+ * Reset-to-origin and discard run outside the session queue, and the flags
+ * behind `gitActionRunning` only know about the ones this client started — so
+ * this check is the fast local withhold, not the safety net. The backend marks
+ * the branch while either runs and refuses a forced start from any connected
+ * client, which is what catches a reset or discard another window started.
  *
  * The item is omitted rather than rendered disabled: the row already reads as
  * queued, and it comes back on its own once the branch frees up.

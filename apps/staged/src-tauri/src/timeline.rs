@@ -982,6 +982,15 @@ pub(crate) fn reset_branch_to_remote_impl(
     store: &Arc<Store>,
     branch_id: &str,
 ) -> Result<(), String> {
+    // Reset runs outside the session queue, so this marker is what lets the
+    // forced-start gate refuse "Start now" — from any connected client, not
+    // just the one whose flags withheld the menu item — while HEAD is moving.
+    // Acquired here rather than in the entry points so the Tauri command and
+    // the web-server arm are covered alike, and RAII so every refusal below
+    // clears it.
+    let _worktree_operation =
+        crate::session_commands::BranchWorktreeOperationGuard::acquire(branch_id);
+
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -1151,6 +1160,11 @@ pub(crate) fn discard_worktree_changes_impl(
     branch_id: &str,
     expected_preview: Option<WorktreeChangesPreview>,
 ) -> Result<(), String> {
+    // Same cross-client marker as `reset_branch_to_remote_impl`: discard also
+    // rewrites the tree outside the session queue.
+    let _worktree_operation =
+        crate::session_commands::BranchWorktreeOperationGuard::acquire(branch_id);
+
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -1642,6 +1656,39 @@ mod tests {
         let err = reset_branch_to_remote_impl(&store, &branch.id).unwrap_err();
 
         assert!(err.contains("HEAD is detached"));
+    }
+
+    /// The marker the impl sets for the forced-start gate is RAII: a reset
+    /// refused by validation — deep in, after the git state was computed —
+    /// must clear it, or "Start now" would stay withheld on the branch until
+    /// the app restarts.
+    #[test]
+    fn failed_reset_clears_the_worktree_operation_marker() {
+        let (_origin, clone) = remote_backed_feature();
+        fs::write(clone.path.join("local.txt"), "local\n").unwrap();
+        run_git(&clone.path, &["add", "."]);
+        run_git(&clone.path, &["commit", "-m", "local"]);
+        let (store, branch) = store_with_branch_path(&clone.path);
+
+        let err = reset_branch_to_remote_impl(&store, &branch.id).unwrap_err();
+
+        assert!(err.contains("only available when the branch has diverged"));
+        assert!(!crate::session_commands::branch_worktree_operation_in_flight(&branch.id));
+    }
+
+    /// Same for discard, on the earliest error return the impl has.
+    #[test]
+    fn failed_discard_clears_the_worktree_operation_marker() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        let err = discard_worktree_changes_impl(&store, &branch.id, None).unwrap_err();
+
+        assert!(err.contains("No worktree for branch"));
+        assert!(!crate::session_commands::branch_worktree_operation_in_flight(&branch.id));
     }
 
     #[test]

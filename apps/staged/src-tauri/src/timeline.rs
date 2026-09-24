@@ -423,6 +423,18 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 git::EnvSource::Lite,
             ));
 
+            if let Ok(Some(project)) = store.get_project(&branch.project_id) {
+                let session_working_dir = branches::local_branch_session_working_dir(
+                    store,
+                    &project,
+                    &branch,
+                    worktree_path,
+                );
+                if session_working_dir.as_path() != worktree_path {
+                    git::prewarm_shell_env(&session_working_dir);
+                }
+            }
+
             {
                 let path_str = wd.path.clone();
                 // `git config user.{name,email}` reads `.git/config` + `~/.gitconfig`

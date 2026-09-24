@@ -947,6 +947,62 @@ fn finish_cancelled_before_run<R: tauri::Runtime>(
     transitioned
 }
 
+/// Record and announce the terminal state of a branch session whose start
+/// failed after its row was already `running` and its caller had already
+/// answered.
+///
+/// The immediate branch start inserts its row and responds before the prompt
+/// context is built and before [`start_session`] runs (see
+/// `session_commands::complete_running_branch_session_start`), so a failure in
+/// either has no caller left to return to: the row has to carry it, the way
+/// the session thread's own `Err` arm records a crashed run.
+///
+/// Gated on winning `transition_from_running` like
+/// [`finish_failed_pipeline_handoff_start`]. A Stop that landed first has
+/// already written `cancelled` — through `cancel_session_impl`'s fallback
+/// while nothing was registered, or through [`finish_cancelled_before_run`] on
+/// the way out of `start_session` — and emitted it, and an `error` behind that
+/// would talk over the user's Stop. A row that is *gone* still gets the emit,
+/// which is all that clears the client's `running` state.
+///
+/// Returns whether the transition won, which is what says this path owns the
+/// terminal state — and so owes the branch queue the drain that state
+/// unblocks. The caller drains; it holds the concrete handle the drain needs.
+#[must_use]
+pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
+    session_id: &str,
+    branch_id: Option<String>,
+    project_id: Option<String>,
+    store: &Store,
+    app_handle: &AppHandle<R>,
+    error: &str,
+) -> bool {
+    let transitioned = store
+        .transition_from_running(
+            session_id,
+            SessionStatus::Error,
+            Some(error),
+            Some(&CompletionReason::Crashed),
+        )
+        .unwrap_or(false);
+    log::error!(
+        "Session {session_id} failed before its run started (transition won: \
+         {transitioned}): {error}"
+    );
+    if transitioned || matches!(store.get_session(session_id), Ok(None)) {
+        emit_status(
+            app_handle,
+            session_id,
+            SessionStatus::Error.as_str(),
+            Some(error.to_string()),
+            Some(&CompletionReason::Crashed),
+            branch_id,
+            project_id,
+        );
+    }
+    transitioned
+}
+
 /// Start a session: persist the user message, spawn the agent, stream to DB.
 ///
 /// Returns immediately — the actual agent work happens on a background task.
@@ -4818,6 +4874,69 @@ mod tests {
             "a Stop is not the handoff step failing"
         );
         assert_eq!(step.error, None);
+    }
+
+    /// The immediate branch start has answered its client by the time the
+    /// context build or `start_session` can fail, so the row is the only place
+    /// the failure can go: it reads `error`/`Crashed` with the message, and
+    /// the write reports that it owns the terminal state (and so the drain).
+    #[test]
+    fn a_failed_start_after_the_response_records_the_error_on_the_row() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("prompt", &PathBuf::from("/tmp"));
+        store.create_session(&session).unwrap();
+        let app = mock_app();
+
+        assert!(finish_failed_before_run(
+            &session.id,
+            Some("branch-1".to_string()),
+            None,
+            &store,
+            app.handle(),
+            "No worktree for branch: branch-1",
+        ));
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Error);
+        assert_eq!(
+            row.error_message.as_deref(),
+            Some("No worktree for branch: branch-1")
+        );
+        assert_eq!(row.completion_reason, Some(CompletionReason::Crashed));
+    }
+
+    /// A Stop that landed first — through `cancel_session_impl`'s fallback
+    /// while nothing was registered, or through `finish_cancelled_before_run`
+    /// on the way out of `start_session` — already owns the row. The failure
+    /// must not talk over it, and must report that it recorded nothing.
+    #[test]
+    fn a_failed_start_after_the_response_leaves_a_stopped_row_alone() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("prompt", &PathBuf::from("/tmp"));
+        store.create_session(&session).unwrap();
+        let app = mock_app();
+
+        assert!(finish_cancelled_before_run(
+            &session.id,
+            None,
+            None,
+            &store,
+            app.handle(),
+            CompletionReason::Interrupted,
+        ));
+        assert!(!finish_failed_before_run(
+            &session.id,
+            None,
+            None,
+            &store,
+            app.handle(),
+            "No ACP agent found.",
+        ));
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Cancelled);
+        assert_eq!(row.completion_reason, Some(CompletionReason::Interrupted));
+        assert_eq!(row.error_message, None);
     }
 
     /// The drain the startup-failure path kicks hangs off this answer: a

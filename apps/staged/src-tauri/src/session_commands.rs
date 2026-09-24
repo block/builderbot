@@ -2524,6 +2524,62 @@ pub async fn start_project_session(
     })
 }
 
+/// The part of a branch session start that the row insert needs and that
+/// costs only store reads: the branch, its project, and the directory the
+/// agent will run in.
+///
+/// Everything slower — the git log, the timeline, the full prompt — is
+/// [`prepare_branch_session_start`], which the immediate start runs behind
+/// its response (see [`complete_running_branch_session_start`]).
+struct BranchSessionTarget {
+    branch: store::Branch,
+    project: store::Project,
+    /// Local: the worktree joined with the project (or project-repo) subpath,
+    /// which is also the agent's cwd. Remote: the derived clone path, a
+    /// fallback — the actual work happens via ws_exec, not the local
+    /// filesystem.
+    working_dir: PathBuf,
+}
+
+fn resolve_branch_session_target(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<BranchSessionTarget, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let working_dir = if branch.workspace_name.is_some() {
+        resolve_branch_repo_slug(store, &project, &branch)
+            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+
+        crate::branches::local_branch_session_working_dir(
+            store,
+            &project,
+            &branch,
+            PathBuf::from(&workdir.path),
+        )
+    };
+
+    Ok(BranchSessionTarget {
+        branch,
+        project,
+        working_dir,
+    })
+}
+
 struct PreparedBranchSessionStart {
     branch: store::Branch,
     session_type: BranchSessionType,
@@ -2606,41 +2662,41 @@ async fn review_tip_sha(
         .unwrap_or_else(|| "unknown".to_string()))
 }
 
+/// Everything a branch session needs beyond its row: the branch context, the
+/// full prompt, and the SHAs its artifact anchors to.
+///
+/// This is the slow half of a start. It reads the git log, walks the branch's
+/// notes and reviews, and for remote branches round-trips the workspace, so
+/// the immediate start runs it *after* answering the client (see
+/// [`complete_running_branch_session_start`]) and the queued drain runs it
+/// before claiming the row. For both immediate and queued starts, the local
+/// and remote context builders run under `spawn_blocking`, so a captured-env
+/// retry inside the git log (see `cli::run_smart`) pins a blocking thread, not
+/// an async one. Other preparation work in this function still runs in the
+/// async task.
 #[allow(clippy::too_many_arguments)]
 async fn prepare_branch_session_start(
     store: &Arc<Store>,
     app_handle: &tauri::AppHandle,
-    branch_id: &str,
+    target: &BranchSessionTarget,
     prompt: &str,
     session_type: BranchSessionType,
     provider: Option<String>,
     launch_context: Option<&BranchSessionLaunchContext>,
 ) -> Result<PreparedBranchSessionStart, String> {
-    let branch = store
-        .get_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
+    let branch = &target.branch;
+    let project = &target.project;
+    let working_dir = target.working_dir.clone();
     let is_remote = branch.workspace_name.is_some();
 
-    // Resolve working directory and branch context.
-    // Remote branches use ws_exec for git operations; local branches use the worktree directly.
-    let (working_dir, branch_context, pikchr_grammar_reference) = if is_remote {
-        // For remote branches, use the derived clone path as a fallback working dir.
-        // The actual work happens via ws_exec, not local filesystem.
-        let fallback_dir = resolve_branch_repo_slug(store, &project, &branch)
-            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
+    // Remote branches use ws_exec for git operations; local branches use the
+    // worktree directly.
+    let (branch_context, pikchr_grammar_reference) = if is_remote {
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
         let pikchr_grammar_staging = remote_pikchr_grammar_staging(app_handle, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(store);
-        let branch_id_for_context = branch_id.to_string();
+        let branch_id_for_context = branch.id.clone();
         let project_id_for_context = branch.project_id.clone();
         let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
@@ -2655,59 +2711,45 @@ async fn prepare_branch_session_start(
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
         (
-            fallback_dir,
             remote_context.branch_context,
             remote_context.pikchr_grammar_reference,
         )
     } else {
-        let workdir = store
-            .get_workdir_for_branch(branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-
-        let mut worktree_path = PathBuf::from(&workdir.path);
-        // Use the project_repo's subpath when the branch is attached to a specific
-        // repo (e.g. a secondary repo with no subpath), rather than always falling
-        // back to the project-level subpath which may belong to a different repo.
-        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            store
-                .get_project_repo(repo_id)
-                .ok()
-                .flatten()
-                .and_then(|repo| repo.subpath)
-        } else {
-            project.subpath.clone()
-        };
-        if let Some(ref subpath) = effective_subpath {
-            worktree_path = worktree_path.join(subpath);
-        }
-
-        let ctx = build_branch_context(
-            &worktree_path,
-            &branch.base_branch,
-            store,
-            branch_id,
-            &branch.project_id,
-        );
+        let worktree_path = working_dir.clone();
+        let base_branch = branch.base_branch.clone();
+        let store_for_context = Arc::clone(store);
+        let branch_id_for_context = branch.id.clone();
+        let project_id_for_context = branch.project_id.clone();
+        let ctx = tauri::async_runtime::spawn_blocking(move || {
+            build_branch_context(
+                &worktree_path,
+                &base_branch,
+                &store_for_context,
+                &branch_id_for_context,
+                &project_id_for_context,
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to build branch context: {e}"))?;
         let pikchr_grammar_reference =
             local_pikchr_grammar_reference_for_session(app_handle, &session_type);
-        (worktree_path, ctx, pikchr_grammar_reference)
+        (ctx, pikchr_grammar_reference)
     };
 
     let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
-        commit_pre_head_sha(store, &branch, &working_dir).await?
+        commit_pre_head_sha(store, branch, &working_dir).await?
     } else {
         None
     };
 
     let review_tip_sha = if matches!(session_type, BranchSessionType::Review) {
-        Some(review_tip_sha(store, &branch, &working_dir).await?)
+        Some(review_tip_sha(store, branch, &working_dir).await?)
     } else {
         None
     };
 
     // Build the full prompt with action instructions + project information + branch context.
-    let project_information = build_project_context(store, &project, &branch);
+    let project_information = build_project_context(store, project, branch);
     let full_prompt = build_full_prompt_with_pikchr_reference(
         prompt,
         &project_information,
@@ -2749,7 +2791,7 @@ async fn prepare_branch_session_start(
     };
 
     Ok(PreparedBranchSessionStart {
-        branch,
+        branch: branch.clone(),
         session_type,
         provider,
         working_dir,
@@ -2760,39 +2802,61 @@ async fn prepare_branch_session_start(
     })
 }
 
+/// Insert the `running` row and artifact stub for an immediate branch start,
+/// before any context exists for it.
+///
+/// The row goes in the shape a queued row has when the drain claims it: the
+/// raw prompt with the launch context embedded (see [`embed_launch_context`])
+/// and the resolved working directory, but no branch context — that is built
+/// behind the response and swapped in with `prepare_queued_session`, the same
+/// primitive the drain uses. Every reader of the stored prompt is a
+/// completion- or display-time path, so the raw prompt is safe for the moment
+/// it stands. A review's `commit_sha` likewise starts empty, as a queued
+/// review's does, and is filled in once the tip SHA has been read.
+///
+/// Images are linked here rather than left to `start_session` so they don't
+/// surface as orphans in the branch timeline the client reloads on the
+/// response; `start_session` re-links them idempotently.
+#[allow(clippy::too_many_arguments)]
 fn insert_running_branch_session(
     store: &Arc<Store>,
-    prepared: &PreparedBranchSessionStart,
+    target: &BranchSessionTarget,
     prompt: &str,
+    session_type: &BranchSessionType,
+    provider: Option<&str>,
+    image_ids: &[String],
+    launch_context: Option<&BranchSessionLaunchContext>,
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<CreatedBranchSession, String> {
+    let stored_prompt = embed_launch_context(prompt, launch_context)?;
     let mut session = with_optional_acp_config_selection(
-        store::Session::new_running(&prepared.full_prompt, &prepared.working_dir),
+        store::Session::new_running(&stored_prompt, &target.working_dir),
         acp_config_selection,
     );
-    if let Some(ref p) = prepared.provider {
+    if let Some(p) = provider {
         session = session.with_provider(p);
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    let artifact_id = match &prepared.session_type {
+    store
+        .set_images_session_id(image_ids, &session.id)
+        .map_err(|e| e.to_string())?;
+
+    let branch_id = target.branch.id.as_str();
+    let artifact_id = match session_type {
         BranchSessionType::Note => {
-            let note = store::Note::new(&prepared.branch.id, prompt, "").with_session(&session.id);
+            let note = store::Note::new(branch_id, prompt, "").with_session(&session.id);
             store.create_note(&note).map_err(|e| e.to_string())?;
             note.id
         }
         BranchSessionType::Commit => {
-            let commit = store::Commit::new_pending(&prepared.branch.id).with_session(&session.id);
+            let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
             store.create_commit(&commit).map_err(|e| e.to_string())?;
             commit.id
         }
         BranchSessionType::Review => {
-            let review = store::Review::new(
-                &prepared.branch.id,
-                prepared.review_tip_sha.as_deref().unwrap_or("unknown"),
-                store::ReviewScope::Branch,
-            )
-            .with_session(&session.id);
+            let review = store::Review::new(branch_id, "", store::ReviewScope::Branch)
+                .with_session(&session.id);
             store.create_review(&review).map_err(|e| e.to_string())?;
             review.id
         }
@@ -2855,7 +2919,8 @@ fn insert_queued_branch_session(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Hand a prepared branch session to the runner. The `running` status was
+/// emitted when the row was inserted, so this only starts the agent.
 fn launch_running_branch_session(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -2863,10 +2928,9 @@ fn launch_running_branch_session(
     prepared: PreparedBranchSessionStart,
     created: CreatedBranchSession,
     image_ids: Vec<String>,
-) -> Result<BranchSessionResponse, String> {
+) -> Result<session_runner::SessionStartOutcome, String> {
     let session_type = prepared.session_type;
     let branch = prepared.branch;
-    let session_type_str = session_type.as_str();
     let branch_id = branch.id.clone();
     let project_id = branch.project_id.clone();
     let workspace_name = branch.workspace_name.clone();
@@ -2875,14 +2939,6 @@ fn launch_running_branch_session(
     let expose_pikchr_tools = local_note_pikchr_tools_available(
         matches!(session_type, BranchSessionType::Note),
         workspace_name.as_deref(),
-    );
-
-    session_runner::emit_session_running(
-        &app_handle,
-        &created.session.id,
-        &branch_id,
-        &project_id,
-        session_type_str,
     );
 
     session_runner::start_session(
@@ -2911,15 +2967,175 @@ fn launch_running_branch_session(
         store,
         app_handle,
         Arc::clone(&registry),
-    )?;
-
-    Ok(BranchSessionResponse {
-        session_id: created.session.id,
-        artifact_id: created.artifact_id,
-        session_status: BranchSessionLaunchStatus::Running,
-    })
+    )
 }
 
+/// Whether `session_id` is still the `running` row the insert left behind.
+///
+/// Between the insert and `start_session`'s registration nothing holds a
+/// token for the session, so a Stop in that window takes
+/// `cancel_session_impl`'s fallback and writes `cancelled` straight to the
+/// row, and a delete removes it. Either way there is nothing left to start.
+fn branch_session_still_running(store: &Store, session_id: &str) -> Result<bool, String> {
+    let session = store.get_session(session_id).map_err(|e| e.to_string())?;
+    Ok(matches!(session, Some(s) if s.status == store::SessionStatus::Running))
+}
+
+/// How [`complete_running_branch_session_start`] left a session whose second
+/// phase ran to the end without failing.
+enum SecondPhaseOutcome {
+    /// The runner accepted the session. Its thread owns the terminal state
+    /// from here, and the branch drain that comes with it.
+    Launched,
+    /// The re-read found the row stopped or deleted, so no agent was spawned.
+    ///
+    /// The terminal state is someone else's, but the drain is not. A Stop in
+    /// the gap found no registered token and took `cancel_session_impl`'s
+    /// `!was_running` fallback, which writes `cancelled` and emits but never
+    /// drains — with no runner there was nothing whose drain it could be
+    /// pre-empting — and a delete drains nothing at all. Every start on the
+    /// branch that arrived in the meantime queued behind this row
+    /// (`should_queue_branch_session_start` saw it as `running`), and with no
+    /// session thread to end, nothing would move those rows until some
+    /// unrelated session on the branch happened to finish. `start_session`'s
+    /// cancelled-before-run arm drains for exactly this reason; this is the
+    /// same situation one step earlier, with the whole context build — a
+    /// `ws_exec` round trip, for a remote branch — as the window.
+    AlreadyEnded,
+}
+
+/// The second phase of an immediate branch start: build the context, give the
+/// row its full prompt, and hand the session to the runner.
+///
+/// Runs after [`start_or_queue_branch_session_for_store`] has answered the
+/// client, so nothing here can return to a caller. A failure — in the context
+/// build, the row update, or `start_session` itself — is recorded on the row
+/// and emitted by `finish_failed_before_run`, and the branch queue that row
+/// was blocking is drained, exactly as the session thread does for a run that
+/// crashes.
+///
+/// This mirrors the queued drain's shape (`start_queued_session_for_branch`):
+/// there the raw prompt waits in a `queued` row until the drain builds the
+/// context and calls `prepare_queued_session`; here it waits in a `running`
+/// row for the same update. Both leave a window between the row going
+/// `running` and the runner registering a token, in which a Stop writes
+/// `cancelled` directly to the row — so the row is re-read before the agent
+/// is spawned, and a session stopped or deleted in the meantime is left as it
+/// is. Its branch queue is not: see [`SecondPhaseOutcome::AlreadyEnded`].
+#[allow(clippy::too_many_arguments)]
+async fn complete_running_branch_session_start(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    target: BranchSessionTarget,
+    created: CreatedBranchSession,
+    prompt: String,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    image_ids: Vec<String>,
+    launch_context: Option<BranchSessionLaunchContext>,
+) {
+    let session_id = created.session.id.clone();
+    let branch_id = target.branch.id.clone();
+    let project_id = target.branch.project_id.clone();
+
+    let outcome: Result<SecondPhaseOutcome, String> = async {
+        let prepared = prepare_branch_session_start(
+            &store,
+            &app_handle,
+            &target,
+            &prompt,
+            session_type,
+            provider,
+            launch_context.as_ref(),
+        )
+        .await?;
+
+        // The row went in with the raw prompt; swap in the full prompt now
+        // that it exists. `working_dir` is unchanged — it was resolved for the
+        // insert — but this is the one primitive that writes the prompt.
+        store
+            .prepare_queued_session(
+                &session_id,
+                &prepared.working_dir.to_string_lossy(),
+                &prepared.full_prompt,
+            )
+            .map_err(|e| e.to_string())?;
+        if let Some(tip_sha) = prepared.review_tip_sha.as_deref() {
+            store
+                .update_review_commit_sha(&created.artifact_id, tip_sha)
+                .map_err(|e| e.to_string())?;
+        }
+
+        if !branch_session_still_running(&store, &session_id)? {
+            log::info!(
+                "Session {session_id} was stopped or deleted before its context was ready; \
+                 not starting an agent"
+            );
+            return Ok(SecondPhaseOutcome::AlreadyEnded);
+        }
+
+        launch_running_branch_session(
+            Arc::clone(&store),
+            Arc::clone(&registry),
+            app_handle.clone(),
+            prepared,
+            created,
+            image_ids,
+        )?;
+        Ok(SecondPhaseOutcome::Launched)
+    }
+    .await;
+
+    // Whether this task owes the branch its drain. This row is what every
+    // later start on the branch queued behind, and exactly one path kicks the
+    // queue when it stops blocking them: the session thread, once there is
+    // one, and this task until then.
+    let owes_drain = match outcome {
+        Ok(SecondPhaseOutcome::Launched) => false,
+        Ok(SecondPhaseOutcome::AlreadyEnded) => true,
+        // Owning the terminal state means owing the drain. Losing the
+        // transition means another writer got there first and drains — or
+        // already did — on its own account.
+        Err(error) => session_runner::finish_failed_before_run(
+            &session_id,
+            Some(branch_id.clone()),
+            Some(project_id),
+            &store,
+            &app_handle,
+            &error,
+        ),
+    };
+
+    if owes_drain {
+        match drain_queued_sessions_for_branch(store, registry, app_handle, branch_id, None).await {
+            Ok(true) => log::info!(
+                "Drained next queued session after session {session_id} did not start an agent"
+            ),
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "Failed to drain queued sessions after session {session_id} did not start an agent: {e}"
+            ),
+        }
+    }
+}
+
+/// Start a branch session now, or queue it behind the branch's running work.
+///
+/// An immediate start is two-phase. Under the branch's launch lock it decides
+/// start-or-queue and, for a start, inserts the `running` row with the raw
+/// prompt and the resolved working directory — store reads only. It then
+/// emits `running`, answers the client, and leaves the context build, the
+/// prompt update, and the runner handoff to
+/// [`complete_running_branch_session_start`] on a background task. The Start
+/// button therefore waits on the store and nothing else; the git log and the
+/// timeline walk surface as agent startup latency instead of a frozen dialog.
+///
+/// This is the shape the queued path has always had — raw prompt in the row,
+/// context built when the row is claimed — applied to the case where nothing
+/// is running. It also removes the second queue check the old shape needed:
+/// with the insert inside the same lock section as the decision, there is no
+/// prepare window for another start to slip into.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_or_queue_branch_session_for_store(
     store: Arc<Store>,
@@ -2938,7 +3154,7 @@ pub async fn start_or_queue_branch_session_for_store(
     let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
     let launch_lock = branch_session_launch_lock_for(&branch_id);
 
-    {
+    let (target, created) = {
         let _guard = launch_lock.lock().unwrap();
         if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
             return insert_queued_branch_session(
@@ -2949,40 +3165,51 @@ pub async fn start_or_queue_branch_session_for_store(
                 provider,
                 &image_ids,
                 launch_context.as_ref(),
-                acp_config_selection.clone(),
+                acp_config_selection,
             );
         }
-    }
-
-    let prepared = prepare_branch_session_start(
-        &store,
-        &app_handle,
-        &branch_id,
-        &prompt,
-        session_type.clone(),
-        provider.clone(),
-        launch_context.as_ref(),
-    )
-    .await?;
-
-    let created = {
-        let _guard = launch_lock.lock().unwrap();
-        if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
-            return insert_queued_branch_session(
-                &store,
-                &branch_id,
-                &prompt,
-                &session_type,
-                provider,
-                &image_ids,
-                launch_context.as_ref(),
-                acp_config_selection.clone(),
-            );
-        }
-        insert_running_branch_session(&store, &prepared, &prompt, acp_config_selection)?
+        let target = resolve_branch_session_target(&store, &branch_id)?;
+        let created = insert_running_branch_session(
+            &store,
+            &target,
+            &prompt,
+            &session_type,
+            provider.as_deref(),
+            &image_ids,
+            launch_context.as_ref(),
+            acp_config_selection,
+        )?;
+        (target, created)
     };
 
-    launch_running_branch_session(store, registry, app_handle, prepared, created, image_ids)
+    session_runner::emit_session_running(
+        &app_handle,
+        &created.session.id,
+        &branch_id,
+        &target.branch.project_id,
+        session_type.as_str(),
+    );
+
+    let response = BranchSessionResponse {
+        session_id: created.session.id.clone(),
+        artifact_id: created.artifact_id.clone(),
+        session_status: BranchSessionLaunchStatus::Running,
+    };
+
+    tauri::async_runtime::spawn(complete_running_branch_session_start(
+        store,
+        registry,
+        app_handle,
+        target,
+        created,
+        prompt,
+        session_type,
+        provider,
+        image_ids,
+        launch_context,
+    ));
+
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3309,27 +3536,29 @@ async fn start_queued_session_for_branch(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-        let mut worktree_path = PathBuf::from(&workdir.path);
-        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            store
-                .get_project_repo(repo_id)
-                .ok()
-                .flatten()
-                .and_then(|repo| repo.subpath)
-        } else {
-            project.subpath.clone()
-        };
-        if let Some(ref subpath) = effective_subpath {
-            worktree_path = worktree_path.join(subpath);
-        }
-
-        let ctx = build_branch_context(
-            &worktree_path,
-            &branch.base_branch,
+        let worktree_path = crate::branches::local_branch_session_working_dir(
             &store,
-            &branch_id,
-            &branch.project_id,
+            &project,
+            &branch,
+            PathBuf::from(&workdir.path),
         );
+
+        let worktree_path_for_context = worktree_path.clone();
+        let base_branch = branch.base_branch.clone();
+        let store_for_context = Arc::clone(&store);
+        let branch_id_for_context = branch_id.clone();
+        let project_id_for_context = branch.project_id.clone();
+        let ctx = tauri::async_runtime::spawn_blocking(move || {
+            build_branch_context(
+                &worktree_path_for_context,
+                &base_branch,
+                &store_for_context,
+                &branch_id_for_context,
+                &project_id_for_context,
+            )
+        })
+        .await
+        .map_err(|e| format!("Failed to build branch context: {e}"))?;
         let pikchr_grammar_reference =
             local_pikchr_grammar_reference_for_session(&app_handle, &session_type);
         (worktree_path, ctx, pikchr_grammar_reference)
@@ -5931,6 +6160,136 @@ mod tests {
             acp_config_selection_for_session_start(&session),
             Some(selection)
         );
+    }
+
+    /// The immediate start's row goes in before any context exists, in the
+    /// shape a queued row has when the drain claims it: the raw prompt with
+    /// the launch context embedded, the resolved working directory, and the
+    /// artifact stub already linked. The client's timeline reload on the
+    /// response finds everything it would find a second later, minus the
+    /// context the agent is about to be handed.
+    #[test]
+    fn immediate_start_inserts_a_running_row_with_the_raw_prompt() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let launch_context = BranchSessionLaunchContext {
+            source: "review".to_string(),
+            scope: "commit".to_string(),
+            commit_sha: "abc123".to_string(),
+            review_id: None,
+        };
+
+        let created = insert_running_branch_session(
+            &store,
+            &target,
+            "capture a note",
+            &BranchSessionType::Note,
+            Some("claude"),
+            &[],
+            Some(&launch_context),
+            None,
+        )
+        .unwrap();
+
+        let session = store.get_session(&created.session.id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Running);
+        assert_eq!(session.working_dir, target.working_dir.to_string_lossy());
+        assert_eq!(session.provider.as_deref(), Some("claude"));
+        let (prompt, context) = extract_launch_context(&session.prompt).unwrap();
+        assert_eq!(prompt, "capture a note");
+        assert_eq!(context, Some(launch_context));
+
+        let note = store.get_note(&created.artifact_id).unwrap().unwrap();
+        assert_eq!(note.session_id.as_deref(), Some(session.id.as_str()));
+    }
+
+    /// A review inserted this way has no tip SHA yet — reading it is part of
+    /// the slow half — so it starts empty like a queued review's and is
+    /// filled in by `update_review_commit_sha` once the context is built.
+    #[test]
+    fn immediate_start_review_row_starts_without_a_tip_sha() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+
+        let created = insert_running_branch_session(
+            &store,
+            &target,
+            "",
+            &BranchSessionType::Review,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let review = store.get_review(&created.artifact_id).unwrap().unwrap();
+        assert_eq!(review.commit_sha, "");
+        assert_eq!(
+            review.session_id.as_deref(),
+            Some(created.session.id.as_str())
+        );
+    }
+
+    /// The working directory the row carries is the agent's cwd: the worktree
+    /// joined with the project subpath, resolved from the store alone so the
+    /// insert never waits on git or a shell.
+    #[test]
+    fn immediate_start_target_joins_the_project_subpath() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut project = store::Project::new("test-owner/test-repo");
+        project.subpath = Some("apps/staged".to_string());
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let workdir =
+            store::Workdir::new(&project.id, "/tmp/staged-test-worktree").with_branch(&branch.id);
+        store.create_workdir(&workdir).unwrap();
+
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+
+        assert_eq!(
+            target.working_dir,
+            PathBuf::from("/tmp/staged-test-worktree/apps/staged")
+        );
+        assert_eq!(target.branch.id, branch.id);
+        assert_eq!(target.project.id, project.id);
+    }
+
+    /// A Stop that lands while the context is building finds no registered
+    /// token and writes `cancelled` straight to the row, and a delete removes
+    /// it. The second phase re-reads the row before spawning an agent so
+    /// neither gets one — and drains the branch queue instead, since neither
+    /// writer did (see `SecondPhaseOutcome::AlreadyEnded`).
+    #[test]
+    fn immediate_start_second_phase_sees_a_stop_that_landed_in_the_gap() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let created = insert_running_branch_session(
+            &store,
+            &target,
+            "capture a note",
+            &BranchSessionType::Note,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(branch_session_still_running(&store, &created.session.id).unwrap());
+
+        store
+            .update_session_status(
+                &created.session.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::Interrupted),
+            )
+            .unwrap();
+        assert!(!branch_session_still_running(&store, &created.session.id).unwrap());
+
+        store.delete_session(&created.session.id).unwrap();
+        assert!(!branch_session_still_running(&store, &created.session.id).unwrap());
     }
 
     #[test]

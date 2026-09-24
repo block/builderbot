@@ -92,39 +92,43 @@
   {:else}
     <Sprout size={14} class="pr-status-clean" />
   {/if}
-  <div class="row-text">
-    <span class="project-name">{projectDisplayName(project)}</span>
-    <div class="row-meta">
-      {#if badges.length > 0}
-        <span class="badge-row">
-          {#each badges as badge}
-            <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
-          {/each}
-        </span>
-        {#if activity}
-          <span class="activity-separator">&middot;</span>
-          <span class="activity-text">{activity}</span>
-        {/if}
-      {:else}
-        <span class="repo-count"
-          >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
-        >
+  <span class="project-name">{projectDisplayName(project)}</span>
+  <div class="row-meta">
+    {#if badges.length > 0}
+      <span class="badge-row">
+        {#each badges as badge}
+          <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+        {/each}
+      </span>
+      {#if activity}
+        <span class="activity-separator">&middot;</span>
+        <span class="activity-text">{activity}</span>
       {/if}
-    </div>
+    {:else}
+      <span class="repo-count"
+        >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
+      >
+    {/if}
   </div>
 </div>
 
 <style>
   .row-main {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
+    /*
+      Icon column + text column. The icon and the name share the first grid
+      row, so centring aligns the 14px icon on the name's line box rather than
+      on the whole two-line block; the meta line sits below the name.
+    */
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    column-gap: 10px;
+    row-gap: 4px;
+    align-items: center;
     flex: 1;
     min-width: 0;
   }
 
   .row-main :global(svg) {
-    flex-shrink: 0;
     width: 16px;
   }
 
@@ -164,13 +168,6 @@
     stroke: var(--text-muted);
   }
 
-  .row-text {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
   .project-name {
     font-size: var(--size-sm);
     font-weight: 600;
@@ -181,6 +178,7 @@
   }
 
   .row-meta {
+    grid-column: 2;
     display: flex;
     align-items: center;
     gap: 6px;

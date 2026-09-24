@@ -354,10 +354,13 @@ class ProjectsDataStore {
    * Register a newly created project immediately — closing the creation
    * modal must not wait for a reload — then hydrate its branches and repos
    * in the background.
+   *
+   * Seeds it at the head: the list is newest first, so this is where the
+   * change-feed refetch will land it and nothing jumps once that arrives.
    */
   projectCreated(project: Project): void {
     if (!this._projects.some((p) => p.id === project.id)) {
-      this._projects = [...this._projects, project];
+      this._projects = [project, ...this._projects];
     }
     if (!this._branchesByProject.has(project.id)) {
       this._branchesByProject = new Map(this._branchesByProject).set(project.id, []);

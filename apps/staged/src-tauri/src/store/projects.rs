@@ -100,7 +100,10 @@ impl Store {
     pub fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, github_repo, location, subpath, created_at, updated_at FROM projects ORDER BY created_at ASC",
+            // Newest first. The rowid tiebreak keeps the order stable when two
+            // projects share a created_at millisecond, giving the later insert
+            // precedence so a freshly created project always lands at the top.
+            "SELECT id, name, github_repo, location, subpath, created_at, updated_at FROM projects ORDER BY created_at DESC, rowid DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             let location_str: String = row.get(3)?;

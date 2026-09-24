@@ -776,8 +776,9 @@ describe('projectCreated', () => {
     store.projectCreated(created);
 
     // Synchronous registration so the creation modal can close instantly, and
-    // hydrated right away so selecting it doesn't blank the project view.
-    expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    // hydrated right away so selecting it doesn't blank the project view. It
+    // lands at the head because the list is newest first.
+    expect(store.projects.map((p) => p.id)).toEqual(['p2', 'p1']);
     expect(store.branchesByProject.get('p2')).toEqual([]);
     expect(store.isProjectHydrated('p2')).toBe(true);
 

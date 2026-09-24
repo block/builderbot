@@ -71,6 +71,52 @@ fn test_list_projects() {
 }
 
 #[test]
+fn test_list_projects_returns_newest_first() {
+    let store = Store::in_memory().unwrap();
+
+    let mut oldest = Project::new("test-owner/repo-oldest");
+    oldest.created_at = 1_000;
+    let mut middle = Project::new("test-owner/repo-middle");
+    middle.created_at = 2_000;
+    let mut newest = Project::new("test-owner/repo-newest");
+    newest.created_at = 3_000;
+
+    // Insert out of timestamp order so the ordering can't come from insert order.
+    store.create_project(&middle).unwrap();
+    store.create_project(&newest).unwrap();
+    store.create_project(&oldest).unwrap();
+
+    let ids: Vec<String> = store
+        .list_projects()
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    assert_eq!(ids, vec![newest.id, middle.id, oldest.id]);
+}
+
+#[test]
+fn test_list_projects_breaks_created_at_ties_by_insert_order() {
+    let store = Store::in_memory().unwrap();
+
+    let mut first = Project::new("test-owner/repo-first");
+    first.created_at = 5_000;
+    let mut second = Project::new("test-owner/repo-second");
+    second.created_at = 5_000;
+
+    store.create_project(&first).unwrap();
+    store.create_project(&second).unwrap();
+
+    let ids: Vec<String> = store
+        .list_projects()
+        .unwrap()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    assert_eq!(ids, vec![second.id, first.id]);
+}
+
+#[test]
 fn test_project_note_sets_completed_at_when_created_with_content() {
     let note = ProjectNote::new("project-1", "Title", "Body");
     assert_eq!(note.completed_at, Some(note.created_at));

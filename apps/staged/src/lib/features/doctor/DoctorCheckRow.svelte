@@ -79,25 +79,16 @@
   const actionableReadouts = $derived(
     [check.main, check.bridge].filter((r) => isReadoutActionable(r)).map((r) => r!)
   );
-  /** What the confirmation shows: the command per readout, or for a Staged-
-   *  managed install the description of what the managed installer will do. */
-  const updateCommands = $derived(actionableReadouts.map((r) => r.updateCommand!));
   /**
-   * Every actionable readout is Staged-managed: no shell command runs, the
-   * backend reinstalls Staged's private copy, so the dialog says so instead of
-   * asking to "run a command".
-   *
-   * `bundled` misses one case on a build that manages the Claude and Codex
-   * bridges: a copy of one of them that resolved elsewhere on PATH (a user
-   * install, before the launch reconcile lands) is not bundled, yet the backend
-   * still routes its update to the managed installer and describes it that way
-   * in `updateCommand`. Such a row gets the "run update command?" header over a
-   * managed-install body. Telling the two apart needs a per-readout
-   * "managed action" flag on `AgentVersionInfo`, which is a doctor crate change.
+   * What the confirmation body shows, one line per actionable readout: the
+   * shell command the update runs, or for an install the backend routes to the
+   * managed installer — a Staged-managed row, or a user copy of Claude or Codex
+   * resolved before the launch reconcile landed — its description of what that
+   * installer will do. The title is neutral ("Update <label>?") on purpose: the
+   * frontend cannot tell those two apart, since a redirected user copy is not
+   * `bundled`, and it doesn't need to, because each body states what runs.
    */
-  const managedUpdate = $derived(
-    actionableReadouts.length > 0 && actionableReadouts.every((r) => r.bundled === true)
-  );
+  const updateCommands = $derived(actionableReadouts.map((r) => r.updateCommand!));
 
   const canUpdate = $derived(hasActionableUpdate(check));
   const updating = $derived(doctorState.updating.includes(check.id));
@@ -393,13 +384,7 @@
 <AlertDialog.Root bind:open={showUpdateDialog}>
   <AlertDialog.Content>
     <AlertDialog.Header>
-      <AlertDialog.Title>
-        {#if managedUpdate}
-          Update Staged's managed install?
-        {:else}
-          Run update command{updateCommands.length > 1 ? 's' : ''}?
-        {/if}
-      </AlertDialog.Title>
+      <AlertDialog.Title>Update {check.label}?</AlertDialog.Title>
       <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
         {updateCommands.join('\n')}
       </AlertDialog.Description>

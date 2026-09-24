@@ -351,6 +351,13 @@
       discardingWorktreeChanges
   );
 
+  /**
+   * A commit session owns the worktree for writing. Covers running rebase and
+   * squash pipelines too: each owns the pending-commit row it is rewriting.
+   *
+   * Kept apart from `gitActionRunning` because "Start now" treats them
+   * differently — see `canStartQueuedSessionNow`.
+   */
   let hasActiveCommitSession = $derived.by(() => {
     for (const commit of timeline.commits) {
       if (commit.sessionStatus === 'running') return true;
@@ -360,15 +367,6 @@
     }
     return false;
   });
-
-  /**
-   * Something already owns the worktree for writing — see
-   * `canStartQueuedSessionNow`.
-   *
-   * `hasActiveCommitSession` covers running rebase and squash pipelines too:
-   * each owns the pending-commit row it is rewriting.
-   */
-  let exclusiveHolderRunning = $derived(hasActiveCommitSession || gitActionRunning);
 
   $effect(() => {
     liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
@@ -1023,7 +1021,8 @@
     // can start — see `canStartQueuedSessionNow`.
     return canStartQueuedSessionNow({
       kind,
-      exclusiveHolderRunning,
+      commitSessionRunning: hasActiveCommitSession,
+      gitActionRunning,
       provisioning: !!provisioningLabel,
     });
   }

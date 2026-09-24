@@ -2083,21 +2083,35 @@ fn can_start_with_active_branch_sessions(
 /// Running a queued note or review beside a commit session is the main use case,
 /// and neither writes to the worktree.
 ///
-/// The worktree rule stays: two exclusive sessions would have two agents editing
-/// the same tree, so an exclusive candidate is refused while anything exclusive
-/// is active. Reset-to-origin and discard run outside the session queue and so
-/// are invisible here — the frontend withholds the menu item during those.
+/// Two rules stay. A git pipeline (push / pull) refuses every candidate: it is
+/// over in seconds, and a pull moves the worktree's HEAD under a review that
+/// has already recorded the tip SHA it will store as reviewed, so what it
+/// stores may not be what it read. Beside a commit session or commit pipeline
+/// only an exclusive candidate is refused, since two of those would have two
+/// agents editing the same tree. Reset-to-origin and discard run outside the
+/// session queue and so are invisible here — the frontend withholds the menu
+/// item during those.
 fn can_force_start_with_active(
     candidate: BranchSessionScheduleKind,
     active: &HashSet<BranchSessionScheduleKind>,
 ) -> bool {
+    if active.contains(&BranchSessionScheduleKind::GitPipeline) {
+        return false;
+    }
     !candidate.is_exclusive() || !active.iter().any(|kind| kind.is_exclusive())
 }
 
-/// The refusal a forced start reports when the branch's exclusive work would
-/// not let the row run.
-const FORCE_START_BLOCKED_MESSAGE: &str =
-    "A commit or git action is running on this branch. Stop it first.";
+/// The refusal a forced start reports when `can_force_start_with_active` would
+/// not let `candidate` run. A note or review can only be blocked by a git
+/// pipeline, which finishes on its own; a commit may be waiting on a commit
+/// session the user would have to stop.
+fn force_start_blocked_message(candidate: BranchSessionScheduleKind) -> &'static str {
+    if candidate.is_exclusive() {
+        "A commit or git action is running on this branch. Stop it first."
+    } else {
+        "A git action is running on this branch. Try again once it finishes."
+    }
+}
 
 /// Which gate a queued row's claim must pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2105,7 +2119,7 @@ pub(crate) enum QueuedSessionStartMode {
     /// The branch drain: queue order, the worktree rule, and one instance per
     /// kind (`can_start_with_active_branch_sessions`).
     Drain,
-    /// "Start now": the worktree rule alone (`can_force_start_with_active`).
+    /// "Start now": the worktree rules alone (`can_force_start_with_active`).
     Force,
 }
 
@@ -3370,7 +3384,7 @@ pub async fn drain_queued_sessions_for_branch(
 /// The row the user picked, not the oldest one: this is what backs the "Start
 /// now" context-menu action, so it bypasses queue order and the FIFO barrier a
 /// queued commit puts in front of later rows. See `can_force_start_with_active`
-/// for the one rule it keeps.
+/// for the rules it keeps.
 ///
 /// Returns whether the session was started — `false` means a concurrent drain
 /// claimed the row first, which is not an error.
@@ -3435,9 +3449,10 @@ pub async fn start_queued_session_now_for_branch(
     // terminal-state drain can land in that window and take a different
     // exclusive row, so the claim re-reads this under the branch launch lock
     // (see `QueuedSessionClaim`).
+    let kind = schedule.kind;
     let active = running_branch_session_kinds(&store, &branch_id)?;
-    if !can_force_start_with_active(schedule.kind, &active) {
-        return Err(FORCE_START_BLOCKED_MESSAGE.to_string());
+    if !can_force_start_with_active(kind, &active) {
+        return Err(force_start_blocked_message(kind).to_string());
     }
 
     let started = start_queued_session_for_branch(
@@ -3457,7 +3472,7 @@ pub async fn start_queued_session_now_for_branch(
         QueuedSessionStart::Skipped => Ok(false),
         // The row is still queued; what changed is the branch. Same refusal as
         // the snapshot would have given had it seen the session that landed.
-        QueuedSessionStart::Blocked => Err(FORCE_START_BLOCKED_MESSAGE.to_string()),
+        QueuedSessionStart::Blocked => Err(force_start_blocked_message(kind).to_string()),
     }
 }
 
@@ -6153,6 +6168,61 @@ mod tests {
             BranchSessionScheduleKind::Review,
             &reviews
         ));
+    }
+
+    #[test]
+    fn force_start_refuses_every_kind_beside_a_git_pipeline() {
+        let active = HashSet::from([BranchSessionScheduleKind::GitPipeline]);
+
+        for kind in [
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::CommitPipeline,
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            assert!(
+                !can_force_start_with_active(kind, &active),
+                "{kind:?} should be refused while a git pipeline runs"
+            );
+        }
+    }
+
+    #[test]
+    fn force_start_refuses_every_kind_when_a_git_pipeline_runs_beside_a_commit() {
+        let active = HashSet::from([
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::GitPipeline,
+        ]);
+
+        for kind in [
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            assert!(
+                !can_force_start_with_active(kind, &active),
+                "{kind:?} should be refused while a git pipeline runs, even beside a commit"
+            );
+        }
+    }
+
+    #[test]
+    fn force_start_refusal_names_only_what_can_block_the_row() {
+        assert!(force_start_blocked_message(BranchSessionScheduleKind::Commit).contains("commit"));
+        assert!(
+            force_start_blocked_message(BranchSessionScheduleKind::CommitPipeline)
+                .contains("commit")
+        );
+        for kind in [
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            let message = force_start_blocked_message(kind);
+            assert!(
+                !message.contains("commit"),
+                "{kind:?} cannot be blocked by a commit, got: {message}"
+            );
+            assert!(message.contains("git action"));
+        }
     }
 
     #[test]

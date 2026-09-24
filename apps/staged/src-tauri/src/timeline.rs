@@ -19,34 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-struct TimelineStageTimer {
-    started: Instant,
-    last: Instant,
-}
-
-impl TimelineStageTimer {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            started: now,
-            last: now,
-        }
-    }
-
-    fn lap(&mut self, stage: &str, count: usize) {
-        let now = Instant::now();
-        log::info!(
-            "[timeline] {} +{:?} total {:?} count={}",
-            stage,
-            now.duration_since(self.last),
-            now.duration_since(self.started),
-            count
-        );
-        self.last = now;
-    }
-}
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// TTL for cached git user identity lookups (5 minutes).
 const GIT_USER_IDENTITY_TTL_MS: u128 = 300_000;
@@ -358,7 +331,6 @@ pub fn build_branch_timeline_public(
 }
 
 fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
-    let mut timer = TimelineStageTimer::new();
     // Get the branch and its workdir for git operations
     let branch = store
         .get_branch(branch_id)
@@ -477,8 +449,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             commits = map_local_commits(store, branch_id, &git_commits);
         }
     }
-    timer.lap("git-state", commits.len());
-    timer.lap("identity", 1);
 
     clamp_commit_sort_timestamps(&mut commits);
 
@@ -491,7 +461,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     }
 
     // Also include pending commits (sha = None, i.e. session in progress)
-    timer.lap("commits", commits.len());
     let db_commits = store
         .list_commits_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
@@ -620,14 +589,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         })
         .collect();
 
-    timer.lap(
-        "db",
-        commits.len() + notes.len() + reviews.len() + images.len(),
-    );
-    timer.lap(
-        "total",
-        commits.len() + notes.len() + reviews.len() + images.len(),
-    );
     Ok(BranchTimeline {
         commits,
         notes,

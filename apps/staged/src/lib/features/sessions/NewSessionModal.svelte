@@ -680,9 +680,9 @@
       </div>
     </form>
     <Dialog.ResizeHandle
-      width={dialogWidth.width}
       minWidth={dialogWidth.minWidth}
       onWidthChange={(next, commit) => dialogWidth.set(next, commit)}
+      onResizeEnd={() => dialogWidth.clearPreview()}
       onReset={() => dialogWidth.reset()}
     />
   </Dialog.Content>

@@ -60,7 +60,7 @@
 
   /**
    * Width the chat column takes when the split is open, added on top of the
-   * persisted note width so opening chat never narrows the note. Must match the
+   * persisted note width so opening chat preserves it when space permits. Matches the
    * second grid column in `.split-chat-open` below.
    */
   const CHAT_PANE_WIDTH = 380;
@@ -151,7 +151,6 @@
   let resizing = $state(false);
 
   function handleWidthChange(total: number, commit: boolean) {
-    resizing = !commit;
     dialogWidth.set(total - (splitChatOpen ? CHAT_PANE_WIDTH : 0), commit);
   }
 
@@ -177,7 +176,7 @@
   // The transition animates the chat pane sliding in and out; it is dropped
   // mid-drag so the right edge tracks the pointer instead of lagging behind it.
   let contentClass = $derived(
-    `h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col${
+    `dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col${
       resizing ? '' : ' transition-[width] duration-150'
     }`
   );
@@ -731,9 +730,13 @@
       {/if}
     </div>
     <Dialog.ResizeHandle
-      width={totalWidth}
       minWidth={totalMinWidth}
       onWidthChange={handleWidthChange}
+      onResizeStart={() => (resizing = true)}
+      onResizeEnd={() => {
+        dialogWidth.clearPreview();
+        resizing = false;
+      }}
       onReset={() => dialogWidth.reset()}
     />
   </Dialog.Content>
@@ -754,9 +757,9 @@
     min-width: 0;
   }
 
-  /* Fixed chat column: the dialog's width is the note width plus
-     CHAT_PANE_WIDTH, so the note column keeps its width when chat opens and
-     absorbs everything a drag adds. Keep the second track in sync with
+  /* Fixed chat column: the preferred dialog width is the note width plus
+     CHAT_PANE_WIDTH. The note column absorbs resizing and viewport compression.
+     Keep the second track in sync with
      CHAT_PANE_WIDTH in the script above. */
   .note-modal-header-grid.split-chat-open,
   .modal-body.split-chat-open {

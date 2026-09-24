@@ -133,7 +133,7 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && requestClose()}>
   <Dialog.Content
-    class="h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    class="dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
     style={dialogWidth.style}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
@@ -201,9 +201,9 @@
       }}
     />
     <Dialog.ResizeHandle
-      width={dialogWidth.width}
       minWidth={dialogWidth.minWidth}
       onWidthChange={(next, commit) => dialogWidth.set(next, commit)}
+      onResizeEnd={() => dialogWidth.clearPreview()}
       onReset={() => dialogWidth.reset()}
     />
   </Dialog.Content>

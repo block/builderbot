@@ -6,78 +6,123 @@
   moves each edge by W/2 — the handle therefore applies twice the pointer delta
   to keep the right edge under the cursor.
 
-  Pointer capture on the button keeps move/up events coming to us even when the
+  Pointer capture on the separator keeps move/up events coming to us even when the
   cursor leaves the dialog, and gives us `pointercancel` for free. Dragging out
   over the overlay is safe: bits-ui only dismisses on a `pointerdown` that
   starts outside the content.
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { untrack } from 'svelte';
   import { viewport } from '$lib/shared/viewport.svelte';
-  import { dialogMaxWidth } from './dialogWidth.svelte.js';
-
-  const KEYBOARD_STEP = 16;
+  import { DIALOG_VIEWPORT_GUTTER } from './dialogWidth.svelte.js';
+  import { createDialogResize, resizeBounds } from './dialogResize';
 
   interface Props {
-    /** Current total width of the dialog in px. */
-    width: number;
     /** Narrowest the dialog may get, in px. */
     minWidth: number;
     /**
      * Called with the requested total width. `commit` is false while dragging
-     * and true once the gesture ends, so callers can persist only the result.
+     * and true only for a changed final width, so callers persist only the result.
      */
     onWidthChange: (width: number, commit: boolean) => void;
+    /** Always called when a gesture ends, including cancellation and no-ops. */
+    onResizeEnd: () => void;
+    onResizeStart?: () => void;
     /** Double-click handler; restores the default width. */
     onReset: () => void;
     label?: string;
   }
 
-  let { width, minWidth, onWidthChange, onReset, label = 'Resize dialog' }: Props = $props();
+  let {
+    minWidth,
+    onWidthChange,
+    onResizeEnd,
+    onResizeStart,
+    onReset,
+    label = 'Resize dialog',
+  }: Props = $props();
 
   let resizing = $state(false);
-  let startX = 0;
-  let startWidth = 0;
-  let captured: { handle: HTMLButtonElement; pointerId: number } | null = null;
+  let viewportWidth = $state(window.innerWidth);
+  let renderedWidth = $state(0);
+  let controls = $state('');
+  let dialog: HTMLElement | null = null;
+  let captured: { handle: HTMLElement; pointerId: number } | null = null;
+  let bodyStyles: { cursor: string; userSelect: string } | null = null;
+  const bounds = $derived(resizeBounds(minWidth, viewportWidth - DIALOG_VIEWPORT_GUTTER * 2));
+  const accessibleWidth = $derived(Math.max(bounds.min, Math.min(bounds.max, renderedWidth)));
+
+  const resize = createDialogResize({
+    geometry: () => ({
+      ...resizeBounds(minWidth, window.innerWidth - DIALOG_VIEWPORT_GUTTER * 2),
+      width: dialog?.getBoundingClientRect().width ?? minWidth,
+    }),
+    preview: (next) => onWidthChange(next, false),
+    commit: (next) => onWidthChange(next, true),
+    end: () => {
+      resizing = false;
+      releaseCapture();
+      if (bodyStyles) {
+        document.body.style.cursor = bodyStyles.cursor;
+        document.body.style.userSelect = bodyStyles.userSelect;
+        bodyStyles = null;
+      }
+      onResizeEnd();
+    },
+  });
+
+  function measure() {
+    // Ignore the entrance scale animation, which does not trigger ResizeObserver.
+    renderedWidth = dialog?.offsetWidth ?? minWidth;
+  }
+
+  function observeDialog(handle: HTMLElement) {
+    dialog = handle.closest<HTMLElement>('[data-slot="dialog-content"]');
+    controls = dialog?.id ?? '';
+    const observer = new ResizeObserver(measure);
+    if (dialog) observer.observe(dialog);
+    measure();
+    return {
+      destroy() {
+        resize.cancel();
+        observer.disconnect();
+        dialog = null;
+      },
+    };
+  }
+
+  // Changing the column layout invalidates the gesture's geometry and projection.
+  $effect(() => {
+    minWidth;
+    viewport.isMobile;
+    viewport.canSplit;
+    untrack(() => resize.cancel());
+  });
+
+  function handleWindowResize() {
+    resize.cancel();
+    measure();
+  }
 
   function startResize(event: PointerEvent) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || captured) return;
     // Also stops `Dialog.Content`'s full-screen window drag from claiming this.
     event.preventDefault();
 
-    const handle = event.currentTarget as HTMLButtonElement;
+    const handle = event.currentTarget as HTMLElement;
+    handle.focus({ preventScroll: true });
     handle.setPointerCapture(event.pointerId);
     captured = { handle, pointerId: event.pointerId };
 
     resizing = true;
-    startX = event.clientX;
-    startWidth = width;
+    bodyStyles = {
+      cursor: document.body.style.cursor,
+      userSelect: document.body.style.userSelect,
+    };
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-  }
-
-  /**
-   * Clamp against the total the dialog may reach before handing the width on.
-   * Callers that split the total across columns (NoteModal's chat pane) store
-   * less than they are given, so they cannot do this clamp themselves.
-   */
-  function requestWidth(next: number, commit: boolean) {
-    const max = dialogMaxWidth(minWidth);
-    onWidthChange(Math.max(minWidth, Math.min(max, next)), commit);
-  }
-
-  function handleMove(event: PointerEvent) {
-    if (!resizing) return;
-    requestWidth(startWidth + (event.clientX - startX) * 2, false);
-  }
-
-  function stopResize() {
-    if (!resizing) return;
-    resizing = false;
-    releaseCapture();
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-    requestWidth(width, true);
+    onResizeStart?.();
+    resize.start(event);
   }
 
   function releaseCapture() {
@@ -90,47 +135,51 @@
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault();
-      requestWidth(width - KEYBOARD_STEP, true);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      requestWidth(width + KEYBOARD_STEP, true);
-    } else if (event.key === 'Home') {
-      event.preventDefault();
-      requestWidth(minWidth, true);
-    } else if (event.key === 'End') {
-      event.preventDefault();
-      requestWidth(dialogMaxWidth(minWidth), true);
-    }
+    if (resize.key(event.key)) event.preventDefault();
   }
-
-  onDestroy(() => {
-    if (!resizing) return;
-    resizing = false;
-    releaseCapture();
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-  });
 </script>
 
+<svelte:window bind:innerWidth={viewportWidth} onresize={handleWindowResize} />
+
 {#if !viewport.isMobile}
-  <button
-    type="button"
+  <!-- A focusable ARIA separator is the interactive window-splitter pattern. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <div
+    use:observeDialog
+    role="separator"
+    tabindex="0"
     class="dialog-resize-handle"
     class:active={resizing}
     data-slot="dialog-resize-handle"
+    data-dialog-no-drag
     aria-label={label}
+    aria-orientation="vertical"
+    aria-controls={controls || undefined}
+    aria-valuemin={bounds.min}
+    aria-valuemax={bounds.max}
+    aria-valuenow={accessibleWidth}
+    aria-valuetext={`${accessibleWidth} pixels`}
+    aria-disabled={bounds.min === bounds.max}
     onpointerdown={startResize}
-    onpointermove={handleMove}
-    onpointerup={stopResize}
-    onpointercancel={stopResize}
+    onpointermove={resize.move}
+    onpointerup={resize.release}
+    onpointercancel={(event) => resize.cancel(event.pointerId)}
+    onlostpointercapture={(event) => resize.cancel(event.pointerId)}
     onkeydown={handleKeydown}
-    ondblclick={onReset}
-  ></button>
+    ondblclick={() => {
+      resize.cancel();
+      onReset();
+    }}
+  ></div>
 {/if}
 
 <style>
+  @media (min-width: 769px) {
+    :global([data-slot='dialog-content'].dialog-resize-gutter) {
+      padding-right: 8px;
+    }
+  }
+
   .dialog-resize-handle {
     position: absolute;
     top: 0;

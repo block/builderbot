@@ -7,10 +7,9 @@
  * width the dialog had before it became resizable, so a user who never drags
  * sees no change.
  *
- * The maximum follows the window: `set()` clamps against the live window size,
- * and the inline style also carries a viewport-relative `max-width` so a later
- * window shrink only caps rendering. The saved preference is untouched, and the
- * dialog returns to it when the window grows again.
+ * Preferred widths are independent of the viewport. CSS caps rendering and the
+ * resize handle constrains gestures to the available space. Previews never
+ * replace the preference, so cancelling a gesture restores it without a write.
  */
 
 import { getStoreValue, setStoreValue } from '../../../shared/persistentStore';
@@ -26,16 +25,6 @@ export const NOTE_DIALOG_MIN_WIDTH = 700;
 export const SESSION_DIALOG_MIN_WIDTH = 700;
 export const NEW_SESSION_DIALOG_MIN_WIDTH = 580;
 
-/**
- * Widest the dialog may be drawn right now. Never below `minWidth`: when the
- * window is narrower than the minimum, the CSS `max-width` caps rendering and
- * the stored width stays put, matching the pre-resize behaviour.
- */
-export function dialogMaxWidth(minWidth: number): number {
-  if (typeof window === 'undefined') return minWidth;
-  return Math.max(minWidth, window.innerWidth - DIALOG_VIEWPORT_GUTTER * 2);
-}
-
 /** Inline style for a dialog of `width` px, capped to the viewport. */
 export function dialogWidthStyle(width: number): string {
   return `width:${width}px;max-width:calc(100vw - ${DIALOG_VIEWPORT_GUTTER * 2}px);`;
@@ -44,14 +33,15 @@ export function dialogWidthStyle(width: number): string {
 export interface DialogWidth {
   readonly key: string;
   readonly minWidth: number;
-  /** Stored width in px, clamped to `[minWidth, dialogMaxWidth(minWidth)]`. */
+  /** Preview or preferred width in px, independent of the viewport cap. */
   readonly width: number;
   readonly hydrated: boolean;
-  readonly maxWidth: number;
   /** `width` as an inline style, ready for `Dialog.Content`'s `style` prop. */
   readonly style: string;
-  /** Clamp and apply a new width, persisting it unless `persist` is false. */
+  /** Apply a preferred width, or a temporary preview when `persist` is false. */
   set(width: number, persist?: boolean): void;
+  /** Discard the preview without changing or persisting the preferred width. */
+  clearPreview(): void;
   /** Return to the default (the minimum) and persist that. */
   reset(): void;
   /** Read the saved width once per app run; safe to call on every mount. */
@@ -72,45 +62,55 @@ export function createDialogWidth(options: { key: string; minWidth: number }): D
   const cached = instances.get(key);
   if (cached) return cached;
 
-  const inner = $state({ width: minWidth, hydrated: false });
+  const inner = $state({ width: minWidth, preview: null as number | null, hydrated: false });
   let hydration: Promise<void> | null = null;
+  let interacted = false;
 
-  function clamp(width: number): number {
-    if (!Number.isFinite(width)) return inner.width;
-    return Math.max(minWidth, Math.min(dialogMaxWidth(minWidth), Math.round(width)));
+  function normalize(width: number): number {
+    return Math.max(minWidth, Math.round(width));
   }
 
   async function hydrate(): Promise<void> {
-    const saved = await getStoreValue<number>(key);
-    if (typeof saved === 'number' && Number.isFinite(saved)) {
-      inner.width = clamp(saved);
+    try {
+      const saved = await getStoreValue<number>(key);
+      if (!interacted && typeof saved === 'number' && Number.isFinite(saved)) {
+        inner.width = normalize(saved);
+      }
+    } catch (error) {
+      console.error(`[DialogWidth] Failed to read ${key}:`, error);
+    } finally {
+      inner.hydrated = true;
     }
-    inner.hydrated = true;
   }
 
   const instance: DialogWidth = {
     key,
     minWidth,
     get width() {
-      return inner.width;
+      return inner.preview ?? inner.width;
     },
     get hydrated() {
       return inner.hydrated;
     },
-    get maxWidth() {
-      return dialogMaxWidth(minWidth);
-    },
     get style() {
-      return dialogWidthStyle(inner.width);
+      return dialogWidthStyle(instance.width);
     },
     set(width: number, persist = true) {
-      const clamped = clamp(width);
-      if (inner.width !== clamped) {
-        inner.width = clamped;
-      }
+      if (!Number.isFinite(width)) return;
+      interacted = true;
+      const normalized = normalize(width);
       if (persist) {
-        void setStoreValue(key, clamped);
+        inner.width = normalized;
+        inner.preview = null;
+        void setStoreValue(key, normalized).catch((error) => {
+          console.error(`[DialogWidth] Failed to write ${key}:`, error);
+        });
+      } else {
+        inner.preview = normalized;
       }
+    },
+    clearPreview() {
+      inner.preview = null;
     },
     reset() {
       instance.set(minWidth);
@@ -126,8 +126,8 @@ export function createDialogWidth(options: { key: string; minWidth: number }): D
 }
 
 /**
- * Read every saved dialog width at startup so the first open of an app run
- * renders at the user's width instead of jumping there from the minimum.
+ * Start reading saved widths without blocking startup. A dialog opened before
+ * hydration settles may still change width when its preference arrives.
  */
 export async function hydrateDialogWidths(): Promise<void> {
   await Promise.all(

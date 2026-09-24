@@ -28,6 +28,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.doUnmock('../../../shared/persistentStore');
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('createDialogWidth', () => {
@@ -50,15 +51,14 @@ describe('createDialogWidth', () => {
     expect(width.width).toBe(700);
   });
 
-  it('clamps above the window maximum down to a gutter on each side', async () => {
+  it('keeps the preferred width independent of the viewport cap', async () => {
     const { createDialogWidth } = await importDialogWidth();
 
     const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
     width.set(5000);
 
-    // 1200 window − 32px gutter per side.
-    expect(width.width).toBe(1136);
-    expect(width.maxWidth).toBe(1136);
+    expect(width.width).toBe(5000);
+    expect(width.style).toBe('width:5000px;max-width:calc(100vw - 64px);');
   });
 
   it('keeps the minimum when the window is narrower than it', async () => {
@@ -66,22 +66,111 @@ describe('createDialogWidth', () => {
     const { createDialogWidth } = await importDialogWidth();
 
     const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
-    width.set(5000);
+    width.set(500);
 
-    expect(width.maxWidth).toBe(700);
     expect(width.width).toBe(700);
   });
 
-  it('hydrates from the store, clamping the saved value', async () => {
-    savedWidth = 5000;
+  it('restores an oversized preference after starting in a small window and growing', async () => {
+    savedWidth = 1400;
     const { createDialogWidth } = await importDialogWidth();
 
     const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
     await width.ensureHydrated();
 
     expect(getStoreValue).toHaveBeenCalledWith('test-width');
-    expect(width.width).toBe(1136);
+    expect(width.width).toBe(1400);
     expect(width.hydrated).toBe(true);
+    vi.stubGlobal('window', { innerWidth: 1800 });
+    expect(width.style).toBe('width:1400px;max-width:calc(100vw - 64px);');
+    expect(setStoreValue).not.toHaveBeenCalled();
+  });
+
+  it.each([NaN, Infinity, -Infinity, '900', null])(
+    'ignores invalid saved width %s',
+    async (saved) => {
+      savedWidth = saved;
+      const { createDialogWidth } = await importDialogWidth();
+      const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+      await width.ensureHydrated();
+      expect(width.width).toBe(700);
+      expect(width.hydrated).toBe(true);
+    }
+  );
+
+  it.each([
+    [200, 700],
+    [900.7, 901],
+  ])('normalizes saved width %s to %s', async (saved, expected) => {
+    savedWidth = saved;
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    await width.ensureHydrated();
+    expect(width.width).toBe(expected);
+  });
+
+  it('settles a failed hydration once at the current width', async () => {
+    const error = new Error('read failed');
+    getStoreValue.mockRejectedValue(error);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    await expect(width.ensureHydrated()).resolves.toBeUndefined();
+    await width.ensureHydrated();
+    expect(width.hydrated).toBe(true);
+    expect(width.width).toBe(700);
+    expect(getStoreValue).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('[DialogWidth] Failed to read test-width:', error);
+  });
+
+  it.each([true, false])(
+    'ignores a delayed read after interaction (persist=%s)',
+    async (persist) => {
+      let resolve!: (width: number) => void;
+      getStoreValue.mockReturnValue(new Promise<number>((done) => (resolve = done)));
+      const { createDialogWidth } = await importDialogWidth();
+      const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+      const hydration = width.ensureHydrated();
+      width.set(1000, persist);
+      resolve(800);
+      await hydration;
+      expect(width.width).toBe(1000);
+      width.clearPreview();
+      expect(width.width).toBe(persist ? 1000 : 700);
+    }
+  );
+
+  it('does not apply a stale preference when hydration starts after a resize', async () => {
+    savedWidth = 800;
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    width.set(1000);
+    await width.ensureHydrated();
+    expect(width.width).toBe(1000);
+  });
+
+  it('logs rejected writes while keeping the new preference in memory', async () => {
+    const error = new Error('write failed');
+    setStoreValue.mockRejectedValue(error);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    width.set(900);
+    await Promise.resolve();
+    expect(width.width).toBe(900);
+    expect(log).toHaveBeenCalledWith('[DialogWidth] Failed to write test-width:', error);
+  });
+
+  it('discards a preview without losing an oversized preference or writing', async () => {
+    savedWidth = 1400;
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    await width.ensureHydrated();
+    width.set(1000, false);
+    expect(width.style).toContain('width:1000px;');
+    width.clearPreview();
+    expect(width.width).toBe(1400);
+    expect(setStoreValue).not.toHaveBeenCalled();
   });
 
   it('leaves the default in place when nothing is saved, and hydrates once', async () => {
@@ -159,6 +248,7 @@ describe('createDialogWidth', () => {
     width.set(Number.NaN);
 
     expect(width.width).toBe(900);
+    expect(setStoreValue).not.toHaveBeenCalled();
   });
 });
 

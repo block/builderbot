@@ -281,9 +281,8 @@ export async function initPreferences(): Promise<void> {
   // just lengthens the staged reveal on resume. Loading continues below.
   preferences.loaded = true;
 
-  // Saved dialog widths, so the first note/session dialog of the run opens at
-  // the user's width instead of jumping there from the minimum. Nothing waits
-  // on these — each dialog also hydrates on mount.
+  // Preload dialog widths without blocking startup. An early opening may still
+  // resize when hydration finishes; each dialog also hydrates on mount.
   void hydrateDialogWidths();
 
   // Load diff theme (migrating from the legacy combined `syntax-theme` key).

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::git;
-use crate::session_commands::BranchSessionLaunchStatus;
+use crate::session_commands::{BranchSessionLaunchStatus, QueuedSessionClaim, QueuedSessionStart};
 use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineKind, PipelineStep, Store};
 
@@ -732,6 +732,12 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     Ok(BranchPipelineResponse::running(session_id))
 }
 
+/// Start a queued rebase or squash that the branch queue (or a forced start)
+/// has decided may run.
+///
+/// `claim` is what actually takes the row: it re-checks the branch under the
+/// launch lock and flips the row to `running` in one step, so the decision the
+/// caller made before its awaits cannot be overtaken by another start.
 pub(crate) async fn start_queued_commit_pipeline_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -739,7 +745,8 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     branch_id: String,
     session: store::Session,
     provider: Option<String>,
-) -> Result<bool, String> {
+    claim: QueuedSessionClaim,
+) -> Result<QueuedSessionStart, String> {
     let kind = session
         .pipeline
         .as_ref()
@@ -763,11 +770,9 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     }
     let effective_provider = session.provider.clone().or(provider);
 
-    let transitioned = store
-        .transition_queued_to_running(&session.id)
-        .map_err(|e| e.to_string())?;
-    if !transitioned {
-        return Ok(false);
+    let claimed = claim.claim(&store)?;
+    if claimed != QueuedSessionStart::Started {
+        return Ok(claimed);
     }
 
     store
@@ -810,8 +815,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         app_handle,
         Arc::clone(&registry),
     )
-    // A shutdown refusal is not a start — see `start_queued_session_for_branch`.
-    .map(session_runner::SessionStartOutcome::started)
+    .map(QueuedSessionStart::from_runner)
 }
 
 /// Insert the session row for a push that runs right now.
@@ -918,7 +922,7 @@ fn queue_push_pipeline_locked(
 /// Steps are rebuilt from the branch's current name and the persisted
 /// `push_force` flag rather than replayed from the queued pipeline, matching
 /// [`start_queued_commit_pipeline_for_branch`] so a branch renamed while the work
-/// waited still acts on the right ref.
+/// waited still acts on the right ref. `claim` takes the row the same way too.
 pub(crate) async fn start_queued_git_pipeline_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -926,7 +930,8 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
     branch_id: String,
     session: store::Session,
     provider: Option<String>,
-) -> Result<bool, String> {
+    claim: QueuedSessionClaim,
+) -> Result<QueuedSessionStart, String> {
     let queued_pipeline = session
         .pipeline
         .as_ref()
@@ -957,11 +962,9 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         .with_push_force(force);
     let effective_provider = session.provider.clone().or(provider);
 
-    let transitioned = store
-        .transition_queued_to_running(&session.id)
-        .map_err(|e| e.to_string())?;
-    if !transitioned {
-        return Ok(false);
+    let claimed = claim.claim(&store)?;
+    if claimed != QueuedSessionStart::Started {
+        return Ok(claimed);
     }
 
     // No `mark_session_artifact_started` call: a git pipeline has no queued
@@ -1003,8 +1006,7 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         app_handle,
         Arc::clone(&registry),
     )
-    // A shutdown refusal is not a start — see `start_queued_session_for_branch`.
-    .map(session_runner::SessionStartOutcome::started)
+    .map(QueuedSessionStart::from_runner)
 }
 
 /// What the branch queue decided to do with a pull request.

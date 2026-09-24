@@ -917,8 +917,10 @@ pub struct Note {
     pub content: String,
     pub created_at: i64,
     pub updated_at: i64,
-    /// When the AI session finished producing this note's content.
-    /// `None` while the session is still running.
+    /// When this note's content became readable: for a session note, when the
+    /// session finished producing it, so `None` while that session still runs.
+    /// A note with no session is set at save time, body or not — see
+    /// [`Note::new_standalone`].
     pub completed_at: Option<i64>,
     /// AI-suggested prompt for a follow-up commit session.
     pub suggested_next_commit_step: Option<String>,
@@ -956,6 +958,20 @@ impl Note {
             parent_project_note_id: None,
             subtype: None,
         }
+    }
+
+    /// Build a note that has no owning session, and is therefore complete the
+    /// moment it is saved — even with an empty body.
+    ///
+    /// The editor has no title field, so a one-line note stores its whole text
+    /// as the title and leaves `content` empty. Under [`Note::new`] that is
+    /// indistinguishable from a session stub still generating, and consumers
+    /// that skip pending notes (branch history, the `#note:` picker) drop it.
+    /// Nothing will ever fill a session-less note in, so it is never pending.
+    pub fn new_standalone(branch_id: &str, title: &str, content: &str) -> Self {
+        let mut note = Self::new(branch_id, title, content);
+        note.completed_at = Some(note.updated_at);
+        note
     }
 
     pub fn with_session(mut self, session_id: &str) -> Self {

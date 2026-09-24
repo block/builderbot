@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Branch, BranchTimeline, HashtagItem, ProjectNote } from '../../types';
+import type {
+  Branch,
+  BranchTimeline,
+  HashtagItem,
+  NoteTimelineItem,
+  ProjectNote,
+} from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import {
   buildProjectHashtagItems,
@@ -239,6 +245,43 @@ describe('timelineToHashtagItems', () => {
       'commit:oldcommit',
       'note:old-note',
     ]);
+  });
+
+  // A note written as one line stores its whole text in the title and has no
+  // body, so it is saved with no completion time on older rows — the same shape
+  // as a session note still generating. Only the latter is pending.
+  it('lists a bodyless standalone note but not a generating session note', () => {
+    const pending: Omit<NoteTimelineItem, 'id' | 'title' | 'sessionId'> = {
+      content: '',
+      sessionStatus: null,
+      completionReason: null,
+      createdAt: 1000,
+      updatedAt: 1000,
+      completedAt: null,
+      suggestedNextCommitStep: null,
+      suggestedNextNoteStep: null,
+      subtype: null,
+    };
+    const timeline = emptyTimeline({
+      notes: [
+        {
+          ...pending,
+          id: 'written-note',
+          title: 'Bump the lockfile before release',
+          sessionId: null,
+          subtype: 'written',
+        },
+        { ...pending, id: 'generating-note', title: 'Working on it', sessionId: 'session-1' },
+      ],
+    });
+
+    const items = timelineToHashtagItems(timeline);
+    expect(items.map((item) => item.id)).toEqual(['written-note']);
+    // With an item in hand, an existing `#note:<id>` token resolves and renders
+    // its title instead of the raw id.
+    expect(findHashtagItemForReference(items, 'note', 'written-note')).toEqual(
+      expect.objectContaining({ type: 'note', title: 'Bump the lockfile before release' })
+    );
   });
 });
 

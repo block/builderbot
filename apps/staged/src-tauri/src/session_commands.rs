@@ -4476,27 +4476,40 @@ fn write_image_to_temp_file(
 ///
 /// Like `format_note_with_heading` with a "Note" heading, but a child note also
 /// gets a reference line naming itself and its parent project note, so the agent
-/// can connect it to the `#note:<id>` citations in the parent note's body.
+/// can connect it to the `#note:<id>` citations in the parent note's body, and a
+/// user-written one says so. A note with no body — a one-line written note, whose
+/// text is entirely in its title — is just the heading and those lines.
 pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option<&str>) -> String {
     let heading = format!("### Note: {}", note.title);
-    // The reference line sits directly under the heading, with the pointer
-    // directly under that, so the whole item is one unbroken block.
-    let reference = match &note.parent_project_note_id {
+    // The annotation lines sit directly under the heading, with the pointer
+    // directly under those, so the whole item is one unbroken block.
+    let mut annotations = match &note.parent_project_note_id {
         Some(parent_id) => format!(
             "\nChild note #note:{} of project note #project-note:{parent_id}.",
             note.id
         ),
         None => String::new(),
     };
+    // Provenance, on the same block: a note the user wrote is an instruction to
+    // weigh, not the output of an earlier agent turn.
+    if note.is_written() {
+        annotations.push_str("\nWritten by the user.");
+    }
+
+    // A one-line written note keeps its whole text in the title, so there is no
+    // body to point at — a `See:` line would send the agent to an empty file.
+    if note.content.is_empty() {
+        return format!("{heading}{annotations}");
+    }
 
     write_content_to_temp_file(
         &note.id,
         &note.content,
         workspace_name,
         "staged-note",
-        |path| format!("{heading}{reference}\nSee: `{path}`"),
+        |path| format!("{heading}{annotations}\nSee: `{path}`"),
     )
-    .unwrap_or_else(|| format!("{heading}{reference}\n\n{}", note.content))
+    .unwrap_or_else(|| format!("{heading}{annotations}\n\n{}", note.content))
 }
 
 /// Convert notes from the DB into timeline entries.
@@ -4522,8 +4535,11 @@ fn note_timeline_entries(
 
     let mut entries = Vec::new();
     for note in &notes {
-        if note.content.is_empty() {
-            continue; // skip notes still generating
+        // An empty body means "still generating" only for a note a session
+        // owns; a session-less note is whatever the user saved, and a one-line
+        // written note legitimately has its whole text in the title.
+        if note.session_id.is_some() && note.content.is_empty() {
+            continue; // skip session notes still generating (or that failed)
         }
         entries.push(TimelineEntry {
             timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
@@ -7477,6 +7493,27 @@ mod tests {
             .expect("standalone note missing from branch history");
         assert!(!standalone_entry.content.contains("Child note"));
         assert!(!standalone_entry.content.contains("#project-note:"));
+    }
+
+    /// A note written as a single line stores its whole text in the title and
+    /// leaves the body empty — the same shape a session stub has while it
+    /// generates. Only the stub is pending, so only the stub is skipped, and the
+    /// bodyless note gets its heading with no pointer to an empty file.
+    #[test]
+    fn note_timeline_entries_include_bodyless_written_notes_but_not_session_stubs() {
+        let (store, branch) = setup_branch_store();
+
+        let written = store::Note::new(&branch.id, "Bump the lockfile before release", "")
+            .with_subtype(store::Note::SUBTYPE_WRITTEN);
+        store.create_note(&written).unwrap();
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let entries = note_timeline_entries(&store, &branch.id, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].content,
+            "### Note: Bump the lockfile before release\nWritten by the user."
+        );
     }
 
     #[test]

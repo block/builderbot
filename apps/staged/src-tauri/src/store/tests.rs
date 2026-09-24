@@ -686,6 +686,64 @@ fn test_transition_queued_to_running_does_not_overwrite_cancelled_session() {
 }
 
 #[test]
+fn test_transition_to_running_can_clear_a_matching_temporary_agent_id() {
+    let store = Store::in_memory().unwrap();
+
+    let mut session = Session::new_running("cancelled startup", Path::new("/tmp"));
+    session.agent_id = Some("pending-branch-start:test-token".to_string());
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::Interrupted),
+        )
+        .unwrap();
+
+    assert!(store
+        .transition_to_running_clearing_agent_id(
+            &session.id,
+            Some("pending-branch-start:test-token")
+        )
+        .unwrap());
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Running);
+    assert_eq!(final_state.agent_id, None);
+    assert_eq!(final_state.completion_reason, None);
+}
+
+#[test]
+fn test_transition_to_running_preserves_a_non_matching_agent_id() {
+    let store = Store::in_memory().unwrap();
+
+    let mut session = Session::new_running("completed turn", Path::new("/tmp"));
+    session.agent_id = Some("real-agent-session".to_string());
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(
+            &session.id,
+            SessionStatus::Completed,
+            None,
+            Some(&CompletionReason::TurnComplete),
+        )
+        .unwrap();
+
+    assert!(store
+        .transition_to_running_clearing_agent_id(
+            &session.id,
+            Some("pending-branch-start:test-token")
+        )
+        .unwrap());
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Running);
+    assert_eq!(final_state.agent_id.as_deref(), Some("real-agent-session"));
+    assert_eq!(final_state.completion_reason, None);
+}
+
+#[test]
 fn test_get_active_sessions_returns_running_and_queued_only() {
     let store = Store::in_memory().unwrap();
 

@@ -52,6 +52,7 @@ const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
 const PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX: &str = "/tmp/staged-pikchr-grammar-";
 const PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX: &str = ".md";
 pub(crate) const PIKCHR_GRAMMAR_URL: &str = "https://pikchr.org/home/doc/trunk/doc/grammar.md";
+pub(crate) const PENDING_BRANCH_START_AGENT_ID_PREFIX: &str = "pending-branch-start:";
 
 enum RemotePikchrGrammarStaging {
     NotNeeded,
@@ -1301,7 +1302,9 @@ pub(crate) async fn resume_session_for_store(
     // Use the provider that originally created this session so the
     // agent's conversation history can be restored correctly.
     let provider = session.provider.clone();
-    let agent_session_id = session.agent_id.clone();
+    let pending_start_agent_id =
+        pending_branch_start_agent_id(session.agent_id.as_deref()).map(ToString::to_string);
+    let agent_session_id = resumable_agent_session_id(session.agent_id.as_deref());
     let working_dir = PathBuf::from(&session.working_dir);
     let effective_acp_config_selection =
         resolve_resume_acp_config_selection(&store, &session, acp_config_selection);
@@ -1414,7 +1417,7 @@ pub(crate) async fn resume_session_for_store(
     };
 
     let transitioned = store
-        .transition_to_running(&session_id)
+        .transition_to_running_clearing_agent_id(&session_id, pending_start_agent_id.as_deref())
         .map_err(|e| e.to_string())?;
     if !transitioned {
         return Err("Session is already running".to_string());
@@ -1892,6 +1895,24 @@ fn with_optional_acp_config_selection(
         Some(selection) => session.with_acp_config_selection(selection),
         None => session,
     }
+}
+
+fn new_pending_branch_start_agent_id() -> String {
+    format!(
+        "{}{}",
+        PENDING_BRANCH_START_AGENT_ID_PREFIX,
+        uuid::Uuid::new_v4()
+    )
+}
+
+pub(crate) fn pending_branch_start_agent_id(agent_id: Option<&str>) -> Option<&str> {
+    agent_id.filter(|id| id.starts_with(PENDING_BRANCH_START_AGENT_ID_PREFIX))
+}
+
+pub(crate) fn resumable_agent_session_id(agent_id: Option<&str>) -> Option<String> {
+    agent_id
+        .filter(|id| !id.starts_with(PENDING_BRANCH_START_AGENT_ID_PREFIX))
+        .map(ToString::to_string)
 }
 
 pub(crate) fn resolve_resume_acp_config_selection(
@@ -2825,6 +2846,7 @@ struct PreparedBranchSessionStart {
 struct CreatedBranchSession {
     session: store::Session,
     artifact_id: String,
+    start_agent_id: String,
 }
 
 fn acp_config_selection_for_session_start(
@@ -3060,10 +3082,12 @@ fn insert_running_branch_session(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<CreatedBranchSession, String> {
     let stored_prompt = embed_launch_context(prompt, launch_context)?;
+    let start_agent_id = new_pending_branch_start_agent_id();
     let mut session = with_optional_acp_config_selection(
         store::Session::new_running(&stored_prompt, &target.working_dir),
         acp_config_selection,
     );
+    session.agent_id = Some(start_agent_id.clone());
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
@@ -3096,6 +3120,7 @@ fn insert_running_branch_session(
     Ok(CreatedBranchSession {
         session,
         artifact_id,
+        start_agent_id,
     })
 }
 
@@ -3201,15 +3226,82 @@ fn launch_running_branch_session(
     )
 }
 
-/// Whether `session_id` is still the `running` row the insert left behind.
+/// Whether `session_id` is still the exact `running` row the insert left behind.
 ///
 /// Between the insert and `start_session`'s registration nothing holds a
 /// token for the session, so a Stop in that window takes
 /// `cancel_session_impl`'s fallback and writes `cancelled` straight to the
-/// row, and a delete removes it. Either way there is nothing left to start.
-fn branch_session_still_running(store: &Store, session_id: &str) -> Result<bool, String> {
+/// row, and a delete removes it. Stop -> Resume can make the row `running`
+/// again, so the status is not enough: the temporary `agent_id` marker must
+/// also still be the one this starter inserted.
+fn branch_session_start_still_owned(
+    store: &Store,
+    session_id: &str,
+    start_agent_id: &str,
+) -> Result<bool, String> {
     let session = store.get_session(session_id).map_err(|e| e.to_string())?;
-    Ok(matches!(session, Some(s) if s.status == store::SessionStatus::Running))
+    Ok(matches!(
+        session,
+        Some(s)
+            if s.status == store::SessionStatus::Running
+                && s.agent_id.as_deref() == Some(start_agent_id)
+    ))
+}
+
+fn failed_immediate_branch_start_owes_drain<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
+    start_agent_id: &str,
+    branch_id: &str,
+    project_id: &str,
+    error: &str,
+) -> bool {
+    match store.get_session(session_id) {
+        Ok(Some(session))
+            if session.status == store::SessionStatus::Running
+                && session.agent_id.as_deref() == Some(start_agent_id) =>
+        {
+            session_runner::finish_failed_before_run(
+                session_id,
+                Some(branch_id.to_string()),
+                Some(project_id.to_string()),
+                store,
+                app_handle,
+                error,
+            )
+        }
+        Ok(Some(session)) if session.agent_id.as_deref() == Some(start_agent_id) => {
+            log::error!(
+                "Session {session_id} failed before its run started after it was already \
+                 ended; preserving status {:?}: {error}",
+                session.status
+            );
+            true
+        }
+        Ok(None) => {
+            log::error!(
+                "Session {session_id} failed before its run started after its row was \
+                 deleted: {error}"
+            );
+            true
+        }
+        Ok(Some(session)) => {
+            log::error!(
+                "Session {session_id} failed before its original run started, but the row \
+                 no longer belongs to that start (status {:?}); preserving it: {error}",
+                session.status
+            );
+            false
+        }
+        Err(e) => {
+            log::error!(
+                "Session {session_id} failed before its run started, and its row could not \
+                 be loaded to decide branch draining ({e}): {error}"
+            );
+            false
+        }
+    }
 }
 
 /// How [`complete_running_branch_session_start`] left a session whose second
@@ -3241,18 +3333,20 @@ enum SecondPhaseOutcome {
 /// Runs after [`start_or_queue_branch_session_for_store`] has answered the
 /// client, so nothing here can return to a caller. A failure — in the context
 /// build, the row update, or `start_session` itself — is recorded on the row
-/// and emitted by `finish_failed_before_run`, and the branch queue that row
-/// was blocking is drained, exactly as the session thread does for a run that
-/// crashes.
+/// and emitted by `finish_failed_before_run` while this start still owns the
+/// row. If a Stop or delete already ended it, that terminal state is preserved
+/// and the branch queue that row was blocking is still drained.
 ///
 /// This mirrors the queued drain's shape (`start_queued_session_for_branch`):
 /// there the raw prompt waits in a `queued` row until the drain builds the
 /// context and calls `prepare_queued_session`; here it waits in a `running`
-/// row for the same update. Both leave a window between the row going
+/// row with a temporary startup marker until `prepare_immediate_branch_session`
+/// swaps in the full prompt. Both leave a window between the row going
 /// `running` and the runner registering a token, in which a Stop writes
-/// `cancelled` directly to the row — so the row is re-read before the agent
-/// is spawned, and a session stopped or deleted in the meantime is left as it
-/// is. Its branch queue is not: see [`SecondPhaseOutcome::AlreadyEnded`].
+/// `cancelled` directly to the row — so the row is checked against its marker
+/// before the agent is spawned, and a session stopped, resumed, or deleted in
+/// the meantime is left as it is. Its branch queue is not: see
+/// [`SecondPhaseOutcome::AlreadyEnded`].
 #[allow(clippy::too_many_arguments)]
 async fn complete_running_branch_session_start(
     store: Arc<Store>,
@@ -3267,6 +3361,7 @@ async fn complete_running_branch_session_start(
     launch_context: Option<BranchSessionLaunchContext>,
 ) {
     let session_id = created.session.id.clone();
+    let start_agent_id = created.start_agent_id.clone();
     let branch_id = target.branch.id.clone();
     let project_id = target.branch.project_id.clone();
 
@@ -3282,26 +3377,43 @@ async fn complete_running_branch_session_start(
         )
         .await?;
 
+        if !branch_session_start_still_owned(&store, &session_id, &start_agent_id)? {
+            log::info!(
+                "Session {session_id} was stopped, resumed, or deleted before its context \
+                 was ready; not starting an agent"
+            );
+            return Ok(SecondPhaseOutcome::AlreadyEnded);
+        }
+
         // The row went in with the raw prompt; swap in the full prompt now
         // that it exists. `working_dir` is unchanged — it was resolved for the
-        // insert — but this is the one primitive that writes the prompt.
-        store
-            .prepare_queued_session(
+        // insert — but the compare-and-swap keeps a Stop -> Resume in the gap
+        // from having its new turn overwritten by this abandoned starter.
+        let prepared_row = store
+            .prepare_immediate_branch_session(
                 &session_id,
+                &start_agent_id,
                 &prepared.working_dir.to_string_lossy(),
                 &prepared.full_prompt,
             )
             .map_err(|e| e.to_string())?;
+        if !prepared_row {
+            log::info!(
+                "Session {session_id} changed before its context could be stored; \
+                 not starting an agent"
+            );
+            return Ok(SecondPhaseOutcome::AlreadyEnded);
+        }
         if let Some(tip_sha) = prepared.review_tip_sha.as_deref() {
             store
                 .update_review_commit_sha(&created.artifact_id, tip_sha)
                 .map_err(|e| e.to_string())?;
         }
 
-        if !branch_session_still_running(&store, &session_id)? {
+        if !branch_session_start_still_owned(&store, &session_id, &start_agent_id)? {
             log::info!(
-                "Session {session_id} was stopped or deleted before its context was ready; \
-                 not starting an agent"
+                "Session {session_id} was stopped, resumed, or deleted after its context \
+                 was stored; not starting an agent"
             );
             return Ok(SecondPhaseOutcome::AlreadyEnded);
         }
@@ -3325,15 +3437,13 @@ async fn complete_running_branch_session_start(
     let owes_drain = match outcome {
         Ok(SecondPhaseOutcome::Launched) => false,
         Ok(SecondPhaseOutcome::AlreadyEnded) => true,
-        // Owning the terminal state means owing the drain. Losing the
-        // transition means another writer got there first and drains — or
-        // already did — on its own account.
-        Err(error) => session_runner::finish_failed_before_run(
-            &session_id,
-            Some(branch_id.clone()),
-            Some(project_id),
+        Err(error) => failed_immediate_branch_start_owes_drain(
             &store,
             &app_handle,
+            &session_id,
+            &start_agent_id,
+            &branch_id,
+            &project_id,
             &error,
         ),
     };
@@ -7193,6 +7303,14 @@ mod tests {
         assert_eq!(session.status, store::SessionStatus::Running);
         assert_eq!(session.working_dir, target.working_dir.to_string_lossy());
         assert_eq!(session.provider.as_deref(), Some("claude"));
+        assert_eq!(
+            session.agent_id.as_deref(),
+            Some(created.start_agent_id.as_str())
+        );
+        assert!(session
+            .agent_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with(PENDING_BRANCH_START_AGENT_ID_PREFIX)));
         let (prompt, context) = extract_launch_context(&session.prompt).unwrap();
         assert_eq!(prompt, "capture a note");
         assert_eq!(context, Some(launch_context));
@@ -7274,7 +7392,12 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(branch_session_still_running(&store, &created.session.id).unwrap());
+        assert!(branch_session_start_still_owned(
+            &store,
+            &created.session.id,
+            &created.start_agent_id
+        )
+        .unwrap());
 
         store
             .update_session_status(
@@ -7284,10 +7407,153 @@ mod tests {
                 Some(&store::CompletionReason::Interrupted),
             )
             .unwrap();
-        assert!(!branch_session_still_running(&store, &created.session.id).unwrap());
+        assert!(!branch_session_start_still_owned(
+            &store,
+            &created.session.id,
+            &created.start_agent_id
+        )
+        .unwrap());
 
         store.delete_session(&created.session.id).unwrap();
-        assert!(!branch_session_still_running(&store, &created.session.id).unwrap());
+        assert!(!branch_session_start_still_owned(
+            &store,
+            &created.session.id,
+            &created.start_agent_id
+        )
+        .unwrap());
+    }
+
+    /// Stop -> Resume during context preparation puts the same row back in
+    /// `running`, but it is a new turn. The resume transition clears the
+    /// startup marker atomically, so the original second phase cannot mistake
+    /// that row for its own and launch a second runner.
+    #[test]
+    fn immediate_start_second_phase_does_not_own_a_resumed_stopped_row() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let created = insert_running_branch_session(
+            &store,
+            &target,
+            "capture a note",
+            &BranchSessionType::Note,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+
+        store
+            .update_session_status(
+                &created.session.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::Interrupted),
+            )
+            .unwrap();
+
+        assert!(store
+            .transition_to_running_clearing_agent_id(
+                &created.session.id,
+                Some(&created.start_agent_id)
+            )
+            .unwrap());
+
+        let session = store.get_session(&created.session.id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Running);
+        assert_eq!(session.agent_id, None);
+        assert!(!branch_session_start_still_owned(
+            &store,
+            &created.session.id,
+            &created.start_agent_id
+        )
+        .unwrap());
+
+        assert!(!store
+            .prepare_immediate_branch_session(
+                &created.session.id,
+                &created.start_agent_id,
+                "/tmp/other",
+                "full prompt"
+            )
+            .unwrap());
+        assert_eq!(
+            store
+                .get_session(&created.session.id)
+                .unwrap()
+                .unwrap()
+                .prompt,
+            "capture a note"
+        );
+    }
+
+    /// If preparation fails after Stop or delete won the gap, the original
+    /// start must not overwrite the terminal state with `error`, but it still
+    /// owes the branch queue a drain because neither Stop nor delete kicked it.
+    #[test]
+    fn immediate_start_failure_after_stop_or_delete_still_owes_the_branch_drain() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let app = mock_app();
+
+        let stopped = insert_running_branch_session(
+            &store,
+            &target,
+            "capture a note",
+            &BranchSessionType::Note,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        store
+            .update_session_status(
+                &stopped.session.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::Interrupted),
+            )
+            .unwrap();
+
+        assert!(failed_immediate_branch_start_owes_drain(
+            &store,
+            app.handle(),
+            &stopped.session.id,
+            &stopped.start_agent_id,
+            &branch.id,
+            &branch.project_id,
+            "Failed to get HEAD SHA"
+        ));
+        let stopped_row = store.get_session(&stopped.session.id).unwrap().unwrap();
+        assert_eq!(stopped_row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            stopped_row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+
+        let deleted = insert_running_branch_session(
+            &store,
+            &target,
+            "capture another note",
+            &BranchSessionType::Note,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        store.delete_session(&deleted.session.id).unwrap();
+
+        assert!(failed_immediate_branch_start_owes_drain(
+            &store,
+            app.handle(),
+            &deleted.session.id,
+            &deleted.start_agent_id,
+            &branch.id,
+            &branch.project_id,
+            "Failed to get HEAD SHA"
+        ));
     }
 
     #[test]

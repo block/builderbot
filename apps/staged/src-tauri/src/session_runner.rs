@@ -1834,7 +1834,11 @@ fn stored_agent_session_id(store: &Store, session_id: &str) -> Result<Option<Str
     store
         .get_session(session_id)
         .map_err(|e| format!("Failed to load session agent id for Pikchr correction: {e}"))
-        .map(|session| session.and_then(|s| s.agent_id))
+        .map(|session| {
+            session.and_then(|s| {
+                crate::session_commands::resumable_agent_session_id(s.agent_id.as_deref())
+            })
+        })
 }
 
 fn session_has_note_artifact(store: &Store, session_id: &str) -> bool {

@@ -19,6 +19,7 @@ import {
   type ThemePreviewColors,
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import { hydrateDialogWidths } from '../../components/ui/dialog/dialogWidth.svelte';
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
 import type { AcpConfigValueSelection } from '../../types';
@@ -279,6 +280,10 @@ export async function initPreferences(): Promise<void> {
   // not the first paint of the project view — so gating the whole app on it
   // just lengthens the staged reveal on resume. Loading continues below.
   preferences.loaded = true;
+
+  // Preload dialog widths without blocking startup. An early opening may still
+  // resize when hydration finishes; each dialog also hydrates on mount.
+  void hydrateDialogWidths();
 
   // Load diff theme (migrating from the legacy combined `syntax-theme` key).
   let savedDiffTheme = await getStoreValue<string>(DIFF_THEME_STORE_KEY);

@@ -13,6 +13,11 @@
   import X from '@lucide/svelte/icons/x';
   import PencilLine from '@lucide/svelte/icons/pencil-line';
   import * as Dialog from '$lib/components/ui/dialog';
+  import {
+    createDialogWidth,
+    NOTE_DIALOG_MIN_WIDTH,
+    NOTE_DIALOG_WIDTH_KEY,
+  } from '$lib/components/ui/dialog/dialogWidth.svelte';
   import { Button } from '$lib/components/ui/button';
   import Spinner from '../../shared/Spinner.svelte';
   import { viewport } from '../../shared/viewport.svelte';
@@ -34,6 +39,14 @@
   let markdown = $state('');
   let saving = $state(false);
   let error = $state<string | null>(null);
+
+  // Shared with NoteModal: editing opens from the viewer, so the two should be
+  // the same width.
+  const dialogWidth = createDialogWidth({
+    key: NOTE_DIALOG_WIDTH_KEY,
+    minWidth: NOTE_DIALOG_MIN_WIDTH,
+  });
+  void dialogWidth.ensureHydrated();
 
   let isEdit = $derived(!!note);
   // Keyed so the editor remounts (and re-seeds its document) when the dialog
@@ -95,7 +108,8 @@
   }}
 >
   <Dialog.Content
-    class="h-[80vh] max-h-[900px] sm:max-w-[700px] p-0 gap-0 overflow-hidden flex flex-col"
+    class="dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    style={dialogWidth.style}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
@@ -160,6 +174,12 @@
         <span class={saving ? 'invisible' : ''}>Save</span>
       </Button>
     </div>
+    <Dialog.ResizeHandle
+      minWidth={dialogWidth.minWidth}
+      onWidthChange={(next, commit) => dialogWidth.set(next, commit)}
+      onResizeEnd={() => dialogWidth.clearPreview()}
+      onReset={() => dialogWidth.reset()}
+    />
   </Dialog.Content>
 </Dialog.Root>
 

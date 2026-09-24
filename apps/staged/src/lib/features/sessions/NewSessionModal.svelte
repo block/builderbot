@@ -40,6 +40,11 @@
   import { buildBranchHashtagItems } from './hashtagItems';
   import { foldSnippetsIntoPrompt, snippetLabel, type TextSnippet } from './sessionModalHelpers';
   import * as Dialog from '$lib/components/ui/dialog';
+  import {
+    createDialogWidth,
+    NEW_SESSION_DIALOG_MIN_WIDTH,
+    NEW_SESSION_DIALOG_WIDTH_KEY,
+  } from '$lib/components/ui/dialog/dialogWidth.svelte';
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
@@ -327,6 +332,12 @@
   let dragOver = $state(false);
   let modalElement: HTMLElement | null = $state(null);
 
+  const dialogWidth = createDialogWidth({
+    key: NEW_SESSION_DIALOG_WIDTH_KEY,
+    minWidth: NEW_SESSION_DIALOG_MIN_WIDTH,
+  });
+  void dialogWidth.ensureHydrated();
+
   // Seed prompt and mode from props once; caller preserves draft across open/close.
   $effect(() => {
     if (!initialized) {
@@ -524,7 +535,8 @@
 <Dialog.Root {open} onOpenChange={(v) => !v && handleClose()}>
   <Dialog.Content
     bind:ref={modalElement}
-    class={`sm:max-w-[580px] max-h-[calc(100vh-16vh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
+    class={`max-h-[calc(100vh-16vh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
+    style={dialogWidth.style}
     showCloseButton={false}
   >
     <Dialog.Title class="sr-only">
@@ -667,6 +679,12 @@
         </div>
       </div>
     </form>
+    <Dialog.ResizeHandle
+      minWidth={dialogWidth.minWidth}
+      onWidthChange={(next, commit) => dialogWidth.set(next, commit)}
+      onResizeEnd={() => dialogWidth.clearPreview()}
+      onReset={() => dialogWidth.reset()}
+    />
   </Dialog.Content>
 </Dialog.Root>
 

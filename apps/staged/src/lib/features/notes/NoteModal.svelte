@@ -20,6 +20,12 @@
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import * as Dialog from '$lib/components/ui/dialog';
+  import {
+    createDialogWidth,
+    dialogWidthStyle,
+    NOTE_DIALOG_MIN_WIDTH,
+    NOTE_DIALOG_WIDTH_KEY,
+  } from '$lib/components/ui/dialog/dialogWidth.svelte';
   import { Button } from '$lib/components/ui/button';
   import {
     countAssistantMessagesAfter,
@@ -51,6 +57,13 @@
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
+
+  /**
+   * Width the chat column takes when the split is open, added on top of the
+   * persisted note width so opening chat preserves it when space permits. Matches the
+   * second grid column in `.split-chat-open` below.
+   */
+  const CHAT_PANE_WIDTH = 380;
 
   interface Props {
     open: boolean;
@@ -127,6 +140,20 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
+
+  // Only the note column's width is persisted — shared with WriteNoteModal,
+  // since editing opens from here.
+  const dialogWidth = createDialogWidth({
+    key: NOTE_DIALOG_WIDTH_KEY,
+    minWidth: NOTE_DIALOG_MIN_WIDTH,
+  });
+  void dialogWidth.ensureHydrated();
+  let resizing = $state(false);
+
+  function handleWidthChange(total: number, commit: boolean) {
+    dialogWidth.set(total - (splitChatOpen ? CHAT_PANE_WIDTH : 0), commit);
+  }
+
   let noteSearchAvailable = $derived(hasNoteContent && !chatOnly);
   let chatToggleLabel = $derived(
     chatOpen
@@ -146,9 +173,15 @@
         ? 'Show chat pane'
         : 'View chat pane'
   );
+  // Keep chat toggles animated; the resize handle suspends this transition
+  // while measuring and applying pointer, keyboard, and reset commands.
   let contentClass = $derived(
-    `h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col transition-[max-width] duration-150 ${splitChatOpen ? 'sm:max-w-[1080px]' : 'sm:max-w-[700px]'}`
+    `dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col${
+      resizing ? ' transition-none' : ' transition-[width] duration-150'
+    }`
   );
+  let totalWidth = $derived(dialogWidth.width + (splitChatOpen ? CHAT_PANE_WIDTH : 0));
+  let totalMinWidth = $derived(dialogWidth.minWidth + (splitChatOpen ? CHAT_PANE_WIDTH : 0));
   let noteInfo = $derived<LinkedNoteContext | null>(
     displayNoteId
       ? {
@@ -557,6 +590,7 @@
 >
   <Dialog.Content
     class={contentClass}
+    style={dialogWidthStyle(totalWidth)}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
@@ -695,6 +729,16 @@
         </aside>
       {/if}
     </div>
+    <Dialog.ResizeHandle
+      minWidth={totalMinWidth}
+      onWidthChange={handleWidthChange}
+      onResizeStart={() => (resizing = true)}
+      onResizeEnd={() => {
+        dialogWidth.clearPreview();
+        resizing = false;
+      }}
+      onReset={() => dialogWidth.reset()}
+    />
   </Dialog.Content>
 </Dialog.Root>
 
@@ -713,10 +757,14 @@
     min-width: 0;
   }
 
+  /* Fixed chat column: the preferred dialog width is the note width plus
+     CHAT_PANE_WIDTH. The note column absorbs resizing and viewport compression.
+     Keep the second track in sync with
+     CHAT_PANE_WIDTH in the script above. */
   .note-modal-header-grid.split-chat-open,
   .modal-body.split-chat-open {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(340px, 1fr);
+    grid-template-columns: minmax(0, 1fr) 380px;
   }
 
   .note-header-pane {
@@ -737,8 +785,6 @@
     align-items: center;
     justify-content: flex-end;
     gap: 4px;
-    min-width: 340px;
-    max-width: 390px;
     flex: 1 1 0;
     padding: 12px;
     border-left: 1px solid var(--border-subtle);
@@ -809,14 +855,8 @@
     background: var(--bg-primary);
   }
 
-  .split-chat-open .chat-pane {
-    min-width: 340px;
-    max-width: 390px;
-  }
-
   .chat-only .chat-pane {
     border-left: none;
-    max-width: none;
   }
 
   .modal-content {

@@ -8,6 +8,7 @@ import Content from './dialog-content.svelte';
 import Description from './dialog-description.svelte';
 import Trigger from './dialog-trigger.svelte';
 import Close from './dialog-close.svelte';
+import ResizeHandle from './dialog-resize-handle.svelte';
 
 export {
   Root,
@@ -20,6 +21,7 @@ export {
   Content,
   Description,
   Close,
+  ResizeHandle,
   //
   Root as Dialog,
   Title as DialogTitle,
@@ -31,4 +33,5 @@ export {
   Content as DialogContent,
   Description as DialogDescription,
   Close as DialogClose,
+  ResizeHandle as DialogResizeHandle,
 };

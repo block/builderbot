@@ -8,6 +8,11 @@
   import { onDestroy } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import * as Dialog from '$lib/components/ui/dialog';
+  import {
+    createDialogWidth,
+    SESSION_DIALOG_MIN_WIDTH,
+    SESSION_DIALOG_WIDTH_KEY,
+  } from '$lib/components/ui/dialog/dialogWidth.svelte';
   import { Button } from '$lib/components/ui/button';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
@@ -73,6 +78,12 @@
   let currentMatchIndex = $state(0);
   let unregisterSearchTarget: (() => void) | null = null;
 
+  const dialogWidth = createDialogWidth({
+    key: SESSION_DIALOG_WIDTH_KEY,
+    minWidth: SESSION_DIALOG_MIN_WIDTH,
+  });
+  void dialogWidth.ensureHydrated();
+
   $effect(() => {
     if (!open) return;
     const unregister = registerSearchShortcutTarget({
@@ -122,7 +133,8 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && requestClose()}>
   <Dialog.Content
-    class="sm:max-w-[700px] h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    class="dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    style={dialogWidth.style}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
@@ -187,6 +199,12 @@
         matchCount = state.matchCount;
         currentMatchIndex = state.currentIndex;
       }}
+    />
+    <Dialog.ResizeHandle
+      minWidth={dialogWidth.minWidth}
+      onWidthChange={(next, commit) => dialogWidth.set(next, commit)}
+      onResizeEnd={() => dialogWidth.clearPreview()}
+      onReset={() => dialogWidth.reset()}
     />
   </Dialog.Content>
 </Dialog.Root>

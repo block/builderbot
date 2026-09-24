@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BranchChangedEvent, ProjectChangedEvent } from '../types';
+import type { BranchChangedEvent, ProjectChangedEvent, ReposChangedEvent } from '../types';
 
 /**
  * The project-changed and branch-changed legs of the cache listener,
@@ -23,6 +23,10 @@ function emitProjectChanged(payload: ProjectChangedEvent): void {
 
 function emitBranchChanged(payload: BranchChangedEvent): void {
   eventCallbacks.get('branch-changed')?.(payload);
+}
+
+function emitReposChanged(payload: ReposChangedEvent): void {
+  eventCallbacks.get('repos-changed')?.(payload);
 }
 
 async function startListening() {
@@ -87,6 +91,28 @@ describe('project-changed cache invalidation', () => {
       ['list_project_repos'],
     ]);
     expect(invalidateCacheByArgs).not.toHaveBeenCalled();
+  });
+});
+
+describe('repos-changed cache invalidation', () => {
+  it('drops the cached badge list, which every badge write publishes through', async () => {
+    await startListening();
+
+    emitReposChanged({ githubRepo: 'org/alpha' });
+
+    // Badges are one argless list, so a single repo's change drops the whole
+    // key; nothing else in the repo family is cached in IDB.
+    expect(invalidateCacheByCommand.mock.calls).toEqual([['get_all_repo_badges']]);
+    expect(invalidateCacheByArgs).not.toHaveBeenCalled();
+    expect(invalidateCache).not.toHaveBeenCalled();
+  });
+
+  it('drops the badge list on the lag flush as well', async () => {
+    await startListening();
+
+    emitReposChanged({ githubRepo: null });
+
+    expect(invalidateCacheByCommand.mock.calls).toEqual([['get_all_repo_badges']]);
   });
 });
 

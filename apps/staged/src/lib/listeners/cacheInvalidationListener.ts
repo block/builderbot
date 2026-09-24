@@ -2,7 +2,8 @@
  * Event-driven cache invalidation listener.
  *
  * Listens for backend events (pr-status-changed and the store change feed's
- * project-changed / branch-changed / notes-changed / review-changed) and
+ * project-changed / repos-changed / branch-changed / notes-changed /
+ * review-changed) and
  * invalidates the corresponding caches so that stale data is never served
  * after the backend pushes an update. The store change feed publishes from
  * every mutating store method, so a write in any window (or the backend
@@ -27,6 +28,7 @@ import type {
   NotesChangedEvent,
   PrStatusChangedEvent,
   ProjectChangedEvent,
+  ReposChangedEvent,
   ReviewChangedEvent,
   SessionStatusPayload,
 } from '../types';
@@ -55,6 +57,18 @@ export function listenForCacheInvalidation(): UnlistenFn {
       } else {
         invalidateCacheByArgs('list_project_repos', { projectId: payload.projectId });
       }
+    })
+  );
+
+  // Repos changed (badge create / update / delete, pins, recents) → drop the
+  // badge list so a non-forced SWR read that started before the edit cannot
+  // land after projectsData's forced reload and put pre-edit badges back into
+  // IDB. This listener is registered ahead of projectsDataStore's, and the
+  // cache stamps invalidations at call time, so the forced reload issued in
+  // the same dispatch is post-invalidation and its write is kept.
+  unlisteners.push(
+    listenToEvent<ReposChangedEvent>('repos-changed', () => {
+      invalidateCacheByCommand('get_all_repo_badges');
     })
   );
 

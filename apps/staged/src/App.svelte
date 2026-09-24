@@ -353,6 +353,10 @@
     // Global session-status listener — must live at App level so it works
     // regardless of which view the user is on. See sessionStatusListener.ts.
     unlistenSessionStatus = listenForSessionStatus();
+    // Registered before the data stores below on purpose: change-feed events
+    // dispatch to listeners in registration order, so a store's forced reload
+    // always starts after the cache invalidation for the same event and its
+    // fresh write is kept rather than treated as pre-mutation.
     unlistenCacheInvalidation = listenForCacheInvalidation();
     unlistenPageLifecycle = listenForPageLifecycle();
     // Refresh provider discovery (and any loaded doctor report) once the

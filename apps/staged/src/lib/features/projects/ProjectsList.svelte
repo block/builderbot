@@ -158,7 +158,14 @@
 
   $effect(() => {
     const targetProjectId = projectsListViewState.returnTargetProjectId;
-    const targetHydrated = !targetProjectId || projectsDataStore.isProjectHydrated(targetProjectId);
+    // Wait for the return-target card's final height, but only while the
+    // target is still a project: a delete lands you back here via goHome()
+    // with the deleted id as the target, and applyProjectList has already
+    // pruned it from the hydrated set, so it would otherwise never satisfy.
+    const targetHydrated =
+      !targetProjectId ||
+      !projects.some((p) => p.id === targetProjectId) ||
+      projectsDataStore.isProjectHydrated(targetProjectId);
     const readyToDecide =
       projectsListViewState.restorePending &&
       !restoreInProgress &&
@@ -448,10 +455,13 @@
                       ></div>
                     {/if}
                     <div class="card-header">
-                      {#if !hydrated}
-                        <span class="project-status-placeholder" aria-hidden="true"></span>
-                      {:else if project.location === 'remote'}
+                      {#if project.location === 'remote'}
+                        <!-- Location comes with the project list, so remote cards
+                             paint the cloud at once; only its status class waits
+                             on branches. -->
                         <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
+                      {:else if !hydrated}
+                        <span class="project-status-placeholder" aria-hidden="true"></span>
                       {:else if prStatus === 'merged'}
                         <GitPullRequest size={16} class="pr-status-merged" />
                       {:else if prStatus === 'checks_failing'}

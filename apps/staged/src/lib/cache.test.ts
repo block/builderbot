@@ -715,6 +715,54 @@ describe('first-load race protection', () => {
     }
     expect(results).toEqual([{ data: 'fresh', source: 'network', fetchedAt: expect.any(Number) }]);
   });
+
+  it('lets a forced fetch that starts after an invalidation call cache its result', async () => {
+    // Seed a pre-mutation entry so the invalidation has an IDB key to find.
+    mockInvoke.mockResolvedValueOnce('pre-mutation');
+    await cachedCommand('get_all_repo_badges', undefined, { ttl: 60_000 });
+
+    // One change-feed dispatch: the cache listener starts the invalidation and
+    // the store then issues its forced reload. That reload is post-mutation,
+    // so its write must land even though the invalidation's IDB key scan only
+    // settles — and finds the reload in flight — after the reload started.
+    const invalidation = invalidateCacheByCommand('get_all_repo_badges');
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const forced = cachedCommand<string>('get_all_repo_badges', undefined, {
+      ttl: 60_000,
+      bypassRead: true,
+    });
+    await invalidation;
+    pending.resolve('post-mutation');
+    await expect(forced).resolves.toEqual({ data: 'post-mutation', revalidating: null });
+
+    mockInvoke.mockResolvedValueOnce('unexpected network read');
+    const next = await cachedCommand<string>('get_all_repo_badges', undefined, { ttl: 60_000 });
+    expect(next).toEqual({ data: 'post-mutation', revalidating: null });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('still blocks a fetch that was in flight when the invalidation was called', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const inFlight = cachedCommand<string>('get_all_repo_badges', undefined, {
+      ttl: 60_000,
+      bypassRead: true,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const invalidation = invalidateCacheByCommand('get_all_repo_badges');
+    // A second invalidation whose scan settles later must not resurrect the
+    // in-flight fetch by stamping the key with a newer sequence.
+    await Promise.all([invalidation, invalidateCacheByCommand('get_all_repo_badges')]);
+    pending.resolve('pre-mutation');
+    await inFlight;
+
+    mockInvoke.mockResolvedValueOnce('fresh');
+    const next = await cachedCommand<string>('get_all_repo_badges', undefined, { ttl: 60_000 });
+    expect(next).toEqual({ data: 'fresh', revalidating: null });
+  });
 });
 
 describe('markAllStale', () => {
@@ -900,6 +948,37 @@ describe('cache maintenance', () => {
     expect(remaining.has(freshKey)).toBe(true);
     expect(remaining.has(oldKey)).toBe(false);
     expect(remaining.has(staleSchemaKey)).toBe(false);
+  });
+
+  it('sweepCache keeps an entry rewritten with a fresh fetchedAt while the sweep runs', async () => {
+    const store = createStore('staged-cache', 'responses');
+    const key = _cacheKey('rewritten');
+    const now = Date.now();
+    await set(
+      key,
+      {
+        key,
+        data: 'old',
+        fetchedAt: now - 8 * 24 * 60 * 60 * 1000,
+        schemaVersion: CACHE_SCHEMA_VERSION,
+      },
+      store
+    );
+
+    // The boot-time case: the sweep runs while hydration is still writing. The
+    // rewrite's transaction is created after the sweep has started scanning,
+    // so a read-then-delete sweep would act on the stale fetchedAt it read and
+    // delete the fresh record that landed in between.
+    const sweep = sweepCache();
+    const rewrite = set(
+      key,
+      { key, data: 'fresh', fetchedAt: now, schemaVersion: CACHE_SCHEMA_VERSION },
+      store
+    );
+    await Promise.all([sweep, rewrite]);
+
+    const remaining = new Map(await entries<string, { data: string }>(store));
+    expect(remaining.get(key)?.data).toBe('fresh');
   });
 
   it('evicts the older half and retries once on QuotaExceededError', async () => {

@@ -540,6 +540,97 @@ describe('hydration readiness', () => {
     expect(store.isProjectHydrated('p1')).toBe(true);
   });
 
+  it('keeps a queued re-entry soft so overlapping ensureLoaded calls never discard hydration', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    // The first re-entry hangs on its list read; the second queues behind it —
+    // two views mounting in one navigation.
+    let resolveReload!: (value: SwrResult<Project[]>) => void;
+    listProjects.mockReturnValueOnce(
+      new Promise<SwrResult<Project[]>>((resolve) => {
+        resolveReload = resolve;
+      })
+    );
+    await store.ensureLoaded();
+    await store.ensureLoaded();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    let resolveRepos!: (value: SwrResult<ProjectRepo[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveBranches = resolve;
+      })
+    );
+    listProjectRepos.mockReturnValueOnce(
+      new Promise<SwrResult<ProjectRepo[]>>((resolve) => {
+        resolveRepos = resolve;
+      })
+    );
+    const hydrating = store.hydrateProject('p1');
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(1));
+
+    // The queued follow-up runs once the first re-entry lands. A hard one would
+    // bump the generation and clear the in-flight set, so the hydration below
+    // would be thrown away and refetched.
+    resolveReload(swr([project()]));
+    await vi.waitFor(() => expect(listProjects).toHaveBeenCalledTimes(3));
+
+    resolveBranches(swr([branch({ branchName: 'kept' })]));
+    resolveRepos(swr([projectRepo()]));
+    await hydrating;
+
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(store.branchesByProject.get('p1')![0].branchName).toBe('kept');
+    expect(store.isProjectHydrated('p1')).toBe(true);
+  });
+
+  it('runs the queued follow-up hard when a project-changed reload overlaps a soft re-entry', async () => {
+    freezeBackgroundHydration();
+    const store = await importStore();
+    store.startListeners();
+    await store.ensureLoaded();
+
+    let resolveReload!: (value: SwrResult<Project[]>) => void;
+    listProjects.mockReturnValueOnce(
+      new Promise<SwrResult<Project[]>>((resolve) => {
+        resolveReload = resolve;
+      })
+    );
+    await store.ensureLoaded();
+    // Queued behind the soft re-entry: forced and hard.
+    emit('project-changed', { projectId: 'p1' });
+
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    let resolveRepos!: (value: SwrResult<ProjectRepo[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveBranches = resolve;
+      })
+    );
+    listProjectRepos.mockReturnValueOnce(
+      new Promise<SwrResult<ProjectRepo[]>>((resolve) => {
+        resolveRepos = resolve;
+      })
+    );
+    const hydrating = store.hydrateProject('p1');
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(1));
+
+    resolveReload(swr([project()]));
+    await vi.waitFor(() => expect(listProjects).toHaveBeenCalledTimes(3));
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+
+    // The hard follow-up bumped the generation, so the pre-change hydration is
+    // discarded instead of being applied over the reload.
+    resolveBranches(swr([branch({ branchName: 'stale' })]));
+    resolveRepos(swr([projectRepo()]));
+    await hydrating;
+
+    expect(store.branchesByProject.get('p1')).toEqual([]);
+    expect(store.isProjectHydrated('p1')).toBe(false);
+  });
+
   it('drops late hydration for a project removed by a soft revalidation', async () => {
     const beta = project({ id: 'p2', name: 'Beta' });
     let resolveBranches!: (value: SwrResult<Branch[]>) => void;

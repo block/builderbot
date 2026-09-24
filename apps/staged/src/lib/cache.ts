@@ -1,4 +1,4 @@
-import { get, set, del, keys, entries, clear, createStore } from 'idb-keyval';
+import { get, set, del, keys, entries, clear, createStore, promisifyRequest } from 'idb-keyval';
 import { invokeCommand, isTauri } from './transport';
 
 /**
@@ -18,12 +18,20 @@ export const CACHE_SCHEMA_VERSION = 2;
 const CACHE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Tracks the invalidation generation per cache key. When a read starts, it
- * captures the current epoch for that key. If the key is invalidated while
- * the network request is in flight, the epoch advances and the stale write
- * is skipped — preventing pre-mutation data from repopulating the cache.
+ * Every invalidation call takes the next sequence number synchronously, and
+ * a fetch captures the current number when it starts. When the invalidation
+ * later resolves which keys it covers (the command-wide and by-args variants
+ * have to scan IDB first), it stamps them with its sequence; a fetch whose
+ * write would land is skipped when its key carries a newer stamp.
+ *
+ * Stamping at call time rather than at scan time is what lets the change-feed
+ * handlers run in one dispatch: the cache listener starts the invalidation,
+ * the view store issues its forced reload right behind it, and that reload —
+ * post-mutation by construction — is not mistaken for the pre-mutation fetch
+ * the invalidation exists to block.
  */
-const invalidationEpochs = new Map<string, number>();
+let invalidationSequence = 0;
+const keyInvalidatedAt = new Map<string, number>();
 
 /**
  * Generation for full-cache invalidations. Unlike the per-key map, this also
@@ -32,24 +40,26 @@ const invalidationEpochs = new Map<string, number>();
 let fullInvalidationEpoch = 0;
 
 interface InvalidationEpoch {
-  key: number;
+  sequence: number;
   full: number;
 }
 
-function getEpoch(key: string): number {
-  return invalidationEpochs.get(key) ?? 0;
+function nextInvalidationSequence(): number {
+  return ++invalidationSequence;
 }
 
-function bumpEpoch(key: string): void {
-  invalidationEpochs.set(key, getEpoch(key) + 1);
+function markInvalidated(key: string, sequence: number): void {
+  // Max, not overwrite: a slow scan settling after a later invalidation must
+  // not roll the key's stamp back and let a fetch the later one blocked through.
+  keyInvalidatedAt.set(key, Math.max(keyInvalidatedAt.get(key) ?? 0, sequence));
 }
 
-function captureEpoch(key: string): InvalidationEpoch {
-  return { key: getEpoch(key), full: fullInvalidationEpoch };
+function captureEpoch(): InvalidationEpoch {
+  return { sequence: invalidationSequence, full: fullInvalidationEpoch };
 }
 
 function isEpochCurrent(key: string, epoch: InvalidationEpoch): boolean {
-  return getEpoch(key) === epoch.key && fullInvalidationEpoch === epoch.full;
+  return (keyInvalidatedAt.get(key) ?? 0) <= epoch.sequence && fullInvalidationEpoch === epoch.full;
 }
 
 /**
@@ -140,6 +150,10 @@ export async function* cachedInvoke<T>(
 
   const key = cacheKey(command, args);
   const store = getStore();
+  // Stamped at request time, before the IDB read: an invalidation called from
+  // here on postdates this request and must not be mistaken for one this
+  // request's response could predate.
+  const epochAtStart = captureEpoch();
 
   let entry: CacheEntry<T> | undefined;
   let isUsable = false;
@@ -156,7 +170,6 @@ export async function* cachedInvoke<T>(
   }
 
   addInFlight(key);
-  const epochAtStart = captureEpoch(key);
 
   try {
     const data = await invokeCommand<T>(command, args);
@@ -202,10 +215,11 @@ export async function cachedCommand<T>(
 
   const key = cacheKey(command, args);
   const store = getStore();
+  // Stamped at request time, before any IDB read (see cachedInvoke).
+  const epochAtStart = captureEpoch();
 
   if (config.bypassRead) {
     addInFlight(key);
-    const epochAtStart = captureEpoch(key);
     try {
       const data = await invokeCommand<T>(command, args);
       // Skip the cache write if the key was invalidated while we were fetching —
@@ -233,7 +247,6 @@ export async function cachedCommand<T>(
   }
 
   addInFlight(key);
-  const epochAtStart = captureEpoch(key);
   const network = invokeCommand<T>(command, args)
     .then(async (data) => {
       // Skip the cache write if the key was invalidated while we were fetching —
@@ -301,24 +314,38 @@ async function cacheSet<T>(key: string, entry: CacheEntry<T>): Promise<void> {
   }
 }
 
-/** Remove stale schema and week-old entries. Intended to run once per app session. */
+function isSweepable(entry: Partial<CacheEntry<unknown>> | undefined, now: number): boolean {
+  return (
+    entry == null ||
+    entry.schemaVersion !== CACHE_SCHEMA_VERSION ||
+    typeof entry.fetchedAt !== 'number' ||
+    now - entry.fetchedAt > CACHE_SWEEP_MAX_AGE_MS
+  );
+}
+
+/**
+ * Remove stale schema and week-old entries. Intended to run once per app
+ * session — during boot, while hydration is still writing. Check and delete
+ * happen on the live record inside one readwrite cursor so a write that lands
+ * mid-sweep (its transaction serializes before or after this one, never
+ * between a read and its delete) is seen with its fresh fetchedAt and kept.
+ */
 export async function sweepCache(): Promise<void> {
   if (isTauri) return;
   try {
     const store = getStore();
     const now = Date.now();
-    const allEntries = await entries<string, CacheEntry<unknown>>(store);
-    await Promise.all(
-      allEntries
-        .filter(([, entry]) => {
-          return (
-            entry.schemaVersion !== CACHE_SCHEMA_VERSION ||
-            typeof entry.fetchedAt !== 'number' ||
-            now - entry.fetchedAt > CACHE_SWEEP_MAX_AGE_MS
-          );
-        })
-        .map(([k]) => del(k, store))
-    );
+    await store('readwrite', (objectStore) => {
+      objectStore.openCursor().onsuccess = function () {
+        const cursor = this.result;
+        if (!cursor) return;
+        if (isSweepable(cursor.value as Partial<CacheEntry<unknown>> | undefined, now)) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      return promisifyRequest(objectStore.transaction);
+    });
   } catch {
     // Best-effort sweep — don't let cache maintenance block boot.
   }
@@ -331,19 +358,26 @@ export async function invalidateCache(
 ): Promise<void> {
   if (isTauri) return;
   const key = cacheKey(command, args);
-  bumpEpoch(key);
+  markInvalidated(key, nextInvalidationSequence());
   await del(key, getStore()).catch(() => {});
 }
 
-/** Invalidate all entries for a command (regardless of args). */
+/**
+ * Invalidate all entries for a command (regardless of args).
+ *
+ * The IDB delete is best-effort ordering-wise: a post-call fetch that comes
+ * back before the key scan settles has its fresh write deleted here and is
+ * refetched on the next read — a miss, never stale data.
+ */
 export async function invalidateCacheByCommand(command: string): Promise<void> {
   if (isTauri) return;
+  const sequence = nextInvalidationSequence();
   const store = getStore();
   const prefix = `${command}:`;
   const idbMatching = (await keys<string>(store)).filter((k) => k.startsWith(prefix));
   const inFlightMatching = [...inFlightKeys.keys()].filter((k) => k.startsWith(prefix));
-  const toBump = new Set<string>([...idbMatching, ...inFlightMatching]);
-  toBump.forEach(bumpEpoch);
+  const toMark = new Set<string>([...idbMatching, ...inFlightMatching]);
+  toMark.forEach((k) => markInvalidated(k, sequence));
   await Promise.all(idbMatching.map((k) => del(k, store)));
 }
 
@@ -366,6 +400,7 @@ export async function invalidateCacheByArgs(
   partialArgs: Record<string, unknown>
 ): Promise<void> {
   if (isTauri) return;
+  const sequence = nextInvalidationSequence();
   const store = getStore();
   const matches = (key: string): boolean => {
     const args = parseCacheArgs(key, command);
@@ -374,8 +409,8 @@ export async function invalidateCacheByArgs(
   };
   const idbMatching = (await keys<string>(store)).filter(matches);
   const inFlightMatching = [...inFlightKeys.keys()].filter(matches);
-  const toBump = new Set<string>([...idbMatching, ...inFlightMatching]);
-  toBump.forEach(bumpEpoch);
+  const toMark = new Set<string>([...idbMatching, ...inFlightMatching]);
+  toMark.forEach((k) => markInvalidated(k, sequence));
   await Promise.all(idbMatching.map((k) => del(k, store)));
 }
 

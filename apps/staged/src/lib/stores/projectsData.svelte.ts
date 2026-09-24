@@ -137,6 +137,7 @@ class ProjectsDataStore {
   private revalidatePending = false;
   private revalidateQueued = false;
   private revalidateQueuedForce = false;
+  private revalidateQueuedHard = false;
   private backgroundHydrationCancel: (() => void) | null = null;
   /** In-flight per-project hydrations, so the foreground fetch, the idle drip
    *  and the grid's sweep share one request instead of racing three. */
@@ -385,10 +386,15 @@ class ProjectsDataStore {
     if (this.revalidatePending) {
       // A change arrived while a reload was in flight; that reload may have
       // read the list before the write committed, so run once more after it.
-      // Preserve force across the queue: if any queued event says the backend
-      // changed, the follow-up fetch must not accept a cached answer.
+      // Preserve force and hardness across the queue: if any queued event says
+      // the backend changed, the follow-up fetch must not accept a cached
+      // answer, and if any queued caller asked for a hard reload the follow-up
+      // must bump the generation. Overlapping soft callers — two views
+      // mounting in one navigation — stay soft, or the follow-up would discard
+      // the in-flight hydrations the soft path exists to keep.
       this.revalidateQueued = true;
       this.revalidateQueuedForce ||= force;
+      this.revalidateQueuedHard ||= !soft;
       return;
     }
     this.revalidatePending = true;
@@ -398,9 +404,11 @@ class ProjectsDataStore {
       this.revalidatePending = false;
       if (this.revalidateQueued) {
         const queuedForce = this.revalidateQueuedForce;
+        const queuedHard = this.revalidateQueuedHard;
         this.revalidateQueued = false;
         this.revalidateQueuedForce = false;
-        void this.revalidate({ force: queuedForce });
+        this.revalidateQueuedHard = false;
+        void this.revalidate({ force: queuedForce, soft: !queuedHard });
       }
     }
   }

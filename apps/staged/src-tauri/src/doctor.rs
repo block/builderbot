@@ -1053,6 +1053,15 @@ fn apply_managed_bridge_readout(
 /// when the crate derived no command (an `Unknown` source, say) — Staged can
 /// install its own copy where the crate had nothing to offer.
 ///
+/// The version the description names is the one the installer will fetch:
+/// `versions.latest`, Staged's own `npm view <pkg> version` against the
+/// configured registry, gathered alongside the managed readout. The crate's
+/// `latest_version` is derived per install source — `brew info` for a Homebrew
+/// copy — and can name a release the configured registry does not (yet) carry,
+/// or lag one it does; it is only the fallback for when the managed probe
+/// failed, so the text at least names the release the row is flagged stale
+/// against.
+///
 /// Only ever fires on the freshness pass, since `update_available` is unset
 /// until then, and never on a management-off build, where
 /// [`managed_bridge_versions`] returns nothing.
@@ -1073,11 +1082,11 @@ fn redirect_unmanaged_update_to_managed_install(
     if main.update_available != Some(true) {
         return false;
     }
-    main.update_command = Some(managed_install_description(
-        &versions.tool,
-        main.latest_version.as_deref(),
-        &path,
-    ));
+    let latest = versions
+        .latest
+        .as_deref()
+        .or(main.latest_version.as_deref());
+    main.update_command = Some(managed_install_description(&versions.tool, latest, &path));
     main.update_fix_type = Some(FixType::UpdateMain);
     true
 }
@@ -1788,9 +1797,16 @@ mod tests {
     /// does not run for a copy it never uses) are replaced by a description of
     /// the managed install. A source the crate cannot update gets the action it
     /// had none for.
+    ///
+    /// The version the description names is the managed probe's — what the
+    /// installer will actually fetch from the configured registry — not the
+    /// crate's per-source answer (`brew info` for a Homebrew copy), which the
+    /// readout itself keeps showing.
     #[test]
     fn a_user_copy_with_a_newer_release_is_redirected_to_the_managed_install() {
-        let installed = versions(Some("0.16.2"), Some("0.17.0"));
+        // The configured registry is one release ahead of what the crate's
+        // source-aware lookup found for the user's copy.
+        let installed = versions(Some("0.16.2"), Some("0.17.1"));
         let cases = [
             (
                 "/Users/u/.nvm/versions/node/v22.14.0/bin/claude-agent-acp",
@@ -1827,19 +1843,56 @@ mod tests {
                 description.contains("@agentclientprotocol/claude-agent-acp"),
                 "{description}"
             );
-            assert!(description.contains("0.17.0"), "{description}");
+            assert!(
+                description.contains("0.17.1"),
+                "names the registry release the installer fetches: {description}"
+            );
+            assert!(
+                !description.contains("0.17.0"),
+                "not the crate's per-source answer: {description}"
+            );
             assert!(description.contains("~/.staged/packages"), "{description}");
             assert!(description.contains(path), "{description}");
             assert!(!description.contains("npm install"), "{description}");
             assert!(!description.contains("brew upgrade"), "{description}");
 
             // The action is the *only* change: path, source, both versions and
-            // `updateAvailable` still describe the copy that is on PATH.
+            // `updateAvailable` still describe the copy that is on PATH — the
+            // readout's `latestVersion` stays the crate's, even though the
+            // description names the registry's.
             let main = after.main.as_mut().unwrap();
             main.update_command = command.map(str::to_string);
             main.update_fix_type = command.map(|_| FixType::UpdateMain);
             assert_eq!(json(&after), before, "{source:?}");
         }
+    }
+
+    /// When the managed probe failed — registry unreachable, garbage, timed
+    /// out — the description falls back to the version the crate flagged the
+    /// copy stale against, rather than naming nothing: the row is still
+    /// redirected, since the installer's `@latest` needs no version up front.
+    #[test]
+    fn a_redirected_description_falls_back_to_the_crates_latest_when_the_probe_failed() {
+        let probe_failed = versions(Some("0.16.2"), None);
+        let path = "/opt/homebrew/bin/claude-agent-acp";
+        let check = user_copy_claude_check(
+            path,
+            &InstallSource::Brew,
+            Some("0.17.0"),
+            Some("brew upgrade claude-agent-acp"),
+        );
+
+        let after = apply_to(check, &probe_failed, true);
+
+        let main = after.main.as_ref().unwrap();
+        assert_eq!(main.update_fix_type, Some(FixType::UpdateMain));
+        assert_eq!(
+            main.update_command.as_deref(),
+            Some(
+                "install Staged's managed @agentclientprotocol/claude-agent-acp 0.17.0 in \
+                 ~/.staged/packages (the copy at /opt/homebrew/bin/claude-agent-acp is left as is)"
+            )
+        );
     }
 
     /// Only the managed shim gets the managed readout. A row whose path sits

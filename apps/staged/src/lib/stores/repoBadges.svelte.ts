@@ -5,7 +5,12 @@
  * They are lazily generated on first encounter and cached here.
  */
 
-import { getAllRepoBadges, ensureRepoBadges, updateRepoBadge } from '../commands';
+import {
+  getAllRepoBadges,
+  ensureRepoBadges,
+  updateRepoBadge,
+  type ForceRefreshOptions,
+} from '../commands';
 import { agentState } from '../features/agents/agent.svelte';
 import { getPreferredAgent } from '../features/settings/preferences.svelte';
 import type { RepoBadge } from '../types';
@@ -16,6 +21,7 @@ function badgeKey(githubRepo: string, subpath: string): string {
 
 class RepoBadgeStore {
   private badges = $state<Map<string, RepoBadge>>(new Map());
+  private loadGeneration = 0;
 
   /** Return all loaded badges. */
   all(): RepoBadge[] {
@@ -28,14 +34,27 @@ class RepoBadgeStore {
   }
 
   /** Load all badges from the backend. Call once on app startup. */
-  async loadAll(): Promise<void> {
-    try {
-      const all = await getAllRepoBadges();
+  async loadAll(options: ForceRefreshOptions = {}): Promise<void> {
+    // SWR revalidations and forced reloads can overlap; only the newest
+    // request is allowed to replace the full badge map.
+    const generation = ++this.loadGeneration;
+    const applyBadges = (all: RepoBadge[]) => {
+      if (generation !== this.loadGeneration) return;
       const next = new Map<string, RepoBadge>();
       for (const badge of all) {
         next.set(badgeKey(badge.githubRepo, badge.subpath), badge);
       }
       this.badges = next;
+    };
+
+    try {
+      const { data, revalidating } = await getAllRepoBadges(options);
+      applyBadges(data);
+      if (revalidating) {
+        revalidating.then(applyBadges).catch((e) => {
+          console.error('[RepoBadgeStore] Failed to revalidate badges:', e);
+        });
+      }
     } catch (e) {
       console.error('[RepoBadgeStore] Failed to load badges:', e);
     }
@@ -50,6 +69,8 @@ class RepoBadgeStore {
   ): Promise<RepoBadge> {
     const sp = subpath ?? '';
     const updated = await updateRepoBadge(githubRepo, sp, shortName, hue);
+    // A manual edit is newer than any load already in flight.
+    this.loadGeneration++;
     const next = new Map(this.badges);
     next.set(badgeKey(githubRepo, sp), updated);
     this.badges = next;

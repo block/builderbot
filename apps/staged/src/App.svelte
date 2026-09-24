@@ -64,6 +64,7 @@
   import { listenForMenuEvents } from './lib/listeners/menuListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
+  import { sweepCache } from './lib/cache';
   import type { StoreIncompatibility } from './lib/types';
 
   const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
@@ -335,6 +336,7 @@
     if (navigation.selectedProjectId) {
       void commands.warmProjectTimelines(navigation.selectedProjectId);
     }
+    void projectsDataStore.ensureLoaded();
 
     // App-menu items, all nine registered and torn down as one. See
     // menuListener.ts for why they're window-scoped.
@@ -351,6 +353,10 @@
     // Global session-status listener — must live at App level so it works
     // regardless of which view the user is on. See sessionStatusListener.ts.
     unlistenSessionStatus = listenForSessionStatus();
+    // Registered before the data stores below on purpose: change-feed events
+    // dispatch to listeners in registration order, so a store's forced reload
+    // always starts after the cache invalidation for the same event and its
+    // fresh write is kept rather than treated as pre-mutation.
     unlistenCacheInvalidation = listenForCacheInvalidation();
     unlistenPageLifecycle = listenForPageLifecycle();
     // Refresh provider discovery (and any loaded doctor report) once the
@@ -378,6 +384,13 @@
       await initNavigation();
     } catch (e) {
       console.error('Failed to restore last viewed project:', e);
+    }
+
+    const sweep = () => void sweepCache();
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(sweep, { timeout: 10_000 });
+    } else {
+      setTimeout(sweep, 0);
     }
 
     // Cache the BLOX_ENV value once at startup (process-level, never changes).

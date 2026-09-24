@@ -11,12 +11,13 @@
  *
  * ensureLoaded() applies the SwrResult render-stale-then-refresh contract in
  * both modes: the first call fetches the project list; later calls resolve
- * immediately with the in-memory data and kick a background revalidation.
- * Readiness is two-level so no view waits for data it doesn't paint —
- * `loaded` means "the project list landed", while per-project branches and
- * repos are hydrated on demand (hydrateProject / ensureProjectsHydrated) and
- * dripped through the idle queue for everything nobody asked for. Views gate
- * on isProjectHydrated()/allProjectsHydrated rather than on `loaded`.
+ * immediately with the in-memory data and kick a soft background revalidation
+ * that does not discard in-flight per-project hydration. Readiness is two-level
+ * so no view waits for data it doesn't paint — `loaded` means "the project list
+ * landed", while per-project branches and repos are hydrated on demand
+ * (hydrateProject / ensureProjectsHydrated) and dripped through the idle queue
+ * for everything nobody asked for. Views that need branch/repo details gate on
+ * isProjectHydrated()/allProjectsHydrated rather than on `loaded`.
  *
  * ProjectHome, ProjectsList, ProjectsSidebar, and ReposListView all read
  * this store directly; startListeners() is wired once from App.svelte.
@@ -111,13 +112,14 @@ class ProjectsDataStore {
    * Projects whose branches + repos have been fetched at least once, mapped to
    * the load generation that fetched them. Membership is what view gates read
    * (isProjectHydrated); the generation lets the idle drip skip a project some
-   * foreground caller already fetched under the current load while still
-   * refreshing it after the next one.
+   * foreground caller already fetched under the current load.
    *
    * Entries are written once a fetch *settles* — success or failure, or a
-   * failed fetch would gate a view forever — and survive a generation bump:
+   * failed fetch would gate a view forever — and survive generation bumps:
    * they mean "we have data to paint", so a refresh never re-blanks a painted
-   * view.
+   * view. Soft revalidations preserve the generation and the in-flight set;
+   * freshness for already-painted projects comes from change-feed refetches,
+   * project selection, and hard refreshes rather than redoing the whole drip.
    */
   private _hydratedProjects = $state<Map<string, number>>(new Map());
 
@@ -135,6 +137,7 @@ class ProjectsDataStore {
   private revalidatePending = false;
   private revalidateQueued = false;
   private revalidateQueuedForce = false;
+  private revalidateQueuedHard = false;
   private backgroundHydrationCancel: (() => void) | null = null;
   /** In-flight per-project hydrations, so the foreground fetch, the idle drip
    *  and the grid's sweep share one request instead of racing three. */
@@ -242,13 +245,20 @@ class ProjectsDataStore {
    */
   async ensureLoaded(): Promise<void> {
     if (this._loaded) {
-      void this.revalidate();
+      void this.revalidate({ soft: true });
       return;
     }
     this.initialLoad ??= this.loadProjectsAndHydrate().finally(() => {
       this.initialLoad = null;
     });
     return this.initialLoad;
+  }
+
+  /** Wait for the first project list without forcing an already-loaded store to
+   *  revalidate. Used by startup validation paths that must not throw away work
+   *  a view has already kicked off. */
+  whenLoaded(): Promise<void> {
+    return this._loaded ? Promise.resolve() : this.ensureLoaded();
   }
 
   /** Full reload (used by cache-stale and the project-delete flow). Always
@@ -369,52 +379,69 @@ class ProjectsDataStore {
     this._branchesByProject = next;
   }
 
-  private async revalidate({ force = false }: { force?: boolean } = {}): Promise<void> {
+  private async revalidate({
+    force = false,
+    soft = false,
+  }: { force?: boolean; soft?: boolean } = {}): Promise<void> {
     if (this.revalidatePending) {
       // A change arrived while a reload was in flight; that reload may have
       // read the list before the write committed, so run once more after it.
-      // Preserve force across the queue: if any queued event says the backend
-      // changed, the follow-up fetch must not accept a cached answer.
+      // Preserve force and hardness across the queue: if any queued event says
+      // the backend changed, the follow-up fetch must not accept a cached
+      // answer, and if any queued caller asked for a hard reload the follow-up
+      // must bump the generation. Overlapping soft callers — two views
+      // mounting in one navigation — stay soft, or the follow-up would discard
+      // the in-flight hydrations the soft path exists to keep.
       this.revalidateQueued = true;
       this.revalidateQueuedForce ||= force;
+      this.revalidateQueuedHard ||= !soft;
       return;
     }
     this.revalidatePending = true;
     try {
-      await this.loadProjectsAndHydrate({ force });
+      await this.loadProjectsAndHydrate({ force, soft });
     } finally {
       this.revalidatePending = false;
       if (this.revalidateQueued) {
         const queuedForce = this.revalidateQueuedForce;
+        const queuedHard = this.revalidateQueuedHard;
         this.revalidateQueued = false;
         this.revalidateQueuedForce = false;
-        void this.revalidate({ force: queuedForce });
+        this.revalidateQueuedHard = false;
+        void this.revalidate({ force: queuedForce, soft: !queuedHard });
       }
     }
   }
 
-  private async loadProjectsAndHydrate({ force = false }: { force?: boolean } = {}): Promise<void> {
-    const generation = ++this.loadGeneration;
-    this.cancelBackgroundHydration();
-    // Those promises are already no-ops under the new generation; drop them so
-    // callers after the bump start fresh fetches.
-    this.hydrationInFlight.clear();
+  private async loadProjectsAndHydrate({
+    force = false,
+    soft = false,
+  }: { force?: boolean; soft?: boolean } = {}): Promise<void> {
+    const generation = soft ? this.loadGeneration : ++this.loadGeneration;
+    if (!soft) {
+      this.cancelBackgroundHydration();
+      // Those promises are already no-ops under the new generation; drop them so
+      // callers after the bump start fresh fetches.
+      this.hydrationInFlight.clear();
+    }
     if (this._projects.length === 0) {
       this._loading = true;
     }
     this._error = null;
-    await repoBadgeStore.loadAll();
     try {
-      const { data, revalidating } = await commands.listProjects({ force });
+      const [{ data, revalidating }] = await Promise.all([
+        commands.listProjects({ force }),
+        repoBadgeStore.loadAll({ force }),
+      ]);
       if (generation !== this.loadGeneration) return;
-      this.applyProjectList(data, generation);
+      this.applyProjectList(data, generation, { scheduleHydration: !soft });
       this._loaded = true;
 
       if (revalidating) {
         // Applied outside the awaited chain so callers aren't blocked on the
         // SWR refresh — they already have renderable data.
         revalidating
-          .then((fresh) => this.applyProjectList(fresh, generation))
+          .then((fresh) => this.applyProjectList(fresh, generation, { scheduleHydration: !soft }))
           .catch((e) => {
             console.error('[projectsData] Failed to revalidate project list:', e);
           });
@@ -433,11 +460,20 @@ class ProjectsDataStore {
    * Apply a fetched project list: seed branch entries so per-project
    * consumers can render immediately and prune state for removed projects.
    * Synchronous by design — this is what `loaded` waits for. Per-project
-   * branches and repos are left to the idle drip kicked here, or to whichever
-   * view asks for them sooner.
+   * branches and repos are left to the idle drip kicked here on hard loads, or
+   * to whichever view asks for them sooner. Soft revalidations reuse the
+   * current drip rather than cancelling and restarting it.
    */
-  private applyProjectList(projectList: Project[], generation: number): void {
+  private applyProjectList(
+    projectList: Project[],
+    generation: number,
+    { scheduleHydration = true }: { scheduleHydration?: boolean } = {}
+  ): void {
     if (generation !== this.loadGeneration) return;
+    const previousProjectIds = new Set(this._projects.map((project) => project.id));
+    const newlySeenProjectIds = projectList
+      .map((project) => project.id)
+      .filter((projectId) => !previousProjectIds.has(projectId));
     this._projects = projectList;
 
     const branchMap = new Map<string, Branch[]>();
@@ -470,10 +506,19 @@ class ProjectsDataStore {
       this._deletingProjectNames = prunedDeleting;
     }
 
-    this.scheduleBackgroundHydration(
-      projectList.map((p) => p.id),
-      generation
-    );
+    if (scheduleHydration) {
+      this.scheduleBackgroundHydration(
+        projectList.map((p) => p.id),
+        generation
+      );
+    } else {
+      // Soft revalidations do not restart the whole drip, but a project that
+      // only appears in the fresh result has no existing branch/repo fetch to
+      // join. Put just those new cards onto the background hydration queue.
+      for (const projectId of newlySeenProjectIds) {
+        void this.hydrateProject(projectId, { priority: 'background' });
+      }
+    }
   }
 
   /** Hydrate a project unless the same hydration is already in flight, so the
@@ -531,8 +576,12 @@ class ProjectsDataStore {
     }
   }
 
+  private hasProject(projectId: string): boolean {
+    return this._projects.some((project) => project.id === projectId);
+  }
+
   private markProjectHydrated(projectId: string, generation: number): void {
-    if (generation !== this.loadGeneration) return;
+    if (generation !== this.loadGeneration || !this.hasProject(projectId)) return;
     this._hydratedProjects = new Map(this._hydratedProjects).set(projectId, generation);
   }
 
@@ -541,7 +590,7 @@ class ProjectsDataStore {
     branches: Branch[],
     generation: number
   ): Branch[] | null {
-    if (generation !== this.loadGeneration) return null;
+    if (generation !== this.loadGeneration || !this.hasProject(projectId)) return null;
 
     const mergedBranches = mergeBranchesPreservingWorktree(
       this._branchesByProject.get(projectId) || [],
@@ -552,7 +601,7 @@ class ProjectsDataStore {
   }
 
   private applyProjectRepos(projectId: string, repos: ProjectRepo[], generation: number): void {
-    if (generation !== this.loadGeneration) return;
+    if (generation !== this.loadGeneration || !this.hasProject(projectId)) return;
     this._reposByProject = new Map(this._reposByProject).set(projectId, repos);
     void repoBadgeStore.ensureForRepos(
       repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
@@ -751,7 +800,7 @@ class ProjectsDataStore {
     // affinities) are all repo writes.
     this.unlisteners.push(
       listenToEvent<ReposChangedEvent>('repos-changed', () => {
-        void repoBadgeStore.loadAll();
+        void repoBadgeStore.loadAll({ force: true });
         if (this._homeRepos !== null || this.homeReposInFlight) {
           void this.startHomeReposFetch();
         }

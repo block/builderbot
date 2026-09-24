@@ -69,17 +69,22 @@ function initialProjectId(): string | null {
   return readSnapshot<string>(SNAPSHOT_KEYS.lastProject);
 }
 
+const initialProject = initialProjectId();
+const initialDetailStack: DetailRoute[] = initialProject
+  ? [rootRoute(), { kind: 'project', projectId: initialProject }]
+  : [rootRoute()];
+
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   // Web and the first Tauri window seed synchronously from the localStorage
-  // mirror so <ProjectHome> can paint before the async persistent store and
-  // `listProjects()` validation resolve (see initNavigation).
-  selectedProjectId: initialProjectId(),
+  // mirror so <ProjectHome> and the Back affordance can paint before the async
+  // persistent store and `listProjects()` validation resolve (see initNavigation).
+  selectedProjectId: initialProject,
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
-  detailStack: [rootRoute()] as DetailRoute[],
-  currentRoute: rootRoute() as DetailRoute,
-  canGoBack: false,
+  detailStack: initialDetailStack,
+  currentRoute: initialDetailStack[initialDetailStack.length - 1] ?? rootRoute(),
+  canGoBack: initialDetailStack.length > 1,
 });
 
 function currentRoute(): DetailRoute {
@@ -166,24 +171,20 @@ function persistLastProject(projectId: string | null): void {
  * start; a secondary window opens on the project its opener seeded it with.
  */
 export async function initNavigation(): Promise<void> {
-  // Kick the shared projects load immediately so the data is warming while we
-  // read the persisted route — every consumer (sidebar, landing page, this
-  // validation) shares the one fetch.
-  const projectsLoad = projectsDataStore.ensureLoaded();
-
   const label = getWindowLabel();
   if (label && label !== 'main') {
     const seedProjectId = await takeWindowSeed().catch(() => null);
     if (!seedProjectId) return;
     // Validate against the project list like the restore path below — the
     // project could have been deleted between opening and initializing.
-    await projectsLoad;
+    await projectsDataStore.whenLoaded();
     if (projectsDataStore.loaded && !projectsDataStore.projects.some((p) => p.id === seedProjectId))
       return;
     setDetailStack([rootRoute(), { kind: 'project', projectId: seedProjectId }]);
     return;
   }
 
+  const seeded = navigation.detailStack.length > 1;
   // `selectedProjectId` may already be set synchronously from the localStorage
   // mirror (web cold boot). Fall back to the async persistent store otherwise —
   // it is the source of truth in Tauri mode. Either way we render immediately
@@ -194,7 +195,7 @@ export async function initNavigation(): Promise<void> {
 
   // Validate the project still exists; this runs in the background relative to
   // the first paint, which already shows the restored project.
-  await projectsLoad;
+  await projectsDataStore.whenLoaded();
   if (!projectsDataStore.loaded) {
     // If we can't list projects (e.g. store error), keep whatever we restored.
     console.warn('[Navigation] Could not verify last project, keeping restored route');
@@ -202,10 +203,19 @@ export async function initNavigation(): Promise<void> {
   }
   const existingIds = new Set(projectsDataStore.projects.map((p) => p.id));
   if (existingIds.has(lastProjectId)) {
-    setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
-  } else {
+    // Web: the seeded stack is already right. Tauri: push the restored route,
+    // but only if the user hasn't navigated while we were validating.
+    if (!seeded && navigation.detailStack.length === 1) {
+      setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
+    }
+  } else if (
+    (!seeded && navigation.detailStack.length === 1) ||
+    navigation.detailStack.some(
+      (route) => route.kind === 'project' && route.projectId === lastProjectId
+    )
+  ) {
     // Project was deleted — back out to home and clear the persisted values.
-    navigation.selectedProjectId = null;
+    setDetailStack([rootRoute()]);
     await setStoreValue(LAST_PROJECT_STORE_KEY, null);
     clearSnapshot(SNAPSHOT_KEYS.lastProject);
   }

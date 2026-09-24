@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BranchChangedEvent, ProjectChangedEvent } from '../types';
+import type { BranchChangedEvent, ProjectChangedEvent, ReposChangedEvent } from '../types';
 
 /**
  * The project-changed and branch-changed legs of the cache listener,
@@ -23,6 +23,10 @@ function emitProjectChanged(payload: ProjectChangedEvent): void {
 
 function emitBranchChanged(payload: BranchChangedEvent): void {
   eventCallbacks.get('branch-changed')?.(payload);
+}
+
+function emitReposChanged(payload: ReposChangedEvent): void {
+  eventCallbacks.get('repos-changed')?.(payload);
 }
 
 async function startListening() {
@@ -68,8 +72,11 @@ describe('project-changed cache invalidation', () => {
 
     emitProjectChanged({ projectId: 'p1' });
 
-    // list_projects takes no args, so the drop is command-wide either way.
-    expect(invalidateCacheByCommand.mock.calls).toEqual([['list_projects']]);
+    // list_projects and badges take no args, so each is exactly one key and
+    // the per-key drop (synchronous stamp, single delete, no IDB key scan)
+    // covers it in full.
+    expect(invalidateCache.mock.calls).toEqual([['list_projects'], ['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
     expect(invalidateCacheByArgs.mock.calls).toEqual([['list_project_repos', { projectId: 'p1' }]]);
   });
 
@@ -78,11 +85,34 @@ describe('project-changed cache invalidation', () => {
 
     emitProjectChanged({ projectId: null });
 
-    expect(invalidateCacheByCommand.mock.calls).toEqual([
-      ['list_projects'],
-      ['list_project_repos'],
-    ]);
+    expect(invalidateCache.mock.calls).toEqual([['list_projects'], ['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand.mock.calls).toEqual([['list_project_repos']]);
     expect(invalidateCacheByArgs).not.toHaveBeenCalled();
+  });
+});
+
+describe('repos-changed cache invalidation', () => {
+  it('drops the cached badge list, which every badge write publishes through', async () => {
+    await startListening();
+
+    emitReposChanged({ githubRepo: 'org/alpha' });
+
+    // Badges are one argless list, so a single repo's change drops the whole
+    // key; nothing else in the repo family is cached in IDB. The per-key drop
+    // avoids a full-store key scan on every pin and recent-repo update, which
+    // publish through this same event.
+    expect(invalidateCache.mock.calls).toEqual([['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
+    expect(invalidateCacheByArgs).not.toHaveBeenCalled();
+  });
+
+  it('drops the badge list on the lag flush as well', async () => {
+    await startListening();
+
+    emitReposChanged({ githubRepo: null });
+
+    expect(invalidateCache.mock.calls).toEqual([['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
   });
 });
 

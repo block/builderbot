@@ -251,8 +251,12 @@ function ensureSystemModeListener() {
 export async function initPreferences(): Promise<void> {
   await initPersistentStore();
 
+  const [savedSize, savedMode] = await Promise.all([
+    getStoreValue<number>(SIZE_STORE_KEY),
+    getStoreValue<AppMode>(APP_MODE_STORE_KEY),
+  ]);
+
   // Load size
-  const savedSize = await getStoreValue<number>(SIZE_STORE_KEY);
   if (
     typeof savedSize === 'number' &&
     Number.isFinite(savedSize) &&
@@ -264,7 +268,6 @@ export async function initPreferences(): Promise<void> {
   applySize();
 
   // Load app chrome mode and apply the fixed light/dark chrome theme.
-  const savedMode = await getStoreValue<AppMode>(APP_MODE_STORE_KEY);
   if (savedMode === 'light' || savedMode === 'dark' || savedMode === 'system') {
     preferences.mode = savedMode;
   }

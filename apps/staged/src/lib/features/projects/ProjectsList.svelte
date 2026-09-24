@@ -61,11 +61,9 @@
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let homeRepos = $derived(projectsDataStore.homeRepos);
-  // The grid paints every card complete or not at all, so it waits for each
-  // project's branches and repos — not just the project list `loaded` covers.
-  let loading = $derived(
-    projectsDataStore.loading || !projectsDataStore.loaded || !projectsDataStore.allProjectsHydrated
-  );
+  // The grid paints as soon as the project list lands. Per-card branch/repo
+  // details fill in behind as hydration finishes.
+  let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
@@ -159,12 +157,22 @@
   }
 
   $effect(() => {
+    const targetProjectId = projectsListViewState.returnTargetProjectId;
+    // Wait for the return-target card's final height, but only while the
+    // target is still a project: a delete lands you back here via goHome()
+    // with the deleted id as the target, and applyProjectList has already
+    // pruned it from the hydrated set, so it would otherwise never satisfy.
+    const targetHydrated =
+      !targetProjectId ||
+      !projects.some((p) => p.id === targetProjectId) ||
+      projectsDataStore.isProjectHydrated(targetProjectId);
     const readyToDecide =
       projectsListViewState.restorePending &&
       !restoreInProgress &&
       !loading &&
       !error &&
-      mainPanelEl;
+      mainPanelEl &&
+      targetHydrated;
 
     if (!readyToDecide) return;
 
@@ -391,7 +399,8 @@
               deletingProjectNames,
               projectBranches.get(project.id) || []
             )}
-            {@const prStatus = getProjectPrStatus(project.id)}
+            {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
+            {@const prStatus = hydrated ? getProjectPrStatus(project.id) : null}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
@@ -447,7 +456,12 @@
                     {/if}
                     <div class="card-header">
                       {#if project.location === 'remote'}
+                        <!-- Location comes with the project list, so remote cards
+                             paint the cloud at once; only its status class waits
+                             on branches. -->
                         <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
+                      {:else if !hydrated}
+                        <span class="project-status-placeholder" aria-hidden="true"></span>
                       {:else if prStatus === 'merged'}
                         <GitPullRequest size={16} class="pr-status-merged" />
                       {:else if prStatus === 'checks_failing'}
@@ -711,6 +725,12 @@
   }
 
   .card-header :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .project-status-placeholder {
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
   }
 

@@ -1,4 +1,4 @@
-import { get, set, del, keys, entries, clear, createStore } from 'idb-keyval';
+import { get, set, del, keys, entries, clear, createStore, promisifyRequest } from 'idb-keyval';
 import { invokeCommand, isTauri } from './transport';
 
 /**
@@ -8,23 +8,33 @@ import { invokeCommand, isTauri } from './transport';
  * new UI depends on reads as `undefined` (e.g. `CommitTimelineItem.pipelineKind`,
  * whose absence silently re-enables the Rebase button mid-rebase).
  *
- * Entries that fail the check read as misses and sit inert in IndexedDB until
- * they're overwritten or LRU-evicted. The cost of a bump is one cold-cache boot
- * per client.
+ * Entries that fail the check read as misses and are cleaned by the once-per-
+ * session cache sweep. The cost of a bump is one cold-cache boot per client.
  *
  * The timeline boot snapshot in `commands.ts` is versioned by this same
  * constant, so one bump covers both layers that survive a deploy.
  */
 export const CACHE_SCHEMA_VERSION = 2;
-const MAX_CACHE_ENTRIES = 200;
+const CACHE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Tracks the invalidation generation per cache key. When a read starts, it
- * captures the current epoch for that key. If the key is invalidated while
- * the network request is in flight, the epoch advances and the stale write
- * is skipped — preventing pre-mutation data from repopulating the cache.
+ * Every invalidation call takes the next sequence number synchronously and
+ * stamps the keys it covers with it. A fetch captures the current number as
+ * its network call goes out, and skips its cache write when its key carries a
+ * newer stamp.
+ *
+ * Stamping at call time rather than after an IDB scan is what lets the
+ * change-feed handlers run in one dispatch: the cache listener starts the
+ * invalidation, the view store issues its forced reload right behind it, and
+ * that reload — post-mutation by construction — carries the new sequence and
+ * is not mistaken for the pre-mutation fetch the invalidation exists to block.
+ * It is also what covers a key that so far exists only as an in-flight
+ * request: the command-wide and by-args variants stamp the matching in-flight
+ * keys before they scan IDB, so a response that lands mid-scan is already
+ * blocked rather than written where no delete will ever reach it.
  */
-const invalidationEpochs = new Map<string, number>();
+let invalidationSequence = 0;
+const keyInvalidatedAt = new Map<string, number>();
 
 /**
  * Generation for full-cache invalidations. Unlike the per-key map, this also
@@ -33,31 +43,39 @@ const invalidationEpochs = new Map<string, number>();
 let fullInvalidationEpoch = 0;
 
 interface InvalidationEpoch {
-  key: number;
+  sequence: number;
   full: number;
 }
 
-function getEpoch(key: string): number {
-  return invalidationEpochs.get(key) ?? 0;
+function nextInvalidationSequence(): number {
+  return ++invalidationSequence;
 }
 
-function bumpEpoch(key: string): void {
-  invalidationEpochs.set(key, getEpoch(key) + 1);
+function markInvalidated(key: string, sequence: number): void {
+  // Max, not overwrite: a slow scan settling after a later invalidation must
+  // not roll the key's stamp back and let a fetch the later one blocked through.
+  keyInvalidatedAt.set(key, Math.max(keyInvalidatedAt.get(key) ?? 0, sequence));
 }
 
-function captureEpoch(key: string): InvalidationEpoch {
-  return { key: getEpoch(key), full: fullInvalidationEpoch };
+function captureEpoch(): InvalidationEpoch {
+  return { sequence: invalidationSequence, full: fullInvalidationEpoch };
 }
 
 function isEpochCurrent(key: string, epoch: InvalidationEpoch): boolean {
-  return getEpoch(key) === epoch.key && fullInvalidationEpoch === epoch.full;
+  return (keyInvalidatedAt.get(key) ?? 0) <= epoch.sequence && fullInvalidationEpoch === epoch.full;
 }
 
 /**
  * Refcount of cache keys with an active network fetch. Scoped invalidators
- * union this with the IDB key set so first-load races (key not yet written to
- * IDB) still get their epoch bumped — otherwise the in-flight fetch would
- * resolve and write pre-mutation data into the invalidated namespace.
+ * stamp the matching keys here synchronously at call time, before their IDB
+ * scan, so first-load races (key not yet written to IDB) are blocked even
+ * when the response lands mid-scan — otherwise the in-flight fetch would
+ * write pre-mutation data into the invalidated namespace and nothing would
+ * delete it.
+ *
+ * Every fetch registers here in the same synchronous step that captures its
+ * epoch, so a fetch holding an older sequence than an invalidation is always
+ * visible to that invalidation's in-flight pass.
  */
 const inFlightKeys = new Map<string, number>();
 
@@ -156,8 +174,12 @@ export async function* cachedInvoke<T>(
     if (isFresh) return;
   }
 
+  // Registered and stamped as the network call goes out, after the IDB read:
+  // an invalidation that landed during the read predates this network call,
+  // so its response is post-mutation and may be cached. The two calls stay
+  // adjacent so an invalidation can never see one without the other.
   addInFlight(key);
-  const epochAtStart = captureEpoch(key);
+  const epochAtStart = captureEpoch();
 
   try {
     const data = await invokeCommand<T>(command, args);
@@ -206,7 +228,7 @@ export async function cachedCommand<T>(
 
   if (config.bypassRead) {
     addInFlight(key);
-    const epochAtStart = captureEpoch(key);
+    const epochAtStart = captureEpoch();
     try {
       const data = await invokeCommand<T>(command, args);
       // Skip the cache write if the key was invalidated while we were fetching —
@@ -233,8 +255,10 @@ export async function cachedCommand<T>(
     return { data: entry.data, revalidating: null };
   }
 
+  // Registered and stamped as the network call goes out, after the IDB read
+  // (see cachedInvoke).
   addInFlight(key);
-  const epochAtStart = captureEpoch(key);
+  const epochAtStart = captureEpoch();
   const network = invokeCommand<T>(command, args)
     .then(async (data) => {
       // Skip the cache write if the key was invalidated while we were fetching —
@@ -267,43 +291,86 @@ export async function cachedCommand<T>(
   return { data, revalidating: null };
 }
 
-/**
- * Evict the oldest cache entries (by fetchedAt) until the store is under the
- * MAX_CACHE_ENTRIES limit. Called after writes and on quota errors.
- */
-async function evictIfNeeded(): Promise<void> {
-  try {
-    const store = getStore();
-    const allEntries = await entries<string, CacheEntry<unknown>>(store);
-    if (allEntries.length <= MAX_CACHE_ENTRIES) return;
+async function evictOldestHalf(): Promise<void> {
+  const store = getStore();
+  const allEntries = await entries<string, CacheEntry<unknown>>(store);
+  if (allEntries.length === 0) return;
 
-    // Sort by fetchedAt ascending (oldest first) and evict the excess
-    const sorted = allEntries.sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
-    const toEvict = sorted.slice(0, sorted.length - MAX_CACHE_ENTRIES);
-    await Promise.all(toEvict.map(([k]) => del(k, store)));
-  } catch {
-    // Best-effort eviction — don't let this block the caller
-  }
+  const sorted = allEntries.sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+  const toEvict = sorted.slice(0, Math.ceil(sorted.length / 2));
+  await Promise.all(toEvict.map(([k]) => del(k, store)));
+}
+
+function isQuotaExceededError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === 'QuotaExceededError';
 }
 
 /**
- * Write a cache entry, with quota-error recovery via LRU eviction.
+ * Write a cache entry, with quota-error recovery by evicting the oldest half
+ * and retrying once.
  */
 async function cacheSet<T>(key: string, entry: CacheEntry<T>): Promise<void> {
   const store = getStore();
   try {
     await set(key, entry, store);
   } catch (err) {
-    // On quota error, evict old entries and retry once
-    if (err instanceof DOMException && err.name === 'QuotaExceededError') {
-      await evictIfNeeded();
-      await set(key, entry, store).catch(() => {});
-      return;
+    if (isQuotaExceededError(err)) {
+      try {
+        await evictOldestHalf();
+        await set(key, entry, store);
+      } catch {
+        // Cache is best-effort.
+      }
     }
-    // Swallow other write errors — cache is best-effort
+    // Swallow write errors — cache is best-effort.
   }
-  // Proactive eviction after successful writes
-  evictIfNeeded();
+}
+
+function isSweepable(entry: Partial<CacheEntry<unknown>> | undefined, now: number): boolean {
+  return (
+    entry == null ||
+    entry.schemaVersion !== CACHE_SCHEMA_VERSION ||
+    typeof entry.fetchedAt !== 'number' ||
+    now - entry.fetchedAt > CACHE_SWEEP_MAX_AGE_MS
+  );
+}
+
+/**
+ * Remove stale schema and week-old entries. Intended to run once per app
+ * session — during boot, while hydration is still writing. Check and delete
+ * happen on the live records inside one readwrite transaction so a write that
+ * lands mid-sweep (its transaction serializes before or after this one, never
+ * between the read and its delete) is seen with its fresh fetchedAt and kept.
+ *
+ * The read is one getAllKeys plus one getAll rather than a cursor: a
+ * readwrite transaction holds the store's exclusive lock for as long as it
+ * has requests outstanding, and a cursor costs one event-loop hop per record
+ * while boot-time cachedInvoke reads queue behind it. Two hops plus the
+ * deletes keeps that stall bounded however large the store has grown.
+ */
+export async function sweepCache(): Promise<void> {
+  if (isTauri) return;
+  try {
+    const store = getStore();
+    const now = Date.now();
+    await store('readwrite', (objectStore) => {
+      // Requests on one transaction complete in issue order, so the keys are
+      // in hand when the values arrive, and both are in key order with no
+      // write between them, so the two arrays line up index for index.
+      const keysRequest = objectStore.getAllKeys();
+      const valuesRequest = objectStore.getAll();
+      valuesRequest.onsuccess = () => {
+        const allKeys = keysRequest.result;
+        const values = valuesRequest.result as Array<Partial<CacheEntry<unknown>> | undefined>;
+        for (let i = 0; i < allKeys.length; i++) {
+          if (isSweepable(values[i], now)) objectStore.delete(allKeys[i]);
+        }
+      };
+      return promisifyRequest(objectStore.transaction);
+    });
+  } catch {
+    // Best-effort sweep — don't let cache maintenance block boot.
+  }
 }
 
 /** Invalidate a specific cache entry. */
@@ -313,20 +380,39 @@ export async function invalidateCache(
 ): Promise<void> {
   if (isTauri) return;
   const key = cacheKey(command, args);
-  bumpEpoch(key);
+  markInvalidated(key, nextInvalidationSequence());
   await del(key, getStore()).catch(() => {});
+}
+
+/**
+ * Shared body of the scoped invalidators.
+ *
+ * The in-flight keys are stamped synchronously, before the IDB key scan: a
+ * fetch that was in flight at call time may land during the scan, and if its
+ * key is not in IDB yet the scan has nothing to delete, so an unstamped write
+ * would be served as fresh for the whole TTL. Every fetch that starts after
+ * this point captures a sequence >= ours and passes the check by
+ * construction, so the post-scan pass only has to delete.
+ *
+ * That delete is best-effort ordering-wise: a post-call fetch that comes back
+ * before the key scan settles has its fresh write deleted here and is
+ * refetched on the next read — a miss, never stale data.
+ */
+async function invalidateMatching(matches: (key: string) => boolean): Promise<void> {
+  const sequence = nextInvalidationSequence();
+  for (const key of inFlightKeys.keys()) {
+    if (matches(key)) markInvalidated(key, sequence);
+  }
+  const store = getStore();
+  const idbMatching = (await keys<string>(store)).filter(matches);
+  await Promise.all(idbMatching.map((k) => del(k, store)));
 }
 
 /** Invalidate all entries for a command (regardless of args). */
 export async function invalidateCacheByCommand(command: string): Promise<void> {
   if (isTauri) return;
-  const store = getStore();
   const prefix = `${command}:`;
-  const idbMatching = (await keys<string>(store)).filter((k) => k.startsWith(prefix));
-  const inFlightMatching = [...inFlightKeys.keys()].filter((k) => k.startsWith(prefix));
-  const toBump = new Set<string>([...idbMatching, ...inFlightMatching]);
-  toBump.forEach(bumpEpoch);
-  await Promise.all(idbMatching.map((k) => del(k, store)));
+  await invalidateMatching((key) => key.startsWith(prefix));
 }
 
 function parseCacheArgs(key: string, command: string): Record<string, unknown> | undefined {
@@ -348,17 +434,11 @@ export async function invalidateCacheByArgs(
   partialArgs: Record<string, unknown>
 ): Promise<void> {
   if (isTauri) return;
-  const store = getStore();
-  const matches = (key: string): boolean => {
+  await invalidateMatching((key) => {
     const args = parseCacheArgs(key, command);
     if (!args) return false;
     return Object.entries(partialArgs).every(([argKey, argValue]) => args[argKey] === argValue);
-  };
-  const idbMatching = (await keys<string>(store)).filter(matches);
-  const inFlightMatching = [...inFlightKeys.keys()].filter(matches);
-  const toBump = new Set<string>([...idbMatching, ...inFlightMatching]);
-  toBump.forEach(bumpEpoch);
-  await Promise.all(idbMatching.map((k) => del(k, store)));
+  });
 }
 
 /** Mark all entries as stale so SWR serves them while revalidating. */
@@ -381,8 +461,4 @@ export async function clearAllCache(): Promise<void> {
 }
 
 // Exported for testing
-export {
-  cacheKey as _cacheKey,
-  MAX_CACHE_ENTRIES as _MAX_CACHE_ENTRIES,
-  evictIfNeeded as _evictIfNeeded,
-};
+export { cacheKey as _cacheKey };

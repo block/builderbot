@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createStore, set } from 'idb-keyval';
+import { createStore, entries, set } from 'idb-keyval';
 
 // Mock transport — web mode (isTauri = false) with controllable invokeCommand
 const mockInvoke = vi.fn();
@@ -17,10 +17,9 @@ import {
   invalidateCacheByCommand,
   markAllStale,
   clearAllCache,
+  sweepCache,
   CACHE_SCHEMA_VERSION,
   _cacheKey,
-  _MAX_CACHE_ENTRIES,
-  _evictIfNeeded,
 } from './cache';
 
 function deferred<T>() {
@@ -603,9 +602,10 @@ describe('first-load race protection', () => {
 
     const inFlight = cachedCommand<string>('list_projects', undefined, { ttl: 60_000 });
 
-    // Let cachedCommand reach the network step (IDB miss, addInFlight, network promise constructed)
-    await Promise.resolve();
-    await Promise.resolve();
+    // Let cachedCommand reach the network step (IDB miss, addInFlight, network
+    // promise constructed). The IDB read settles on a macrotask, so wait for
+    // the network call itself rather than a fixed number of microtasks.
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
 
     await invalidateCacheByCommand('list_projects');
 
@@ -663,8 +663,7 @@ describe('first-load race protection', () => {
       { ttl: 60_000 }
     );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
 
     await invalidateCacheByArgs('get_diff_files', { branchId: 'branch-a' });
 
@@ -683,6 +682,70 @@ describe('first-load race protection', () => {
     expect(results).toEqual([{ data: 'fresh', source: 'network', fetchedAt: expect.any(Number) }]);
   });
 
+  it('invalidateCacheByCommand blocks an in-flight first-load response that lands before its key scan settles', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const args = { branchId: 'branch-a' };
+    const inFlight = cachedCommand<string>('get_branch_timeline', args, { ttl: 60_000 });
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    // Call the invalidation but let the response land while its IDB key scan
+    // is still pending. The key is not in IDB yet, so the scan finds nothing
+    // to delete: only a stamp taken synchronously at call time can keep the
+    // pre-mutation write out, and without it the entry would be served as
+    // fresh for the whole TTL.
+    const invalidation = invalidateCacheByCommand('get_branch_timeline');
+    pending.resolve('pre-mutation');
+    await expect(inFlight).resolves.toEqual({ data: 'pre-mutation', revalidating: null });
+    await invalidation;
+
+    mockInvoke.mockResolvedValueOnce('fresh');
+    await expect(
+      cachedCommand<string>('get_branch_timeline', args, { ttl: 60_000 })
+    ).resolves.toEqual({ data: 'fresh', revalidating: null });
+  });
+
+  it('invalidateCacheByArgs blocks an in-flight first-load response that lands before its key scan settles', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const args = { branchId: 'branch-a', scope: 'branch' };
+    const inFlight = cachedCommand<string>('get_diff_files', args, { ttl: 60_000 });
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    const invalidation = invalidateCacheByArgs('get_diff_files', { branchId: 'branch-a' });
+    pending.resolve('pre-mutation');
+    await expect(inFlight).resolves.toEqual({ data: 'pre-mutation', revalidating: null });
+    await invalidation;
+
+    mockInvoke.mockResolvedValueOnce('fresh');
+    await expect(cachedCommand<string>('get_diff_files', args, { ttl: 60_000 })).resolves.toEqual({
+      data: 'fresh',
+      revalidating: null,
+    });
+  });
+
+  it('caches a fetch whose network call goes out after an invalidation that landed during its IDB read', async () => {
+    // The IDB read and the network call are separate hops. An invalidation
+    // that lands between them predates the network call, so the response is
+    // post-mutation and dropping its write would be a gratuitous miss.
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const inFlight = cachedCommand<string>('list_projects', undefined, { ttl: 60_000 });
+    // No await: the IDB read is still pending when the invalidation is called.
+    expect(mockInvoke).not.toHaveBeenCalled();
+    await invalidateCacheByCommand('list_projects');
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    pending.resolve('post-mutation');
+    await expect(inFlight).resolves.toEqual({ data: 'post-mutation', revalidating: null });
+
+    mockInvoke.mockResolvedValueOnce('unexpected network read');
+    await expect(
+      cachedCommand<string>('list_projects', undefined, { ttl: 60_000 })
+    ).resolves.toEqual({ data: 'post-mutation', revalidating: null });
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+  });
+
   it('refcounts in-flight keys so concurrent reads of the same key both honor invalidation', async () => {
     const first = deferred<string>();
     const second = deferred<string>();
@@ -691,8 +754,7 @@ describe('first-load race protection', () => {
     const callA = cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
     const callB = cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
 
     // Resolve the first call; let the cache write settle.
     first.resolve('a');
@@ -715,6 +777,54 @@ describe('first-load race protection', () => {
       results.push(r);
     }
     expect(results).toEqual([{ data: 'fresh', source: 'network', fetchedAt: expect.any(Number) }]);
+  });
+
+  it('lets a forced fetch that starts after an invalidation call cache its result', async () => {
+    // Seed a pre-mutation entry so the invalidation has an IDB key to find.
+    mockInvoke.mockResolvedValueOnce('pre-mutation');
+    await cachedCommand('get_all_repo_badges', undefined, { ttl: 60_000 });
+
+    // One change-feed dispatch: the cache listener starts the invalidation and
+    // the store then issues its forced reload. That reload is post-mutation,
+    // so its write must land even though the invalidation's IDB key scan only
+    // settles — and finds the reload in flight — after the reload started.
+    const invalidation = invalidateCacheByCommand('get_all_repo_badges');
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const forced = cachedCommand<string>('get_all_repo_badges', undefined, {
+      ttl: 60_000,
+      bypassRead: true,
+    });
+    await invalidation;
+    pending.resolve('post-mutation');
+    await expect(forced).resolves.toEqual({ data: 'post-mutation', revalidating: null });
+
+    mockInvoke.mockResolvedValueOnce('unexpected network read');
+    const next = await cachedCommand<string>('get_all_repo_badges', undefined, { ttl: 60_000 });
+    expect(next).toEqual({ data: 'post-mutation', revalidating: null });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('still blocks a fetch that was in flight when the invalidation was called', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const inFlight = cachedCommand<string>('get_all_repo_badges', undefined, {
+      ttl: 60_000,
+      bypassRead: true,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const invalidation = invalidateCacheByCommand('get_all_repo_badges');
+    // A second invalidation whose scan settles later must not resurrect the
+    // in-flight fetch by stamping the key with a newer sequence.
+    await Promise.all([invalidation, invalidateCacheByCommand('get_all_repo_badges')]);
+    pending.resolve('pre-mutation');
+    await inFlight;
+
+    mockInvoke.mockResolvedValueOnce('fresh');
+    const next = await cachedCommand<string>('get_all_repo_badges', undefined, { ttl: 60_000 });
+    expect(next).toEqual({ data: 'fresh', revalidating: null });
   });
 });
 
@@ -847,40 +957,130 @@ describe('markAllStale', () => {
   });
 });
 
-describe('evictIfNeeded', () => {
-  it('evicts oldest entries when cache exceeds MAX_CACHE_ENTRIES', async () => {
-    // Fill cache beyond the limit
-    const total = _MAX_CACHE_ENTRIES + 10;
+describe('cache maintenance', () => {
+  it('does not evict readable entries by count', async () => {
+    const total = 250;
     for (let i = 0; i < total; i++) {
       mockInvoke.mockResolvedValue(`value-${i}`);
       await cachedCommand('cmd', { id: String(i) }, { ttl: 60_000 });
     }
 
-    // Explicit eviction (also triggered by cacheSet, but let's verify directly)
-    await _evictIfNeeded();
-
-    // Verify: the oldest entries should have been evicted.
-    // The first 10 entries (id 0-9) should be gone; entries 10+ should remain.
-    mockInvoke.mockResolvedValue('new');
-
-    // Entry 0 should be a cache miss (evicted)
-    const missResults = [];
-    for await (const r of cachedInvoke('cmd', { id: '0' }, { ttl: 60_000 })) {
-      missResults.push(r);
+    for (let i = 0; i < total; i++) {
+      const result = await cachedCommand<string>('cmd', { id: String(i) }, { ttl: 60_000 });
+      expect(result).toEqual({ data: `value-${i}`, revalidating: null });
     }
-    expect(missResults).toEqual([
-      { data: 'new', source: 'network', fetchedAt: expect.any(Number) },
-    ]);
+    expect(mockInvoke).toHaveBeenCalledTimes(total);
+  });
 
-    // Entry at the tail (most recent) should still be a cache hit
-    const hitResults = [];
-    for await (const r of cachedInvoke('cmd', { id: String(total - 1) }, { ttl: 60_000 })) {
-      hitResults.push(r);
+  it('sweepCache removes stale-schema and week-old entries while keeping fresh ones', async () => {
+    const store = createStore('staged-cache', 'responses');
+    const freshKey = _cacheKey('fresh');
+    const oldKey = _cacheKey('old');
+    const staleSchemaKey = _cacheKey('stale_schema');
+    const now = Date.now();
+
+    await set(
+      freshKey,
+      { key: freshKey, data: 'fresh', fetchedAt: now, schemaVersion: CACHE_SCHEMA_VERSION },
+      store
+    );
+    await set(
+      oldKey,
+      {
+        key: oldKey,
+        data: 'old',
+        fetchedAt: now - 8 * 24 * 60 * 60 * 1000,
+        schemaVersion: CACHE_SCHEMA_VERSION,
+      },
+      store
+    );
+    await set(
+      staleSchemaKey,
+      {
+        key: staleSchemaKey,
+        data: 'stale',
+        fetchedAt: now,
+        schemaVersion: CACHE_SCHEMA_VERSION - 1,
+      },
+      store
+    );
+
+    await sweepCache();
+
+    const remaining = new Map(await entries<string, unknown>(store));
+    expect(remaining.has(freshKey)).toBe(true);
+    expect(remaining.has(oldKey)).toBe(false);
+    expect(remaining.has(staleSchemaKey)).toBe(false);
+  });
+
+  it('sweepCache keeps an entry rewritten with a fresh fetchedAt while the sweep runs', async () => {
+    const store = createStore('staged-cache', 'responses');
+    const key = _cacheKey('rewritten');
+    const now = Date.now();
+    await set(
+      key,
+      {
+        key,
+        data: 'old',
+        fetchedAt: now - 8 * 24 * 60 * 60 * 1000,
+        schemaVersion: CACHE_SCHEMA_VERSION,
+      },
+      store
+    );
+
+    // The boot-time case: the sweep runs while hydration is still writing. The
+    // rewrite's transaction is created after the sweep has started scanning,
+    // so a read-then-delete sweep would act on the stale fetchedAt it read and
+    // delete the fresh record that landed in between.
+    const sweep = sweepCache();
+    const rewrite = set(
+      key,
+      { key, data: 'fresh', fetchedAt: now, schemaVersion: CACHE_SCHEMA_VERSION },
+      store
+    );
+    await Promise.all([sweep, rewrite]);
+
+    const remaining = new Map(await entries<string, { data: string }>(store));
+    expect(remaining.get(key)?.data).toBe('fresh');
+  });
+
+  it('evicts the older half and retries once on QuotaExceededError', async () => {
+    const store = createStore('staged-cache', 'responses');
+    const now = Date.now();
+    for (let i = 0; i < 4; i++) {
+      const key = _cacheKey('seed', { id: String(i) });
+      await set(
+        key,
+        { key, data: `seed-${i}`, fetchedAt: now + i, schemaVersion: CACHE_SCHEMA_VERSION },
+        store
+      );
     }
-    expect(hitResults[0]).toEqual({
-      data: `value-${total - 1}`,
-      source: 'cache',
-      fetchedAt: expect.any(Number),
+
+    const originalPut = IDBObjectStore.prototype.put;
+    let shouldThrow = true;
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
+      this: IDBObjectStore,
+      ...args
+    ) {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new DOMException('quota exceeded', 'QuotaExceededError');
+      }
+      return originalPut.apply(this, args as Parameters<IDBObjectStore['put']>);
     });
+
+    try {
+      mockInvoke.mockResolvedValue('fresh');
+      await cachedCommand('cmd', undefined, { ttl: 60_000 });
+    } finally {
+      putSpy.mockRestore();
+    }
+
+    const remaining = new Map(await entries<string, { data: string }>(store));
+    expect(remaining.has(_cacheKey('seed', { id: '0' }))).toBe(false);
+    expect(remaining.has(_cacheKey('seed', { id: '1' }))).toBe(false);
+    expect(remaining.has(_cacheKey('seed', { id: '2' }))).toBe(true);
+    expect(remaining.has(_cacheKey('seed', { id: '3' }))).toBe(true);
+    expect(remaining.get(_cacheKey('cmd'))?.data).toBe('fresh');
   });
 });

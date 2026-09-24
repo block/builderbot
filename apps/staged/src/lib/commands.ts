@@ -1887,8 +1887,13 @@ export function createImageFromData(
 // =============================================================================
 
 /** Fetch all repo badges from the store. */
-export function getAllRepoBadges(): Promise<import('./types').RepoBadge[]> {
-  return invokeCommand('get_all_repo_badges');
+export function getAllRepoBadges(
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<import('./types').RepoBadge[]>> {
+  return cachedCommand('get_all_repo_badges', undefined, {
+    ttl: 5 * 60_000,
+    bypassRead: options.force,
+  });
 }
 
 /** Ensure badges exist for the given (githubRepo, subpath) pairs.

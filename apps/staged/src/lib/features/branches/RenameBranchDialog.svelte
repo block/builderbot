@@ -64,8 +64,9 @@
 
     renaming = true;
     error = null;
+    const submitted = trimmed;
     try {
-      await onRename?.(trimmed);
+      await onRename?.(submitted);
       open = false;
     } catch (e) {
       error = errorMessage(e);
@@ -75,16 +76,7 @@
   }
 </script>
 
-<Dialog.Root
-  {open}
-  onOpenChange={(nextOpen) => {
-    if (nextOpen) {
-      open = true;
-    } else {
-      requestClose();
-    }
-  }}
->
+<Dialog.Root bind:open={() => open, (nextOpen) => (nextOpen ? (open = true) : requestClose())}>
   <Dialog.Content class="sm:max-w-[420px] gap-4">
     <Dialog.Header>
       <Dialog.Title>Rename Branch</Dialog.Title>

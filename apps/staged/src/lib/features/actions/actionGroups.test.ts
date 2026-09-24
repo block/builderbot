@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectAction } from '../../api/commands';
 import {
+  createActionGroups,
   getPinnedActions,
   getSecondaryRunningActions,
   groupActionsByType,
@@ -89,6 +90,18 @@ describe('getSecondaryRunningActions', () => {
 });
 
 describe('groupActionsByType', () => {
+  it('creates one empty bucket for every supported type in display order', () => {
+    expect(Object.keys(createActionGroups())).toEqual([
+      'run',
+      'prerun',
+      'build',
+      'test',
+      'format',
+      'check',
+      'cleanUp',
+    ]);
+  });
+
   it('buckets actions by type and leaves unknown types out', () => {
     const groups = groupActionsByType([
       action('Dev', { actionType: 'run', sortOrder: 0 }),

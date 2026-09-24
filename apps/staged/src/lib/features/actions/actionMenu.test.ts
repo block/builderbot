@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProjectAction } from '../../api/commands';
+import type { ActionType } from './actions';
 
 // Vitest runs without the Svelte plugin, so the icon components the builder
 // hangs off each item can't be imported here — and this suite only cares which
@@ -10,7 +11,7 @@ vi.mock('./lucideIcons', () => ({ getActionTypeIcon: (type: string) => `icon:${t
 const { buildActionMenuItems } = await import('./actionMenu');
 const { groupActionsByType } = await import('./actionGroups');
 
-function action(name: string, actionType: string, pinned = false): ProjectAction {
+function action(name: string, actionType: ActionType, pinned = false): ProjectAction {
   return {
     id: `action-${name}`,
     contextId: 'context-1',

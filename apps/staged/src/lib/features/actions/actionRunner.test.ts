@@ -14,6 +14,7 @@ describe('ActionRunner', () => {
     getRunningBranchActions = vi.fn();
     getRunPhase = vi.fn();
     vi.doMock('./actions', () => ({
+      ACTION_TYPES: ['run', 'prerun', 'build', 'test', 'format', 'check', 'cleanUp'],
       getRunningBranchActions,
       getRunPhase,
       stopBranchAction: vi.fn(),

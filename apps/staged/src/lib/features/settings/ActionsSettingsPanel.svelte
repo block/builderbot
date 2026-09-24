@@ -7,7 +7,6 @@
   import Pin from '@lucide/svelte/icons/pin';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import Save from '@lucide/svelte/icons/save';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Code2 from '@lucide/svelte/icons/code-2';
   import Search from '@lucide/svelte/icons/search';
@@ -16,20 +15,13 @@
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
-  import * as Select from '$lib/components/ui/select';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
-  import { Checkbox } from '$lib/components/ui/checkbox';
-  import { Label } from '$lib/components/ui/label';
   import type { ActionContext, ProjectAction } from '../../api/commands';
   import * as commands from '../../api/commands';
-  import {
-    detectRepoActions,
-    listenToRepoActionsDetection,
-    type ActionType,
-  } from '../actions/actions';
-  import { shouldPinNewAction } from '../actions/actionGroups';
+  import { detectRepoActions, listenToRepoActionsDetection } from '../actions/actions';
+  import { createActionGroups, shouldPinNewAction } from '../actions/actionGroups';
   import ActionIcon from '../actions/ActionIcon.svelte';
-  import IconPicker from '../actions/IconPicker.svelte';
+  import ActionEditDialog, { type ActionFormValues } from '../actions/ActionEditDialog.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { hueSliderGradient } from '../../shared/badgeColors';
@@ -70,14 +62,9 @@
   let deletingRepo = $state(false);
   let showDeleteAllConfirm = $state(false);
   let showDeleteRepoConfirm = $state(false);
+  let editorOpen = $state(false);
+  /** The action the open editor is changing, or null when adding a new one. */
   let editingAction = $state<ProjectAction | null>(null);
-  let editForm = $state({
-    name: '',
-    command: '',
-    actionType: 'run' as ActionType,
-    pinned: false,
-    icon: null as string | null,
-  });
   let badgeEditName = $state('');
   let badgeEditHue = $state(0);
   let badgeError = $state('');
@@ -347,35 +334,21 @@
   }
 
   function startAddAction() {
-    editForm = {
-      name: '',
-      command: '',
-      actionType: 'run',
-      // A context with nothing pinned has an empty card header, so the action
-      // filling it in opts in by default — see shouldPinNewAction.
-      pinned: shouldPinNewAction(actions),
-      icon: null,
-    };
-    editingAction = {} as ProjectAction;
+    editingAction = null;
+    editorOpen = true;
   }
 
   function startEditAction(action: ProjectAction) {
-    editForm = {
-      name: action.name,
-      command: action.command,
-      actionType: action.actionType as ActionType,
-      pinned: action.pinned,
-      icon: action.icon,
-    };
     editingAction = action;
+    editorOpen = true;
   }
 
-  function cancelEdit() {
-    editingAction = null;
-  }
-
-  async function saveAction() {
-    if (!selectedContext || !editForm.name || !editForm.command) return;
+  /**
+   * Persists the editor's draft. Rejects on failure so the dialog can keep the
+   * draft on screen with the error instead of dropping it.
+   */
+  async function saveAction(values: ActionFormValues) {
+    if (!selectedContext) throw new Error('Select a repo before saving an action.');
 
     // Capture context values before any await to avoid stale references
     // if the user switches repo contexts while the save is in-flight.
@@ -383,52 +356,51 @@
     const subpath = selectedContext.subpath ?? undefined;
     const entryKey = selectedRepoKey;
 
-    try {
-      if (!editingAction?.id) {
-        const nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
-        const newAction = await commands.createRepoAction(
-          githubRepo,
-          subpath,
-          editForm.name,
-          editForm.command,
-          editForm.actionType,
-          nextSortOrder,
-          editForm.pinned,
-          editForm.icon
-        );
-        if (selectedRepoKey === entryKey) {
-          actions = [...actions, newAction];
-        }
-      } else {
-        const actionId = editingAction.id;
-        await commands.updateProjectAction(
-          actionId,
-          editForm.name,
-          editForm.command,
-          editForm.actionType,
-          editingAction.sortOrder,
-          editForm.pinned,
-          editForm.icon
-        );
+    const actionToEdit = editingAction;
+    if (!actionToEdit) {
+      const nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
+      const newAction = await commands.createRepoAction(
+        githubRepo,
+        subpath,
+        values.name,
+        values.command,
+        values.actionType,
+        nextSortOrder,
+        values.pinned,
+        values.icon
+      );
+      if (selectedRepoKey === entryKey) {
+        actions = [...actions, newAction];
+      }
+    } else {
+      const actionId = actionToEdit.id;
+      const sortOrder = actionToEdit.sortOrder;
+      await commands.updateProjectAction(
+        actionId,
+        values.name,
+        values.command,
+        values.actionType,
+        sortOrder,
+        values.pinned,
+        values.icon
+      );
+      if (selectedRepoKey === entryKey) {
         actions = actions.map((a) =>
           a.id === actionId
             ? {
                 ...a,
-                name: editForm.name,
-                command: editForm.command,
-                actionType: editForm.actionType,
-                pinned: editForm.pinned,
-                icon: editForm.icon,
+                name: values.name,
+                command: values.command,
+                actionType: values.actionType,
+                pinned: values.pinned,
+                icon: values.icon,
               }
             : a
         );
       }
-
-      editingAction = null;
-      window.dispatchEvent(new CustomEvent('project-actions-changed'));
-    } catch (e) {
-      console.error('Failed to save action:', e);
     }
+
+    window.dispatchEvent(new CustomEvent('project-actions-changed'));
   }
 
   async function deleteAction(actionId: string) {
@@ -541,15 +513,7 @@
   });
 
   let groupedActions = $derived.by(() => {
-    const groups: Record<string, ProjectAction[]> = {
-      prerun: [],
-      run: [],
-      build: [],
-      test: [],
-      format: [],
-      check: [],
-      cleanUp: [],
-    };
+    const groups = createActionGroups();
     for (const action of actions) {
       const type = action.actionType;
       if (groups[type]) groups[type].push(action);
@@ -805,53 +769,20 @@
           {/if}
         {/if}
       </div>
-
-      {#if editingAction}
-        <div class="editor">
-          <IconPicker
-            icon={editForm.icon}
-            actionType={editForm.actionType}
-            onSelect={(icon) => (editForm.icon = icon)}
-          />
-          <Input bind:value={editForm.name} placeholder="Action name" />
-          <Input
-            bind:value={editForm.command}
-            placeholder="Command"
-            autocomplete="off"
-            autocorrect="off"
-            autocapitalize="off"
-            spellcheck="false"
-          />
-          <Select.Root
-            type="single"
-            value={editForm.actionType}
-            onValueChange={(v) => (editForm.actionType = v as ActionType)}
-          >
-            <Select.Trigger class="w-full">
-              {editForm.actionType}
-            </Select.Trigger>
-            <Select.Content>
-              {#each ['run', 'prerun', 'build', 'test', 'format', 'check', 'cleanUp'] as t (t)}
-                <Select.Item value={t} label={t}>{t}</Select.Item>
-              {/each}
-            </Select.Content>
-          </Select.Root>
-          <div class="flex items-center gap-1.5">
-            <Checkbox id="pinned" bind:checked={editForm.pinned} />
-            <Label for="pinned" class="text-muted-foreground text-sm">Show in card header</Label>
-          </div>
-          <div class="editor-buttons">
-            <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
-            <Button variant="outline" size="sm" onclick={saveAction}>
-              <Save size={14} />
-              Save
-            </Button>
-          </div>
-        </div>
-      {/if}
     </section>
   </div>
 </div>
+
+<!--
+  A context with nothing pinned has an empty card header, so the action
+  filling it in opts in by default — see shouldPinNewAction.
+-->
+<ActionEditDialog
+  bind:open={editorOpen}
+  action={editingAction}
+  defaultPinned={shouldPinNewAction(actions)}
+  onSave={saveAction}
+/>
 
 <AlertDialog.Root bind:open={showDeleteRepoConfirm}>
   <AlertDialog.Content>
@@ -1265,24 +1196,6 @@
     gap: 4px;
   }
 
-  .editor {
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    background: var(--bg-primary);
-    padding: 12px;
-    display: grid;
-    grid-template-columns: auto 1fr 1fr auto auto auto;
-    gap: 8px;
-    align-items: center;
-  }
-
-  .editor-buttons {
-    display: inline-flex;
-    gap: 8px;
-    grid-column: 1 / -1;
-    justify-self: end;
-  }
-
   @media (max-width: 900px) {
     .panel-body {
       flex-direction: column;
@@ -1303,14 +1216,6 @@
     .actions-header :global(button) {
       flex: 1 1 auto;
       justify-content: center;
-    }
-
-    .editor {
-      grid-template-columns: 1fr;
-    }
-
-    .editor-buttons {
-      justify-self: stretch;
     }
   }
 </style>

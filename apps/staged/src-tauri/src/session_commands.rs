@@ -2991,6 +2991,29 @@ fn branch_session_still_running(store: &Store, session_id: &str) -> Result<bool,
     Ok(matches!(session, Some(s) if s.status == store::SessionStatus::Running))
 }
 
+/// How [`complete_running_branch_session_start`] left a session whose second
+/// phase ran to the end without failing.
+enum SecondPhaseOutcome {
+    /// The runner accepted the session. Its thread owns the terminal state
+    /// from here, and the branch drain that comes with it.
+    Launched,
+    /// The re-read found the row stopped or deleted, so no agent was spawned.
+    ///
+    /// The terminal state is someone else's, but the drain is not. A Stop in
+    /// the gap found no registered token and took `cancel_session_impl`'s
+    /// `!was_running` fallback, which writes `cancelled` and emits but never
+    /// drains — with no runner there was nothing whose drain it could be
+    /// pre-empting — and a delete drains nothing at all. Every start on the
+    /// branch that arrived in the meantime queued behind this row
+    /// (`should_queue_branch_session_start` saw it as `running`), and with no
+    /// session thread to end, nothing would move those rows until some
+    /// unrelated session on the branch happened to finish. `start_session`'s
+    /// cancelled-before-run arm drains for exactly this reason; this is the
+    /// same situation one step earlier, with the whole context build — a
+    /// `ws_exec` round trip, for a remote branch — as the window.
+    AlreadyEnded,
+}
+
 /// The second phase of an immediate branch start: build the context, give the
 /// row its full prompt, and hand the session to the runner.
 ///
@@ -3008,7 +3031,7 @@ fn branch_session_still_running(store: &Store, session_id: &str) -> Result<bool,
 /// `running` and the runner registering a token, in which a Stop writes
 /// `cancelled` directly to the row — so the row is re-read before the agent
 /// is spawned, and a session stopped or deleted in the meantime is left as it
-/// is.
+/// is. Its branch queue is not: see [`SecondPhaseOutcome::AlreadyEnded`].
 #[allow(clippy::too_many_arguments)]
 async fn complete_running_branch_session_start(
     store: Arc<Store>,
@@ -3026,7 +3049,7 @@ async fn complete_running_branch_session_start(
     let branch_id = target.branch.id.clone();
     let project_id = target.branch.project_id.clone();
 
-    let result: Result<(), String> = async {
+    let outcome: Result<SecondPhaseOutcome, String> = async {
         let prepared = prepare_branch_session_start(
             &store,
             &app_handle,
@@ -3059,7 +3082,7 @@ async fn complete_running_branch_session_start(
                 "Session {session_id} was stopped or deleted before its context was ready; \
                  not starting an agent"
             );
-            return Ok(());
+            return Ok(SecondPhaseOutcome::AlreadyEnded);
         }
 
         launch_running_branch_session(
@@ -3070,33 +3093,39 @@ async fn complete_running_branch_session_start(
             created,
             image_ids,
         )?;
-        Ok(())
+        Ok(SecondPhaseOutcome::Launched)
     }
     .await;
 
-    if let Err(error) = result {
-        let transitioned = session_runner::finish_failed_before_run(
+    // Whether this task owes the branch its drain. This row is what every
+    // later start on the branch queued behind, and exactly one path kicks the
+    // queue when it stops blocking them: the session thread, once there is
+    // one, and this task until then.
+    let owes_drain = match outcome {
+        Ok(SecondPhaseOutcome::Launched) => false,
+        Ok(SecondPhaseOutcome::AlreadyEnded) => true,
+        // Owning the terminal state means owing the drain. Losing the
+        // transition means another writer got there first and drains — or
+        // already did — on its own account.
+        Err(error) => session_runner::finish_failed_before_run(
             &session_id,
             Some(branch_id.clone()),
             Some(project_id),
             &store,
             &app_handle,
             &error,
-        );
-        // Owning the terminal state means owing the branch its drain: this
-        // row is what every later start on the branch queued behind.
-        if transitioned {
-            match drain_queued_sessions_for_branch(store, registry, app_handle, branch_id, None)
-                .await
-            {
-                Ok(true) => log::info!(
-                    "Drained next queued session after session {session_id} failed to start"
-                ),
-                Ok(false) => {}
-                Err(e) => log::error!(
-                    "Failed to drain queued sessions after session {session_id} failed to start: {e}"
-                ),
-            }
+        ),
+    };
+
+    if owes_drain {
+        match drain_queued_sessions_for_branch(store, registry, app_handle, branch_id, None).await {
+            Ok(true) => log::info!(
+                "Drained next queued session after session {session_id} did not start an agent"
+            ),
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "Failed to drain queued sessions after session {session_id} did not start an agent: {e}"
+            ),
         }
     }
 }
@@ -6238,7 +6267,8 @@ mod tests {
     /// A Stop that lands while the context is building finds no registered
     /// token and writes `cancelled` straight to the row, and a delete removes
     /// it. The second phase re-reads the row before spawning an agent so
-    /// neither gets one.
+    /// neither gets one — and drains the branch queue instead, since neither
+    /// writer did (see `SecondPhaseOutcome::AlreadyEnded`).
     #[test]
     fn immediate_start_second_phase_sees_a_stop_that_landed_in_the_gap() {
         let (store, branch) = setup_branch_store_with_workdir();

@@ -661,8 +661,8 @@
 
   .projects-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    grid-auto-rows: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-auto-rows: auto;
     gap: 12px;
   }
 
@@ -692,7 +692,6 @@
     border: none;
     border-radius: 10px;
     padding: 16px;
-    min-height: 120px;
     color: inherit;
     cursor: pointer;
     transition: background-color 0.15s ease;
@@ -774,14 +773,16 @@
     margin-top: auto;
     font-size: var(--size-sm);
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 4px;
     overflow: hidden;
   }
 
   .repo-line {
     display: inline-flex;
     align-items: center;
+    max-width: 100%;
     gap: 5px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -791,6 +792,7 @@
   .repo-badge-label {
     display: inline-flex;
     align-items: center;
+    max-width: 100%;
     padding: 1px 5px;
     border-radius: 4px;
     font-weight: 600;
@@ -895,7 +897,6 @@
     }
 
     .project-card {
-      min-height: 104px;
       padding: 14px;
     }
 

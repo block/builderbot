@@ -12,7 +12,7 @@
   starts outside the content.
 -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { flushSync, untrack } from 'svelte';
   import { viewport } from '$lib/shared/viewport.svelte';
   import { DIALOG_VIEWPORT_GUTTER } from './dialogWidth.svelte.js';
   import { createDialogResize, resizeBounds } from './dialogResize';
@@ -25,8 +25,9 @@
      * and true only for a changed final width, so callers persist only the result.
      */
     onWidthChange: (width: number, commit: boolean) => void;
-    /** Always called when a gesture ends, including cancellation and no-ops. */
+    /** Always called after a gesture or direct command, including cancellation and no-ops. */
     onResizeEnd: () => void;
+    /** Disable width transitions before measuring a gesture or direct command. */
     onResizeStart?: () => void;
     /** Double-click handler; restores the default width. */
     onReset: () => void;
@@ -121,7 +122,7 @@
     };
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    onResizeStart?.();
+    flushSync(() => onResizeStart?.());
     resize.start(event);
   }
 
@@ -134,8 +135,21 @@
     }
   }
 
+  function runImmediateResize(action: () => void) {
+    flushSync(() => onResizeStart?.());
+    try {
+      flushSync(action);
+      // Lay out the new width before the caller restores its chat transition.
+      measure();
+    } finally {
+      onResizeEnd();
+    }
+  }
+
   function handleKeydown(event: KeyboardEvent) {
-    if (resize.key(event.key)) event.preventDefault();
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    if (!resizing) runImmediateResize(() => resize.key(event.key));
   }
 </script>
 
@@ -168,7 +182,7 @@
     onkeydown={handleKeydown}
     ondblclick={() => {
       resize.cancel();
-      onReset();
+      runImmediateResize(onReset);
     }}
   ></div>
 {/if}

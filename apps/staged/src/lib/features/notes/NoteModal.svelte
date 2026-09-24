@@ -173,11 +173,11 @@
         ? 'Show chat pane'
         : 'View chat pane'
   );
-  // The transition animates the chat pane sliding in and out; it is dropped
-  // mid-drag so the right edge tracks the pointer instead of lagging behind it.
+  // Keep chat toggles animated; the resize handle suspends this transition
+  // while measuring and applying pointer, keyboard, and reset commands.
   let contentClass = $derived(
     `dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col${
-      resizing ? '' : ' transition-[width] duration-150'
+      resizing ? ' transition-none' : ' transition-[width] duration-150'
     }`
   );
   let totalWidth = $derived(dialogWidth.width + (splitChatOpen ? CHAT_PANE_WIDTH : 0));

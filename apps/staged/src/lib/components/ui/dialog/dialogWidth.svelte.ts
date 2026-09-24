@@ -64,6 +64,7 @@ export function createDialogWidth(options: { key: string; minWidth: number }): D
 
   const inner = $state({ width: minWidth, preview: null as number | null, hydrated: false });
   let hydration: Promise<void> | null = null;
+  let persistence = Promise.resolve();
   let interacted = false;
 
   function normalize(width: number): number {
@@ -102,9 +103,12 @@ export function createDialogWidth(options: { key: string; minWidth: number }): D
       if (persist) {
         inner.width = normalized;
         inner.preview = null;
-        void setStoreValue(key, normalized).catch((error) => {
-          console.error(`[DialogWidth] Failed to write ${key}:`, error);
-        });
+        // Keep writes ordered across all mounts sharing this preference key.
+        persistence = persistence
+          .then(() => setStoreValue(key, normalized))
+          .catch((error) => {
+            console.error(`[DialogWidth] Failed to write ${key}:`, error);
+          });
       } else {
         inner.preview = normalized;
       }

@@ -10,6 +10,16 @@ async function importDialogWidth() {
   return await import('./dialogWidth.svelte');
 }
 
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.resetModules();
   // Runes compile away in the app build; under vitest they stay plain global
@@ -156,9 +166,76 @@ describe('createDialogWidth', () => {
     const { createDialogWidth } = await importDialogWidth();
     const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
     width.set(900);
-    await Promise.resolve();
     expect(width.width).toBe(900);
-    expect(log).toHaveBeenCalledWith('[DialogWidth] Failed to write test-width:', error);
+    await vi.waitFor(() =>
+      expect(log).toHaveBeenCalledWith('[DialogWidth] Failed to write test-width:', error)
+    );
+  });
+
+  it('finishes a delayed resize save before a reset from another mount of the same key', async () => {
+    const firstSave = deferred();
+    const lastSave = deferred();
+    setStoreValue
+      .mockImplementationOnce(async (_key, value) => {
+        await firstSave.promise;
+        savedWidth = value;
+      })
+      .mockImplementationOnce(async (_key, value) => {
+        await lastSave.promise;
+        savedWidth = value;
+      });
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    width.set(900);
+    await vi.waitFor(() => expect(setStoreValue).toHaveBeenCalledTimes(1));
+
+    createDialogWidth({ key: 'test-width', minWidth: 700 }).reset();
+    // Make the newer request ready to finish first, reproducing the HTTP race.
+    lastSave.resolve();
+    await lastSave.promise;
+    expect(width.width).toBe(700);
+    expect(setStoreValue).toHaveBeenCalledTimes(1);
+
+    firstSave.resolve();
+    await vi.waitFor(() => expect(savedWidth).toBe(700));
+    expect(setStoreValue.mock.calls).toEqual([
+      ['test-width', 900],
+      ['test-width', 700],
+    ]);
+  });
+
+  it('continues queued saves after an earlier save rejects', async () => {
+    const firstSave = deferred();
+    const error = new Error('write failed');
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    setStoreValue
+      .mockReturnValueOnce(firstSave.promise)
+      .mockImplementationOnce(async (_key, value) => {
+        savedWidth = value;
+      });
+    const { createDialogWidth } = await importDialogWidth();
+    const width = createDialogWidth({ key: 'test-width', minWidth: 700 });
+    width.set(900);
+    width.set(1000);
+    await vi.waitFor(() => expect(setStoreValue).toHaveBeenCalledTimes(1));
+
+    firstSave.reject(error);
+    await vi.waitFor(() => expect(savedWidth).toBe(1000));
+    expect(width.width).toBe(1000);
+    expect(log).toHaveBeenCalledExactlyOnceWith('[DialogWidth] Failed to write test-width:', error);
+  });
+
+  it('does not block another preference key behind a pending save', async () => {
+    const pendingSave = deferred();
+    setStoreValue.mockImplementation(async (key, value) => {
+      if (key === 'note-width') await pendingSave.promise;
+      else savedWidth = value;
+    });
+    const { createDialogWidth } = await importDialogWidth();
+    createDialogWidth({ key: 'note-width', minWidth: 700 }).set(900);
+    createDialogWidth({ key: 'session-width', minWidth: 700 }).set(800);
+    await vi.waitFor(() => expect(savedWidth).toBe(800));
+    pendingSave.resolve();
   });
 
   it('discards a preview without losing an oversized preference or writing', async () => {
@@ -197,7 +274,9 @@ describe('createDialogWidth', () => {
 
     width.set(900);
 
-    expect(setStoreValue).toHaveBeenCalledExactlyOnceWith('test-width', 900);
+    await vi.waitFor(() =>
+      expect(setStoreValue).toHaveBeenCalledExactlyOnceWith('test-width', 900)
+    );
   });
 
   it('persists the clamped width, not the requested one', async () => {
@@ -205,7 +284,7 @@ describe('createDialogWidth', () => {
 
     createDialogWidth({ key: 'test-width', minWidth: 700 }).set(100);
 
-    expect(setStoreValue).toHaveBeenCalledWith('test-width', 700);
+    await vi.waitFor(() => expect(setStoreValue).toHaveBeenCalledWith('test-width', 700));
   });
 
   it('resets to the default and persists that', async () => {
@@ -216,7 +295,7 @@ describe('createDialogWidth', () => {
     width.reset();
 
     expect(width.width).toBe(700);
-    expect(setStoreValue).toHaveBeenLastCalledWith('test-width', 700);
+    await vi.waitFor(() => expect(setStoreValue).toHaveBeenLastCalledWith('test-width', 700));
   });
 
   it('shares one instance per key so remounts keep the width', async () => {

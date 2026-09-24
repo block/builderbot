@@ -60,7 +60,7 @@ pub fn create_note(
     subtype: Option<String>,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
+    let mut note = crate::store::models::Note::new_standalone(&branch_id, &title, &content);
     note.subtype = subtype;
     store
         .create_note_with_unique_title(&mut note)

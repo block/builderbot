@@ -269,10 +269,11 @@ impl Store {
             Self::resolve_unique_note_title(&conn, &existing.branch_id, title, Some(id))?
         };
         let now = now_timestamp();
-        let completed_at =
-            existing
-                .completed_at
-                .or(if content.is_empty() { None } else { Some(now) });
+        // A written note is complete as soon as it is saved: no session will
+        // fill it in later, and editing one down to a bare title (the whole
+        // text in the title column, an empty body) must not make it look
+        // pending to the consumers that skip generating notes.
+        let completed_at = existing.completed_at.or(Some(now));
         conn.execute(
             "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = ?4 WHERE id = ?5",
             params![title, content, now, completed_at, id],

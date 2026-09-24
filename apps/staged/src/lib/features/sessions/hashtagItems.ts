@@ -227,7 +227,10 @@ function timelineToSortableHashtagItems(
 
   for (const note of timeline.notes) {
     if (!note.title.trim()) continue;
-    if (note.completedAt == null) continue;
+    // Only a note a session owns can still be generating. A session-less note
+    // is complete on save even without a body (a one-line written note keeps
+    // its whole text in the title), and older rows may predate the backfill.
+    if (note.sessionId && note.completedAt == null) continue;
     items.push({
       type: 'note',
       id: note.id,

@@ -2471,6 +2471,34 @@ fn test_update_written_note_rewrites_title_and_content() {
     assert!(stored.is_written());
 }
 
+/// A written note edited down to a bare title has no body left, which used to
+/// leave `completed_at` NULL — the fingerprint of a session note still
+/// generating, and enough for branch history and the `#note:` picker to drop it.
+#[test]
+fn test_update_written_note_completes_a_note_with_an_empty_body() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Saved without a body, the way a one-line note arrives from the editor.
+    let mut note =
+        Note::new_standalone(&branch.id, "Reminder", "").with_subtype(Note::SUBTYPE_WRITTEN);
+    assert!(note.completed_at.is_some(), "no session will fill it in");
+    note.completed_at = None; // a row predating the 0031 backfill
+    store.create_note_with_unique_title(&mut note).unwrap();
+
+    let updated = store
+        .update_written_note(&note.id, "Reminder, trimmed", "")
+        .unwrap();
+    assert_eq!(updated.content, "");
+    assert!(updated.completed_at.is_some());
+
+    let stored = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(stored.completed_at, updated.completed_at);
+}
+
 #[test]
 fn test_update_written_note_keeps_its_own_title_but_avoids_others() {
     let store = Store::in_memory().unwrap();

@@ -2466,7 +2466,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
             let subtype: Option<String> = opt_arg(&args, "subtype")?;
-            let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
+            let mut note = crate::store::models::Note::new_standalone(&branch_id, &title, &content);
             note.subtype = subtype;
             store
                 .create_note_with_unique_title(&mut note)

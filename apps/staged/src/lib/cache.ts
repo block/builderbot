@@ -18,17 +18,20 @@ export const CACHE_SCHEMA_VERSION = 2;
 const CACHE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Every invalidation call takes the next sequence number synchronously, and
- * a fetch captures the current number when it starts. When the invalidation
- * later resolves which keys it covers (the command-wide and by-args variants
- * have to scan IDB first), it stamps them with its sequence; a fetch whose
- * write would land is skipped when its key carries a newer stamp.
+ * Every invalidation call takes the next sequence number synchronously and
+ * stamps the keys it covers with it. A fetch captures the current number as
+ * its network call goes out, and skips its cache write when its key carries a
+ * newer stamp.
  *
- * Stamping at call time rather than at scan time is what lets the change-feed
- * handlers run in one dispatch: the cache listener starts the invalidation,
- * the view store issues its forced reload right behind it, and that reload —
- * post-mutation by construction — is not mistaken for the pre-mutation fetch
- * the invalidation exists to block.
+ * Stamping at call time rather than after an IDB scan is what lets the
+ * change-feed handlers run in one dispatch: the cache listener starts the
+ * invalidation, the view store issues its forced reload right behind it, and
+ * that reload — post-mutation by construction — carries the new sequence and
+ * is not mistaken for the pre-mutation fetch the invalidation exists to block.
+ * It is also what covers a key that so far exists only as an in-flight
+ * request: the command-wide and by-args variants stamp the matching in-flight
+ * keys before they scan IDB, so a response that lands mid-scan is already
+ * blocked rather than written where no delete will ever reach it.
  */
 let invalidationSequence = 0;
 const keyInvalidatedAt = new Map<string, number>();
@@ -64,9 +67,15 @@ function isEpochCurrent(key: string, epoch: InvalidationEpoch): boolean {
 
 /**
  * Refcount of cache keys with an active network fetch. Scoped invalidators
- * union this with the IDB key set so first-load races (key not yet written to
- * IDB) still get their epoch bumped — otherwise the in-flight fetch would
- * resolve and write pre-mutation data into the invalidated namespace.
+ * stamp the matching keys here synchronously at call time, before their IDB
+ * scan, so first-load races (key not yet written to IDB) are blocked even
+ * when the response lands mid-scan — otherwise the in-flight fetch would
+ * write pre-mutation data into the invalidated namespace and nothing would
+ * delete it.
+ *
+ * Every fetch registers here in the same synchronous step that captures its
+ * epoch, so a fetch holding an older sequence than an invalidation is always
+ * visible to that invalidation's in-flight pass.
  */
 const inFlightKeys = new Map<string, number>();
 
@@ -150,10 +159,6 @@ export async function* cachedInvoke<T>(
 
   const key = cacheKey(command, args);
   const store = getStore();
-  // Stamped at request time, before the IDB read: an invalidation called from
-  // here on postdates this request and must not be mistaken for one this
-  // request's response could predate.
-  const epochAtStart = captureEpoch();
 
   let entry: CacheEntry<T> | undefined;
   let isUsable = false;
@@ -169,7 +174,12 @@ export async function* cachedInvoke<T>(
     if (isFresh) return;
   }
 
+  // Registered and stamped as the network call goes out, after the IDB read:
+  // an invalidation that landed during the read predates this network call,
+  // so its response is post-mutation and may be cached. The two calls stay
+  // adjacent so an invalidation can never see one without the other.
   addInFlight(key);
+  const epochAtStart = captureEpoch();
 
   try {
     const data = await invokeCommand<T>(command, args);
@@ -215,11 +225,10 @@ export async function cachedCommand<T>(
 
   const key = cacheKey(command, args);
   const store = getStore();
-  // Stamped at request time, before any IDB read (see cachedInvoke).
-  const epochAtStart = captureEpoch();
 
   if (config.bypassRead) {
     addInFlight(key);
+    const epochAtStart = captureEpoch();
     try {
       const data = await invokeCommand<T>(command, args);
       // Skip the cache write if the key was invalidated while we were fetching —
@@ -246,7 +255,10 @@ export async function cachedCommand<T>(
     return { data: entry.data, revalidating: null };
   }
 
+  // Registered and stamped as the network call goes out, after the IDB read
+  // (see cachedInvoke).
   addInFlight(key);
+  const epochAtStart = captureEpoch();
   const network = invokeCommand<T>(command, args)
     .then(async (data) => {
       // Skip the cache write if the key was invalidated while we were fetching —
@@ -326,9 +338,15 @@ function isSweepable(entry: Partial<CacheEntry<unknown>> | undefined, now: numbe
 /**
  * Remove stale schema and week-old entries. Intended to run once per app
  * session — during boot, while hydration is still writing. Check and delete
- * happen on the live record inside one readwrite cursor so a write that lands
- * mid-sweep (its transaction serializes before or after this one, never
- * between a read and its delete) is seen with its fresh fetchedAt and kept.
+ * happen on the live records inside one readwrite transaction so a write that
+ * lands mid-sweep (its transaction serializes before or after this one, never
+ * between the read and its delete) is seen with its fresh fetchedAt and kept.
+ *
+ * The read is one getAllKeys plus one getAll rather than a cursor: a
+ * readwrite transaction holds the store's exclusive lock for as long as it
+ * has requests outstanding, and a cursor costs one event-loop hop per record
+ * while boot-time cachedInvoke reads queue behind it. Two hops plus the
+ * deletes keeps that stall bounded however large the store has grown.
  */
 export async function sweepCache(): Promise<void> {
   if (isTauri) return;
@@ -336,13 +354,17 @@ export async function sweepCache(): Promise<void> {
     const store = getStore();
     const now = Date.now();
     await store('readwrite', (objectStore) => {
-      objectStore.openCursor().onsuccess = function () {
-        const cursor = this.result;
-        if (!cursor) return;
-        if (isSweepable(cursor.value as Partial<CacheEntry<unknown>> | undefined, now)) {
-          cursor.delete();
+      // Requests on one transaction complete in issue order, so the keys are
+      // in hand when the values arrive, and both are in key order with no
+      // write between them, so the two arrays line up index for index.
+      const keysRequest = objectStore.getAllKeys();
+      const valuesRequest = objectStore.getAll();
+      valuesRequest.onsuccess = () => {
+        const allKeys = keysRequest.result;
+        const values = valuesRequest.result as Array<Partial<CacheEntry<unknown>> | undefined>;
+        for (let i = 0; i < allKeys.length; i++) {
+          if (isSweepable(values[i], now)) objectStore.delete(allKeys[i]);
         }
-        cursor.continue();
       };
       return promisifyRequest(objectStore.transaction);
     });
@@ -363,22 +385,34 @@ export async function invalidateCache(
 }
 
 /**
- * Invalidate all entries for a command (regardless of args).
+ * Shared body of the scoped invalidators.
  *
- * The IDB delete is best-effort ordering-wise: a post-call fetch that comes
- * back before the key scan settles has its fresh write deleted here and is
+ * The in-flight keys are stamped synchronously, before the IDB key scan: a
+ * fetch that was in flight at call time may land during the scan, and if its
+ * key is not in IDB yet the scan has nothing to delete, so an unstamped write
+ * would be served as fresh for the whole TTL. Every fetch that starts after
+ * this point captures a sequence >= ours and passes the check by
+ * construction, so the post-scan pass only has to delete.
+ *
+ * That delete is best-effort ordering-wise: a post-call fetch that comes back
+ * before the key scan settles has its fresh write deleted here and is
  * refetched on the next read — a miss, never stale data.
  */
+async function invalidateMatching(matches: (key: string) => boolean): Promise<void> {
+  const sequence = nextInvalidationSequence();
+  for (const key of inFlightKeys.keys()) {
+    if (matches(key)) markInvalidated(key, sequence);
+  }
+  const store = getStore();
+  const idbMatching = (await keys<string>(store)).filter(matches);
+  await Promise.all(idbMatching.map((k) => del(k, store)));
+}
+
+/** Invalidate all entries for a command (regardless of args). */
 export async function invalidateCacheByCommand(command: string): Promise<void> {
   if (isTauri) return;
-  const sequence = nextInvalidationSequence();
-  const store = getStore();
   const prefix = `${command}:`;
-  const idbMatching = (await keys<string>(store)).filter((k) => k.startsWith(prefix));
-  const inFlightMatching = [...inFlightKeys.keys()].filter((k) => k.startsWith(prefix));
-  const toMark = new Set<string>([...idbMatching, ...inFlightMatching]);
-  toMark.forEach((k) => markInvalidated(k, sequence));
-  await Promise.all(idbMatching.map((k) => del(k, store)));
+  await invalidateMatching((key) => key.startsWith(prefix));
 }
 
 function parseCacheArgs(key: string, command: string): Record<string, unknown> | undefined {
@@ -400,18 +434,11 @@ export async function invalidateCacheByArgs(
   partialArgs: Record<string, unknown>
 ): Promise<void> {
   if (isTauri) return;
-  const sequence = nextInvalidationSequence();
-  const store = getStore();
-  const matches = (key: string): boolean => {
+  await invalidateMatching((key) => {
     const args = parseCacheArgs(key, command);
     if (!args) return false;
     return Object.entries(partialArgs).every(([argKey, argValue]) => args[argKey] === argValue);
-  };
-  const idbMatching = (await keys<string>(store)).filter(matches);
-  const inFlightMatching = [...inFlightKeys.keys()].filter(matches);
-  const toMark = new Set<string>([...idbMatching, ...inFlightMatching]);
-  toMark.forEach((k) => markInvalidated(k, sequence));
-  await Promise.all(idbMatching.map((k) => del(k, store)));
+  });
 }
 
 /** Mark all entries as stale so SWR serves them while revalidating. */

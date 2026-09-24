@@ -72,11 +72,11 @@ describe('project-changed cache invalidation', () => {
 
     emitProjectChanged({ projectId: 'p1' });
 
-    // list_projects and badges take no args, so the drop is command-wide either way.
-    expect(invalidateCacheByCommand.mock.calls).toEqual([
-      ['list_projects'],
-      ['get_all_repo_badges'],
-    ]);
+    // list_projects and badges take no args, so each is exactly one key and
+    // the per-key drop (synchronous stamp, single delete, no IDB key scan)
+    // covers it in full.
+    expect(invalidateCache.mock.calls).toEqual([['list_projects'], ['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
     expect(invalidateCacheByArgs.mock.calls).toEqual([['list_project_repos', { projectId: 'p1' }]]);
   });
 
@@ -85,11 +85,8 @@ describe('project-changed cache invalidation', () => {
 
     emitProjectChanged({ projectId: null });
 
-    expect(invalidateCacheByCommand.mock.calls).toEqual([
-      ['list_projects'],
-      ['get_all_repo_badges'],
-      ['list_project_repos'],
-    ]);
+    expect(invalidateCache.mock.calls).toEqual([['list_projects'], ['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand.mock.calls).toEqual([['list_project_repos']]);
     expect(invalidateCacheByArgs).not.toHaveBeenCalled();
   });
 });
@@ -101,10 +98,12 @@ describe('repos-changed cache invalidation', () => {
     emitReposChanged({ githubRepo: 'org/alpha' });
 
     // Badges are one argless list, so a single repo's change drops the whole
-    // key; nothing else in the repo family is cached in IDB.
-    expect(invalidateCacheByCommand.mock.calls).toEqual([['get_all_repo_badges']]);
+    // key; nothing else in the repo family is cached in IDB. The per-key drop
+    // avoids a full-store key scan on every pin and recent-repo update, which
+    // publish through this same event.
+    expect(invalidateCache.mock.calls).toEqual([['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
     expect(invalidateCacheByArgs).not.toHaveBeenCalled();
-    expect(invalidateCache).not.toHaveBeenCalled();
   });
 
   it('drops the badge list on the lag flush as well', async () => {
@@ -112,7 +111,8 @@ describe('repos-changed cache invalidation', () => {
 
     emitReposChanged({ githubRepo: null });
 
-    expect(invalidateCacheByCommand.mock.calls).toEqual([['get_all_repo_badges']]);
+    expect(invalidateCache.mock.calls).toEqual([['get_all_repo_badges']]);
+    expect(invalidateCacheByCommand).not.toHaveBeenCalled();
   });
 });
 

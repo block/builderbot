@@ -45,13 +45,16 @@ export function listenForCacheInvalidation(): UnlistenFn {
 
   // Project changed (create / rename / delete / repo attach) → drop the
   // project-list caches for future non-forced reads in this tab and any other
-  // tab sharing the same IDB store. list_projects takes no args so the drop is
-  // command-wide; the repo lists scope to the named project when the payload
-  // names one, widening only on the feed's lag recovery.
+  // tab sharing the same IDB store. list_projects and get_all_repo_badges take
+  // no args, so each has exactly one key and the per-key drop covers it: the
+  // key is stamped synchronously and deleted directly, with no IDB key scan
+  // for an in-flight response to slip past or a post-call write to be lost to.
+  // The repo lists scope to the named project when the payload names one,
+  // widening only on the feed's lag recovery.
   unlisteners.push(
     listenToEvent<ProjectChangedEvent>('project-changed', (payload) => {
-      invalidateCacheByCommand('list_projects');
-      invalidateCacheByCommand('get_all_repo_badges');
+      invalidateCache('list_projects');
+      invalidateCache('get_all_repo_badges');
       if (payload.projectId === null) {
         invalidateCacheByCommand('list_project_repos');
       } else {
@@ -65,10 +68,12 @@ export function listenForCacheInvalidation(): UnlistenFn {
   // land after projectsData's forced reload and put pre-edit badges back into
   // IDB. This listener is registered ahead of projectsDataStore's, and the
   // cache stamps invalidations at call time, so the forced reload issued in
-  // the same dispatch is post-invalidation and its write is kept.
+  // the same dispatch is post-invalidation and its write is kept. The badge
+  // list is one argless key, so the per-key drop covers it without a
+  // full-store key scan on every pin or recent-repo update.
   unlisteners.push(
     listenToEvent<ReposChangedEvent>('repos-changed', () => {
-      invalidateCacheByCommand('get_all_repo_badges');
+      invalidateCache('get_all_repo_badges');
     })
   );
 

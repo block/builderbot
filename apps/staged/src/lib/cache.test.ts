@@ -602,9 +602,10 @@ describe('first-load race protection', () => {
 
     const inFlight = cachedCommand<string>('list_projects', undefined, { ttl: 60_000 });
 
-    // Let cachedCommand reach the network step (IDB miss, addInFlight, network promise constructed)
-    await Promise.resolve();
-    await Promise.resolve();
+    // Let cachedCommand reach the network step (IDB miss, addInFlight, network
+    // promise constructed). The IDB read settles on a macrotask, so wait for
+    // the network call itself rather than a fixed number of microtasks.
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
 
     await invalidateCacheByCommand('list_projects');
 
@@ -662,8 +663,7 @@ describe('first-load race protection', () => {
       { ttl: 60_000 }
     );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
 
     await invalidateCacheByArgs('get_diff_files', { branchId: 'branch-a' });
 
@@ -682,6 +682,70 @@ describe('first-load race protection', () => {
     expect(results).toEqual([{ data: 'fresh', source: 'network', fetchedAt: expect.any(Number) }]);
   });
 
+  it('invalidateCacheByCommand blocks an in-flight first-load response that lands before its key scan settles', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const args = { branchId: 'branch-a' };
+    const inFlight = cachedCommand<string>('get_branch_timeline', args, { ttl: 60_000 });
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    // Call the invalidation but let the response land while its IDB key scan
+    // is still pending. The key is not in IDB yet, so the scan finds nothing
+    // to delete: only a stamp taken synchronously at call time can keep the
+    // pre-mutation write out, and without it the entry would be served as
+    // fresh for the whole TTL.
+    const invalidation = invalidateCacheByCommand('get_branch_timeline');
+    pending.resolve('pre-mutation');
+    await expect(inFlight).resolves.toEqual({ data: 'pre-mutation', revalidating: null });
+    await invalidation;
+
+    mockInvoke.mockResolvedValueOnce('fresh');
+    await expect(
+      cachedCommand<string>('get_branch_timeline', args, { ttl: 60_000 })
+    ).resolves.toEqual({ data: 'fresh', revalidating: null });
+  });
+
+  it('invalidateCacheByArgs blocks an in-flight first-load response that lands before its key scan settles', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const args = { branchId: 'branch-a', scope: 'branch' };
+    const inFlight = cachedCommand<string>('get_diff_files', args, { ttl: 60_000 });
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    const invalidation = invalidateCacheByArgs('get_diff_files', { branchId: 'branch-a' });
+    pending.resolve('pre-mutation');
+    await expect(inFlight).resolves.toEqual({ data: 'pre-mutation', revalidating: null });
+    await invalidation;
+
+    mockInvoke.mockResolvedValueOnce('fresh');
+    await expect(cachedCommand<string>('get_diff_files', args, { ttl: 60_000 })).resolves.toEqual({
+      data: 'fresh',
+      revalidating: null,
+    });
+  });
+
+  it('caches a fetch whose network call goes out after an invalidation that landed during its IDB read', async () => {
+    // The IDB read and the network call are separate hops. An invalidation
+    // that lands between them predates the network call, so the response is
+    // post-mutation and dropping its write would be a gratuitous miss.
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+    const inFlight = cachedCommand<string>('list_projects', undefined, { ttl: 60_000 });
+    // No await: the IDB read is still pending when the invalidation is called.
+    expect(mockInvoke).not.toHaveBeenCalled();
+    await invalidateCacheByCommand('list_projects');
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    pending.resolve('post-mutation');
+    await expect(inFlight).resolves.toEqual({ data: 'post-mutation', revalidating: null });
+
+    mockInvoke.mockResolvedValueOnce('unexpected network read');
+    await expect(
+      cachedCommand<string>('list_projects', undefined, { ttl: 60_000 })
+    ).resolves.toEqual({ data: 'post-mutation', revalidating: null });
+    expect(mockInvoke).toHaveBeenCalledTimes(1);
+  });
+
   it('refcounts in-flight keys so concurrent reads of the same key both honor invalidation', async () => {
     const first = deferred<string>();
     const second = deferred<string>();
@@ -690,8 +754,7 @@ describe('first-load race protection', () => {
     const callA = cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
     const callB = cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(2));
 
     // Resolve the first call; let the cache write settle.
     first.resolve('a');

@@ -68,7 +68,6 @@
     /** When set, the delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     onRetryClick?: () => void;
-    onStartClick?: () => void;
     onResumeClick?: () => void;
     onPullClick?: () => void;
     pullDisabledReason?: string;
@@ -115,7 +114,6 @@
     onDeleteClick,
     deleteDisabledReason,
     onRetryClick,
-    onStartClick,
     onResumeClick,
     onPullClick,
     pullDisabledReason,
@@ -227,11 +225,6 @@
   function handleRetryClick(e: MouseEvent) {
     e.stopPropagation();
     onRetryClick?.();
-  }
-
-  function handleStartClick(e: MouseEvent) {
-    e.stopPropagation();
-    onStartClick?.();
   }
 
   function handleResumeClick(e: MouseEvent) {
@@ -394,7 +387,6 @@
       <div
         class="timeline-actions"
         class:always-visible={!!onRetryClick ||
-          !!onStartClick ||
           !!onResumeClick ||
           !!onPullClick ||
           !!pullDisabledReason ||
@@ -412,18 +404,6 @@
           !!onDiscardChangesClick ||
           !!discardChangesDisabledReason}
       >
-        {#if onStartClick}
-          <Button
-            variant="outline"
-            size="xs"
-            onclick={handleStartClick}
-            title="Start"
-            aria-label="Start"
-            class="h-[22px] rounded border-[var(--border-muted)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-          >
-            Start
-          </Button>
-        {/if}
         {#if onRetryClick}
           <Button
             variant="ghost"
@@ -575,7 +555,7 @@
             </Button>
           </span>
         {/if}
-        {#if hasSession && !onStartClick && !isQueued}
+        {#if hasSession && !isQueued}
           <Button
             variant="ghost"
             size="icon-xs"

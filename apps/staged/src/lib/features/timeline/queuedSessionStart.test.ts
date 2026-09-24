@@ -1,16 +1,40 @@
 import { describe, expect, it } from 'vitest';
-import { canStartQueuedSessions } from './queuedSessionStart';
+import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
 
-describe('canStartQueuedSessions', () => {
-  it('offers Start on an idle branch', () => {
-    expect(canStartQueuedSessions({ hasActiveSession: false, gitActionRunning: false })).toBe(true);
+const allKinds: QueuedSessionKind[] = ['commit', 'note', 'review'];
+
+describe('canStartQueuedSessionNow', () => {
+  it('offers Start now for every kind on an idle branch', () => {
+    for (const kind of allKinds) {
+      expect(
+        canStartQueuedSessionNow({ kind, exclusiveHolderRunning: false, provisioning: false })
+      ).toBe(true);
+    }
   });
 
-  it('withholds Start while a git action holds the branch', () => {
-    expect(canStartQueuedSessions({ hasActiveSession: false, gitActionRunning: true })).toBe(false);
+  it('offers Start now for notes and reviews while a commit or git action holds the worktree', () => {
+    for (const kind of ['note', 'review'] as QueuedSessionKind[]) {
+      expect(
+        canStartQueuedSessionNow({ kind, exclusiveHolderRunning: true, provisioning: false })
+      ).toBe(true);
+    }
   });
 
-  it('withholds Start while another session is running', () => {
-    expect(canStartQueuedSessions({ hasActiveSession: true, gitActionRunning: false })).toBe(false);
+  it('withholds Start now for a commit while a commit or git action holds the worktree', () => {
+    expect(
+      canStartQueuedSessionNow({
+        kind: 'commit',
+        exclusiveHolderRunning: true,
+        provisioning: false,
+      })
+    ).toBe(false);
+  });
+
+  it('withholds Start now for every kind while the branch is provisioning', () => {
+    for (const kind of allKinds) {
+      expect(
+        canStartQueuedSessionNow({ kind, exclusiveHolderRunning: false, provisioning: true })
+      ).toBe(false);
+    }
   });
 });

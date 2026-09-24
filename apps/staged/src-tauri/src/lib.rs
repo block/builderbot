@@ -2433,6 +2433,7 @@ pub fn run() {
             session_commands::start_or_queue_branch_session,
             session_commands::queue_branch_session,
             session_commands::drain_queued_sessions,
+            session_commands::start_queued_session_now,
             session_commands::start_project_session,
             // Actions
             actions::commands::detect_repo_actions,

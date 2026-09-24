@@ -1159,6 +1159,17 @@ export function drainQueuedSessions(branchId: string): Promise<boolean> {
   });
 }
 
+/** Start one queued session ahead of the branch queue ("Start now").
+ *  Returns false when a concurrent drain claimed the session first; rejects when
+ *  the branch is still provisioning or something already holds its worktree. */
+export function startQueuedSessionNow(branchId: string, sessionId: string): Promise<boolean> {
+  return invokeCommand('start_queued_session_now', {
+    branchId,
+    sessionId,
+    provider: null,
+  });
+}
+
 // =============================================================================
 // Timeline item deletion
 // =============================================================================

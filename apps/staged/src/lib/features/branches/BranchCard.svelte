@@ -2023,10 +2023,21 @@
               onDeleteReview={handleDeleteReview}
               onImageClick={handleImageClick}
               onDeleteImage={handleDeleteImage}
-              onStartQueued={() => {
+              onStartQueuedNow={(sid) => {
                 commands
-                  .drainQueuedSessions(branch.id)
-                  .catch((e) => console.error('Failed to drain queued sessions:', e));
+                  .startQueuedSessionNow(branch.id, sid)
+                  .then(() => loadTimeline())
+                  .catch((e) => {
+                    console.error('Failed to start queued session:', e);
+                    toast.error('Start failed', {
+                      description:
+                        e instanceof Error
+                          ? e.message
+                          : typeof e === 'string'
+                            ? e
+                            : 'Could not start the session. Please try again.',
+                    });
+                  });
               }}
               onNewNote={() => sessionMgr.openNewSession('note')}
               onNewCommit={() => sessionMgr.openNewSession('commit')}

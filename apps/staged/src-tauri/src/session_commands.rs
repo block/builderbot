@@ -2073,6 +2073,27 @@ fn can_start_with_active_branch_sessions(
     candidate.allows_parallel_instances() || !active.contains(&candidate)
 }
 
+/// Whether a forced start ("Start now") may run `candidate` beside the kinds
+/// already active on the branch.
+///
+/// This deliberately drops two of the rules
+/// `can_start_with_active_branch_sessions` enforces, because jumping them is the
+/// whole point of the action: queue order, and the one-instance-per-kind rule
+/// that keeps a second review or commit from starting beside a running one.
+/// Running a queued note or review beside a commit session is the main use case,
+/// and neither writes to the worktree.
+///
+/// The worktree rule stays: two exclusive sessions would have two agents editing
+/// the same tree, so an exclusive candidate is refused while anything exclusive
+/// is active. Reset-to-origin and discard run outside the session queue and so
+/// are invisible here — the frontend withholds the menu item during those.
+fn can_force_start_with_active(
+    candidate: BranchSessionScheduleKind,
+    active: &HashSet<BranchSessionScheduleKind>,
+) -> bool {
+    !candidate.is_exclusive() || !active.iter().any(|kind| kind.is_exclusive())
+}
+
 fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
@@ -3214,6 +3235,82 @@ pub async fn drain_queued_sessions_for_branch(
     }
 
     Ok(started_any)
+}
+
+/// Start one specific queued session now, ahead of the branch's queue.
+///
+/// The row the user picked, not the oldest one: this is what backs the "Start
+/// now" context-menu action, so it bypasses queue order and the FIFO barrier a
+/// queued commit puts in front of later rows. See `can_force_start_with_active`
+/// for the one rule it keeps.
+///
+/// Returns whether the session was started — `false` means a concurrent drain
+/// claimed the row first, which is not an error.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_queued_session_now(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    let store = get_store(&store)?;
+    start_queued_session_now_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        session_id,
+        provider,
+    )
+    .await
+}
+
+/// Force-start a single queued branch session, skipping the queue.
+///
+/// Unlike the drain this reports refusals as errors rather than a silent
+/// `Ok(false)`: the user asked for this specific row, so "a commit is running"
+/// is something they need told.
+pub async fn start_queued_session_now_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    // Same reasoning as the drain's gate: a shutdown must not claim queued rows
+    // and spawn agent children that `app.exit(0)` would orphan.
+    if crate::app_lifecycle::is_quitting(&app_handle) {
+        return Ok(false);
+    }
+
+    if branch_session_start_waits_for_provisioning(&store, &branch_id)? {
+        return Err("Branch is still being set up".to_string());
+    }
+
+    let session = store
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+    if session.status != store::SessionStatus::Queued {
+        return Err(format!("Session {session_id} is no longer queued"));
+    }
+
+    let schedule = resolve_branch_session_schedule(&store, &branch_id, &session, true)?
+        .ok_or_else(|| format!("Session {session_id} does not belong to branch {branch_id}"))?;
+
+    let active = running_branch_session_kinds(&store, &branch_id)?;
+    if !can_force_start_with_active(schedule.kind, &active) {
+        return Err("A commit or git action is running on this branch. Stop it first.".to_string());
+    }
+
+    start_queued_session_for_branch(
+        store, registry, app_handle, branch_id, session, schedule, provider,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5874,6 +5971,84 @@ mod tests {
         let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
 
         assert_eq!(drainable, vec!["note-1".to_string(), "note-2".to_string()]);
+    }
+
+    #[test]
+    fn force_start_runs_note_or_review_beside_a_running_commit() {
+        let active = HashSet::from([BranchSessionScheduleKind::Commit]);
+
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Review,
+            &active
+        ));
+    }
+
+    #[test]
+    fn force_start_runs_a_second_note_or_review_beside_its_own_kind() {
+        let notes = HashSet::from([BranchSessionScheduleKind::Note]);
+        let reviews = HashSet::from([BranchSessionScheduleKind::Review]);
+
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Note,
+            &notes
+        ));
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Review,
+            &reviews
+        ));
+    }
+
+    #[test]
+    fn force_start_refuses_a_commit_beside_exclusive_work() {
+        for active_kind in [
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::CommitPipeline,
+            BranchSessionScheduleKind::GitPipeline,
+        ] {
+            let active = HashSet::from([active_kind]);
+            assert!(
+                !can_force_start_with_active(BranchSessionScheduleKind::Commit, &active),
+                "commit should be refused beside {active_kind:?}"
+            );
+            assert!(
+                !can_force_start_with_active(BranchSessionScheduleKind::CommitPipeline, &active),
+                "rebase/squash should be refused beside {active_kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn force_start_runs_a_commit_beside_notes_and_reviews() {
+        let active = HashSet::from([
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ]);
+
+        assert!(can_force_start_with_active(
+            BranchSessionScheduleKind::Commit,
+            &active
+        ));
+    }
+
+    #[test]
+    fn force_start_runs_anything_on_an_idle_branch() {
+        let active = HashSet::new();
+
+        for kind in [
+            BranchSessionScheduleKind::Commit,
+            BranchSessionScheduleKind::CommitPipeline,
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+        ] {
+            assert!(
+                can_force_start_with_active(kind, &active),
+                "{kind:?} should start on an idle branch"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@ import type { DisplayRootInput } from './pathDisplayRoots';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
 import { formatJson, terminalRefsFromAcpContent, textFromAcpContent } from './acpTranscript';
 import { makePathsRelative, parseToolCall, stripCodeFences } from './sessionModalHelpers';
-import { toolCallImageContent, type ToolCallImage } from './toolCallImages';
+import { toolCallImageContent, toolCallOutputText, type ToolCallImage } from './toolCallImages';
 
 export type ToolCallCategory = 'edit' | 'command' | 'read' | 'search' | 'network' | 'generic';
 
@@ -292,8 +292,8 @@ export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
   const exitCode = firstNumber(rawRecord, ['exitCode', 'exit_code', 'code']);
   const structuredOutput =
     rawImages.images.length > 0
-      ? stripCodeFences(rawImages.text)
-      : valueText(
+      ? toolCallOutputText(item.rawOutput)
+      : toolCallOutputText(
           firstValue(rawRecord, ['output', 'text', 'body', 'response', 'content', 'result'])
         );
   const resultText =

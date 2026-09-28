@@ -1,3 +1,6 @@
+import { formatJson } from './acpTranscript';
+import { stripCodeFences } from './sessionModalHelpers';
+
 export type ToolCallImage =
   | { kind: 'inline'; dataUrl: string; label: string }
   | { kind: 'file'; path: string; label: string };
@@ -43,6 +46,18 @@ export function toolCallImageContent(value: unknown): { images: ToolCallImage[];
     }
   }
   return { images, text: text.join('\n').trim() };
+}
+
+export function toolCallOutputText(value: unknown): string {
+  const content = toolCallImageContent(value);
+  if (content.images.length === 0) return formatJson(value);
+
+  // Image blocks replace only their payloads, not the result's sibling text fields.
+  const parts = isRecord(value)
+    ? ['output', 'text', 'body', 'response', 'result'].map((key) => toolCallOutputText(value[key]))
+    : [];
+  parts.push(stripCodeFences(content.text));
+  return [...new Set(parts.filter(Boolean))].join('\n');
 }
 
 function localImagePath(uri: string): string | null {

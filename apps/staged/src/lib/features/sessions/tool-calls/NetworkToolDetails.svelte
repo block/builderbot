@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RichToolItem } from '../acpTranscript';
   import { formatJson } from '../acpTranscript';
+  import { toolCallOutputText } from '../toolCallImages';
   import { isRecord, type ToolCallViewModel } from '../toolCallViewModel';
   import OutputSections from './OutputSections.svelte';
 
@@ -74,13 +75,12 @@
       responseHeaders: valueText(
         firstValue(rawOutput, ['headers']) ?? firstValue(response, ['headers'])
       ),
-      responseBody:
-        model.output.images.length > 0
-          ? model.output.primaryText
-          : valueText(
-              firstValue(rawOutput, ['body', 'text', 'content']) ??
-                firstValue(response, ['body', 'text', 'content'])
-            ),
+      responseBody: toolCallOutputText(
+        firstValue(rawOutput, ['body', 'text']) ??
+          firstValue(response, ['body', 'text']) ??
+          firstValue(rawOutput, ['content']) ??
+          firstValue(response, ['content'])
+      ),
     };
   }
 
@@ -193,7 +193,8 @@
 
   <OutputSections
     {viewModel}
-    includePrimary={!network.responseBody}
+    includePrimary={!network.responseBody ||
+      (viewModel.output.images.length > 0 && network.responseBody !== viewModel.output.primaryText)}
     includeRaw={!hasStructuredResponse}
   />
 </div>

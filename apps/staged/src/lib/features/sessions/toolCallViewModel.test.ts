@@ -317,6 +317,56 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.hasDetails).toBe(true);
   });
 
+  it.each(['output', 'text', 'body', 'response', 'result'])(
+    'preserves a sibling %s field alongside raw image content',
+    (field) => {
+      const model = buildToolCallViewModel(
+        richTool({
+          rawOutput: { [field]: 'Screenshot captured', content: [rawImage] },
+        })
+      );
+
+      expect(model.output.primaryText).toBe('Screenshot captured');
+      expect(model.sections).toContainEqual({
+        kind: 'output',
+        source: 'primary',
+        label: 'Output',
+        text: 'Screenshot captured',
+        tone: 'normal',
+      });
+      expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
+    }
+  );
+
+  it('keeps distinct sibling fields and image captions without repeating identical text', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        rawOutput: {
+          output: 'Screenshot captured',
+          text: 'Screenshot captured',
+          body: { width: 1280, height: 720 },
+          content: [rawImage, { type: 'text', text: '```text\nImage caption\n```' }],
+        },
+      })
+    );
+
+    expect(model.output.primaryText).toBe(
+      'Screenshot captured\n{\n  "width": 1280,\n  "height": 720\n}\nImage caption'
+    );
+  });
+
+  it('filters image payloads in the selected output field while preserving its text', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        content: [acpImage],
+        rawOutput: { body: [rawImage, { type: 'text', text: 'Screenshot captured' }] },
+      })
+    );
+
+    expect(model.output.primaryText).toBe('Screenshot captured');
+    expect(model.output.images).toHaveLength(1);
+  });
+
   it('preserves a raw text response accompanying an ACP image', () => {
     const model = buildToolCallViewModel(
       richTool({ content: [acpImage], rawOutput: { body: 'Screenshot captured' } })

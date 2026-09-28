@@ -2,6 +2,7 @@
   import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
   import type { ToolCallViewModel } from '../toolCallViewModel';
+  import ToolResultImage from './ToolResultImage.svelte';
 
   type OutputTone = 'normal' | 'danger' | 'cancelled';
 
@@ -125,6 +126,10 @@
         class:tool-output-cancelled={block.tone === 'cancelled'}>{block.text}</pre>
     </div>
   </section>
+{/each}
+
+{#each viewModel.output.images as image}
+  <ToolResultImage {image} />
 {/each}
 
 {#if viewModel.output.emptyLabel}

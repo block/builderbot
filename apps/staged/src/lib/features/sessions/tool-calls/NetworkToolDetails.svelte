@@ -74,10 +74,13 @@
       responseHeaders: valueText(
         firstValue(rawOutput, ['headers']) ?? firstValue(response, ['headers'])
       ),
-      responseBody: valueText(
-        firstValue(rawOutput, ['body', 'text', 'content']) ??
-          firstValue(response, ['body', 'text', 'content'])
-      ),
+      responseBody:
+        model.output.images.length > 0
+          ? model.output.primaryText
+          : valueText(
+              firstValue(rawOutput, ['body', 'text', 'content']) ??
+                firstValue(response, ['body', 'text', 'content'])
+            ),
     };
   }
 

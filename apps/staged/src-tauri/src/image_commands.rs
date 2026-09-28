@@ -1,5 +1,8 @@
 //! Image commands — image upload, retrieval, and management.
 
+mod tool_results;
+pub use tool_results::*;
+
 use crate::store::Store;
 use std::path::Path;
 use std::sync::{Arc, Mutex};

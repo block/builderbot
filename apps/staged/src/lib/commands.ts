@@ -1874,6 +1874,11 @@ export function getImageData(imageId: string): Promise<string> {
   return invokeCommand('get_image_data', { imageId });
 }
 
+/** Load an image referenced by a tool result without creating an attachment. */
+export function readImageFile(filePath: string): Promise<string> {
+  return invokeCommand('read_image_file', { filePath });
+}
+
 /** Create an image from base64-encoded data (browser file input / clipboard paste). */
 export function createImageFromData(
   branchId: string | null,

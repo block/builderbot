@@ -2629,6 +2629,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let data_url = format!("data:{};base64,{}", image.mime_type, encoded);
             Ok(serde_json::to_value(data_url).unwrap())
         }
+        "read_image_file" => {
+            let file_path: String = arg(&args, "filePath")?;
+            crate::image_commands::read_image_file(file_path).map(Value::String)
+        }
         "delete_image" => {
             let store = get_store(store_mutex)?;
             let image_id: String = arg(&args, "imageId")?;

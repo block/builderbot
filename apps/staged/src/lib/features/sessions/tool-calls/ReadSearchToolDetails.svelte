@@ -24,10 +24,9 @@
 
   let { item, viewModel, displayRoots }: Props = $props();
   let matches = $derived(extractMatches(item.rawOutput, displayRoots));
-  // The Path field names the file (with its line suffix folded in); chips only
-  // carry locations it doesn't already cover.
+  // The header names the file; chips retain line numbers and other locations.
   let locationSummary = $derived(
-    summarizeToolCallLocations(viewModel.metadata.locations, viewModel.metadata.targetPath)
+    summarizeToolCallLocations(viewModel.metadata.locations, null, [viewModel.metadata.targetPath])
   );
 
   function extractMatches(rawOutput: unknown, roots?: DisplayRootInput): MatchRow[] {
@@ -87,18 +86,12 @@
 </script>
 
 <div class="tool-detail-stack">
-  <div class="tool-field-list">
-    {#if viewModel.metadata.targetPath}
-      <span class="tool-field-label">Path</span>
-      <span class="tool-field-value"
-        >{viewModel.metadata.targetPath}{locationSummary.pathSuffix}</span
-      >
-    {/if}
-    {#if viewModel.metadata.query}
+  {#if viewModel.metadata.query}
+    <div class="tool-field-list">
       <span class="tool-field-label">{viewModel.category === 'search' ? 'Query' : 'Selector'}</span>
       <span class="tool-field-value">{viewModel.metadata.query}</span>
-    {/if}
-  </div>
+    </div>
+  {/if}
 
   {#if locationSummary.chips.length > 0}
     <div class="tool-meta-row">

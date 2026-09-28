@@ -197,11 +197,35 @@ impl Store {
     /// This is the safe entry point for `resume_session` — it prevents two
     /// concurrent resume calls from both succeeding.
     pub fn transition_to_running(&self, id: &str) -> Result<bool, StoreError> {
+        self.transition_to_running_clearing_agent_id(id, None)
+    }
+
+    /// Atomically transition a session to `Running`, clearing a caller-owned
+    /// temporary `agent_id` marker at the same time.
+    ///
+    /// Real ACP session ids are preserved. The optional clear is for rows that
+    /// were visible as `running` before an ACP session existed; if a user stops
+    /// and resumes such a row before the original startup finishes, clearing
+    /// that marker makes the original startup's later compare-and-swap fail.
+    pub fn transition_to_running_clearing_agent_id(
+        &self,
+        id: &str,
+        agent_id_to_clear: Option<&str>,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2
-             WHERE id = ?3 AND status != 'running'",
-            params![now_timestamp(), std::process::id(), id],
+            "UPDATE sessions
+             SET status = 'running',
+                 error_message = NULL,
+                 completion_reason = NULL,
+                 updated_at = ?1,
+                 owner_pid = ?2,
+                 agent_id = CASE
+                     WHEN ?3 IS NOT NULL AND agent_id = ?3 THEN NULL
+                     ELSE agent_id
+                 END
+             WHERE id = ?4 AND status != 'running'",
+            params![now_timestamp(), std::process::id(), agent_id_to_clear, id],
         )?;
         Ok(rows > 0)
     }
@@ -303,8 +327,10 @@ impl Store {
         Ok(())
     }
 
-    /// Update a queued session's working directory, prompt, and owner PID
-    /// when it is being drained (started for real).
+    /// Update a queued session's working directory, prompt, and owner PID once
+    /// its prompt context exists.
+    ///
+    /// Used by the branch queue drain after it has claimed a `queued` row.
     pub fn prepare_queued_session(
         &self,
         id: &str,
@@ -317,6 +343,38 @@ impl Store {
             params![working_dir, prompt, std::process::id(), now_timestamp(), id],
         )?;
         Ok(())
+    }
+
+    /// Update an immediate branch-start row only if it is still the row the
+    /// original starter inserted.
+    ///
+    /// Immediate branch starts insert a `running` row before context exists and
+    /// stamp `agent_id` with a temporary startup marker. A Stop followed by
+    /// Resume can legitimately put the row back in `running`; the marker makes
+    /// that new turn distinct so the abandoned starter cannot overwrite its
+    /// prompt or launch a second runner.
+    pub fn prepare_immediate_branch_session(
+        &self,
+        id: &str,
+        expected_agent_id: &str,
+        working_dir: &str,
+        prompt: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE sessions
+             SET working_dir = ?1, prompt = ?2, owner_pid = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'running' AND agent_id = ?6",
+            params![
+                working_dir,
+                prompt,
+                std::process::id(),
+                now_timestamp(),
+                id,
+                expected_agent_id,
+            ],
+        )?;
+        Ok(rows > 0)
     }
 
     /// Get all queued sessions for a branch, ordered by creation time (oldest first).

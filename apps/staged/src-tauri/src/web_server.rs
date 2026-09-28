@@ -3041,7 +3041,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
             let provider = session.provider.clone();
-            let agent_session_id = session.agent_id.clone();
+            let pending_start_agent_id =
+                session_commands::pending_branch_start_agent_id(session.agent_id.as_deref())
+                    .map(ToString::to_string);
+            let agent_session_id =
+                session_commands::resumable_agent_session_id(session.agent_id.as_deref());
             let working_dir = std::path::PathBuf::from(&session.working_dir);
             let effective_acp_config_selection =
                 session_commands::resolve_resume_acp_config_selection(
@@ -3142,7 +3146,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             };
 
             let transitioned = store
-                .transition_to_running(&session_id)
+                .transition_to_running_clearing_agent_id(
+                    &session_id,
+                    pending_start_agent_id.as_deref(),
+                )
                 .map_err(|e| e.to_string())?;
             if !transitioned {
                 return Err("Session is already running".to_string());

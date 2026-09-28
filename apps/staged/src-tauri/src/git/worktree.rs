@@ -457,6 +457,14 @@ fn parse_commit_info_lines(output: &str) -> Vec<CommitInfo> {
 ///
 /// Uses `merge-base` to find the actual fork point, consistent with
 /// [`get_commits_since_base`].
+///
+/// Both inner calls run via `cli::run_smart`, for the same reason
+/// [`get_commits_since_base`] does: `merge-base` and `git log` are
+/// env-independent reads, so the lite env is correct. This is the read behind
+/// every branch session's prompt context, and `worktree` is the session's
+/// working directory — the worktree joined with the project subpath, a cache
+/// key nothing else warms — so on the captured path it made every cold Start
+/// wait out a `$SHELL -ils` capture that only the agent process needs.
 pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitError> {
     let merge_base = super::refs::merge_base(worktree, base, "HEAD")?;
     let range = format!("{merge_base}..HEAD");
@@ -467,7 +475,7 @@ pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitErr
     // time is the one a rebase preserves, so rewritten commits keep their
     // place among the session messages they're interleaved with
     // %B is the full commit message (subject + body)
-    let output = cli::run(
+    let output = cli::run_smart(
         worktree,
         &[
             "log",

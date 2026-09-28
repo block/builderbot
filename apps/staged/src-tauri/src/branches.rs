@@ -453,6 +453,33 @@ pub(crate) fn branch_git_runner<'a>(
     Ok(git_runner(working_dir, workspace_name, remote_dir))
 }
 
+/// Resolve the local cwd a branch session should run in.
+///
+/// The branch worktree itself is the git checkout root. If the branch belongs
+/// to a project repo with a subpath, that repo's subpath wins; otherwise the
+/// legacy project-level subpath applies.
+pub(crate) fn local_branch_session_working_dir(
+    store: &Store,
+    project: &store::Project,
+    branch: &store::Branch,
+    worktree_path: impl Into<PathBuf>,
+) -> PathBuf {
+    let mut working_dir = worktree_path.into();
+    let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
+        store
+            .get_project_repo(repo_id)
+            .ok()
+            .flatten()
+            .and_then(|repo| repo.subpath)
+    } else {
+        project.subpath.clone()
+    };
+    if let Some(ref subpath) = effective_subpath {
+        working_dir = working_dir.join(subpath);
+    }
+    working_dir
+}
+
 /// Read HEAD through a runner, trimmed.
 pub(crate) fn head_sha(git: &GitRunner<'_>) -> Result<String, String> {
     git(&["rev-parse", "HEAD"]).map(|sha| sha.trim().to_string())
@@ -3120,6 +3147,49 @@ mod tests {
             workspace_git_args("ws-1", None, &["rev-parse", "HEAD"]).unwrap(),
             vec!["git", "rev-parse", "HEAD"]
         );
+    }
+
+    #[test]
+    fn local_session_working_dir_uses_project_repo_subpath_when_present() {
+        let store = Store::in_memory().unwrap();
+        let mut project = store::Project::new("block/builderbot");
+        project.subpath = Some("apps/root".to_string());
+        store.create_project(&project).unwrap();
+        let repo = store::ProjectRepo::new(
+            &project.id,
+            "block/builderbot",
+            "feature",
+            Some("apps/staged".to_string()),
+        );
+        store.create_project_repo(&repo).unwrap();
+
+        let branch = store::Branch::new(&project.id, "feature", "main").with_project_repo(&repo.id);
+        let working_dir = local_branch_session_working_dir(
+            &store,
+            &project,
+            &branch,
+            PathBuf::from("/tmp/worktree"),
+        );
+
+        assert_eq!(working_dir, PathBuf::from("/tmp/worktree/apps/staged"));
+    }
+
+    #[test]
+    fn local_session_working_dir_falls_back_to_project_subpath() {
+        let store = Store::in_memory().unwrap();
+        let mut project = store::Project::new("block/builderbot");
+        project.subpath = Some("apps/staged".to_string());
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+
+        let working_dir = local_branch_session_working_dir(
+            &store,
+            &project,
+            &branch,
+            PathBuf::from("/tmp/worktree"),
+        );
+
+        assert_eq!(working_dir, PathBuf::from("/tmp/worktree/apps/staged"));
     }
 
     /// A session config's already-absolute `remote_working_dir` resolves to the

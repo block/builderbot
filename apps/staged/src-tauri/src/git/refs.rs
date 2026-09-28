@@ -139,9 +139,14 @@ pub fn list_branches(repo: &Path) -> Result<Vec<BranchRef>, GitError> {
     Ok(branches)
 }
 
-/// Compute the merge-base between two refs
+/// Compute the merge-base between two refs.
+///
+/// Runs via `cli::run_smart`: `merge-base` only walks the object database and
+/// refs, so it never needs the captured shell env, and its one caller
+/// ([`super::get_full_commit_log`]) sits on the session-start path where
+/// blocking on the per-directory `$SHELL -ils` capture was the whole cost.
 pub fn merge_base(repo: &Path, ref1: &str, ref2: &str) -> Result<String, GitError> {
-    let output = cli::run(repo, &["merge-base", ref1, ref2])?;
+    let output = cli::run_smart(repo, &["merge-base", ref1, ref2])?;
     Ok(output.trim().to_string())
 }
 

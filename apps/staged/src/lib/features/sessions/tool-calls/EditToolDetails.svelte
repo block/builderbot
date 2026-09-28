@@ -8,30 +8,16 @@
   }
 
   let { viewModel }: Props = $props();
-  // The diff header already names the file; only surface path metadata it doesn't cover.
-  let showPath = $derived(
-    !!viewModel.metadata.targetPath &&
-      !viewModel.metadata.diffs.some((diff) => diff.path === viewModel.metadata.targetPath)
-  );
+  // The tool and diff headers name the files; chips retain location details.
   let locationSummary = $derived(
-    summarizeToolCallLocations(
-      viewModel.metadata.locations,
-      showPath ? viewModel.metadata.targetPath : null,
-      [viewModel.metadata.targetPath, ...viewModel.metadata.diffs.map((diff) => diff.path)]
-    )
+    summarizeToolCallLocations(viewModel.metadata.locations, null, [
+      viewModel.metadata.targetPath,
+      ...viewModel.metadata.diffs.map((diff) => diff.path),
+    ])
   );
 </script>
 
 <div class="tool-detail-stack">
-  {#if showPath}
-    <div class="tool-primary-row">
-      <span class="tool-field-label">Path</span>
-      <span class="tool-field-value"
-        >{viewModel.metadata.targetPath}{locationSummary.pathSuffix}</span
-      >
-    </div>
-  {/if}
-
   {#if locationSummary.chips.length > 0}
     <div class="tool-meta-row">
       {#each locationSummary.chips as chip}

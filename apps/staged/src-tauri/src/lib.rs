@@ -2359,6 +2359,7 @@ pub fn run() {
             image_commands::create_image,
             image_commands::get_image_path,
             image_commands::get_image_data,
+            image_commands::read_image_file,
             image_commands::delete_image,
             image_commands::list_branch_images,
             image_commands::create_image_from_data,

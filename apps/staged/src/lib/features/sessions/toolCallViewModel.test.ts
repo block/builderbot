@@ -236,6 +236,184 @@ describe('buildToolCallViewModel classification', () => {
 });
 
 describe('buildToolCallViewModel output handling', () => {
+  const png =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
+  const acpImage = {
+    type: 'content',
+    content: { type: 'image', data: png, mimeType: 'image/png' },
+  };
+  const rawImage = {
+    type: 'image',
+    source: { type: 'base64', data: png, media_type: 'image/png' },
+  };
+
+  it('renders a Claude Read image once without its raw or legacy JSON', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        toolKind: 'read',
+        content: [acpImage],
+        rawOutput: [rawImage],
+        result: message({ id: 2, role: 'tool_result', content: JSON.stringify([rawImage]) }),
+      })
+    );
+
+    expect(model.output.images).toEqual([
+      { kind: 'inline', dataUrl: `data:image/png;base64,${png}`, label: 'Tool result image' },
+    ]);
+    expect(model.sections.map((section) => section.kind)).toEqual(['image', 'status']);
+    expect(model.output.primaryText).toBe('');
+    expect(model.output.emptyLabel).toBeNull();
+    expect(model.hasDetails).toBe(true);
+  });
+
+  it('keeps accompanying text and multiple images in ACP output', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        content: [
+          { type: 'content', content: { type: 'text', text: 'Screenshot captured' } },
+          acpImage,
+          { type: 'content', content: { type: 'image', mimeType: 'image/jpeg', data: 'jpeg' } },
+        ],
+      })
+    );
+
+    expect(model.output.images).toHaveLength(2);
+    expect(model.output.primaryText).toBe('Screenshot captured');
+    expect(model.output.state).toBe('output');
+  });
+
+  it.each([
+    ['Claude', [rawImage, { type: 'text', text: 'Image result' }]],
+    [
+      'MCP',
+      {
+        content: [
+          { type: 'image', data: png, mimeType: 'image/png' },
+          { type: 'text', text: 'Image result' },
+        ],
+      },
+    ],
+  ])('renders %s raw images when ACP content is absent', (_, rawOutput) => {
+    const model = buildToolCallViewModel(richTool({ rawOutput }));
+
+    expect(model.output.images).toHaveLength(1);
+    expect(model.output.primaryText).toBe('Image result');
+    expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
+    expect(model.output.primaryText).not.toContain(png);
+  });
+
+  it('renders a Codex View Image resource link without requiring a MIME type', () => {
+    const path = '/tmp/screenshots/after.png';
+    const model = buildToolCallViewModel(
+      richTool({
+        toolKind: 'read',
+        content: [{ type: 'content', content: { type: 'resource_link', uri: path, name: path } }],
+      })
+    );
+
+    expect(model.output.images).toEqual([{ kind: 'file', path, label: path }]);
+    expect(model.output.state).toBe('output');
+    expect(model.output.emptyLabel).toBeNull();
+    expect(model.hasDetails).toBe(true);
+  });
+
+  it.each(['output', 'text', 'body', 'response', 'result'])(
+    'preserves a sibling %s field alongside raw image content',
+    (field) => {
+      const model = buildToolCallViewModel(
+        richTool({
+          rawOutput: { [field]: 'Screenshot captured', content: [rawImage] },
+        })
+      );
+
+      expect(model.output.primaryText).toBe('Screenshot captured');
+      expect(model.sections).toContainEqual({
+        kind: 'output',
+        source: 'primary',
+        label: 'Output',
+        text: 'Screenshot captured',
+        tone: 'normal',
+      });
+      expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
+    }
+  );
+
+  it('keeps distinct sibling fields and image captions without repeating identical text', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        rawOutput: {
+          output: 'Screenshot captured',
+          text: 'Screenshot captured',
+          body: { width: 1280, height: 720 },
+          content: [rawImage, { type: 'text', text: '```text\nImage caption\n```' }],
+        },
+      })
+    );
+
+    expect(model.output.primaryText).toBe(
+      'Screenshot captured\n{\n  "width": 1280,\n  "height": 720\n}\nImage caption'
+    );
+  });
+
+  it('filters image payloads in the selected output field while preserving its text', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        content: [acpImage],
+        rawOutput: { body: [rawImage, { type: 'text', text: 'Screenshot captured' }] },
+      })
+    );
+
+    expect(model.output.primaryText).toBe('Screenshot captured');
+    expect(model.output.images).toHaveLength(1);
+  });
+
+  it('preserves a raw text response accompanying an ACP image', () => {
+    const model = buildToolCallViewModel(
+      richTool({ content: [acpImage], rawOutput: { body: 'Screenshot captured' } })
+    );
+
+    expect(model.output.images).toHaveLength(1);
+    expect(model.output.primaryText).toBe('Screenshot captured');
+  });
+
+  it('decodes file URLs for image resource links', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        content: [
+          {
+            type: 'content',
+            content: { type: 'resource_link', uri: 'file:///tmp/screen%20shot.PNG' },
+          },
+        ],
+      })
+    );
+
+    expect(model.output.images).toEqual([
+      { kind: 'file', path: '/tmp/screen shot.PNG', label: '/tmp/screen shot.PNG' },
+    ]);
+  });
+
+  it('leaves unsupported and malformed raw content available as JSON', () => {
+    const rawOutput = [
+      null,
+      { type: 'image', data: png },
+      { type: 'image', data: '', mimeType: 'image/png' },
+      { type: 'image', data: png, mimeType: 'text/html' },
+      { type: 'resource_link', uri: '/tmp/document.txt' },
+      { type: 'resource_link', uri: 'https://example.test/screenshot.png' },
+      { type: 'resource_link', uri: 'file://remote-host/screenshot.png' },
+      { type: 'resource_link', uri: 'file:///tmp/%invalid.png' },
+    ];
+    const model = buildToolCallViewModel(richTool({ rawOutput }));
+
+    expect(model.output.images).toEqual([]);
+    expect(model.sections).toContainEqual({
+      kind: 'raw_output',
+      label: 'Raw output',
+      text: JSON.stringify(rawOutput, null, 2),
+    });
+  });
+
   it('suppresses raw output JSON when a structured error is shown', () => {
     const model = buildToolCallViewModel(
       richTool({

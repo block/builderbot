@@ -2,6 +2,7 @@ import type { DisplayRootInput } from './pathDisplayRoots';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
 import { formatJson, terminalRefsFromAcpContent, textFromAcpContent } from './acpTranscript';
 import { makePathsRelative, parseToolCall, stripCodeFences } from './sessionModalHelpers';
+import { toolCallImageContent, toolCallOutputText, type ToolCallImage } from './toolCallImages';
 
 export type ToolCallCategory = 'edit' | 'command' | 'read' | 'search' | 'network' | 'generic';
 
@@ -53,6 +54,7 @@ export interface ToolCallMetadata {
 
 export interface ToolCallOutput {
   state: ToolCallOutputState;
+  images: ToolCallImage[];
   primaryText: string;
   /** Pretty-printed raw output JSON. Lazily formatted — read only when expanded. */
   rawText: string;
@@ -68,6 +70,7 @@ export interface ToolCallOutput {
 export type ToolCallOutputSource = 'error' | 'stdout' | 'stderr' | 'primary';
 
 export type ToolCallSection =
+  | { kind: 'image'; image: ToolCallImage }
   | { kind: 'locations'; locations: ToolCallLocation[] }
   | { kind: 'input'; label: 'Input'; text: string }
   | { kind: 'diff'; diff: ToolCallDiff }
@@ -271,6 +274,9 @@ export function classifyToolCall(
 
 export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
   const rawRecord = recordOrNull(item.rawOutput);
+  const contentImages = toolCallImageContent(item.content);
+  const rawImages = toolCallImageContent(item.rawOutput);
+  const images = contentImages.images.length > 0 ? contentImages.images : rawImages.images;
   // Pretty-printing the whole raw output is the expensive path a collapsed card
   // must not pay, and it's discarded outright when structured output exists, so
   // keep it lazy and gate its section on the cheap `hasRawText` flag.
@@ -284,10 +290,14 @@ export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
   const stdout = valueText(firstValue(rawRecord, ['stdout', 'standardOutput', 'standard_output']));
   const stderr = valueText(firstValue(rawRecord, ['stderr', 'standardError', 'standard_error']));
   const exitCode = firstNumber(rawRecord, ['exitCode', 'exit_code', 'code']);
-  const structuredOutput = valueText(
-    firstValue(rawRecord, ['output', 'text', 'body', 'response', 'content', 'result'])
-  );
-  const resultText = item.result?.content ? stripCodeFences(item.result.content) : '';
+  const structuredOutput =
+    rawImages.images.length > 0
+      ? toolCallOutputText(item.rawOutput)
+      : toolCallOutputText(
+          firstValue(rawRecord, ['output', 'text', 'body', 'response', 'content', 'result'])
+        );
+  const resultText =
+    images.length === 0 && item.result?.content ? stripCodeFences(item.result.content) : '';
   const primaryText =
     contentText ||
     (typeof item.rawOutput === 'string' ? item.rawOutput : '') ||
@@ -295,11 +305,19 @@ export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
     stdout ||
     stderr ||
     resultText;
-  const hasAnyOutput = !!(primaryText || hasRawText || errorText || stdout || stderr);
+  const hasAnyOutput = !!(
+    images.length ||
+    primaryText ||
+    hasRawText ||
+    errorText ||
+    stdout ||
+    stderr
+  );
   const isWaiting = item.status === 'pending' || item.status === 'in_progress';
 
   return {
     state: hasAnyOutput ? 'output' : isWaiting ? 'waiting' : 'empty',
+    images,
     primaryText,
     get rawText() {
       return (rawTextCache ??= formatJson(rawOutput));
@@ -345,6 +363,10 @@ export function buildToolCallSections(
   }
 
   let hasStructuredOutput = false;
+  for (const image of output.images) {
+    sections.push({ kind: 'image', image });
+    hasStructuredOutput = true;
+  }
   const outputTone = item.status === 'cancelled' ? 'cancelled' : 'normal';
   if (output.errorText) {
     sections.push({

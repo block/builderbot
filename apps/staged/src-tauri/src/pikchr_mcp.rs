@@ -38,6 +38,7 @@
 //! `generate_pikchr` needs to spin up, persist, and cancel its sub-session, so
 //! it remains safe to attach to any local session.
 
+use std::borrow::Cow;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -48,10 +49,10 @@ use tokio_util::sync::CancellationToken;
 use acp_client::{McpServer, McpServerHttp};
 use axum::Router;
 use base64::Engine as _;
-use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, ProgressNotificationParam, ProgressToken, ServerCapabilities,
-    ServerInfo,
+    CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken, ProtocolVersion,
+    ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::{
@@ -788,7 +789,6 @@ struct PikchrToolsHandler {
     /// runs, so the Stop control in its UI cancels the actual worker instead
     /// of falling back to a bare store write the worker never observes.
     registry: Arc<SessionRegistry>,
-    tool_router: ToolRouter<Self>,
 }
 
 impl PikchrToolsHandler {
@@ -805,7 +805,6 @@ impl PikchrToolsHandler {
             app_handle,
             store,
             registry,
-            tool_router: Self::tool_router(),
         }
     }
 }
@@ -893,13 +892,14 @@ rendered PNG preview you may open as an optional final check."
 
         // Cancellation token owned by *this* future (the parent MCP request).
         // The worker gets a clone; the parent keeps the token alive through a
-        // `DropGuard`. If the MCP client abandons this tool call, the future is
-        // dropped, the guard cancels the token, and the sub-session's provider
-        // subprocess is torn down promptly — rather than running detached until
-        // the wall-clock timeout. The worker arms this same token on timeout,
-        // recording the reason first so the cancelled child session can say
-        // "timed out" rather than a bare cancel; a guard-driven cancel records
-        // nothing and reads as the caller abandoning the call.
+        // `DropGuard`. rmcp signals request cancellation through `ctx.ct`;
+        // it does not drop the handler future. The select below returns on that
+        // signal, dropping the guard and cancelling the worker's token so the
+        // sub-session's provider subprocess is torn down promptly. Dropping
+        // this future also cancels the worker. The worker arms this same token
+        // on timeout, recording the reason first so the child session can say
+        // "timed out"; a guard-driven cancel records nothing and reads as the
+        // caller abandoning the call.
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
         let worker_cancel_reason = Arc::new(CancelReason::new());
@@ -1104,10 +1104,13 @@ accepted a render, so the diagram run was cancelled.",
 
         // Await the worker while ticking progress keep-alives back to the
         // caller so its idle timer doesn't sever a long run. The keep-alive
-        // loop never completes; the select ends when the worker reports (or
-        // this future is dropped, which also stops the keep-alives).
+        // loop never completes; the select ends when the worker reports or
+        // rmcp cancels the request. Both paths stop the keep-alives.
         let received = tokio::select! {
             received = rx => received,
+            _ = ctx.ct.cancelled() => {
+                return Err(ErrorData::internal_error("generate_pikchr call cancelled", None));
+            }
             _ = send_progress_keepalives(&ctx.peer, ctx.meta.get_progress_token()) => {
                 unreachable!("the progress keep-alive loop never completes")
             }
@@ -1151,14 +1154,9 @@ fn progress_keepalive(
     progress_token: ProgressToken,
     elapsed_secs: u64,
 ) -> ProgressNotificationParam {
-    ProgressNotificationParam {
-        progress_token,
-        progress: elapsed_secs as f64,
-        total: None,
-        message: Some(format!(
-            "Diagram specialist still working ({elapsed_secs}s elapsed)."
-        )),
-    }
+    ProgressNotificationParam::new(progress_token, elapsed_secs as f64).with_message(format!(
+        "Diagram specialist still working ({elapsed_secs}s elapsed)."
+    ))
 }
 
 /// Tick an MCP progress notification to the caller every
@@ -1344,11 +1342,11 @@ fn build_generate_pikchr_result(
 ) -> CallToolResult {
     let mut content = Vec::new();
     if let Some(path) = preview_image_path {
-        content.push(Content::text(format!(
+        content.push(ContentBlock::text(format!(
             "Rendered preview image path: {path}"
         )));
     }
-    content.push(Content::text(source.to_string()));
+    content.push(ContentBlock::text(source.to_string()));
 
     let mut structured = serde_json::Map::new();
     structured.insert(
@@ -1373,11 +1371,15 @@ fn build_generate_pikchr_result(
 
 #[tool_handler]
 impl ServerHandler for PikchrToolsHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    // rmcp 3 serves MCP 2026-07-28 sessionlessly, which holds HTTP response
+    // headers until the first handler message; long-polling tools need work
+    // before we advertise it.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
     }
 }
 
@@ -1452,16 +1454,11 @@ struct RenderPikchrParams {
 struct PikchrPreviewHandler {
     scale: f32,
     slot: Arc<LastRenderSlot>,
-    tool_router: ToolRouter<Self>,
 }
 
 impl PikchrPreviewHandler {
     fn new(scale: f32, slot: Arc<LastRenderSlot>) -> Self {
-        Self {
-            scale,
-            slot,
-            tool_router: Self::tool_router(),
-        }
+        Self { scale, slot }
     }
 }
 
@@ -1496,20 +1493,20 @@ successful render."
                 "The previous successful render is still stored; accepting with `AcceptLastRender` \
 now would accept that earlier version, not this source."
             };
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "{}\n{slot_note}",
                 preview.summary
             ))]));
         }
 
-        let mut content = vec![Content::text(preview.summary)];
+        let mut content = vec![ContentBlock::text(preview.summary)];
         if let Some(png) = &preview.png {
-            content.push(Content::image(
+            content.push(ContentBlock::image(
                 base64::engine::general_purpose::STANDARD.encode(png),
                 "image/png",
             ));
         }
-        content.push(Content::text(accept_instruction()));
+        content.push(ContentBlock::text(accept_instruction()));
 
         self.slot.store(GenOutcome {
             source: p.pikchr,
@@ -1522,11 +1519,15 @@ now would accept that earlier version, not this source."
 
 #[tool_handler]
 impl ServerHandler for PikchrPreviewHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    // rmcp 3 serves MCP 2026-07-28 sessionlessly, which holds HTTP response
+    // headers until the first handler message; long-polling tools need work
+    // before we advertise it.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
     }
 }
 
@@ -1568,6 +1569,10 @@ async fn start_pikchr_preview_mcp_server(
 
     Ok((port, handle))
 }
+
+#[cfg(test)]
+#[path = "pikchr_mcp/transport_tests.rs"]
+mod transport_tests;
 
 #[cfg(test)]
 mod tests {

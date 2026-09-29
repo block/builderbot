@@ -1,14 +1,15 @@
 //! MCP server for project sessions.
 //! Exposes `start_repo_session` and `add_project_repo` tools to the agent.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use axum::Router;
 use base64::Engine;
-use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{ProtocolVersion, ServerCapabilities, ServerConfig};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -530,7 +531,6 @@ struct AddProjectRepoParams {
 
 #[derive(Clone)]
 struct ProjectToolsHandler {
-    tool_router: ToolRouter<Self>,
     project_id: String,
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
@@ -569,7 +569,6 @@ impl ProjectToolsHandler {
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
-            tool_router: Self::tool_router(),
             project_id,
             store,
             registry,
@@ -1120,11 +1119,15 @@ fn worktree_ready_reply(github_repo: &str, runs_setup_actions: bool) -> String {
 
 #[tool_handler]
 impl ServerHandler for ProjectToolsHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    // rmcp 3 serves MCP 2026-07-28 sessionlessly, which holds HTTP response
+    // headers until the first handler message; long-polling tools need work
+    // before we advertise it.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
     }
 }
 

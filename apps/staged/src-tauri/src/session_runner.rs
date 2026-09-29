@@ -1841,7 +1841,7 @@ fn stored_agent_session_id(store: &Store, session_id: &str) -> Result<Option<Str
         })
 }
 
-fn session_has_note_artifact(store: &Store, session_id: &str) -> bool {
+pub(crate) fn session_has_note_artifact(store: &Store, session_id: &str) -> bool {
     store
         .get_note_by_session(session_id)
         .ok()
@@ -3698,6 +3698,7 @@ fn completed_turn_completion_reason(
 /// - `HoldStopped` — the connection settled knowing about the cancel; it
 ///   applied to the wait, not the turn (a cancel during the hold can only
 ///   settle this way, never `Quiescent`).
+/// - `ResponseComplete` — the caller accepted a finished response.
 /// - `Quiescent` — the background set drained and the agent confirmed idle.
 /// - `HeldUntilCap` — the cap truncated the wait before the cancel arrived.
 ///
@@ -3712,6 +3713,7 @@ fn completed_turn_survives_late_cancel(
         settle_reason,
         Some(
             acp_client::SessionSettleReason::Quiescent
+                | acp_client::SessionSettleReason::ResponseComplete
                 | acp_client::SessionSettleReason::HeldUntilCap
                 | acp_client::SessionSettleReason::HoldStopped
         )
@@ -3770,7 +3772,7 @@ fn terminal_state_completed_successfully(
 /// Fallback path: handle model outputs where the rule is accidentally attached
 /// to prior text (for example, `Preamble.---\n# Title`) by accepting inline
 /// rules only when the remaining content starts with an H1.
-fn extract_note_content(text: &str) -> Option<String> {
+pub(crate) fn extract_note_content(text: &str) -> Option<String> {
     let sanitized = strip_suggested_next_steps_blocks(text);
     let text = sanitized.as_deref().unwrap_or(text);
     extract_note_after_standalone_hr(text).or_else(|| extract_note_after_inline_hr(text))
@@ -4291,6 +4293,7 @@ pub fn emit_session_running(
 
 #[cfg(test)]
 mod tests {
+    mod note_completion;
     use super::*;
     use crate::git::strip_git_env;
 

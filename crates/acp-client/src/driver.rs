@@ -49,6 +49,8 @@ use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
 
+mod response_completion;
+
 static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // =============================================================================
@@ -66,6 +68,14 @@ pub trait MessageWriter: Send + Sync {
 
     /// Flush all buffered text and close the current message block.
     async fn finalize(&self);
+
+    /// Whether the caller's current response is a finished artifact that should
+    /// release a background hold. Called only at a successful response boundary;
+    /// implementations must flush buffered output before inspecting it and must
+    /// not match historical responses. This does not cancel the session.
+    async fn should_finish_after_response(&self) -> bool {
+        false
+    }
 
     /// Record a tool call with its ID, title, and optional raw input parameters.
     async fn record_tool_call(
@@ -896,6 +906,8 @@ pub enum SessionSettleReason {
     Immediate,
     /// The background task set drained and the debounce elapsed.
     Quiescent,
+    /// The caller recognized a completed response and released the hold.
+    ResponseComplete,
     /// The hard hold cap expired before quiescence could be confirmed; the
     /// wait was truncated and any still-running background work abandoned.
     HeldUntilCap,
@@ -3264,6 +3276,9 @@ struct BackgroundActivity {
     /// per hold (see [`BackgroundHoldConfig::idle_latch_staleness`]), so a
     /// lost trailing `idle` cannot cap-condemn every later hold.
     session_state: Option<SdkSessionState>,
+    /// The caller accepted a completed response. Latched until connection
+    /// teardown so subsequent activity cannot hide it through watch coalescing.
+    finish_requested: bool,
     /// Connection-scoped counter bumped on each recognized task terminal
     /// notification. Unlike a transient edge bit, this survives watch
     /// coalescing with nonterminal updates. Each hold baselines it at entry
@@ -3285,6 +3300,9 @@ struct LiveTaskSnapshot {
 
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
+    /// Serializes response chunks and result boundaries through writer awaits,
+    /// so acceptance cannot race the persistence of a final chunk.
+    response: Mutex<response_completion::ResponseState>,
     phase: Mutex<HandlerPhase>,
     /// Signalled when replay matching determines all DB messages have been replayed.
     replay_done: tokio::sync::Notify,
@@ -3344,6 +3362,7 @@ impl AcpNotificationHandler {
 
         Self {
             writer,
+            response: Mutex::new(response_completion::ResponseState::default()),
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
             permission_cancel_token,
@@ -3404,6 +3423,17 @@ impl AcpNotificationHandler {
     /// Subscribe to the connection's background-activity signal.
     fn subscribe_background_activity(&self) -> watch::Receiver<BackgroundActivity> {
         self.background_activity_tx.subscribe()
+    }
+
+    /// Ask the caller whether a completed response satisfies its task. The
+    /// writer still owns its current buffer here; teardown finalizes it later.
+    async fn finish_completed_response(&self) {
+        let already_requested = self.background_activity_tx.borrow().finish_requested;
+        if !already_requested && self.writer.should_finish_after_response().await {
+            self.background_activity_tx.send_modify(|activity| {
+                activity.finish_requested = true;
+            });
+        }
     }
 
     async fn finalize_replay_if_idle(&self, timeout: Duration) -> bool {
@@ -3477,6 +3507,7 @@ impl AcpNotificationHandler {
     /// connection stays up for background work, so everything that arrives from
     /// here on is an out-of-turn continuation.
     async fn transition_to_background_holding(&self) {
+        self.response.lock().await.reset_output();
         // Only this hold's own evidence may name its continuation: neither a
         // raw frame's origin kind nor a settled task from before the hold.
         *self.autonomous_origin.lock().await = None;
@@ -3748,6 +3779,11 @@ impl AcpNotificationHandler {
         let mentions_task = sdk_message_mentions_task(message);
         let task_settled = sdk_message_settles_task(message);
         let session_state = sdk_message_session_state(message);
+        self.response
+            .lock()
+            .await
+            .accept_result(self, &params)
+            .await?;
         self.background_activity_tx.send_modify(|activity| {
             activity.sdk_frames_seen = true;
             activity.ever_started_task |= mentions_task || !snapshot.live_ids.is_empty();
@@ -3830,6 +3866,25 @@ impl AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
+        let mut response = self.response.lock().await;
+        self.session_notification_inner(notification, &mut response)
+            .await
+    }
+
+    async fn session_notification_inner(
+        &self,
+        notification: SessionNotification,
+        response: &mut response_completion::ResponseState,
+    ) -> agent_client_protocol::Result<()> {
+        // A bridge fallback may carry a different message id. Drop duplicated
+        // text before it can open a new record and finalize the accepted note.
+        if let SessionUpdate::AgentMessageChunk(chunk) = &notification.update {
+            if let AcpContentBlock::Text(text) = &chunk.content {
+                if response.suppress_fallback(&text.text) {
+                    return Ok(());
+                }
+            }
+        }
         // Every received update counts as activity for the post-turn holding
         // debounce — out-of-turn continuations stream as ordinary
         // session/updates, and the hold must not declare quiescence mid-burst.
@@ -4061,11 +4116,18 @@ impl AcpNotificationHandler {
         // writer's next append lands in a row of its own.
         if decision.close_open_record {
             self.writer.finalize().await;
+            response.text.clear();
         }
 
         // Execute the live action without holding the phase lock.
         match decision.action {
             LiveAction::AppendText { text, metadata } => {
+                if response.completed {
+                    self.writer.finalize().await;
+                    response.text.clear();
+                    response.completed = false;
+                }
+                response.text.push_str(&text);
                 self.writer.append_text(&text).await;
                 self.writer.record_acp_event_metadata(metadata).await;
             }
@@ -4078,6 +4140,7 @@ impl AcpNotificationHandler {
                 raw_input,
                 metadata,
             } => {
+                response.text.clear();
                 self.writer
                     .record_tool_call(&id, &title, raw_input.as_ref())
                     .await;
@@ -4516,6 +4579,8 @@ enum HoldSettle {
 
 /// How a post-turn holding wait ended.
 enum HoldOutcome {
+    /// The caller accepted the completed response, regardless of live tasks.
+    ResponseComplete,
     /// The background task set drained and the debounce elapsed — safe to
     /// tear down.
     Quiescent,
@@ -4534,6 +4599,7 @@ enum HoldOutcome {
 impl std::fmt::Debug for HoldOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            HoldOutcome::ResponseComplete => "ResponseComplete",
             HoldOutcome::Quiescent => "Quiescent",
             HoldOutcome::HeldUntilCap => "HeldUntilCap",
             HoldOutcome::NewTurn(_) => "NewTurn",
@@ -4840,6 +4906,9 @@ async fn hold_for_background_quiescence(
     let mut control_open = true;
     let mut activity_open = true;
     let outcome = loop {
+        if activity_rx.borrow().finish_requested {
+            break HoldOutcome::ResponseComplete;
+        }
         if let Some(settle) = state.poll_settle(tokio::time::Instant::now()) {
             break match settle {
                 HoldSettle::Quiescent => HoldOutcome::Quiescent,
@@ -5030,7 +5099,7 @@ async fn run_acp_session(
         // old per-turn run().
         *pending_reply.borrow_mut() = Some(turn.reply);
 
-        let outcome = run_prompt_turn(
+        let prompt = run_prompt_turn(
             connection,
             &setup,
             handler,
@@ -5038,8 +5107,22 @@ async fn run_acp_session(
             cancel_token,
             &turn.prompt,
             &turn.images,
-        )
-        .await;
+        );
+        let outcome = if background_hold.is_some() {
+            tokio::select! {
+                biased;
+                result = prompt => result,
+                _ = handler.wait_for_response_finish() => {
+                    if cancel_token.is_cancelled() {
+                        return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
+                    }
+                    transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
+                    return Ok((AgentRunOutcome::Completed, SessionSettleReason::ResponseComplete));
+                }
+            }
+        } else {
+            prompt.await
+        };
 
         // Feature off: preserve the old behavior byte-for-byte — finalize()
         // + graceful_stop() fire immediately after each prompt resolves, and
@@ -5072,6 +5155,21 @@ async fn run_acp_session(
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Failed);
                 return Err(e);
             }
+        }
+
+        // A completed artifact is a successful finish even if tasks are still
+        // live. This is separate from user cancellation, which also suppresses
+        // queued follow-ups in callers. The normal teardown still runs.
+        if handler
+            .subscribe_background_activity()
+            .borrow()
+            .finish_requested
+        {
+            transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
+            return Ok((
+                AgentRunOutcome::Completed,
+                SessionSettleReason::ResponseComplete,
+            ));
         }
 
         // Only hold when there is something to wait for. In raw mode the
@@ -5133,6 +5231,13 @@ async fn run_acp_session(
         {
             HoldOutcome::NewTurn(turn) => {
                 next_turn = Some(turn);
+            }
+            HoldOutcome::ResponseComplete => {
+                transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
+                return Ok((
+                    AgentRunOutcome::Completed,
+                    SessionSettleReason::ResponseComplete,
+                ));
             }
             HoldOutcome::Quiescent => {
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Quiescent);
@@ -5215,6 +5320,11 @@ async fn run_prompt_turn(
     let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
     handler.transition_to_live().await;
+    handler
+        .response
+        .lock()
+        .await
+        .start_prompt(setup.agent_session_id.to_string());
 
     let prompt_task = connection.send_request(prompt_request).block_task();
     tokio::pin!(prompt_task);
@@ -5243,6 +5353,14 @@ async fn run_prompt_turn(
 
     if let Some(metadata) = prompt_response_metadata(&prompt_response) {
         handler.writer.record_acp_event_metadata(metadata).await;
+    }
+
+    // Compatibility for agents without raw per-response results. Non-success
+    // stop reasons and an already observed result cannot accept an old buffer.
+    if prompt_response.stop_reason == StopReason::EndTurn
+        && !handler.response.lock().await.completed
+    {
+        handler.finish_completed_response().await;
     }
 
     Ok(AgentRunOutcome::from_stop_reason(
@@ -5775,7 +5893,7 @@ struct AcpSessionSetupContext<'a> {
 /// In typed mode the `async_task_*` session updates replace the `task_*`
 /// frames and the `init` availability probe (the mirrored capability is the
 /// availability proof), so only the idle-latch frame and the continuation
-/// origin filter remain requested.
+/// origin filter remain requested, alongside response results.
 ///
 /// Agents MUST NOT make assumptions about unrecognized `_meta` keys per the
 /// ACP spec, so this is safe to send regardless of provider — non-Claude
@@ -5797,6 +5915,7 @@ fn background_task_tracking_meta(mode: TaskTrackingMode) -> Meta {
             "type": "assistant",
             "origin": TASK_NOTIFICATION_ORIGIN,
         })))
+        .chain(std::iter::once(serde_json::json!({ "type": "result" })))
         .collect();
     let mut meta = Meta::new();
     meta.insert(
@@ -6269,6 +6388,7 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod response_completion;
     mod settlement;
 
     use std::collections::BTreeSet;
@@ -8649,8 +8769,9 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(subtypes, expected);
 
         // Plus the origin-matched assistant filter that names the autonomous
-        // cycle a continuation record belongs to.
-        assert_eq!(other_filters.len(), 1);
+        // cycle a continuation record belongs to, plus response boundaries.
+        assert_eq!(other_filters.len(), 2);
+        assert_eq!(other_filters[1]["type"], "result");
         assert_eq!(other_filters[0]["type"], "assistant");
         assert_eq!(other_filters[0]["origin"], TASK_NOTIFICATION_ORIGIN);
     }
@@ -8665,8 +8786,9 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
         // The typed lifecycle replaces the task_* subtypes and the init
         // availability probe; only the idle-latch frame and the continuation
-        // origin filter remain requested.
-        assert_eq!(filters.len(), 2);
+        // origin filter remain requested, alongside response results.
+        assert_eq!(filters.len(), 3);
+        assert_eq!(filters[2]["type"], "result");
         assert_eq!(filters[0]["type"], "system");
         assert_eq!(filters[0]["subtype"], SESSION_STATE_SUBTYPE);
         assert_eq!(filters[1]["type"], "assistant");

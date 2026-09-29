@@ -316,8 +316,18 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<(PathBuf, Option<String>)>, Git
 }
 
 /// Get the current HEAD commit SHA for a worktree/repo.
+///
+/// Runs via `cli::run_smart`: `rev-parse HEAD` only reads refs, so it never
+/// needs the captured shell env. `build_diff_spec` calls this for the
+/// `worktree` scope and for `branch` scope without a commit sha, so on the
+/// captured path opening the uncommitted-changes diff before the project's
+/// warm-up finished blocked on the `$SHELL -ils` capture — the same stall
+/// [`get_parent_commit`] hit for commit diffs. The mutating callers (update,
+/// delete-commit, PR creation) are unaffected: the only behavioural difference
+/// is a lite-env attempt before the captured env, as in
+/// [`super::refs::merge_base`].
 pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
-    let output = cli::run(worktree, &["rev-parse", "HEAD"])?;
+    let output = cli::run_smart(worktree, &["rev-parse", "HEAD"])?;
     Ok(output.trim().to_string())
 }
 
@@ -668,8 +678,18 @@ pub fn discard_worktree_changes(
 
 /// Get the parent commit SHA of a given commit.
 /// Returns None if the commit has no parent (initial commit).
+///
+/// Runs via `cli::run_smart`: `rev-parse <sha>^` only reads refs and objects,
+/// so it never needs the captured shell env. That makes the fast path safe for
+/// every caller, not just the foreground one. `build_diff_spec` uses it for
+/// commit diffs, where blocking on the `$SHELL -ils` capture was the stall;
+/// the delete-commit flow in `timeline.rs` uses it before `reset_to_commit`,
+/// which still goes through `cli::run` and so still waits for the captured
+/// env. The only behavioural difference from `run` is a lite-env attempt
+/// before the captured fallback, as in [`super::refs::merge_base`] and
+/// [`get_head_sha`].
 pub fn get_parent_commit(worktree: &Path, commit_sha: &str) -> Result<Option<String>, GitError> {
-    let result = cli::run(worktree, &["rev-parse", &format!("{commit_sha}^")]);
+    let result = cli::run_smart(worktree, &["rev-parse", &format!("{commit_sha}^")]);
     match result {
         Ok(output) => Ok(Some(output.trim().to_string())),
         Err(_) => Ok(None), // No parent (initial commit or invalid)

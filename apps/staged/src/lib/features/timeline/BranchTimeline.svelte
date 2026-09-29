@@ -738,15 +738,11 @@
         secondaryMeta = formatRelativeTime(note.completedAt ?? note.createdAt, nowMs);
       }
 
-      const liveTitle =
-        type === 'generating-note' && note.sessionId
-          ? liveSessionTitles[note.sessionId]
-          : undefined;
-
       all.push({
         key: `note-${note.id}`,
         type,
-        title: stripXmlTags(liveTitle ?? note.title),
+        // Session labels can contain the full prompt, even when resuming a saved note.
+        title: stripXmlTags(note.title),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
         // Use completedAt so completed notes sort by completion time, not queue time

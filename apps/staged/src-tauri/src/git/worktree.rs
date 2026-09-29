@@ -677,8 +677,16 @@ pub fn discard_worktree_changes(
 
 /// Get the parent commit SHA of a given commit.
 /// Returns None if the commit has no parent (initial commit).
+///
+/// Runs via `cli::run_smart`: `rev-parse <sha>^` only reads refs and objects,
+/// so it never needs the captured shell env. That makes the fast path safe for
+/// every caller, not just the foreground one. `build_diff_spec` uses it for
+/// commit diffs, where blocking on the `$SHELL -ils` capture was the stall;
+/// the delete-commit flow in `timeline.rs` uses it before `reset_to_commit`,
+/// which still goes through `cli::run` and so still waits for the captured
+/// env. The only behavioural difference from `run` is a lite-env attempt
+/// before the captured fallback, as in `refs::merge_base` and [`get_head_sha`].
 pub fn get_parent_commit(worktree: &Path, commit_sha: &str) -> Result<Option<String>, GitError> {
-    // Parent lookup is a foreground diff read; don't wait for shell-env capture.
     let result = cli::run_smart(worktree, &["rev-parse", &format!("{commit_sha}^")]);
     match result {
         Ok(output) => Ok(Some(output.trim().to_string())),

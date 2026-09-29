@@ -67,6 +67,14 @@ pub trait MessageWriter: Send + Sync {
     /// Flush all buffered text and close the current message block.
     async fn finalize(&self);
 
+    /// Whether the caller's current response is a finished artifact that should
+    /// release a background hold. Called only at a successful response boundary;
+    /// implementations must flush buffered output before inspecting it and must
+    /// not match historical responses. This does not cancel the session.
+    async fn should_finish_after_response(&self) -> bool {
+        false
+    }
+
     /// Record a tool call with its ID, title, and optional raw input parameters.
     async fn record_tool_call(
         &self,
@@ -896,6 +904,8 @@ pub enum SessionSettleReason {
     Immediate,
     /// The background task set drained and the debounce elapsed.
     Quiescent,
+    /// The caller recognized a completed response and released the hold.
+    ResponseComplete,
     /// The hard hold cap expired before quiescence could be confirmed; the
     /// wait was truncated and any still-running background work abandoned.
     HeldUntilCap,
@@ -3264,6 +3274,9 @@ struct BackgroundActivity {
     /// per hold (see [`BackgroundHoldConfig::idle_latch_staleness`]), so a
     /// lost trailing `idle` cannot cap-condemn every later hold.
     session_state: Option<SdkSessionState>,
+    /// The caller accepted a completed response. Latched until connection
+    /// teardown so subsequent activity cannot hide it through watch coalescing.
+    finish_requested: bool,
     /// Connection-scoped counter bumped on each recognized task terminal
     /// notification. Unlike a transient edge bit, this survives watch
     /// coalescing with nonterminal updates. Each hold baselines it at entry
@@ -3404,6 +3417,16 @@ impl AcpNotificationHandler {
     /// Subscribe to the connection's background-activity signal.
     fn subscribe_background_activity(&self) -> watch::Receiver<BackgroundActivity> {
         self.background_activity_tx.subscribe()
+    }
+
+    /// Ask the caller whether a completed response satisfies its task. The
+    /// writer still owns its current buffer here; teardown finalizes it later.
+    async fn finish_completed_response(&self) {
+        if self.writer.should_finish_after_response().await {
+            self.background_activity_tx.send_modify(|activity| {
+                activity.finish_requested = true;
+            });
+        }
     }
 
     async fn finalize_replay_if_idle(&self, timeout: Duration) -> bool {
@@ -3748,6 +3771,21 @@ impl AcpNotificationHandler {
         let mentions_task = sdk_message_mentions_task(message);
         let task_settled = sdk_message_settles_task(message);
         let session_state = sdk_message_session_state(message);
+        // An idle edge ends an autonomous response. Merely receiving text,
+        // tool results, or task completion does not: the response can still be
+        // streaming. Require a continuation so an old live-turn buffer cannot
+        // satisfy this boundary before any new output has arrived.
+        if session_state == Some(SdkSessionState::Idle)
+            && matches!(
+                &*self.phase.lock().await,
+                HandlerPhase::BackgroundHolding {
+                    continuation: Some(_),
+                    ..
+                }
+            )
+        {
+            self.finish_completed_response().await;
+        }
         self.background_activity_tx.send_modify(|activity| {
             activity.sdk_frames_seen = true;
             activity.ever_started_task |= mentions_task || !snapshot.live_ids.is_empty();
@@ -4516,6 +4554,8 @@ enum HoldSettle {
 
 /// How a post-turn holding wait ended.
 enum HoldOutcome {
+    /// The caller accepted the completed response, regardless of live tasks.
+    ResponseComplete,
     /// The background task set drained and the debounce elapsed — safe to
     /// tear down.
     Quiescent,
@@ -4534,6 +4574,7 @@ enum HoldOutcome {
 impl std::fmt::Debug for HoldOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            HoldOutcome::ResponseComplete => "ResponseComplete",
             HoldOutcome::Quiescent => "Quiescent",
             HoldOutcome::HeldUntilCap => "HeldUntilCap",
             HoldOutcome::NewTurn(_) => "NewTurn",
@@ -4840,6 +4881,9 @@ async fn hold_for_background_quiescence(
     let mut control_open = true;
     let mut activity_open = true;
     let outcome = loop {
+        if activity_rx.borrow().finish_requested {
+            break HoldOutcome::ResponseComplete;
+        }
         if let Some(settle) = state.poll_settle(tokio::time::Instant::now()) {
             break match settle {
                 HoldSettle::Quiescent => HoldOutcome::Quiescent,
@@ -5074,6 +5118,22 @@ async fn run_acp_session(
             }
         }
 
+        // A completed artifact is a successful finish even if tasks are still
+        // live. This is separate from user cancellation, which also suppresses
+        // queued follow-ups in callers. The normal teardown still runs.
+        handler.finish_completed_response().await;
+        if handler
+            .subscribe_background_activity()
+            .borrow()
+            .finish_requested
+        {
+            transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
+            return Ok((
+                AgentRunOutcome::Completed,
+                SessionSettleReason::ResponseComplete,
+            ));
+        }
+
         // Only hold when there is something to wait for. In raw mode the
         // `init` availability probe re-emits at the start of every prompt
         // turn, so a raw-SDK stream that works has already proven itself by
@@ -5133,6 +5193,13 @@ async fn run_acp_session(
         {
             HoldOutcome::NewTurn(turn) => {
                 next_turn = Some(turn);
+            }
+            HoldOutcome::ResponseComplete => {
+                transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
+                return Ok((
+                    AgentRunOutcome::Completed,
+                    SessionSettleReason::ResponseComplete,
+                ));
             }
             HoldOutcome::Quiescent => {
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Quiescent);
@@ -6269,6 +6336,7 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod response_completion;
     mod settlement;
 
     use std::collections::BTreeSet;

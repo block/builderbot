@@ -292,6 +292,15 @@ impl acp_client::MessageWriter for MessageWriter {
         self.finalize().await
     }
 
+    async fn should_finish_after_response(&self) -> bool {
+        // Inspect only the currently streamed response, never older transcript
+        // rows. The ACP caller invokes this only at a completed response boundary.
+        self.flush_text().await;
+        crate::session_runner::session_has_note_artifact(&self.store, &self.session_id)
+            && crate::session_runner::extract_note_content(self.current_text.lock().await.as_str())
+                .is_some()
+    }
+
     async fn record_tool_call(
         &self,
         tool_call_id: &str,
@@ -491,6 +500,60 @@ mod tests {
         store.create_session(&session).expect("create session");
         let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store));
         (store, session.id, writer)
+    }
+
+    #[tokio::test]
+    async fn completed_note_detection_uses_only_current_response_for_both_note_kinds() {
+        use crate::store::{Branch, Note, Project, ProjectNote};
+        use acp_client::MessageWriter as _;
+
+        for project_note in [false, true] {
+            let (store, session_id, writer) = setup_writer();
+            let project = Project::new("test/notes");
+            store.create_project(&project).unwrap();
+            if project_note {
+                let note = ProjectNote::new(&project.id, "", "").with_session(&session_id);
+                store.create_project_note(&note).unwrap();
+            } else {
+                let branch = Branch::new(&project.id, "notes", "main");
+                store.create_branch(&branch).unwrap();
+                let note = Note::new(&branch.id, "", "").with_session(&session_id);
+                store.create_note(&note).unwrap();
+            }
+            store
+                .add_session_message(
+                    &session_id,
+                    MessageRole::Assistant,
+                    "---\n# Historical note\nOld body",
+                )
+                .unwrap();
+            assert!(!writer.should_finish_after_response().await);
+            writer
+                .append_text("Example:\n```\n---\n# Title\nBody\n```")
+                .await;
+            assert!(!writer.should_finish_after_response().await);
+            writer.finalize().await;
+            writer.append_text("Preamble\n---\n").await;
+            assert!(!writer.should_finish_after_response().await);
+            writer.append_text("# Current note\nFull body.\n").await;
+            writer.append_text("```suggested-next-steps\n{\"suggestedNextCommitStep\":\"Implement\",\"suggestedNextNoteStep\":null}\n```").await;
+            assert!(writer.should_finish_after_response().await);
+            let messages = store.get_session_messages(&session_id).unwrap();
+            let saved = &messages.last().unwrap().content;
+            assert!(saved.contains("Full body."));
+            assert!(saved.contains("suggestedNextCommitStep"));
+            writer.finalize().await;
+            // Closing a response prevents it from satisfying a later boundary.
+            assert!(!writer.should_finish_after_response().await);
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_session_does_not_finish_for_note_shaped_output() {
+        use acp_client::MessageWriter as _;
+        let (_, _, writer) = setup_writer();
+        writer.append_text("---\n# A heading\nBody").await;
+        assert!(!writer.should_finish_after_response().await);
     }
 
     fn permission_request(session_id: &str, request_id: &str) -> AcpPermissionRequest {

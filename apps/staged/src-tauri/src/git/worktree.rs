@@ -324,7 +324,8 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<(PathBuf, Option<String>)>, Git
 /// warm-up finished blocked on the `$SHELL -ils` capture — the same stall
 /// [`get_parent_commit`] hit for commit diffs. The mutating callers (update,
 /// delete-commit, PR creation) are unaffected: the only behavioural difference
-/// is a lite-env attempt before the captured env, as in `refs::merge_base`.
+/// is a lite-env attempt before the captured env, as in
+/// [`super::refs::merge_base`].
 pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
     let output = cli::run_smart(worktree, &["rev-parse", "HEAD"])?;
     Ok(output.trim().to_string())
@@ -685,7 +686,8 @@ pub fn discard_worktree_changes(
 /// the delete-commit flow in `timeline.rs` uses it before `reset_to_commit`,
 /// which still goes through `cli::run` and so still waits for the captured
 /// env. The only behavioural difference from `run` is a lite-env attempt
-/// before the captured fallback, as in `refs::merge_base` and [`get_head_sha`].
+/// before the captured fallback, as in [`super::refs::merge_base`] and
+/// [`get_head_sha`].
 pub fn get_parent_commit(worktree: &Path, commit_sha: &str) -> Result<Option<String>, GitError> {
     let result = cli::run_smart(worktree, &["rev-parse", &format!("{commit_sha}^")]);
     match result {

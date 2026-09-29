@@ -9,6 +9,8 @@ const ARTIFACT: &str = "complete artifact with next steps";
 #[derive(Default)]
 struct ArtifactWriter {
     text: Mutex<String>,
+    metadata: Mutex<Vec<super::super::AcpEventMetadata>>,
+    acceptance_checks: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
@@ -19,7 +21,12 @@ impl MessageWriter for ArtifactWriter {
     async fn finalize(&self) {
         self.text.lock().unwrap().clear();
     }
+    async fn record_acp_event_metadata(&self, metadata: super::super::AcpEventMetadata) {
+        self.metadata.lock().unwrap().push(metadata);
+    }
     async fn should_finish_after_response(&self) -> bool {
+        self.acceptance_checks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         *self.text.lock().unwrap() == ARTIFACT
     }
     async fn record_tool_call(&self, _: &str, _: &str, _: Option<&serde_json::Value>) {}
@@ -35,6 +42,7 @@ impl MessageWriter for ArtifactWriter {
 
 async fn start_task(handler: &Arc<AcpNotificationHandler>, mode: TaskTrackingMode) {
     handler.set_task_tracking_mode(mode);
+    handler.response.lock().await.start_prompt("sess-1".into());
     match mode {
         TaskTrackingMode::Raw => feed_sdk_frame(handler, task_started("live-task")).await,
         TaskTrackingMode::Typed => {
@@ -47,6 +55,14 @@ async fn start_task(handler: &Arc<AcpNotificationHandler>, mode: TaskTrackingMod
             .await
         }
     }
+}
+
+fn successful_result(id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false,
+        "num_turns": 1, "stop_reason": "end_turn", "uuid": id, "result": text,
+        "usage": { "output_tokens": 10 },
+    })
 }
 
 async fn idle(handler: &Arc<AcpNotificationHandler>) {
@@ -141,7 +157,8 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
         feed(&handler, agent_text(None, " with next steps")).await;
         // The caller would accept this text, but it is still streaming.
         assert_holding(hold.as_mut()).await;
-        idle(&handler).await;
+        feed_sdk_frame(&handler, successful_result("background", ARTIFACT)).await;
+        feed_sdk_frame(&handler, successful_result("background", ARTIFACT)).await;
         // A later nonterminal update can coalesce with the finish notification.
         // It must not erase the completed response's request to end the hold.
         match mode {
@@ -224,21 +241,28 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
     use agent_client_protocol::schema::ProtocolVersion;
     use std::cell::RefCell;
 
-    for continuation in [false, true] {
-        let writer = Arc::new(ArtifactWriter::default());
-        let cancel = CancellationToken::new();
-        let handler = Arc::new(AcpNotificationHandler::new(
-            writer.clone(),
-            false,
-            vec![],
-            cancel.clone(),
-        ));
-        let prompt_handler = handler.clone();
-        let agent = agent_client_protocol::Agent
+    for mode in [TaskTrackingMode::Raw, TaskTrackingMode::Typed] {
+        // 0: prompt reply; 1: hold; 2: pending prompt; 3: autonomous
+        // pending continuation; 4: result-only; 5: late chunk; 6: user Stop;
+        // 7: background holding disabled.
+        for scenario in 0..8 {
+            let continuation = scenario == 1;
+            let writer = Arc::new(ArtifactWriter::default());
+            let cancel = CancellationToken::new();
+            let handler = Arc::new(AcpNotificationHandler::new(
+                writer.clone(),
+                false,
+                vec![],
+                cancel.clone(),
+            ));
+
+            let user_cancel = cancel.clone();
+            let agent = agent_client_protocol::Agent
             .builder()
             .on_receive_request(
-                async |_: InitializeRequest, responder, _| {
-                    responder.respond(InitializeResponse::new(ProtocolVersion::V1))
+                async move |_: InitializeRequest, responder, _| {
+                    let response = InitializeResponse::new(ProtocolVersion::V1);
+                    responder.respond(if mode == TaskTrackingMode::Typed { response.meta(super::super::air_client_capabilities_meta()) } else { response })
                 },
                 agent_client_protocol::on_receive_request!(),
             )
@@ -249,41 +273,108 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                 agent_client_protocol::on_receive_request!(),
             )
             .on_receive_request(
-                async move |_: PromptRequest, responder, _| {
-                    feed_sdk_frame(&prompt_handler, task_started("live-task")).await;
-                    feed(
-                        &prompt_handler,
-                        agent_text(None, if continuation { "working" } else { ARTIFACT }),
-                    )
-                    .await;
+                async move |_: PromptRequest, responder, connection| {
+                    let send_result = |message| {
+                        let params = serde_json::value::to_raw_value(&serde_json::json!({
+                            "sessionId": "sess-1", "message": message,
+                        })).unwrap();
+                        connection.send_notification(agent_client_protocol::schema::v1::AgentNotification::ExtNotification(ExtNotification::new(
+                            "_claude/sdkMessage", params.into(),
+                        ))).unwrap();
+                    };
+                    if mode == TaskTrackingMode::Typed {
+                        let notification = super::super::IncomingSessionUpdate::parse_message(
+                            "session/update", &serde_json::json!({
+                                "sessionId": "sess-1", "update": {
+                                    "sessionUpdate": "async_task_spawned", "asyncTaskId": "live-task",
+                                },
+                            }),
+                        ).unwrap();
+                        connection.send_notification(notification).unwrap();
+                    } else {
+                        send_result(task_started("live-task"));
+                    }
+                    if scenario == 3 {
+                        connection.send_notification(agent_text(None, "working")).unwrap();
+                        send_result(successful_result("initial", "working"));
+                    }
+                    if scenario != 4 {
+                        connection.send_notification(agent_text(None,
+                            if continuation { "working" }
+                            else if scenario == 5 { "complete artifact" }
+                            else { ARTIFACT },
+                        )).unwrap();
+                    }
+                    if scenario == 6 {
+                        user_cancel.cancel();
+                        return responder.respond(PromptResponse::new(StopReason::Cancelled));
+                    }
+                    if scenario >= 2 {
+                        let mut result = successful_result("final", ARTIFACT);
+                        if scenario == 3 {
+                            result["origin"] = serde_json::json!({"kind": "task-notification"});
+                        }
+                        send_result(result);
+                        // The bridge sends a result before its fallback text. The
+                        // complete artifact must already be persisted at settlement.
+                        if scenario == 4 {
+                            connection.send_notification(agent_text(None, ARTIFACT)).unwrap();
+                        } else if scenario == 5 {
+                            connection.send_notification(agent_text(None, " with next steps")).unwrap();
+                        }
+                        // Neither idle nor the prompt reply is sent, even though
+                        // the subagent is still live. Only a raw result can finish.
+                        if scenario != 7 {
+                            std::future::pending::<()>().await;
+                        }
+                    }
                     responder.respond(PromptResponse::new(StopReason::EndTurn))
                 },
                 agent_client_protocol::on_receive_request!(),
             );
-        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
-        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
-        let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
-        let (reply, _reply_rx) = oneshot::channel();
-        prompt_tx
-            .send(QueuedSessionTurn {
-                prompt: "write".into(),
-                images: vec![],
-                reply,
-            })
-            .unwrap();
-        let child_exited = CancellationToken::new();
-        let active = AtomicBool::new(false);
-        let pending_reply = RefCell::new(None);
-        let holding = CancellationToken::new();
-        let holding_for_observer = holding.clone();
-        let observer: BackgroundHoldObserver = Arc::new(move |status| {
-            if status.holding {
-                holding_for_observer.cancel();
-            }
-        });
-        let outcome = tokio::time::timeout(
+            let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+            let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+            let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+            let (reply, _reply_rx) = oneshot::channel();
+            prompt_tx
+                .send(QueuedSessionTurn {
+                    prompt: "write".into(),
+                    images: vec![],
+                    reply,
+                })
+                .unwrap();
+            let child_exited = CancellationToken::new();
+            let active = AtomicBool::new(false);
+            let pending_reply = RefCell::new(None);
+            let holding = CancellationToken::new();
+            let holding_for_observer = holding.clone();
+            let observer: BackgroundHoldObserver = Arc::new(move |status| {
+                if status.holding {
+                    holding_for_observer.cancel();
+                }
+            });
+            let outcome = tokio::time::timeout(
             SETTLE_TIMEOUT,
-            agent_client_protocol::Client.connect_with(agent, async |connection| {
+            agent_client_protocol::Client.builder()
+                .on_receive_notification({
+                    let handler = handler.clone();
+                    async move |notification: super::super::IncomingSessionUpdate, _| {
+                        match notification {
+                            super::super::IncomingSessionUpdate::Standard(update) => handler.session_notification(update).await,
+                            super::super::IncomingSessionUpdate::AsyncTask(update) => handler.async_task_update(update).await,
+                        }
+                    }
+                }, agent_client_protocol::on_receive_notification!())
+                .on_receive_notification({
+                    let handler = handler.clone();
+                    async move |notification: agent_client_protocol::schema::v1::AgentNotification, _| {
+                        if let agent_client_protocol::schema::v1::AgentNotification::ExtNotification(ext) = notification {
+                            handler.ext_notification(ext).await?;
+                        }
+                        Ok(())
+                    }
+                }, agent_client_protocol::on_receive_notification!())
+                .connect_with(agent, async |connection| {
                 let run = super::super::run_acp_session(
                     &connection,
                     Path::new("/tmp"),
@@ -296,7 +387,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     "test",
                     &cancel,
                     None,
-                    Some(&QUIESCENCE_PROBE),
+                    if scenario == 7 { None } else { Some(&QUIESCENCE_PROBE) },
                     Some(&observer),
                     &child_exited,
                     &mut prompt_rx,
@@ -308,7 +399,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     if continuation {
                         holding.cancelled().await;
                         feed(&handler, agent_text(None, ARTIFACT)).await;
-                        idle(&handler).await;
+                        feed_sdk_frame(&handler, successful_result("background", ARTIFACT)).await;
                     }
                 };
                 let (result, ()) = tokio::join!(run, complete_background);
@@ -318,15 +409,187 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(
-            outcome,
-            (
-                AgentRunOutcome::Completed,
-                SessionSettleReason::ResponseComplete
-            )
-        );
-        assert_eq!(*writer.text.lock().unwrap(), ARTIFACT);
-        assert!(!cancel.is_cancelled());
-        assert!(!active.load(std::sync::atomic::Ordering::Relaxed));
+            assert_eq!(
+                outcome,
+                (
+                    if scenario == 6 {
+                        AgentRunOutcome::Cancelled
+                    } else {
+                        AgentRunOutcome::Completed
+                    },
+                    if scenario == 6 {
+                        SessionSettleReason::Cancelled
+                    } else if scenario == 7 {
+                        SessionSettleReason::Immediate
+                    } else {
+                        SessionSettleReason::ResponseComplete
+                    }
+                )
+            );
+            assert_eq!(
+                *writer.text.lock().unwrap(),
+                ARTIFACT,
+                "scenario {scenario}, mode {mode:?}"
+            );
+            assert_eq!(
+                handler.subscribe_background_activity().borrow().live_tasks,
+                1,
+                "scenario {scenario}, mode {mode:?}"
+            );
+            assert_eq!(cancel.is_cancelled(), scenario == 6);
+            assert!(!active.load(std::sync::atomic::Ordering::Relaxed));
+        }
     }
+}
+
+#[tokio::test]
+async fn unsuccessful_unrelated_and_historical_results_do_not_accept_notes() {
+    for mutation in [
+        "error",
+        "refusal",
+        "max_tokens",
+        "cancelled",
+        "zero",
+        "subtype",
+        "foreign",
+        "unrelated",
+    ] {
+        let writer = Arc::new(ArtifactWriter::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            writer,
+            false,
+            vec![],
+            CancellationToken::new(),
+        ));
+        start_task(&handler, TaskTrackingMode::Raw).await;
+        feed(&handler, agent_text(None, ARTIFACT)).await;
+        let mut result = successful_result("bad", ARTIFACT);
+        match mutation {
+            "error" => result["is_error"] = true.into(),
+            "zero" => result["num_turns"] = 0.into(),
+            "subtype" => result["subtype"] = "error_during_execution".into(),
+            "foreign" => result["parent_tool_use_id"] = "subagent".into(),
+            "unrelated" => result["result"] = "different response".into(),
+            reason => result["stop_reason"] = reason.into(),
+        }
+        feed_sdk_frame(&handler, result).await;
+        assert!(
+            !handler
+                .subscribe_background_activity()
+                .borrow()
+                .finish_requested,
+            "{mutation}"
+        );
+    }
+    let handler = Arc::new(AcpNotificationHandler::new(
+        Arc::new(ArtifactWriter::default()),
+        false,
+        vec![],
+        CancellationToken::new(),
+    ));
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(None, ARTIFACT)).await;
+    handler.transition_to_background_holding().await;
+    feed_sdk_frame(&handler, successful_result("old", "")).await;
+    assert!(
+        !handler
+            .subscribe_background_activity()
+            .borrow()
+            .finish_requested
+    );
+}
+
+#[tokio::test]
+async fn result_only_fallback_and_duplicate_results_are_recorded_once() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = Arc::new(AcpNotificationHandler::new(
+        writer.clone(),
+        false,
+        vec![],
+        CancellationToken::new(),
+    ));
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    handler.transition_to_background_holding().await;
+    feed_sdk_frame(&handler, successful_result("only", ARTIFACT)).await;
+    feed(
+        &handler,
+        agent_text(Some("fallback-id"), "complete artifact"),
+    )
+    .await;
+    feed(
+        &handler,
+        agent_text(Some("fallback-id"), " with next steps"),
+    )
+    .await;
+    feed_sdk_frame(&handler, successful_result("only", ARTIFACT)).await;
+    assert_eq!(*writer.text.lock().unwrap(), ARTIFACT);
+    assert!(
+        handler
+            .subscribe_background_activity()
+            .borrow()
+            .finish_requested
+    );
+    assert_eq!(
+        writer
+            .acceptance_checks
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let metadata = writer.metadata.lock().unwrap();
+    let result = metadata
+        .iter()
+        .find(|event| event.event_kind.as_deref() == Some("response_result"))
+        .unwrap();
+    assert_eq!(result.usage.as_ref().unwrap()["output_tokens"], 10);
+    assert_eq!(result.content.as_ref().unwrap()["result"], ARTIFACT);
+}
+
+#[tokio::test]
+async fn replay_and_pre_prompt_results_cannot_finish_or_be_reused() {
+    for replaying in [false, true] {
+        let writer = Arc::new(ArtifactWriter::default());
+        let handler = Arc::new(AcpNotificationHandler::new(
+            writer.clone(),
+            replaying,
+            vec![],
+            CancellationToken::new(),
+        ));
+        feed_sdk_frame(&handler, successful_result("historical", ARTIFACT)).await;
+        assert!(
+            !handler
+                .subscribe_background_activity()
+                .borrow()
+                .finish_requested
+        );
+        handler.transition_to_live().await;
+        handler.response.lock().await.start_prompt("sess-1".into());
+        feed(&handler, agent_text(None, ARTIFACT)).await;
+        feed_sdk_frame(&handler, successful_result("historical", ARTIFACT)).await;
+        assert!(
+            !handler
+                .subscribe_background_activity()
+                .borrow()
+                .finish_requested
+        );
+        assert_eq!(
+            writer
+                .acceptance_checks
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_writer_does_not_request_finish_for_successful_results() {
+    let handler = hold_test_handler();
+    handler.response.lock().await.start_prompt("sess-1".into());
+    feed(&handler, agent_text(None, ARTIFACT)).await;
+    feed_sdk_frame(&handler, successful_result("ordinary", ARTIFACT)).await;
+    assert!(
+        !handler
+            .subscribe_background_activity()
+            .borrow()
+            .finish_requested
+    );
 }

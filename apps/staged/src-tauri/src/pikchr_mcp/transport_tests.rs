@@ -13,7 +13,7 @@ async fn rpc_result(response: reqwest::Response) -> Value {
 }
 
 #[tokio::test]
-async fn preview_rejects_sessionless_discovery_and_serves_legacy_tools() {
+async fn preview_serves_sessionless_and_legacy_tools() {
     let slot = Arc::new(LastRenderSlot::new());
     let (port, server) = start_pikchr_preview_mcp_server(DEFAULT_SCALE, Arc::clone(&slot))
         .await
@@ -44,13 +44,56 @@ async fn preview_rejects_sessionless_discovery_and_serves_legacy_tools() {
         .send()
         .await
         .unwrap();
-    assert_eq!(discovery.status(), reqwest::StatusCode::BAD_REQUEST);
-    let discovery: Value = discovery.json().await.unwrap();
-    assert_eq!(discovery["error"]["code"], -32022);
-    assert_eq!(
-        discovery["error"]["data"]["supported"],
-        json!(["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"])
-    );
+    assert!(discovery.headers().get("Mcp-Session-Id").is_none());
+    let discovery = rpc_result(discovery).await;
+    assert!(discovery["result"]["supportedVersions"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("2026-07-28")));
+
+    // Modern calls carry their own metadata and need no initialize/session.
+    let modern = |method: &str, id: u32, mut params: Value| {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "staged-test", "version": "1"},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        post()
+            .header("Mcp-Protocol-Version", "2026-07-28")
+            .header("Mcp-Method", method)
+            .json(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+    };
+    let list = modern("tools/list", 10, json!({})).send().await.unwrap();
+    assert!(list.headers().get("Mcp-Session-Id").is_none());
+    let list = rpc_result(list).await;
+    assert_eq!(list["result"]["tools"][0]["name"], "render_pikchr");
+    assert_eq!(list["result"]["resultType"], "complete");
+    for (id, source) in [
+        (11, "box \"first request\""),
+        (12, "box \"second request\""),
+    ] {
+        let render = modern(
+            "tools/call",
+            id,
+            json!({
+                "name": "render_pikchr", "arguments": {"pikchr": source}
+            }),
+        )
+        .header("Mcp-Name", "render_pikchr")
+        .send()
+        .await
+        .unwrap();
+        assert!(render.headers().get("Mcp-Session-Id").is_none());
+        let render = rpc_result(render).await;
+        assert_eq!(render["result"]["isError"], false);
+        assert_eq!(render["result"]["resultType"], "complete");
+        assert!(render["result"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|content| content["type"] == "image" && content["mimeType"] == "image/png"));
+        assert_eq!(slot.take().unwrap().source, source);
+    }
 
     let initialize = post()
         .json(&json!({

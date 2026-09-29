@@ -38,7 +38,6 @@
 //! `generate_pikchr` needs to spin up, persist, and cancel its sub-session, so
 //! it remains safe to attach to any local session.
 
-use std::borrow::Cow;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -50,17 +49,15 @@ use acp_client::{McpServer, McpServerHttp};
 use axum::Router;
 use base64::Engine as _;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{
-    CallToolResult, ContentBlock, ProgressNotificationParam, ProgressToken, ProtocolVersion,
-    ServerCapabilities, ServerConfig,
-};
+use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerConfig};
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, Peer, RoleServer, ServerHandler};
+use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, RoleServer, ServerHandler};
 
 use crate::agent::AcpDriver;
+use crate::mcp_progress::send_progress_keepalives;
 use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
 use crate::session_runner::{ExternalSessionRegistration, SessionRegistry};
 use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus, Store};
@@ -69,15 +66,6 @@ use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus,
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
 /// running indefinitely. Enforced by cancelling the sub-session's token.
 const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(1200);
-
-/// Interval between MCP progress keep-alives sent to the caller while
-/// `generate_pikchr` waits on its specialist run. Without them the whole run
-/// is one silent request, and MCP clients cut those off long before
-/// [`GENERATE_PIKCHR_TIMEOUT`]: Claude Code aborts any tool call that produces
-/// no response or progress notification for 300 s, orphaning a worker that
-/// then finishes into the void. 30 s keeps a generous margin under that (and
-/// any comparable client-side idle timer) at negligible cost.
-const PROGRESS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Cap the rasterized PNG so a runaway diagram can't allocate a huge pixmap.
 const MAX_RENDER_DIMENSION: u32 = 4096;
@@ -1111,7 +1099,7 @@ accepted a render, so the diagram run was cancelled.",
             _ = ctx.ct.cancelled() => {
                 return Err(ErrorData::internal_error("generate_pikchr call cancelled", None));
             }
-            _ = send_progress_keepalives(&ctx.peer, ctx.meta.get_progress_token()) => {
+            _ = send_progress_keepalives(&ctx.peer, ctx.meta.get_progress_token(), "Diagram specialist still working") => {
                 unreachable!("the progress keep-alive loop never completes")
             }
         };
@@ -1144,44 +1132,6 @@ accepted a render, so the diagram run was cancelled.",
             preview_image_path.as_deref(),
             &outcome.source,
         ))
-    }
-}
-
-/// Build the progress keep-alive notification sent `elapsed_secs` into a
-/// `generate_pikchr` run. Progress reports elapsed seconds with no total:
-/// monotonically increasing, as the spec asks of an unbounded operation.
-fn progress_keepalive(
-    progress_token: ProgressToken,
-    elapsed_secs: u64,
-) -> ProgressNotificationParam {
-    ProgressNotificationParam::new(progress_token, elapsed_secs as f64).with_message(format!(
-        "Diagram specialist still working ({elapsed_secs}s elapsed)."
-    ))
-}
-
-/// Tick an MCP progress notification to the caller every
-/// [`PROGRESS_KEEPALIVE_INTERVAL`] for as long as this future is polled.
-/// Never completes — run it under `select!` against the awaited work so it
-/// stops when the work does. Progress notifications may only reference a
-/// token the caller provided, so when the request carries none this pends
-/// forever (rather than returning, which the caller treats as unreachable)
-/// and the call proceeds without keep-alives.
-async fn send_progress_keepalives(peer: &Peer<RoleServer>, progress_token: Option<ProgressToken>) {
-    let Some(progress_token) = progress_token else {
-        return std::future::pending().await;
-    };
-    let started = tokio::time::Instant::now();
-    loop {
-        tokio::time::sleep(PROGRESS_KEEPALIVE_INTERVAL).await;
-        let elapsed_secs = started.elapsed().as_secs();
-        if let Err(e) = peer
-            .notify_progress(progress_keepalive(progress_token.clone(), elapsed_secs))
-            .await
-        {
-            // A failed keep-alive usually means the caller is gone; the
-            // worker result (or this future being dropped) settles the call.
-            log::debug!("[pikchr_mcp] failed to send generate_pikchr progress keep-alive: {e}");
-        }
     }
 }
 
@@ -1374,13 +1324,6 @@ impl ServerHandler for PikchrToolsHandler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
-
-    // rmcp 3 serves MCP 2026-07-28 sessionlessly, which holds HTTP response
-    // headers until the first handler message; long-polling tools need work
-    // before we advertise it.
-    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
-    }
 }
 
 /// Start a local MCP HTTP server exposing the `generate_pikchr` tool.
@@ -1522,13 +1465,6 @@ impl ServerHandler for PikchrPreviewHandler {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
-
-    // rmcp 3 serves MCP 2026-07-28 sessionlessly, which holds HTTP response
-    // headers until the first handler message; long-polling tools need work
-    // before we advertise it.
-    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Borrowed(ProtocolVersion::known_up_to(&ProtocolVersion::V_2025_11_25))
-    }
 }
 
 /// Start a local MCP HTTP server exposing the `render_pikchr` tool for one
@@ -1668,20 +1604,6 @@ arrow from COLL.e to SNOW.w"#;
 
         assert!(refused.is_none());
         assert!(registry.running_session_ids().is_empty());
-    }
-
-    #[test]
-    fn progress_keepalive_reports_elapsed_seconds_with_no_total() {
-        let token = ProgressToken(rmcp::model::NumberOrString::Number(7));
-
-        let notification = progress_keepalive(token.clone(), 90);
-
-        assert_eq!(notification.progress_token, token);
-        // Elapsed seconds as the progress value keeps successive keep-alives
-        // monotonically increasing, and an unbounded run reports no total.
-        assert_eq!(notification.progress, 90.0);
-        assert_eq!(notification.total, None);
-        assert!(notification.message.expect("message").contains("90s"));
     }
 
     #[tokio::test]

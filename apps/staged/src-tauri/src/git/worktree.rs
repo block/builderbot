@@ -669,7 +669,8 @@ pub fn discard_worktree_changes(
 /// Get the parent commit SHA of a given commit.
 /// Returns None if the commit has no parent (initial commit).
 pub fn get_parent_commit(worktree: &Path, commit_sha: &str) -> Result<Option<String>, GitError> {
-    let result = cli::run(worktree, &["rev-parse", &format!("{commit_sha}^")]);
+    // Parent lookup is a foreground diff read; don't wait for shell-env capture.
+    let result = cli::run_smart(worktree, &["rev-parse", &format!("{commit_sha}^")]);
     match result {
         Ok(output) => Ok(Some(output.trim().to_string())),
         Err(_) => Ok(None), // No parent (initial commit or invalid)

@@ -279,8 +279,7 @@ fn map_local_commits(
 /// The agent-pushed ACP session title, when set and non-empty.
 ///
 /// Applied at read time only, as an interim display name for in-progress
-/// timeline rows — stored artifact names (commit subject, note H1, review
-/// title) always win once the session ends.
+/// pending commits and untitled reviews. Notes always use their stored titles.
 fn non_empty_acp_title(resolved: &ResolvedSession) -> Option<String> {
     resolved
         .acp_title
@@ -519,18 +518,11 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .into_iter()
         .map(|n| {
             let resolved = store.resolve_session_status(n.session_id.as_deref());
-            // While the session runs, the stored title is just the prompt
-            // stub — an agent-pushed ACP title is a better interim name.
-            // Once the session ends the stored title is final (note H1 or
-            // prompt fallback) and always wins.
-            let title = if resolved.status.as_deref() == Some("running") {
-                non_empty_acp_title(&resolved).unwrap_or(n.title)
-            } else {
-                n.title
-            };
+            // Session titles are temporary labels and may contain the full prompt.
+            // Keep the stored document title, including when a session resumes.
             NoteTimelineItem {
                 id: n.id,
-                title,
+                title: n.title,
                 content: n.content,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
@@ -1844,7 +1836,7 @@ mod tests {
     }
 
     #[test]
-    fn build_branch_timeline_running_note_shows_acp_title() {
+    fn build_branch_timeline_running_note_preserves_stored_title() {
         let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
         let (store, branch) = store_with_branch(&repo);
 
@@ -1867,8 +1859,32 @@ mod tests {
                 .title
                 .clone()
         };
-        assert_eq!(title_of(&titled_note.id), "Plan: staged rollout");
+        assert_eq!(title_of(&titled_note.id), "write up the plan");
         assert_eq!(title_of(&untitled_note.id), "summarize findings");
+    }
+
+    #[test]
+    fn build_branch_timeline_resumed_note_ignores_prompt_as_session_title() {
+        let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+        let session = running_session(
+            &store,
+            "Revise the findings",
+            Some("<instructions>Write # <Title> followed by the note.</instructions>\n\n# Branch history\nPrevious findings"),
+        );
+        let body = "Findings.\n\n| Change | Result |\n| --- | --- |\n| Fix | Pass |";
+        let mut note = Note::new(&branch.id, "Saved findings", body).with_session(&session.id);
+        note.completed_at = Some(note.created_at);
+        store.create_note(&note).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.notes.len(), 1);
+        let displayed = &timeline.notes[0];
+        assert_eq!(displayed.session_status.as_deref(), Some("running"));
+        assert_eq!(displayed.title, note.title);
+        assert_eq!(displayed.content, body);
+        assert_eq!(displayed.completed_at, note.completed_at);
     }
 
     #[test]

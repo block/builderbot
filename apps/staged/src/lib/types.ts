@@ -12,6 +12,12 @@ export interface Project {
   subpath: string | null;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Id of the user-chosen status option shown instead of the computed PR/cloud
+   * status, or null for Default. Ids that match no configured option render
+   * as Default.
+   */
+  statusOverride: string | null;
 }
 
 export type ProjectLocation = 'local' | 'remote';

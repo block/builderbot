@@ -39,6 +39,7 @@
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
   import { projectDisplayName } from '../../shared/utils';
+  import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
   import { openDiffRoute } from '../layout/navigation.svelte';
   import {
@@ -559,7 +560,10 @@
 
 <div class="project-section">
   <section class="project-overview-card">
-    <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
+    <div class="project-title-row">
+      <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
+      <ProjectStatusPicker {project} {branches} disabled={deleting} />
+    </div>
 
     {#if projectNotes.length > 0}
       {@const nowMs = minuteNow.now()}
@@ -715,6 +719,14 @@
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
     background-color: var(--bg-primary);
+  }
+
+  .project-title-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    min-width: 0;
   }
 
   .project-title {

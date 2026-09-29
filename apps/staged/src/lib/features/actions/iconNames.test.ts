@@ -63,6 +63,10 @@ describe('searchIconNames', () => {
     expect(searchIconNames(names, '   ')).toEqual(['play', 'rocket', 'wrench']);
   });
 
+  it("offers a caller's own shortlist, filtered the same way", () => {
+    expect(searchIconNames(names, '', ['wrench', 'gone', 'play'])).toEqual(['wrench', 'play']);
+  });
+
   it('substring-matches anywhere in the name, and takes spaces for dashes', () => {
     expect(searchIconNames(names, 'play')).toEqual(['play', 'play-circle', 'circle-play']);
     expect(searchIconNames(names, 'Circle Play')).toEqual(['circle-play']);

@@ -85,7 +85,7 @@ export function pascalToKebab(pascal: string): string {
 
 /**
  * Icon names matching a search query, capped at [`ICON_SEARCH_LIMIT`]. An empty
- * query gets the curated set — painting 1,600 SVGs at once is what the cap and
+ * query gets the curated set (action-flavoured unless the caller passes its own) — painting 1,600 SVGs at once is what the cap and
  * the curated list exist to avoid.
  *
  * Search hits come from `names` and so always resolve in the map, but the
@@ -93,11 +93,15 @@ export function pascalToKebab(pascal: string): string {
  * through `names` means an icon Lucide renames or drops just disappears from
  * the shortlist instead of rendering `undefined`.
  */
-export function searchIconNames(names: string[], query: string): string[] {
+export function searchIconNames(
+  names: string[],
+  query: string,
+  curated: readonly string[] = CURATED_ICONS
+): string[] {
   const trimmed = query.trim().toLowerCase().replace(/\s+/g, '-');
   if (!trimmed) {
     const available = new Set(names);
-    return CURATED_ICONS.filter((name) => available.has(name));
+    return curated.filter((name) => available.has(name));
   }
   return names.filter((name) => name.includes(trimmed)).slice(0, ICON_SEARCH_LIMIT);
 }

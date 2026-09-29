@@ -20,6 +20,7 @@ function project(overrides: Partial<Project> = {}): Project {
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
+    statusOverride: null,
     ...overrides,
   };
 }

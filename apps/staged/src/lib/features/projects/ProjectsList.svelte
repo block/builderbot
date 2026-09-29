@@ -6,29 +6,20 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { fade } from 'svelte/transition';
-  import Cloud from '@lucide/svelte/icons/cloud';
-  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
-  import GitPullRequestClosed from '@lucide/svelte/icons/git-pull-request-closed';
-  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
-  import Sprout from '@lucide/svelte/icons/sprout';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import type { Project, WorkspaceStatus } from '../../types';
+  import type { Project } from '../../types';
   import RepoCard from './RepoCard.svelte';
-  import {
-    projectDisplayName,
-    aggregateProjectPrStatus,
-    projectHasCodeChanges,
-    projectActivity,
-  } from '../../shared/utils';
+  import { projectDisplayName, projectActivity } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
+  import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
@@ -240,33 +231,6 @@
     selectProject(projectId);
   }
 
-  function getProjectPrStatus(
-    projectId: string
-  ): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
-    const branches = projectBranches.get(projectId) || [];
-    return aggregateProjectPrStatus(branches);
-  }
-
-  function getProjectWorkspaceStatus(projectId: string): WorkspaceStatus | null {
-    const branches = projectBranches.get(projectId) || [];
-    return branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null;
-  }
-
-  function cloudStatusClass(status: WorkspaceStatus | null): string {
-    switch (status) {
-      case 'running':
-        return 'cloud-running';
-      case 'starting':
-        return 'cloud-starting';
-      case 'error':
-        return 'cloud-error';
-      case 'stopped':
-      case 'suspended':
-      default:
-        return 'cloud-inactive';
-    }
-  }
-
   function verifyCommandKeyState(e: KeyboardEvent | MouseEvent) {
     // Verify the command key is actually held down by checking the event's metaKey/ctrlKey
     const actuallyHeld = e.metaKey || e.ctrlKey;
@@ -400,12 +364,9 @@
               projectBranches.get(project.id) || []
             )}
             {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
-            {@const prStatus = hydrated ? getProjectPrStatus(project.id) : null}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
-            {@const workspaceStatus =
-              project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
             <div class="project-card-wrapper" use:trackProjectCard={project.id}>
               <ContextMenu.Root>
                 <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
@@ -455,28 +416,14 @@
                       ></div>
                     {/if}
                     <div class="card-header">
-                      {#if project.location === 'remote'}
-                        <!-- Location comes with the project list, so remote cards
-                             paint the cloud at once; only its status class waits
-                             on branches. -->
-                        <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
-                      {:else if !hydrated}
-                        <span class="project-status-placeholder" aria-hidden="true"></span>
-                      {:else if prStatus === 'merged'}
-                        <GitPullRequest size={16} class="pr-status-merged" />
-                      {:else if prStatus === 'checks_failing'}
-                        <GitPullRequest size={16} class="pr-status-checks-failing" />
-                      {:else if prStatus === 'open'}
-                        <GitPullRequest size={16} />
-                      {:else if prStatus === 'closed'}
-                        <GitPullRequestClosed size={16} />
-                      {:else if prStatus === 'conflict'}
-                        <GitPullRequestClosed size={16} class="pr-status-conflict" />
-                      {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
-                        <GitPullRequestDraft size={16} class="pr-status-draft" />
-                      {:else}
-                        <Sprout size={16} class="pr-status-clean" />
-                      {/if}
+                      <!-- Remote cards and chosen statuses paint at once; only
+                           the PR status waits on branches. -->
+                      <ProjectStatusIcon
+                        {project}
+                        branches={projectBranches.get(project.id) || []}
+                        {hydrated}
+                        size={16}
+                      />
                       <span>{projectDisplayName(project)}</span>
                     </div>
                     {#if activity}
@@ -723,48 +670,6 @@
 
   .card-header :global(svg) {
     flex-shrink: 0;
-  }
-
-  .project-status-placeholder {
-    width: 16px;
-    height: 16px;
-    flex-shrink: 0;
-  }
-
-  .card-header :global(svg.pr-status-merged) {
-    stroke: var(--ui-success);
-  }
-
-  .card-header :global(svg.pr-status-conflict) {
-    stroke: var(--ui-danger);
-  }
-
-  .card-header :global(svg.pr-status-checks-failing) {
-    stroke: var(--ui-danger);
-  }
-
-  .card-header :global(svg.pr-status-draft) {
-    stroke: var(--text-muted);
-  }
-
-  .card-header :global(svg.pr-status-clean) {
-    stroke: var(--text-faint);
-  }
-
-  .card-header :global(svg.cloud-running) {
-    stroke: var(--ui-accent);
-  }
-
-  .card-header :global(svg.cloud-starting) {
-    stroke: var(--ui-info);
-  }
-
-  .card-header :global(svg.cloud-error) {
-    stroke: var(--ui-danger);
-  }
-
-  .card-header :global(svg.cloud-inactive) {
-    stroke: var(--text-muted);
   }
 
   .repo {

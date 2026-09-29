@@ -854,6 +854,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             }
             Ok(Value::Null)
         }
+        "set_project_status_override" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let status_override: Option<String> = opt_arg(&args, "statusOverride")?;
+            store
+                .set_project_status_override(&project_id, status_override.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "set_primary_project_repo" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;

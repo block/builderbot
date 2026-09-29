@@ -199,6 +199,15 @@ export async function setPrimaryProjectRepo(
   await invalidateCache('list_project_repos', { projectId });
 }
 
+/** Set a project's status option id, or clear it back to Default with null. */
+export async function setProjectStatusOverride(
+  projectId: string,
+  statusOverride: string | null
+): Promise<void> {
+  await invokeCommand('set_project_status_override', { projectId, statusOverride });
+  await invalidateCacheByCommand('list_projects');
+}
+
 export function getSuggestedRepos(projectId: string, limit?: number): Promise<SuggestedRepo[]> {
   return invokeCommand('get_suggested_repos', { projectId, limit: limit ?? null });
 }

@@ -1,13 +1,17 @@
 <!--
-  IconPicker.svelte — pick the Lucide icon an action's header button shows.
+  IconPicker.svelte — pick a Lucide icon: an action's header button, or a
+  project status option.
 
   The trigger is a button showing the current icon; opening it loads the full
   icon map (one lazy chunk, see lucideIcons.ts) and shows a search box over a
   grid. An empty query gets the curated shortlist; anything else substring-
   matches the kebab-case names, capped so the grid never tries to paint 1,600
-  SVGs. "Default" clears back to the action type's own icon.
+  SVGs. "Default" clears back to the action type's own icon; callers without
+  an action type get no Default entry and supply their own trigger icon and
+  shortlist.
 -->
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import Search from '@lucide/svelte/icons/search';
   import * as Popover from '$lib/components/ui/popover';
   import { Input } from '$lib/components/ui/input';
@@ -19,12 +23,16 @@
   interface Props {
     /** Currently selected kebab-case icon name, or null for the type default. */
     icon: string | null;
-    /** Which default the "Default" entry stands for. */
-    actionType: string;
+    /** Which default the "Default" entry stands for; omit to hide that entry. */
+    actionType?: string;
     onSelect: (icon: string | null) => void;
+    /** The empty-search shortlist; defaults to the action-flavoured one. */
+    curated?: readonly string[];
+    /** Renders the trigger's icon; defaults to the action's icon. */
+    triggerIcon?: Snippet;
   }
 
-  let { icon, actionType, onSelect }: Props = $props();
+  let { icon, actionType, onSelect, curated, triggerIcon }: Props = $props();
 
   let open = $state(false);
   let query = $state('');
@@ -40,9 +48,9 @@
   });
 
   let allNames = $derived(iconMap ? Object.keys(iconMap).sort() : []);
-  let results = $derived(searchIconNames(allNames, query));
+  let results = $derived(searchIconNames(allNames, query, curated));
   let truncated = $derived(query.trim().length > 0 && results.length === ICON_SEARCH_LIMIT);
-  let TypeIcon = $derived(getActionTypeIcon(actionType));
+  let TypeIcon = $derived(actionType ? getActionTypeIcon(actionType) : null);
 </script>
 
 <Popover.Root bind:open>
@@ -52,7 +60,11 @@
     aria-label="Choose icon"
     onclick={() => (query = '')}
   >
-    <ActionIcon {icon} {actionType} size={14} />
+    {#if triggerIcon}
+      {@render triggerIcon()}
+    {:else}
+      <ActionIcon {icon} actionType={actionType ?? ''} size={14} />
+    {/if}
   </Popover.Trigger>
   <Popover.Content align="start" sideOffset={6} class="w-[268px] p-2">
     <label class="icon-search">
@@ -65,17 +77,19 @@
       />
     </label>
 
-    <button
-      class="icon-default"
-      class:selected={icon === null}
-      onclick={() => {
-        onSelect(null);
-        open = false;
-      }}
-    >
-      <TypeIcon size={14} />
-      Default for {actionType}
-    </button>
+    {#if TypeIcon}
+      <button
+        class="icon-default"
+        class:selected={icon === null}
+        onclick={() => {
+          onSelect(null);
+          open = false;
+        }}
+      >
+        <TypeIcon size={14} />
+        Default for {actionType}
+      </button>
+    {/if}
 
     {#if !iconMap}
       <div class="icon-loading"><Spinner size={14} /> Loading icons…</div>

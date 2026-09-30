@@ -13,6 +13,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import IconPicker from '../actions/IconPicker.svelte';
@@ -21,6 +22,7 @@
     NEW_PROJECT_STATUS_ICON,
     PROJECT_STATUS_COLORS,
     PROJECT_STATUS_COLOR_VARS,
+    isDefaultProjectStatusOptions,
     type ProjectStatusOption,
   } from '../projects/projectStatusDisplay';
   import {
@@ -46,6 +48,18 @@
   ];
 
   let options = $derived(preferences.projectStatusOptions);
+  /** Nothing to reset when the list already equals the defaults. */
+  let isDefault = $derived(isDefaultProjectStatusOptions(options));
+
+  // Resetting discards user-added statuses for good (their ids are UUIDs that
+  // cannot be recreated) and returns projects using them to Default, so it
+  // asks first.
+  let showResetConfirm = $state(false);
+
+  function confirmReset() {
+    resetProjectStatusOptions();
+    showResetConfirm = false;
+  }
 
   function labelInputId(option: ProjectStatusOption): string {
     return `project-status-label-${option.id}`;
@@ -132,7 +146,13 @@
       <Plus size={14} />
       Add status
     </Button>
-    <Button variant="ghost" size="sm" onclick={resetProjectStatusOptions}>
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={isDefault}
+      title={isDefault ? 'Statuses already match the defaults' : undefined}
+      onclick={() => (showResetConfirm = true)}
+    >
       <RotateCcw size={14} />
       Reset to defaults
     </Button>
@@ -144,6 +164,22 @@
     any project using it to Default.
   </p>
 </div>
+
+<AlertDialog.Root bind:open={showResetConfirm}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Reset Project Statuses</AlertDialog.Title>
+      <AlertDialog.Description>
+        Restore the built-in statuses? Statuses you added will be removed and cannot be recovered,
+        and any project using one returns to Default.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={confirmReset}>Reset</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .status-options-field {

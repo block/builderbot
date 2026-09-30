@@ -25,14 +25,15 @@ export const PROJECT_STATUS_COLORS: ProjectStatusColor[] = [
   'gray',
 ];
 
+/** Dedicated tokens (defined in app.css) so status colors are themed on their own terms. */
 export const PROJECT_STATUS_COLOR_VARS: Record<ProjectStatusColor, string> = {
-  green: 'var(--ui-success)',
-  red: 'var(--ui-danger)',
-  amber: 'var(--status-modified)',
-  blue: 'var(--status-renamed)',
-  purple: 'var(--review-color)',
-  cyan: 'var(--image-color)',
-  gray: 'var(--text-muted)',
+  green: 'var(--project-status-green)',
+  red: 'var(--project-status-red)',
+  amber: 'var(--project-status-amber)',
+  blue: 'var(--project-status-blue)',
+  purple: 'var(--project-status-purple)',
+  cyan: 'var(--project-status-cyan)',
+  gray: 'var(--project-status-gray)',
 };
 
 export interface ProjectStatusOption {
@@ -54,6 +55,25 @@ export const DEFAULT_PROJECT_STATUS_OPTIONS: ProjectStatusOption[] = [
 
 /** The icon a new, user-added status starts with. */
 export const NEW_PROJECT_STATUS_ICON = 'circle-dot';
+
+/**
+ * Whether an option list is exactly the built-in defaults, in order. Used to
+ * tell a no-op "Reset to defaults" from one that would discard user changes.
+ */
+export function isDefaultProjectStatusOptions(options: ProjectStatusOption[]): boolean {
+  return (
+    options.length === DEFAULT_PROJECT_STATUS_OPTIONS.length &&
+    options.every((option, i) => {
+      const d = DEFAULT_PROJECT_STATUS_OPTIONS[i];
+      return (
+        option.id === d.id &&
+        option.label === d.label &&
+        option.icon === d.icon &&
+        option.color === d.color
+      );
+    })
+  );
+}
 
 function isProjectStatusColor(value: unknown): value is ProjectStatusColor {
   return PROJECT_STATUS_COLORS.includes(value as ProjectStatusColor);

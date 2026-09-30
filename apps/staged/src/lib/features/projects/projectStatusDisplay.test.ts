@@ -3,6 +3,7 @@ import type { Branch, Project } from '../../types';
 import {
   DEFAULT_PROJECT_STATUS_OPTIONS,
   computedStatusLabel,
+  isDefaultProjectStatusOptions,
   normalizeProjectStatusOptions,
   resolveComputedProjectStatus,
   resolveProjectStatus,
@@ -104,6 +105,36 @@ describe('normalizeProjectStatusOptions', () => {
       { id: 'a', label: '', icon: 'eye', color: 'red' },
     ]);
     expect(result?.[0].label).toBe('');
+  });
+});
+
+// ── isDefaultProjectStatusOptions ──
+
+describe('isDefaultProjectStatusOptions', () => {
+  it('is true for the defaults, including an equal copy', () => {
+    expect(isDefaultProjectStatusOptions(DEFAULT_PROJECT_STATUS_OPTIONS)).toBe(true);
+    expect(
+      isDefaultProjectStatusOptions(DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o })))
+    ).toBe(true);
+  });
+
+  it('is false once an option is added, removed, edited or reordered', () => {
+    const defaults = DEFAULT_PROJECT_STATUS_OPTIONS;
+    const added: ProjectStatusOption = { id: 'uuid', label: 'QA', icon: 'bug', color: 'amber' };
+    expect(isDefaultProjectStatusOptions([...defaults, added])).toBe(false);
+    expect(isDefaultProjectStatusOptions(defaults.slice(1))).toBe(false);
+    expect(isDefaultProjectStatusOptions([])).toBe(false);
+    expect(
+      isDefaultProjectStatusOptions(
+        defaults.map((o) => (o.id === 'blocked' ? { ...o, label: 'Stuck' } : o))
+      )
+    ).toBe(false);
+    expect(
+      isDefaultProjectStatusOptions(
+        defaults.map((o) => (o.id === 'blocked' ? { ...o, color: 'gray' } : o))
+      )
+    ).toBe(false);
+    expect(isDefaultProjectStatusOptions([...defaults].reverse())).toBe(false);
   });
 });
 

@@ -331,6 +331,10 @@ fn git_push_with_fallback(args: &str) -> String {
 /// diverged from `origin/{branch}`). Only the rebase variant consults this
 /// value; squash always operates against the base branch.
 ///
+/// Every rebase variant runs [`git::rebase_preserving_merge_edits_command`]
+/// rather than a bare `git rebase`, so merge commits that carry hand edits are
+/// linearised into ordinary commits instead of being silently dropped.
+///
 /// Errors for [`PipelineKind::Push`] and [`PipelineKind::Pull`], which produce no
 /// commit and belong to the git pipeline path — the only caller that reads the
 /// kind from the database checks it first, so this guards against a misrouted
@@ -369,10 +373,13 @@ fn build_commit_pipeline_steps(
                 },
                 PipelineStep::Command {
                     label: rebase_label,
-                    command: format!("git rebase --signoff origin/{rebase_target}"),
+                    command: git::rebase_preserving_merge_edits_command(&format!(
+                        "origin/{rebase_target}"
+                    )),
                     on_failure: FailureStrategy::HandoffToAi {
                         prompt_template: format!(
-                            "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{rebase_target}` with DCO signoffs. Do not push the branch.{target_note}\n\n{{step_outputs}}"
+                            "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{rebase_target}` with DCO signoffs. Commits titled \"{hand_edit_prefix}<sha>\" carry content that existed only inside that merge commit and is in no other commit: resolve conflicts in them so the content is kept, and never drop or skip them. Do not abort and restart with a plain `git rebase`, which would lose that content; if you must restart, re-run the exact rebase command shown below. Do not push the branch.{target_note}\n\n{{step_outputs}}",
+                            hand_edit_prefix = git::HAND_EDIT_COMMIT_SUBJECT_PREFIX,
                         ),
                     },
                 },
@@ -2687,7 +2694,31 @@ mod tests {
 
         let (label, command, _) = command_at(&steps, 1);
         assert_eq!(label, "Rebase onto base");
-        assert_eq!(command, "git rebase --signoff origin/main");
+        assert_eq!(
+            command,
+            git::rebase_preserving_merge_edits_command("origin/main")
+        );
+        assert!(command.contains("--signoff"));
+        assert!(command.contains("onto='origin/main'"));
+    }
+
+    /// The rebase step must never be a bare `git rebase`: that is exactly the
+    /// command that silently drops hand edits carried by merge commits.
+    #[test]
+    fn rebase_pipeline_routes_through_the_merge_edit_safeguard() {
+        for target in ["main", "feature-branch"] {
+            let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", target).unwrap();
+            let (_, command, on_failure) = command_at(&steps, 1);
+            assert!(command.contains("git merge-tree --write-tree"), "{command}");
+            assert!(!command.contains("--rebase-merges"), "{command}");
+            assert!(!command.starts_with("git rebase"), "{command}");
+
+            let FailureStrategy::HandoffToAi { prompt_template } = on_failure else {
+                panic!("expected rebase step to have HandoffToAi failure");
+            };
+            assert!(prompt_template.contains(git::HAND_EDIT_COMMIT_SUBJECT_PREFIX));
+            assert!(prompt_template.contains("never drop or skip them"));
+        }
     }
 
     #[test]
@@ -2704,7 +2735,11 @@ mod tests {
 
         let (label, command, _) = command_at(&steps, 1);
         assert_eq!(label, "Rebase onto origin/feature-branch");
-        assert_eq!(command, "git rebase --signoff origin/feature-branch");
+        assert_eq!(
+            command,
+            git::rebase_preserving_merge_edits_command("origin/feature-branch")
+        );
+        assert!(command.contains("onto='origin/feature-branch'"));
     }
 
     #[test]

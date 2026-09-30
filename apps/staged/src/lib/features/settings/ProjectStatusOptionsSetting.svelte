@@ -58,6 +58,8 @@
 
   function confirmReset() {
     resetProjectStatusOptions();
+    // AlertDialog.Action does not close the dialog itself (only Cancel does),
+    // so every confirm handler closes it explicitly.
     showResetConfirm = false;
   }
 
@@ -146,16 +148,21 @@
       <Plus size={14} />
       Add status
     </Button>
-    <Button
-      variant="ghost"
-      size="sm"
-      disabled={isDefault}
-      title={isDefault ? 'Statuses already match the defaults' : undefined}
-      onclick={() => (showResetConfirm = true)}
-    >
-      <RotateCcw size={14} />
-      Reset to defaults
-    </Button>
+    <!--
+      The title lives on the wrapper: a disabled Button has pointer-events
+      none, so a title on the button itself would never show.
+    -->
+    <span class="inline-flex" title={isDefault ? 'Statuses already match the defaults' : undefined}>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={isDefault}
+        onclick={() => (showResetConfirm = true)}
+      >
+        <RotateCcw size={14} />
+        Reset to defaults
+      </Button>
+    </span>
   </div>
 
   <p class="field-description">

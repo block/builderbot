@@ -8,6 +8,7 @@ A desktop app for reviewing git changes, managing branches, and running AI codin
 
 - **Diff viewer** — Side-by-side diffs between any two refs (branches, commits, tags, or the working tree)
 - **Project & branch management** — Track multiple projects, create branches, and view branch timelines
+- **Rebase & squash** — Rebase a branch onto its base (or onto its own remote) and squash its commits from the branch timeline. A rebase linearises merge commits on the branch: pure automatic merges are dropped, while hand edits made inside a merge are kept as their own commit at the merge's position, or the rebase stops with a conflict that names the merge. The rebase step's output lists what happened to each merge. Rebasing a branch that has merge commits needs git 2.38 or newer (for `git merge-tree --write-tree`); an older git is refused before the branch is touched rather than risking dropped content, while branches without merges rebase on any git.
 - **AI agent sessions** — Launch coding sessions with ACP-compatible agents (Goose, Claude Code, Codex, Pi) and watch changes stream in
 - **Review workflow** — Mark files as reviewed, add notes and annotations
 - **File watching** — Auto-refresh when files change on disk

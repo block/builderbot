@@ -5,6 +5,7 @@ mod diff;
 mod env;
 mod files;
 pub mod github;
+mod rebase;
 mod refs;
 mod state;
 #[cfg(test)]
@@ -34,6 +35,7 @@ pub use github::{
     CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, Issue,
     PrStatus, PullRequest, PullRequestInfo,
 };
+pub use rebase::{rebase_preserving_merge_edits_command, HAND_EDIT_COMMIT_SUBJECT_PREFIX};
 pub use refs::{
     branch_name_without_origin, detect_default_branch, detect_default_branch_from_remote,
     get_current_branch, get_remote_url, get_repo_root, list_branches, list_refs, merge_base,

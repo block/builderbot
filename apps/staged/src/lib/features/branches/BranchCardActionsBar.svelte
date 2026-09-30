@@ -301,6 +301,7 @@
       {/if}
       <DropdownMenu.Item
         disabled={rebaseSquashDisabled || rebaseAlreadyInFlight}
+        title="Rebase onto the base branch. Merge commits are linearised: pure automatic merges are dropped, and hand edits made inside a merge are kept as their own commit."
         onSelect={() => onRebaseBranch?.()}
       >
         <GitBranch size={14} /> Rebase Branch

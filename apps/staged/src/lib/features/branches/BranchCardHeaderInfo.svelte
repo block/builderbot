@@ -70,7 +70,8 @@
     {#if parentAheadCount > 0 && onRebase}
       <span
         class="inline-flex"
-        title={rebaseDisabledReason ?? 'Rebase onto parent'}
+        title={rebaseDisabledReason ??
+          'Rebase onto parent. Merge commits are linearised: pure automatic merges are dropped, and hand edits made inside a merge are kept as their own commit.'}
         transition:slide={{ axis: 'x', duration: 150 }}
       >
         <Button

@@ -378,7 +378,7 @@ fn build_commit_pipeline_steps(
                     )),
                     on_failure: FailureStrategy::HandoffToAi {
                         prompt_template: format!(
-                            "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{rebase_target}` with DCO signoffs. Commits titled \"{hand_edit_prefix}<sha>\" carry content that existed only inside that merge commit and is in no other commit: resolve conflicts in them so the content is kept, and never drop or skip them. Do not abort and restart with a plain `git rebase`, which would lose that content; if you must restart, re-run the exact rebase command shown below. Do not push the branch.{target_note}\n\n{{step_outputs}}",
+                            "The rebase onto `origin/{rebase_target}` failed. Inspect the output and recover from the actual failure. If the rebase is stopped on a conflict, resolve it, stage the resolution, and run `git rebase --continue` (the rebase already applies DCO signoffs) until it finishes. Never restart the rebase and never run a plain `git rebase`: commits titled \"{hand_edit_prefix}<sha>\" carry content that existed only inside that merge commit and is in no other commit, so a fresh rebase would lose it. Resolve conflicts in those commits so the content is kept, and never drop or skip them. `git rebase --abort` is the user's decision, not yours; if you cannot resolve a conflict, leave the rebase in progress and report why. If the output says the rebase was refused before it started (for example because git is too old), do not attempt it another way; report the reason to the user. Do not push the branch.{target_note}\n\n{{step_outputs}}",
                             hand_edit_prefix = git::HAND_EDIT_COMMIT_SUBJECT_PREFIX,
                         ),
                     },
@@ -2703,7 +2703,9 @@ mod tests {
     }
 
     /// The rebase step must never be a bare `git rebase`: that is exactly the
-    /// command that silently drops hand edits carried by merge commits.
+    /// command that silently drops hand edits carried by merge commits. The
+    /// step also travels to remote workspaces as a single argv element, so the
+    /// command must be one line.
     #[test]
     fn rebase_pipeline_routes_through_the_merge_edit_safeguard() {
         for target in ["main", "feature-branch"] {
@@ -2712,6 +2714,7 @@ mod tests {
             assert!(command.contains("git merge-tree --write-tree"), "{command}");
             assert!(!command.contains("--rebase-merges"), "{command}");
             assert!(!command.starts_with("git rebase"), "{command}");
+            assert!(!command.contains('\n'), "{command}");
 
             let FailureStrategy::HandoffToAi { prompt_template } = on_failure else {
                 panic!("expected rebase step to have HandoffToAi failure");
@@ -2719,6 +2722,43 @@ mod tests {
             assert!(prompt_template.contains(git::HAND_EDIT_COMMIT_SUBJECT_PREFIX));
             assert!(prompt_template.contains("never drop or skip them"));
         }
+    }
+
+    /// After a conflict the only correct move is `git rebase --continue`. The
+    /// prompt must not send the agent back to the generated command (a long
+    /// script it cannot reproduce byte for byte) and must leave aborting to
+    /// the user.
+    #[test]
+    fn rebase_handoff_prompt_continues_never_restarts_and_leaves_abort_to_the_user() {
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
+        let (_, _, on_failure) = command_at(&steps, 1);
+        let FailureStrategy::HandoffToAi { prompt_template } = on_failure else {
+            panic!("expected rebase step to have HandoffToAi failure");
+        };
+        assert!(
+            prompt_template.contains("run `git rebase --continue`"),
+            "{prompt_template}"
+        );
+        assert!(
+            prompt_template.contains("Never restart the rebase and never run a plain `git rebase`"),
+            "{prompt_template}"
+        );
+        assert!(
+            prompt_template.contains("`git rebase --abort` is the user's decision, not yours"),
+            "{prompt_template}"
+        );
+        assert!(
+            prompt_template.contains("refused before it started"),
+            "{prompt_template}"
+        );
+        assert!(
+            !prompt_template.contains("re-run the exact rebase command"),
+            "{prompt_template}"
+        );
+        assert!(
+            !prompt_template.contains("if you must restart"),
+            "{prompt_template}"
+        );
     }
 
     #[test]

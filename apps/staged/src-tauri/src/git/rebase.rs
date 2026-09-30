@@ -12,191 +12,262 @@
 //! [`rebase_preserving_merge_edits_command`] is the one place Staged builds a
 //! rebase from. Every pipeline that rebases (rebase onto base, rebase onto
 //! origin, and any future variant) must go through it. The command it returns
-//! is a self-contained POSIX shell script, because pipeline steps run as shell
+//! is a self-contained POSIX `sh` program, because pipeline steps run as shell
 //! commands both locally and on remote workspaces, and the safeguard has to
 //! behave identically in both places.
 //!
-//! What the script does, before touching the branch:
+//! What the command does, before touching the branch:
 //!
 //! 1. Lists the merge commits in `<onto>..HEAD`, oldest first in topological
-//!    order.
-//! 2. For each, computes the automatic merge of its two parents with
+//!    order. A branch with none takes the plain `git rebase --signoff` path and
+//!    works on any git version.
+//! 2. Checks `git --version` against [`REQUIRED_GIT_VERSION`]. `git merge-tree
+//!    --write-tree`, which the next step needs, arrived in git 2.38; an older
+//!    git cannot tell which merges carry hand edits, so the rebase is refused
+//!    with a message naming the installed and required versions rather than
+//!    risking dropped content.
+//! 3. For each merge, computes the automatic merge of its two parents with
 //!    `git merge-tree --write-tree` and compares that tree with the merge's real
 //!    tree. Equal trees mean a pure automatic merge, dropped exactly as before.
-//! 3. For a merge whose trees differ, records two throwaway commits with
+//!    Any other failure of `merge-tree` (unrelated histories, missing objects
+//!    in a shallow clone) stops the command with git's own stderr.
+//! 4. For a merge whose trees differ, records two throwaway commits with
 //!    `git commit-tree`: the automatic merge result, and on top of it the
 //!    merge's real tree, authored by the merge's original author at the
 //!    original author date. The second commit's diff against its parent is
 //!    precisely the hand edits, and its message names the merge it came from.
-//! 4. Runs `git rebase --interactive` with a `GIT_SEQUENCE_EDITOR` that inserts a
+//! 5. Runs `git rebase --interactive` with a `GIT_SEQUENCE_EDITOR` that inserts a
 //!    `pick` of each hand-edit commit right after the last surviving pick that
 //!    is an ancestor of the merge, so it lands where the merge sat in the
-//!    sequence and later commits that depend on it still apply.
+//!    sequence and later commits that depend on it still apply. When
+//!    `rebase.updateRefs` is on, git writes `update-ref refs/heads/<x>` lines
+//!    directly after the pick a stacked branch points at; the insert goes after
+//!    those lines so the stacked branch keeps following its own commit.
 //!
 //! If a hand-edit commit does not apply cleanly the rebase stops on it like any
-//! other conflict, and the script names the merge the content came from. The
-//! script's output doubles as the summary shown in the pipeline step: which
-//! merges were linearised and which files their edits touched, which pure
-//! automatic merges were dropped, and the resulting commit list.
+//! other conflict, and the command names the merge the content came from. Its
+//! output doubles as the summary shown in the pipeline step: which merges were
+//! linearised and which files their edits touched, which pure automatic merges
+//! were dropped, and the resulting commit list.
+//!
+//! # Shape of the generated command
+//!
+//! The command is a single line. On a remote workspace a pipeline step travels
+//! as one argv element through `sq blox ws exec … -- sh -c "cd '…' && sh -lc
+//! '<command>'"`, and nothing in this repository can verify that an embedded
+//! newline survives that channel. So [`STATEMENTS`] holds complete `sh`
+//! commands that are joined with `; `, and the two helper programs the rebase
+//! needs as files, the sequence editor ([`EDITOR_LINES`]) and its awk splice
+//! ([`SPLICE_AWK_LINES`]), are written at run time with `printf '%s\n'` of
+//! single-quoted lines. A newline only ever appears as the two characters `\n`
+//! inside a `printf` format. The editor is also syntax-checked with `sh -n`
+//! before the rebase starts, so a damaged helper fails loudly instead of
+//! producing a wrong todo. Everything is plain POSIX `sh`, tested under both
+//! `sh` and `dash`.
+//!
+//! The version check lives in the command rather than reusing the Rust-side
+//! probes in `git::config_apply`. Those probe the git on the app's own PATH, or
+//! run a separate `ws_exec`; the command checks the git that will actually run
+//! the rebase, in the pipeline's login-shell environment, on whichever machine
+//! the branch lives, and it already knows whether the range has merges at all.
 //!
 //! `--rebase-merges` is deliberately not used. It recreates merges by
 //! re-running them, so hand edits are lost anyway, and a merge whose second
 //! parent is already an ancestor of the new base degenerates to a no-op.
 
-/// Token in [`SCRIPT`] that [`rebase_preserving_merge_edits_command`] replaces
-/// with the shell-quoted ref to rebase onto.
+/// Token in [`STATEMENTS`] that [`rebase_preserving_merge_edits_command`]
+/// replaces with the shell-quoted ref to rebase onto.
 const ONTO_PLACEHOLDER: &str = "__STAGED_ONTO__";
+
+/// Token in [`STATEMENTS`] replaced with [`REQUIRED_GIT_VERSION`].
+const REQUIRED_GIT_PLACEHOLDER: &str = "__STAGED_REQUIRED_GIT__";
+
+/// Token in [`STATEMENTS`] replaced with the statements that write the sequence
+/// editor and its awk splice into the temporary directory.
+const WRITE_HELPERS_PLACEHOLDER: &str = "__STAGED_WRITE_HELPERS__";
+
+/// The oldest git whose `merge-tree --write-tree` exists. Below it the command
+/// refuses to rebase a branch that has merge commits.
+pub const REQUIRED_GIT_VERSION: &str = "2.38";
 
 /// Subject prefix of the commits that carry a merge's hand edits. The todo
 /// editor and the post-rebase summary both key off it, and the AI handoff
 /// prompt in `prs` tells the agent never to drop commits that start with it.
 pub const HAND_EDIT_COMMIT_SUBJECT_PREFIX: &str = "Preserve hand edits from merge ";
 
-/// The safeguard, as a POSIX `sh` script. See the module docs for the
-/// algorithm. Everything the script prints goes to stdout (git's own output is
-/// redirected there too) so the pipeline step shows one ordered transcript.
-const SCRIPT: &str = r##"# Staged rebase safeguard: linearise merge commits without losing hand edits.
-onto=__STAGED_ONTO__
+/// The safeguard, as complete POSIX `sh` commands that are joined with `; `.
+/// See the module docs for the algorithm. Everything the command prints goes to
+/// stdout (git's own output is redirected there too) so the pipeline step shows
+/// one ordered transcript.
+///
+/// Each element must be a complete command: compound commands (`if`, `for`,
+/// function bodies) are written on one line with their own `;` separators.
+const STATEMENTS: &[&str] = &[
+    "onto=__STAGED_ONTO__",
+    "required_git=__STAGED_REQUIRED_GIT__",
+    "fail() { printf 'staged-rebase: %s\\n' \"$*\" >&2; exit 1; }",
+    "git rev-parse --verify --quiet \"$onto^{commit}\" >/dev/null || fail \"cannot resolve $onto\"",
+    "git rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null || fail \"cannot resolve HEAD\"",
+    "merges=$(git rev-list --reverse --topo-order --merges \"$onto..HEAD\") || fail \"cannot list the merge commits in $onto..HEAD\"",
+    // No merges: the plain rebase, on any git version.
+    "if [ -z \"$merges\" ]; then printf 'Merge commits in %s..HEAD: none\\n\\n' \"$onto\"; exec git rebase --signoff \"$onto\"; fi",
+    "set -- $merges",
+    "merge_count=$#",
+    // Version pre-flight: refuse, before touching anything, when this git has no
+    // `merge-tree --write-tree`. An unparseable version string is noted and
+    // allowed through; a genuinely missing subcommand still fails loudly below
+    // with git's own error, never by silently dropping content.
+    "git_version=$(git --version 2>&1) || fail \"cannot run git --version: $git_version\"",
+    concat!(
+        "set -- $(printf '%s\\n' \"$git_version\" | ",
+        "sed -n 's/^git version \\([0-9][0-9]*\\)\\.\\([0-9][0-9]*\\).*$/\\1 \\2/p')"
+    ),
+    concat!(
+        "if [ $# -ne 2 ]; then ",
+        "printf 'note: cannot parse the git version from \"%s\"; assuming git %s or newer\\n' \"$git_version\" \"$required_git\"; ",
+        "elif [ \"$1\" -lt \"${required_git%.*}\" ] || { [ \"$1\" -eq \"${required_git%.*}\" ] && [ \"$2\" -lt \"${required_git#*.}\" ]; }; then ",
+        "fail \"refusing to rebase with $git_version: git $required_git or newer is required to rebase a branch that has merge commits. ",
+        "$onto..HEAD has $merge_count merge commit(s), and this git cannot tell which of them carry hand edits (it lacks git merge-tree --write-tree), ",
+        "so a rebase could drop content that exists only inside those merge commits. The branch was left untouched; upgrade git and retry.\"; ",
+        "fi"
+    ),
+    "tmp=$(mktemp -d \"${TMPDIR:-/tmp}/staged-rebase.XXXXXX\") || fail \"cannot create a temporary directory\"",
+    "trap 'rm -rf \"$tmp\"' EXIT",
+    WRITE_HELPERS_PLACEHOLDER,
+    "sh -n \"$tmp/edit-todo\" || fail \"the generated todo editor failed a shell syntax check; refusing to start the rebase\"",
+    ": > \"$tmp/synthetic\"",
+    "linearised=0",
+    "dropped=0",
+    "printf 'Merge commits in %s..HEAD:\\n' \"$onto\"",
+    concat!(
+        "for merge in $merges; do ",
+        "set -- $(git rev-list --parents -n 1 \"$merge\"); shift; ",
+        "short=$(git rev-parse --short \"$merge\"); ",
+        "subject=$(git log -1 --format=%s \"$merge\"); ",
+        "[ $# -eq 2 ] || fail \"merge $short has $# parents; only two-parent merges can be linearised. Rebase this branch by hand.\"; ",
+        // Exit 0: clean automatic merge. Exit 1: automatic merge with conflicts,
+        // still a tree. Anything else is a real failure, reported as such.
+        "auto=$(git merge-tree --write-tree \"$1\" \"$2\" 2>\"$tmp/merge-tree.err\"); merge_tree_status=$?; ",
+        "if [ $merge_tree_status -gt 1 ]; then ",
+        "fail \"cannot compute the automatic merge of the parents of merge $short (git merge-tree --write-tree exited $merge_tree_status): $(cat \"$tmp/merge-tree.err\")\"; ",
+        "fi; ",
+        "auto_tree=$(printf '%s\\n' \"$auto\" | sed -n 1p); ",
+        "tree=$(git rev-parse --verify \"$merge^{tree}\") || fail \"cannot read the tree of merge $short\"; ",
+        "if [ \"$auto_tree\" = \"$tree\" ]; then ",
+        "dropped=$((dropped + 1)); ",
+        "printf '  %s %s\\n    pure automatic merge: dropped\\n' \"$short\" \"$subject\"; ",
+        "continue; ",
+        "fi; ",
+        "linearised=$((linearised + 1)); ",
+        "files=$(git diff-tree -r --name-only \"$auto_tree\" \"$tree\"); ",
+        "author_name=$(git log -1 --format=%an \"$merge\"); ",
+        "author_email=$(git log -1 --format=%ae \"$merge\"); ",
+        "author_date=$(git log -1 --format=%aD \"$merge\"); ",
+        // Two throwaway commits: the automatic merge result, then the merge's
+        // real tree on top of it. Picking the second replays exactly the hand
+        // edits.
+        "scaffold=$(GIT_AUTHOR_NAME=\"$author_name\" GIT_AUTHOR_EMAIL=\"$author_email\" GIT_AUTHOR_DATE=\"$author_date\" ",
+        "git commit-tree \"$auto_tree\" -p \"$1\" -m \"Automatic merge result of $short (Staged rebase scaffolding)\") ",
+        "|| fail \"cannot record the automatic merge result of merge $short\"; ",
+        "message=$(printf 'Preserve hand edits from merge %s\\n\\nStaged linearised merge commit %s\\n(\"%s\") while rebasing onto %s. A rebase does not replay merge\\ncommits, so this commit carries the hand edits that merge introduced beyond\\nthe automatic merge of its parents; without it that content would be lost.\\n\\nFiles:\\n%s\\n' ",
+        "\"$short\" \"$merge\" \"$subject\" \"$onto\" \"$(printf '%s\\n' \"$files\" | sed 's/^/  /')\"); ",
+        "synthetic=$(GIT_AUTHOR_NAME=\"$author_name\" GIT_AUTHOR_EMAIL=\"$author_email\" GIT_AUTHOR_DATE=\"$author_date\" ",
+        "git commit-tree \"$tree\" -p \"$scaffold\" -m \"$message\") ",
+        "|| fail \"cannot record the hand edits of merge $short\"; ",
+        "printf '%s %s %s\\n' \"$synthetic\" \"$merge\" \"$short\" >> \"$tmp/synthetic\"; ",
+        "git rev-list \"$merge\" --not \"$onto\" > \"$tmp/ancestors.$merge\" || fail \"cannot list the ancestors of merge $short\"; ",
+        "note=\"\"; ",
+        "if [ $merge_tree_status -eq 1 ]; then note=\" (the automatic merge had conflicts; their resolution is part of the preserved edits)\"; fi; ",
+        "printf '  %s %s\\n    hand edits kept as a separate commit by %s%s; files:\\n' \"$short\" \"$subject\" \"$author_name\" \"$note\"; ",
+        "printf '%s\\n' \"$files\" | sed 's/^/      /'; ",
+        "done"
+    ),
+    "printf '\\n'",
+    concat!(
+        "GIT_SEQUENCE_EDITOR=\"sh '$tmp/edit-todo'\" ",
+        "git -c rebase.abbreviateCommands=false rebase --interactive --signoff --empty=drop --no-autosquash \"$onto\" 2>&1"
+    ),
+    "status=$?",
+    concat!(
+        "if [ $status -ne 0 ]; then ",
+        "stopped=$(git rev-parse --verify --quiet REBASE_HEAD 2>/dev/null); ",
+        "if [ -n \"$stopped\" ]; then ",
+        "stopped_on=$(grep \"^$stopped \" \"$tmp/synthetic\" | cut -d' ' -f3); ",
+        "if [ -n \"$stopped_on\" ]; then ",
+        "printf '\\nThe rebase stopped while applying the hand edits carried by merge %s. That content exists in no other commit: resolve the conflict so it is kept, then continue the rebase with git rebase --continue. Do not drop this commit.\\n' \"$stopped_on\"; ",
+        "fi; ",
+        "fi; ",
+        "exit $status; ",
+        "fi"
+    ),
+    "printf '\\nRebase complete: %s merge commit(s) linearised, %s pure automatic merge(s) dropped.\\n' \"$linearised\" \"$dropped\"",
+    concat!(
+        "while read -r synthetic merge short; do ",
+        "if ! git log --format=%s \"$onto..HEAD\" | grep -qFx \"Preserve hand edits from merge $short\"; then ",
+        "printf 'The hand edits carried by merge %s were already present on %s; their commit became empty and was dropped.\\n' \"$short\" \"$onto\"; ",
+        "fi; ",
+        "done < \"$tmp/synthetic\""
+    ),
+    "printf '\\nCommits on the rebased branch:\\n'",
+    "git log --reverse --format='  %h %s' \"$onto..HEAD\"",
+];
 
-fail() {
-  printf 'staged-rebase: %s\n' "$*" >&2
-  exit 1
-}
+/// Sequence editor for `git rebase -i`, one line per element. Written to
+/// `$tmp/edit-todo` at run time and invoked by git as `sh "$tmp/edit-todo"
+/// <todo>`, so `$0` is the file and `$(dirname "$0")` is `$tmp`.
+///
+/// It numbers the `pick` lines, finds for each hand-edit commit the last pick
+/// that is an ancestor of its merge (0 when none survive), and hands the
+/// resulting `<pick index>\t<todo line>` pairs to the awk splice.
+const EDITOR_LINES: &[&str] = &[
+    "todo=$1",
+    "dir=$(dirname \"$0\")",
+    ": > \"$dir/picks\"",
+    "count=0",
+    "while IFS= read -r line || [ -n \"$line\" ]; do",
+    "  case \"$line\" in",
+    "    \"pick \"*|\"p \"*)",
+    "      count=$((count + 1))",
+    "      set -- $line",
+    "      full=$(git rev-parse --verify --quiet \"$2^{commit}\" </dev/null) || exit 1",
+    "      printf '%s %s\\n' \"$count\" \"$full\" >> \"$dir/picks\"",
+    "      ;;",
+    "  esac",
+    "done < \"$todo\"",
+    ": > \"$dir/inserts\"",
+    "while read -r synthetic merge short; do",
+    "  anchor=0",
+    "  while read -r index full; do",
+    "    if grep -qFx \"$full\" \"$dir/ancestors.$merge\"; then anchor=$index; fi",
+    "  done < \"$dir/picks\"",
+    "  printf '%s\\tpick %s Preserve hand edits from merge %s\\n' \"$anchor\" \"$synthetic\" \"$short\" >> \"$dir/inserts\"",
+    "done < \"$dir/synthetic\"",
+    "awk -v inserts=\"$dir/inserts\" -f \"$dir/splice.awk\" \"$todo\" > \"$todo.staged\" || exit 1",
+    "mv \"$todo.staged\" \"$todo\"",
+];
 
-git rev-parse --verify --quiet "$onto^{commit}" >/dev/null || fail "cannot resolve $onto"
-git rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null || fail "cannot resolve HEAD"
-
-merges=$(git rev-list --reverse --topo-order --merges "$onto..HEAD") \
-  || fail "cannot list the merge commits in $onto..HEAD"
-
-if [ -z "$merges" ]; then
-  printf 'Merge commits in %s..HEAD: none\n\n' "$onto"
-  exec git rebase --signoff "$onto"
-fi
-
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/staged-rebase.XXXXXX") || fail "cannot create a temporary directory"
-trap 'rm -rf "$tmp"' EXIT
-: > "$tmp/synthetic"
-linearised=0
-dropped=0
-
-printf 'Merge commits in %s..HEAD:\n' "$onto"
-for merge in $merges; do
-  set -- $(git rev-list --parents -n 1 "$merge")
-  shift
-  short=$(git rev-parse --short "$merge")
-  subject=$(git log -1 --format=%s "$merge")
-  [ $# -eq 2 ] || fail "merge $short has $# parents; only two-parent merges can be linearised. Rebase this branch by hand."
-
-  auto=$(git merge-tree --write-tree "$1" "$2" 2>"$tmp/merge-tree.err")
-  merge_tree_status=$?
-  if [ $merge_tree_status -gt 1 ]; then
-    fail "git merge-tree --write-tree failed for merge $short (git 2.38 or newer is required to rebase a branch that has merge commits): $(cat "$tmp/merge-tree.err")"
-  fi
-  auto_tree=$(printf '%s\n' "$auto" | sed -n 1p)
-  tree=$(git rev-parse --verify "$merge^{tree}") || fail "cannot read the tree of merge $short"
-
-  if [ "$auto_tree" = "$tree" ]; then
-    dropped=$((dropped + 1))
-    printf '  %s %s\n    pure automatic merge: dropped\n' "$short" "$subject"
-    continue
-  fi
-
-  linearised=$((linearised + 1))
-  files=$(git diff-tree -r --name-only "$auto_tree" "$tree")
-  author_name=$(git log -1 --format=%an "$merge")
-  author_email=$(git log -1 --format=%ae "$merge")
-  author_date=$(git log -1 --format=%aD "$merge")
-
-  # Two throwaway commits: the automatic merge result, then the merge's real
-  # tree on top of it. Picking the second replays exactly the hand edits.
-  scaffold=$(GIT_AUTHOR_NAME="$author_name" GIT_AUTHOR_EMAIL="$author_email" GIT_AUTHOR_DATE="$author_date" \
-    git commit-tree "$auto_tree" -p "$1" -m "Automatic merge result of $short (Staged rebase scaffolding)") \
-    || fail "cannot record the automatic merge result of merge $short"
-  message=$(printf 'Preserve hand edits from merge %s\n\nStaged linearised merge commit %s\n("%s") while rebasing onto %s. A rebase does not replay merge\ncommits, so this commit carries the hand edits that merge introduced beyond\nthe automatic merge of its parents; without it that content would be lost.\n\nFiles:\n%s\n' \
-    "$short" "$merge" "$subject" "$onto" "$(printf '%s\n' "$files" | sed 's/^/  /')")
-  synthetic=$(GIT_AUTHOR_NAME="$author_name" GIT_AUTHOR_EMAIL="$author_email" GIT_AUTHOR_DATE="$author_date" \
-    git commit-tree "$tree" -p "$scaffold" -m "$message") \
-    || fail "cannot record the hand edits of merge $short"
-  printf '%s %s %s\n' "$synthetic" "$merge" "$short" >> "$tmp/synthetic"
-  git rev-list "$merge" --not "$onto" > "$tmp/ancestors.$merge" \
-    || fail "cannot list the ancestors of merge $short"
-
-  note=""
-  if [ $merge_tree_status -eq 1 ]; then
-    note=" (the automatic merge had conflicts; their resolution is part of the preserved edits)"
-  fi
-  printf '  %s %s\n    hand edits kept as a separate commit by %s%s; files:\n' "$short" "$subject" "$author_name" "$note"
-  printf '%s\n' "$files" | sed 's/^/      /'
-done
-
-# Sequence editor for `git rebase -i`: insert a pick of each hand-edit commit
-# right after the last surviving pick that is an ancestor of its merge.
-cat > "$tmp/edit-todo" <<'STAGED_EDIT_TODO'
-todo=$1
-dir=$(dirname "$0")
-: > "$dir/picks"
-count=0
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in
-    "pick "*|"p "*)
-      count=$((count + 1))
-      set -- $line
-      full=$(git rev-parse --verify --quiet "$2^{commit}" </dev/null) || exit 1
-      printf '%s %s\n' "$count" "$full" >> "$dir/picks"
-      ;;
-  esac
-done < "$todo"
-: > "$dir/inserts"
-while read -r synthetic merge short; do
-  anchor=0
-  while read -r index full; do
-    if grep -qFx "$full" "$dir/ancestors.$merge"; then
-      anchor=$index
-    fi
-  done < "$dir/picks"
-  printf '%s\tpick %s Preserve hand edits from merge %s\n' "$anchor" "$synthetic" "$short" >> "$dir/inserts"
-done < "$dir/synthetic"
-awk -v inserts="$dir/inserts" '
-  BEGIN {
-    while ((getline line < inserts) > 0) {
-      tab = index(line, "\t")
-      key = substr(line, 1, tab - 1)
-      ins[key] = ins[key] substr(line, tab + 1) "\n"
-    }
-    if ("0" in ins) printf "%s", ins["0"]
-  }
-  { print }
-  /^(pick|p) / { n++; if ((n "") in ins) printf "%s", ins[n ""] }
-' "$todo" > "$todo.staged" || exit 1
-mv "$todo.staged" "$todo"
-STAGED_EDIT_TODO
-
-printf '\n'
-GIT_SEQUENCE_EDITOR="sh '$tmp/edit-todo'" \
-  git -c rebase.abbreviateCommands=false rebase --interactive --signoff --empty=drop --no-autosquash "$onto" 2>&1
-status=$?
-
-if [ $status -ne 0 ]; then
-  stopped=$(git rev-parse --verify --quiet REBASE_HEAD 2>/dev/null)
-  if [ -n "$stopped" ]; then
-    stopped_on=$(grep "^$stopped " "$tmp/synthetic" | cut -d' ' -f3)
-    if [ -n "$stopped_on" ]; then
-      printf '\nThe rebase stopped while applying the hand edits carried by merge %s. That content exists in no other commit: resolve the conflict so it is kept, then continue the rebase. Do not drop this commit.\n' "$stopped_on"
-    fi
-  fi
-  exit $status
-fi
-
-printf '\nRebase complete: %s merge commit(s) linearised, %s pure automatic merge(s) dropped.\n' "$linearised" "$dropped"
-while read -r synthetic merge short; do
-  if ! git log --format=%s "$onto..HEAD" | grep -qFx "Preserve hand edits from merge $short"; then
-    printf 'The hand edits carried by merge %s were already present on %s; their commit became empty and was dropped.\n' "$short" "$onto"
-  fi
-done < "$tmp/synthetic"
-printf '\nCommits on the rebased branch:\n'
-git log --reverse --format='  %h %s' "$onto..HEAD"
-"##;
+/// The awk program that splices the inserts into the todo, one line per
+/// element. Written to `$tmp/splice.awk` at run time.
+///
+/// Inserts keyed `0` go before everything. An insert keyed `n` is queued when
+/// the `n`th pick is printed and emitted just before the next line that is not
+/// an `update-ref`: with `rebase.updateRefs` on, git places `update-ref
+/// refs/heads/<x>` directly after the pick that `<x>` points at, and emitting
+/// the insert between them would repoint `<x>` at the hand-edit commit.
+const SPLICE_AWK_LINES: &[&str] = &[
+    "BEGIN {",
+    "  while ((getline line < inserts) > 0) {",
+    "    tab = index(line, \"\\t\")",
+    "    key = substr(line, 1, tab - 1)",
+    "    ins[key] = ins[key] substr(line, tab + 1) \"\\n\"",
+    "  }",
+    "  if (\"0\" in ins) printf \"%s\", ins[\"0\"]",
+    "}",
+    "pending != \"\" && !/^update-ref / { printf \"%s\", pending; pending = \"\" }",
+    "{ print }",
+    "/^(pick|p) / { n++; pending = \"\"; if ((n \"\") in ins) pending = ins[n \"\"] }",
+    "END { if (pending != \"\") printf \"%s\", pending }",
+];
 
 /// The shell command that rebases the current branch onto `onto_ref` (for
 /// example `origin/main`) while preserving hand edits carried by merge commits.
@@ -204,9 +275,28 @@ git log --reverse --format='  %h %s' "$onto..HEAD"
 /// Signs off every replayed commit, as Staged's rebase always has. Prints a
 /// summary of what happened to each merge commit, exits non-zero when the
 /// rebase stops (on a conflict or otherwise), and names the merge a conflicting
-/// hand-edit commit came from. See the module docs for the full behaviour.
+/// hand-edit commit came from. The result is a single line of POSIX `sh` with
+/// no raw newline, carriage return or tab. See the module docs for the full
+/// behaviour.
 pub fn rebase_preserving_merge_edits_command(onto_ref: &str) -> String {
-    SCRIPT.replace(ONTO_PLACEHOLDER, &shell_single_quote(onto_ref))
+    let write_helpers = format!(
+        "{}; {}",
+        write_file_statement("$tmp/edit-todo", EDITOR_LINES),
+        write_file_statement("$tmp/splice.awk", SPLICE_AWK_LINES)
+    );
+    STATEMENTS
+        .join("; ")
+        .replace(WRITE_HELPERS_PLACEHOLDER, &write_helpers)
+        .replace(REQUIRED_GIT_PLACEHOLDER, REQUIRED_GIT_VERSION)
+        .replace(ONTO_PLACEHOLDER, &shell_single_quote(onto_ref))
+}
+
+/// A `printf '%s\n' <quoted line>... > <path>` statement that writes `lines`
+/// as a file. Each line is a single-quoted word, so nothing in it is expanded
+/// and no raw newline is needed in the command.
+fn write_file_statement(path: &str, lines: &[&str]) -> String {
+    let quoted: Vec<String> = lines.iter().map(|line| shell_single_quote(line)).collect();
+    format!("printf '%s\\n' {} > \"{path}\"", quoted.join(" "))
 }
 
 /// Quote `value` as a single POSIX shell word.
@@ -219,6 +309,7 @@ mod tests {
     use super::*;
     use crate::git::strip_git_env;
     use crate::test_utils::TempGitRepo;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     /// What the rebase command produced: the pipeline sees the same two things,
@@ -228,10 +319,23 @@ mod tests {
         output: String,
     }
 
+    /// How to run the command: which shell interprets it, and an optional
+    /// directory prepended to `PATH` so a fake `git` can stand in front of the
+    /// real one.
+    #[derive(Default)]
+    struct RunOptions<'a> {
+        shell: Option<&'a str>,
+        path_prefix: Option<&'a Path>,
+    }
+
     /// Run the generated command the way a pipeline step does, `sh -c` in the
     /// worktree, isolated from the developer's own git config.
     fn run_rebase(repo: &TempGitRepo, onto: &str) -> RebaseRun {
-        let mut command = Command::new("sh");
+        run_rebase_with(repo, onto, RunOptions::default())
+    }
+
+    fn run_rebase_with(repo: &TempGitRepo, onto: &str, options: RunOptions<'_>) -> RebaseRun {
+        let mut command = Command::new(options.shell.unwrap_or("sh"));
         command
             .arg("-c")
             .arg(rebase_preserving_merge_edits_command(onto))
@@ -240,12 +344,86 @@ mod tests {
         command
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1");
-        let output = command.output().expect("sh should spawn");
+        if let Some(prefix) = options.path_prefix {
+            let mut paths = vec![prefix.to_path_buf()];
+            paths.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            command.env(
+                "PATH",
+                std::env::join_paths(paths).expect("PATH should join"),
+            );
+        }
+        let output = command.output().expect("shell should spawn");
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         RebaseRun {
             success: output.status.success(),
             output: text,
+        }
+    }
+
+    /// The shells the command must work under: `sh` always, and `dash` (the
+    /// `/bin/sh` of Debian and Ubuntu, so of Blox workspaces) when installed.
+    fn shells() -> Vec<&'static str> {
+        let mut shells = vec!["sh"];
+        if Command::new("dash")
+            .arg("-c")
+            .arg(":")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            shells.push("dash");
+        }
+        shells
+    }
+
+    /// A directory holding a `git` wrapper script, for putting in front of the
+    /// real git on `PATH`. `body` runs first with the original arguments; it
+    /// falls through to the real git unless it exits.
+    struct FakeGit {
+        dir: PathBuf,
+    }
+
+    impl FakeGit {
+        fn new(body: &str) -> Self {
+            let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .map(|dir| dir.join("git"))
+                .find(|candidate| candidate.is_file())
+                .expect("a real git on PATH");
+            let dir =
+                std::env::temp_dir().join(format!("staged-fake-git-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = format!(
+                "#!/bin/sh\n{body}\nexec {} \"$@\"\n",
+                shell_single_quote(&real.to_string_lossy())
+            );
+            let path = dir.join("git");
+            std::fs::write(&path, script).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Self { dir }
+        }
+
+        /// A git that reports `version` and is otherwise the real one.
+        fn reporting_version(version: &str) -> Self {
+            Self::new(&format!(
+                "if [ \"$1\" = \"--version\" ]; then printf '%s\\n' {}; exit 0; fi",
+                shell_single_quote(version)
+            ))
+        }
+
+        fn path(&self) -> &Path {
+            &self.dir
+        }
+    }
+
+    impl Drop for FakeGit {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
@@ -326,6 +504,32 @@ mod tests {
         }
     }
 
+    /// The fixture whose hand edits create `hand-edit.txt`, which `B2` then
+    /// extends. This is the failure from the branch note.
+    fn hand_edit_fixture() -> Fixture {
+        fixture(
+            |repo| repo.write_file("hand-edit.txt", "hand edit\n"),
+            |repo| repo.write_file("hand-edit.txt", "hand edit\nlater line\n"),
+            |repo| repo.write_file("main-later.txt", "main later\n"),
+        )
+    }
+
+    /// A branch with a single commit on top of main and no merges.
+    fn merge_free_repo() -> TempGitRepo {
+        let repo = TempGitRepo::new();
+        repo.write_file("base.txt", "base\n");
+        repo.commit("chore: base");
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("feature.txt", "feature\n");
+        repo.commit("feat: add feature");
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("main-later.txt", "main later\n");
+        let main_tip = repo.commit("chore: advance main");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &main_tip]);
+        repo.run_git(&["checkout", "feature"]);
+        repo
+    }
+
     fn subjects(repo: &TempGitRepo, range: &str) -> Vec<String> {
         repo.run_git(&["log", "--reverse", "--format=%s", range])
             .lines()
@@ -343,17 +547,97 @@ mod tests {
         repo.run_git(&["show", &format!("HEAD:{path}")])
     }
 
+    fn rev(repo: &TempGitRepo, name: &str) -> String {
+        repo.run_git(&["rev-parse", name]).trim().to_string()
+    }
+
     #[test]
     fn command_embeds_the_quoted_ref_and_avoids_rebase_merges() {
         let command = rebase_preserving_merge_edits_command("origin/main");
-        assert!(command.contains("onto='origin/main'"), "{command}");
+        assert!(command.starts_with("onto='origin/main'; "), "{command}");
         assert!(command.contains("git merge-tree --write-tree"));
         assert!(command.contains("--signoff"));
         assert!(!command.contains("--rebase-merges"));
+        assert!(!command.contains("--no-update-refs"));
         assert!(!command.contains(ONTO_PLACEHOLDER));
+        assert!(!command.contains(REQUIRED_GIT_PLACEHOLDER));
+        assert!(!command.contains(WRITE_HELPERS_PLACEHOLDER));
+        assert!(
+            command.contains(&format!("; required_git={REQUIRED_GIT_VERSION}; ")),
+            "{command}"
+        );
 
         let quoted = rebase_preserving_merge_edits_command("origin/it's");
-        assert!(quoted.contains("onto='origin/it'\\''s'"), "{quoted}");
+        assert!(quoted.starts_with("onto='origin/it'\\''s'; "), "{quoted}");
+    }
+
+    /// Pipeline commands reach remote workspaces as one argv element through
+    /// `sq blox ws exec … sh -c "… sh -lc '<command>'"`. Whether an embedded
+    /// newline survives that cannot be verified here, so the command must not
+    /// contain one, nor any other raw control character.
+    #[test]
+    fn command_is_a_single_line_with_no_raw_control_characters() {
+        for onto in ["origin/main", "origin/it's", "origin/a b"] {
+            let command = rebase_preserving_merge_edits_command(onto);
+            assert!(!command.contains('\n'), "raw newline in: {command}");
+            assert!(!command.contains('\r'), "raw carriage return in: {command}");
+            assert!(!command.contains('\t'), "raw tab in: {command}");
+            assert!(
+                !command.chars().any(|c| c.is_control()),
+                "control character in: {command}"
+            );
+        }
+        for line in EDITOR_LINES.iter().chain(SPLICE_AWK_LINES) {
+            assert!(
+                !line.chars().any(|c| c.is_control()),
+                "helper line has a raw control character: {line:?}"
+            );
+        }
+    }
+
+    /// The helpers written at run time must reproduce their source lines
+    /// exactly, including the lines that contain single quotes, under both
+    /// shells.
+    #[test]
+    fn helper_files_are_written_verbatim_by_printf() {
+        for shell in shells() {
+            let dir = std::env::temp_dir().join(format!("staged-helper-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let editor = dir.join("edit-todo");
+            let awk = dir.join("splice.awk");
+            let script = format!(
+                "{}; {}",
+                write_file_statement(&editor.to_string_lossy(), EDITOR_LINES),
+                write_file_statement(&awk.to_string_lossy(), SPLICE_AWK_LINES)
+            );
+            let status = Command::new(shell)
+                .arg("-c")
+                .arg(&script)
+                .status()
+                .expect("shell should spawn");
+            assert!(status.success(), "{shell}: {script}");
+            let mut expected_editor = EDITOR_LINES.join("\n");
+            expected_editor.push('\n');
+            assert_eq!(
+                std::fs::read_to_string(&editor).unwrap(),
+                expected_editor,
+                "{shell}"
+            );
+            let mut expected_awk = SPLICE_AWK_LINES.join("\n");
+            expected_awk.push('\n');
+            assert_eq!(
+                std::fs::read_to_string(&awk).unwrap(),
+                expected_awk,
+                "{shell}"
+            );
+            let syntax = Command::new(shell)
+                .arg("-n")
+                .arg(&editor)
+                .status()
+                .expect("shell should spawn");
+            assert!(syntax.success(), "{shell} -n rejected the editor");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     /// The failure from the branch note: a merge of main whose hand edits
@@ -362,86 +646,158 @@ mod tests {
     /// the later commit conflicts against a file that no longer exists.
     #[test]
     fn hand_edits_in_a_merge_survive_the_rebase_in_position_with_their_author() {
-        let fixture = fixture(
-            |repo| repo.write_file("hand-edit.txt", "hand edit\n"),
-            |repo| repo.write_file("hand-edit.txt", "hand edit\nlater line\n"),
-            |repo| repo.write_file("main-later.txt", "main later\n"),
-        );
-        let repo = &fixture.repo;
+        for shell in shells() {
+            let fixture = hand_edit_fixture();
+            let repo = &fixture.repo;
 
-        let run = run_rebase(repo, "origin/main");
-        assert!(run.success, "rebase should complete:\n{}", run.output);
+            let run = run_rebase_with(
+                repo,
+                "origin/main",
+                RunOptions {
+                    shell: Some(shell),
+                    ..RunOptions::default()
+                },
+            );
+            assert!(
+                run.success,
+                "{shell}: rebase should complete:\n{}",
+                run.output
+            );
 
-        // Linear history with the hand edits at the merge's position.
-        assert_eq!(
-            subjects(repo, "origin/main..HEAD"),
-            vec![
-                "feat: add feature".to_string(),
-                format!("{HAND_EDIT_COMMIT_SUBJECT_PREFIX}{}", fixture.merge_short),
-                "feat: later work".to_string(),
-            ]
-        );
-        assert_eq!(
-            repo.run_git(&["rev-list", "--merges", "origin/main..HEAD"])
-                .trim(),
-            ""
-        );
-        assert_eq!(
-            repo.run_git(&["symbolic-ref", "HEAD"]).trim(),
-            "refs/heads/feature",
-            "the rebase must finish on the branch, not a detached HEAD"
-        );
-        assert_eq!(repo.run_git(&["status", "--porcelain"]).trim(), "");
+            // Linear history with the hand edits at the merge's position.
+            assert_eq!(
+                subjects(repo, "origin/main..HEAD"),
+                vec![
+                    "feat: add feature".to_string(),
+                    format!("{HAND_EDIT_COMMIT_SUBJECT_PREFIX}{}", fixture.merge_short),
+                    "feat: later work".to_string(),
+                ],
+                "{shell}"
+            );
+            assert_eq!(
+                repo.run_git(&["rev-list", "--merges", "origin/main..HEAD"])
+                    .trim(),
+                ""
+            );
+            assert_eq!(
+                repo.run_git(&["symbolic-ref", "HEAD"]).trim(),
+                "refs/heads/feature",
+                "the rebase must finish on the branch, not a detached HEAD"
+            );
+            assert_eq!(repo.run_git(&["status", "--porcelain"]).trim(), "");
 
-        // The content is at the tip, with the later commit applied on top.
-        assert_eq!(
-            file_at_head(repo, "hand-edit.txt"),
-            "hand edit\nlater line\n"
-        );
-        assert_eq!(file_at_head(repo, "main-later.txt"), "main later\n");
-        assert_eq!(file_at_head(repo, "main-only.txt"), "main only\n");
+            // The content is at the tip, with the later commit applied on top.
+            assert_eq!(
+                file_at_head(repo, "hand-edit.txt"),
+                "hand edit\nlater line\n"
+            );
+            assert_eq!(file_at_head(repo, "main-later.txt"), "main later\n");
+            assert_eq!(file_at_head(repo, "main-only.txt"), "main only\n");
 
-        // The synthetic commit keeps the merge's author and author date, and
-        // its message says where the content came from.
-        assert_eq!(show(repo, "HEAD~1", "%an <%ae>"), MERGE_AUTHOR);
-        assert_eq!(
-            show(repo, "HEAD~1", "%at %ai"),
-            show(repo, &fixture.merge_sha, "%at %ai"),
-            "the synthetic commit must keep the merge's author date"
-        );
-        let body = show(repo, "HEAD~1", "%B");
-        assert!(body.contains(&fixture.merge_sha), "{body}");
-        assert!(body.contains("hand edits"), "{body}");
-        assert!(body.contains("hand-edit.txt"), "{body}");
-        assert!(body.contains("Signed-off-by:"), "{body}");
-        assert_eq!(
-            repo.run_git(&["diff-tree", "-r", "--name-only", "--no-commit-id", "HEAD~1"])
-                .trim(),
-            "hand-edit.txt",
-            "the synthetic commit must contain only the hand edits"
-        );
+            // The synthetic commit keeps the merge's author and author date, and
+            // its message says where the content came from.
+            assert_eq!(show(repo, "HEAD~1", "%an <%ae>"), MERGE_AUTHOR);
+            assert_eq!(
+                show(repo, "HEAD~1", "%at %ai"),
+                show(repo, &fixture.merge_sha, "%at %ai"),
+                "the synthetic commit must keep the merge's author date"
+            );
+            let body = show(repo, "HEAD~1", "%B");
+            assert!(body.contains(&fixture.merge_sha), "{body}");
+            assert!(body.contains("hand edits"), "{body}");
+            assert!(body.contains("hand-edit.txt"), "{body}");
+            assert!(body.contains("Signed-off-by:"), "{body}");
+            assert_eq!(
+                repo.run_git(&["diff-tree", "-r", "--name-only", "--no-commit-id", "HEAD~1"])
+                    .trim(),
+                "hand-edit.txt",
+                "the synthetic commit must contain only the hand edits"
+            );
 
-        // The summary names the merge, the files, and the outcome.
-        assert!(run.output.contains(&fixture.merge_short), "{}", run.output);
-        assert!(
-            run.output
-                .contains("hand edits kept as a separate commit by Merge Author"),
-            "{}",
-            run.output
-        );
-        assert!(run.output.contains("      hand-edit.txt"), "{}", run.output);
-        assert!(
-            run.output.contains(
-                "Rebase complete: 1 merge commit(s) linearised, 0 pure automatic merge(s) dropped."
-            ),
-            "{}",
-            run.output
-        );
-        assert!(
-            run.output.contains("Commits on the rebased branch:"),
-            "{}",
-            run.output
-        );
+            // The summary names the merge, the files, and the outcome.
+            assert!(run.output.contains(&fixture.merge_short), "{}", run.output);
+            assert!(
+                run.output
+                    .contains("hand edits kept as a separate commit by Merge Author"),
+                "{}",
+                run.output
+            );
+            assert!(run.output.contains("      hand-edit.txt"), "{}", run.output);
+            assert!(
+                run.output.contains(
+                    "Rebase complete: 1 merge commit(s) linearised, 0 pure automatic merge(s) dropped."
+                ),
+                "{}",
+                run.output
+            );
+            assert!(
+                run.output.contains("Commits on the rebased branch:"),
+                "{}",
+                run.output
+            );
+            assert!(
+                !run.output.contains("note: cannot parse the git version"),
+                "{}",
+                run.output
+            );
+        }
+    }
+
+    /// With `rebase.updateRefs` on, git writes `update-ref refs/heads/<x>`
+    /// directly after the pick a stacked branch points at. The hand-edit pick
+    /// must go after that line, or the stacked branch ends up on the hand-edit
+    /// commit instead of the rebased copy of its own commit.
+    #[test]
+    fn update_refs_sibling_branch_follows_its_own_commit_not_the_hand_edits() {
+        for shell in shells() {
+            let fixture = hand_edit_fixture();
+            let repo = &fixture.repo;
+            // `feature~2` walks first parents: B2, the merge, then B1.
+            let first = rev(repo, "feature~2");
+            assert_eq!(show(repo, &first, "%s"), "feat: add feature");
+            repo.run_git(&["branch", "other", &first]);
+            repo.run_git(&["config", "rebase.updateRefs", "true"]);
+
+            let run = run_rebase_with(
+                repo,
+                "origin/main",
+                RunOptions {
+                    shell: Some(shell),
+                    ..RunOptions::default()
+                },
+            );
+            assert!(run.success, "{shell}: {}", run.output);
+            assert!(
+                run.output.contains("refs/heads/other"),
+                "{shell}: git should report updating the stacked ref:\n{}",
+                run.output
+            );
+
+            assert_eq!(
+                subjects(repo, "origin/main..HEAD"),
+                vec![
+                    "feat: add feature".to_string(),
+                    format!("{HAND_EDIT_COMMIT_SUBJECT_PREFIX}{}", fixture.merge_short),
+                    "feat: later work".to_string(),
+                ],
+                "{shell}"
+            );
+            let other = rev(repo, "other");
+            assert_ne!(
+                other, first,
+                "{shell}: other must have been moved by the rebase"
+            );
+            assert_eq!(
+                show(repo, "other", "%s"),
+                "feat: add feature",
+                "{shell}: other must point at the rebased copy of its own commit"
+            );
+            assert_eq!(other, rev(repo, "HEAD~2"), "{shell}");
+            assert_eq!(
+                file_at_head(repo, "hand-edit.txt"),
+                "hand edit\nlater line\n"
+            );
+        }
     }
 
     /// Main later rewrote the very lines the merge's hand edits changed. The
@@ -455,7 +811,7 @@ mod tests {
             |repo| repo.write_file("base.txt", "base changed on main\n"),
         );
         let repo = &fixture.repo;
-        let original_tip = repo.run_git(&["rev-parse", "feature"]).trim().to_string();
+        let original_tip = rev(repo, "feature");
 
         let run = run_rebase(repo, "origin/main");
         assert!(!run.success, "the rebase must stop:\n{}", run.output);
@@ -464,6 +820,12 @@ mod tests {
                 "The rebase stopped while applying the hand edits carried by merge {}",
                 fixture.merge_short
             )),
+            "{}",
+            run.output
+        );
+        assert!(
+            run.output
+                .contains("continue the rebase with git rebase --continue"),
             "{}",
             run.output
         );
@@ -488,7 +850,7 @@ mod tests {
 
         // Nothing was lost: aborting returns the untouched branch.
         repo.run_git(&["rebase", "--abort"]);
-        assert_eq!(repo.run_git(&["rev-parse", "feature"]).trim(), original_tip);
+        assert_eq!(rev(repo, "feature"), original_tip);
         assert_eq!(file_at_head(repo, "base.txt"), "base edited in the merge\n");
     }
 
@@ -634,17 +996,7 @@ mod tests {
     /// A branch without merges takes the plain path and behaves as before.
     #[test]
     fn branch_without_merges_rebases_plainly() {
-        let repo = TempGitRepo::new();
-        repo.write_file("base.txt", "base\n");
-        repo.commit("chore: base");
-        repo.run_git(&["checkout", "-b", "feature"]);
-        repo.write_file("feature.txt", "feature\n");
-        repo.commit("feat: add feature");
-        repo.run_git(&["checkout", "main"]);
-        repo.write_file("main-later.txt", "main later\n");
-        let main_tip = repo.commit("chore: advance main");
-        repo.run_git(&["update-ref", "refs/remotes/origin/main", &main_tip]);
-        repo.run_git(&["checkout", "feature"]);
+        let repo = merge_free_repo();
 
         let run = run_rebase(&repo, "origin/main");
         assert!(run.success, "{}", run.output);
@@ -660,5 +1012,214 @@ mod tests {
         );
         assert!(show(&repo, "HEAD", "%B").contains("Signed-off-by:"));
         assert_eq!(file_at_head(&repo, "main-later.txt"), "main later\n");
+    }
+
+    /// A git older than 2.38 has no `merge-tree --write-tree`, so it cannot
+    /// tell which merges carry hand edits. The command must refuse before the
+    /// rebase starts, naming both versions and the reason, and leave the branch
+    /// exactly as it was.
+    #[test]
+    fn old_git_is_refused_before_the_branch_is_touched_when_merges_exist() {
+        let fake = FakeGit::reporting_version("git version 2.34.1");
+        let fixture = hand_edit_fixture();
+        let repo = &fixture.repo;
+        let original_tip = rev(repo, "feature");
+
+        let run = run_rebase_with(
+            repo,
+            "origin/main",
+            RunOptions {
+                path_prefix: Some(fake.path()),
+                ..RunOptions::default()
+            },
+        );
+        assert!(!run.success, "{}", run.output);
+        assert!(
+            run.output
+                .contains("refusing to rebase with git version 2.34.1"),
+            "{}",
+            run.output
+        );
+        assert!(
+            run.output.contains("git 2.38 or newer is required"),
+            "{}",
+            run.output
+        );
+        assert!(
+            run.output
+                .contains("origin/main..HEAD has 1 merge commit(s)"),
+            "{}",
+            run.output
+        );
+        assert!(
+            run.output
+                .contains("could drop content that exists only inside those merge commits"),
+            "{}",
+            run.output
+        );
+        assert!(
+            run.output.contains("The branch was left untouched"),
+            "{}",
+            run.output
+        );
+        assert!(
+            !run.output.contains("merge-tree --write-tree exited"),
+            "the refusal must come from the version check, not from running merge-tree:\n{}",
+            run.output
+        );
+
+        assert!(!repo.path().join(".git/rebase-merge").exists());
+        assert!(!repo.path().join(".git/rebase-apply").exists());
+        assert_eq!(rev(repo, "feature"), original_tip);
+        assert_eq!(rev(repo, "HEAD"), original_tip);
+        assert_eq!(repo.run_git(&["status", "--porcelain"]).trim(), "");
+    }
+
+    /// The version gate only matters when there are merges to inspect. A
+    /// merge-free branch keeps rebasing on any git.
+    #[test]
+    fn old_git_still_rebases_a_branch_without_merges() {
+        let fake = FakeGit::reporting_version("git version 2.34.1");
+        let repo = merge_free_repo();
+
+        let run = run_rebase_with(
+            &repo,
+            "origin/main",
+            RunOptions {
+                path_prefix: Some(fake.path()),
+                ..RunOptions::default()
+            },
+        );
+        assert!(run.success, "{}", run.output);
+        assert!(
+            run.output
+                .contains("Merge commits in origin/main..HEAD: none"),
+            "{}",
+            run.output
+        );
+        assert_eq!(
+            subjects(&repo, "origin/main..HEAD"),
+            vec!["feat: add feature".to_string()]
+        );
+    }
+
+    /// Versions at and above the floor pass the gate, including a major bump
+    /// and Apple's suffixed format.
+    #[test]
+    fn git_at_or_above_the_required_version_passes_the_gate() {
+        for version in [
+            "git version 2.38.0",
+            "git version 2.39.5 (Apple Git-154)",
+            "git version 3.0.0",
+        ] {
+            let fake = FakeGit::reporting_version(version);
+            let fixture = hand_edit_fixture();
+            let run = run_rebase_with(
+                &fixture.repo,
+                "origin/main",
+                RunOptions {
+                    path_prefix: Some(fake.path()),
+                    ..RunOptions::default()
+                },
+            );
+            assert!(run.success, "{version}: {}", run.output);
+            assert!(
+                !run.output.contains("refusing to rebase"),
+                "{version}: {}",
+                run.output
+            );
+            assert!(
+                !run.output.contains("note: cannot parse"),
+                "{version}: {}",
+                run.output
+            );
+        }
+    }
+
+    /// A version string the command cannot parse is not treated as too old:
+    /// the command says so and carries on, because a git that really lacks
+    /// `merge-tree --write-tree` still fails loudly on its own error.
+    #[test]
+    fn unparseable_git_version_is_noted_and_allowed_through() {
+        let fake = FakeGit::reporting_version("git version custom-build");
+        let fixture = hand_edit_fixture();
+        let run = run_rebase_with(
+            &fixture.repo,
+            "origin/main",
+            RunOptions {
+                path_prefix: Some(fake.path()),
+                ..RunOptions::default()
+            },
+        );
+        assert!(run.success, "{}", run.output);
+        assert!(
+            run.output.contains(
+                "note: cannot parse the git version from \"git version custom-build\"; assuming git 2.38 or newer"
+            ),
+            "{}",
+            run.output
+        );
+    }
+
+    /// A merge of an unrelated history has no merge base, so `merge-tree`
+    /// refuses with exit 128 rather than the conflict exit 1. That is not a
+    /// version problem and must not be reported as one: the headline says what
+    /// failed, for which merge, and git's own stderr follows.
+    #[test]
+    fn other_merge_tree_failures_surface_their_own_stderr_not_a_version_complaint() {
+        let repo = TempGitRepo::new();
+        repo.write_file("base.txt", "base\n");
+        repo.commit("chore: base");
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("feature.txt", "feature\n");
+        repo.commit("feat: add feature");
+
+        repo.run_git(&["checkout", "--orphan", "unrelated"]);
+        repo.run_git(&["rm", "-rf", "--quiet", "."]);
+        repo.write_file("unrelated.txt", "unrelated\n");
+        repo.commit("chore: unrelated root");
+
+        repo.run_git(&["checkout", "feature"]);
+        repo.run_git(&[
+            "merge",
+            "--no-ff",
+            "--allow-unrelated-histories",
+            "-m",
+            "Merge unrelated",
+            "unrelated",
+        ]);
+        let merge_short = repo
+            .run_git(&["rev-parse", "--short", "HEAD"])
+            .trim()
+            .to_string();
+        let original_tip = rev(&repo, "feature");
+
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("main-later.txt", "main later\n");
+        let main_tip = repo.commit("chore: advance main");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &main_tip]);
+        repo.run_git(&["checkout", "feature"]);
+
+        let run = run_rebase(&repo, "origin/main");
+        assert!(!run.success, "{}", run.output);
+        assert!(
+            run.output.contains(&format!(
+                "cannot compute the automatic merge of the parents of merge {merge_short} (git merge-tree --write-tree exited 128)"
+            )),
+            "{}",
+            run.output
+        );
+        assert!(
+            run.output.contains("unrelated histories"),
+            "git's own stderr must be shown:\n{}",
+            run.output
+        );
+        assert!(
+            !run.output.contains("2.38") && !run.output.contains("refusing to rebase"),
+            "a merge-tree failure on a capable git must not be blamed on the version:\n{}",
+            run.output
+        );
+        assert!(!repo.path().join(".git/rebase-merge").exists());
+        assert_eq!(rev(&repo, "feature"), original_tip);
     }
 }

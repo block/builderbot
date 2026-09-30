@@ -42,7 +42,11 @@
 //!    sequence and later commits that depend on it still apply. When
 //!    `rebase.updateRefs` is on, git writes `update-ref refs/heads/<x>` lines
 //!    directly after the pick a stacked branch points at; the insert goes after
-//!    those lines so the stacked branch keeps following its own commit.
+//!    those lines so the stacked branch keeps following its own commit. Before
+//!    handing the todo back, the editor checks that every inserted pick is
+//!    present in it, verbatim, and exits non-zero naming any that are not; git
+//!    then aborts without having touched the branch. A damaged splice can
+//!    therefore never produce a completed rebase that lacks the hand edits.
 //!
 //! If a hand-edit commit does not apply cleanly the rebase stops on it like any
 //! other conflict, and the command names the merge the content came from. Its
@@ -60,10 +64,13 @@
 //! needs as files, the sequence editor ([`EDITOR_LINES`]) and its awk splice
 //! ([`SPLICE_AWK_LINES`]), are written at run time with `printf '%s\n'` of
 //! single-quoted lines. A newline only ever appears as the two characters `\n`
-//! inside a `printf` format. The editor is also syntax-checked with `sh -n`
-//! before the rebase starts, so a damaged helper fails loudly instead of
-//! producing a wrong todo. Everything is plain POSIX `sh`, tested under both
-//! `sh` and `dash`.
+//! inside a `printf` format. Each write fails the command if it does not
+//! complete, and before the rebase starts the editor is syntax-checked with
+//! `sh -n` and its line count compared with the source, so a damaged or
+//! truncated helper fails loudly instead of producing a wrong todo. The line
+//! count matters because the editor's own presence check (step 5) is part of
+//! the editor: a copy cut short before the splice would also lose the check.
+//! Everything is plain POSIX `sh`, tested under both `sh` and `dash`.
 //!
 //! The version check lives in the command rather than reusing the Rust-side
 //! probes in `git::config_apply`. Those probe the git on the app's own PATH, or
@@ -85,6 +92,10 @@ const REQUIRED_GIT_PLACEHOLDER: &str = "__STAGED_REQUIRED_GIT__";
 /// Token in [`STATEMENTS`] replaced with the statements that write the sequence
 /// editor and its awk splice into the temporary directory.
 const WRITE_HELPERS_PLACEHOLDER: &str = "__STAGED_WRITE_HELPERS__";
+
+/// Token in [`STATEMENTS`] replaced with the number of lines in
+/// [`EDITOR_LINES`], which the written editor must have before it is used.
+const EDITOR_LINE_COUNT_PLACEHOLDER: &str = "__STAGED_EDITOR_LINE_COUNT__";
 
 /// The oldest git whose `merge-tree --write-tree` exists. Below it the command
 /// refuses to rebase a branch that has merge commits.
@@ -135,6 +146,13 @@ const STATEMENTS: &[&str] = &[
     "trap 'rm -rf \"$tmp\"' EXIT",
     WRITE_HELPERS_PLACEHOLDER,
     "sh -n \"$tmp/edit-todo\" || fail \"the generated todo editor failed a shell syntax check; refusing to start the rebase\"",
+    // The editor's own check that the inserted picks reached the todo is its
+    // final statements, so a copy truncated at a line boundary would pass
+    // `sh -n` and silently skip both the splice and the check.
+    concat!(
+        "[ \"$(grep -c '' \"$tmp/edit-todo\")\" -eq __STAGED_EDITOR_LINE_COUNT__ ] || ",
+        "fail \"the generated todo editor is incomplete ($(grep -c '' \"$tmp/edit-todo\") of __STAGED_EDITOR_LINE_COUNT__ lines); refusing to start the rebase\""
+    ),
     ": > \"$tmp/synthetic\"",
     "linearised=0",
     "dropped=0",
@@ -218,7 +236,12 @@ const STATEMENTS: &[&str] = &[
 ///
 /// It numbers the `pick` lines, finds for each hand-edit commit the last pick
 /// that is an ancestor of its merge (0 when none survive), and hands the
-/// resulting `<pick index>\t<todo line>` pairs to the awk splice.
+/// resulting `<pick index>\t<todo line>` pairs to the awk splice. It then
+/// re-reads the spliced todo and exits non-zero, naming each missing line,
+/// unless every inserted pick is present verbatim. The check looks for the
+/// exact inserted lines rather than counting subjects that look like
+/// hand-edit commits, because a branch rebased this way before carries earlier
+/// `Preserve hand edits from merge …` commits as ordinary picks.
 const EDITOR_LINES: &[&str] = &[
     "todo=$1",
     "dir=$(dirname \"$0\")",
@@ -226,7 +249,8 @@ const EDITOR_LINES: &[&str] = &[
     "count=0",
     "while IFS= read -r line || [ -n \"$line\" ]; do",
     "  case \"$line\" in",
-    "    \"pick \"*|\"p \"*)",
+    // Long form only: the rebase runs with `rebase.abbreviateCommands=false`.
+    "    \"pick \"*)",
     "      count=$((count + 1))",
     "      set -- $line",
     "      full=$(git rev-parse --verify --quiet \"$2^{commit}\" </dev/null) || exit 1",
@@ -235,15 +259,29 @@ const EDITOR_LINES: &[&str] = &[
     "  esac",
     "done < \"$todo\"",
     ": > \"$dir/inserts\"",
+    ": > \"$dir/expected\"",
     "while read -r synthetic merge short; do",
     "  anchor=0",
     "  while read -r index full; do",
     "    if grep -qFx \"$full\" \"$dir/ancestors.$merge\"; then anchor=$index; fi",
     "  done < \"$dir/picks\"",
-    "  printf '%s\\tpick %s Preserve hand edits from merge %s\\n' \"$anchor\" \"$synthetic\" \"$short\" >> \"$dir/inserts\"",
+    "  insert=\"pick $synthetic Preserve hand edits from merge $short\"",
+    "  printf '%s\\t%s\\n' \"$anchor\" \"$insert\" >> \"$dir/inserts\"",
+    "  printf '%s\\n' \"$insert\" >> \"$dir/expected\"",
     "done < \"$dir/synthetic\"",
     "awk -v inserts=\"$dir/inserts\" -f \"$dir/splice.awk\" \"$todo\" > \"$todo.staged\" || exit 1",
-    "mv \"$todo.staged\" \"$todo\"",
+    "mv \"$todo.staged\" \"$todo\" || exit 1",
+    "missing=0",
+    "while IFS= read -r insert; do",
+    "  if ! grep -qFx \"$insert\" \"$todo\"; then",
+    "    printf 'staged-rebase: preserved pick missing from the rebase todo: %s\\n' \"$insert\" >&2",
+    "    missing=$((missing + 1))",
+    "  fi",
+    "done < \"$dir/expected\"",
+    "if [ \"$missing\" -ne 0 ]; then",
+    "  printf 'staged-rebase: %s of %s preserved hand-edit pick(s) did not reach the rebase todo, so the todo editor or its awk splice is damaged; refusing to start the rebase. The branch was left untouched.\\n' \"$missing\" \"$(grep -c '' \"$dir/expected\")\" >&2",
+    "  exit 1",
+    "fi",
 ];
 
 /// The awk program that splices the inserts into the todo, one line per
@@ -263,9 +301,13 @@ const SPLICE_AWK_LINES: &[&str] = &[
     "  }",
     "  if (\"0\" in ins) printf \"%s\", ins[\"0\"]",
     "}",
+    // Both rules match the long command forms only, and must stay symmetric:
+    // the rebase runs with `rebase.abbreviateCommands=false`, so `p ` and
+    // `u ` never appear, and matching one short form but not the other would
+    // put inserts between a pick and its update-ref lines again.
     "pending != \"\" && !/^update-ref / { printf \"%s\", pending; pending = \"\" }",
     "{ print }",
-    "/^(pick|p) / { n++; pending = \"\"; if ((n \"\") in ins) pending = ins[n \"\"] }",
+    "/^pick / { n++; pending = \"\"; if ((n \"\") in ins) pending = ins[n \"\"] }",
     "END { if (pending != \"\") printf \"%s\", pending }",
 ];
 
@@ -280,13 +322,17 @@ const SPLICE_AWK_LINES: &[&str] = &[
 /// behaviour.
 pub fn rebase_preserving_merge_edits_command(onto_ref: &str) -> String {
     let write_helpers = format!(
-        "{}; {}",
+        "{} || fail \"cannot write the todo editor to $tmp\"; {} || fail \"cannot write the todo splice to $tmp\"",
         write_file_statement("$tmp/edit-todo", EDITOR_LINES),
         write_file_statement("$tmp/splice.awk", SPLICE_AWK_LINES)
     );
     STATEMENTS
         .join("; ")
         .replace(WRITE_HELPERS_PLACEHOLDER, &write_helpers)
+        .replace(
+            EDITOR_LINE_COUNT_PLACEHOLDER,
+            &EDITOR_LINES.len().to_string(),
+        )
         .replace(REQUIRED_GIT_PLACEHOLDER, REQUIRED_GIT_VERSION)
         .replace(ONTO_PLACEHOLDER, &shell_single_quote(onto_ref))
 }
@@ -319,13 +365,15 @@ mod tests {
         output: String,
     }
 
-    /// How to run the command: which shell interprets it, and an optional
+    /// How to run the command: which shell interprets it, an optional
     /// directory prepended to `PATH` so a fake `git` can stand in front of the
-    /// real one.
+    /// real one, and optionally a different command to run in place of the
+    /// generated one, for tests that damage it.
     #[derive(Default)]
     struct RunOptions<'a> {
         shell: Option<&'a str>,
         path_prefix: Option<&'a Path>,
+        command: Option<String>,
     }
 
     /// Run the generated command the way a pipeline step does, `sh -c` in the
@@ -338,7 +386,11 @@ mod tests {
         let mut command = Command::new(options.shell.unwrap_or("sh"));
         command
             .arg("-c")
-            .arg(rebase_preserving_merge_edits_command(onto))
+            .arg(
+                options
+                    .command
+                    .unwrap_or_else(|| rebase_preserving_merge_edits_command(onto)),
+            )
             .current_dir(repo.path());
         strip_git_env(&mut command);
         command
@@ -551,6 +603,53 @@ mod tests {
         repo.run_git(&["rev-parse", name]).trim().to_string()
     }
 
+    /// The fixture whose hand edits nothing later builds on: `B2` touches only
+    /// `feature.txt`. This is the shape in which losing the hand edits is
+    /// silent. A plain rebase of this branch completes without a conflict and
+    /// `hand-edit.txt` is simply gone.
+    fn independent_hand_edit_fixture() -> Fixture {
+        fixture(
+            |repo| repo.write_file("hand-edit.txt", "hand edit\n"),
+            |repo| repo.write_file("feature.txt", "feature\nmore\n"),
+            |repo| repo.write_file("main-later.txt", "main later\n"),
+        )
+    }
+
+    /// The generated command with the statement that writes the helper file at
+    /// `path` replaced by one that writes `replacement` instead, standing in
+    /// for a helper that was damaged on its way to disk.
+    fn command_with_damaged_helper(
+        onto: &str,
+        path: &str,
+        original: &[&str],
+        replacement: &[&str],
+    ) -> String {
+        let command = rebase_preserving_merge_edits_command(onto);
+        let genuine = write_file_statement(path, original);
+        assert!(command.contains(&genuine), "{command}");
+        command.replace(&genuine, &write_file_statement(path, replacement))
+    }
+
+    fn assert_branch_untouched(repo: &TempGitRepo, original_tip: &str, context: &str) {
+        assert!(
+            !repo.path().join(".git/rebase-merge").exists(),
+            "{context}: no rebase may be in progress"
+        );
+        assert!(!repo.path().join(".git/rebase-apply").exists(), "{context}");
+        assert_eq!(rev(repo, "feature"), original_tip, "{context}");
+        assert_eq!(rev(repo, "HEAD"), original_tip, "{context}");
+        assert_eq!(
+            repo.run_git(&["symbolic-ref", "HEAD"]).trim(),
+            "refs/heads/feature",
+            "{context}"
+        );
+        assert_eq!(
+            repo.run_git(&["status", "--porcelain"]).trim(),
+            "",
+            "{context}"
+        );
+    }
+
     #[test]
     fn command_embeds_the_quoted_ref_and_avoids_rebase_merges() {
         let command = rebase_preserving_merge_edits_command("origin/main");
@@ -562,8 +661,28 @@ mod tests {
         assert!(!command.contains(ONTO_PLACEHOLDER));
         assert!(!command.contains(REQUIRED_GIT_PLACEHOLDER));
         assert!(!command.contains(WRITE_HELPERS_PLACEHOLDER));
+        assert!(!command.contains(EDITOR_LINE_COUNT_PLACEHOLDER));
         assert!(
             command.contains(&format!("; required_git={REQUIRED_GIT_VERSION}; ")),
+            "{command}"
+        );
+        assert!(
+            command.contains(&format!(
+                "[ \"$(grep -c '' \"$tmp/edit-todo\")\" -eq {} ]",
+                EDITOR_LINES.len()
+            )),
+            "{command}"
+        );
+        assert!(
+            command.contains(
+                "> \"$tmp/edit-todo\" || fail \"cannot write the todo editor to $tmp\"; "
+            ),
+            "{command}"
+        );
+        assert!(
+            command.contains(
+                "> \"$tmp/splice.awk\" || fail \"cannot write the todo splice to $tmp\"; "
+            ),
             "{command}"
         );
 
@@ -798,6 +917,197 @@ mod tests {
                 "hand edit\nlater line\n"
             );
         }
+    }
+
+    /// The splice is the one step whose failure would be silent. An awk
+    /// program that merely copies the todo hands git a valid todo without the
+    /// hand-edit picks; the rebase would complete, and the summary would call
+    /// each merge's edits "already present" and harmlessly dropped. The editor
+    /// must instead refuse before the branch is touched and name the picks
+    /// that went missing.
+    #[test]
+    fn splice_that_loses_the_inserts_is_refused_before_the_branch_is_touched() {
+        for shell in shells() {
+            let fixture = independent_hand_edit_fixture();
+            let repo = &fixture.repo;
+            let original_tip = rev(repo, "feature");
+            let command = command_with_damaged_helper(
+                "origin/main",
+                "$tmp/splice.awk",
+                SPLICE_AWK_LINES,
+                &["{ print }"],
+            );
+
+            let run = run_rebase_with(
+                repo,
+                "origin/main",
+                RunOptions {
+                    shell: Some(shell),
+                    command: Some(command),
+                    ..RunOptions::default()
+                },
+            );
+            assert!(
+                !run.success,
+                "{shell}: the rebase must be refused:\n{}",
+                run.output
+            );
+            let named = run
+                .output
+                .lines()
+                .find(|line| {
+                    line.starts_with(
+                        "staged-rebase: preserved pick missing from the rebase todo: pick ",
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!("{shell}: the missing pick must be named:\n{}", run.output)
+                });
+            assert!(
+                named.ends_with(&format!(
+                    " {HAND_EDIT_COMMIT_SUBJECT_PREFIX}{}",
+                    fixture.merge_short
+                )),
+                "{shell}: {named}"
+            );
+            assert!(
+                run.output
+                    .contains("1 of 1 preserved hand-edit pick(s) did not reach the rebase todo"),
+                "{shell}: {}",
+                run.output
+            );
+            assert!(
+                run.output.contains("refusing to start the rebase"),
+                "{shell}: {}",
+                run.output
+            );
+            assert!(
+                !run.output.contains("Rebase complete")
+                    && !run.output.contains("were already present on"),
+                "{shell}: the loss must not be reported as benign:\n{}",
+                run.output
+            );
+            assert_branch_untouched(repo, &original_tip, shell);
+            assert_eq!(file_at_head(repo, "hand-edit.txt"), "hand edit\n");
+        }
+    }
+
+    /// A copy of the editor cut short at a line boundary before the splice is
+    /// still valid `sh`, and it has also lost its own presence check. Git would
+    /// run it, get the todo back unmodified, and complete the rebase without
+    /// the hand edits. The command compares the written editor's line count
+    /// with the source before the rebase starts.
+    #[test]
+    fn truncated_todo_editor_is_refused_before_the_branch_is_touched() {
+        let awk_call = EDITOR_LINES
+            .iter()
+            .position(|line| line.starts_with("awk "))
+            .expect("the editor calls awk");
+        let truncated = &EDITOR_LINES[..awk_call];
+        for shell in shells() {
+            let fixture = independent_hand_edit_fixture();
+            let repo = &fixture.repo;
+            let original_tip = rev(repo, "feature");
+            let command = command_with_damaged_helper(
+                "origin/main",
+                "$tmp/edit-todo",
+                EDITOR_LINES,
+                truncated,
+            );
+
+            let run = run_rebase_with(
+                repo,
+                "origin/main",
+                RunOptions {
+                    shell: Some(shell),
+                    command: Some(command),
+                    ..RunOptions::default()
+                },
+            );
+            assert!(
+                !run.success,
+                "{shell}: the rebase must be refused:\n{}",
+                run.output
+            );
+            assert!(
+                !run.output.contains("failed a shell syntax check"),
+                "{shell}: the truncated editor is valid sh; the line count must catch it:\n{}",
+                run.output
+            );
+            assert!(
+                run.output.contains(&format!(
+                    "the generated todo editor is incomplete ({} of {} lines); refusing to start the rebase",
+                    truncated.len(),
+                    EDITOR_LINES.len()
+                )),
+                "{shell}: {}",
+                run.output
+            );
+            assert!(
+                !run.output.contains("Rebase complete")
+                    && !run.output.contains("were already present on"),
+                "{shell}: {}",
+                run.output
+            );
+            assert_branch_untouched(repo, &original_tip, shell);
+            assert_eq!(file_at_head(repo, "hand-edit.txt"), "hand edit\n");
+        }
+    }
+
+    /// A branch rebased this way once carries its earlier `Preserve hand edits
+    /// from merge …` commit as an ordinary pick. When a later merge of main
+    /// brings new hand edits and the branch is rebased again, the editor's
+    /// presence check must look for the lines it inserted this time, not count
+    /// picks whose subject looks like a hand-edit commit, or the earlier commit
+    /// would make it refuse a perfectly good rebase.
+    #[test]
+    fn second_rebase_keeps_the_earlier_preserved_commit_and_adds_the_new_one() {
+        let fixture = hand_edit_fixture();
+        let repo = &fixture.repo;
+        let first = run_rebase(repo, "origin/main");
+        assert!(first.success, "{}", first.output);
+
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("main-2.txt", "main 2\n");
+        repo.commit("chore: main 2");
+        repo.run_git(&["checkout", "feature"]);
+        repo.run_git(&["merge", "--no-commit", "--no-ff", "main"]);
+        repo.write_file("hand-edit-2.txt", "second hand edit\n");
+        repo.run_git(&["add", "-A"]);
+        repo.run_git(&["commit", "-m", "Merge main into feature again"]);
+        let second_short = repo
+            .run_git(&["rev-parse", "--short", "HEAD"])
+            .trim()
+            .to_string();
+
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("main-3.txt", "main 3\n");
+        let main_tip = repo.commit("chore: main 3");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &main_tip]);
+        repo.run_git(&["checkout", "feature"]);
+
+        let second = run_rebase(repo, "origin/main");
+        assert!(second.success, "{}", second.output);
+        assert!(
+            !second.output.contains("preserved pick missing"),
+            "{}",
+            second.output
+        );
+        assert_eq!(
+            subjects(repo, "origin/main..HEAD"),
+            vec![
+                "feat: add feature".to_string(),
+                format!("{HAND_EDIT_COMMIT_SUBJECT_PREFIX}{}", fixture.merge_short),
+                "feat: later work".to_string(),
+                format!("{HAND_EDIT_COMMIT_SUBJECT_PREFIX}{second_short}"),
+            ]
+        );
+        assert_eq!(
+            file_at_head(repo, "hand-edit.txt"),
+            "hand edit\nlater line\n"
+        );
+        assert_eq!(file_at_head(repo, "hand-edit-2.txt"), "second hand edit\n");
+        assert_eq!(file_at_head(repo, "main-3.txt"), "main 3\n");
     }
 
     /// Main later rewrote the very lines the merge's hand edits changed. The
@@ -1103,11 +1413,13 @@ mod tests {
         );
     }
 
-    /// Versions at and above the floor pass the gate, including a major bump
-    /// and Apple's suffixed format.
+    /// Versions at and above the floor pass the gate, including the floor
+    /// itself with and without a patch component, a major bump and Apple's
+    /// suffixed format.
     #[test]
     fn git_at_or_above_the_required_version_passes_the_gate() {
         for version in [
+            "git version 2.38",
             "git version 2.38.0",
             "git version 2.39.5 (Apple Git-154)",
             "git version 3.0.0",

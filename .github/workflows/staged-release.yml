@@ -21,8 +21,6 @@ jobs:
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1.1.5
 
-      - run: corepack enable pnpm
-
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: apps/staged/src-tauri

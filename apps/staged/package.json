@@ -64,8 +64,5 @@
     "pikchr-js": "0.1.4",
     "sanitize-html": "^2.17.7",
     "shiki": "^4.4.3"
-  },
-  "overrides": {
-    "ajv": "8.20.0"
   }
 }

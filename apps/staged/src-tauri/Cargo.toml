@@ -14,33 +14,33 @@ name = "staged_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.5.5", features = [] }
+tauri-build = { version = "2.7.1", features = [] }
 
 [dependencies]
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 libc = "0.2"
-tauri = { version = "2.10.2", features = [] }
-tauri-plugin-log = "2.8.0"
+tauri = { version = "2.12.1", features = [] }
+tauri-plugin-log = "2.10.0"
 
 # Git integration
 thiserror = "2.0"
 anyhow = "1.0"
-base64 = "0.22"
+base64 = "0.23"
 tempfile = "3"
 sha2 = "0.11"
 
 # Review storage
-rusqlite = { version = "0.39", features = ["bundled"] }
-rusqlite_migration = { version = "2.5.0", features = ["from-directory"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = { version = "2.6.0", features = ["from-directory"] }
 include_dir = "0.7.4"
 uuid = { version = "1.0", features = ["v4", "serde"] }
-dirs = "6.0"
-tauri-plugin-clipboard-manager = "2.3.2"
-tauri-plugin-window-state = "2.4.1"
-reqwest = { version = "0.13.1", features = ["json"] }
-tokio = { version = "1.50.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread", "time", "fs"] }
+dirs = "7.0"
+tauri-plugin-clipboard-manager = "2.4.1"
+tauri-plugin-window-state = "2.5.0"
+reqwest = { version = "0.13.5", features = ["json"] }
+tokio = { version = "1.53.1", features = ["sync", "process", "io-util", "macros", "rt-multi-thread", "time", "fs"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
@@ -53,23 +53,23 @@ doctor = { path = "../../../crates/doctor" }
 # Actions framework
 builderbot-actions = { path = "../../../crates/builderbot-actions" }
 acp-client = { path = "../../../crates/acp-client" }
-agent-client-protocol = { version = "0.15.1", features = ["unstable"] }
+agent-client-protocol = { version = "2.2.0", features = ["unstable"] }
 blox-cli = { path = "../../../crates/blox-cli" }
 
 regex = "1"
 strip-ansi-escapes = "0.2"
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
-tauri-plugin-store = "2.4.2"
+tauri-plugin-store = "2.5.0"
 
 # MCP server for project sessions
 rmcp = { version = "3.5", features = ["server", "transport-streamable-http-server"] }
 axum = { version = "0.8", features = ["ws"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
-tower-http = { version = "0.6", features = ["fs", "cors"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+tower-http = { version = "0.7", features = ["fs", "cors"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
-rand = "0.9"
+rand = "0.10"
 hex = "0.4"
 subtle = "2.6"
 time = "0.3"
@@ -77,8 +77,8 @@ pikchr = "0.1.4"
 
 # Pikchr preview MCP tool: render Pikchr source to SVG (same C engine as the
 # frontend's pikchr-js) and rasterize to PNG for the note-writing agent.
-resvg = "0.47"
-usvg = "0.47"
+resvg = "0.48"
+usvg = "0.48"
 tiny-skia = "0.12"
 
 # Managed Node.js runtime: tarball extraction for runtime installs
@@ -89,11 +89,11 @@ flate2 = "1"
 # test-util: `#[tokio::test(start_paused = true)]` for the store-events
 # coalescer tests, so the 50ms window is driven by the paused clock instead
 # of a real sleep.
-tokio = { version = "1.50.0", features = ["test-util"] }
+tokio = { version = "1.53.1", features = ["test-util"] }
 # test: tauri's `MockRuntime`, so window_commands' failure paths can be driven
 # without a real event loop. Feature unification enables it only when
 # compiling tests; the shipped binary's tauri is unchanged.
-tauri = { version = "2.10.2", features = ["test"] }
+tauri = { version = "2.12.1", features = ["test"] }
 
 [features]
 # no-block-npm-registry: downloads the managed Node.js runtime from upstream

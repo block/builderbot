@@ -355,7 +355,6 @@ impl AcpAuthenticationSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpAuthenticationMethodCategory {
     AgentManaged,
-    EnvironmentBacked,
     Terminal,
     Unsupported,
 }
@@ -364,7 +363,6 @@ impl AcpAuthenticationMethodCategory {
     fn label(self) -> &'static str {
         match self {
             Self::AgentManaged => "agent-managed",
-            Self::EnvironmentBacked => "environment-backed",
             Self::Terminal => "terminal",
             Self::Unsupported => "unsupported",
         }
@@ -494,7 +492,6 @@ fn auth_method_details(method: &AuthMethod) -> AcpAuthenticationMethod {
 fn auth_method_category(method: &AuthMethod) -> AcpAuthenticationMethodCategory {
     match method {
         AuthMethod::Agent(_) => AcpAuthenticationMethodCategory::AgentManaged,
-        AuthMethod::EnvVar(_) => AcpAuthenticationMethodCategory::EnvironmentBacked,
         AuthMethod::Terminal(_) => AcpAuthenticationMethodCategory::Terminal,
         _ => AcpAuthenticationMethodCategory::Unsupported,
     }
@@ -506,9 +503,6 @@ fn auth_method_can_be_handled(category: AcpAuthenticationMethodCategory) -> bool
         // `authenticate`, but the generic driver still must not choose one by
         // guessing from provider-defined IDs, names, or list order.
         AcpAuthenticationMethodCategory::AgentManaged => true,
-        // Environment-backed methods need provider-specific confirmation that
-        // credentials are available in the agent process environment.
-        AcpAuthenticationMethodCategory::EnvironmentBacked => false,
         // Terminal authentication requires a complete interactive terminal
         // flow. Until that exists, never send it through `authenticate`.
         AcpAuthenticationMethodCategory::Terminal => false,

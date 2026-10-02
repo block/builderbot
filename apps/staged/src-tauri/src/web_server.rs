@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::Router;
 use axum_extra::extract::cookie::{Cookie, CookieJar};
-use rand::Rng;
+use rand::RngExt;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;

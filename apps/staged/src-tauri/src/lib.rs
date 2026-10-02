@@ -21,6 +21,7 @@ pub mod github_commands;
 pub mod image_commands;
 pub mod managed_acp_tools;
 pub mod managed_node;
+mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;
 pub mod paths;

@@ -2,26 +2,29 @@
 //! Exposes `start_repo_session` and `add_project_repo` tools to the agent.
 
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::task::JoinHandle;
 
 use axum::Router;
 use base64::Engine;
-use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{ServerCapabilities, ServerConfig};
+use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{schemars, tool, tool_handler, tool_router, RoleServer, ServerHandler};
 use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
+use crate::mcp_progress::send_progress_keepalives;
 use crate::session_runner::SessionRegistry;
 use crate::store::{
     AcpConfigSelection, Branch, CompletionReason, MessageRole, ProjectRepo, Session,
     SessionMessage, SessionStatus, Store,
 };
 use tokio_util::sync::CancellationToken;
+
+mod wait;
 
 /// What outcome the caller expects from a `start_repo_session` call.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -109,7 +112,9 @@ struct StartRepoSessionParams {
 struct WaitForRepoSessionParams {
     /// Opaque handle returned by `start_repo_session`.
     pub repo_session_id: String,
-    /// How long to wait for a status change before returning the current state.
+    /// How long to wait for completion before returning the current state.
+    /// Without an MCP progress token, each wait is capped at 30 seconds; poll again
+    /// with the same handle if the session is still queued or running.
     #[serde(default = "default_wait_for_completion_seconds")]
     pub wait_for_completion_seconds: u64,
 }
@@ -530,7 +535,6 @@ struct AddProjectRepoParams {
 
 #[derive(Clone)]
 struct ProjectToolsHandler {
-    tool_router: ToolRouter<Self>,
     project_id: String,
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
@@ -569,7 +573,6 @@ impl ProjectToolsHandler {
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
-            tool_router: Self::tool_router(),
             project_id,
             store,
             registry,
@@ -743,51 +746,29 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`. `wait_for_completion_seconds` defaults to 240."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running."
     )]
     async fn wait_for_repo_session(
         &self,
         Parameters(p): Parameters<WaitForRepoSessionParams>,
-        request_ct: CancellationToken,
+        ctx: RequestContext<RoleServer>,
     ) -> String {
         let handle = match Self::decode_repo_session_handle(&p.repo_session_id) {
             Ok(handle) => handle,
             Err(e) => return e,
         };
 
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(p.wait_for_completion_seconds);
-        loop {
-            match self.repo_session_payload(&p.repo_session_id, &handle) {
-                Ok(payload) => {
-                    let state = payload
-                        .get("state")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("failed");
-                    if matches!(state, "completed" | "cancelled" | "failed") {
-                        return payload.to_string();
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        return payload.to_string();
-                    }
-                }
-                Err(e) => return e,
-            }
-
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                _ = request_ct.cancelled() => {
-                    return match self.repo_session_payload(&p.repo_session_id, &handle) {
-                        Ok(payload) => payload.to_string(),
-                        Err(e) => e,
-                    };
-                }
-                _ = self.cancel_token.cancelled() => {
-                    return match self.repo_session_payload(&p.repo_session_id, &handle) {
-                        Ok(payload) => payload.to_string(),
-                        Err(e) => e,
-                    };
-                }
+        let progress_token = ctx.meta.get_progress_token();
+        let wait = wait::wait_for_completion(
+            wait::duration(p.wait_for_completion_seconds, progress_token.is_some()),
+            &ctx.ct,
+            &self.cancel_token,
+            || self.repo_session_payload(&p.repo_session_id, &handle),
+        );
+        tokio::select! {
+            result = wait => result,
+            _ = send_progress_keepalives(&ctx.peer, progress_token, "Waiting for repository session") => {
+                unreachable!("the progress keep-alive loop never completes")
             }
         }
     }
@@ -1120,11 +1101,8 @@ fn worktree_ready_reply(github_repo: &str, runs_setup_actions: bool) -> String {
 
 #[tool_handler]
 impl ServerHandler for ProjectToolsHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
-        }
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
     }
 }
 

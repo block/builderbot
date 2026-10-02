@@ -11,6 +11,7 @@ on:
       - "pnpm-workspace.yaml"
       - "package.json"
       - "rust-toolchain.toml"
+      - "bin/**"
       - ".github/workflows/differ-ci.yml"
   push:
     branches: [main]
@@ -22,6 +23,7 @@ on:
       - "pnpm-workspace.yaml"
       - "package.json"
       - "rust-toolchain.toml"
+      - "bin/**"
       - ".github/workflows/differ-ci.yml"
   workflow_dispatch:
 
@@ -37,11 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      # Install hermit (manages node, rust, just)
+      # Install hermit (manages node, pnpm, rust, just)
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1.1.5
-
-      # Enable pnpm via corepack (node ships with corepack; version comes from packageManager in package.json)
-      - run: corepack enable pnpm
 
       # Cache Cargo dependencies
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

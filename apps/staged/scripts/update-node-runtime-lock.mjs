@@ -116,7 +116,7 @@ async function main() {
   const version = args.version ?? (await currentLockedVersion(args.lockFile));
   if (!version) {
     throw new Error(
-      "No version given and no existing lockfile to refresh; pass a version (e.g. v24.11.0)",
+      "No version given and no existing lockfile to refresh; pass a version (e.g. v24.21.0)",
     );
   }
 

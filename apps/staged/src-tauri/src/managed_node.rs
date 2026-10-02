@@ -30,7 +30,7 @@ const UPSTREAM_NODE_DIST_BASE_URL: &str = "https://nodejs.org/dist";
 const PACKAGES_LOCK_FILENAME: &str = ".lock";
 
 /// Hard cap on the compressed tarball; the largest pinned artifact today is
-/// ~49 MB, so anything near this is a wrong or corrupted download.
+/// ~55 MiB, so anything near this is a wrong or corrupted download.
 const MAX_ARCHIVE_BYTES: u64 = 90 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -41,7 +41,7 @@ const PROGRESS_LOG_STEP_BYTES: u64 = 10 * 1024 * 1024;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct NodeRuntimeLock {
-    /// Pinned Node.js version, `v`-prefixed (`v24.11.0`) — the exact string
+    /// Pinned Node.js version, `v`-prefixed (`v24.21.0`) — the exact string
     /// `node --version` prints.
     pub version: String,
     /// Rust target triple → release tarball pin.

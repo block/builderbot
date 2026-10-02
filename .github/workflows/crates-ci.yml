@@ -8,6 +8,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - "bin/**"
       - ".github/workflows/crates-ci.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
+      - "bin/**"
       - ".github/workflows/crates-ci.yml"
   workflow_dispatch:
 

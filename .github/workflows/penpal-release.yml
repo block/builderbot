@@ -29,7 +29,7 @@ jobs:
             exit 1
           fi
 
-      # Install hermit (manages node, rust, just, go)
+      # Install hermit (manages node, pnpm, rust, just, go)
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1.1.5
 
       # Cache Cargo dependencies
@@ -37,9 +37,6 @@ jobs:
         with:
           workspaces: apps/penpal/frontend/src-tauri
           key: aarch64-apple-darwin
-
-      # Enable pnpm via corepack
-      - run: corepack enable pnpm
 
       # Install dependencies
       - name: Install dependencies

@@ -11,8 +11,9 @@
 //! - **Managed bridges** (`tools/<id>/` + `bin/`): the claude/codex ACP
 //!   bridges in [`MANAGED_TOOLS`]. [`install_managed_tool`] installs — or
 //!   upgrades — each to the latest published version with a floating
-//!   `npm install <pkg>@latest --prefix` on the managed runtime, writes an
-//!   absolute-path shim into `bin/` (no host `node` on PATH required), and
+//!   `npm install <pkg>@latest --prefix` on the managed runtime, validates
+//!   the staged native CLI before promotion, writes an absolute-path shim
+//!   into `bin/` (no host `node` on PATH required), and
 //!   records the installed version in `state.json`. The startup reconciler
 //!   (`acp_tools_reconciler`) runs this for every managed bridge on launch,
 //!   so a new bridge release ships to users the next time Staged starts.
@@ -45,6 +46,8 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncBufReadExt;
 
 use crate::managed_node;
+
+mod validation;
 
 /// Dev/bridge-developer override: a directory of bridge binaries that
 /// replaces managed bridge resolution.
@@ -245,6 +248,7 @@ pub struct ManagedTool {
 /// The ACP bridges Staged installs and upgrades on every launch. Both vendor
 /// their agent's full CLI (Claude Code, `codex`) inside the npm package, so
 /// no separate main-CLI install is needed.
+/// Each entry must have a runtime probe in [`validation::validate_staged_tool`].
 pub const MANAGED_TOOLS: &[ManagedTool] = &[
     ManagedTool {
         id: "claude-acp",
@@ -342,8 +346,7 @@ pub enum ManagedToolError {
     NotManaged(String),
     Node(managed_node::ManagedNodeError),
     NpmInstall(String),
-    /// The install exited cleanly but produced no runnable bridge — a floor
-    /// check replacing the old lock's integrity validation.
+    /// npm exited cleanly but the staged bridge failed install validation.
     Incomplete(String),
     Io(String),
 }
@@ -428,6 +431,7 @@ pub async fn install_managed_tool(
         &managed_node::node_runtime_lock().version,
         &tool,
         npm_registry(),
+        validation::VALIDATION_TIMEOUT,
         on_line,
     )
     .await
@@ -442,11 +446,12 @@ async fn install_npm_tool(
     node_version: &str,
     tool: &ManagedTool,
     registry: Option<&str>,
+    validation_timeout: Duration,
     on_line: &InstallLineFn<'_>,
 ) -> Result<(), ManagedToolError> {
     let install_dir = tool_install_dir(packages_root, tool.id);
     // Stage the floating install into a scratch prefix and swap it into the
-    // live tree only after the entrypoint floor-check passes. npm reifies in
+    // live tree only after entrypoint and runtime validation pass. npm reifies in
     // place, so installing straight into `install_dir` would let a failure
     // mid-reify — or an upstream `@latest` that drops the entrypoint — replace
     // the live tree the (version-independent) shim already points at, breaking
@@ -482,6 +487,14 @@ async fn install_npm_tool(
             tool.package,
             staged_entrypoint.display()
         )));
+    }
+    on_line(&format!("Validating {} before promotion", tool.package));
+    if let Err(error) =
+        validation::validate_staged_tool(node_install_dir, &staging_dir, tool, validation_timeout)
+            .await
+    {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(error);
     }
     let version = installed_version(&staging_dir, tool.package).unwrap_or_default();
 
@@ -972,6 +985,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod validation;
     use super::*;
 
     #[test]
@@ -1264,6 +1278,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            super::validation::VALIDATION_TIMEOUT,
             &on_line,
         )
         .await
@@ -1311,6 +1326,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            super::validation::VALIDATION_TIMEOUT,
             &|_| {},
         )
         .await
@@ -1339,6 +1355,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            super::validation::VALIDATION_TIMEOUT,
             &|_| {},
         )
         .await
@@ -1372,6 +1389,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            super::validation::VALIDATION_TIMEOUT,
             &|_| {},
         )
         .await
@@ -1422,6 +1440,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            super::validation::VALIDATION_TIMEOUT,
             &|_| {},
         )
         .await

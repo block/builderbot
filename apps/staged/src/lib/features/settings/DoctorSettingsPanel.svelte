@@ -121,6 +121,16 @@
   </div>
 
   <div class="panel-body">
+    {#if Object.keys(doctorState.updateAllErrors).length > 0}
+      <div role="alert" class="text-destructive text-sm">
+        <p>Some updates failed. You can retry them individually or run Update all again.</p>
+        <ul>
+          {#each Object.entries(doctorState.updateAllErrors) as [checkId, error] (checkId)}
+            <li class="break-words whitespace-pre-wrap">{error}</li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
     {#if doctorState.loading}
       <div class="loading-state">
         <Spinner size={24} />

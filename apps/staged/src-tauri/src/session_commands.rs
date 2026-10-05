@@ -1963,13 +1963,18 @@ pub(crate) fn resolve_resume_acp_config_selection(
     }
 
     let stored_selection = stored_selection?;
-    let discovery = fresh_cached_acp_config_discovery(session.provider.as_deref()).or_else(|| {
-        latest_acp_config_discovery_from_session_metadata(
-            store,
-            &session.id,
-            session.provider.as_deref(),
-        )
-    });
+    // Prefer the catalog this session's agent last returned — the closest
+    // proxy for what its next session/load will offer — over the
+    // provider-global picker cache, which is session/new-shaped and may come
+    // from another worktree or provider state. A wrongly kept pin fails one
+    // turn and the runner clears it; a wrongly dropped one is persisted and
+    // silently runs on the default.
+    let discovery = latest_acp_config_discovery_from_session_metadata(
+        store,
+        &session.id,
+        session.provider.as_deref(),
+    )
+    .or_else(|| fresh_cached_acp_config_discovery(session.provider.as_deref()));
 
     match discovery.as_ref() {
         Some(discovery) => {
@@ -2060,7 +2065,7 @@ fn latest_acp_config_discovery_from_session_metadata(
         Ok(messages) => messages,
         Err(e) => {
             log::warn!(
-                "Failed to read ACP config metadata for session {session_id}; using stored selection as-is: {e}"
+                "Failed to read ACP config metadata for session {session_id}; falling back to the provider cache: {e}"
             );
             return None;
         }
@@ -2085,7 +2090,7 @@ fn latest_acp_config_discovery_from_session_metadata(
         )),
         Err(e) => {
             log::warn!(
-                "Failed to parse ACP config metadata for session {session_id}; using stored selection as-is: {e}"
+                "Failed to parse ACP config metadata for session {session_id}; falling back to the provider cache: {e}"
             );
             None
         }
@@ -7977,6 +7982,97 @@ mod tests {
 
         assert_eq!(resolved, None);
         remove_acp_config_cache_entry(provider_id);
+    }
+
+    /// Seeds a fresh provider cache entry offering `models` (value id, label)
+    /// and no effort selector, as the picker's session/new probe would.
+    fn seed_fresh_model_cache(provider_id: &str, models: &[(&str, &str)]) {
+        let mut discovery = test_acp_config_discovery(provider_id, models[0].0);
+        if let Some(model) = discovery.model.as_mut() {
+            model.options = models
+                .iter()
+                .map(
+                    |(value_id, label)| crate::acp_config::NormalizedAcpConfigValueOption {
+                        value_id: (*value_id).to_string(),
+                        label: (*label).to_string(),
+                        group_label: None,
+                    },
+                )
+                .collect();
+        }
+        acp_config_discovery_cache().lock().unwrap().insert(
+            provider_id.to_string(),
+            AcpConfigDiscoveryCacheEntry {
+                discovery,
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
+    /// The session's own catalog decides, not a provider cache probed for
+    /// some other worktree or provider state that lacks the pin's family.
+    #[test]
+    fn resume_selection_prefers_session_metadata_over_a_cache_lacking_the_pin() {
+        let provider_id = "metadata-over-cache-keeps-pin";
+        seed_fresh_model_cache(provider_id, &[("opus", "Opus")]);
+        let store = Store::in_memory().unwrap();
+        let session = hinted_fable_pin_session(provider_id);
+        store.create_session(&session).unwrap();
+        add_model_catalog_metadata(&store, &session.id, &[("claude-fable-5-1", "Fable 5.1")]);
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        remove_acp_config_cache_entry(provider_id);
+        assert_eq!(resolved, session.acp_config_selection);
+    }
+
+    /// A cache that still offers the pin's base must not keep a pin the
+    /// session's own catalog no longer has a row for.
+    #[test]
+    fn resume_selection_prefers_session_metadata_over_a_cache_offering_the_pin() {
+        let provider_id = "metadata-over-cache-drops-pin";
+        seed_fresh_model_cache(provider_id, &[("claude-fable-5-1", "Fable 5.1")]);
+        let store = Store::in_memory().unwrap();
+        let session = hinted_fable_pin_session(provider_id);
+        store.create_session(&session).unwrap();
+        add_model_catalog_metadata(&store, &session.id, &[("opus", "Opus")]);
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        remove_acp_config_cache_entry(provider_id);
+        assert_eq!(
+            resolved,
+            Some(store::AcpConfigSelection {
+                model: None,
+                effort: Some(test_acp_config_value_selection("effort", "high", "High")),
+            })
+        );
+    }
+
+    /// Without a recorded catalog (never ran, pre-metadata rows) the fresh
+    /// provider cache is still consulted.
+    #[test]
+    fn resume_selection_falls_back_to_the_cache_without_session_metadata() {
+        let provider_id = "cache-fallback-without-metadata";
+        seed_fresh_model_cache(provider_id, &[("claude-fable-5-1", "Fable 5.1")]);
+        let store = Store::in_memory().unwrap();
+        let session = hinted_fable_pin_session(provider_id);
+        store.create_session(&session).unwrap();
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        remove_acp_config_cache_entry(provider_id);
+        assert_eq!(
+            resolved,
+            Some(store::AcpConfigSelection {
+                model: Some(test_acp_config_value_selection(
+                    "model",
+                    "claude-fable-5-1[1m]",
+                    "Fable 5.1",
+                )),
+                effort: None,
+            })
+        );
     }
 
     #[test]

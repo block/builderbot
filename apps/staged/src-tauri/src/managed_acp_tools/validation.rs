@@ -18,33 +18,34 @@ pub(super) async fn validate_staged_tool(
     tool: &ManagedTool,
     timeout: Duration,
 ) -> Result<(), ManagedToolError> {
-    // Codex keeps its entrypoint floor check until it has a verified runtime
-    // probe of its own. Claude's bridge --version would miss the native CLI.
-    if tool.id != "claude-acp" {
-        return Ok(());
-    }
-    validate_claude(node_install_dir, staging_dir, tool, timeout).await
-}
-
-async fn validate_claude(
-    node_install_dir: &Path,
-    staging_dir: &Path,
-    tool: &ManagedTool,
-    timeout: Duration,
-) -> Result<(), ManagedToolError> {
+    // Probe the bundled native CLI through each bridge's runtime resolver.
+    // Codex intercepts --version even after `cli`, so use its short flag.
+    let args = match tool.id {
+        "claude-acp" => ["--cli", "--version"],
+        "codex-acp" => ["cli", "-V"],
+        // New managed bridges must supply a native runtime check before they
+        // can be promoted; an entrypoint file alone cannot certify an install.
+        _ => {
+            return Err(ManagedToolError::Incomplete(format!(
+                "{} has no post-install runtime validation configured",
+                tool.package
+            )))
+        }
+    };
     let incomplete = |reason| {
         ManagedToolError::Incomplete(format!(
-            "{} failed post-install validation: `--cli --version` {reason}",
-            tool.package
+            "{} failed post-install validation: `{}` {reason}",
+            tool.package,
+            args.join(" ")
         ))
     };
     let mut command = tokio::process::Command::new(node_binary(node_install_dir));
     command
         .arg(npm_entrypoint(staging_dir, tool.package))
-        .args(["--cli", "--version"])
+        .args(args)
         .current_dir(staging_dir)
-        // In particular, CLAUDE_CODE_EXECUTABLE and NODE_OPTIONS must not
-        // let a personal installation mask a missing managed dependency.
+        // In particular, CLAUDE_CODE_EXECUTABLE, CODEX_PATH and NODE_OPTIONS
+        // must not let a personal install mask a missing managed dependency.
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::null())
@@ -110,7 +111,7 @@ async fn supervise_probe(
         if unsafe { libc::kill(-pgid, libc::SIGKILL) } == -1 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
-                log::warn!("failed to kill Claude validation process group {pgid}: {error}");
+                log::warn!("failed to kill ACP validation process group {pgid}: {error}");
             }
         }
     }

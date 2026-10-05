@@ -1,7 +1,7 @@
 use super::*;
 
 const TIMEOUT: Duration = super::super::validation::VALIDATION_TIMEOUT;
-const MISSING_NATIVE: &str = "echo 'Claude native binary not found for darwin-arm64' >&2\nexit 1\n";
+const MISSING_NATIVE: &str = "echo 'native binary not found for this platform' >&2\nexit 1\n";
 
 fn write_probe(node: &Path, template: &Path, tool: &ManagedTool, script: &str) {
     write_fixture_install(template, tool, "1.2.4");
@@ -9,11 +9,16 @@ fn write_probe(node: &Path, template: &Path, tool: &ManagedTool, script: &str) {
     write_fake_node_with_npm(node, template, 0);
     // Execute the staged fixture itself. Check the absolute entrypoint and
     // arguments so probing the old live tree or plain --version cannot pass.
+    let args_check = match tool.id {
+        "claude-acp" => "[ \"$2\" = --cli ] && [ \"$3\" = --version ]",
+        "codex-acp" => "[ \"$2\" = cli ] && [ \"$3\" = -V ]",
+        _ => panic!("missing probe fixture for {}", tool.id),
+    };
     write_shim(
         &node.join("bin"),
         "node",
         &format!(
-            "#!/bin/sh\ncase \"$1\" in /*) ;; *) exit 91 ;; esac\n[ \"$1\" -ef \"$PWD/node_modules/{}/dist/index.js\" ] || exit 91\n[ \"$2\" = --cli ] && [ \"$3\" = --version ] && [ $# = 3 ] || exit 92\nexec /bin/sh \"$@\"\n",
+            "#!/bin/sh\ncase \"$1\" in /*) ;; *) exit 91 ;; esac\n[ \"$1\" -ef \"$PWD/node_modules/{}/dist/index.js\" ] || exit 91\n{args_check} && [ $# = 3 ] || exit 92\nexec /bin/sh \"$@\"\n",
             tool.package
         ),
     )
@@ -21,85 +26,90 @@ fn write_probe(node: &Path, template: &Path, tool: &ManagedTool, script: &str) {
 }
 
 #[tokio::test]
-async fn complete_claude_promotes_the_validated_staging_tree() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("packages with spaces");
-    let node = root.join("node");
-    let tool = test_tool();
-    write_probe(
-        &node,
-        &dir.path().join("template"),
-        &tool,
-        "[ -z \"${CLAUDE_CODE_EXECUTABLE:-}\" ] || exit 93\n[ -z \"${NODE_OPTIONS:-}\" ] || exit 94\nread input && exit 95\necho validated > validated\necho '2.1.287 (Claude Code)'\n",
-    );
+async fn every_managed_tool_promotes_the_validated_staging_tree() {
+    for tool in MANAGED_TOOLS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages with spaces");
+        let node = root.join("node");
+        write_probe(
+            &node,
+            &dir.path().join("template"),
+            tool,
+            "[ -z \"${CLAUDE_CODE_EXECUTABLE:-}${CODEX_PATH:-}${NODE_OPTIONS:-}\" ] || exit 93\nread input && exit 95\necho validated > validated\necho 'native-cli 1.2.4'\n",
+        );
 
-    install_npm_tool(
-        &root,
-        &node,
-        TEST_NODE_VERSION,
-        &tool,
-        None,
-        TIMEOUT,
-        &|_| {},
-    )
-    .await
-    .unwrap();
+        install_npm_tool(
+            &root,
+            &node,
+            TEST_NODE_VERSION,
+            tool,
+            None,
+            TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap();
 
-    let live = tool_install_dir(&root, tool.id);
-    assert_eq!(
-        std::fs::read_to_string(live.join("validated")).unwrap(),
-        "validated\n"
-    );
-    assert_eq!(
-        installed_tool_version(&root, &tool).as_deref(),
-        Some("1.2.4")
-    );
-    assert_eq!(
-        read_state(&root).tools[tool.id].node_version,
-        TEST_NODE_VERSION
-    );
-    assert_eq!(
-        std::fs::read_to_string(shim_bin_dir(&root).join(tool.binary)).unwrap(),
-        shim_contents(&node_binary(&node), &npm_entrypoint(&live, tool.package))
-    );
-    assert!(!staging_install_dir(&root, tool.id).exists());
+        let live = tool_install_dir(&root, tool.id);
+        assert_eq!(
+            std::fs::read_to_string(live.join("validated")).unwrap(),
+            "validated\n"
+        );
+        assert_eq!(
+            installed_tool_version(&root, tool).as_deref(),
+            Some("1.2.4")
+        );
+        assert_eq!(
+            read_state(&root).tools[tool.id].node_version,
+            TEST_NODE_VERSION
+        );
+        assert_eq!(
+            std::fs::read_to_string(shim_bin_dir(&root).join(tool.binary)).unwrap(),
+            shim_contents(&node_binary(&node), &npm_entrypoint(&live, tool.package))
+        );
+        assert!(!staging_install_dir(&root, tool.id).exists());
+    }
 }
 
 #[tokio::test]
 async fn incomplete_first_install_creates_no_live_tree_shim_or_state() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("packages");
-    let node = root.join("node");
-    let tool = test_tool();
-    write_probe(&node, &dir.path().join("template"), &tool, MISSING_NATIVE);
+    for tool in MANAGED_TOOLS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages");
+        let node = root.join("node");
+        write_probe(&node, &dir.path().join("template"), tool, MISSING_NATIVE);
 
-    let error = install_npm_tool(
-        &root,
-        &node,
-        TEST_NODE_VERSION,
-        &tool,
-        None,
-        TIMEOUT,
-        &|_| {},
-    )
-    .await
-    .unwrap_err();
+        let error = install_npm_tool(
+            &root,
+            &node,
+            TEST_NODE_VERSION,
+            tool,
+            None,
+            TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
 
-    assert!(matches!(error, ManagedToolError::Incomplete(_)), "{error}");
-    assert!(!tool_install_dir(&root, tool.id).exists());
-    assert!(!shim_bin_dir(&root).join(tool.binary).exists());
-    assert!(!state_path(&root).exists());
-    assert!(!staging_install_dir(&root, tool.id).exists());
+        assert!(matches!(error, ManagedToolError::Incomplete(_)), "{error}");
+        assert!(!tool_install_dir(&root, tool.id).exists());
+        assert!(!shim_bin_dir(&root).join(tool.binary).exists());
+        assert!(!state_path(&root).exists());
+        assert!(!staging_install_dir(&root, tool.id).exists());
+    }
 }
 
 /// Every validation failure must preserve the old tree, shim and state before
 /// the reconcile epilogue records it. Use an old Node path to catch premature
 /// runtime migration as well as premature package promotion.
-async fn rejected_upgrade(script: &str, timeout: Duration) -> (tempfile::TempDir, String) {
+async fn rejected_upgrade(
+    tool: &ManagedTool,
+    script: &str,
+    timeout: Duration,
+) -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let (root, node, old_node) = write_node_bump_leftovers(dir.path());
-    let tool = test_tool();
-    write_installed_tool(&root, &old_node, &tool);
+    write_installed_tool(&root, &old_node, tool);
     let live = tool_install_dir(&root, tool.id);
     let entrypoint = npm_entrypoint(&live, tool.package);
     std::fs::write(&entrypoint, "echo '1.2.3'\n").unwrap();
@@ -112,14 +122,14 @@ async fn rejected_upgrade(script: &str, timeout: Duration) -> (tempfile::TempDir
     let shim = shim_bin_dir(&root).join(tool.binary);
     let shim_before = std::fs::read(&shim).unwrap();
     let state_before = std::fs::read(state_path(&root)).unwrap();
-    write_probe(&node, &dir.path().join("template"), &tool, script);
+    write_probe(&node, &dir.path().join("template"), tool, script);
     let lines = Mutex::new(Vec::new());
 
     let error = install_npm_tool(
         &root,
         &node,
         TEST_NODE_VERSION,
-        &tool,
+        tool,
         None,
         timeout,
         &|line| lines.lock().unwrap().push(line.to_string()),
@@ -131,7 +141,7 @@ async fn rejected_upgrade(script: &str, timeout: Duration) -> (tempfile::TempDir
     assert_eq!(std::fs::read(&shim).unwrap(), shim_before);
     assert_eq!(std::fs::read(state_path(&root)).unwrap(), state_before);
     assert_eq!(
-        installed_tool_version(&root, &tool).as_deref(),
+        installed_tool_version(&root, tool).as_deref(),
         Some("1.2.3")
     );
     let old_version = tokio::process::Command::new(&shim).output().await.unwrap();
@@ -149,47 +159,59 @@ async fn rejected_upgrade(script: &str, timeout: Duration) -> (tempfile::TempDir
 
 #[tokio::test]
 async fn missing_native_binary_preserves_live_install_and_partial_reconcile_runtime() {
-    let (dir, error) = rejected_upgrade(MISSING_NATIVE, TIMEOUT).await;
-    assert!(error.contains("--cli --version"), "{error}");
-    assert!(error.contains("Claude native binary not found"), "{error}");
-    let root = dir.path().join("packages");
-    let node = managed_node::pinned_install_dir(&root.join("node")).unwrap();
-    let codex = MANAGED_TOOLS[1];
-    let template = dir.path().join("codex-template");
-    write_probe(&node, &template, &codex, "exit 99\n");
-    // The next tool still installs; Codex must not run Claude's probe.
-    install_npm_tool(
-        &root,
-        &node,
-        TEST_NODE_VERSION,
-        &codex,
-        None,
-        TIMEOUT,
-        &|_| {},
-    )
-    .await
-    .unwrap();
-    finish_reconcile_at(&root, MANAGED_TOOLS, vec![format!("claude-acp: {error}")]).await;
+    for tool in MANAGED_TOOLS {
+        let (dir, error) = rejected_upgrade(tool, MISSING_NATIVE, TIMEOUT).await;
+        assert!(error.contains(tool.package), "{error}");
+        assert!(error.contains("native binary not found"), "{error}");
+        let root = dir.path().join("packages");
+        let node = managed_node::pinned_install_dir(&root.join("node")).unwrap();
+        // Other tools still install and validate when one fails.
+        for other in MANAGED_TOOLS.iter().filter(|other| other.id != tool.id) {
+            let template = dir.path().join(format!("{}-template", other.id));
+            write_probe(&node, &template, other, "exit 0\n");
+            install_npm_tool(
+                &root,
+                &node,
+                TEST_NODE_VERSION,
+                other,
+                None,
+                TIMEOUT,
+                &|_| {},
+            )
+            .await
+            .unwrap();
+        }
+        finish_reconcile_at(&root, MANAGED_TOOLS, vec![format!("{}: {error}", tool.id)]).await;
 
-    let state = read_state(&root);
-    let record = state.last_reconcile.unwrap();
-    assert!(!record.ok);
-    assert_eq!(record.errors, vec![format!("claude-acp: {error}")]);
-    assert_eq!(state.tools["claude-acp"].version, "1.2.3");
-    assert_eq!(state.tools["codex-acp"].version, "1.2.4");
-    assert!(root.join("node/v0.0.1/plat/bin/node").exists());
+        let state = read_state(&root);
+        let record = state.last_reconcile.unwrap();
+        assert!(!record.ok);
+        assert_eq!(record.errors, vec![format!("{}: {error}", tool.id)]);
+        for managed in MANAGED_TOOLS {
+            assert_eq!(
+                state.tools[managed.id].version,
+                if managed.id == tool.id {
+                    "1.2.3"
+                } else {
+                    "1.2.4"
+                }
+            );
+        }
+        assert!(root.join("node/v0.0.1/plat/bin/node").exists());
+    }
 }
 
 #[tokio::test]
-async fn personal_claude_override_cannot_mask_missing_native_binary() {
+async fn personal_overrides_cannot_mask_missing_native_binary() {
     // Give only an isolated test subprocess the override: mutating this test
     // runner's environment would race other parallel tests.
-    const MARKER: &str = "STAGED_TEST_CLAUDE_VALIDATION";
+    const MARKER: &str = "STAGED_TEST_ACP_VALIDATION";
     if std::env::var_os(MARKER).is_none() {
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "managed_acp_tools::tests::validation::personal_claude_override_cannot_mask_missing_native_binary", "--nocapture"])
+            .args(["--exact", "managed_acp_tools::tests::validation::personal_overrides_cannot_mask_missing_native_binary", "--nocapture"])
             .env(MARKER, "1")
             .env("CLAUDE_CODE_EXECUTABLE", "/bin/true")
+            .env("CODEX_PATH", "/bin/true")
             .env("NODE_OPTIONS", "--invalid-node-option")
             .output()
             .await
@@ -207,11 +229,15 @@ async fn personal_claude_override_cannot_mask_missing_native_binary() {
         std::env::var("CLAUDE_CODE_EXECUTABLE").unwrap(),
         "/bin/true"
     );
-    let (_, error) = rejected_upgrade(
-        &format!("[ -n \"${{CLAUDE_CODE_EXECUTABLE:-}}\" ] && exit 0\n[ -n \"${{NODE_OPTIONS:-}}\" ] && exit 0\n{MISSING_NATIVE}"),
-        TIMEOUT,
-    ).await;
-    assert!(error.contains("Claude native binary not found"), "{error}");
+    assert_eq!(std::env::var("CODEX_PATH").unwrap(), "/bin/true");
+    for tool in MANAGED_TOOLS {
+        let (_, error) = rejected_upgrade(
+            tool,
+            &format!("[ -n \"${{CLAUDE_CODE_EXECUTABLE:-}}${{CODEX_PATH:-}}${{NODE_OPTIONS:-}}\" ] && exit 0\n{MISSING_NATIVE}"),
+            TIMEOUT,
+        ).await;
+        assert!(error.contains("native binary not found"), "{error}");
+    }
 }
 
 // Model the real Node bridge: keep a distinct native child that inherits the
@@ -266,17 +292,20 @@ async fn assert_probe_tree_stopped(pids: &[i32]) {
 }
 
 async fn timeout_preserves_install_and_kills_tree(bridge_exit: &str) {
-    let started = Instant::now();
-    let (dir, error) = rejected_upgrade(
-        &format!("{HANGING_NATIVE}{bridge_exit}\n"),
-        Duration::from_secs(1),
-    )
-    .await;
-    let pids = probe_pids(&dir.path().join("packages")).await;
-    assert_probe_tree_stopped(&pids).await;
-    assert!(error.contains("timed out after 1 seconds"), "{error}");
-    assert!(error.contains("waiting for native CLI"), "{error}");
-    assert!(started.elapsed() < Duration::from_secs(10));
+    for tool in MANAGED_TOOLS {
+        let started = Instant::now();
+        let (dir, error) = rejected_upgrade(
+            tool,
+            &format!("{HANGING_NATIVE}{bridge_exit}\n"),
+            Duration::from_secs(1),
+        )
+        .await;
+        let pids = probe_pids(&dir.path().join("packages")).await;
+        assert_probe_tree_stopped(&pids).await;
+        assert!(error.contains("timed out after 1 seconds"), "{error}");
+        assert!(error.contains("waiting for native CLI"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 }
 
 #[tokio::test]
@@ -291,32 +320,72 @@ async fn timeout_kills_native_child_after_bridge_exits_with_open_pipes() {
 
 #[tokio::test]
 async fn cancellation_kills_bridge_and_native_child() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("packages");
-    let node = root.join("node");
-    let tool = test_tool();
-    let staging = staging_install_dir(&root, tool.id);
-    write_probe(&node, &staging, &tool, &format!("{HANGING_NATIVE}wait\n"));
-    let probe = tokio::spawn(async move {
-        super::super::validation::validate_staged_tool(&node, &staging, &tool, TIMEOUT).await
-    });
-    let pids = probe_pids(&root).await;
-    probe.abort();
-    assert!(probe.await.unwrap_err().is_cancelled());
-    assert_probe_tree_stopped(&pids).await;
+    for &tool in MANAGED_TOOLS {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("packages");
+        let node = root.join("node");
+        let staging = staging_install_dir(&root, tool.id);
+        write_probe(&node, &staging, &tool, &format!("{HANGING_NATIVE}wait\n"));
+        let probe = tokio::spawn(async move {
+            super::super::validation::validate_staged_tool(&node, &staging, &tool, TIMEOUT).await
+        });
+        let pids = probe_pids(&root).await;
+        probe.abort();
+        assert!(probe.await.unwrap_err().is_cancelled());
+        assert_probe_tree_stopped(&pids).await;
+    }
 }
 
 #[tokio::test]
 async fn verbose_failure_keeps_bounded_stdout_and_stderr_diagnostics() {
-    let (_, error) = rejected_upgrade(
-        "echo 'native binary missing' >&2\ni=0\nwhile [ $i -lt 5000 ]; do echo 'diagnostic output'; echo 'diagnostic error' >&2; i=$((i + 1)); done\nexit 1\n",
+    for tool in MANAGED_TOOLS {
+        let (_, error) = rejected_upgrade(
+            tool,
+            "echo 'native binary missing' >&2\ni=0\nwhile [ $i -lt 5000 ]; do echo 'diagnostic output'; echo 'diagnostic error' >&2; i=$((i + 1)); done\nexit 1\n",
+            TIMEOUT,
+        ).await;
+        assert!(error.contains("stderr: native binary missing"), "{error}");
+        assert!(error.contains("stdout: diagnostic output"), "{error}");
+        assert!(
+            error.len() < 4500,
+            "diagnostics were not bounded: {}",
+            error.len()
+        );
+    }
+}
+
+#[tokio::test]
+async fn new_managed_tool_cannot_silently_skip_validation() {
+    let tool = ManagedTool {
+        id: "future-acp",
+        binary: "future-acp",
+        package: "@example/future-acp",
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let node = dir.path().join("node");
+    let template = dir.path().join("template");
+    write_fixture_install(&template, &tool, "1.2.4");
+    write_fake_node_with_npm(&node, &template, 0);
+    let error = install_npm_tool(
+        dir.path(),
+        &node,
+        TEST_NODE_VERSION,
+        &tool,
+        None,
         TIMEOUT,
-    ).await;
-    assert!(error.contains("stderr: native binary missing"), "{error}");
-    assert!(error.contains("stdout: diagnostic output"), "{error}");
+        &|_| {},
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, ManagedToolError::Incomplete(_)), "{error}");
     assert!(
-        error.len() < 4500,
-        "diagnostics were not bounded: {}",
-        error.len()
+        error
+            .to_string()
+            .contains("no post-install runtime validation"),
+        "{error}"
     );
+    assert!(!tool_install_dir(dir.path(), tool.id).exists());
+    assert!(!staging_install_dir(dir.path(), tool.id).exists());
+    assert!(!shim_bin_dir(dir.path()).join(tool.binary).exists());
+    assert!(!state_path(dir.path()).exists());
 }

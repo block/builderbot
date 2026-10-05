@@ -11,8 +11,9 @@
 //! - **Managed bridges** (`tools/<id>/` + `bin/`): the claude/codex ACP
 //!   bridges in [`MANAGED_TOOLS`]. [`install_managed_tool`] installs — or
 //!   upgrades — each to the latest published version with a floating
-//!   `npm install <pkg>@latest --prefix` on the managed runtime, writes an
-//!   absolute-path shim into `bin/` (no host `node` on PATH required), and
+//!   `npm install <pkg>@latest --prefix` on the managed runtime, validates
+//!   the staged native CLI before promotion, writes an absolute-path shim
+//!   into `bin/` (no host `node` on PATH required), and
 //!   records the installed version in `state.json`. The startup reconciler
 //!   (`acp_tools_reconciler`) runs this for every managed bridge on launch,
 //!   so a new bridge release ships to users the next time Staged starts.
@@ -247,6 +248,7 @@ pub struct ManagedTool {
 /// The ACP bridges Staged installs and upgrades on every launch. Both vendor
 /// their agent's full CLI (Claude Code, `codex`) inside the npm package, so
 /// no separate main-CLI install is needed.
+/// Each entry must have a runtime probe in [`validation::validate_staged_tool`].
 pub const MANAGED_TOOLS: &[ManagedTool] = &[
     ManagedTool {
         id: "claude-acp",

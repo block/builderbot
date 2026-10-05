@@ -20,6 +20,7 @@
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
+  import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
@@ -488,6 +489,8 @@
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
+                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
+                  <ContextMenu.Separator />
                   <ContextMenu.Item
                     disabled={status.kind === 'deleting'}
                     onSelect={() => projectActions.markProjectUnread(project)}

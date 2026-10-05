@@ -1,14 +1,16 @@
 /**
- * Shared project context-menu actions: mark unread and remove project.
+ * Shared project context-menu actions: set status, mark unread and remove
+ * project.
  *
  * ProjectHome (top-bar button + ⌘⌫ shortcut), ProjectsList (card context
  * menu), and ProjectsSidebar (row context menu, rendered from App.svelte on
- * both the project and repos routes) all expose the same two actions. This
- * module owns the orchestration — the safe-to-delete check, the
- * pending-confirmation state behind the shared dialog (ProjectDeleteDialog,
- * mounted once in App.svelte), and the delete lifecycle against the
- * projectsData store — so the flow behaves identically on every route
- * instead of each view carrying its own copy.
+ * both the project and repos routes) all expose mark unread and remove. Set
+ * status backs both context menus' Set Status submenu and the detail page's
+ * status picker. This module owns the orchestration — the optimistic status
+ * write, the safe-to-delete check, the pending-confirmation state behind the
+ * shared dialog (ProjectDeleteDialog, mounted once in App.svelte), and the
+ * delete lifecycle against the projectsData store — so the flow behaves
+ * identically on every route instead of each view carrying its own copy.
  */
 
 import { toast } from 'svelte-sonner';
@@ -32,6 +34,30 @@ class ProjectActionsController {
   markProjectUnread(project: Project): void {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
     projectStateStore.markAsUnread(project.id);
+  }
+
+  /**
+   * Choose a status option for a project, or null to go back to Default (the
+   * computed PR/cloud status). Patches the project store at once so every
+   * surface repaints; the project-changed refetch then confirms, and a failed
+   * write rolls the patch back.
+   */
+  async setProjectStatusOverride(project: Project, statusOverride: string | null): Promise<void> {
+    if (projectsDataStore.isProjectDeleting(project.id)) return;
+    // A dangling id already reads as Default; choosing Default clears it too.
+    if (statusOverride === project.statusOverride) return;
+
+    const projectId = project.id;
+    const previous = project.statusOverride;
+    projectsDataStore.projectStatusOverrideChanged(projectId, statusOverride);
+    try {
+      await commands.setProjectStatusOverride(projectId, statusOverride);
+    } catch (e) {
+      projectsDataStore.projectStatusOverrideChanged(projectId, previous);
+      toast.error('Unable to set project status', {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   /**

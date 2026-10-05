@@ -5,30 +5,27 @@
   ProjectStatusIcon) and opens a menu to pick one of the configured status
   options, or Default to go back to the computed PR/cloud status. The Default
   row previews that computed status, so the user sees what they'd fall back
-  to. The option list itself is edited in Settings > General.
+  to. The option list itself is edited in Settings > General. The sidebar and
+  grid context menus offer the same choices through ProjectStatusSubmenu.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Settings2 from '@lucide/svelte/icons/settings-2';
-  import { toast } from 'svelte-sonner';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-  import * as commands from '../../api/commands';
   import type { Branch, Project } from '../../types';
-  import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { openSettings } from '../layout/navigation.svelte';
   import { preferences } from '../settings/preferences.svelte';
   import ComputedProjectStatusIcon from './ComputedProjectStatusIcon.svelte';
   import ProjectStatusOptionIcon from './ProjectStatusOptionIcon.svelte';
+  import { projectActions } from './projectActions.svelte';
   import {
+    DEFAULT_STATUS_MENU_VALUE,
     PROJECT_STATUS_COLOR_VARS,
     computedStatusLabel,
     findProjectStatusOverride,
     projectStatusOptionLabel,
     resolveComputedProjectStatus,
   } from './projectStatusDisplay';
-
-  /** Radio value for Default; option ids are slugs or UUIDs, so it can't clash. */
-  const DEFAULT_VALUE = '__default__';
 
   interface Props {
     project: Project;
@@ -43,22 +40,9 @@
   let computed = $derived(resolveComputedProjectStatus(project, branches));
   let computedLabel = $derived(computedStatusLabel(computed));
 
-  async function handleValueChange(value: string) {
-    const next = value === DEFAULT_VALUE ? null : value;
-    // A dangling id already reads as Default; choosing Default clears it too.
-    if (next === project.statusOverride) return;
-
-    const projectId = project.id;
-    const previous = project.statusOverride;
-    projectsDataStore.projectStatusOverrideChanged(projectId, next);
-    try {
-      await commands.setProjectStatusOverride(projectId, next);
-    } catch (e) {
-      projectsDataStore.projectStatusOverrideChanged(projectId, previous);
-      toast.error('Unable to set project status', {
-        description: e instanceof Error ? e.message : String(e),
-      });
-    }
+  function handleValueChange(value: string) {
+    const next = value === DEFAULT_STATUS_MENU_VALUE ? null : value;
+    void projectActions.setProjectStatusOverride(project, next);
   }
 </script>
 
@@ -78,12 +62,12 @@
     {/if}
     <ChevronDown size={12} class="pill-chevron" />
   </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="start" sideOffset={4} class="min-w-[200px]">
+  <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
     <DropdownMenu.RadioGroup
-      value={override?.id ?? DEFAULT_VALUE}
-      onValueChange={(value) => void handleValueChange(value)}
+      value={override?.id ?? DEFAULT_STATUS_MENU_VALUE}
+      onValueChange={handleValueChange}
     >
-      <DropdownMenu.RadioItem value={DEFAULT_VALUE}>
+      <DropdownMenu.RadioItem value={DEFAULT_STATUS_MENU_VALUE}>
         <ComputedProjectStatusIcon status={computed} size={14} />
         <span class="flex min-w-0 flex-col">
           <span>Default</span>

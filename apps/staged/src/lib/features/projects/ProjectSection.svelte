@@ -721,15 +721,17 @@
     background-color: var(--bg-primary);
   }
 
+  /* The title takes the free space, so the status picker sits at the right
+     edge; a long title wraps within its column instead of pushing it down. */
   .project-title-row {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 6px 12px;
+    gap: 12px;
     min-width: 0;
   }
 
   .project-title {
+    flex: 1 1 auto;
     min-width: 0;
     margin: 0;
     color: var(--text-primary);

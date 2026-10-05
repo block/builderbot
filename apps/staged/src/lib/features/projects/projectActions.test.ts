@@ -81,6 +81,8 @@ let navigationState: { selectedProjectId: string | null };
 let projectDeleteStarted: ReturnType<typeof vi.fn>;
 let projectDeleteFailed: ReturnType<typeof vi.fn>;
 let ensureProjectHydrated: ReturnType<typeof vi.fn>;
+let setProjectStatusOverride: ReturnType<typeof vi.fn>;
+let projectStatusOverrideChanged: ReturnType<typeof vi.fn>;
 
 /** Mutable backing state for the mocked projectsDataStore. */
 let storeState: {
@@ -114,6 +116,8 @@ beforeEach(() => {
   projectDeleteFailed = vi.fn();
   // Default: the project is already hydrated, so ensuring it is a no-op.
   ensureProjectHydrated = vi.fn().mockResolvedValue(undefined);
+  setProjectStatusOverride = vi.fn().mockResolvedValue(undefined);
+  projectStatusOverrideChanged = vi.fn();
 
   storeState = {
     projects: [project()],
@@ -125,6 +129,7 @@ beforeEach(() => {
   vi.doMock('../../api/commands', () => ({
     deleteProject,
     hasUnpushedCommits,
+    setProjectStatusOverride,
   }));
   vi.doMock('../layout/navigation.svelte', () => ({
     navigation: navigationState,
@@ -156,6 +161,7 @@ beforeEach(() => {
       ensureProjectHydrated,
       projectDeleteStarted,
       projectDeleteFailed,
+      projectStatusOverrideChanged,
     },
   }));
   vi.doMock('../../stores/projectState.svelte', () => ({
@@ -197,6 +203,54 @@ describe('markProjectUnread', () => {
     const actions = await importActions();
     actions.markProjectUnread(project());
     expect(markAsUnread).not.toHaveBeenCalled();
+  });
+});
+
+describe('setProjectStatusOverride', () => {
+  it('patches the store before writing the chosen status', async () => {
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project(), 'blocked');
+    expect(projectStatusOverrideChanged).toHaveBeenCalledWith('p1', 'blocked');
+    expect(setProjectStatusOverride).toHaveBeenCalledWith('p1', 'blocked');
+    expect(projectStatusOverrideChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      setProjectStatusOverride.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('clears the override when going back to Default', async () => {
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project({ statusOverride: 'done' }), null);
+    expect(projectStatusOverrideChanged).toHaveBeenCalledWith('p1', null);
+    expect(setProjectStatusOverride).toHaveBeenCalledWith('p1', null);
+  });
+
+  it('no-ops when the status is unchanged', async () => {
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project({ statusOverride: 'done' }), 'done');
+    await actions.setProjectStatusOverride(project(), null);
+    expect(projectStatusOverrideChanged).not.toHaveBeenCalled();
+    expect(setProjectStatusOverride).not.toHaveBeenCalled();
+  });
+
+  it('ignores projects that are being deleted', async () => {
+    storeState.deletingProjectNames.set('p1', 'Alpha');
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project(), 'blocked');
+    expect(projectStatusOverrideChanged).not.toHaveBeenCalled();
+    expect(setProjectStatusOverride).not.toHaveBeenCalled();
+  });
+
+  it('rolls back and surfaces a failed write', async () => {
+    setProjectStatusOverride.mockRejectedValueOnce(new Error('db locked'));
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project({ statusOverride: 'done' }), 'blocked');
+    expect(projectStatusOverrideChanged.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+    ]);
+    expect(toastError).toHaveBeenCalledWith('Unable to set project status', {
+      description: 'db locked',
+    });
   });
 });
 

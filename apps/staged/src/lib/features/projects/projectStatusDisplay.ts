@@ -57,6 +57,12 @@ export const DEFAULT_PROJECT_STATUS_OPTIONS: ProjectStatusOption[] = [
 export const NEW_PROJECT_STATUS_ICON = 'circle-dot';
 
 /**
+ * Radio value for Default in the status menus (the detail-page picker and the
+ * context-menu submenu); option ids are slugs or UUIDs, so it can't clash.
+ */
+export const DEFAULT_STATUS_MENU_VALUE = '__default__';
+
+/**
  * Whether an option list is exactly the built-in defaults, in order. Used to
  * tell a no-op "Reset to defaults" from one that would discard user changes.
  */

@@ -27,8 +27,11 @@ class ProjectActionsController {
   /** Project awaiting the user's answer in the shared confirmation dialog. */
   private _pendingDelete = $state<Project | null>(null);
 
-  /** Only the latest status write for a project may roll back its optimistic patch. */
-  private readonly statusOverrideWrites = new Map<string, symbol>();
+  /** Each project's queue tail resolves to its last successfully persisted status. */
+  private readonly statusOverrideWrites = new Map<
+    string,
+    { statusOverride: string | null; settled: Promise<string | null> }
+  >();
 
   get pendingDelete(): Project | null {
     return this._pendingDelete;
@@ -42,31 +45,40 @@ class ProjectActionsController {
   /**
    * Choose a status option for a project, or null to go back to Default (the
    * computed PR/cloud status). Patches the project store at once so every
-   * surface repaints; the project-changed refetch then confirms, and a failed
-   * write rolls the patch back only if no newer selection has superseded it.
+   * surface repaints. Writes run in selection order for each project, and a
+   * failed write rolls back to the last confirmed status only if no newer
+   * selection has superseded it.
    */
   async setProjectStatusOverride(project: Project, statusOverride: string | null): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
-    // A dangling id already reads as Default; choosing Default clears it too.
-    if (statusOverride === project.statusOverride) return;
-
     const projectId = project.id;
-    const previous = project.statusOverride;
-    // Unique even after a newer request completes and clears the map entry.
-    const write = Symbol();
-    this.statusOverrideWrites.set(projectId, write);
+    const pending = this.statusOverrideWrites.get(projectId);
+    // A dangling id already reads as Default; choosing Default clears it too.
+    // A refetch may show an earlier status while newer choices are queued.
+    if (statusOverride === (pending ? pending.statusOverride : project.statusOverride)) return;
+
+    const previous = pending?.settled ?? Promise.resolve(project.statusOverride);
+    const settled: Promise<string | null> = previous.then(async (confirmedStatus) => {
+      try {
+        await commands.setProjectStatusOverride(projectId, statusOverride);
+        return statusOverride;
+      } catch (e) {
+        if (this.statusOverrideWrites.get(projectId)?.settled === settled) {
+          projectsDataStore.projectStatusOverrideChanged(projectId, confirmedStatus);
+        }
+        toast.error('Unable to set project status', {
+          description: e instanceof Error ? e.message : String(e),
+        });
+        // Let later choices proceed, retaining a truthful rollback target.
+        return confirmedStatus;
+      }
+    });
+    this.statusOverrideWrites.set(projectId, { statusOverride, settled });
     projectsDataStore.projectStatusOverrideChanged(projectId, statusOverride);
     try {
-      await commands.setProjectStatusOverride(projectId, statusOverride);
-    } catch (e) {
-      if (this.statusOverrideWrites.get(projectId) === write) {
-        projectsDataStore.projectStatusOverrideChanged(projectId, previous);
-      }
-      toast.error('Unable to set project status', {
-        description: e instanceof Error ? e.message : String(e),
-      });
+      await settled;
     } finally {
-      if (this.statusOverrideWrites.get(projectId) === write) {
+      if (this.statusOverrideWrites.get(projectId)?.settled === settled) {
         this.statusOverrideWrites.delete(projectId);
       }
     }

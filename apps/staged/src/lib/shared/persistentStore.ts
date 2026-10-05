@@ -13,7 +13,13 @@
  * The store is saved to `~/.staged/preferences.json` in both modes.
  */
 
-import { isTauri, invokeCommand } from '../transport';
+import {
+  isTauri,
+  invokeCommand,
+  listenToEvent,
+  type ListenOptions,
+  type UnlistenFn,
+} from '../transport';
 
 // ---------------------------------------------------------------------------
 // Tauri store backend
@@ -39,6 +45,7 @@ interface WebStoreBackend {
 type StoreBackend = TauriStoreBackend | WebStoreBackend | null;
 
 let backend: StoreBackend = null;
+let storePath: string | undefined;
 
 /**
  * Initialize the persistent store.
@@ -47,8 +54,8 @@ let backend: StoreBackend = null;
 export async function initPersistentStore(): Promise<void> {
   if (backend) return;
 
+  storePath = await invokeCommand<string>('preferences_store_path');
   if (isTauri) {
-    const storePath = await invokeCommand<string>('preferences_store_path');
     const { load } = await import('@tauri-apps/plugin-store');
     const store = await load(storePath, {
       defaults: {},
@@ -59,6 +66,23 @@ export async function initPersistentStore(): Promise<void> {
   } else {
     backend = { kind: 'web' };
   }
+}
+
+/** Listen for a preference changing in any client, including deletion. */
+export function listenToStoreKeyChange(
+  key: string,
+  callback: (value: unknown) => void,
+  options?: ListenOptions
+): UnlistenFn {
+  return listenToEvent<{ path: string; key: string; value: unknown; exists: boolean }>(
+    'store://change',
+    (event) => {
+      if (event.path === storePath && event.key === key) {
+        callback(event.exists ? event.value : undefined);
+      }
+    },
+    options
+  );
 }
 
 /**

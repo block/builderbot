@@ -29,6 +29,7 @@ pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
 pub(crate) mod pikchr_validation;
 pub mod pr_poll_scheduler;
+mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
 pub mod prs;
@@ -2191,6 +2192,9 @@ pub fn run() {
             // so the web server and event emitters can access it.
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
+            if let Some(path) = preferences_store_path_buf() {
+                preference_events::forward_to_web(app.handle(), path, event_tx.clone());
+            }
 
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.

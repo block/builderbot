@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_util::sync::CancellationToken;
 
 use super::{node_binary, npm_entrypoint, ManagedTool, ManagedToolError};
 
@@ -50,15 +51,36 @@ async fn validate_claude(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     for key in ["HOME", "TMPDIR", "TMP", "TEMP"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
         }
     }
 
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| incomplete(format!("could not start: {error}")))?;
+    // Keep cleanup alive if the caller drops this validation future. The
+    // supervisor owns the child and kills its whole group before reaping it.
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    tokio::spawn(supervise_probe(child, timeout, cancel))
+        .await
+        .map_err(|error| incomplete(format!("could not supervise probe: {error}")))?
+        .map_err(incomplete)
+}
+
+async fn supervise_probe(
+    mut child: tokio::process::Child,
+    timeout: Duration,
+    cancel: CancellationToken,
+) -> Result<(), String> {
+    // Cache the group ID before wait() reaps the bridge: its native child can
+    // still be alive and holding stdout/stderr open after the bridge exits.
+    #[cfg(unix)]
+    let pgid = child.id().expect("newly spawned probe has a PID") as libc::pid_t;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut out = Vec::new();
@@ -66,31 +88,39 @@ async fn validate_claude(
     // Bound the whole probe, including pipe reads: a subprocess holding a pipe
     // open must not wedge installs or Update all. Keep only a small excerpt,
     // but drain both streams concurrently so verbose failures cannot deadlock.
-    let result = tokio::time::timeout(timeout, async {
-        tokio::try_join!(
-            child.wait(),
-            capture_excerpt(&mut stdout, &mut out),
-            capture_excerpt(&mut stderr, &mut err),
-        )
-    })
-    .await;
-    let reason = match result {
-        Ok(Ok((status, (), ()))) if status.success() => return Ok(()),
-        Ok(Ok((status, (), ()))) => format!("exited with {status}"),
-        Ok(Err(error)) => {
-            let _ = child.kill().await;
-            format!("could not complete: {error}")
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            format!("timed out after {} seconds", timeout.as_secs_f64())
-        }
+    let reason = tokio::select! {
+        result = tokio::time::timeout(timeout, async {
+            tokio::try_join!(
+                child.wait(),
+                capture_excerpt(&mut stdout, &mut out),
+                capture_excerpt(&mut stderr, &mut err),
+            )
+        }) => match result {
+            Ok(Ok((status, (), ()))) if status.success() => return Ok(()),
+            Ok(Ok((status, (), ()))) => format!("exited with {status}"),
+            Ok(Err(error)) => format!("could not complete: {error}"),
+            Err(_) => format!("timed out after {} seconds", timeout.as_secs_f64()),
+        },
+        _ = cancel.cancelled() => "was cancelled".to_string(),
     };
-    Err(incomplete(format!(
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(2) takes no pointers; the negative PID targets only the
+        // process group created for this probe, including the native CLI.
+        if unsafe { libc::kill(-pgid, libc::SIGKILL) } == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                log::warn!("failed to kill Claude validation process group {pgid}: {error}");
+            }
+        }
+    }
+    // Reap the bridge (and retain child-only cleanup on non-Unix targets).
+    let _ = child.kill().await;
+    Err(format!(
         "{reason}{}{}",
         diagnostic("stderr", &err),
         diagnostic("stdout", &out),
-    )))
+    ))
 }
 
 async fn capture_excerpt(

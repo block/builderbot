@@ -214,28 +214,96 @@ async fn personal_claude_override_cannot_mask_missing_native_binary() {
     assert!(error.contains("Claude native binary not found"), "{error}");
 }
 
-#[tokio::test]
-async fn timeout_kills_probe_and_preserves_previous_install() {
+// Model the real Node bridge: keep a distinct native child that inherits the
+// output pipes, and record both PIDs only after spawning it.
+const HANGING_NATIVE: &str =
+    "/bin/sleep 60 &\necho \"$$ $!\" > ../../validation-pids\necho 'waiting for native CLI' >&2\n";
+
+async fn probe_pids(root: &Path) -> Vec<i32> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(contents) = tokio::fs::read_to_string(root.join("validation-pids")).await {
+                let pids: Vec<i32> = contents
+                    .split_whitespace()
+                    .map(|pid| pid.parse().unwrap())
+                    .collect();
+                if pids.len() == 2 {
+                    return pids;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("probe did not spawn its native child")
+}
+
+async fn assert_probe_tree_stopped(pids: &[i32]) {
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if pids.iter().all(|&pid| {
+                // Signal 0 only checks existence; allow asynchronous reaping
+                // of the native grandchild by the OS after the group is killed.
+                (unsafe { libc::kill(pid, 0) }) == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            }) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if stopped.is_err() {
+        // Do not leave a hanging fixture behind when this regression fails.
+        for &pid in pids {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+    assert!(
+        stopped.is_ok(),
+        "probe processes survived cleanup: {pids:?}"
+    );
+}
+
+async fn timeout_preserves_install_and_kills_tree(bridge_exit: &str) {
     let started = Instant::now();
     let (dir, error) = rejected_upgrade(
-        "echo $$ > ../../validation-pid\necho 'waiting for native CLI' >&2\nexec /bin/sleep 60\n",
+        &format!("{HANGING_NATIVE}{bridge_exit}\n"),
         Duration::from_secs(1),
     )
     .await;
+    let pids = probe_pids(&dir.path().join("packages")).await;
+    assert_probe_tree_stopped(&pids).await;
     assert!(error.contains("timed out after 1 seconds"), "{error}");
     assert!(error.contains("waiting for native CLI"), "{error}");
     assert!(started.elapsed() < Duration::from_secs(10));
-    let pid = std::fs::read_to_string(dir.path().join("packages/validation-pid"))
-        .unwrap()
-        .trim()
-        .parse::<i32>()
-        .unwrap();
-    // Signal 0 only checks existence; the timed-out child must be reaped.
-    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
+}
+
+#[tokio::test]
+async fn timeout_kills_bridge_and_native_child_and_preserves_previous_install() {
+    timeout_preserves_install_and_kills_tree("wait").await;
+}
+
+#[tokio::test]
+async fn timeout_kills_native_child_after_bridge_exits_with_open_pipes() {
+    timeout_preserves_install_and_kills_tree("exit 0").await;
+}
+
+#[tokio::test]
+async fn cancellation_kills_bridge_and_native_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("packages");
+    let node = root.join("node");
+    let tool = test_tool();
+    let staging = staging_install_dir(&root, tool.id);
+    write_probe(&node, &staging, &tool, &format!("{HANGING_NATIVE}wait\n"));
+    let probe = tokio::spawn(async move {
+        super::super::validation::validate_staged_tool(&node, &staging, &tool, TIMEOUT).await
+    });
+    let pids = probe_pids(&root).await;
+    probe.abort();
+    assert!(probe.await.unwrap_err().is_cancelled());
+    assert_probe_tree_stopped(&pids).await;
 }
 
 #[tokio::test]

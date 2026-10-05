@@ -206,7 +206,7 @@ describe('doctor store', () => {
   });
 
   it('keeps Update all failures visible after re-checking and continues the remaining updates', async () => {
-    const { doctorState, updateAll, runChecks } = await load();
+    const { doctorState, updateAll, updateCheck, runChecks, hasActionableUpdate } = await load();
     const report = { checks: [managedClaude('0.16.2', '0.17.0'), amp()] };
     doctorState.report = report;
     const error = 'installed ACP bridge is incomplete: Claude native binary not found';
@@ -220,18 +220,55 @@ describe('doctor store', () => {
         ['ai-agent-amp', 'updateMain', 'brew upgrade ampcode'],
         ['ai-agent-amp', 'updateBridge', 'npm install -g amp-acp@latest'],
       ]);
-      expect(doctorState.updateAllErrors).toEqual([`Claude Code: ${error}`]);
+      expect(doctorState.updateAllErrors).toEqual({ 'ai-agent-claude': `Claude Code: ${error}` });
       expect(doctorState.updating).toEqual([]);
       expect(doctorState.updatingAll).toBe(false);
 
       runDoctor.mockResolvedValueOnce(report);
       runDoctorFreshness.mockResolvedValueOnce(report);
       await runChecks();
-      expect(doctorState.updateAllErrors).toEqual([`Claude Code: ${error}`]);
+      expect(doctorState.updateAllErrors).toEqual({ 'ai-agent-claude': `Claude Code: ${error}` });
 
-      // A successful retry clears the previous batch's errors.
+      // The alert recommends individual retries. Once they succeed, no Update
+      // all button remains to clear a stale error after rescanning/reopening.
+      await updateCheck(report.checks[0]);
+      const current = { checks: [managedClaude('0.17.0', '0.17.0')] };
+      runDoctor.mockResolvedValueOnce(current);
+      runDoctorFreshness.mockResolvedValueOnce(current);
+      await runChecks();
+      await flush();
+      expect(doctorState.report!.checks.some(hasActionableUpdate)).toBe(false);
+      expect(doctorState.updateAllErrors).toEqual({});
+    } finally {
+      logError.mockRestore();
+    }
+  });
+
+  it('clears only the retried check after all its updates succeed', async () => {
+    const { doctorState, updateAll, updateCheck } = await load();
+    const claude = managedClaude('0.16.2', '0.17.0');
+    const other = amp();
+    // Labels need not be unique; errors must be associated with check IDs.
+    other.label = claude.label;
+    doctorState.report = { checks: [claude, other] };
+    runDoctorUpdate.mockRejectedValueOnce('Claude failed').mockRejectedValueOnce('Amp failed');
+    const logError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
       await updateAll();
-      expect(doctorState.updateAllErrors).toEqual([]);
+      const errors = { ...doctorState.updateAllErrors };
+      expect(Object.keys(errors)).toEqual([claude.id, other.id]);
+
+      // A no-op or a partially successful retry must retain both errors.
+      expect(await updateCheck(managedClaude('0.17.0', '0.17.0'))).toBe(false);
+      runDoctorUpdate.mockResolvedValueOnce(undefined).mockRejectedValueOnce('Bridge failed');
+      await expect(updateCheck(other)).rejects.toBe('Bridge failed');
+      expect(doctorState.updateAllErrors).toEqual(errors);
+
+      await updateCheck(other);
+      expect(doctorState.updateAllErrors).toEqual({ [claude.id]: errors[claude.id] });
+
+      await updateAll();
+      expect(doctorState.updateAllErrors).toEqual({});
     } finally {
       logError.mockRestore();
     }

@@ -24,8 +24,8 @@ interface DoctorState {
   updating: string[];
   /** True while a panel-wide "Update all" run is in progress. */
   updatingAll: boolean;
-  /** Failed batch updates, kept visible through the follow-up scan. */
-  updateAllErrors: string[];
+  /** Failed batch updates by check ID, kept until a successful retry. */
+  updateAllErrors: Record<string, string>;
 }
 
 export const doctorState: DoctorState = $state({
@@ -34,7 +34,7 @@ export const doctorState: DoctorState = $state({
   freshnessLoading: false,
   updating: [],
   updatingAll: false,
-  updateAllErrors: [],
+  updateAllErrors: {},
 });
 
 /** Version fields the freshness pass fills in; merged onto the base report. */
@@ -203,6 +203,7 @@ export async function updateCheck(check: DoctorCheck): Promise<boolean> {
       await runDoctorUpdate(check.id, readout.updateFixType, readout.updateCommand);
       ranAny = true;
     }
+    if (ranAny) delete doctorState.updateAllErrors[check.id];
   } finally {
     doctorState.updating = doctorState.updating.filter((id) => id !== check.id);
   }
@@ -223,7 +224,6 @@ export async function updateCheck(check: DoctorCheck): Promise<boolean> {
 export async function updateAll(): Promise<void> {
   if (doctorState.updatingAll) return;
   doctorState.updatingAll = true;
-  doctorState.updateAllErrors = [];
   try {
     const checks = doctorState.report?.checks.filter(hasActionableUpdate) ?? [];
     for (const check of checks) {
@@ -231,10 +231,7 @@ export async function updateAll(): Promise<void> {
         await updateCheck(check);
       } catch (e) {
         console.error(`[Doctor] Failed to update ${check.id}:`, e);
-        doctorState.updateAllErrors = [
-          ...doctorState.updateAllErrors,
-          `${check.label}: ${String(e)}`,
-        ];
+        doctorState.updateAllErrors[check.id] = `${check.label}: ${String(e)}`;
       }
     }
   } finally {

@@ -5719,12 +5719,52 @@ fn split_config_value_hint(value_id: &str) -> (&str, Option<&str>) {
 /// The base id of a config value carrying a trailing bracketed hint, e.g.
 /// `claude-fable-5` for `claude-fable-5[1m]`. `None` when there is no such
 /// suffix, or when stripping it would leave nothing behind.
-fn strip_config_value_hint(value_id: &str) -> Option<&str> {
+pub fn strip_config_value_hint(value_id: &str) -> Option<&str> {
     let (base, hint) = split_config_value_hint(value_id);
     hint.map(|_| base)
 }
 
+/// The hint-less `requested` id wearing `pinned`'s bracketed hint, when both
+/// name the same family: `claude-fable-5-1` against a `claude-fable-5[1m]` pin
+/// is `claude-fable-5-1[1m]`. The write-side twin of tier 3 in
+/// [`resolve_config_option_value`]: a hint-less request from a picker that
+/// `session/load` rebuilt around the pin's resolved id is the pin's current
+/// spelling, not a choice of a different model, so the hint travels with it.
+///
+/// `None` when `pinned` has no hint, when `requested` already carries one (a
+/// real choice from a `session/new`-shaped catalog), or when the families
+/// differ (`opus` against a Fable pin). A same-base request returns `pinned`'s
+/// own spelling.
+///
+/// Any hint-less same-family request carries the hint, including one naming a
+/// different generation than the pin's. Today's `session/load` catalog only
+/// lists the pin's resolved id, so that can only be an echo; if several bare
+/// generations are ever listed, carrying the hint is still the direction tier 3
+/// takes at run time, and strictly more resolvable than persisting a bare id.
+pub fn carry_config_value_hint(pinned: &str, requested: &str) -> Option<String> {
+    let (_, Some(hint)) = split_config_value_hint(pinned) else {
+        return None;
+    };
+    let (_, None) = split_config_value_hint(requested) else {
+        return None;
+    };
+    let family = config_value_family(pinned);
+    if family.is_empty() || family != config_value_family(requested) {
+        return None;
+    }
+    Some(format!("{requested}[{hint}]"))
+}
+
 /// The one value of `option` from the same family as `value_id`, as
+/// `(value id, display name)`. See [`sole_config_value_family_match_in`].
+fn sole_config_value_family_match(
+    option: &SessionConfigOption,
+    value_id: &str,
+) -> Option<(String, String)> {
+    sole_config_value_family_match_in(select_option_values(option)?, value_id)
+}
+
+/// The one of `values` from the same family as `value_id`, as
 /// `(value id, display name)`.
 ///
 /// A family is the base id's letters ([`config_value_family`]), so a renamed
@@ -5746,8 +5786,8 @@ fn strip_config_value_hint(value_id: &str) -> Option<&str> {
 /// Fable 5.1 and 5.2 both on offer for a pin naming Fable 5), so the caller
 /// reports the pin as unavailable instead of guessing which generation was
 /// meant. There is no looser rung below this one to fall through to.
-fn sole_config_value_family_match(
-    option: &SessionConfigOption,
+pub fn sole_config_value_family_match_in(
+    values: impl IntoIterator<Item = (String, String)>,
     value_id: &str,
 ) -> Option<(String, String)> {
     let (_, pinned_hint) = split_config_value_hint(value_id);
@@ -5758,7 +5798,7 @@ fn sole_config_value_family_match(
 
     let mut hint_exact = Vec::new();
     let mut hint_less = Vec::new();
-    for (candidate, name) in select_option_values(option)? {
+    for (candidate, name) in values {
         let (base, hint) = split_config_value_hint(&candidate);
         if alphabetic_skeleton(base) != family {
             continue;
@@ -6391,31 +6431,32 @@ mod tests {
         acp_spawn_command, agent_auth_required_detail, air_client_capabilities_meta,
         apply_or_record_session_config_options, async_task_stop_message, async_task_stop_outcome,
         autoapprove_permission_decision, background_continuation_origin,
-        background_task_tracking_meta, build_prompt_content_blocks, consume_remote_acp_line,
-        decode_remote_acp_line, defensive_permission_decision, describe_prompt_error,
-        hold_for_background_quiescence, is_config_selection_unavailable_error,
-        is_missing_mcp_transport_error, labeled_background_continuation_origin,
-        mcp_server_transport_supported, origin_task_name_label, permission_response_for_decision,
-        permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
-        resolve_acp_working_dir, resolve_session_config_option_selection,
-        resolve_spawn_working_dir, run_prompt_turn, sanitize_remote_acp_chunk,
-        sdk_message_mentions_task, sdk_message_origin_kind, sdk_message_session_state,
-        sdk_message_settles_task, send_session_setup_request, setup_acp_session, shell_exec_line,
-        shell_quote, task_tracking_mode_from_initialize, AcpAuthenticationMethodCategory,
-        AcpAuthenticationRequired, AcpAuthenticationSelection, AcpDriver, AcpEventMetadata,
-        AcpNotificationHandler, AcpPermissionDecision, AcpPermissionOption,
-        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
-        AcpSessionSetup, AcpSessionSetupContext, AcpToolCallMetadata, AgentRunOutcome,
-        AsyncTaskNotification, AsyncTaskState, AsyncTaskStopHandle, AsyncTaskUpdate,
-        BackgroundActivity, BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus,
-        BackgroundHoldTask, BackgroundTaskSet, BasicMessageWriter, HoldOutcome, HoldSettle,
-        HoldingState, IncomingSessionUpdate, MessageWriter, OutOfTurnPermissionPolicy,
-        QueuedSessionTurn, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
-        SdkSessionState, SessionLifetime, SessionSettleReason, SessionSettled,
-        StopAsyncTaskRequest, Store, TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD,
-        AVAILABILITY_PROBE_SUBTYPE, BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES,
-        CLAUDE_SDK_MESSAGE_METHOD, CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS,
-        PERMISSION_ANNOUNCEMENT_GRACE, SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
+        background_task_tracking_meta, build_prompt_content_blocks, carry_config_value_hint,
+        consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
+        describe_prompt_error, hold_for_background_quiescence,
+        is_config_selection_unavailable_error, is_missing_mcp_transport_error,
+        labeled_background_continuation_origin, mcp_server_transport_supported,
+        origin_task_name_label, permission_response_for_decision, permission_response_for_options,
+        reject_queued_stop_requests, remote_acp_segments, resolve_acp_working_dir,
+        resolve_session_config_option_selection, resolve_spawn_working_dir, run_prompt_turn,
+        sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
+        sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
+        setup_acp_session, shell_exec_line, shell_quote, task_tracking_mode_from_initialize,
+        AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
+        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
+        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        AcpSessionConfigOptionSelection, AcpSessionSetup, AcpSessionSetupContext,
+        AcpToolCallMetadata, AgentRunOutcome, AsyncTaskNotification, AsyncTaskState,
+        AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
+        BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BackgroundTaskSet,
+        BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState, IncomingSessionUpdate,
+        MessageWriter, OutOfTurnPermissionPolicy, QueuedSessionTurn, RemoteLineOutcome,
+        ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState, SessionLifetime,
+        SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store, TaskTrackingMode,
+        TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
+        BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES, CLAUDE_SDK_MESSAGE_METHOD,
+        CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS, PERMISSION_ANNOUNCEMENT_GRACE,
+        SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
     };
     use agent_client_protocol::schema::v1::{
         AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
@@ -7352,6 +7393,34 @@ mod tests {
             .expect_err("a bare value must not match a hinted row");
 
         assert!(error.contains("Selected ACP model value 'claude-opus-5' is no longer available"));
+    }
+
+    /// A hint-less echo of a hinted pin's family takes the pin's hint, whether
+    /// it names the pin's own base or a renamed generation.
+    #[test]
+    fn carries_a_pinned_hint_onto_a_same_family_bare_request() {
+        assert_eq!(
+            carry_config_value_hint("claude-fable-5-1[1m]", "claude-fable-5-1").as_deref(),
+            Some("claude-fable-5-1[1m]")
+        );
+        assert_eq!(
+            carry_config_value_hint("claude-fable-5[1m]", "claude-fable-5-1").as_deref(),
+            Some("claude-fable-5-1[1m]")
+        );
+    }
+
+    #[test]
+    fn does_not_carry_a_pinned_hint_across_families_or_onto_a_hinted_request() {
+        assert_eq!(carry_config_value_hint("claude-fable-5[1m]", "opus"), None);
+        assert_eq!(
+            carry_config_value_hint("claude-fable-5", "claude-fable-5-1"),
+            None
+        );
+        assert_eq!(
+            carry_config_value_hint("claude-fable-5[1m]", "claude-fable-5-1[1m]"),
+            None
+        );
+        assert_eq!(carry_config_value_hint("[1m]", "claude-fable-5-1"), None);
     }
 
     #[test]

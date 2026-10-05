@@ -27,16 +27,16 @@ pub use agent_client_protocol::schema::v1::{
     SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
 };
 pub use driver::{
-    autoapprove_permission_decision, background_continuation_origin,
+    autoapprove_permission_decision, background_continuation_origin, carry_config_value_hint,
     is_config_selection_unavailable_error, is_missing_mcp_transport_error,
-    labeled_background_continuation_origin, strip_code_fences, strip_config_value_hint,
-    AcpAuthenticationSelection, AcpDriver, AcpEventMetadata, AcpInitializeMetadata,
-    AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
-    AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver, AgentRunOutcome,
-    AsyncTaskStopHandle, BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus,
-    BackgroundHoldTask, BasicMessageWriter, MessageWriter, OutOfTurnPermissionPolicy,
-    ReplayBoundary, SessionConnection, SessionLifetime, SessionSettleReason, SessionSettled, Store,
-    BACKGROUND_CONTINUATION_ORIGIN,
+    labeled_background_continuation_origin, sole_config_value_family_match_in, strip_code_fences,
+    strip_config_value_hint, AcpAuthenticationSelection, AcpDriver, AcpEventMetadata,
+    AcpInitializeMetadata, AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind,
+    AcpPermissionRequest, AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver,
+    AgentRunOutcome, AsyncTaskStopHandle, BackgroundHoldConfig, BackgroundHoldObserver,
+    BackgroundHoldStatus, BackgroundHoldTask, BasicMessageWriter, MessageWriter,
+    OutOfTurnPermissionPolicy, ReplayBoundary, SessionConnection, SessionLifetime,
+    SessionSettleReason, SessionSettled, Store, BACKGROUND_CONTINUATION_ORIGIN,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

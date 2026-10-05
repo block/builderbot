@@ -1920,12 +1920,33 @@ pub(crate) fn resolve_resume_acp_config_selection(
     session: &store::Session,
     requested_selection: Option<store::AcpConfigSelection>,
 ) -> Option<store::AcpConfigSelection> {
-    if requested_selection.is_some() {
-        return normalize_empty_acp_config_selection(requested_selection);
+    let stored_selection =
+        normalize_empty_acp_config_selection(session.acp_config_selection.clone());
+
+    if let Some(mut requested) = normalize_empty_acp_config_selection(requested_selection) {
+        if let (Some(requested_model), Some(stored_model)) = (
+            requested.model.as_ref(),
+            stored_selection
+                .as_ref()
+                .and_then(|stored| stored.model.as_ref()),
+        ) {
+            // The agent resolves `claude-fable-5-1[1m]` to `claude-fable-5-1` on
+            // session/load and rebuilds the picker around it, so a follow-up that
+            // "selects" the bare id is reporting the pin's resolved spelling, not
+            // choosing a different model. Keep the pin so child sessions, which
+            // start via session/new, inherit the spelling that catalog offers; the
+            // driver maps it onto the bare row at run time.
+            if requested_model.config_id == stored_model.config_id
+                && acp_client::strip_config_value_hint(&stored_model.value_id)
+                    == Some(requested_model.value_id.as_str())
+            {
+                requested.model = Some(stored_model.clone());
+            }
+        }
+        return Some(requested);
     }
 
-    let stored_selection =
-        normalize_empty_acp_config_selection(session.acp_config_selection.clone())?;
+    let stored_selection = stored_selection?;
     let discovery = fresh_cached_acp_config_discovery(session.provider.as_deref()).or_else(|| {
         latest_acp_config_discovery_from_session_metadata(
             store,
@@ -1969,15 +1990,30 @@ fn sanitize_acp_config_value_selection(
 ) -> Option<store::AcpConfigValueSelection> {
     let selection = selection?;
     let selector = selector?;
-    let option = selector
-        .options
-        .iter()
-        .find(|option| option.value_id == selection.value_id)?;
+    let offers = |value_id: &str| {
+        selector
+            .options
+            .iter()
+            .find(|option| option.value_id == value_id)
+    };
 
+    if let Some(option) = offers(&selection.value_id) {
+        return Some(store::AcpConfigValueSelection {
+            config_id: selector.config_id.clone(),
+            value_id: selection.value_id,
+            label: Some(option.label.clone()),
+        });
+    }
+
+    // A hinted pin whose base the catalog lists is the session/load shape of the
+    // same model, not a stale value: keep the pin so children still inherit the
+    // spelling session/new understands. The driver resolves it at run time.
+    let base_value_id = acp_client::strip_config_value_hint(&selection.value_id)?;
+    offers(base_value_id)?;
     Some(store::AcpConfigValueSelection {
         config_id: selector.config_id.clone(),
         value_id: selection.value_id,
-        label: Some(option.label.clone()),
+        label: selection.label,
     })
 }
 
@@ -7611,6 +7647,117 @@ mod tests {
                 effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
             })
         );
+    }
+
+    fn hinted_fable_pin_session(provider_id: &str) -> store::Session {
+        store::Session::new_running("resume", Path::new("/tmp"))
+            .with_provider(provider_id)
+            .with_acp_config_selection(store::AcpConfigSelection {
+                model: Some(test_acp_config_value_selection(
+                    "model",
+                    "claude-fable-5-1[1m]",
+                    "Fable 5.1",
+                )),
+                effort: Some(test_acp_config_value_selection("effort", "high", "High")),
+            })
+    }
+
+    #[test]
+    fn resume_selection_keeps_hinted_pin_when_request_is_its_base() {
+        let store = Store::in_memory().unwrap();
+        let session = hinted_fable_pin_session("claude");
+        store.create_session(&session).unwrap();
+
+        let resolved = resolve_resume_acp_config_selection(
+            &store,
+            &session,
+            Some(store::AcpConfigSelection {
+                model: Some(test_acp_config_value_selection(
+                    "model",
+                    "claude-fable-5-1",
+                    "Fable 5.1",
+                )),
+                effort: Some(test_acp_config_value_selection("effort", "xhigh", "XHigh")),
+            }),
+        );
+
+        assert_eq!(
+            resolved,
+            Some(store::AcpConfigSelection {
+                model: Some(test_acp_config_value_selection(
+                    "model",
+                    "claude-fable-5-1[1m]",
+                    "Fable 5.1",
+                )),
+                effort: Some(test_acp_config_value_selection("effort", "xhigh", "XHigh")),
+            })
+        );
+    }
+
+    #[test]
+    fn resume_selection_accepts_a_real_model_change_over_a_hinted_pin() {
+        let store = Store::in_memory().unwrap();
+        let session = hinted_fable_pin_session("claude");
+        store.create_session(&session).unwrap();
+        let requested = store::AcpConfigSelection {
+            model: Some(test_acp_config_value_selection("model", "opus", "Opus")),
+            effort: None,
+        };
+
+        let resolved =
+            resolve_resume_acp_config_selection(&store, &session, Some(requested.clone()));
+
+        assert_eq!(resolved, Some(requested));
+    }
+
+    #[test]
+    fn resume_selection_keeps_hinted_pin_when_metadata_catalog_offers_only_its_base() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let provider_id = "metadata-provider-hinted-pin";
+        remove_acp_config_cache_entry(provider_id);
+        let store = Store::in_memory().unwrap();
+        let session = hinted_fable_pin_session(provider_id);
+        store.create_session(&session).unwrap();
+
+        // The catalog Claude Code rebuilds on session/load: the pin's resolved,
+        // bare spelling instead of the hinted row session/new advertised.
+        let config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "claude-fable-5-1",
+                vec![
+                    SessionConfigSelectOption::new("default", "Default"),
+                    SessionConfigSelectOption::new("claude-fable-5-1", "Fable 5.1"),
+                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "effort",
+                "Effort",
+                "high",
+                vec![SessionConfigSelectOption::new("high", "High")],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("config_options_update".to_string()),
+                    acp_config_options: serde_json::to_value(config_options).ok(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        assert_eq!(resolved, session.acp_config_selection);
     }
 
     #[test]

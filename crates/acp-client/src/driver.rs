@@ -5719,7 +5719,7 @@ fn split_config_value_hint(value_id: &str) -> (&str, Option<&str>) {
 /// The base id of a config value carrying a trailing bracketed hint, e.g.
 /// `claude-fable-5` for `claude-fable-5[1m]`. `None` when there is no such
 /// suffix, or when stripping it would leave nothing behind.
-fn strip_config_value_hint(value_id: &str) -> Option<&str> {
+pub fn strip_config_value_hint(value_id: &str) -> Option<&str> {
     let (base, hint) = split_config_value_hint(value_id);
     hint.map(|_| base)
 }

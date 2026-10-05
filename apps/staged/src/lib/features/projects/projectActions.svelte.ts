@@ -27,6 +27,9 @@ class ProjectActionsController {
   /** Project awaiting the user's answer in the shared confirmation dialog. */
   private _pendingDelete = $state<Project | null>(null);
 
+  /** Only the latest status write for a project may roll back its optimistic patch. */
+  private readonly statusOverrideWrites = new Map<string, symbol>();
+
   get pendingDelete(): Project | null {
     return this._pendingDelete;
   }
@@ -40,7 +43,7 @@ class ProjectActionsController {
    * Choose a status option for a project, or null to go back to Default (the
    * computed PR/cloud status). Patches the project store at once so every
    * surface repaints; the project-changed refetch then confirms, and a failed
-   * write rolls the patch back.
+   * write rolls the patch back only if no newer selection has superseded it.
    */
   async setProjectStatusOverride(project: Project, statusOverride: string | null): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
@@ -49,14 +52,23 @@ class ProjectActionsController {
 
     const projectId = project.id;
     const previous = project.statusOverride;
+    // Unique even after a newer request completes and clears the map entry.
+    const write = Symbol();
+    this.statusOverrideWrites.set(projectId, write);
     projectsDataStore.projectStatusOverrideChanged(projectId, statusOverride);
     try {
       await commands.setProjectStatusOverride(projectId, statusOverride);
     } catch (e) {
-      projectsDataStore.projectStatusOverrideChanged(projectId, previous);
+      if (this.statusOverrideWrites.get(projectId) === write) {
+        projectsDataStore.projectStatusOverrideChanged(projectId, previous);
+      }
       toast.error('Unable to set project status', {
         description: e instanceof Error ? e.message : String(e),
       });
+    } finally {
+      if (this.statusOverrideWrites.get(projectId) === write) {
+        this.statusOverrideWrites.delete(projectId);
+      }
     }
   }
 

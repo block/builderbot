@@ -6,21 +6,25 @@
   NamedIcon), showing CircleDot until it lands.
 -->
 <script lang="ts">
-  import Ban from '@lucide/svelte/icons/ban';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import CircleDot from '@lucide/svelte/icons/circle-dot';
   import CirclePause from '@lucide/svelte/icons/circle-pause';
   import Eye from '@lucide/svelte/icons/eye';
+  import Lightbulb from '@lucide/svelte/icons/lightbulb';
+  import OctagonMinus from '@lucide/svelte/icons/octagon-minus';
+  import Paintbrush from '@lucide/svelte/icons/paintbrush';
   import NamedIcon from '../actions/NamedIcon.svelte';
   import type { IconComponent } from '../actions/lucideIcons';
   import { PROJECT_STATUS_COLOR_VARS, type ProjectStatusOption } from './projectStatusDisplay';
 
   const BUILT_IN_ICONS: Record<string, IconComponent> = {
-    ban: Ban,
     'circle-check': CircleCheck,
     'circle-dot': CircleDot,
     'circle-pause': CirclePause,
     eye: Eye,
+    lightbulb: Lightbulb,
+    'octagon-minus': OctagonMinus,
+    paintbrush: Paintbrush,
   };
 
   interface Props {

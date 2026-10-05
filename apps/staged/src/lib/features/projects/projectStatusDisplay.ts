@@ -46,8 +46,10 @@ export interface ProjectStatusOption {
 }
 
 export const DEFAULT_PROJECT_STATUS_OPTIONS: ProjectStatusOption[] = [
+  { id: 'idea', label: 'Idea', icon: 'lightbulb', color: 'amber' },
   { id: 'in-progress', label: 'In progress', icon: 'circle-dot', color: 'blue' },
-  { id: 'blocked', label: 'Blocked', icon: 'ban', color: 'red' },
+  { id: 'polishing', label: 'Polishing', icon: 'paintbrush', color: 'cyan' },
+  { id: 'blocked', label: 'Blocked', icon: 'octagon-minus', color: 'red' },
   { id: 'needs-review', label: 'Needs review', icon: 'eye', color: 'purple' },
   { id: 'on-hold', label: 'On hold', icon: 'circle-pause', color: 'gray' },
   { id: 'done', label: 'Done', icon: 'circle-check', color: 'green' },

@@ -33,14 +33,15 @@
 
   /** The picker's empty-search shortlist: status-flavoured, not action-flavoured. */
   const STATUS_ICONS = [
+    'lightbulb',
     'circle-dot',
-    'circle-check',
-    'ban',
+    'paintbrush',
+    'octagon-minus',
     'eye',
     'circle-pause',
+    'circle-check',
     'clock',
     'flag',
-    'lightbulb',
     'bug',
     'rocket',
     'hourglass',

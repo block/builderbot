@@ -12,6 +12,7 @@ function project(overrides: Partial<Project> = {}): Project {
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
+    statusOverride: null,
     ...overrides,
   };
 }
@@ -80,6 +81,8 @@ let navigationState: { selectedProjectId: string | null };
 let projectDeleteStarted: ReturnType<typeof vi.fn>;
 let projectDeleteFailed: ReturnType<typeof vi.fn>;
 let ensureProjectHydrated: ReturnType<typeof vi.fn>;
+let setProjectStatusOverride: ReturnType<typeof vi.fn>;
+let projectStatusOverrideChanged: ReturnType<typeof vi.fn>;
 
 /** Mutable backing state for the mocked projectsDataStore. */
 let storeState: {
@@ -92,6 +95,16 @@ let storeState: {
 async function importActions() {
   const { projectActions } = await import('./projectActions.svelte');
   return projectActions;
+}
+
+function deferredWrite() {
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 beforeEach(() => {
@@ -113,6 +126,12 @@ beforeEach(() => {
   projectDeleteFailed = vi.fn();
   // Default: the project is already hydrated, so ensuring it is a no-op.
   ensureProjectHydrated = vi.fn().mockResolvedValue(undefined);
+  setProjectStatusOverride = vi.fn().mockResolvedValue(undefined);
+  projectStatusOverrideChanged = vi.fn((projectId: string, statusOverride: string | null) => {
+    storeState.projects = storeState.projects.map((p) =>
+      p.id === projectId ? { ...p, statusOverride } : p
+    );
+  });
 
   storeState = {
     projects: [project()],
@@ -124,6 +143,7 @@ beforeEach(() => {
   vi.doMock('../../api/commands', () => ({
     deleteProject,
     hasUnpushedCommits,
+    setProjectStatusOverride,
   }));
   vi.doMock('../layout/navigation.svelte', () => ({
     navigation: navigationState,
@@ -155,6 +175,7 @@ beforeEach(() => {
       ensureProjectHydrated,
       projectDeleteStarted,
       projectDeleteFailed,
+      projectStatusOverrideChanged,
     },
   }));
   vi.doMock('../../stores/projectState.svelte', () => ({
@@ -196,6 +217,245 @@ describe('markProjectUnread', () => {
     const actions = await importActions();
     actions.markProjectUnread(project());
     expect(markAsUnread).not.toHaveBeenCalled();
+  });
+});
+
+describe('setProjectStatusOverride', () => {
+  it('patches the store before writing the chosen status', async () => {
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project(), 'blocked');
+    expect(projectStatusOverrideChanged).toHaveBeenCalledWith('p1', 'blocked');
+    expect(setProjectStatusOverride).toHaveBeenCalledWith('p1', 'blocked');
+    expect(projectStatusOverrideChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      setProjectStatusOverride.mock.invocationCallOrder[0]
+    );
+  });
+
+  it('clears the override when going back to Default', async () => {
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project({ statusOverride: 'done' }), null);
+    expect(projectStatusOverrideChanged).toHaveBeenCalledWith('p1', null);
+    expect(setProjectStatusOverride).toHaveBeenCalledWith('p1', null);
+  });
+
+  it('no-ops when the status is unchanged', async () => {
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project({ statusOverride: 'done' }), 'done');
+    await actions.setProjectStatusOverride(project(), null);
+    expect(projectStatusOverrideChanged).not.toHaveBeenCalled();
+    expect(setProjectStatusOverride).not.toHaveBeenCalled();
+  });
+
+  it('ignores projects that are being deleted', async () => {
+    storeState.deletingProjectNames.set('p1', 'Alpha');
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project(), 'blocked');
+    expect(projectStatusOverrideChanged).not.toHaveBeenCalled();
+    expect(setProjectStatusOverride).not.toHaveBeenCalled();
+  });
+
+  it('rolls back and surfaces a failed write', async () => {
+    setProjectStatusOverride.mockRejectedValueOnce(new Error('db locked'));
+    const actions = await importActions();
+    await actions.setProjectStatusOverride(project({ statusOverride: 'done' }), 'blocked');
+    expect(projectStatusOverrideChanged.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+    ]);
+    expect(toastError).toHaveBeenCalledWith('Unable to set project status', {
+      description: 'db locked',
+    });
+  });
+
+  it('persists rapid selections in order while immediately showing the latest choice', async () => {
+    const blocked = deferredWrite();
+    const done = deferredWrite();
+    const cleared = deferredWrite();
+    const responses = [blocked, done, cleared];
+    let persistedStatus: string | null = null;
+    setProjectStatusOverride.mockImplementation(async (_id: string, status: string | null) => {
+      await responses.shift()!.promise;
+      persistedStatus = status;
+    });
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[0], 'done');
+    const third = actions.setProjectStatusOverride(storeState.projects[0], null);
+    expect(projectStatusOverrideChanged.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+      ['p1', null],
+    ]);
+    await Promise.resolve();
+    expect(setProjectStatusOverride.mock.calls).toEqual([['p1', 'blocked']]);
+
+    blocked.resolve();
+    await first;
+    expect(persistedStatus).toBe('blocked');
+    expect(setProjectStatusOverride.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+    ]);
+
+    done.resolve();
+    await second;
+    expect(persistedStatus).toBe('done');
+    expect(setProjectStatusOverride.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+      ['p1', null],
+    ]);
+
+    cleared.resolve();
+    await third;
+    expect(persistedStatus).toBeNull();
+    expect(storeState.projects[0].statusOverride).toBeNull();
+
+    // Once drained, a later selection starts a fresh queue.
+    setProjectStatusOverride.mockResolvedValueOnce(undefined);
+    await actions.setProjectStatusOverride(storeState.projects[0], 'idea');
+    expect(setProjectStatusOverride).toHaveBeenLastCalledWith('p1', 'idea');
+  });
+
+  it('continues after a failed write without rolling back a newer queued selection', async () => {
+    const blocked = deferredWrite();
+    const done = deferredWrite();
+    setProjectStatusOverride.mockReturnValueOnce(blocked.promise).mockReturnValueOnce(done.promise);
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[0], 'done');
+    blocked.reject(new Error('older write failed'));
+    await first;
+    expect(storeState.projects[0].statusOverride).toBe('done');
+    expect(projectStatusOverrideChanged.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+    ]);
+    expect(setProjectStatusOverride.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+    ]);
+    expect(toastError).toHaveBeenCalledWith('Unable to set project status', {
+      description: 'older write failed',
+    });
+
+    done.resolve();
+    await second;
+    expect(storeState.projects[0].statusOverride).toBe('done');
+  });
+
+  it('rolls back to the last confirmed status when every queued write fails', async () => {
+    const blocked = deferredWrite();
+    const done = deferredWrite();
+    setProjectStatusOverride.mockReturnValueOnce(blocked.promise).mockReturnValueOnce(done.promise);
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[0], 'done');
+    blocked.reject(new Error('older write failed'));
+    await first;
+    done.reject(new Error('latest write failed'));
+    await second;
+    expect(storeState.projects[0].statusOverride).toBeNull();
+    expect(projectStatusOverrideChanged.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', 'done'],
+      ['p1', null],
+    ]);
+
+    await actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    expect(storeState.projects[0].statusOverride).toBe('blocked');
+    expect(setProjectStatusOverride).toHaveBeenCalledTimes(3);
+  });
+
+  it('compares a selection with the queue even if a refetch replaced the optimistic status', async () => {
+    const blocked = deferredWrite();
+    setProjectStatusOverride.mockReturnValueOnce(blocked.promise);
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    storeState.projects = [project()];
+    await actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[0], null);
+    expect(projectStatusOverrideChanged.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', null],
+    ]);
+
+    blocked.resolve();
+    await Promise.all([first, second]);
+    expect(setProjectStatusOverride.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p1', null],
+    ]);
+  });
+
+  it('still rolls back the latest selection after an older write succeeds', async () => {
+    const blocked = deferredWrite();
+    const done = deferredWrite();
+    setProjectStatusOverride.mockReturnValueOnce(blocked.promise).mockReturnValueOnce(done.promise);
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[0], 'done');
+    blocked.resolve();
+    await first;
+    done.reject(new Error('latest write failed'));
+    await second;
+
+    expect(storeState.projects[0].statusOverride).toBe('blocked');
+    expect(toastError).toHaveBeenCalledWith('Unable to set project status', {
+      description: 'latest write failed',
+    });
+  });
+
+  it('distinguishes a repeated selection from an older pending write of the same status', async () => {
+    const olderBlocked = deferredWrite();
+    const newerBlocked = deferredWrite();
+    setProjectStatusOverride
+      .mockReturnValueOnce(olderBlocked.promise)
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(newerBlocked.promise);
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[0], 'done');
+    const third = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    olderBlocked.reject(new Error('older write failed'));
+    await first;
+    expect(storeState.projects[0].statusOverride).toBe('blocked');
+
+    await second;
+    newerBlocked.reject(new Error('latest write failed'));
+    await third;
+    expect(storeState.projects[0].statusOverride).toBe('done');
+  });
+
+  it('tracks pending selections independently for each project', async () => {
+    const firstWrite = deferredWrite();
+    const secondWrite = deferredWrite();
+    setProjectStatusOverride
+      .mockReturnValueOnce(firstWrite.promise)
+      .mockReturnValueOnce(secondWrite.promise);
+    storeState.projects = [project(), project({ id: 'p2', statusOverride: 'done' })];
+    const actions = await importActions();
+
+    const first = actions.setProjectStatusOverride(storeState.projects[0], 'blocked');
+    const second = actions.setProjectStatusOverride(storeState.projects[1], 'blocked');
+    await Promise.resolve();
+    expect(setProjectStatusOverride.mock.calls).toEqual([
+      ['p1', 'blocked'],
+      ['p2', 'blocked'],
+    ]);
+    firstWrite.reject(new Error('first project write failed'));
+    await first;
+    expect(storeState.projects.map((p) => p.statusOverride)).toEqual([null, 'blocked']);
+
+    secondWrite.reject(new Error('second project write failed'));
+    await second;
+    expect(storeState.projects.map((p) => p.statusOverride)).toEqual([null, 'done']);
   });
 });
 

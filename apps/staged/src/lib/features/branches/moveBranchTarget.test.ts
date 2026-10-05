@@ -16,6 +16,7 @@ function project(overrides: Partial<Project> & { id: string; name: string }): Pr
     subpath: null,
     createdAt: 0,
     updatedAt: 0,
+    statusOverride: null,
     ...overrides,
   };
 }

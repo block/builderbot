@@ -86,6 +86,7 @@ export interface Theme {
     dangerBg: string; // Danger background (for error messages)
     warning: string; // Warning/caution text
     warningBg: string; // Warning background (for caution banners)
+    info: string; // Informational/transitional state (e.g. a workspace provisioning)
     selection: string; // Selected items background (theme-derived)
   };
 
@@ -516,6 +517,9 @@ export function createAdaptiveTheme(
       dangerBg: overlay(accentRed, isDark ? 0.1 : 0.08),
       warning: accentOrange,
       warningBg: overlay(accentOrange, isDark ? 0.1 : 0.08),
+      // Info is the link/renamed blue, so it follows the theme's git palette
+      // (when the syntax theme provides one) rather than the fixed UI accent.
+      info: accentBlue,
       // Selection uses foreground color for a neutral, theme-consistent highlight
       selection: overlay(syntaxFg, isDark ? 0.08 : 0.1),
     },
@@ -613,6 +617,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-danger-bg': t.ui.dangerBg,
     '--ui-warning': t.ui.warning,
     '--ui-warning-bg': t.ui.warningBg,
+    '--ui-info': t.ui.info,
     '--ui-selection': t.ui.selection,
 
     '--diagram-canvas-bg': t.diagram.canvasBg,

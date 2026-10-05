@@ -1,8 +1,8 @@
 <!--
   ProjectRowContent.svelte — how a project introduces itself in a row: a state
-  icon on the left (aggregate PR status, or cloud status for remote projects),
-  the name, and a meta line of colored repo badges with any running activity —
-  falling back to a repo count while badges haven't landed.
+  icon on the left (see ProjectStatusIcon), the name, and a meta line of
+  colored repo badges with any running activity — falling back to a repo count
+  while badges haven't landed.
 
   Shared between the sidebar's project rows and pickers that list projects
   (MoveBranchDialog), so a project reads the same everywhere. Everything is
@@ -11,24 +11,14 @@
   row brightens it).
 -->
 <script lang="ts">
-  import Cloud from '@lucide/svelte/icons/cloud';
-  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
-  import GitPullRequestClosed from '@lucide/svelte/icons/git-pull-request-closed';
-  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
-  import Sprout from '@lucide/svelte/icons/sprout';
-  import type { Project, WorkspaceStatus } from '../../types';
-  import {
-    projectDisplayName,
-    aggregateProjectPrStatus,
-    projectHasCodeChanges,
-    projectSubtitle,
-    projectActivity,
-  } from '../../shared/utils';
+  import type { Project } from '../../types';
+  import { projectDisplayName, projectSubtitle, projectActivity } from '../../shared/utils';
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { getProjectStatus } from './projectStatus';
+  import ProjectStatusIcon from './ProjectStatusIcon.svelte';
 
   interface Props {
     project: Project;
@@ -39,12 +29,6 @@
   let branches = $derived(projectsDataStore.branchesByProject.get(project.id) ?? []);
   let status = $derived(
     getProjectStatus(project.id, projectsDataStore.deletingProjectNames, branches)
-  );
-  let prStatus = $derived(aggregateProjectPrStatus(branches));
-  let workspaceStatus = $derived(
-    project.location === 'remote'
-      ? (branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null)
-      : null
   );
   let badges = $derived(
     (projectsDataStore.reposByProject.get(project.id) ?? [])
@@ -57,41 +41,10 @@
   let repoCount = $derived(
     projectsDataStore.repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0)
   );
-
-  function cloudStatusClass(status: WorkspaceStatus | null): string {
-    switch (status) {
-      case 'running':
-        return 'cloud-running';
-      case 'starting':
-        return 'cloud-starting';
-      case 'error':
-        return 'cloud-error';
-      case 'stopped':
-      case 'suspended':
-      default:
-        return 'cloud-inactive';
-    }
-  }
 </script>
 
 <div class="row-main">
-  {#if project.location === 'remote'}
-    <Cloud size={14} class={cloudStatusClass(workspaceStatus)} />
-  {:else if prStatus === 'merged'}
-    <GitPullRequest size={14} class="pr-status-merged" />
-  {:else if prStatus === 'checks_failing'}
-    <GitPullRequest size={14} class="pr-status-checks-failing" />
-  {:else if prStatus === 'open'}
-    <GitPullRequest size={14} />
-  {:else if prStatus === 'closed'}
-    <GitPullRequestClosed size={14} />
-  {:else if prStatus === 'conflict'}
-    <GitPullRequestClosed size={14} class="pr-status-conflict" />
-  {:else if projectHasCodeChanges(branches)}
-    <GitPullRequestDraft size={14} class="pr-status-draft" />
-  {:else}
-    <Sprout size={14} class="pr-status-clean" />
-  {/if}
+  <ProjectStatusIcon {project} {branches} size={14} />
   <span class="project-name">{projectDisplayName(project)}</span>
   <div class="row-meta">
     {#if badges.length > 0}
@@ -130,42 +83,6 @@
 
   .row-main :global(svg) {
     width: 16px;
-  }
-
-  .row-main :global(svg.pr-status-merged) {
-    stroke: var(--ui-success);
-  }
-
-  .row-main :global(svg.pr-status-conflict) {
-    stroke: var(--ui-danger);
-  }
-
-  .row-main :global(svg.pr-status-checks-failing) {
-    stroke: var(--ui-danger);
-  }
-
-  .row-main :global(svg.pr-status-draft) {
-    stroke: var(--text-faint);
-  }
-
-  .row-main :global(svg.pr-status-clean) {
-    stroke: var(--text-faint);
-  }
-
-  .row-main :global(svg.cloud-running) {
-    stroke: var(--ui-accent);
-  }
-
-  .row-main :global(svg.cloud-starting) {
-    stroke: var(--ui-info);
-  }
-
-  .row-main :global(svg.cloud-error) {
-    stroke: var(--ui-danger);
-  }
-
-  .row-main :global(svg.cloud-inactive) {
-    stroke: var(--text-muted);
   }
 
   .project-name {

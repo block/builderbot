@@ -28,6 +28,7 @@
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import RepoCard from './RepoCard.svelte';
   import ProjectRowContent from './ProjectRowContent.svelte';
+  import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import SidebarFilterRow from './SidebarFilterRow.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
   import * as commands from '../../api/commands';
@@ -534,6 +535,8 @@
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
+                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
+                  <ContextMenu.Separator />
                   <ContextMenu.Item
                     disabled={status.kind === 'deleting'}
                     onSelect={() => projectActions.markProjectUnread(project)}

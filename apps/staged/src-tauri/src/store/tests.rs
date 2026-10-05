@@ -117,6 +117,46 @@ fn test_list_projects_breaks_created_at_ties_by_insert_order() {
 }
 
 #[test]
+fn test_project_status_override_round_trips() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    assert!(store
+        .get_project(&project.id)
+        .unwrap()
+        .unwrap()
+        .status_override
+        .is_none());
+
+    store
+        .set_project_status_override(&project.id, Some("blocked"))
+        .unwrap();
+    let fetched = store.get_project(&project.id).unwrap().unwrap();
+    assert_eq!(fetched.status_override.as_deref(), Some("blocked"));
+    let listed = store.list_projects().unwrap();
+    assert_eq!(listed[0].status_override.as_deref(), Some("blocked"));
+
+    // Rewriting the primary repo leaves the status alone.
+    store
+        .update_project(
+            &project.id,
+            &fetched.name,
+            Some("test-owner/other-repo"),
+            &fetched.location,
+            None,
+        )
+        .unwrap();
+    let fetched = store.get_project(&project.id).unwrap().unwrap();
+    assert_eq!(fetched.status_override.as_deref(), Some("blocked"));
+
+    store
+        .set_project_status_override(&project.id, None)
+        .unwrap();
+    let fetched = store.get_project(&project.id).unwrap().unwrap();
+    assert!(fetched.status_override.is_none());
+}
+
+#[test]
 fn test_project_note_sets_completed_at_when_created_with_content() {
     let note = ProjectNote::new("project-1", "Title", "Body");
     assert_eq!(note.completed_at, Some(note.created_at));

@@ -29,9 +29,9 @@
  * branch-changed, repos-changed): every mutating backend store method
  * publishes, so a write in any window — or in the backend itself — refetches
  * here. The remaining imperative entry points (projectCreated,
- * setBranchesByProject, refreshProject) exist for immediacy: they paint the
- * local window's own mutation without waiting a coalescing window for the
- * echo; the event-driven refetch then confirms.
+ * projectStatusOverrideChanged, setBranchesByProject, refreshProject) exist
+ * for immediacy: they paint the local window's own mutation without waiting a
+ * coalescing window for the echo; the event-driven refetch then confirms.
  */
 
 import { listenToEvent, type UnlistenFn } from '../transport';
@@ -370,6 +370,14 @@ class ProjectsDataStore {
     // land on a view that treats it as un-hydrated and blanks for a beat.
     this.markProjectHydrated(project.id, this.loadGeneration);
     void this.hydrateProject(project.id);
+  }
+
+  /**
+   * Show a project's new status option at once, ahead of the project-changed
+   * refetch that makes it authoritative.
+   */
+  projectStatusOverrideChanged(projectId: string, statusOverride: string | null): void {
+    this._projects = this._projects.map((p) => (p.id === projectId ? { ...p, statusOverride } : p));
   }
 
   /**

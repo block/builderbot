@@ -18,11 +18,21 @@ import {
   type SyntaxThemeName,
   type ThemePreviewColors,
 } from '../diff/highlighter';
-import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import {
+  initPersistentStore,
+  getStoreValue,
+  setStoreValue,
+  listenToStoreKeyChange,
+} from '../../shared/persistentStore';
 import { hydrateDialogWidths } from '../../components/ui/dialog/dialogWidth.svelte';
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
 import type { AcpConfigValueSelection } from '../../types';
+import {
+  DEFAULT_PROJECT_STATUS_OPTIONS,
+  normalizeProjectStatusOptions,
+  type ProjectStatusOption,
+} from '../projects/projectStatusDisplay';
 
 // Re-export so picker code can import the type alongside the actions.
 export type { AcpConfigPref, AcpConfigPrefPatch };
@@ -71,6 +81,8 @@ const ACP_CONFIG_PREFS_STORE_KEY = 'acp-config-prefs';
 const DIAGRAM_SUBSESSION_CONFIG_STORE_KEY = 'diagram-subsession-config';
 /** Prefix applied to branch names inferred from project names (backend-read). */
 const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
+/** The statuses a project can be manually set to (frontend-only). */
+const PROJECT_STATUS_OPTIONS_STORE_KEY = 'project-status-options';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -170,6 +182,14 @@ export const preferences = $state({
    * in one. Empty means no prefix. Read by the backend from the store file.
    */
   branchPrefix: '',
+  /**
+   * The statuses a project can be set to in place of its computed PR/cloud
+   * status. Projects store the chosen option's id; one whose option is
+   * removed here falls back to Default.
+   */
+  projectStatusOptions: DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({
+    ...o,
+  })) as ProjectStatusOption[],
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -245,12 +265,51 @@ function ensureSystemModeListener() {
 // Initialization
 // =============================================================================
 
+let unlistenStatusOptions: (() => void) | undefined;
+let statusOptionsRevision = 0;
+
+function applyProjectStatusOptions(value: unknown): void {
+  statusOptionsRevision += 1;
+  preferences.projectStatusOptions =
+    normalizeProjectStatusOptions(value) ?? DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o }));
+}
+
+async function refreshProjectStatusOptions(): Promise<void> {
+  const revision = ++statusOptionsRevision;
+  try {
+    const value = await getStoreValue<unknown>(PROJECT_STATUS_OPTIONS_STORE_KEY);
+    // A notification, local edit, or newer refresh wins over an older snapshot.
+    if (revision === statusOptionsRevision) applyProjectStatusOptions(value);
+  } catch (error) {
+    console.error('[Preferences] Failed to refresh project status options:', error);
+  }
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    unlistenStatusOptions?.();
+    statusOptionsRevision += 1;
+  });
+}
+
 /**
  * Initialize preferences: load from store, apply theme, load Shiki.
  * Must be called once at app startup. Sets preferences.loaded = true when complete.
  */
 export async function initPreferences(): Promise<void> {
   await initPersistentStore();
+
+  unlistenStatusOptions ??= listenToStoreKeyChange(
+    PROJECT_STATUS_OPTIONS_STORE_KEY,
+    applyProjectStatusOptions,
+    {
+      // Close the initial registration gap and recover missed web events on reconnect.
+      onEstablished: () => void refreshProjectStatusOptions(),
+    }
+  );
+  // Also load without waiting for the web event socket to connect. Statuses
+  // belong to the first project paint, ahead of the slower diff-theme loading.
+  await refreshProjectStatusOptions();
 
   const [savedSize, savedMode] = await Promise.all([
     getStoreValue<number>(SIZE_STORE_KEY),
@@ -387,6 +446,22 @@ export async function selectDiffTheme(name: string): Promise<void> {
 export function setBranchPrefix(prefix: string): void {
   preferences.branchPrefix = prefix;
   setStoreValue(BRANCH_PREFIX_STORE_KEY, prefix.trim());
+}
+
+// =============================================================================
+// Project Status Option Actions
+// =============================================================================
+
+/** Replace the list of statuses a project can be set to. */
+export function setProjectStatusOptions(options: ProjectStatusOption[]): void {
+  statusOptionsRevision += 1;
+  preferences.projectStatusOptions = options;
+  setStoreValue(PROJECT_STATUS_OPTIONS_STORE_KEY, options);
+}
+
+/** Restore the built-in project statuses. */
+export function resetProjectStatusOptions(): void {
+  setProjectStatusOptions(DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o })));
 }
 
 // =============================================================================

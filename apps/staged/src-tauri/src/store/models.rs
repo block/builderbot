@@ -63,6 +63,10 @@ pub struct Project {
     pub subpath: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// User-chosen status option id shown instead of the computed PR/cloud
+    /// status, or `None` for Default. Option ids are frontend preferences.
+    #[serde(default)]
+    pub status_override: Option<String>,
 }
 
 impl Project {
@@ -86,6 +90,7 @@ impl Project {
             subpath: None,
             created_at: now,
             updated_at: now,
+            status_override: None,
         }
     }
 

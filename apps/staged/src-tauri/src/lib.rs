@@ -29,6 +29,7 @@ pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
 pub(crate) mod pikchr_validation;
 pub mod pr_poll_scheduler;
+mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
 pub mod prs;
@@ -781,6 +782,19 @@ async fn remove_project_repo(
         }
     }
     Ok(())
+}
+
+/// Set or clear (`None`) the user-chosen status shown in place of a project's
+/// computed PR/cloud status.
+#[tauri::command(rename_all = "camelCase")]
+fn set_project_status_override(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    status_override: Option<String>,
+) -> Result<(), String> {
+    get_store(&store)?
+        .set_project_status_override(&project_id, status_override.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2178,6 +2192,9 @@ pub fn run() {
             // so the web server and event emitters can access it.
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
+            if let Some(path) = preferences_store_path_buf() {
+                preference_events::forward_to_web(app.handle(), path, event_tx.clone());
+            }
 
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.
@@ -2287,6 +2304,7 @@ pub fn run() {
             clear_project_repo_reason,
             remove_project_repo,
             set_primary_project_repo,
+            set_project_status_override,
             delete_project,
             // Repo badges
             get_all_repo_badges,

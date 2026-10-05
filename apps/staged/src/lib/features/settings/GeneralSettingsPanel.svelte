@@ -9,6 +9,7 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import DiagramConfigSetting from './DiagramConfigSetting.svelte';
+  import ProjectStatusOptionsSetting from './ProjectStatusOptionsSetting.svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,
@@ -177,6 +178,10 @@
           This prefix will be added to branch names along with a slash separator.
         {/if}
       </p>
+    </div>
+
+    <div class="field">
+      <ProjectStatusOptionsSetting />
     </div>
   </div>
 </div>

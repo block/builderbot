@@ -3557,6 +3557,43 @@ fn run_post_completion_hooks(
                             "extracted"
                         }
                     );
+                    let scope = match target.kind {
+                        NoteKind::Repo => {
+                            store.get_note(&target.id).ok().flatten().and_then(|note| {
+                                store
+                                    .get_branch(&note.branch_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|branch| {
+                                        (Some(note.branch_id), branch.project_id, note.content)
+                                    })
+                            })
+                        }
+                        NoteKind::Project => store
+                            .get_project_note(&target.id)
+                            .ok()
+                            .flatten()
+                            .map(|note| (None, note.project_id, note.content)),
+                    };
+                    let Some((branch_id, project_id, previous_content)) = scope else {
+                        log::warn!("Cannot resolve media scope for {label} {}", target.id);
+                        continue;
+                    };
+                    let media = crate::note_media::ingest_note_media(
+                        store,
+                        crate::note_media::NoteScope {
+                            branch_id: branch_id.as_deref(),
+                            project_id: &project_id,
+                            previous_content: &previous_content,
+                        },
+                        session_id,
+                        workspace_name,
+                        remote_working_dir
+                            .filter(|_| workspace_name.is_some())
+                            .map(std::path::Path::new)
+                            .unwrap_or(working_dir),
+                        &body,
+                    );
                     let sncs = suggested_next_steps
                         .as_ref()
                         .and_then(|s| s.suggested_next_commit_step.as_deref());
@@ -3567,18 +3604,19 @@ fn run_post_completion_hooks(
                         NoteKind::Repo => store.update_note_title_and_content(
                             &target.id,
                             &final_title,
-                            &body,
+                            &media.markdown,
                             sncs,
                             snns,
                         ),
                         NoteKind::Project => store.update_project_note_title_and_content(
                             &target.id,
                             &final_title,
-                            &body,
+                            &media.markdown,
                             sncs,
                             snns,
                         ),
                     };
+                    media.finish(store, &previous_content, result.is_ok());
                     if let Err(e) = result {
                         log::error!("Failed to update {label} content: {e}");
                     }

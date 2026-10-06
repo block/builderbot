@@ -103,13 +103,13 @@ fn render_pikchr_for_validation(source: &str) -> Result<(), String> {
     }
 }
 
-struct OpeningFence {
-    fence_char: char,
-    fence_length: usize,
+pub(crate) struct OpeningFence {
+    pub(crate) fence_char: char,
+    pub(crate) fence_length: usize,
     info_string: String,
 }
 
-fn parse_opening_fence(line: &str) -> Option<OpeningFence> {
+pub(crate) fn parse_opening_fence(line: &str) -> Option<OpeningFence> {
     let rest = strip_allowed_indent(line)?;
     let fence_char = rest.chars().next()?;
     if fence_char != '`' && fence_char != '~' {
@@ -128,7 +128,7 @@ fn parse_opening_fence(line: &str) -> Option<OpeningFence> {
     })
 }
 
-fn is_closing_fence(line: &str, fence_char: char, fence_length: usize) -> bool {
+pub(crate) fn is_closing_fence(line: &str, fence_char: char, fence_length: usize) -> bool {
     let Some(rest) = strip_allowed_indent(line) else {
         return false;
     };

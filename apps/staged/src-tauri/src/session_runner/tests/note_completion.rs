@@ -96,3 +96,72 @@ fn note_finish_is_successful_and_keeps_queued_follow_ups_enabled() {
     // An actual Stop still suppresses further work, even after a note finished.
     assert!(!queued_follow_up_should_start(completed, true));
 }
+
+#[test]
+fn completion_ingests_media_for_branch_and_project_notes() {
+    use crate::note_media::{refs::media_ids, tests::Fixture};
+    for project_note in [false, true] {
+        let fixture = Fixture::new();
+        let image_path = fixture.dir.path().join("shot.png");
+        std::fs::write(&image_path, crate::note_media::tests::PNG).unwrap();
+        let content = "---\n# Media note\n![Screenshot](shot.png)";
+        let id = if project_note {
+            let note =
+                ProjectNote::new(&fixture.project.id, "", "").with_session(&fixture.session.id);
+            fixture.store.create_project_note(&note).unwrap();
+            note.id
+        } else {
+            let note = Note::new(&fixture.branch.id, "", "").with_session(&fixture.session.id);
+            fixture.store.create_note(&note).unwrap();
+            note.id
+        };
+        fixture
+            .store
+            .add_session_message(&fixture.session.id, MessageRole::Assistant, content)
+            .unwrap();
+        let store = fixture.store.clone();
+        run_post_completion_hooks(
+            &fixture.session.id,
+            fixture.dir.path(),
+            None,
+            None,
+            None,
+            &store,
+        );
+        let note_content = if project_note {
+            store.get_project_note(&id).unwrap().unwrap().content
+        } else {
+            store.get_note(&id).unwrap().unwrap().content
+        };
+        let ids = media_ids(&note_content);
+        assert_eq!(ids.len(), 1);
+        let image = store
+            .get_image(ids.iter().next().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            image.session_id.as_deref(),
+            Some(fixture.session.id.as_str())
+        );
+        assert_eq!(
+            image.branch_id.as_deref(),
+            if project_note {
+                None
+            } else {
+                Some(fixture.branch.id.as_str())
+            }
+        );
+        assert_eq!(
+            std::fs::read(
+                crate::store::images::image_file_path(
+                    &image.project_id,
+                    &image.id,
+                    &image.filename
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            crate::note_media::tests::PNG
+        );
+    }
+}

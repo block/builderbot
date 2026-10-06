@@ -148,6 +148,10 @@
     extractMarkdownDiagramFences,
     fencedDiagramMarkdown,
   } from '../../shared/markdown/diagramFormats';
+  import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
+  import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
+  import { resolveStagedMediaUrl } from '../../shared/markdown/mediaUrl';
+  import '../../shared/markdown/mediaStyles.css';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -335,6 +339,7 @@
   );
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
+  let mediaViewer = $state<MarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
   let metadataFollowupConfig = $derived.by(() =>
     latestAcpConfigDiscoveryFromMetadata(session?.provider, acpMetadataMessages)
@@ -1347,6 +1352,15 @@
     return html;
   }
 
+  function openMediaViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
+    const media = getMarkdownMediaFromEvent(event.target);
+    if (!media) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    mediaViewer = media;
+    return true;
+  }
+
   function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
     const svgMarkup = getMarkdownDiagramSvgMarkup(event.target);
     if (!svgMarkup) return false;
@@ -1386,7 +1400,7 @@
   }
 
   function handleContentClick(event: MouseEvent) {
-    if (openDiagramViewerFromEvent(event)) return;
+    if (openMediaViewerFromEvent(event) || openDiagramViewerFromEvent(event)) return;
 
     const click = hashtagClickFromTarget(event.target);
     if (click && onHashtagClick) {
@@ -1399,7 +1413,11 @@
   }
 
   function handleContentKeydown(event: KeyboardEvent) {
-    if (isMarkdownDiagramActivationKey(event) && openDiagramViewerFromEvent(event)) return;
+    if (
+      isMarkdownDiagramActivationKey(event) &&
+      (openMediaViewerFromEvent(event) || openDiagramViewerFromEvent(event))
+    )
+      return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const click = hashtagClickFromTarget(event.target);
     if (!click || !onHashtagClick) return;
@@ -2490,6 +2508,16 @@
     {/if}
   </div>
 </div>
+
+{#if mediaViewer}
+  <MediaViewerModal
+    open={true}
+    src={resolveStagedMediaUrl(mediaViewer.id, mediaViewer.ext)}
+    kind={mediaViewer.kind}
+    title={mediaViewer.alt}
+    onClose={() => (mediaViewer = null)}
+  />
+{/if}
 
 <DiagramViewerModal
   open={diagramViewerSvg !== null}

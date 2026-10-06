@@ -1,5 +1,6 @@
 import { marked, Renderer, type Tokens } from 'marked';
 
+import { renderMarkdownMedia } from './mediaRendering';
 import { sanitize } from '../sanitize';
 import {
   renderMarkdownDiagramCodeBlock,
@@ -41,6 +42,11 @@ function createMarkdownRenderer(
   trustedHtml: TrustedHtmlReplacement[]
 ): Renderer {
   const renderer = new Renderer();
+  const renderImage = renderer.image.bind(renderer);
+  renderer.image = (token: Tokens.Image) => {
+    const media = renderMarkdownMedia(token);
+    return media ? stashTrustedHtml(media, trustedHtml) : renderImage(token);
+  };
   const renderCode = renderer.code.bind(renderer);
   const renderText = renderer.text.bind(renderer);
 

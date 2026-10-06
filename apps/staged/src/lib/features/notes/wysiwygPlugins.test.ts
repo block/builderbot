@@ -153,3 +153,14 @@ describe('firstLineTitlePlugin', () => {
     expect(view.state.doc.child(1).type.name).toBe('paragraph');
   });
 });
+
+describe('stored note media', () => {
+  it('preserves image and video references through editor edits', async () => {
+    const image = 'staged-media://3f2a9c1e-1234-4567-8123-123456789abc.png';
+    const video = 'staged-media://3f2a9c1e-1234-4567-8123-123456789abc.mp4';
+    const view = await createEditor(`# Note\n\n![Image](${image})\n\n![Video](${video})`);
+    view.dispatch(view.state.tr.insertText('Edited ', 1));
+    expect(currentMarkdown()).toContain(`![Image](${image})`);
+    expect(currentMarkdown()).toContain(`![Video](${video})`);
+  });
+});

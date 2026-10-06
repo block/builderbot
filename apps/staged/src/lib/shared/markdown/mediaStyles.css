@@ -1,0 +1,48 @@
+.markdown-content .markdown-media {
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+}
+.markdown-content .markdown-media img,
+.markdown-content .markdown-media video {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+}
+.markdown-content .markdown-media img {
+  cursor: zoom-in;
+}
+.markdown-content .markdown-media figcaption {
+  padding: 6px 10px;
+  color: var(--text-muted);
+  font-size: var(--size-sm);
+}
+.markdown-content .markdown-media-expand {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+.markdown-content .markdown-media:hover .markdown-media-expand,
+.markdown-content .markdown-media:focus-within .markdown-media-expand {
+  opacity: 1;
+}
+@media (hover: none) {
+  .markdown-content .markdown-media-expand {
+    opacity: 1;
+  }
+}

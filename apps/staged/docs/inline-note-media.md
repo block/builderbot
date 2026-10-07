@@ -55,6 +55,14 @@ those paths. Missing files become text placeholders. Images and videos up to
 placeholder with caption, filename, size, and reason. Remote ingestion bounds
 output with `head` and uses positional shell arguments for paths.
 
+A project agent reads a child repo session's note through the
+`wait_for_repo_session` and `cancel_repo_session` replies, which materialize
+the note content the same way, always into the local OS temp directory because
+project sessions run locally. The reply's `output` field is the child's raw
+final message and still carries the child's original pre-ingest paths, which
+may no longer exist (and never do on Blox), so parents should prefer
+`note.content`.
+
 ## Serving and implementation choices
 
 The desktop `staged-media` protocol resolves IDs through the store and handles
@@ -68,20 +76,21 @@ this feature does not enable the currently stubbed web server.
 Compared with the original plan, responsibilities are split under `note_media/`
 (parsing, file validation/storage, ingestion/cleanup, materialization, serving)
 instead of one Rust file. Context materialization lives there and is called by
-both existing note formatters. Shared media CSS covers both notes and chat.
-Placeholders are escaped text rather than broken Markdown image links.
-The only dependency declaration added is **dev-only** `tower` (already present
-transitively) for authenticated router `oneshot` tests.
+both note formatters and the project-agent repo-session payload. Shared media
+CSS covers both notes and chat. Placeholders are escaped text rather than
+broken Markdown image links. The only dependency declaration added is
+**dev-only** `tower` (already present transitively) for authenticated router
+`oneshot` tests.
 
 ## Validation
 
 Automated tests cover ingestion and note completion for both note kinds,
 path forms, code skipping, titles, magic/size validation, deduplication,
 rollback, deletion and shared references, local materialization and missing
-files, the remote video cap, desktop ranges, authenticated browser serving,
-renderer escaping, viewer targets, platform URL resolution, and Milkdown
-round-tripping. Run the repository's Rust tests, frontend tests, type check,
-Clippy, and formatting checks using Hermit.
+files, the remote video cap, project-agent child-note handoff, desktop ranges,
+authenticated browser serving, renderer escaping, viewer targets, platform URL
+resolution, and Milkdown round-tripping. Run the repository's Rust tests,
+frontend tests, type check, Clippy, and formatting checks using Hermit.
 
 Native smoke validation used a disposable Tauri/WKWebView app with the
 production renderer, viewer, ingestion, and byte handler: PNG display,

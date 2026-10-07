@@ -11,7 +11,9 @@ Markdown image syntax, including for videos:
 Absolute paths, `~/` paths, `file:///` URLs, and paths relative to the session's
 working directory are accepted. Use angle brackets around paths with spaces, or
 percent-encode the spaces. HTTP(S) images remain external. Reference-style
-images and raw HTML media are not ingested. Code examples are skipped.
+images and raw HTML media are not ingested. Fenced and indented code examples
+are skipped. Indentation is judged relative to the enclosing list item or quote,
+as the renderer does, so an image indented under a list step is ingested.
 
 Supported formats are PNG, JPEG, GIF, and WebP up to 10 MiB, and MP4, WebM, and
 MOV up to 100 MiB. Extension and file signatures must agree. Video validation

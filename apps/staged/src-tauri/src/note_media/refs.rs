@@ -13,62 +13,10 @@ pub(crate) struct MediaRef {
 
 pub(crate) fn extract_media_refs(markdown: &str) -> Vec<MediaRef> {
     let mut refs = Vec::new();
-    let mut fence = None;
-    let mut offset = 0;
-    let mut prose_start = 0;
-    for line in markdown.split_inclusive('\n') {
-        let fence_line = strip_containers(line);
-        let is_code = if let Some((character, length)) = fence {
-            if crate::pikchr_validation::is_closing_fence(
-                fence_line.trim_end_matches(['\r', '\n']),
-                character,
-                length,
-            ) {
-                fence = None;
-            }
-            true
-        } else if let Some(opening) = crate::pikchr_validation::parse_opening_fence(fence_line) {
-            fence = Some((opening.fence_char, opening.fence_length));
-            true
-        } else {
-            fence_line.starts_with("    ") || fence_line.starts_with('\t')
-        };
-        if is_code {
-            extract_inline(&markdown[prose_start..offset], prose_start, &mut refs);
-            prose_start = offset + line.len();
-        }
-        offset += line.len();
+    for range in super::blocks::prose_ranges(markdown) {
+        extract_inline(&markdown[range.clone()], range.start, &mut refs);
     }
-    extract_inline(&markdown[prose_start..], prose_start, &mut refs);
     refs
-}
-
-// Fences also occur inside quoted/list examples. Strip their container
-// prefixes for fence detection only; byte ranges still use the original text.
-fn strip_containers(mut line: &str) -> &str {
-    loop {
-        let trimmed = line.trim_start_matches(' ');
-        if line.len() - trimmed.len() > 3 {
-            return line;
-        }
-        if let Some(rest) = trimmed.strip_prefix('>') {
-            line = rest.strip_prefix(' ').unwrap_or(rest);
-        } else if let Some(rest) = ["- ", "* ", "+ "]
-            .iter()
-            .find_map(|prefix| trimmed.strip_prefix(prefix))
-        {
-            line = rest;
-        } else {
-            let digits = trimmed.bytes().take_while(u8::is_ascii_digit).count();
-            if (1..=9).contains(&digits)
-                && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") "))
-            {
-                line = &trimmed[digits + 2..];
-            } else {
-                return line;
-            }
-        }
-    }
 }
 
 fn extract_inline(line: &str, offset: usize, refs: &mut Vec<MediaRef>) {

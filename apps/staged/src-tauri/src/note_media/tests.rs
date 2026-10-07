@@ -410,3 +410,78 @@ fn fenced_examples_in_quotes_and_lists_are_not_ingested() {
         assert_eq!(refs[0].target, "real.png");
     }
 }
+
+/// Expected counts match Marked (`gfm: true, breaks: true`), the app's renderer.
+fn assert_image_counts(cases: &[(&str, usize)]) {
+    for (source, expected) in cases {
+        assert_eq!(extract_media_refs(source).len(), *expected, "{source:?}");
+    }
+}
+
+#[test]
+fn images_inside_lists_are_ingested() {
+    assert_image_counts(&[
+        ("1. Step\n\n    ![S](p)", 1),
+        ("1. Step\n    ![S](p)", 1),
+        ("- Step\n\n    ![S](p)", 1),
+        ("- a\n  - b\n\n      ![S](p)", 1),
+        ("-   a\n\n      ![S](p)", 1),
+        ("10. a\n\n    ![S](p)", 1),
+        ("100. a\n\n     ![S](p)", 1),
+        ("> - a\n>\n>     ![S](p)", 1),
+        ("- Step\n\n\t![S](p)", 1),
+        ("- a\n- b\n\n    ![S](p)", 1),
+        ("- a\n\n    ![S](p)\n        ![T](p)", 2),
+        ("1. Step\r\n\r\n    ![S](p)\r\n", 1),
+    ]);
+    let source = "1. Step\n\n    ![Shot](/tmp/shot.png)\n";
+    let refs = extract_media_refs(source);
+    assert_eq!(&source[refs[0].destination.clone()], "/tmp/shot.png");
+}
+
+#[test]
+fn indented_code_examples_stay_code_relative_to_containers() {
+    assert_image_counts(&[
+        ("- Step\n\n      ![S](p)", 0),
+        ("- a\n\n        ![S](p)", 0),
+        ("- a\n    - b\n\n          ![S](p)", 0),
+        ("1.     ![S](p)", 0),
+        ("Para\n\n    ![S](p)", 0),
+        ("- a\n\nPara\n\n    ![S](p)", 0),
+        ("> - a\n\n    ![S](p)", 0),
+        (">     ![S](p)", 0),
+        ("> a\n>\n>     ![S](p)", 0),
+        ("- a\n\n\t    ![S](p)", 0),
+    ]);
+}
+
+#[test]
+fn paragraph_continuations_and_lazy_lines_follow_marked() {
+    assert_image_counts(&[
+        ("Here it is:\n    ![S](p)", 1),
+        ("> a\n>     ![S](p)", 1),
+        ("- a\nb\n\n    ![S](p)", 1),
+        ("- a\n===\n\n    ![S](p)", 1),
+        ("- a\n# h\n\n    ![S](p)", 0),
+        ("- a\n---\n\n    ![S](p)", 0),
+        ("- a\n> q\n\n    ![S](p)", 0),
+        ("- a\n```\n\n    ![S](p)", 0),
+        ("# Title\n    ![S](p)", 0),
+        ("---\n    ![S](p)", 0),
+        ("Title\n===\n    ![S](p)", 0),
+    ]);
+}
+
+#[test]
+fn indented_list_images_are_ingested_without_changing_indentation() {
+    let f = Fixture::new();
+    std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();
+    let outcome = f.ingest("", "1. Step\n\n    ![Screenshot](shot.png)");
+    assert_eq!(outcome.kept_ids.len(), 1);
+    let id = outcome.kept_ids.iter().next().unwrap();
+    assert_eq!(
+        outcome.markdown,
+        format!("1. Step\n\n    ![Screenshot](staged-media://{id}.png)")
+    );
+    assert!(media_ids(&outcome.markdown).contains(id));
+}

@@ -119,6 +119,26 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('markdown-diagram-source');
     expect(html).not.toContain('<script>');
   });
+
+  // Mirrors the Rust note media scanner (src-tauri/src/note_media/tests.rs):
+  // a renderer upgrade that changes these must update the scanner too.
+  it.each([
+    ['1. Step\n\n    ![S](p)', 1],
+    ['- a\n  - b\n\n      ![S](p)', 1],
+    ['> - a\n>\n>     ![S](p)', 1],
+    ['- Step\n\n\t![S](p)', 1],
+    ['- a\nb\n\n    ![S](p)', 1],
+    ['Here it is:\n    ![S](p)', 1],
+    ['- a\n\n    ![S](p)\n        ![T](p)', 2],
+    ['- Step\n\n      ![S](p)', 0],
+    ['1.     ![S](p)', 0],
+    ['- a\n\nPara\n\n    ![S](p)', 0],
+    ['- a\n# h\n\n    ![S](p)', 0],
+    ['> - a\n\n    ![S](p)', 0],
+    ['- a\n\n\t    ![S](p)', 0],
+  ])('renders indented images by container rules: %j', (source, images) => {
+    expect(renderMarkdown(source).match(/<img/g)?.length ?? 0).toBe(images);
+  });
 });
 
 const safePikchrRenderer: PikchrRenderer = () => ({

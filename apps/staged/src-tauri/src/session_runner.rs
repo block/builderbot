@@ -1087,7 +1087,12 @@ pub fn start_session(
             // don't appear in the branch timeline. Both operations are kept together;
             // if set_images_session_id fails we log a warning rather than aborting the
             // session, since the message was already persisted.
-            if let Some(ref queued_message_id) = config.queued_message_id {
+            //
+            // The prompt's row id marks where this turn starts, so note
+            // extraction only considers what the agent wrote in this turn.
+            let turn_start_message_id = if let Some(ref queued_message_id) =
+                config.queued_message_id
+            {
                 store
                     .add_session_message_with_images_from_queue(
                         &config.session_id,
@@ -1120,9 +1125,9 @@ pub fn start_session(
                 }
             }
 
-            Ok((driver, resolved_provider_id))
+            Ok((driver, resolved_provider_id, turn_start_message_id))
         });
-    let (cancel_token, (driver, resolved_provider_id)) = match started {
+    let (cancel_token, (driver, resolved_provider_id, turn_start_message_id)) = match started {
         Ok(started) => started,
         Err(failure) => {
             if let Some(completion_reason) = failure.accepted_cancellation {
@@ -1646,6 +1651,7 @@ pub fn start_session(
                     .as_deref()
                     .and_then(|dir| dir.to_str()),
                 &store_for_status,
+                turn_start_message_id,
             );
         }
 
@@ -3339,8 +3345,11 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 /// - **Commits**: If a pending commit record is linked to this session and
 ///   HEAD has moved since the session started, record the new SHA.
 ///   For remote workspaces, HEAD is checked via `blox ws_exec`.
-/// - **Notes**: If an empty note is linked to this session, parse the
-///   assistant's last message for content after the first `---`.
+/// - **Notes**: If a note is linked to this session, parse the last assistant
+///   message of the completed turn (messages from `turn_start_message_id`
+///   onwards) for content after the first `---`. Earlier turns are never
+///   re-extracted: their media sources may be gone, and re-ingesting them
+///   would replace saved attachments with unavailable placeholders.
 fn run_post_completion_hooks(
     session_id: &str,
     working_dir: &std::path::Path,
@@ -3348,6 +3357,7 @@ fn run_post_completion_hooks(
     workspace_name: Option<&str>,
     remote_working_dir: Option<&str>,
     store: &Arc<Store>,
+    turn_start_message_id: i64,
 ) {
     // --- Commit detection ---
     if let Some(pre_sha) = pre_head_sha {
@@ -3518,8 +3528,8 @@ fn run_post_completion_hooks(
     .collect();
 
     if !note_targets.is_empty() {
-        // Scan assistant messages once for all note targets.
-        if let Ok(messages) = store.get_session_messages(session_id) {
+        // Scan this turn's assistant messages once for all note targets.
+        if let Ok(messages) = store.get_session_messages_since(session_id, turn_start_message_id) {
             let note_content = messages
                 .iter()
                 .rev()
@@ -3621,7 +3631,11 @@ fn run_post_completion_hooks(
                         log::error!("Failed to update {label} content: {e}");
                     }
                 } else {
-                    log::warn!("Session {session_id}: {label} session completed but no --- found in assistant output");
+                    if target.is_amendment {
+                        log::info!("Session {session_id}: turn did not rewrite the {label}; keeping existing content and attachments");
+                    } else {
+                        log::warn!("Session {session_id}: {label} session completed but no --- found in assistant output");
+                    }
                     let result = match target.kind {
                         NoteKind::Repo => store.mark_note_completed(&target.id),
                         NoteKind::Project => store.mark_project_note_completed(&target.id),
@@ -5917,6 +5931,7 @@ mod tests {
             None,
             None,
             &fixture.store,
+            0,
         );
 
         assert_reassociated(&fixture);
@@ -6016,6 +6031,7 @@ mod tests {
             None,
             None,
             &fixture.store,
+            0,
         );
     }
 
@@ -6107,6 +6123,7 @@ mod tests {
             None,
             None,
             &fixture.store,
+            0,
         );
 
         let store = &fixture.store;
@@ -6154,6 +6171,7 @@ mod tests {
             None,
             None,
             &fixture.store,
+            0,
         );
 
         assert_untouched(&fixture);
@@ -6387,6 +6405,7 @@ Solid changes with minor nit
             None,
             None,
             &store,
+            0,
         );
 
         let review = store.get_review(&review_id).unwrap().unwrap();
@@ -6416,6 +6435,7 @@ Solid changes with minor nit
             None,
             None,
             &store,
+            0,
         );
 
         let review = store.get_review(&review_id).unwrap().unwrap();
@@ -6437,6 +6457,7 @@ Solid changes with minor nit
             None,
             None,
             &store,
+            0,
         );
 
         let review = store.get_review(&review_id).unwrap().unwrap();

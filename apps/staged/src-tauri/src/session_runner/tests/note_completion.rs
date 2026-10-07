@@ -21,6 +21,9 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             store.create_note(&note).unwrap();
             note.id
         };
+        let turn = store
+            .add_session_message(&session.id, MessageRole::User, "Write a note")
+            .unwrap();
         let writer = MessageWriter::new(session.id.clone(), store.clone());
         writer
             .append_text("---\n# Design\n```pikchr\nbox \"unterminated\n```")
@@ -52,6 +55,7 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             None,
             None,
             &store,
+            turn,
         );
         let (title, content, completed, commit_step, note_step) = if project_note {
             let note = store.get_project_note(&id).unwrap().unwrap();
@@ -127,6 +131,7 @@ fn completion_ingests_media_for_branch_and_project_notes() {
             None,
             None,
             &store,
+            0,
         );
         let note_content = if project_note {
             store.get_project_note(&id).unwrap().unwrap().content
@@ -164,4 +169,59 @@ fn completion_ingests_media_for_branch_and_project_notes() {
             crate::note_media::tests::PNG
         );
     }
+}
+
+#[test]
+fn follow_up_turn_without_a_note_keeps_saved_media_even_when_sources_are_gone() {
+    use crate::note_media::{
+        refs::media_ids,
+        tests::{Fixture, PNG},
+    };
+    let f = Fixture::new();
+    let shot = f.dir.path().join("shot.png");
+    std::fs::write(&shot, PNG).unwrap();
+    let note = Note::new(&f.branch.id, "", "").with_session(&f.session.id);
+    f.store.create_note(&note).unwrap();
+    let run_turn = |prompt: &str, response: &str| {
+        let turn = f
+            .store
+            .add_session_message(&f.session.id, MessageRole::User, prompt)
+            .unwrap();
+        f.store
+            .add_session_message(&f.session.id, MessageRole::Assistant, response)
+            .unwrap();
+        run_post_completion_hooks(
+            &f.session.id,
+            f.dir.path(),
+            None,
+            None,
+            None,
+            &f.store,
+            turn,
+        );
+        f.store.get_note(&note.id).unwrap().unwrap()
+    };
+
+    let saved = run_turn(
+        "Write a note",
+        &format!("Intro\n\n---\n# Shot\n\n![Shot]({})", shot.display()),
+    );
+    assert!(saved.content.contains("staged-media://"));
+    let id = media_ids(&saved.content).into_iter().next().unwrap();
+    let image = f.store.get_image(&id).unwrap().unwrap();
+    let file = crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+        .unwrap();
+    assert!(file.exists());
+
+    std::fs::remove_file(&shot).unwrap();
+    let followed_up = run_turn("One more question", "Here's the answer.");
+    assert_eq!(followed_up.content, saved.content);
+    assert!(f.store.get_image(&id).unwrap().is_some());
+    assert!(file.exists());
+    assert!(followed_up.completed_at.is_some());
+
+    let amended = run_turn("Drop the screenshot", "---\n# Shot\n\nNo image now");
+    assert!(amended.content.contains("No image now"));
+    assert!(f.store.get_image(&id).unwrap().is_none());
+    assert!(!file.exists());
 }

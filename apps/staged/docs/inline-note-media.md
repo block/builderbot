@@ -34,7 +34,10 @@ unchanged: only validated media references use trusted renderer HTML.
 Note attachments have session IDs, so they do not become separate timeline or
 `#image:` entries. They are also excluded from session-restart chat image inputs.
 Amendments reuse previous attachments by ID or SHA-256 content. Branch moves
-already relocate session-scoped image rows and files.
+already relocate session-scoped image rows and files. Only the completed turn's
+output is scanned for a note, so a follow-up that does not rewrite the note
+leaves the saved note and its attachments untouched, even if the original
+source files no longer exist.
 
 Cleanup runs **after** a successful note save, and failed saves roll back new
 attachments. Deleting a project note includes its child-note attachments.

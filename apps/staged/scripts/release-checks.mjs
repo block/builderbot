@@ -5,6 +5,7 @@
 // credential-free latest.json endpoint, immutable staged/vX.Y.Z version tags,
 // fixed asset names, and a valid darwin-aarch64 updater feed. Publication
 // scripts fail closed on any violation rather than shipping a broken feed.
+import { execFileSync } from 'node:child_process';
 
 export const STABLE_CHANNEL = 'stable';
 
@@ -135,6 +136,46 @@ export function assertValidStableFeed(feed, { version, platform, expectedUrl }) 
     );
   }
   assertValidHttpsAssetUrl(record.url);
+}
+
+/**
+ * Verify the updater archive contains the app being released. The archive's
+ * file name carries no version, so a stale bundle left on disk would otherwise
+ * be published — validly signed — under the new version, and every client that
+ * installs it would keep being re-offered the update. Reads the top-level
+ * `<Name>.app/Contents/Info.plist` and compares its CFBundleShortVersionString.
+ */
+export function assertArchiveEmbedsVersion(archivePath, version) {
+  // Piped stderr lands in the thrown error's message if tar fails.
+  const tarOptions = {
+    encoding: 'utf-8',
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  };
+  const entries = execFileSync('tar', ['-tzf', archivePath], tarOptions)
+    .split('\n')
+    .filter((entry) => /^(?:\.\/)?[^/]+\.app\/Contents\/Info\.plist$/.test(entry));
+  if (entries.length !== 1) {
+    throw new Error(
+      `Expected exactly one <Name>.app/Contents/Info.plist in ${archivePath}, found ${entries.length}.`
+    );
+  }
+
+  const plist = execFileSync('tar', ['-xzOf', archivePath, entries[0]], tarOptions);
+  const match = plist.match(
+    /<key>\s*CFBundleShortVersionString\s*<\/key>\s*<string>\s*([^<]*?)\s*<\/string>/
+  );
+  if (!match) {
+    throw new Error(
+      `Could not read CFBundleShortVersionString from ${entries[0]} in ${archivePath}.`
+    );
+  }
+  if (match[1] !== version) {
+    throw new Error(
+      `Updater archive embeds version "${match[1]}" but publishing version "${version}". ` +
+        'The bundle was built from a different version; rebuild before publishing.'
+    );
+  }
 }
 
 /** Published asset URLs must be plain HTTPS without embedded credentials. */

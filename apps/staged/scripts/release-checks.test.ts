@@ -1,5 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { infoPlist, writeAppArchive } from './app-archive-fixture';
 import {
+  assertArchiveEmbedsVersion,
   assertStableChannel,
   assertValidHttpsAssetUrl,
   assertValidStableFeed,
@@ -198,6 +203,55 @@ describe('assertValidStableFeed', () => {
 
   it('rejects non-object feeds', () => {
     expect(() => assertValidStableFeed(null, options)).toThrow(/JSON object/);
+  });
+});
+
+describe('assertArchiveEmbedsVersion', () => {
+  let archiveDir: string;
+  const archivePath = () => join(archiveDir, 'Staged.app.tar.gz');
+
+  beforeEach(() => {
+    archiveDir = mkdtempSync(join(tmpdir(), 'staged-release-checks-'));
+  });
+
+  afterEach(() => {
+    rmSync(archiveDir, { recursive: true, force: true });
+  });
+
+  it('accepts an archive whose Info.plist embeds the release version', () => {
+    writeAppArchive(archivePath(), { plist: infoPlist('1.2.3') });
+    expect(() => assertArchiveEmbedsVersion(archivePath(), '1.2.3')).not.toThrow();
+  });
+
+  it('does not depend on the app bundle name', () => {
+    writeAppArchive(archivePath(), { plist: infoPlist('1.2.3'), appName: 'Other.app' });
+    expect(() => assertArchiveEmbedsVersion(archivePath(), '1.2.3')).not.toThrow();
+  });
+
+  it('rejects an archive built from a different version', () => {
+    writeAppArchive(archivePath(), { plist: infoPlist('1.2.2') });
+    expect(() => assertArchiveEmbedsVersion(archivePath(), '1.2.3')).toThrow(
+      /embeds version "1\.2\.2" but publishing version "1\.2\.3"/
+    );
+  });
+
+  it('rejects an archive without a top-level Info.plist', () => {
+    writeAppArchive(archivePath(), { plist: null });
+    expect(() => assertArchiveEmbedsVersion(archivePath(), '1.2.3')).toThrow(
+      /Expected exactly one <Name>\.app\/Contents\/Info\.plist .* found 0/
+    );
+  });
+
+  it('rejects an Info.plist without CFBundleShortVersionString', () => {
+    writeAppArchive(archivePath(), { plist: 'bplist00\u0000binary' });
+    expect(() => assertArchiveEmbedsVersion(archivePath(), '1.2.3')).toThrow(
+      /Could not read CFBundleShortVersionString/
+    );
+  });
+
+  it('rejects a file that is not a tar.gz archive', () => {
+    writeFileSync(archivePath(), 'archive-bytes');
+    expect(() => assertArchiveEmbedsVersion(archivePath(), '1.2.3')).toThrow();
   });
 });
 

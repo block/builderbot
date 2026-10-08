@@ -4,8 +4,9 @@
 //
 // - stable-only channel, X.Y.Z version matching the staged/vX.Y.Z tag
 // - archive and signature assets present with a nonempty signature
-// - latest.json contains a valid darwin-aarch64 entry pointing at the
-//   stable alias archive URL
+// - the archive's Info.plist embeds the version being released
+// - the generated latest.json contains a valid darwin-aarch64 entry pointing
+//   at the stable alias archive URL
 // - published alias assets are reachable before the workflow reports success
 import { execFileSync } from 'node:child_process';
 import {
@@ -20,6 +21,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import {
+  assertArchiveEmbedsVersion,
   assertStableChannel,
   assertValidStableFeed,
   assertValidVersion,
@@ -73,7 +75,6 @@ const bundleDir = resolve(
     defaultBundleDirs.find((dir) => existsSync(resolve(process.cwd(), dir))) ??
     defaultBundleDirs[1]
 );
-const latestPath = join(bundleDir, 'latest.json');
 
 assertValidVersion(version);
 assertVersionTagMatchesVersion(versionTag, version);
@@ -175,7 +176,7 @@ function readSignature(signaturePath) {
   return signature;
 }
 
-function buildStableLatest(signaturePath) {
+function buildStableLatest(signaturePath, archiveUrl) {
   return {
     version,
     notes: `Release v${version}.`,
@@ -183,7 +184,7 @@ function buildStableLatest(signaturePath) {
     platforms: {
       [updaterPlatform]: {
         signature: readSignature(signaturePath),
-        url: '',
+        url: archiveUrl,
       },
     },
   };
@@ -198,32 +199,13 @@ async function main() {
   const signaturePath = `${archivePath}.sig`;
   requirePath(archivePath);
   requirePath(signaturePath);
-
-  const latest = existsSync(latestPath)
-    ? JSON.parse(readFileSync(latestPath, 'utf-8'))
-    : buildStableLatest(signaturePath);
-  // The Tauri-generated feed version must already match the release version:
-  // a mismatch means the tag was bumped without rebuilding the bundle, and
-  // rewriting it here would advertise a version the archive does not contain.
-  if (latest.version !== version) {
-    throw new Error(
-      `latest.json version "${latest.version}" does not match release version "${version}". ` +
-        'The bundle was likely built from a different version; rebuild before publishing.'
-    );
-  }
-  latest.pub_date = new Date().toISOString();
-  const platformRecord = latest?.platforms?.[updaterPlatform];
-  if (!platformRecord) {
-    const available = Object.keys(latest?.platforms ?? {});
-    throw new Error(
-      `Platform "${updaterPlatform}" missing in latest.json. Available: ${available.join(', ') || '(none)'}`
-    );
-  }
+  // The feed is generated from `version`, so the archive itself must contain
+  // that version or the feed would advertise bytes it doesn't describe.
+  assertArchiveEmbedsVersion(archivePath, version);
 
   const archiveName = basename(archivePath);
   const signatureName = basename(signaturePath);
-  platformRecord.signature = readSignature(signaturePath);
-  platformRecord.url = downloadUrl(archiveName);
+  const latest = buildStableLatest(signaturePath, downloadUrl(archiveName));
 
   // Validate the generated feed before publishing anything to the alias.
   assertValidStableFeed(latest, {

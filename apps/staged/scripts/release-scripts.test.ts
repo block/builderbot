@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { infoPlist, writeAppArchive } from './app-archive-fixture';
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const appDir = resolve(scriptsDir, '..');
@@ -74,23 +75,20 @@ function setupUpdaterBundle({
   signature = 'c2lnbmF0dXJl',
   includeArchive = true,
   includeSignature = true,
-  latestJson,
+  archiveVersion = VERSION,
 }: {
   signature?: string;
   includeArchive?: boolean;
   includeSignature?: boolean;
-  latestJson?: Record<string, unknown>;
+  archiveVersion?: string;
 } = {}) {
   const bundleDir = join(fixtureDir, 'src-tauri/target/aarch64-apple-darwin/release/bundle/macos');
   mkdirSync(bundleDir, { recursive: true });
   if (includeArchive) {
-    writeFileSync(join(bundleDir, 'Staged.app.tar.gz'), 'archive-bytes');
+    writeAppArchive(join(bundleDir, 'Staged.app.tar.gz'), { plist: infoPlist(archiveVersion) });
   }
   if (includeSignature) {
     writeFileSync(join(bundleDir, 'Staged.app.tar.gz.sig'), signature);
-  }
-  if (latestJson) {
-    writeFileSync(join(bundleDir, 'latest.json'), `${JSON.stringify(latestJson, null, 2)}\n`);
   }
   return bundleDir;
 }
@@ -294,45 +292,24 @@ describe('publish-updater-to-github-release.mjs', () => {
     expect(result.stderr).toContain('signature');
   });
 
-  it('fails when latest.json lacks the darwin-aarch64 platform', () => {
-    setupUpdaterBundle({
-      latestJson: {
-        version: VERSION,
-        platforms: {
-          'linux-x86_64': { signature: 'c2ln', url: '' },
-        },
-      },
-    });
-    const result = runScript('publish-updater-to-github-release.mjs', { env: dryEnv });
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain('Platform "darwin-aarch64" missing in latest.json');
-  });
-
-  it('fails when the generated latest.json version does not match the release version', () => {
-    setupUpdaterBundle({
-      latestJson: {
-        version: '0.0.1',
-        platforms: {
-          'darwin-aarch64': { signature: 'stale', url: 'https://example.com/old.tar.gz' },
-        },
-      },
-    });
+  it('fails when the archive was built from a different version', () => {
+    // A version bump pulled onto a working tree that still holds the previous
+    // release's bundle: the stale archive must not ship under the new version.
+    setupUpdaterBundle({ archiveVersion: '0.0.1' });
     const result = runScript('publish-updater-to-github-release.mjs', { env: dryEnv });
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain(
-      `latest.json version "0.0.1" does not match release version "${VERSION}"`
+      `Updater archive embeds version "0.0.1" but publishing version "${VERSION}"`
     );
+    expect(result.stdout).not.toContain('gh release upload');
   });
 
-  it('rewrites the feed URL and signature to the stable alias before validating', () => {
-    setupUpdaterBundle({
-      latestJson: {
-        version: VERSION,
-        platforms: {
-          'darwin-aarch64': { signature: 'stale', url: 'https://example.com/old.tar.gz' },
-        },
-      },
-    });
+  it('ignores a stray latest.json in the bundle directory', () => {
+    const bundleDir = setupUpdaterBundle();
+    writeFileSync(
+      join(bundleDir, 'latest.json'),
+      JSON.stringify({ version: '0.0.1', platforms: {} })
+    );
     const result = runScript('publish-updater-to-github-release.mjs', { env: dryEnv });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('Feed validation passed');

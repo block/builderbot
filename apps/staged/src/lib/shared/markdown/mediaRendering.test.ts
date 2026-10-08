@@ -36,6 +36,31 @@ describe('note media rendering', () => {
     expect(html).not.toContain('<c>');
   });
 
+  it('keeps replacement patterns literal in captions and titles', () => {
+    // `$&`, `` $` ``, and `$'` are String.replace patterns; `$'` escapes to
+    // `$&#39;` and would smuggle in `$&` after escaping.
+    const html = renderMarkdown(`![cost $& $\\\` $' more](staged-media://${id}.png "$& $\\\` $'")`);
+    const caption = 'cost $&amp; $` $&#39; more';
+    expect(html).toContain(`<figcaption>${caption}</figcaption>`);
+    expect(html).toContain(`alt="${caption}"`);
+    expect(html).toContain(`data-media-alt="${caption}"`);
+    expect(html).toContain('title="$&amp; $` $&#39;"');
+    expect(html).not.toContain('STAGED_MARKDOWN_TRUSTED_HTML_');
+  });
+
+  it('cannot splice preceding author text into media attributes', () => {
+    const html = renderMarkdown(`" onclick="alert(1)" x="![$\\\`](staged-media://${id}.png)`);
+    const tags = html.match(/<[a-z][^>]*>/gi) ?? [];
+    expect(tags.some((tag) => tag.startsWith('<figure '))).toBe(true);
+    for (const tag of tags) {
+      expect(tag).not.toContain('onclick');
+      expect(tag).not.toContain('alert');
+    }
+    expect(html).toContain('data-media-alt="$`"');
+    expect(html).toContain('alt="$`"');
+    expect(html).toContain('<figcaption>$`</figcaption>');
+  });
+
   it('escapes captions and titles before bypassing sanitization', () => {
     const html = renderMarkdownMedia({
       type: 'image',

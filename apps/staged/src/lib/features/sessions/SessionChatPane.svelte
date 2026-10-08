@@ -568,6 +568,7 @@
     replyImageIds = replyImageIds.filter((id) => id !== imageId);
     imagePreviews = new Map(imagePreviews);
     imagePreviews.delete(imageId);
+    attachError = null;
     deleteImage(imageId).catch((err) => {
       console.error('Failed to delete image:', err);
     });
@@ -585,8 +586,12 @@
       try {
         const image = await createImage(bid, pid, path, true);
         newIds.push(image.id);
+        attachError = null;
       } catch (e) {
+        // Surface the rejection reason (signature, size) as paste does.
         console.error('Failed to create image from dropped file:', e);
+        const name = path.split(/[\\/]/).pop() || path;
+        attachError = `Could not attach ${name}: ${e instanceof Error ? e.message : String(e)}`;
       }
     }
     if (newIds.length > 0) {
@@ -1017,6 +1022,7 @@
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];
     imagePreviews = new Map();
+    attachError = null;
     // Reset textarea height after clearing (oninput won't fire for programmatic changes)
     tick().then(() => autoResize());
 

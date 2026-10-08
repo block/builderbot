@@ -1,5 +1,6 @@
 //! Shared, validated writes to the existing image store (including note videos).
 
+use super::materialize::RemoteMedia;
 use crate::store::{Image, Store};
 use std::io::Read;
 use std::path::Path;
@@ -249,30 +250,47 @@ pub(crate) fn delete_media_file(store: &Store, image: &Image) -> Result<(), Stri
     Ok(())
 }
 
+/// Probe-and-read script for remote sources. Positional shell arguments handle
+/// spaces/quotes without interpolation. It exits 1 when the path does not
+/// exist and 2, with [`REMOTE_NOT_REGULAR`] on stderr, when it exists but is
+/// not a regular file; `ws_exec` reports only success and stderr, so the
+/// message is what tells the two apart. Output is limited before it crosses
+/// the workspace boundary, and devices/FIFOs are rejected instead of blocking
+/// on a non-file read.
+pub(crate) const REMOTE_READ_SCRIPT: &str = "cd -- \"$2\" || exit 1; media_path=$1; case $media_path in '~/'*) media_path=\"$HOME/${media_path#??}\";; esac; test -e \"$media_path\" || exit 1; test -f \"$media_path\" || { echo 'staged-note-media: not a regular file' >&2; exit 2; }; head -c \"$3\" -- \"$media_path\"";
+pub(crate) const REMOTE_NOT_REGULAR: &str = "staged-note-media: not a regular file";
+
 pub(crate) fn read_candidate(
     target: &str,
     workspace: Option<&str>,
     cwd: &Path,
     cap: u64,
+    remote: &dyn RemoteMedia,
 ) -> Result<Vec<u8>, ReadError> {
     if let Some(workspace) = workspace {
-        // Positional shell arguments handle spaces/quotes without interpolation.
-        // Limit output before it crosses the workspace boundary, and reject
-        // devices/FIFOs instead of blocking on a non-file read.
-        let script = "cd -- \"$2\" || exit; media_path=$1; case $media_path in '~/'*) media_path=\"$HOME/${media_path#??}\";; esac; test -f \"$media_path\" || exit 1; head -c \"$3\" -- \"$media_path\"";
-        let bytes = crate::blox::ws_exec_bytes(
-            workspace,
-            &[
-                "sh",
-                "-c",
-                script,
-                "staged-note-media",
-                target,
-                &cwd.to_string_lossy(),
-                &(cap + 1).to_string(),
-            ],
-        )
-        .map_err(|_| ReadError::NotFound("remote media file is unavailable"))?;
+        let output = remote
+            .exec_output(
+                workspace,
+                &[
+                    "sh",
+                    "-c",
+                    REMOTE_READ_SCRIPT,
+                    "staged-note-media",
+                    target,
+                    &cwd.to_string_lossy(),
+                    &(cap + 1).to_string(),
+                ],
+            )
+            // An unreachable workspace reads as a missing source so a saved
+            // attachment is not deleted over a transient failure.
+            .map_err(|_| ReadError::NotFound("remote media file is unavailable"))?;
+        if !output.success {
+            if String::from_utf8_lossy(&output.stderr).contains(REMOTE_NOT_REGULAR) {
+                return Err("remote media must be a regular file".into());
+            }
+            return Err(ReadError::NotFound("remote media file is unavailable"));
+        }
+        let bytes = output.stdout;
         if bytes.len() as u64 > cap {
             return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
         }

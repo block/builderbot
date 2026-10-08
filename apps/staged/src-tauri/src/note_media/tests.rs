@@ -283,6 +283,46 @@ fn basename_fallback_only_covers_missing_sources() {
 }
 
 #[test]
+fn remote_basename_fallback_only_covers_missing_sources() {
+    let f = Fixture::new();
+    let remote = FakeRemote::default();
+    let path = "/work/shot.png".to_owned();
+    remote.files.borrow_mut().insert(path.clone(), PNG.to_vec());
+    let ingest = |previous: &str, content: &str| {
+        ingest_note_media_with(
+            &f.store,
+            NoteScope {
+                branch_id: Some(&f.branch.id),
+                project_id: &f.project.id,
+                previous_content: previous,
+            },
+            &f.session.id,
+            Some("ws"),
+            Path::new("/work"),
+            content,
+            &remote,
+        )
+    };
+    let first = ingest("", "![Shot](shot.png)");
+    assert_eq!(first.kept_ids.len(), 1);
+    let id = first.kept_ids.iter().next().unwrap().clone();
+    // The script exits 2 for a directory at the old path; that must not read
+    // as a missing source.
+    remote.files.borrow_mut().remove(&path);
+    remote.directories.borrow_mut().insert(path.clone());
+    let directory = ingest(&first.markdown, "![Shot](shot.png)");
+    assert!(directory.kept_ids.is_empty());
+    assert!(directory
+        .markdown
+        .contains("remote media must be a regular file"));
+    assert!(!directory.markdown.contains(&id));
+    remote.directories.borrow_mut().clear();
+    let missing = ingest(&first.markdown, "![Shot](shot.png)");
+    assert_eq!(missing.kept_ids, HashSet::from([id]));
+    assert!(missing.markdown.contains("staged-media://"));
+}
+
+#[test]
 fn unique_filename_variants_follow_the_store_numbering() {
     use crate::store::images::is_unique_filename_variant;
     for (stored, matches) in [
@@ -308,16 +348,51 @@ fn unique_filename_variants_follow_the_store_numbering() {
     assert!(!is_unique_filename_variant("noext 2.png", "noext"));
 }
 
-/// Interprets exactly the commands the transfer and size check issue, over an
-/// in-memory file map, so the staging and rename steps are observable.
+/// Interprets exactly the commands the transfer, size check, and source read
+/// issue, over an in-memory file map, so the staging and rename steps and the
+/// read script's exit paths are observable.
 #[derive(Default)]
 pub(crate) struct FakeRemote {
     pub files: std::cell::RefCell<HashMap<String, Vec<u8>>>,
+    pub directories: std::cell::RefCell<HashSet<String>>,
     pub commands: std::cell::RefCell<Vec<String>>,
     pub fail_writes: std::cell::Cell<bool>,
 }
 
 impl RemoteMedia for FakeRemote {
+    fn exec_output(
+        &self,
+        _workspace: &str,
+        args: &[&str],
+    ) -> Result<crate::blox::WsExecOutput, String> {
+        let ["sh", "-c", files::REMOTE_READ_SCRIPT, "staged-note-media", target, cwd, cap] = args
+        else {
+            panic!("unexpected remote command {args:?}");
+        };
+        let path = if target.starts_with('/') {
+            (*target).to_owned()
+        } else {
+            format!("{cwd}/{target}")
+        };
+        let output = |stdout: Vec<u8>, stderr: &str, success: bool| {
+            Ok(crate::blox::WsExecOutput {
+                stdout,
+                stderr: stderr.as_bytes().to_vec(),
+                success,
+            })
+        };
+        if self.directories.borrow().contains(&path) {
+            return output(Vec::new(), files::REMOTE_NOT_REGULAR, false);
+        }
+        match self.files.borrow().get(&path) {
+            Some(bytes) => {
+                let cap: usize = cap.parse().unwrap();
+                output(bytes[..bytes.len().min(cap)].to_vec(), "", true)
+            }
+            None => output(Vec::new(), "", false),
+        }
+    }
+
     fn exec(&self, _workspace: &str, args: &[&str]) -> Result<String, String> {
         use base64::Engine;
         let mut files = self.files.borrow_mut();
@@ -771,6 +846,93 @@ fn paragraph_continuations_and_lazy_lines_follow_marked() {
         ("# Title\n    ![S](p)", 0),
         ("---\n    ![S](p)", 0),
         ("Title\n===\n    ![S](p)", 0),
+    ]);
+}
+
+/// A fence ends with its container. Blockquotes end when a line lacks their
+/// prefix; Marked's list items absorb dedented lines unless a blank line
+/// preceded them or they start a block, and a dedented ``` then opens a new
+/// fence rather than closing the old one.
+#[test]
+fn fences_end_with_their_container_and_dedented_closers_reopen() {
+    assert_image_counts(&[
+        ("- item\n  ```\n  code\n```\nafter ![S](p)\n```\n", 0),
+        ("> ```\n> code\n```\nafter ![S](p)\n```\n", 0),
+        ("- a\n  ```\n  code\n```\n  after ![S](p)", 0),
+        ("- a\n  ```\n  code\n~~~\nafter ![S](p)\n~~~", 0),
+        ("- a\n\n  ```\n  code\n```\nafter ![S](p)\n```", 0),
+        ("- ```\n  code\n  ```\nafter ![S](p)", 1),
+        ("- a\n  ```\n  code\nlazy ![S](p)\n  ```\n", 0),
+        ("> - a\n>   ```\n>   code\n> lazy ![S](p)\n>   ```", 0),
+        ("- a\n  ```\n  code\n\n  more ![S](p)\n  ```\n", 0),
+        ("- a\n  ```\n  code\n\nafter ![S](p)", 1),
+        ("- a\n  ```\n  code\n  \nafter ![S](p)", 1),
+        ("- a\n  ```\n  code\n\n  ```\nafter ![S](p)", 1),
+        ("- a\n  ```\n  code\n# h\n![S](p)", 1),
+        ("- a\n  ```\n  code\n- b\n![S](p)", 1),
+        ("- a\n  ```\n  code\n---\n![S](p)", 1),
+        ("- a\n  ```\n  code\n> q ![S](p)", 1),
+        ("- a\n  ```\n  code\n<pre>\n![S](p)", 0),
+        ("> ```\n> code\nlazy ![S](p)\n> ```\n", 1),
+        ("> ```\n> code\n\n> more ![S](p)\n> ```\n", 1),
+    ]);
+}
+
+/// HTML blocks (CommonMark 4.6 conditions 1, 2, and 6) render as literal
+/// text, so their images must not be ingested.
+#[test]
+fn html_blocks_are_not_prose() {
+    assert_image_counts(&[
+        ("<pre>\n![S](p)\n</pre>", 0),
+        ("<!-- ![S](p) -->", 0),
+        ("<pre>\n![S](p)\n</PRE>\n![T](p)", 1),
+        ("<pre>\n\n![S](p)\n\n</pre>\n![T](p)", 1),
+        ("<pre>\n![S](p)\n</pre>![T](p)", 0),
+        ("<pre>\n![S](p)\n</pre> tail\n![T](p)", 1),
+        ("<Pre>![S](p)</pre> ![T](p)", 0),
+        ("<pre\n![S](p)\n</pre>\n![T](p)", 1),
+        ("<pre/>\n![S](p)\n</pre>\n![T](p)", 2),
+        ("<prex>\n![S](p)\n\n![T](p)", 2),
+        ("</pre>\n![S](p)\n\n![T](p)", 2),
+        ("<script>\n![S](p)\n</script>", 0),
+        ("<style>\n![S](p)", 0),
+        ("<textarea>\n![S](p)\n</textarea>\n![T](p)", 1),
+        ("<pre>\n```\n![S](p)\n</pre>\n![T](p)", 1),
+        ("```\n<pre>\n```\n![S](p)", 1),
+        ("<!--\n![S](p)\n-->\n![T](p)", 1),
+        ("<!-->\n![S](p)\n-->\n![T](p)", 2),
+        ("<!-- a --> ![S](p)\n![T](p)", 1),
+        ("<div>\n![S](p)\n</div>\n\n![T](p)", 1),
+        ("<div>\n\n![S](p)\n</div>", 1),
+        ("<div>![S](p)\n\n![T](p)", 1),
+        ("<div class=\"x\">\n![S](p)\n\n![T](p)", 1),
+        ("<div\n![S](p)", 0),
+        ("<div/>\n![S](p)", 0),
+        ("</div>\n![S](p)", 0),
+        ("<DIV>\n![S](p)", 0),
+        ("<table>\n![S](p)\n</table>", 0),
+        ("<h1>\n![S](p)\n\n![T](p)", 1),
+        ("<p>\n![S](p)\n\n![T](p)", 1),
+        ("Para\n<pre>\n![S](p)\n</pre>", 0),
+        ("Para\n<div>\n![S](p)\n</div>", 0),
+        ("Para\n<!-- ![S](p) -->\n![T](p)", 1),
+        (" <pre>\n![S](p)", 0),
+        ("    <pre>\n![S](p)", 1),
+        ("\t<pre>\n![S](p)", 1),
+        ("- <pre>\n  ![S](p)\n  </pre>", 0),
+        ("- <div>\n  ![S](p)\n\n  ![T](p)", 1),
+        ("- <div>\n  ![S](p)\n![T](p)", 0),
+        ("- <pre>\n  ![S](p)\n![T](p)\n  </pre>\n![U](p)", 1),
+        ("- <pre>\n  ![S](p)\n\n![T](p)", 1),
+        ("> <pre>\n> ![S](p)\n![T](p)\n> </pre>\n![U](p)", 2),
+        ("> <pre>\n> ![S](p)\n\n![T](p)", 1),
+        ("> <div>\n> ![S](p)\n![T](p)\n\n![U](p)", 2),
+        ("> <!-- ![S](p) -->\n> ![T](p)", 1),
+        ("1. <!--\n   ![S](p)\n   -->\n   ![T](p)", 1),
+        ("- a\n<pre>\n![S](p)\n</pre>", 0),
+        ("- a\n<div>\n![S](p)\n</div>", 0),
+        ("- a\n  <div>\n  ![S](p)\n\n  ![T](p)", 1),
+        ("- a\n  <!--\n  x\nlazy ![S](p)\n  -->\n![T](p)", 1),
     ]);
 }
 

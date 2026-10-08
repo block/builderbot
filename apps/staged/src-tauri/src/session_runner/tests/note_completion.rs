@@ -172,6 +172,84 @@ fn completion_ingests_media_for_branch_and_project_notes() {
 }
 
 #[test]
+fn rewriting_turn_without_a_next_steps_block_keeps_stored_steps() {
+    for project_note in [false, true] {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = Session::new_running("write a note", std::path::Path::new("."));
+        store.create_session(&session).unwrap();
+        let project = Project::new("test/next-steps");
+        store.create_project(&project).unwrap();
+        let id = if project_note {
+            let note = ProjectNote::new(&project.id, "", "").with_session(&session.id);
+            store.create_project_note(&note).unwrap();
+            note.id
+        } else {
+            let branch = Branch::new(&project.id, "notes", "main");
+            store.create_branch(&branch).unwrap();
+            let note = Note::new(&branch.id, "", "").with_session(&session.id);
+            store.create_note(&note).unwrap();
+            note.id
+        };
+        let steps = |store: &Store| {
+            if project_note {
+                let note = store.get_project_note(&id).unwrap().unwrap();
+                (
+                    note.content,
+                    note.suggested_next_commit_step,
+                    note.suggested_next_note_step,
+                )
+            } else {
+                let note = store.get_note(&id).unwrap().unwrap();
+                (
+                    note.content,
+                    note.suggested_next_commit_step,
+                    note.suggested_next_note_step,
+                )
+            }
+        };
+        let run_turn = |prompt: &str, response: &str| {
+            let turn = store
+                .add_session_message(&session.id, MessageRole::User, prompt)
+                .unwrap();
+            store
+                .add_session_message(&session.id, MessageRole::Assistant, response)
+                .unwrap();
+            run_post_completion_hooks(
+                &session.id,
+                std::path::Path::new("."),
+                None,
+                None,
+                None,
+                &store,
+                turn,
+            );
+            steps(&store)
+        };
+
+        let (_, commit, note) = run_turn(
+            "Write a note",
+            "---\n# Plan\n\nFirst.\n```suggested-next-steps\n{\"suggestedNextCommitStep\":\"Implement\",\"suggestedNextNoteStep\":\"Explore\"}\n```",
+        );
+        assert_eq!(commit.as_deref(), Some("Implement"));
+        assert_eq!(note.as_deref(), Some("Explore"));
+
+        // The agent rewrote the note but did not comply with the block request.
+        let (content, commit, note) = run_turn("Update the note", "---\n# Plan\n\nSecond.");
+        assert!(content.contains("Second."));
+        assert_eq!(commit.as_deref(), Some("Implement"));
+        assert_eq!(note.as_deref(), Some("Explore"));
+
+        // A later block replaces both, including clearing one of them.
+        let (_, commit, note) = run_turn(
+            "Update again",
+            "---\n# Plan\n\nThird.\n```suggested-next-steps\n{\"suggestedNextCommitStep\":\"Ship\"}\n```",
+        );
+        assert_eq!(commit.as_deref(), Some("Ship"));
+        assert_eq!(note, None);
+    }
+}
+
+#[test]
 fn follow_up_turn_without_a_note_keeps_saved_media_even_when_sources_are_gone() {
     use crate::note_media::{
         refs::media_ids,

@@ -136,6 +136,28 @@ describe('renderMarkdown', () => {
     ['- a\n# h\n\n    ![S](p)', 0],
     ['> - a\n\n    ![S](p)', 0],
     ['- a\n\n\t    ![S](p)', 0],
+    // A dedented ``` ends the list item or quote and opens a new fence.
+    ['- item\n  ```\n  code\n```\nafter ![S](p)\n```\n', 0],
+    ['> ```\n> code\n```\nafter ![S](p)\n```\n', 0],
+    ['- ```\n  code\n  ```\nafter ![S](p)', 1],
+    // List items absorb dedented lines mid-fence; quotes do not.
+    ['- a\n  ```\n  code\nlazy ![S](p)\n  ```\n', 0],
+    ['> ```\n> code\nlazy ![S](p)\n> ```\n', 1],
+    ['- a\n  ```\n  code\n\nafter ![S](p)', 1],
+    ['- a\n  ```\n  code\n# h\n![S](p)', 1],
+    // HTML blocks: raw tags, comments, and block-level tags.
+    ['<pre>\n![S](p)\n</pre>', 0],
+    ['<!-- ![S](p) -->', 0],
+    ['<pre>\n![S](p)\n</PRE>\n![T](p)', 1],
+    ['<!--\n![S](p)\n-->\n![T](p)', 1],
+    ['<div>\n![S](p)\n</div>\n\n![T](p)', 1],
+    ['<div>\n\n![S](p)\n</div>', 1],
+    ['<div\n![S](p)', 0],
+    ['<pre/>\n![S](p)\n</pre>\n![T](p)', 2],
+    ['Para\n<pre>\n![S](p)\n</pre>', 0],
+    ['- <pre>\n  ![S](p)\n  </pre>', 0],
+    ['- <div>\n  ![S](p)\n\n  ![T](p)', 1],
+    ['> <pre>\n> ![S](p)\n![T](p)\n> </pre>\n![U](p)', 2],
   ])('renders indented images by container rules: %j', (source, images) => {
     expect(renderMarkdown(source).match(/<img/g)?.length ?? 0).toBe(images);
   });

@@ -1,15 +1,15 @@
 //! Markdown block structure for media ingestion: which lines render as prose
-//! rather than fenced or indented code. Follows the CommonMark container rules
-//! Marked uses, so indentation is judged relative to the enclosing list item or
-//! blockquote. A misread code example would have its image rewritten, so this
-//! errs towards code only where the renderer does.
+//! rather than fenced or indented code or an HTML block. Follows the
+//! CommonMark container rules Marked uses, so indentation is judged relative
+//! to the enclosing list item or blockquote. A misread code example would have
+//! its image rewritten, so this errs towards code only where the renderer does.
 
 use crate::pikchr_validation::{is_closing_fence, parse_opening_fence};
 use std::ops::Range;
 
 /// Byte ranges of note text that Markdown renders as prose (not fenced or
-/// indented code). Consecutive prose lines are merged so inline syntax that
-/// spans lines is preserved.
+/// indented code, nor an HTML block). Consecutive prose lines are merged so
+/// inline syntax that spans lines is preserved.
 pub(crate) fn prose_ranges(markdown: &str) -> Vec<Range<usize>> {
     let mut scanner = Scanner::default();
     let mut ranges: Vec<Range<usize>> = Vec::new();
@@ -35,24 +35,83 @@ enum Container {
     },
 }
 
+/// How an open HTML block ends (CommonMark 4.6 start conditions 1, 2, and 6).
+/// Condition 7, an arbitrary complete tag on its own line, is not recognized.
+#[derive(Clone, Copy)]
+enum HtmlBlock {
+    /// `<pre>`, `<script>`, `<style>`, `<textarea>`: ends on a line containing
+    /// any of their closing tags, blank lines included.
+    Raw,
+    /// `<!--`: ends on a line containing `-->`.
+    Comment,
+    /// A block-level tag: ends at the next blank line.
+    Block,
+}
+
+impl HtmlBlock {
+    /// Whether this line meets the end condition. The start line may.
+    fn ends_on(self, content: &str) -> bool {
+        match self {
+            HtmlBlock::Raw => {
+                let lower = content.to_ascii_lowercase();
+                ["</pre>", "</script>", "</style>", "</textarea>"]
+                    .iter()
+                    .any(|tag| lower.contains(tag))
+            }
+            HtmlBlock::Comment => content.contains("-->"),
+            HtmlBlock::Block => false,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Scanner {
     stack: Vec<Container>,
     fence: Option<(char, usize)>,
+    html: Option<HtmlBlock>,
     in_paragraph: bool,
+    /// Whether the previous line was blank; a dedented line after a blank
+    /// ends a list item even inside its fence or HTML block.
+    last_blank: bool,
 }
 
 impl Scanner {
     fn is_prose(&mut self, line: &str) -> bool {
+        let prose = self.scan(line);
+        self.last_blank = line.trim_matches([' ', '\t']).is_empty();
+        prose
+    }
+
+    fn scan(&mut self, line: &str) -> bool {
         let mut cursor = Cursor::new(line);
         let matched = self.match_containers(&mut cursor);
-        // Fenced lines never change the container stack; prefixes are only
-        // stripped (leniently) to find the closing fence.
-        if let Some((character, length)) = self.fence {
-            if cursor.indent() < 4 && is_closing_fence(cursor.content(), character, length) {
+        if self.fence.is_some() || self.html.is_some() {
+            if matched < self.stack.len() && self.leaves_container(&cursor, matched) {
+                // The container closed, taking its fence or HTML block with
+                // it. The line is then read afresh at the outer level, where a
+                // dedented ``` opens a new fence rather than closing one.
+                self.stack.truncate(matched);
                 self.fence = None;
+                self.html = None;
+                self.in_paragraph = false;
+            } else if let Some((character, length)) = self.fence {
+                // Marked's list items absorb other dedented lines, so prefixes
+                // are only stripped (leniently) to find the closing fence.
+                if cursor.indent() < 4 && is_closing_fence(cursor.content(), character, length) {
+                    self.fence = None;
+                }
+                return false;
+            } else if let Some(html) = self.html {
+                match html {
+                    HtmlBlock::Block if cursor.is_blank() => self.html = None,
+                    _ => {
+                        if html.ends_on(cursor.content()) {
+                            self.html = None;
+                        }
+                        return false;
+                    }
+                }
             }
-            return false;
         }
         if cursor.is_blank() {
             self.stack.truncate(matched);
@@ -90,6 +149,17 @@ impl Scanner {
         self.stack.len()
     }
 
+    /// Whether a line that failed to match the container at `depth` ends it
+    /// while a fence or HTML block is open. Blockquotes end as CommonMark
+    /// says; Marked's list items also absorb dedented lines unless a blank
+    /// line preceded them or they would start a block.
+    fn leaves_container(&self, cursor: &Cursor, depth: usize) -> bool {
+        match self.stack[depth] {
+            Container::Quote => true,
+            Container::Item { .. } => self.last_blank || starts_block(cursor),
+        }
+    }
+
     fn open_blocks(&mut self, cursor: &mut Cursor) -> bool {
         loop {
             if cursor.is_blank() {
@@ -122,6 +192,15 @@ impl Scanner {
                 self.in_paragraph = false;
                 return false;
             }
+            if let Some(html) = html_block_start(content) {
+                // A start line that also meets the end condition is the whole
+                // block.
+                if !html.ends_on(content) {
+                    self.html = Some(html);
+                }
+                self.in_paragraph = false;
+                return false;
+            }
             self.in_paragraph = true;
             return true;
         }
@@ -137,7 +216,106 @@ fn starts_block(cursor: &Cursor) -> bool {
             || list_marker_width(content).is_some()
             || parse_opening_fence(content).is_some()
             || is_atx_heading(content)
-            || is_thematic_break(content))
+            || is_thematic_break(content)
+            || html_block_start(content).is_some())
+}
+
+/// Tags whose open or close tag on a line starts an HTML block that runs to
+/// the next blank line (CommonMark 4.6, condition 6).
+const BLOCK_TAGS: &[&str] = &[
+    "address",
+    "article",
+    "aside",
+    "base",
+    "basefont",
+    "blockquote",
+    "body",
+    "caption",
+    "center",
+    "col",
+    "colgroup",
+    "dd",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hr",
+    "html",
+    "iframe",
+    "legend",
+    "li",
+    "link",
+    "main",
+    "menu",
+    "menuitem",
+    "nav",
+    "noframes",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "search",
+    "section",
+    "summary",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "ul",
+];
+
+/// HTML block start conditions 1, 2, and 6 for a line's content (after
+/// container prefixes and under four columns of indentation). All three may
+/// interrupt a paragraph.
+fn html_block_start(content: &str) -> Option<HtmlBlock> {
+    let rest = content.strip_prefix('<')?;
+    if rest.starts_with("!--") {
+        return Some(HtmlBlock::Comment);
+    }
+    let (closing, rest) = match rest.strip_prefix('/') {
+        Some(rest) => (true, rest),
+        None => (false, rest),
+    };
+    let name_len = rest
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric())
+        .count();
+    if name_len == 0 {
+        return None;
+    }
+    let name = rest[..name_len].to_ascii_lowercase();
+    let after = &rest[name_len..];
+    let delimited = matches!(after.as_bytes().first(), None | Some(b' ' | b'\t' | b'>'));
+    if !closing && delimited && ["pre", "script", "style", "textarea"].contains(&name.as_str()) {
+        return Some(HtmlBlock::Raw);
+    }
+    if (delimited || after.starts_with("/>")) && BLOCK_TAGS.contains(&name.as_str()) {
+        return Some(HtmlBlock::Block);
+    }
+    None
 }
 
 /// A position within one line, in columns with tabs expanded to the next

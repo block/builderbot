@@ -80,7 +80,10 @@ function restoreTrustedHtml(
   trustedHtml: TrustedHtmlReplacement[]
 ): string {
   return trustedHtml.reduce((html, replacement) => {
-    return html.replaceAll(replacement.placeholder, replacement.html);
+    // A string replacement would interpret `$&`, `` $` ``, and `$'` inside the
+    // trusted HTML (media captions carry free text), splicing surrounding
+    // author text into attributes. A function replacer is literal.
+    return html.replaceAll(replacement.placeholder, () => replacement.html);
   }, renderedMarkdown);
 }
 

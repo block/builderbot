@@ -3567,25 +3567,47 @@ fn run_post_completion_hooks(
                             "extracted"
                         }
                     );
-                    let scope = match target.kind {
-                        NoteKind::Repo => {
-                            store.get_note(&target.id).ok().flatten().and_then(|note| {
-                                store
-                                    .get_branch(&note.branch_id)
-                                    .ok()
-                                    .flatten()
-                                    .map(|branch| {
-                                        (Some(note.branch_id), branch.project_id, note.content)
-                                    })
-                            })
-                        }
-                        NoteKind::Project => store
-                            .get_project_note(&target.id)
-                            .ok()
-                            .flatten()
-                            .map(|note| (None, note.project_id, note.content)),
-                    };
-                    let Some((branch_id, project_id, previous_content)) = scope else {
+                    // Also carry the stored next steps: a rewriting turn that
+                    // omits the block keeps them rather than nulling them.
+                    let scope =
+                        match target.kind {
+                            NoteKind::Repo => {
+                                store.get_note(&target.id).ok().flatten().and_then(|note| {
+                                    store
+                                        .get_branch(&note.branch_id)
+                                        .ok()
+                                        .flatten()
+                                        .map(|branch| {
+                                            (
+                                                Some(note.branch_id),
+                                                branch.project_id,
+                                                note.content,
+                                                (
+                                                    note.suggested_next_commit_step,
+                                                    note.suggested_next_note_step,
+                                                ),
+                                            )
+                                        })
+                                })
+                            }
+                            NoteKind::Project => store
+                                .get_project_note(&target.id)
+                                .ok()
+                                .flatten()
+                                .map(|note| {
+                                    (
+                                        None,
+                                        note.project_id,
+                                        note.content,
+                                        (
+                                            note.suggested_next_commit_step,
+                                            note.suggested_next_note_step,
+                                        ),
+                                    )
+                                }),
+                        };
+                    let Some((branch_id, project_id, previous_content, stored_steps)) = scope
+                    else {
                         log::warn!("Cannot resolve media scope for {label} {}", target.id);
                         continue;
                     };
@@ -3604,12 +3626,17 @@ fn run_post_completion_hooks(
                             .unwrap_or(working_dir),
                         &body,
                     );
-                    let sncs = suggested_next_steps
-                        .as_ref()
-                        .and_then(|s| s.suggested_next_commit_step.as_deref());
-                    let snns = suggested_next_steps
-                        .as_ref()
-                        .and_then(|s| s.suggested_next_note_step.as_deref());
+                    // The turn's block, when present, replaces both steps; a
+                    // turn without one leaves the stored pair alone, as the
+                    // whole-transcript scan did before extraction was scoped
+                    // to the turn. A first turn stores None either way.
+                    let (sncs, snns) = match &suggested_next_steps {
+                        Some(steps) => (
+                            steps.suggested_next_commit_step.as_deref(),
+                            steps.suggested_next_note_step.as_deref(),
+                        ),
+                        None => (stored_steps.0.as_deref(), stored_steps.1.as_deref()),
+                    };
                     let result = match target.kind {
                         NoteKind::Repo => store.update_note_title_and_content(
                             &target.id,

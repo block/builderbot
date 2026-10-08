@@ -1,6 +1,7 @@
 //! Agent-facing paths for durable note references.
 
 use super::{files, refs};
+use crate::blox::WsExecOutput;
 use crate::store::Store;
 use std::collections::HashMap;
 
@@ -10,6 +11,11 @@ use std::collections::HashMap;
 pub(crate) trait RemoteMedia {
     /// Run one command in the workspace and return its stdout.
     fn exec(&self, workspace: &str, args: &[&str]) -> Result<String, String>;
+
+    /// Run one command and return its stdout, stderr, and whether it
+    /// succeeded, so a script's distinct exit paths can be told apart. `Err`
+    /// is reserved for infrastructure failures.
+    fn exec_output(&self, workspace: &str, args: &[&str]) -> Result<WsExecOutput, String>;
 
     /// Size of an existing remote file, or `None` when it is missing.
     fn size(&self, workspace: &str, path: &str) -> Option<i64> {
@@ -39,6 +45,10 @@ pub(crate) struct BloxRemote;
 impl RemoteMedia for BloxRemote {
     fn exec(&self, workspace: &str, args: &[&str]) -> Result<String, String> {
         crate::blox::ws_exec(workspace, args).map_err(|e| e.to_string())
+    }
+
+    fn exec_output(&self, workspace: &str, args: &[&str]) -> Result<WsExecOutput, String> {
+        crate::blox::ws_exec_output(workspace, args).map_err(|e| e.to_string())
     }
 }
 

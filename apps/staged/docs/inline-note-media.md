@@ -13,7 +13,16 @@ working directory are accepted. Use angle brackets around paths with spaces, or
 percent-encode the spaces. HTTP(S) images remain external. Reference-style
 images and raw HTML media are not ingested. Fenced and indented code examples
 are skipped. Indentation is judged relative to the enclosing list item or quote,
-as the renderer does, so an image indented under a list step is ingested.
+as the renderer does, so an image indented under a list step is ingested. A
+fence ends with its container: a line without the `>` prefix ends a quoted
+fence, and a dedented ```` ``` ```` under a list item ends the item and opens
+a new top-level fence rather than closing the old one, so the text that
+follows stays code. Other dedented lines are absorbed by the list item, as
+Marked does, unless a blank line precedes them. HTML blocks are skipped too:
+`<pre>`, `<script>`, `<style>`, `<textarea>`, and `<!-- -->` run to their
+closing marker, and block-level tags such as `<div>` or `<table>` run to the
+next blank line. An arbitrary custom tag on its own line is not recognized as
+an HTML block.
 
 Supported formats are PNG, JPEG, GIF, and WebP up to 10 MiB, and MP4, WebM, and
 MOV up to 100 MiB. Extension and file signatures must agree. Video validation
@@ -24,7 +33,9 @@ Chat attachments (file picker, paste, drop) share the validation code but are
 stored under the format their bytes actually are: browsers label `file.type`
 from the filename, so a WebP saved as `shot.png` is stored as `shot.webp` with
 an `image/webp` MIME rather than rejected. Only unrecognized signatures, videos,
-and oversized files are refused, and the composer shows the reason.
+and oversized files are refused, and the composer shows the reason for pasted,
+picked, and natively dropped files alike, clearing it when the message is sent
+or the attachment removed.
 
 On session completion, files are copied into the existing project `images/`
 store and destinations become `staged-media://<uuid>.<ext>`. Captions and titles
@@ -33,8 +44,10 @@ the failure. There are no schema changes or new IPC commands.
 
 Images render inline with captions and an expand button; clicking the image
 also opens its viewer. Captions are the alt text flattened to plain text, as a
-plain image's `alt` would be, so `![**Before** fix](…)` reads "Before fix". Videos have native playback controls and an expand
-button. Enter/Space activates the expand button, and Escape closes the viewer.
+plain image's `alt` would be, so `![**Before** fix](…)` reads "Before fix", and
+the trusted figure HTML is spliced back in literally, so `$&`, `` $` ``, and
+`$'` in a caption or title cannot pull surrounding text into an attribute.
+Videos have native playback controls and an expand button. Enter/Space activates the expand button, and Escape closes the viewer.
 The viewer removes its video when closed. The Markdown sanitizer remains
 unchanged: only validated media references use trusted renderer HTML.
 
@@ -61,7 +74,12 @@ again, so two screenshots that shared a basename each keep their own file. A
 match that is still ambiguous becomes a placeholder. Only a missing source
 triggers this fallback: a file that exists at the old path but is oversized,
 mislabelled, or not a regular file is reported as such, never silently replaced
-by the previous attachment.
+by the previous attachment. On Blox the read script exits 1 for a missing path
+and 2, with a `not a regular file` message, for a directory or device at it,
+and only the former falls back; an unreachable workspace is treated as a
+missing source so a saved attachment is not deleted over a transient failure.
+A turn that rewrites the note without a `suggested-next-steps` block keeps the
+stored next steps, since only the turn's own output is scanned for the block.
 
 Cleanup runs **after** a successful note save, and failed saves roll back new
 attachments. Deleting a project note includes its child-note attachments.
@@ -115,10 +133,13 @@ broken Markdown image links. The only dependency declaration added is
 ## Validation
 
 Automated tests cover ingestion and note completion for both note kinds,
-path forms, code skipping, titles, magic/size validation, sniffed chat
-attachment formats, deduplication and its lazy hashing, basename reuse on
-rewrites (numbered filenames, one claim per attachment, and the missing-source
-restriction), rollback, deletion and shared references, local materialization
+path forms, code and HTML block skipping (checked against Marked, with a
+renderer parity test), fence and container interplay, titles, magic/size
+validation, sniffed chat attachment formats, deduplication and its lazy
+hashing, basename reuse on rewrites (numbered filenames, one claim per
+attachment, and the missing-source restriction locally and through the remote
+read script's exit paths), preserved next steps on rewrites without a block,
+rollback, deletion and shared references, local materialization
 and missing files, the remote video cap, size-check skip, and staged rename
 (through a fake workspace shell), project-agent child-note handoff, desktop ranges,
 authenticated browser serving, renderer escaping, viewer targets, platform URL

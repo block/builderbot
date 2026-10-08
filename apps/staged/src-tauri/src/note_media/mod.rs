@@ -163,6 +163,26 @@ pub(crate) fn ingest_note_media(
     working_dir: &Path,
     markdown: &str,
 ) -> IngestOutcome {
+    ingest_note_media_with(
+        store,
+        scope,
+        session_id,
+        workspace_name,
+        working_dir,
+        markdown,
+        &materialize::BloxRemote,
+    )
+}
+
+pub(crate) fn ingest_note_media_with(
+    store: &Store,
+    scope: NoteScope<'_>,
+    session_id: &str,
+    workspace_name: Option<&str>,
+    working_dir: &Path,
+    markdown: &str,
+    remote: &dyn materialize::RemoteMedia,
+) -> IngestOutcome {
     let mut outcome = IngestOutcome {
         markdown: markdown.to_owned(),
         kept_ids: HashSet::new(),
@@ -243,8 +263,13 @@ pub(crate) fn ingest_note_media(
                 .next()
                 .ok_or("invalid media path")?;
             let cap = files::size_limit(filename, true)?;
-            let bytes = match files::read_candidate(&local_target, workspace_name, working_dir, cap)
-            {
+            let bytes = match files::read_candidate(
+                &local_target,
+                workspace_name,
+                working_dir,
+                cap,
+                remote,
+            ) {
                 Ok(bytes) => bytes,
                 // Prefer the attachment saved from this path over a placeholder
                 // that would also have finish() delete it. A file that exists

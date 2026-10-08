@@ -23,8 +23,15 @@ Marked does, unless a blank line precedes them. HTML blocks are skipped too:
 (a `</script>` does not end a `<pre>` block, and with no matching closer the
 block runs to the end of the note, as Marked's backreference does), `<!-- -->`
 runs to `-->`, and block-level tags such as `<div>` or `<table>` run to the
-next blank line. An arbitrary custom tag on its own line is not recognized as
-an HTML block.
+next blank line. Processing instructions (`<?…?>`), declarations
+(`<!DOCTYPE …>`), and `<![CDATA[…]]>` sections are skipped as well, each
+ending only on its own closer (a bare `>` ends a declaration but not a CDATA
+section or processing instruction). Matching Marked, these three neither
+interrupt a paragraph nor end a list item from a dedented line, whereas raw
+tags, comments, and block-level tags do. An arbitrary custom tag on its own
+line is not recognized as an HTML block. Inline HTML spans inside a paragraph
+(such as `Para <!--` continuing onto the next line) are not tracked, so an
+image Marked hides inside one is still ingested.
 
 Supported formats are PNG, JPEG, GIF, and WebP up to 10 MiB, and MP4, WebM, and
 MOV up to 100 MiB. Extension and file signatures must agree. Video validation

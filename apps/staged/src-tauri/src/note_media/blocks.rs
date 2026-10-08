@@ -35,8 +35,9 @@ enum Container {
     },
 }
 
-/// How an open HTML block ends (CommonMark 4.6 start conditions 1, 2, and 6).
-/// Condition 7, an arbitrary complete tag on its own line, is not recognized.
+/// How an open HTML block ends (CommonMark 4.6 start conditions 1 through 6).
+/// Condition 7, an arbitrary complete tag on its own line, is deliberately not
+/// recognized.
 #[derive(Clone, Copy)]
 enum HtmlBlock {
     /// `<pre>`, `<script>`, `<style>`, `<textarea>`: ends on a line containing
@@ -47,6 +48,14 @@ enum HtmlBlock {
     Raw(RawTag),
     /// `<!--`: ends on a line containing `-->`.
     Comment,
+    /// `<?`: ends on a line containing `?>` (a bare `>` does not end it).
+    ProcessingInstruction,
+    /// `<!` and an ASCII letter, such as `<!DOCTYPE`: ends on a line
+    /// containing `>`.
+    Declaration,
+    /// `<![CDATA[`, matched case-insensitively as Marked does: ends on a line
+    /// containing `]]>` (a bare `>` does not end it).
+    Cdata,
     /// A block-level tag: ends at the next blank line.
     Block,
 }
@@ -87,7 +96,21 @@ impl HtmlBlock {
         match self {
             HtmlBlock::Raw(tag) => content.to_ascii_lowercase().contains(tag.closer()),
             HtmlBlock::Comment => content.contains("-->"),
+            HtmlBlock::ProcessingInstruction => content.contains("?>"),
+            HtmlBlock::Declaration => content.contains('>'),
+            HtmlBlock::Cdata => content.contains("]]>"),
             HtmlBlock::Block => false,
+        }
+    }
+
+    /// Whether this block may interrupt a paragraph, or end a list item from
+    /// a dedented line. Marked's paragraph and list-item interrupt patterns
+    /// list only conditions 1, 2, and 6, so a processing instruction,
+    /// declaration, or CDATA section after paragraph text is more paragraph.
+    fn interrupts_paragraph(self) -> bool {
+        match self {
+            HtmlBlock::Raw(_) | HtmlBlock::Comment | HtmlBlock::Block => true,
+            HtmlBlock::ProcessingInstruction | HtmlBlock::Declaration | HtmlBlock::Cdata => false,
         }
     }
 }
@@ -220,7 +243,9 @@ impl Scanner {
                 self.in_paragraph = false;
                 return false;
             }
-            if let Some(html) = html_block_start(content) {
+            if let Some(html) = html_block_start(content)
+                .filter(|html| !self.in_paragraph || html.interrupts_paragraph())
+            {
                 // A start line that also meets the end condition is the whole
                 // block.
                 if !html.ends_on(content) {
@@ -245,7 +270,7 @@ fn starts_block(cursor: &Cursor) -> bool {
             || parse_opening_fence(content).is_some()
             || is_atx_heading(content)
             || is_thematic_break(content)
-            || html_block_start(content).is_some())
+            || html_block_start(content).is_some_and(HtmlBlock::interrupts_paragraph))
 }
 
 /// Tags whose open or close tag on a line starts an HTML block that runs to
@@ -315,13 +340,30 @@ const BLOCK_TAGS: &[&str] = &[
     "ul",
 ];
 
-/// HTML block start conditions 1, 2, and 6 for a line's content (after
-/// container prefixes and under four columns of indentation). All three may
-/// interrupt a paragraph.
+/// HTML block start conditions 1 through 6 for a line's content (after
+/// container prefixes and under four columns of indentation); 7 is
+/// deliberately not recognized. Whether the block may interrupt a paragraph
+/// is up to the caller, via [`HtmlBlock::interrupts_paragraph`].
 fn html_block_start(content: &str) -> Option<HtmlBlock> {
     let rest = content.strip_prefix('<')?;
     if rest.starts_with("!--") {
         return Some(HtmlBlock::Comment);
+    }
+    if rest.starts_with('?') {
+        return Some(HtmlBlock::ProcessingInstruction);
+    }
+    if let Some(after_bang) = rest.strip_prefix('!') {
+        if after_bang
+            .get(..7)
+            .is_some_and(|s| s.eq_ignore_ascii_case("[CDATA["))
+        {
+            return Some(HtmlBlock::Cdata);
+        }
+        return after_bang
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic())
+            .then_some(HtmlBlock::Declaration);
     }
     let (closing, rest) = match rest.strip_prefix('/') {
         Some(rest) => (true, rest),

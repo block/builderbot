@@ -947,6 +947,49 @@ fn html_blocks_are_not_prose() {
     ]);
 }
 
+/// Processing instructions, declarations, and CDATA sections (conditions 3,
+/// 4, and 5) end only on their own closer and, unlike the other HTML blocks,
+/// neither interrupt a paragraph nor end a list item from a dedented line.
+/// Every count was checked against Marked with the app's options.
+#[test]
+fn html_block_declarations_are_not_prose() {
+    assert_image_counts(&[
+        ("<![CDATA[\n![S](p)\n]]>", 0),
+        ("<![CDATA[\n![S](p)\n]]>\n![T](p)", 1),
+        ("<![CDATA[\nfoo > bar\n![S](p)\n]]>\n![T](p)", 1),
+        ("<![CDATA[ x ]]> ![S](p)\n![T](p)", 1),
+        ("<![CDATA[\n![S](p)", 0),
+        ("<![cdata[\n![S](p)\n]]>\n![T](p)", 1),
+        ("<![CDATA[\n\n![S](p)\n\n]]>\n![T](p)", 1),
+        ("<?php\n![S](p)\n?>\n![T](p)", 1),
+        ("<?xml version=\"1.0\"?>\n![T](p)", 1),
+        ("<?\n![S](p)\n>\n![T](p)", 0),
+        ("<?\n\n![S](p)\n\n?>\n![T](p)", 1),
+        ("<!DOCTYPE html>\n![T](p)", 1),
+        ("<!DOCTYPE\n![S](p)\n>\n![T](p)", 1),
+        ("<!doctype\n![S](p)\n>\n![T](p)", 1),
+        ("<!X\n![S](p)\n>\n![T](p)", 1),
+        ("<!1\n![S](p)\n>\n![T](p)", 2),
+        ("<!\n![S](p)", 1),
+        ("<!DOCTYPE\n![S](p)", 0),
+        (" <![CDATA[\n![S](p)", 0),
+        ("    <![CDATA[\n![S](p)", 1),
+        ("Para\n<!DOCTYPE\n![S](p)\n>\n![T](p)", 2),
+        ("- a\n  ```\n  code\n<![CDATA[\n![S](p)\n  ```\n![T](p)", 1),
+        ("- a\n  ```\n  code\n<?x\n![S](p)\n  ```\n![T](p)", 1),
+        ("- a\n  ```\n  code\n<!X\n![S](p)\n  ```\n![T](p)", 1),
+        ("- <![CDATA[\n  ![S](p)\n  ]]>\n  ![T](p)", 1),
+        ("> <?php\n> ![S](p)\n> ?>\n> ![T](p)", 1),
+        ("> <![CDATA[\n> ![S](p)\n![T](p)\n> ]]>\n![U](p)", 2),
+        ("- <![CDATA[\n  ![S](p)\n![T](p)\n  ]]>\n![U](p)", 1),
+        // A blank line first, so the block starts in the item rather than
+        // continuing `a` (where Marked's inline CDATA span would hide `S`).
+        ("- a\n\n  <![CDATA[\n  x\nlazy ![S](p)\n  ]]>\n![T](p)", 1),
+        ("- a\n\n  <?x\n  y\nlazy ![S](p)\n  ?>\n![T](p)", 1),
+        ("- <!DOCTYPE\n  ![S](p)\n\n![T](p)", 1),
+    ]);
+}
+
 #[test]
 fn indented_list_images_are_ingested_without_changing_indentation() {
     let f = Fixture::new();

@@ -258,9 +258,9 @@ pub(crate) fn ingest_note_media_with(
             if target.starts_with("staged-media:") {
                 return Err("invalid stored media reference".into());
             }
-            let filename = local_target
-                .rsplit('/')
-                .next()
+            let filename = Path::new(&local_target)
+                .file_name()
+                .and_then(|s| s.to_str())
                 .ok_or("invalid media path")?;
             let cap = files::size_limit(filename, true)?;
             let bytes = match files::read_candidate(

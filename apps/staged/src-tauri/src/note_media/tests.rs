@@ -124,6 +124,99 @@ fn amendments_reuse_hashes_and_materialized_paths_and_sweep_after_save() {
 }
 
 #[test]
+fn amendments_hash_previous_attachments_only_when_a_fresh_file_needs_deduplicating() {
+    let f = Fixture::new();
+    std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();
+    let first = f.ingest("", "![Before](shot.png)");
+    assert_eq!(first.previous_files_hashed, 0);
+    let id = first.kept_ids.iter().next().unwrap().clone();
+    let stored_only = f.ingest(&first.markdown, &first.markdown);
+    assert_eq!(stored_only.kept_ids, HashSet::from([id.clone()]));
+    assert_eq!(stored_only.previous_files_hashed, 0);
+    let temp_path = f.ingest(
+        &first.markdown,
+        &format!("![Again](/tmp/staged-image-{id}.png)"),
+    );
+    assert_eq!(temp_path.kept_ids, HashSet::from([id.clone()]));
+    assert_eq!(temp_path.previous_files_hashed, 0);
+    std::fs::write(f.dir.path().join("copy.png"), PNG).unwrap();
+    let fresh = f.ingest(&first.markdown, "![Copy](copy.png)");
+    assert_eq!(fresh.kept_ids, HashSet::from([id]));
+    assert_eq!(fresh.previous_files_hashed, 1);
+}
+
+#[test]
+fn rewritten_notes_reuse_attachments_by_source_basename_when_the_file_is_gone() {
+    let f = Fixture::new();
+    let shot = f.dir.path().join("Shot.PNG");
+    std::fs::write(&shot, PNG).unwrap();
+    let first = f.ingest("", &format!("![Shot]({})", shot.display()));
+    let id = first.kept_ids.iter().next().unwrap().clone();
+    std::fs::remove_file(&shot).unwrap();
+    let rewritten = f.ingest(
+        &first.markdown,
+        &format!("Rewritten\n\n![Shot]({})", shot.display()),
+    );
+    assert_eq!(
+        rewritten.markdown,
+        format!("Rewritten\n\n{}", first.markdown)
+    );
+    assert_eq!(rewritten.kept_ids, HashSet::from([id.clone()]));
+    assert!(rewritten.created_ids.is_empty());
+    // A different basename, and a name only another scope saved, stay unavailable.
+    let other = f.ingest(&first.markdown, "![Shot](/tmp/missing/other.png)");
+    assert!(other.kept_ids.is_empty());
+    assert!(other.markdown.contains("media file is unavailable"));
+    let unrelated = f.ingest("", &format!("![Shot]({})", shot.display()));
+    assert!(unrelated.kept_ids.is_empty());
+    assert!(unrelated.markdown.contains("media file is unavailable"));
+    assert!(f.store.get_image(&id).unwrap().is_some());
+}
+
+#[test]
+fn remote_materialization_skips_transfers_when_the_workspace_copy_matches() {
+    use std::cell::RefCell;
+    #[derive(Default)]
+    struct FakeRemote {
+        sizes: RefCell<HashMap<String, i64>>,
+        writes: RefCell<Vec<String>>,
+    }
+    impl RemoteMedia for FakeRemote {
+        fn size(&self, _workspace: &str, path: &str) -> Option<i64> {
+            self.sizes.borrow().get(path).copied()
+        }
+        fn write(&self, _workspace: &str, path: &str, bytes: &[u8]) -> Result<(), String> {
+            self.writes.borrow_mut().push(path.to_owned());
+            self.sizes
+                .borrow_mut()
+                .insert(path.to_owned(), bytes.len() as i64);
+            Ok(())
+        }
+    }
+    let f = Fixture::new();
+    std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();
+    let outcome = f.ingest("", "![a](shot.png) ![b](shot.png)");
+    let id = outcome.kept_ids.iter().next().unwrap();
+    let remote = FakeRemote::default();
+    let path = format!("/tmp/staged-image-{id}.png");
+    let expected = format!("![a]({path}) ![b]({path})");
+    let first = materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
+    assert_eq!(first, expected);
+    assert_eq!(*remote.writes.borrow(), vec![path.clone()]);
+    let second = materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
+    assert_eq!(second, expected);
+    assert_eq!(
+        remote.writes.borrow().len(),
+        1,
+        "matching copy is not re-sent"
+    );
+    remote.sizes.borrow_mut().insert(path.clone(), 1);
+    materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
+    assert_eq!(remote.writes.borrow().len(), 2, "truncated copy is re-sent");
+    assert_eq!(remote.sizes.borrow()[&path], PNG.len() as i64);
+}
+
+#[test]
 fn missing_and_mislabelled_media_become_safe_placeholders() {
     let f = Fixture::new();
     std::fs::write(f.dir.path().join("fake.png"), b"not a png").unwrap();

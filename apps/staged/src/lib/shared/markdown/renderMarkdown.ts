@@ -44,7 +44,7 @@ function createMarkdownRenderer(
   const renderer = new Renderer();
   const renderImage = renderer.image.bind(renderer);
   renderer.image = (token: Tokens.Image) => {
-    const media = renderMarkdownMedia(token);
+    const media = renderMarkdownMedia(token, renderer.parser);
     return media ? stashTrustedHtml(media, trustedHtml) : renderImage(token);
   };
   const renderCode = renderer.code.bind(renderer);

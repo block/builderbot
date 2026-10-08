@@ -5100,7 +5100,7 @@ fn parse_commit_shas(output: &str) -> HashSet<String> {
 /// Uses base64 encoding to avoid shell-escaping issues with arbitrary content.
 /// For payloads exceeding ~500KB of base64, the data is chunked to stay under
 /// ARG_MAX (~1MB on macOS). Returns `Ok(())` on success.
-fn write_bytes_to_remote(
+pub(crate) fn write_bytes_to_remote(
     workspace_name: &str,
     bytes: &[u8],
     remote_path: &str,

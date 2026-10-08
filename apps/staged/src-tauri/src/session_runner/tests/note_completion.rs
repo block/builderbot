@@ -220,6 +220,20 @@ fn follow_up_turn_without_a_note_keeps_saved_media_even_when_sources_are_gone() 
     assert!(file.exists());
     assert!(followed_up.completed_at.is_some());
 
+    // A rewrite built from chat history repeats the original path, not the
+    // stored reference the agent never saw.
+    let rewritten = run_turn(
+        "Please update the note to reflect the latest chat",
+        &format!("---\n# Shot\n\nRewritten.\n\n![Shot]({})", shot.display()),
+    );
+    assert!(rewritten.content.contains("Rewritten."));
+    assert!(rewritten
+        .content
+        .contains(&format!("![Shot](staged-media://{id}.png)")));
+    assert!(!rewritten.content.contains("unavailable"));
+    assert!(f.store.get_image(&id).unwrap().is_some());
+    assert!(file.exists());
+
     let amended = run_turn("Drop the screenshot", "---\n# Shot\n\nNo image now");
     assert!(amended.content.contains("No image now"));
     assert!(f.store.get_image(&id).unwrap().is_none());

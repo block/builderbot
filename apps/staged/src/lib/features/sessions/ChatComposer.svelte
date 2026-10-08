@@ -48,6 +48,8 @@
     imagePreviews?: Map<string, string>;
     onAttachFiles?: (files: File[]) => void;
     onRemoveImage?: (imageId: string) => void;
+    /** Why the last attachment was rejected, shown until the next attempt. */
+    attachError?: string | null;
     /** Session is running — attach/remove disabled, send queues instead. */
     isLive?: boolean;
     sending?: boolean;
@@ -68,6 +70,7 @@
     imagePreviews = new Map(),
     onAttachFiles,
     onRemoveImage,
+    attachError = null,
     isLive = false,
     sending = false,
     onSend,
@@ -113,6 +116,9 @@
         </div>
       {/each}
     </div>
+  {/if}
+  {#if canAttachImages && attachError}
+    <p class="attach-error" role="alert">{attachError}</p>
   {/if}
   <HashtagInput
     bind:textareaEl
@@ -190,6 +196,12 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  .attach-error {
+    margin: 0;
+    font-size: var(--size-sm);
+    color: var(--ui-danger);
   }
 
   .reply-image-thumb {

@@ -20,13 +20,20 @@ MOV up to 100 MiB. Extension and file signatures must agree. Video validation
 checks the container signature, not whether every codec inside it can play in
 the current webview. Older QuickTime files without an `ftyp` header are rejected.
 
+Chat attachments (file picker, paste, drop) share the validation code but are
+stored under the format their bytes actually are: browsers label `file.type`
+from the filename, so a WebP saved as `shot.png` is stored as `shot.webp` with
+an `image/webp` MIME rather than rejected. Only unrecognized signatures, videos,
+and oversized files are refused, and the composer shows the reason.
+
 On session completion, files are copied into the existing project `images/`
 store and destinations become `staged-media://<uuid>.<ext>`. Captions and titles
 are preserved. Invalid or unavailable media becomes readable text explaining
 the failure. There are no schema changes or new IPC commands.
 
 Images render inline with captions and an expand button; clicking the image
-also opens its viewer. Videos have native playback controls and an expand
+also opens its viewer. Captions are the alt text flattened to plain text, as a
+plain image's `alt` would be, so `![**Before** fix](…)` reads "Before fix". Videos have native playback controls and an expand
 button. Enter/Space activates the expand button, and Escape closes the viewer.
 The viewer removes its video when closed. The Markdown sanitizer remains
 unchanged: only validated media references use trusted renderer HTML.
@@ -35,11 +42,18 @@ unchanged: only validated media references use trusted renderer HTML.
 
 Note attachments have session IDs, so they do not become separate timeline or
 `#image:` entries. They are also excluded from session-restart chat image inputs.
-Amendments reuse previous attachments by ID or SHA-256 content. Branch moves
-already relocate session-scoped image rows and files. Only the completed turn's
-output is scanned for a note, so a follow-up that does not rewrite the note
-leaves the saved note and its attachments untouched, even if the original
-source files no longer exist.
+Amendments reuse previous attachments by ID or SHA-256 content; the previous
+attachments are only read and hashed once a fresh file actually needs
+deduplicating, so amendments that repeat stored references read no attachment
+bytes. Branch moves already relocate session-scoped image rows and files. Only
+the completed turn's output is scanned for a note, so a follow-up that does not
+rewrite the note leaves the saved note and its attachments untouched, even if
+the original source files no longer exist. A turn that does rewrite the note
+typically repeats the agent's original source paths, since the agent never saw
+the stored references. When such a path can no longer be read, the attachment
+the previous note saved under the same basename is reused (alt text breaks
+ties; an ambiguous match still becomes a placeholder), so the rewrite keeps the
+stable reference instead of deleting the attachment.
 
 Cleanup runs **after** a successful note save, and failed saves roll back new
 attachments. Deleting a project note includes its child-note attachments.
@@ -52,8 +66,12 @@ When a note is supplied to a later agent, its media is copied next to the note
 in the local OS temp directory or into `/tmp` on Blox. The Markdown points to
 those paths. Missing files become text placeholders. Images and videos up to
 20 MiB use the existing chunked Blox transfer; larger videos produce a
-placeholder with caption, filename, size, and reason. Remote ingestion bounds
-output with `head` and uses positional shell arguments for paths.
+placeholder with caption, filename, size, and reason. Because the remote name
+`/tmp/staged-image-<id>.<ext>` is stable, each context build first checks the
+remote file's size with a single `ws_exec` and skips the transfer when it
+matches the stored size, so repeated session starts do not re-send every
+attachment. Remote ingestion bounds output with `head` and uses positional
+shell arguments for paths.
 
 A project agent reads a child repo session's note through the
 `wait_for_repo_session` and `cancel_repo_session` replies, which materialize
@@ -85,9 +103,11 @@ broken Markdown image links. The only dependency declaration added is
 ## Validation
 
 Automated tests cover ingestion and note completion for both note kinds,
-path forms, code skipping, titles, magic/size validation, deduplication,
-rollback, deletion and shared references, local materialization and missing
-files, the remote video cap, project-agent child-note handoff, desktop ranges,
+path forms, code skipping, titles, magic/size validation, sniffed chat
+attachment formats, deduplication and its lazy hashing, basename reuse on
+rewrites, rollback, deletion and shared references, local materialization and
+missing files, the remote video cap and size-check skip (through a fake
+workspace), project-agent child-note handoff, desktop ranges,
 authenticated browser serving, renderer escaping, viewer targets, platform URL
 resolution, and Milkdown round-tripping. Run the repository's Rust tests,
 frontend tests, type check, Clippy, and formatting checks using Hermit.

@@ -1,4 +1,4 @@
-import type { Tokens } from 'marked';
+import type { Parser, Tokens } from 'marked';
 import { parseStagedMediaReference, resolveStagedMediaUrl } from './mediaUrl';
 
 function escapeHtml(text: string): string {
@@ -10,12 +10,20 @@ function escapeHtml(text: string): string {
     .replaceAll("'", '&#39;');
 }
 
-/** Only canonical IDs and supported extensions can bypass the sanitizer. */
-export function renderMarkdownMedia(token: Tokens.Image): string | null {
+/**
+ * Only canonical IDs and supported extensions can bypass the sanitizer.
+ *
+ * `token.text` is the alt source as typed (`a\_b`, `**Before**`); like
+ * marked's own image renderer, flatten the inline tokens to plain text first.
+ * The flattened text is unescaped, so escaping still happens afterwards.
+ */
+export function renderMarkdownMedia(token: Tokens.Image, parser?: Parser): string | null {
   const media = parseStagedMediaReference(token.href);
   if (!media) return null;
   const { id, ext, kind } = media;
-  const alt = escapeHtml(token.text);
+  const text =
+    parser && token.tokens ? parser.parseInline(token.tokens, parser.textRenderer) : token.text;
+  const alt = escapeHtml(text);
   const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
   const src = escapeHtml(resolveStagedMediaUrl(id, ext));
   return [

@@ -23,6 +23,19 @@ describe('note media rendering', () => {
     expect(html).not.toContain('autoplay');
   });
 
+  it.each([
+    ['![Step a\\_b]', 'Step a_b'],
+    ['![**Before** fix]', 'Before fix'],
+    ['![a & b `<c>`]', 'a &amp; b &lt;c&gt;'],
+  ])('shows %s as plain caption text, escaped after flattening', (alt, caption) => {
+    const html = renderMarkdown(`${alt}(staged-media://${id}.png)`);
+    expect(html).toContain(`<figcaption>${caption}</figcaption>`);
+    expect(html).toContain(`alt="${caption}"`);
+    expect(html).toContain(`data-media-alt="${caption}"`);
+    expect(html).not.toContain('<strong>');
+    expect(html).not.toContain('<c>');
+  });
+
   it('escapes captions and titles before bypassing sanitization', () => {
     const html = renderMarkdownMedia({
       type: 'image',

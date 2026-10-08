@@ -458,6 +458,7 @@
   let canAttachImages = $derived(!!projectId);
   let replyImageIds = $state<string[]>([]);
   let imagePreviews = $state<Map<string, string>>(new Map());
+  let attachError = $state<string | null>(null);
 
   // Drag-and-drop state
   let dragOver = $state(false);
@@ -540,11 +541,13 @@
         true
       );
       replyImageIds = [...replyImageIds, image.id];
-      const dataUrl = `data:${file.type};base64,${base64}`;
+      const dataUrl = `data:${image.mimeType};base64,${base64}`;
       imagePreviews = new Map(imagePreviews);
       imagePreviews.set(image.id, dataUrl);
+      attachError = null;
     } catch (err) {
       console.error('Failed to attach image:', err);
+      attachError = `Could not attach ${file.name}: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -2482,6 +2485,7 @@
         {imagePreviews}
         onAttachFiles={handleAttachFiles}
         onRemoveImage={removeReplyImage}
+        {attachError}
         {isLive}
         {sending}
         onSend={handleSend}

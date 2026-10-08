@@ -59,6 +59,7 @@
   let hasAttachments = $derived(imageIds.length > 0 || textSnippets.length > 0);
 
   let previews = $state<Map<string, string>>(new Map());
+  let attachError = $state<string | null>(null);
   let fileInput: HTMLInputElement;
 
   // Load previews for existing images
@@ -114,12 +115,15 @@
         true
       );
       onImageIdsChange((current) => [...current, image.id]);
-      // Set preview immediately from the local data
-      const dataUrl = `data:${file.type};base64,${base64}`;
+      // Set preview immediately from the local data. The stored MIME follows
+      // the file signature, which may differ from the browser's label.
+      const dataUrl = `data:${image.mimeType};base64,${base64}`;
       previews = new Map(previews);
       previews.set(image.id, dataUrl);
+      attachError = null;
     } catch (err) {
       console.error('Failed to attach image:', err);
+      attachError = `Could not attach ${file.name}: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -249,10 +253,19 @@
     {/if}
   </div>
 {/if}
+{#if attachError}
+  <p class="attach-error" role="alert">{attachError}</p>
+{/if}
 
 <style>
   .file-input-hidden {
     display: none;
+  }
+
+  .attach-error {
+    margin: 4px 0 0;
+    font-size: var(--size-sm);
+    color: var(--ui-danger);
   }
 
   .attached-images {

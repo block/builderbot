@@ -28,9 +28,9 @@ pub fn create_image(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or("Invalid filename")?;
-    let cap = crate::note_media::files::size_limit(filename, false)?;
-    let bytes = crate::note_media::files::read_local(src, cap)?;
-    crate::note_media::files::store_media_file(
+    let bytes =
+        crate::note_media::files::read_local(src, crate::note_media::files::MAX_IMAGE_SIZE)?;
+    crate::note_media::files::store_sniffed_image(
         &store,
         branch_id.as_deref(),
         &project_id,
@@ -39,7 +39,6 @@ pub fn create_image(
             .then_some(crate::store::models::PENDING_SESSION_ID),
         filename,
         &bytes,
-        false,
     )
 }
 
@@ -118,7 +117,9 @@ pub fn get_image_data(
 
 /// Create an image from base64-encoded data (for browser file input / clipboard paste).
 ///
-/// See [`create_image`] for the meaning of the `pending` flag.
+/// `mime_type` is the browser's label and is only accepted for compatibility;
+/// the stored format follows the file signature. See [`create_image`] for the
+/// meaning of the `pending` flag.
 #[tauri::command(rename_all = "camelCase")]
 pub fn create_image_from_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -140,7 +141,7 @@ pub(crate) fn create_image_from_data_impl(
     branch_id: Option<String>,
     project_id: String,
     filename: String,
-    mime_type: String,
+    _mime_type: String,
     data: String,
     pending: Option<bool>,
 ) -> Result<crate::store::Image, String> {
@@ -152,11 +153,7 @@ pub(crate) fn create_image_from_data_impl(
         .decode(&data)
         .map_err(|e| format!("Invalid base64 data: {e}"))?;
 
-    let mime = crate::note_media::files::validate_media(&filename, &bytes, false)?;
-    if !mime_type.is_empty() && mime_type != mime {
-        return Err("MIME type does not match image format".into());
-    }
-    crate::note_media::files::store_media_file(
+    crate::note_media::files::store_sniffed_image(
         &store,
         branch_id.as_deref(),
         &project_id,
@@ -165,6 +162,61 @@ pub(crate) fn create_image_from_data_impl(
             .then_some(crate::store::models::PENDING_SESSION_ID),
         &filename,
         &bytes,
-        false,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::note_media::tests::{Fixture, PNG};
+    use base64::Engine;
+
+    fn attach(
+        f: &Fixture,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<crate::store::Image, String> {
+        create_image_from_data_impl(
+            f.store.clone(),
+            Some(f.branch.id.clone()),
+            f.project.id.clone(),
+            name.into(),
+            mime.into(),
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            Some(true),
+        )
+    }
+
+    #[test]
+    fn chat_attachments_are_stored_under_their_sniffed_format() {
+        let f = Fixture::new();
+        let webp = b"RIFF1234WEBPfixture";
+        let image = attach(&f, "shot.png", "image/png", webp).unwrap();
+        assert_eq!(image.mime_type, "image/webp");
+        assert_eq!(image.filename, "shot.webp");
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+                .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), webp);
+
+        // A truthful name is kept, including the alternate JPEG spelling.
+        assert_eq!(
+            attach(&f, "a.jpeg", "", b"\xff\xd8\xffx").unwrap().filename,
+            "a.jpeg"
+        );
+        assert_eq!(
+            attach(&f, "shot.png", "image/png", PNG).unwrap().filename,
+            "shot.png"
+        );
+        assert_eq!(
+            attach(&f, "pasted", "", PNG).unwrap().filename,
+            "pasted.png"
+        );
+
+        let err = attach(&f, "shot.png", "image/png", b"not an image").unwrap_err();
+        assert!(err.contains("unsupported image format"), "{err}");
+        let err = attach(&f, "clip.png", "", b"\0\0\0\x18ftypisom\0\0\0\0").unwrap_err();
+        assert!(err.contains("only images"), "{err}");
+    }
 }

@@ -129,7 +129,37 @@ pub(crate) fn store_sniffed_image(
     )
 }
 
-pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
+/// Why a media source could not be read. Only [`ReadError::NotFound`] may be
+/// answered with a previously saved attachment; a file that exists but is
+/// oversized, mislabelled, or not a regular file must stay a visible failure.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadError {
+    NotFound(&'static str),
+    Other(String),
+}
+
+impl From<ReadError> for String {
+    fn from(error: ReadError) -> Self {
+        match error {
+            ReadError::NotFound(reason) => reason.to_owned(),
+            ReadError::Other(reason) => reason,
+        }
+    }
+}
+
+impl From<String> for ReadError {
+    fn from(reason: String) -> Self {
+        ReadError::Other(reason)
+    }
+}
+
+impl From<&str> for ReadError {
+    fn from(reason: &str) -> Self {
+        ReadError::Other(reason.to_owned())
+    }
+}
+
+pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -141,13 +171,13 @@ pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, String> {
     }
     let file = options
         .open(path)
-        .map_err(|_| "media file is unavailable")?;
+        .map_err(|_| ReadError::NotFound("media file is unavailable"))?;
     let metadata = file.metadata().map_err(|_| "cannot inspect media file")?;
     if !metadata.is_file() {
         return Err("media must be a regular file".into());
     }
     if metadata.len() > cap {
-        return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024));
+        return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
     }
     let mut bytes = Vec::new();
     file.take(cap + 1)
@@ -224,7 +254,7 @@ pub(crate) fn read_candidate(
     workspace: Option<&str>,
     cwd: &Path,
     cap: u64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, ReadError> {
     if let Some(workspace) = workspace {
         // Positional shell arguments handle spaces/quotes without interpolation.
         // Limit output before it crosses the workspace boundary, and reject
@@ -242,9 +272,9 @@ pub(crate) fn read_candidate(
                 &(cap + 1).to_string(),
             ],
         )
-        .map_err(|_| "remote media file is unavailable")?;
+        .map_err(|_| ReadError::NotFound("remote media file is unavailable"))?;
         if bytes.len() as u64 > cap {
-            return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024));
+            return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
         }
         Ok(bytes)
     } else {

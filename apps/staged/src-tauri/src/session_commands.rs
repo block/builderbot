@@ -5105,38 +5105,62 @@ pub(crate) fn write_bytes_to_remote(
     bytes: &[u8],
     remote_path: &str,
 ) -> Result<(), String> {
+    write_bytes_to_remote_with(
+        &|args| blox::ws_exec(workspace_name, args).map_err(|e| e.to_string()),
+        bytes,
+        remote_path,
+    )
+}
+
+/// [`write_bytes_to_remote`] over any command runner, so tests can observe the
+/// commands without a workspace.
+///
+/// Chunks accumulate in a per-transfer `<remote_path>.<nonce>.part` and the
+/// last chunk's command renames it into place, so the final path only ever
+/// holds a complete file. Two context builds transferring the same stable
+/// `/tmp/staged-image-<id>` copy at once each stage their own file, and the
+/// size check that precedes a transfer can trust what it measures.
+pub(crate) fn write_bytes_to_remote_with(
+    exec: &dyn Fn(&[&str]) -> Result<String, String>,
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), String> {
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
 
     const CHUNK_SIZE: usize = 500_000;
 
-    if encoded.len() <= CHUNK_SIZE {
-        blox::ws_exec(
-            workspace_name,
-            &[
-                "sh",
-                "-c",
-                &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
-            ],
-        )
-        .map_err(|e| format!("Failed to write to remote workspace: {e}"))?;
+    // Base64 is ASCII, so splitting at byte offsets keeps each chunk UTF-8.
+    // An empty payload still needs one command to create the file.
+    let chunks: Vec<&str> = if encoded.is_empty() {
+        vec![""]
     } else {
-        for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
-            let chunk_str = std::str::from_utf8(chunk)
-                .map_err(|e| format!("Invalid UTF-8 in base64 chunk: {e}"))?;
-            let redirect = if i == 0 { ">" } else { ">>" };
-            blox::ws_exec(
-                workspace_name,
-                &[
-                    "sh",
-                    "-c",
-                    &format!(
-                        "echo '{}' | base64 -d {} '{}'",
-                        chunk_str, redirect, remote_path
-                    ),
-                ],
-            )
-            .map_err(|e| format!("Failed to write chunk {i} to remote workspace: {e}"))?;
+        encoded
+            .as_bytes()
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| std::str::from_utf8(chunk).expect("base64 is ASCII"))
+            .collect()
+    };
+    let part = format!("{remote_path}.{}.part", uuid::Uuid::new_v4().simple());
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let redirect = if i == 0 { ">" } else { ">>" };
+        let publish = if i == last {
+            format!(" && mv -f '{part}' '{remote_path}'")
+        } else {
+            String::new()
+        };
+        if let Err(e) = exec(&[
+            "sh",
+            "-c",
+            &format!("echo '{chunk}' | base64 -d {redirect} '{part}'{publish}"),
+        ]) {
+            let _ = exec(&["rm", "-f", &part]);
+            return Err(if last == 0 {
+                format!("Failed to write to remote workspace: {e}")
+            } else {
+                format!("Failed to write chunk {i} to remote workspace: {e}")
+            });
         }
     }
 
@@ -8952,6 +8976,64 @@ mod tests {
         );
 
         assert_eq!(returned_path, expected_path);
+    }
+
+    #[test]
+    fn remote_byte_writes_stage_every_chunk_and_publish_with_the_last_command() {
+        use std::cell::RefCell;
+        let commands = RefCell::new(Vec::<Vec<String>>::new());
+        let record = |args: &[&str]| {
+            commands
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            Ok(String::new())
+        };
+        // 400 KB of payload is ~533 KB of base64, so two chunks.
+        write_bytes_to_remote_with(&record, &vec![7u8; 400_000], "/tmp/file.bin").unwrap();
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 2);
+        let (first, second) = (&commands[0][2], &commands[1][2]);
+        assert!(first.contains("| base64 -d > '/tmp/file.bin."), "{first}");
+        assert!(first.ends_with(".part'"), "{first}");
+        assert!(
+            second.contains("| base64 -d >> '/tmp/file.bin."),
+            "{second}"
+        );
+        assert!(
+            second.contains(".part' && mv -f '/tmp/file.bin."),
+            "{second}"
+        );
+        assert!(second.ends_with(".part' '/tmp/file.bin'"), "{second}");
+        let staging = first.rsplit(" '").next().unwrap();
+        assert!(second.contains(staging), "both chunks use one staging file");
+    }
+
+    #[test]
+    fn failed_remote_byte_writes_remove_the_staging_file() {
+        use std::cell::RefCell;
+        let commands = RefCell::new(Vec::<Vec<String>>::new());
+        let fail_writes = |args: &[&str]| {
+            commands
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            if args[0] == "rm" {
+                Ok(String::new())
+            } else {
+                Err("exit status 1".to_string())
+            }
+        };
+        let error =
+            write_bytes_to_remote_with(&fail_writes, b"bytes", "/tmp/file.bin").unwrap_err();
+        assert!(
+            error.starts_with("Failed to write to remote workspace"),
+            "{error}"
+        );
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1][..2], ["rm", "-f"]);
+        assert!(commands[1][2].starts_with("/tmp/file.bin."));
+        assert!(commands[1][2].ends_with(".part"));
+        assert!(commands[0][2].contains(&format!("> '{}'", commands[1][2])));
     }
 
     #[test]

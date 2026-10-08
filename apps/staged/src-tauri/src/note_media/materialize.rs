@@ -4,20 +4,16 @@ use super::{files, refs};
 use crate::store::Store;
 use std::collections::HashMap;
 
-/// Workspace-side file operations, so tests can observe transfers without a
-/// Blox CLI. A transfer is dozens of chunked `ws_exec` round trips, while a
-/// size check is one, so callers check before re-sending a stable `/tmp` copy.
+/// Workspace command execution, so tests can observe transfers without a Blox
+/// CLI. A transfer is dozens of chunked `ws_exec` round trips, while a size
+/// check is one, so callers check before re-sending a stable `/tmp` copy.
 pub(crate) trait RemoteMedia {
+    /// Run one command in the workspace and return its stdout.
+    fn exec(&self, workspace: &str, args: &[&str]) -> Result<String, String>;
+
     /// Size of an existing remote file, or `None` when it is missing.
-    fn size(&self, workspace: &str, path: &str) -> Option<i64>;
-    fn write(&self, workspace: &str, path: &str, bytes: &[u8]) -> Result<(), String>;
-}
-
-pub(crate) struct BloxRemote;
-
-impl RemoteMedia for BloxRemote {
     fn size(&self, workspace: &str, path: &str) -> Option<i64> {
-        crate::blox::ws_exec(
+        self.exec(
             workspace,
             &["sh", "-c", "wc -c < \"$1\"", "staged-note-media", path],
         )
@@ -27,8 +23,22 @@ impl RemoteMedia for BloxRemote {
         .ok()
     }
 
+    /// Stages the transfer beside `path` and renames it into place, so `size`
+    /// never measures a file another build is still writing.
     fn write(&self, workspace: &str, path: &str, bytes: &[u8]) -> Result<(), String> {
-        crate::session_commands::write_bytes_to_remote(workspace, bytes, path)
+        crate::session_commands::write_bytes_to_remote_with(
+            &|args| self.exec(workspace, args),
+            bytes,
+            path,
+        )
+    }
+}
+
+pub(crate) struct BloxRemote;
+
+impl RemoteMedia for BloxRemote {
+    fn exec(&self, workspace: &str, args: &[&str]) -> Result<String, String> {
+        crate::blox::ws_exec(workspace, args).map_err(|e| e.to_string())
     }
 }
 

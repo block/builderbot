@@ -135,19 +135,10 @@ impl Store {
             return Ok(filename.to_string());
         }
 
-        let path = std::path::Path::new(filename);
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(filename);
-        let ext = path.extension().and_then(|e| e.to_str());
-
+        let (stem, ext) = split_filename(filename);
         let mut counter = 2u32;
         loop {
-            let candidate = match ext {
-                Some(e) => format!("{stem} {counter}.{e}"),
-                None => format!("{stem} {counter}"),
-            };
+            let candidate = numbered_filename(stem, ext, counter);
             if !existing.contains(&candidate) {
                 return Ok(candidate);
             }
@@ -249,6 +240,45 @@ impl Store {
             created_at: row.get(7)?,
         })
     }
+}
+
+fn split_filename(filename: &str) -> (&str, Option<&str>) {
+    let path = std::path::Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    (stem, path.extension().and_then(|e| e.to_str()))
+}
+
+fn numbered_filename(stem: &str, ext: Option<&str>, counter: u32) -> String {
+    match ext {
+        Some(e) => format!("{stem} {counter}.{e}"),
+        None => format!("{stem} {counter}"),
+    }
+}
+
+/// Whether `stored` is `filename` itself or one of the ` 2`, ` 3`, … variants
+/// [`Store::unique_image_filename`] produces for it. Callers that only know
+/// the name a file was saved from use this to find its row.
+pub(crate) fn is_unique_filename_variant(stored: &str, filename: &str) -> bool {
+    if stored == filename {
+        return true;
+    }
+    let (stem, ext) = split_filename(filename);
+    let Some(rest) = stored
+        .strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return false;
+    };
+    let counter = match ext {
+        Some(e) => rest.strip_suffix(e).and_then(|rest| rest.strip_suffix('.')),
+        None => Some(rest),
+    };
+    counter.is_some_and(|counter| {
+        counter.bytes().all(|b| b.is_ascii_digit()) && counter.parse::<u32>().is_ok_and(|n| n >= 2)
+    })
 }
 
 /// Compute the filesystem path for an image file.

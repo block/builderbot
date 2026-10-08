@@ -50,10 +50,18 @@ the completed turn's output is scanned for a note, so a follow-up that does not
 rewrite the note leaves the saved note and its attachments untouched, even if
 the original source files no longer exist. A turn that does rewrite the note
 typically repeats the agent's original source paths, since the agent never saw
-the stored references. When such a path can no longer be read, the attachment
-the previous note saved under the same basename is reused (alt text breaks
-ties; an ambiguous match still becomes a placeholder), so the rewrite keeps the
-stable reference instead of deleting the attachment.
+the stored references. When such a path no longer exists, the attachment the
+previous note saved under the same basename is reused, so the rewrite keeps the
+stable reference instead of deleting the attachment. The store numbers
+colliding filenames across the whole branch (`shot.png`, `shot 2.png`, …),
+chat uploads included, so the match accepts either the bare name or a numbered
+variant. When several previous attachments match, alt text breaks ties, and a
+row already claimed by an earlier reference in the same pass is not offered
+again, so two screenshots that shared a basename each keep their own file. A
+match that is still ambiguous becomes a placeholder. Only a missing source
+triggers this fallback: a file that exists at the old path but is oversized,
+mislabelled, or not a regular file is reported as such, never silently replaced
+by the previous attachment.
 
 Cleanup runs **after** a successful note save, and failed saves roll back new
 attachments. Deleting a project note includes its child-note attachments.
@@ -70,7 +78,11 @@ placeholder with caption, filename, size, and reason. Because the remote name
 `/tmp/staged-image-<id>.<ext>` is stable, each context build first checks the
 remote file's size with a single `ws_exec` and skips the transfer when it
 matches the stored size, so repeated session starts do not re-send every
-attachment. Remote ingestion bounds output with `head` and uses positional
+attachment. A transfer stages its chunks in a per-transfer `.part` file beside
+the destination and the last chunk's command renames it into place, so the
+final path only ever holds a complete file, the size check never measures a
+file another build is still writing, and a failed transfer leaves nothing at
+the final path. Remote ingestion bounds output with `head` and uses positional
 shell arguments for paths.
 
 A project agent reads a child repo session's note through the
@@ -105,9 +117,10 @@ broken Markdown image links. The only dependency declaration added is
 Automated tests cover ingestion and note completion for both note kinds,
 path forms, code skipping, titles, magic/size validation, sniffed chat
 attachment formats, deduplication and its lazy hashing, basename reuse on
-rewrites, rollback, deletion and shared references, local materialization and
-missing files, the remote video cap and size-check skip (through a fake
-workspace), project-agent child-note handoff, desktop ranges,
+rewrites (numbered filenames, one claim per attachment, and the missing-source
+restriction), rollback, deletion and shared references, local materialization
+and missing files, the remote video cap, size-check skip, and staged rename
+(through a fake workspace shell), project-agent child-note handoff, desktop ranges,
 authenticated browser serving, renderer escaping, viewer targets, platform URL
 resolution, and Milkdown round-tripping. Run the repository's Rust tests,
 frontend tests, type check, Clippy, and formatting checks using Hermit.

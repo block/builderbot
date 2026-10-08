@@ -36,9 +36,13 @@ pub(crate) struct IngestOutcome {
 /// Rows are cheap; hashing their bytes (up to 100 MB each) is not, so that
 /// waits until a fresh file actually needs deduplicating.
 struct PreviousAttachments {
+    /// In order of first appearance in the previous content.
     images: Vec<Image>,
     /// Alt texts the previous content used for each attachment id.
     alts: HashMap<String, HashSet<String>>,
+    /// Rows some reference in this pass already resolved to. A basename
+    /// fallback never hands one of these to a second reference.
+    claimed: HashSet<String>,
     hashes: Option<HashMap<(String, Vec<u8>), Image>>,
     files_hashed: usize,
 }
@@ -46,15 +50,19 @@ struct PreviousAttachments {
 impl PreviousAttachments {
     fn load(store: &Store, scope: &NoteScope<'_>) -> Self {
         let mut alts = HashMap::<String, HashSet<String>>::new();
+        let mut ids = Vec::new();
         for reference in extract_media_refs(scope.previous_content) {
             if let Some((id, _)) = stored_ref(&reference.target) {
+                if !alts.contains_key(id) {
+                    ids.push(id.to_owned());
+                }
                 alts.entry(id.to_owned())
                     .or_default()
                     .insert(reference.alt.clone());
             }
         }
-        let images = alts
-            .keys()
+        let images = ids
+            .iter()
             .filter_map(|id| store.get_image(id).ok().flatten())
             .filter(|image| {
                 image.project_id == scope.project_id
@@ -64,6 +72,7 @@ impl PreviousAttachments {
         Self {
             images,
             alts,
+            claimed: HashSet::new(),
             hashes: None,
             files_hashed: 0,
         }
@@ -98,8 +107,10 @@ impl PreviousAttachments {
 
     /// A rewriting turn repeats the agent's original source paths, which may
     /// be gone by now. The attachment saved from that path keeps its basename
-    /// (with a normalized extension), so match on that, then on alt text.
-    fn by_filename(&self, filename: &str, alt: &str) -> Option<Image> {
+    /// (with a normalized extension) unless another image on the branch,
+    /// including a chat upload, already had it, in which case the store
+    /// numbered it. Match either form among unclaimed rows, then on alt text.
+    fn by_filename(&mut self, filename: &str, alt: &str) -> Option<Image> {
         let normalized = Path::new(filename)
             .with_extension(files::extension(filename))
             .to_string_lossy()
@@ -107,7 +118,10 @@ impl PreviousAttachments {
         let matches: Vec<&Image> = self
             .images
             .iter()
-            .filter(|image| image.filename == normalized)
+            .filter(|image| !self.claimed.contains(&image.id))
+            .filter(|image| {
+                crate::store::images::is_unique_filename_variant(&image.filename, &normalized)
+            })
             .collect();
         let narrowed: Vec<&Image> = match matches.len() {
             0 => return None,
@@ -233,8 +247,14 @@ pub(crate) fn ingest_note_media(
             {
                 Ok(bytes) => bytes,
                 // Prefer the attachment saved from this path over a placeholder
-                // that would also have finish() delete it.
-                Err(reason) => return previous.by_filename(filename, &reference.alt).ok_or(reason),
+                // that would also have finish() delete it. A file that exists
+                // but fails validation is a new, bad file, not a stale path.
+                Err(files::ReadError::NotFound(reason)) => {
+                    return previous
+                        .by_filename(filename, &reference.alt)
+                        .ok_or_else(|| reason.to_owned())
+                }
+                Err(reason) => return Err(reason.into()),
             };
             save_candidate(
                 store,
@@ -257,6 +277,7 @@ pub(crate) fn ingest_note_media(
                     ),
                 ));
                 outcome.kept_ids.insert(image.id.clone());
+                previous.claimed.insert(image.id.clone());
                 targets.insert(target.clone(), image);
             }
             Err(reason) => {

@@ -174,25 +174,198 @@ fn rewritten_notes_reuse_attachments_by_source_basename_when_the_file_is_gone() 
 }
 
 #[test]
-fn remote_materialization_skips_transfers_when_the_workspace_copy_matches() {
-    use std::cell::RefCell;
-    #[derive(Default)]
-    struct FakeRemote {
-        sizes: RefCell<HashMap<String, i64>>,
-        writes: RefCell<Vec<String>>,
+fn rewrites_match_numbered_filenames_and_claim_each_attachment_once() {
+    let f = Fixture::new();
+    // A chat upload already owns `shot.png` on this branch, so the note's
+    // attachment is stored as `shot 2.png`.
+    let chat = files::store_media_file(
+        &f.store,
+        Some(&f.branch.id),
+        &f.project.id,
+        Some(&f.session.id),
+        "shot.png",
+        PNG,
+        false,
+    )
+    .unwrap();
+    let shot = f.dir.path().join("shot.png");
+    std::fs::write(&shot, [PNG, b"note"].concat()).unwrap();
+    let first = f.ingest("", &format!("![Shot]({})", shot.display()));
+    let id = first.kept_ids.iter().next().unwrap().clone();
+    assert_eq!(
+        f.store.get_image(&id).unwrap().unwrap().filename,
+        "shot 2.png"
+    );
+    std::fs::remove_file(&shot).unwrap();
+    let rewritten = f.ingest(&first.markdown, &format!("![Shot]({})", shot.display()));
+    assert_eq!(rewritten.markdown, first.markdown);
+    assert_eq!(rewritten.kept_ids, HashSet::from([id.clone()]));
+    assert!(!rewritten.kept_ids.contains(&chat.id));
+
+    // Two screenshots with one basename from different directories.
+    let before = f.dir.path().join("before").join("screen.png");
+    let after = f.dir.path().join("after").join("screen.png");
+    for (path, suffix) in [(&before, &b"before"[..]), (&after, &b"after"[..])] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, [PNG, suffix].concat()).unwrap();
     }
-    impl RemoteMedia for FakeRemote {
-        fn size(&self, _workspace: &str, path: &str) -> Option<i64> {
-            self.sizes.borrow().get(path).copied()
-        }
-        fn write(&self, _workspace: &str, path: &str, bytes: &[u8]) -> Result<(), String> {
-            self.writes.borrow_mut().push(path.to_owned());
-            self.sizes
-                .borrow_mut()
-                .insert(path.to_owned(), bytes.len() as i64);
-            Ok(())
+    let source = format!(
+        "![Before]({})\n![After]({})",
+        before.display(),
+        after.display()
+    );
+    let pair = f.ingest("", &source);
+    assert_eq!(pair.kept_ids.len(), 2);
+    let stored: Vec<String> = extract_media_refs(&pair.markdown)
+        .into_iter()
+        .map(|r| r.target)
+        .collect();
+    assert_ne!(stored[0], stored[1]);
+    std::fs::remove_dir_all(before.parent().unwrap()).unwrap();
+    std::fs::remove_dir_all(after.parent().unwrap()).unwrap();
+    let rewritten = f.ingest(&pair.markdown, &format!("Rewritten\n\n{source}"));
+    assert_eq!(
+        rewritten.markdown,
+        format!("Rewritten\n\n{}", pair.markdown)
+    );
+    assert_eq!(rewritten.kept_ids, pair.kept_ids);
+    assert!(rewritten.created_ids.is_empty());
+    // A third reference to the same basename finds no unclaimed row.
+    let third = f.dir.path().join("third").join("screen.png");
+    let extra = f.ingest(
+        &pair.markdown,
+        &format!("{source}\n![After]({})", third.display()),
+    );
+    assert_eq!(extra.kept_ids, pair.kept_ids);
+    assert_eq!(
+        extra.markdown.matches("media file is unavailable").count(),
+        1
+    );
+    // Identical alt texts leave the pair ambiguous rather than guessing.
+    let same_alt = source
+        .replace("![Before]", "![Shot]")
+        .replace("![After]", "![Shot]");
+    let ambiguous = f.ingest(&pair.markdown, &same_alt);
+    assert!(ambiguous.kept_ids.is_empty());
+    assert_eq!(
+        ambiguous
+            .markdown
+            .matches("media file is unavailable")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn basename_fallback_only_covers_missing_sources() {
+    let f = Fixture::new();
+    let shot = f.dir.path().join("shot.png");
+    std::fs::write(&shot, PNG).unwrap();
+    let first = f.ingest("", "![Shot](shot.png)");
+    let id = first.kept_ids.iter().next().unwrap().clone();
+    // A new file at the same path that breaks the size cap is a new, bad file.
+    std::fs::File::create(&shot)
+        .unwrap()
+        .set_len(files::MAX_IMAGE_SIZE + 1)
+        .unwrap();
+    let oversized = f.ingest(&first.markdown, "![Shot](shot.png)");
+    assert!(oversized.kept_ids.is_empty());
+    assert!(oversized.markdown.contains("exceeds 10 MB limit"));
+    assert!(!oversized.markdown.contains(&id));
+    std::fs::remove_file(&shot).unwrap();
+    std::fs::create_dir(&shot).unwrap();
+    let directory = f.ingest(&first.markdown, "![Shot](shot.png)");
+    assert!(directory.kept_ids.is_empty());
+    assert!(directory.markdown.contains("media must be a regular file"));
+    std::fs::remove_dir(&shot).unwrap();
+    let missing = f.ingest(&first.markdown, "![Shot](shot.png)");
+    assert_eq!(missing.kept_ids, HashSet::from([id]));
+}
+
+#[test]
+fn unique_filename_variants_follow_the_store_numbering() {
+    use crate::store::images::is_unique_filename_variant;
+    for (stored, matches) in [
+        ("shot.png", true),
+        ("shot 2.png", true),
+        ("shot 10.png", true),
+        ("shot 1.png", false),
+        ("shot  2.png", false),
+        ("shot 2.PNG", false),
+        ("shot2.png", false),
+        ("shot 2.png.png", false),
+        ("shot 2a.png", false),
+        ("other.png", false),
+    ] {
+        assert_eq!(
+            is_unique_filename_variant(stored, "shot.png"),
+            matches,
+            "{stored}"
+        );
+    }
+    assert!(is_unique_filename_variant("a.b 3.png", "a.b.png"));
+    assert!(is_unique_filename_variant("noext 2", "noext"));
+    assert!(!is_unique_filename_variant("noext 2.png", "noext"));
+}
+
+/// Interprets exactly the commands the transfer and size check issue, over an
+/// in-memory file map, so the staging and rename steps are observable.
+#[derive(Default)]
+pub(crate) struct FakeRemote {
+    pub files: std::cell::RefCell<HashMap<String, Vec<u8>>>,
+    pub commands: std::cell::RefCell<Vec<String>>,
+    pub fail_writes: std::cell::Cell<bool>,
+}
+
+impl RemoteMedia for FakeRemote {
+    fn exec(&self, _workspace: &str, args: &[&str]) -> Result<String, String> {
+        use base64::Engine;
+        let mut files = self.files.borrow_mut();
+        match args {
+            ["sh", "-c", "wc -c < \"$1\"", _, path] => files
+                .get(*path)
+                .map(|bytes| bytes.len().to_string())
+                .ok_or_else(|| "exit status 1".to_owned()),
+            ["rm", "-f", path] => {
+                files.remove(*path);
+                Ok(String::new())
+            }
+            ["sh", "-c", command] => {
+                self.commands.borrow_mut().push((*command).to_owned());
+                if self.fail_writes.get() {
+                    return Err("exit status 1".into());
+                }
+                let (encoded, rest) = command
+                    .strip_prefix("echo '")
+                    .and_then(|rest| rest.split_once("' | base64 -d "))
+                    .unwrap();
+                let (redirect, rest) = rest.split_once(" '").unwrap();
+                let (part, rest) = rest.split_once('\'').unwrap();
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap();
+                let staged = files.entry(part.to_owned()).or_default();
+                if redirect == ">" {
+                    staged.clear();
+                }
+                staged.extend(decoded);
+                if let Some(rest) = rest.strip_prefix(" && mv -f '") {
+                    let (source, rest) = rest.split_once("' '").unwrap();
+                    let destination = rest.strip_suffix('\'').unwrap();
+                    let bytes = files.remove(source).unwrap();
+                    files.insert(destination.to_owned(), bytes);
+                } else {
+                    assert!(rest.is_empty(), "{command}");
+                }
+                Ok(String::new())
+            }
+            other => panic!("unexpected remote command {other:?}"),
         }
     }
+}
+
+#[test]
+fn remote_materialization_skips_matching_copies_and_publishes_atomically() {
     let f = Fixture::new();
     std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();
     let outcome = f.ingest("", "![a](shot.png) ![b](shot.png)");
@@ -202,18 +375,54 @@ fn remote_materialization_skips_transfers_when_the_workspace_copy_matches() {
     let expected = format!("![a]({path}) ![b]({path})");
     let first = materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
     assert_eq!(first, expected);
-    assert_eq!(*remote.writes.borrow(), vec![path.clone()]);
+    {
+        let commands = remote.commands.borrow();
+        assert_eq!(commands.len(), 1);
+        assert!(
+            !commands[0].contains(&format!("> '{path}'")),
+            "{}",
+            commands[0]
+        );
+        assert!(
+            commands[0].contains(&format!("> '{path}.")) && commands[0].contains(".part'"),
+            "{}",
+            commands[0]
+        );
+        assert!(
+            commands[0].ends_with(&format!(".part' '{path}'")),
+            "{}",
+            commands[0]
+        );
+    }
+    assert_eq!(
+        *remote.files.borrow(),
+        HashMap::from([(path.clone(), PNG.to_vec())]),
+        "only the published file remains"
+    );
     let second = materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
     assert_eq!(second, expected);
     assert_eq!(
-        remote.writes.borrow().len(),
+        remote.commands.borrow().len(),
         1,
         "matching copy is not re-sent"
     );
-    remote.sizes.borrow_mut().insert(path.clone(), 1);
+    remote.files.borrow_mut().insert(path.clone(), vec![0]);
     materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
-    assert_eq!(remote.writes.borrow().len(), 2, "truncated copy is re-sent");
-    assert_eq!(remote.sizes.borrow()[&path], PNG.len() as i64);
+    assert_eq!(
+        remote.commands.borrow().len(),
+        2,
+        "truncated copy is re-sent"
+    );
+    assert_eq!(remote.files.borrow()[&path], PNG);
+    remote.files.borrow_mut().clear();
+    remote.fail_writes.set(true);
+    let failed = materialize_note_media_with(&f.store, &outcome.markdown, Some("ws"), &remote);
+    assert!(failed.contains("media unavailable"));
+    assert!(!failed.contains("staged-media://"));
+    assert!(
+        remote.files.borrow().is_empty(),
+        "a failed transfer leaves neither the final path nor a staging file"
+    );
 }
 
 #[test]

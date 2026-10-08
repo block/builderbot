@@ -215,6 +215,9 @@ impl Listener for TlsListener {
 /// compiling so they stay in sync with the rest of the codebase.
 ///
 /// TODO(web): restore full web server startup from the `mobile-web` branch.
+/// That restore must mount [`media_router`] into the composed app: the
+/// frontend's `resolveStagedMediaUrl` already emits `/api/media/...` in
+/// non-Tauri builds, and only oneshot tests exercise the route today.
 pub fn start(_state: WebAppState) {
     log::warn!("Web server requested but this build has the web server stubbed out");
 }

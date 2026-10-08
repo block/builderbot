@@ -94,6 +94,7 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { pullStateStore } from '../../stores/pullState.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
+  import { rebaseFollowUpStore } from '../../stores/rebaseFollowUp';
   import {
     onBranchGitStateUpdated,
     onBranchSetupProgress,
@@ -374,7 +375,8 @@
 
   async function startBranchCommandPipeline(
     kind: 'rebase' | 'squash',
-    rebaseTarget?: 'base' | 'origin'
+    rebaseTarget?: 'base' | 'origin',
+    options: { thenForcePush?: boolean } = {}
   ) {
     // Deliberately not gated on `branchSessionBusy`: the backend decides
     // between running now and queueing behind in-flight branch work, and it
@@ -389,6 +391,13 @@
         kind === 'rebase'
           ? await commands.rebaseBranch(branch.id, provider, rebaseTarget)
           : await commands.squashCommits(branch.id, provider);
+      // "Rebase and force push": the push is requested by sessionStatusListener
+      // once this rebase session completes, so a failed rebase never pushes.
+      // The backend may have returned an already-queued identical rebase; the
+      // follow-up attaches to whichever session will do the work.
+      if (kind === 'rebase' && options.thenForcePush) {
+        rebaseFollowUpStore.set(branch.id, { rebaseSessionId: result.sessionId, provider });
+      }
       // Add a pending session item so the session stub appears instantly
       // instead of waiting for the full timeline refresh. Queued pipelines get
       // the same label the persisted row will show, so the stub doesn't flash a
@@ -1921,6 +1930,8 @@
           : formatBaseBranch(branch.baseBranch)}
         parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
         onRebase={rebaseAlreadyInFlight ? undefined : () => startBranchCommandPipeline('rebase')}
+        onRebaseAndForcePush={() =>
+          startBranchCommandPipeline('rebase', undefined, { thenForcePush: true })}
         rebaseDisabledReason={branchCommandDisabledReason}
         warning={branchIdentityWarning}
         {refreshingGitState}

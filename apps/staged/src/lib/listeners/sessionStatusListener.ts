@@ -38,6 +38,7 @@ import { projectStateStore } from '../stores/projectState.svelte';
 import { prStateStore } from '../stores/prState.svelte';
 import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
+import { rebaseFollowUpStore, type RebaseFollowUp } from '../stores/rebaseFollowUp';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
 import type {
   ActiveSessionInfo,
@@ -119,7 +120,7 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
     }
-    handleSessionEnd(sessionId, status, errorMessage);
+    handleSessionEnd(sessionId, status, errorMessage, eventBranchId);
   }
 }
 
@@ -319,11 +320,24 @@ function handlePushCompleted(payload: PushCompletedPayload): void {
   }
 }
 
-function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage?: string | null) {
+function handleSessionEnd(
+  sessionId: string,
+  status: SessionStatus,
+  errorMessage?: string | null,
+  eventBranchId?: string
+) {
   const sessionProjectId = sessionRegistry.getProjectId(sessionId);
   const sessionType = sessionRegistry.getType(sessionId);
   const branchId = sessionRegistry.getBranchId(sessionId);
   const currentProjectId = navigation.selectedProjectId;
+
+  // A rebase that never ran (cancelled while queued) is not in the registry,
+  // so the event's own branch id is the only way to find its follow-up.
+  const followUpBranchId = branchId ?? eventBranchId;
+  const followUp = followUpBranchId ? rebaseFollowUpStore.take(followUpBranchId, sessionId) : null;
+  if (followUp && followUpBranchId) {
+    handleRebaseFollowUp(followUpBranchId, status, followUp);
+  }
 
   if (!sessionProjectId && !sessionType && !branchId) {
     console.warn('Received completion event for unknown session ID', { sessionId, status });
@@ -350,6 +364,44 @@ function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage
 
   // Remove running state from projectStateStore and unregister from the registry.
   sessionRegistry.cleanupSession(sessionId);
+}
+
+/**
+ * Start the force push armed behind a finished "Rebase and force push".
+ *
+ * Only a `completed` rebase releases it: a failed or cancelled rebase can
+ * leave the worktree mid-rebase, and force pushing that would publish the
+ * broken state. The push goes through the normal `push_branch` path, so the
+ * backend still queues it behind anything else in flight and the push chip
+ * tracks it like a hand-started force push.
+ */
+function handleRebaseFollowUp(branchId: string, status: SessionStatus, followUp: RebaseFollowUp) {
+  if (status !== 'completed') {
+    toast.error('Force push skipped', {
+      description: `The rebase ${status === 'error' ? 'failed' : 'was cancelled'}, so the branch was not force pushed.`,
+    });
+    return;
+  }
+  const pushState = pushStateStore.getPushState(branchId)?.state;
+  if (pushState === 'pushing' || pushState === 'queued') {
+    toast.error('Force push skipped', {
+      description: 'Another push is already in progress on this branch.',
+    });
+    return;
+  }
+  void startFollowUpForcePush(branchId, followUp.provider);
+}
+
+async function startFollowUpForcePush(branchId: string, provider?: string) {
+  pushStateStore.setPushing(branchId, '__pending__');
+  try {
+    const response = await commands.pushBranch(branchId, provider, true);
+    pushStateStore.setPushLaunch(branchId, response);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    pushStateStore.setPushError(branchId, message);
+    toast.error('Force push failed', { description: message });
+  }
 }
 
 /**

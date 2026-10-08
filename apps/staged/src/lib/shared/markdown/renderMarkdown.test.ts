@@ -149,6 +149,10 @@ describe('renderMarkdown', () => {
     ['<pre>\n![S](p)\n</pre>', 0],
     ['<!-- ![S](p) -->', 0],
     ['<pre>\n![S](p)\n</PRE>\n![T](p)', 1],
+    // A raw block ends only on its own closing tag, else at end of document.
+    ['<pre>\n![S](p)\n</script>\n![T](p)', 0],
+    ['<pre>\n![S](p)\n</script>\n![T](p)\n</pre>\n![U](p)', 1],
+    ['<script>\n![S](p)\n</pre>\n</script>\n![T](p)', 1],
     ['<!--\n![S](p)\n-->\n![T](p)', 1],
     ['<div>\n![S](p)\n</div>\n\n![T](p)', 1],
     ['<div>\n\n![S](p)\n</div>', 1],

@@ -119,6 +119,12 @@
   } from '../branches/branchCardHelpers';
   import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
   import {
+    attachBasename,
+    attachErrorReason,
+    formatAttachErrors,
+    type AttachRejection,
+  } from './attachErrors';
+  import {
     buildAcpTranscriptGroups,
     formatJson,
     groupRichToolsByVerb,
@@ -516,14 +522,22 @@
     }
   });
 
+  // Picker and paste batches: the error is cleared once up front and reported
+  // once at the end, so a later success cannot hide an earlier rejection.
   async function handleAttachFiles(files: File[]) {
+    if (!projectId) return;
+    attachError = null;
+    const rejections: AttachRejection[] = [];
     for (const file of files) {
-      await addImageFile(file);
+      const reason = await addImageFile(file);
+      if (reason !== null) rejections.push({ name: file.name, reason });
     }
+    attachError = formatAttachErrors(rejections);
   }
 
-  async function addImageFile(file: File) {
-    if (!projectId) return;
+  /** Stores one file, returning the rejection reason or null on success. */
+  async function addImageFile(file: File): Promise<string | null> {
+    if (!projectId) return null;
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     const chunks: string[] = [];
@@ -544,10 +558,10 @@
       const dataUrl = `data:${image.mimeType};base64,${base64}`;
       imagePreviews = new Map(imagePreviews);
       imagePreviews.set(image.id, dataUrl);
-      attachError = null;
+      return null;
     } catch (err) {
       console.error('Failed to attach image:', err);
-      attachError = `Could not attach ${file.name}: ${err instanceof Error ? err.message : String(err)}`;
+      return attachErrorReason(err);
     }
   }
 
@@ -555,13 +569,15 @@
     if (!active || !canAttachImages || isLive) return;
     const items = e.clipboardData?.items;
     if (!items) return;
+    const files: File[] = [];
     for (const item of Array.from(items)) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
         const file = item.getAsFile();
-        if (file) void addImageFile(file);
+        if (file) files.push(file);
       }
     }
+    if (files.length > 0) void handleAttachFiles(files);
   }
 
   function removeReplyImage(imageId: string) {
@@ -582,18 +598,20 @@
     const bid = branchId ?? null;
     const pid = projectId;
     const newIds: string[] = [];
+    // Surface rejection reasons (signature, size) as paste does, reporting
+    // the whole batch once so a later success cannot hide an earlier one.
+    attachError = null;
+    const rejections: AttachRejection[] = [];
     for (const path of imagePaths) {
       try {
         const image = await createImage(bid, pid, path, true);
         newIds.push(image.id);
-        attachError = null;
       } catch (e) {
-        // Surface the rejection reason (signature, size) as paste does.
         console.error('Failed to create image from dropped file:', e);
-        const name = path.split(/[\\/]/).pop() || path;
-        attachError = `Could not attach ${name}: ${e instanceof Error ? e.message : String(e)}`;
+        rejections.push({ name: attachBasename(path), reason: attachErrorReason(e) });
       }
     }
+    attachError = formatAttachErrors(rejections);
     if (newIds.length > 0) {
       replyImageIds = [...replyImageIds, ...newIds];
     }

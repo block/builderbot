@@ -897,6 +897,17 @@ fn html_blocks_are_not_prose() {
         ("<script>\n![S](p)\n</script>", 0),
         ("<style>\n![S](p)", 0),
         ("<textarea>\n![S](p)\n</textarea>\n![T](p)", 1),
+        // Only the opening tag's own closer ends a raw block; with none, it
+        // runs to the end of the document.
+        ("<pre>\n![S](p)\n</script>\n![T](p)", 0),
+        ("<pre>\n![S](p)\n</script>\n![T](p)\n</pre>\n![U](p)", 1),
+        ("<pre>\n![S](p)\n</pre>\n</script>\n![T](p)", 1),
+        ("<script>\n![S](p)\n</pre>\n</script>\n![T](p)", 1),
+        ("<textarea>\n![S](p)\n</pre>\n![T](p)", 0),
+        ("<style>\n![S](p)\n</STYLE>\n![T](p)", 1),
+        ("<pre>\n![S](p)\n</pre\n![T](p)", 0),
+        ("<pre>\n![S](p)\n</prex>\n![T](p)", 0),
+        ("- <pre>\n  ![S](p)\n  </script>\n![T](p)", 0),
         ("<pre>\n```\n![S](p)\n</pre>\n![T](p)", 1),
         ("```\n<pre>\n```\n![S](p)", 1),
         ("<!--\n![S](p)\n-->\n![T](p)", 1),

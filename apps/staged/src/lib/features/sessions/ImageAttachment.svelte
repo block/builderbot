@@ -31,6 +31,7 @@
   import { createImageFromData, getImageData, deleteImage } from '../../commands';
   import type { Image } from '../../types';
   import type { TextSnippet } from './sessionModalHelpers';
+  import { attachErrorReason, formatAttachErrors, type AttachRejection } from './attachErrors';
 
   type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
 
@@ -89,13 +90,24 @@
     const input = e.target as HTMLInputElement;
     if (!input.files) return;
 
-    for (const file of Array.from(input.files)) {
-      await addImageFile(file);
-    }
+    await addImageFiles(Array.from(input.files));
     input.value = '';
   }
 
-  async function addImageFile(file: File) {
+  // The error is cleared once up front and reported once at the end, so a
+  // later success in the batch cannot hide an earlier rejection.
+  async function addImageFiles(files: File[]) {
+    attachError = null;
+    const rejections: AttachRejection[] = [];
+    for (const file of files) {
+      const reason = await addImageFile(file);
+      if (reason !== null) rejections.push({ name: file.name, reason });
+    }
+    attachError = formatAttachErrors(rejections);
+  }
+
+  /** Stores one file, returning the rejection reason or null on success. */
+  async function addImageFile(file: File): Promise<string | null> {
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     // Convert to base64 using chunked approach to avoid O(n²) string concatenation
@@ -120,10 +132,10 @@
       const dataUrl = `data:${image.mimeType};base64,${base64}`;
       previews = new Map(previews);
       previews.set(image.id, dataUrl);
-      attachError = null;
+      return null;
     } catch (err) {
       console.error('Failed to attach image:', err);
-      attachError = `Could not attach ${file.name}: ${err instanceof Error ? err.message : String(err)}`;
+      return attachErrorReason(err);
     }
   }
 
@@ -131,13 +143,15 @@
     if (e.defaultPrevented) return;
     const items = e.clipboardData?.items;
     if (!items || disabled) return;
+    const files: File[] = [];
     for (const item of Array.from(items)) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
         const file = item.getAsFile();
-        if (file) void addImageFile(file);
+        if (file) files.push(file);
       }
     }
+    if (files.length > 0) void addImageFiles(files);
   }
 
   function removeImage(imageId: string) {

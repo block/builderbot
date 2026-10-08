@@ -19,8 +19,10 @@ fence, and a dedented ```` ``` ```` under a list item ends the item and opens
 a new top-level fence rather than closing the old one, so the text that
 follows stays code. Other dedented lines are absorbed by the list item, as
 Marked does, unless a blank line precedes them. HTML blocks are skipped too:
-`<pre>`, `<script>`, `<style>`, `<textarea>`, and `<!-- -->` run to their
-closing marker, and block-level tags such as `<div>` or `<table>` run to the
+`<pre>`, `<script>`, `<style>`, and `<textarea>` run to their own closing tag
+(a `</script>` does not end a `<pre>` block, and with no matching closer the
+block runs to the end of the note, as Marked's backreference does), `<!-- -->`
+runs to `-->`, and block-level tags such as `<div>` or `<table>` run to the
 next blank line. An arbitrary custom tag on its own line is not recognized as
 an HTML block.
 

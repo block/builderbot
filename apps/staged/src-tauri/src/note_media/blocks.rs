@@ -40,24 +40,52 @@ enum Container {
 #[derive(Clone, Copy)]
 enum HtmlBlock {
     /// `<pre>`, `<script>`, `<style>`, `<textarea>`: ends on a line containing
-    /// any of their closing tags, blank lines included.
-    Raw,
+    /// the closing tag of the tag that opened it, blank lines included. Marked
+    /// matches the closer with a backreference, so `</script>` does not end a
+    /// `<pre>` block, and a block with no matching closer runs to the end of
+    /// the document.
+    Raw(RawTag),
     /// `<!--`: ends on a line containing `-->`.
     Comment,
     /// A block-level tag: ends at the next blank line.
     Block,
 }
 
+/// The tags of CommonMark 4.6 start condition 1, whose content is raw.
+#[derive(Clone, Copy)]
+enum RawTag {
+    Pre,
+    Script,
+    Style,
+    Textarea,
+}
+
+impl RawTag {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "pre" => Some(RawTag::Pre),
+            "script" => Some(RawTag::Script),
+            "style" => Some(RawTag::Style),
+            "textarea" => Some(RawTag::Textarea),
+            _ => None,
+        }
+    }
+
+    fn closer(self) -> &'static str {
+        match self {
+            RawTag::Pre => "</pre>",
+            RawTag::Script => "</script>",
+            RawTag::Style => "</style>",
+            RawTag::Textarea => "</textarea>",
+        }
+    }
+}
+
 impl HtmlBlock {
     /// Whether this line meets the end condition. The start line may.
     fn ends_on(self, content: &str) -> bool {
         match self {
-            HtmlBlock::Raw => {
-                let lower = content.to_ascii_lowercase();
-                ["</pre>", "</script>", "</style>", "</textarea>"]
-                    .iter()
-                    .any(|tag| lower.contains(tag))
-            }
+            HtmlBlock::Raw(tag) => content.to_ascii_lowercase().contains(tag.closer()),
             HtmlBlock::Comment => content.contains("-->"),
             HtmlBlock::Block => false,
         }
@@ -309,8 +337,10 @@ fn html_block_start(content: &str) -> Option<HtmlBlock> {
     let name = rest[..name_len].to_ascii_lowercase();
     let after = &rest[name_len..];
     let delimited = matches!(after.as_bytes().first(), None | Some(b' ' | b'\t' | b'>'));
-    if !closing && delimited && ["pre", "script", "style", "textarea"].contains(&name.as_str()) {
-        return Some(HtmlBlock::Raw);
+    if !closing && delimited {
+        if let Some(tag) = RawTag::from_name(&name) {
+            return Some(HtmlBlock::Raw(tag));
+        }
     }
     if (delimited || after.starts_with("/>")) && BLOCK_TAGS.contains(&name.as_str()) {
         return Some(HtmlBlock::Block);

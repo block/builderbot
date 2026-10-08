@@ -119,6 +119,60 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('markdown-diagram-source');
     expect(html).not.toContain('<script>');
   });
+
+  // Mirrors the Rust note media scanner (src-tauri/src/note_media/tests.rs):
+  // a renderer upgrade that changes these must update the scanner too.
+  it.each([
+    ['1. Step\n\n    ![S](p)', 1],
+    ['- a\n  - b\n\n      ![S](p)', 1],
+    ['> - a\n>\n>     ![S](p)', 1],
+    ['- Step\n\n\t![S](p)', 1],
+    ['- a\nb\n\n    ![S](p)', 1],
+    ['Here it is:\n    ![S](p)', 1],
+    ['- a\n\n    ![S](p)\n        ![T](p)', 2],
+    ['- Step\n\n      ![S](p)', 0],
+    ['1.     ![S](p)', 0],
+    ['- a\n\nPara\n\n    ![S](p)', 0],
+    ['- a\n# h\n\n    ![S](p)', 0],
+    ['> - a\n\n    ![S](p)', 0],
+    ['- a\n\n\t    ![S](p)', 0],
+    // A dedented ``` ends the list item or quote and opens a new fence.
+    ['- item\n  ```\n  code\n```\nafter ![S](p)\n```\n', 0],
+    ['> ```\n> code\n```\nafter ![S](p)\n```\n', 0],
+    ['- ```\n  code\n  ```\nafter ![S](p)', 1],
+    // List items absorb dedented lines mid-fence; quotes do not.
+    ['- a\n  ```\n  code\nlazy ![S](p)\n  ```\n', 0],
+    ['> ```\n> code\nlazy ![S](p)\n> ```\n', 1],
+    ['- a\n  ```\n  code\n\nafter ![S](p)', 1],
+    ['- a\n  ```\n  code\n# h\n![S](p)', 1],
+    // HTML blocks: raw tags, comments, and block-level tags.
+    ['<pre>\n![S](p)\n</pre>', 0],
+    ['<!-- ![S](p) -->', 0],
+    ['<pre>\n![S](p)\n</PRE>\n![T](p)', 1],
+    // A raw block ends only on its own closing tag, else at end of document.
+    ['<pre>\n![S](p)\n</script>\n![T](p)', 0],
+    ['<pre>\n![S](p)\n</script>\n![T](p)\n</pre>\n![U](p)', 1],
+    ['<script>\n![S](p)\n</pre>\n</script>\n![T](p)', 1],
+    ['<!--\n![S](p)\n-->\n![T](p)', 1],
+    ['<div>\n![S](p)\n</div>\n\n![T](p)', 1],
+    ['<div>\n\n![S](p)\n</div>', 1],
+    ['<div\n![S](p)', 0],
+    ['<pre/>\n![S](p)\n</pre>\n![T](p)', 2],
+    ['Para\n<pre>\n![S](p)\n</pre>', 0],
+    ['- <pre>\n  ![S](p)\n  </pre>', 0],
+    ['- <div>\n  ![S](p)\n\n  ![T](p)', 1],
+    ['> <pre>\n> ![S](p)\n![T](p)\n> </pre>\n![U](p)', 2],
+    // Conditions 3-5 end only on their own closer and do not interrupt
+    // paragraphs or list items.
+    ['<![CDATA[\n![S](p)\n]]>', 0],
+    ['<![CDATA[\nfoo > bar\n![S](p)\n]]>\n![T](p)', 1],
+    ['<?\n![S](p)\n>\n![T](p)', 0],
+    ['<!1\n![S](p)\n>\n![T](p)', 2],
+    ['Para\n<!DOCTYPE\n![S](p)\n>\n![T](p)', 2],
+    ['- a\n  ```\n  code\n<![CDATA[\n![S](p)\n  ```\n![T](p)', 1],
+  ])('renders indented images by container rules: %j', (source, images) => {
+    expect(renderMarkdown(source).match(/<img/g)?.length ?? 0).toBe(images);
+  });
 });
 
 const safePikchrRenderer: PikchrRenderer = () => ({

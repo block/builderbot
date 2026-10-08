@@ -16,6 +16,7 @@
 //! only by the backend (`session_runner` / `agent` modules) via the
 //! `Store` directly.
 
+use crate::note_media::materialize_note_media;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -365,6 +366,16 @@ fn background_hold_from_overrides(
     Some(config)
 }
 
+fn note_media_guidance() -> &'static str {
+    "Staged notes can embed images and videos. Use standard image syntax with an absolute path on this machine: \
+`![Short caption](/absolute/path/to/file.png)`. Supported: png, jpg, jpeg, gif, webp (up to 10 MB) and \
+mp4, webm, mov (up to 100 MB). Staged copies the file into the project when the note is saved, so \
+temporary files such as screenshots in /tmp are fine. Write the caption to say what the viewer \
+should notice. For diagrams, place the Pikchr source in a fenced block rather than embedding \
+the preview image returned by diagram tools. On later remote sessions, videos above 20 MB are \
+listed as unavailable rather than transferred."
+}
+
 fn pikchr_note_guidance(reference: &str, pikchr_tools_available: bool) -> String {
     let mut guidance = format!(
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
@@ -403,6 +414,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
         "write the linked note"
     };
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, pikchr_tools_available);
+    let media_guidance = note_media_guidance();
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
@@ -411,7 +423,7 @@ The user is asking you to {linked_note_action} from the latest chat history.\n\
 \n\
 Use the existing conversation context. Do not create commits.\n\
 \n\
-{pikchr_guidance}\n\
+{pikchr_guidance}\n\n{media_guidance}\n\
 \n\
 {standalone_guidance}\n\
 \n\
@@ -2716,6 +2728,7 @@ repository edits directly here; use `start_repo_session` for implementation work
     // Project sessions always execute locally and are restricted to
     // MCP-capable providers, so the pikchr tool is always attached.
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, true);
+    let media_guidance = note_media_guidance();
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
@@ -2725,7 +2738,7 @@ actions taken.\n\n\
 {preamble}\n\n\
 {start_repo_session_desc}\n\n\
 {PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE}\n\n\
-{pikchr_guidance}\n\n\
+{pikchr_guidance}\n\n{media_guidance}\n\n\
 - add_project_repo: Use this when the task requires a repository that isn't yet in the \
 project. Pass the GitHub repo slug to add it.\n\n\
 IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
@@ -4898,6 +4911,7 @@ pub(crate) fn build_project_session_context(
             // section heading and the rest from each other.
             lines.push(String::new());
             lines.push(format_project_note_for_context(
+                store,
                 &note.id,
                 &note.title,
                 &note.content,
@@ -5086,8 +5100,28 @@ fn parse_commit_shas(output: &str) -> HashSet<String> {
 /// Uses base64 encoding to avoid shell-escaping issues with arbitrary content.
 /// For payloads exceeding ~500KB of base64, the data is chunked to stay under
 /// ARG_MAX (~1MB on macOS). Returns `Ok(())` on success.
-fn write_bytes_to_remote(
+pub(crate) fn write_bytes_to_remote(
     workspace_name: &str,
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), String> {
+    write_bytes_to_remote_with(
+        &|args| blox::ws_exec(workspace_name, args).map_err(|e| e.to_string()),
+        bytes,
+        remote_path,
+    )
+}
+
+/// [`write_bytes_to_remote`] over any command runner, so tests can observe the
+/// commands without a workspace.
+///
+/// Chunks accumulate in a per-transfer `<remote_path>.<nonce>.part` and the
+/// last chunk's command renames it into place, so the final path only ever
+/// holds a complete file. Two context builds transferring the same stable
+/// `/tmp/staged-image-<id>` copy at once each stage their own file, and the
+/// size check that precedes a transfer can trust what it measures.
+pub(crate) fn write_bytes_to_remote_with(
+    exec: &dyn Fn(&[&str]) -> Result<String, String>,
     bytes: &[u8],
     remote_path: &str,
 ) -> Result<(), String> {
@@ -5096,33 +5130,37 @@ fn write_bytes_to_remote(
 
     const CHUNK_SIZE: usize = 500_000;
 
-    if encoded.len() <= CHUNK_SIZE {
-        blox::ws_exec(
-            workspace_name,
-            &[
-                "sh",
-                "-c",
-                &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
-            ],
-        )
-        .map_err(|e| format!("Failed to write to remote workspace: {e}"))?;
+    // Base64 is ASCII, so splitting at byte offsets keeps each chunk UTF-8.
+    // An empty payload still needs one command to create the file.
+    let chunks: Vec<&str> = if encoded.is_empty() {
+        vec![""]
     } else {
-        for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
-            let chunk_str = std::str::from_utf8(chunk)
-                .map_err(|e| format!("Invalid UTF-8 in base64 chunk: {e}"))?;
-            let redirect = if i == 0 { ">" } else { ">>" };
-            blox::ws_exec(
-                workspace_name,
-                &[
-                    "sh",
-                    "-c",
-                    &format!(
-                        "echo '{}' | base64 -d {} '{}'",
-                        chunk_str, redirect, remote_path
-                    ),
-                ],
-            )
-            .map_err(|e| format!("Failed to write chunk {i} to remote workspace: {e}"))?;
+        encoded
+            .as_bytes()
+            .chunks(CHUNK_SIZE)
+            .map(|chunk| std::str::from_utf8(chunk).expect("base64 is ASCII"))
+            .collect()
+    };
+    let part = format!("{remote_path}.{}.part", uuid::Uuid::new_v4().simple());
+    let last = chunks.len() - 1;
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let redirect = if i == 0 { ">" } else { ">>" };
+        let publish = if i == last {
+            format!(" && mv -f '{part}' '{remote_path}'")
+        } else {
+            String::new()
+        };
+        if let Err(e) = exec(&[
+            "sh",
+            "-c",
+            &format!("echo '{chunk}' | base64 -d {redirect} '{part}'{publish}"),
+        ]) {
+            let _ = exec(&["rm", "-f", &part]);
+            return Err(if last == 0 {
+                format!("Failed to write to remote workspace: {e}")
+            } else {
+                format!("Failed to write chunk {i} to remote workspace: {e}")
+            });
         }
     }
 
@@ -5157,13 +5195,15 @@ fn write_note_to_remote(
 ///
 /// Falls back to inlining if the write fails (remote or local).
 fn format_note_with_heading(
+    store: &Store,
     id: &str,
     title: &str,
     content: &str,
     workspace_name: Option<&str>,
     heading: &str,
 ) -> String {
-    write_content_to_temp_file(id, content, workspace_name, "staged-note", |path| {
+    let content = materialize_note_media(store, content, workspace_name);
+    write_content_to_temp_file(id, &content, workspace_name, "staged-note", |path| {
         format!("### {heading}: {title}\nSee: `{path}`")
     })
     .unwrap_or_else(|| format!("### {heading}: {title}\n\n{content}"))
@@ -5208,7 +5248,7 @@ fn write_content_to_temp_file(
 ///   strategy as `write_note_to_remote`.
 ///
 /// Returns the temp path on success, `None` on failure.
-fn write_image_to_temp_file(
+pub(crate) fn write_image_to_temp_file(
     source_path: &std::path::Path,
     image_id: &str,
     ext: &str,
@@ -5294,7 +5334,11 @@ fn write_image_to_temp_file(
 /// can connect it to the `#note:<id>` citations in the parent note's body, and a
 /// user-written one says so. A note with no body — a one-line written note, whose
 /// text is entirely in its title — is just the heading and those lines.
-pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option<&str>) -> String {
+pub(crate) fn format_note_for_context(
+    store: &Store,
+    note: &store::Note,
+    workspace_name: Option<&str>,
+) -> String {
     let heading = format!("### Note: {}", note.title);
     // The annotation lines sit directly under the heading, with the pointer
     // directly under those, so the whole item is one unbroken block.
@@ -5317,14 +5361,11 @@ pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option
         return format!("{heading}{annotations}");
     }
 
-    write_content_to_temp_file(
-        &note.id,
-        &note.content,
-        workspace_name,
-        "staged-note",
-        |path| format!("{heading}{annotations}\nSee: `{path}`"),
-    )
-    .unwrap_or_else(|| format!("{heading}{annotations}\n\n{}", note.content))
+    let content = materialize_note_media(store, &note.content, workspace_name);
+    write_content_to_temp_file(&note.id, &content, workspace_name, "staged-note", |path| {
+        format!("{heading}{annotations}\nSee: `{path}`")
+    })
+    .unwrap_or_else(|| format!("{heading}{annotations}\n\n{content}"))
 }
 
 /// Convert notes from the DB into timeline entries.
@@ -5359,7 +5400,7 @@ fn note_timeline_entries(
         entries.push(TimelineEntry {
             timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
             order: 0,
-            content: format_note_for_context(note, workspace_name),
+            content: format_note_for_context(store, note, workspace_name),
         });
     }
     entries
@@ -5369,12 +5410,13 @@ fn note_timeline_entries(
 ///
 /// Wrapper around `format_note_with_heading` that uses "Project Note" as the heading.
 fn format_project_note_for_context(
+    store: &Store,
     id: &str,
     title: &str,
     content: &str,
     workspace_name: Option<&str>,
 ) -> String {
-    format_note_with_heading(id, title, content, workspace_name, "Project Note")
+    format_note_with_heading(store, id, title, content, workspace_name, "Project Note")
 }
 
 /// Convert project notes from the DB into timeline entries.
@@ -5396,8 +5438,13 @@ fn project_note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        let content =
-            format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
+        let content = format_project_note_for_context(
+            store,
+            &note.id,
+            &note.title,
+            &note.content,
+            workspace_name,
+        );
         entries.push(TimelineEntry {
             timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
             order: 0,
@@ -5772,6 +5819,8 @@ Rules:\n\
             pikchr_grammar_reference,
             pikchr_tools_available,
         ));
+        action_instructions.push_str("\n\n");
+        action_instructions.push_str(note_media_guidance());
     }
 
     let action_tag = format!(
@@ -8887,6 +8936,7 @@ mod tests {
     }
 
     fn assert_note_standalone_output_guidance(prompt: &str) {
+        assert!(prompt.contains(note_media_guidance()));
         let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
         assert!(!standalone_guidance.is_empty());
         assert!(prompt.contains(standalone_guidance));
@@ -8926,6 +8976,64 @@ mod tests {
         );
 
         assert_eq!(returned_path, expected_path);
+    }
+
+    #[test]
+    fn remote_byte_writes_stage_every_chunk_and_publish_with_the_last_command() {
+        use std::cell::RefCell;
+        let commands = RefCell::new(Vec::<Vec<String>>::new());
+        let record = |args: &[&str]| {
+            commands
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            Ok(String::new())
+        };
+        // 400 KB of payload is ~533 KB of base64, so two chunks.
+        write_bytes_to_remote_with(&record, &vec![7u8; 400_000], "/tmp/file.bin").unwrap();
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 2);
+        let (first, second) = (&commands[0][2], &commands[1][2]);
+        assert!(first.contains("| base64 -d > '/tmp/file.bin."), "{first}");
+        assert!(first.ends_with(".part'"), "{first}");
+        assert!(
+            second.contains("| base64 -d >> '/tmp/file.bin."),
+            "{second}"
+        );
+        assert!(
+            second.contains(".part' && mv -f '/tmp/file.bin."),
+            "{second}"
+        );
+        assert!(second.ends_with(".part' '/tmp/file.bin'"), "{second}");
+        let staging = first.rsplit(" '").next().unwrap();
+        assert!(second.contains(staging), "both chunks use one staging file");
+    }
+
+    #[test]
+    fn failed_remote_byte_writes_remove_the_staging_file() {
+        use std::cell::RefCell;
+        let commands = RefCell::new(Vec::<Vec<String>>::new());
+        let fail_writes = |args: &[&str]| {
+            commands
+                .borrow_mut()
+                .push(args.iter().map(|s| s.to_string()).collect());
+            if args[0] == "rm" {
+                Ok(String::new())
+            } else {
+                Err("exit status 1".to_string())
+            }
+        };
+        let error =
+            write_bytes_to_remote_with(&fail_writes, b"bytes", "/tmp/file.bin").unwrap_err();
+        assert!(
+            error.starts_with("Failed to write to remote workspace"),
+            "{error}"
+        );
+        let commands = commands.borrow();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[1][..2], ["rm", "-f"]);
+        assert!(commands[1][2].starts_with("/tmp/file.bin."));
+        assert!(commands[1][2].ends_with(".part"));
+        assert!(commands[0][2].contains(&format!("> '{}'", commands[1][2])));
     }
 
     #[test]

@@ -7,20 +7,6 @@ use crate::store::Store;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-const MAX_IMAGE_SIZE: u64 = 10_485_760; // 10 MB
-
-const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
-
-fn mime_type_for_extension(ext: &str) -> &'static str {
-    match ext {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "application/octet-stream",
-    }
-}
-
 /// Create an image record and copy the file to the project images directory.
 ///
 /// When `pending` is true the image is hidden from the branch timeline until
@@ -38,71 +24,22 @@ pub fn create_image(
     let store = crate::get_store(&store)?;
 
     let src = Path::new(&file_path);
-    if !src.exists() {
-        return Err(format!("File not found: {file_path}"));
-    }
-
     let filename = src
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| "Invalid filename".to_string())?
-        .to_string();
-
-    let ext = src
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .unwrap_or_default();
-
-    if !ALLOWED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
-        return Err(format!(
-            "Unsupported image format: .{ext}. Allowed: {}",
-            ALLOWED_IMAGE_EXTENSIONS.join(", ")
-        ));
-    }
-
-    let metadata = std::fs::metadata(src).map_err(|e| format!("Cannot read file metadata: {e}"))?;
-    if metadata.len() > MAX_IMAGE_SIZE {
-        return Err(format!(
-            "File too large ({} bytes). Maximum is {} bytes.",
-            metadata.len(),
-            MAX_IMAGE_SIZE
-        ));
-    }
-
-    let mime_type = mime_type_for_extension(&ext).to_string();
-    let size_bytes = metadata.len() as i64;
-
-    let filename = store
-        .unique_image_filename(branch_id.as_deref(), &project_id, &filename)
-        .map_err(|e| e.to_string())?;
-
-    let image = crate::store::Image::new(
+        .ok_or("Invalid filename")?;
+    let bytes =
+        crate::note_media::files::read_local(src, crate::note_media::files::MAX_IMAGE_SIZE)?;
+    crate::note_media::files::store_sniffed_image(
+        &store,
         branch_id.as_deref(),
         &project_id,
-        &filename,
-        &mime_type,
-        size_bytes,
-        pending.unwrap_or(false),
-    );
-
-    // Compute destination path and ensure the images directory exists.
-    let dest = crate::store::images::image_file_path(&project_id, &image.id, &filename)?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create images directory: {e}"))?;
-    }
-
-    // Copy the file to the images directory.
-    std::fs::copy(src, &dest).map_err(|e| format!("Cannot copy image file: {e}"))?;
-
-    // Persist the DB record.
-    if let Err(e) = store.create_image(&image) {
-        let _ = std::fs::remove_file(&dest);
-        return Err(e.to_string());
-    }
-
-    Ok(image)
+        pending
+            .unwrap_or(false)
+            .then_some(crate::store::models::PENDING_SESSION_ID),
+        filename,
+        &bytes,
+    )
 }
 
 /// Return the filesystem path for an image (the frontend uses convertFileSrc).
@@ -180,7 +117,9 @@ pub fn get_image_data(
 
 /// Create an image from base64-encoded data (for browser file input / clipboard paste).
 ///
-/// See [`create_image`] for the meaning of the `pending` flag.
+/// `mime_type` is the browser's label and is only accepted for compatibility;
+/// the stored format follows the file signature. See [`create_image`] for the
+/// meaning of the `pending` flag.
 #[tauri::command(rename_all = "camelCase")]
 pub fn create_image_from_data(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -202,71 +141,82 @@ pub(crate) fn create_image_from_data_impl(
     branch_id: Option<String>,
     project_id: String,
     filename: String,
-    mime_type: String,
+    _mime_type: String,
     data: String,
     pending: Option<bool>,
 ) -> Result<crate::store::Image, String> {
     use base64::Engine;
+    if data.len() as u64 > crate::note_media::files::MAX_IMAGE_SIZE.div_ceil(3) * 4 {
+        return Err("Image too large (max 10 MB)".into());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data)
         .map_err(|e| format!("Invalid base64 data: {e}"))?;
 
-    // Validate size
-    if bytes.len() as u64 > MAX_IMAGE_SIZE {
-        return Err(format!(
-            "Image too large: {} bytes (max {})",
-            bytes.len(),
-            MAX_IMAGE_SIZE
-        ));
-    }
-
-    // Validate extension
-    let ext = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if !ALLOWED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
-        return Err(format!("Unsupported image format: .{ext}"));
-    }
-
-    const ALLOWED_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
-    let mime = if mime_type.is_empty() {
-        mime_type_for_extension(&ext).to_string()
-    } else {
-        if !ALLOWED_MIME_TYPES.contains(&mime_type.as_str()) {
-            return Err(format!(
-                "Unsupported MIME type: {mime_type}. Allowed: {}",
-                ALLOWED_MIME_TYPES.join(", ")
-            ));
-        }
-        mime_type
-    };
-
-    let filename = store
-        .unique_image_filename(branch_id.as_deref(), &project_id, &filename)
-        .map_err(|e| e.to_string())?;
-
-    let image = crate::store::Image::new(
+    crate::note_media::files::store_sniffed_image(
+        &store,
         branch_id.as_deref(),
         &project_id,
+        pending
+            .unwrap_or(false)
+            .then_some(crate::store::models::PENDING_SESSION_ID),
         &filename,
-        &mime,
-        bytes.len() as i64,
-        pending.unwrap_or(false),
-    );
-    let path = crate::store::images::image_file_path(&project_id, &image.id, &filename)
-        .map_err(|e| e.to_string())?;
+        &bytes,
+    )
+}
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create images directory: {e}"))?;
-    }
-    std::fs::write(&path, &bytes).map_err(|e| format!("Failed to save image: {e}"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::note_media::tests::{Fixture, PNG};
+    use base64::Engine;
 
-    if let Err(e) = store.create_image(&image) {
-        let _ = std::fs::remove_file(&path);
-        return Err(e.to_string());
+    fn attach(
+        f: &Fixture,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<crate::store::Image, String> {
+        create_image_from_data_impl(
+            f.store.clone(),
+            Some(f.branch.id.clone()),
+            f.project.id.clone(),
+            name.into(),
+            mime.into(),
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+            Some(true),
+        )
     }
-    Ok(image)
+
+    #[test]
+    fn chat_attachments_are_stored_under_their_sniffed_format() {
+        let f = Fixture::new();
+        let webp = b"RIFF1234WEBPfixture";
+        let image = attach(&f, "shot.png", "image/png", webp).unwrap();
+        assert_eq!(image.mime_type, "image/webp");
+        assert_eq!(image.filename, "shot.webp");
+        let path =
+            crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
+                .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), webp);
+
+        // A truthful name is kept, including the alternate JPEG spelling.
+        assert_eq!(
+            attach(&f, "a.jpeg", "", b"\xff\xd8\xffx").unwrap().filename,
+            "a.jpeg"
+        );
+        assert_eq!(
+            attach(&f, "shot.png", "image/png", PNG).unwrap().filename,
+            "shot.png"
+        );
+        assert_eq!(
+            attach(&f, "pasted", "", PNG).unwrap().filename,
+            "pasted.png"
+        );
+
+        let err = attach(&f, "shot.png", "image/png", b"not an image").unwrap_err();
+        assert!(err.contains("unsupported image format"), "{err}");
+        let err = attach(&f, "clip.png", "", b"\0\0\0\x18ftypisom\0\0\0\0").unwrap_err();
+        assert!(err.contains("only images"), "{err}");
+    }
 }

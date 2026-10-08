@@ -36,6 +36,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;
 use subtle::ConstantTimeEq;
+use tauri::Manager;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_rustls::server::TlsStream;
@@ -214,8 +215,76 @@ impl Listener for TlsListener {
 /// compiling so they stay in sync with the rest of the codebase.
 ///
 /// TODO(web): restore full web server startup from the `mobile-web` branch.
+/// That restore must mount [`media_router`] into the composed app: the
+/// frontend's `resolveStagedMediaUrl` already emits `/api/media/...` in
+/// non-Tauri builds, and only oneshot tests exercise the route today.
 pub fn start(_state: WebAppState) {
     log::warn!("Web server requested but this build has the web server stubbed out");
+}
+
+/// Kept ready for the mobile-web startup restore. The route and auth layer are
+/// exercised together by oneshot tests, without starting a listener.
+pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
+    let store = get_store(
+        state
+            .app_handle
+            .state::<Mutex<Option<Arc<Store>>>>()
+            .inner(),
+    )?;
+    Ok(media_router_for_store(
+        store,
+        state.auth_token,
+        state.sessions,
+    ))
+}
+
+fn media_router_for_store(
+    store: Arc<Store>,
+    token: String,
+    sessions: Arc<Mutex<HashSet<String>>>,
+) -> Router {
+    Router::new()
+        .route("/api/media/{file}", get(serve_media))
+        .with_state(store)
+        .route_layer(middleware::from_fn(
+            move |jar: CookieJar, request: Request, next: Next| {
+                let token = token.clone();
+                let sessions = sessions.clone();
+                async move {
+                    if is_authenticated(&token, &sessions, &jar, request.headers()) {
+                        next.run(request).await
+                    } else {
+                        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
+                    }
+                }
+            },
+        ))
+}
+
+async fn serve_media(
+    State(store): State<Arc<Store>>,
+    Path(file): Path<String>,
+    request: Request,
+) -> Response {
+    let (path, mime) = match crate::note_media::serving::lookup(&store, &file) {
+        Ok(value) => value,
+        Err(status) => return status.into_response(),
+    };
+    let mut service = tower_http::services::ServeFile::new_with_mime(
+        path,
+        &mime.parse().expect("validated MIME"),
+    );
+    match service.try_call(request).await {
+        Ok(response) => {
+            let mut response = response.into_response();
+            response.headers_mut().insert(
+                "X-Content-Type-Options",
+                axum::http::HeaderValue::from_static("nosniff"),
+            );
+            response
+        }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 // =============================================================================
@@ -241,30 +310,34 @@ async fn require_auth(
     request: Request,
     next: Next,
 ) -> Response {
-    // Check Authorization header (constant-time comparison to prevent timing attacks)
-    if let Some(auth_header) = request.headers().get("authorization") {
-        if let Ok(value) = auth_header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                if constant_time_eq(token, &state.auth_token) {
-                    return next.run(request).await;
-                }
-            }
-        }
+    if is_authenticated(&state.auth_token, &state.sessions, &jar, request.headers()) {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
     }
+}
 
-    // Check session cookie against the set of valid sessions
-    if let Some(cookie) = jar.get(SESSION_COOKIE_NAME) {
-        let is_valid = {
-            let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            let cookie_val = cookie.value();
-            sessions.iter().any(|s| constant_time_eq(cookie_val, s))
-        };
-        if is_valid {
-            return next.run(request).await;
-        }
+fn is_authenticated(
+    token: &str,
+    sessions: &Mutex<HashSet<String>>,
+    jar: &CookieJar,
+    headers: &axum::http::HeaderMap,
+) -> bool {
+    if headers
+        .get("authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .is_some_and(|value| constant_time_eq(value, token))
+    {
+        return true;
     }
-
-    (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
+    jar.get(SESSION_COOKIE_NAME).is_some_and(|cookie| {
+        sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|s| constant_time_eq(cookie.value(), s))
+    })
 }
 
 /// POST /api/auth — validate the bearer token and issue a session cookie.
@@ -2503,6 +2576,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Note not found: {note_id}"))?;
             store.delete_note(&note_id).map_err(|e| e.to_string())?;
+            crate::note_media::cleanup_unreferenced(
+                &store,
+                crate::note_media::refs::media_ids(&note.content),
+            );
             if delete_session_flag.unwrap_or(false) {
                 if let Some(sid) = note.session_id {
                     let _ = store.delete_session(&sid);
@@ -2575,9 +2652,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
+            let media_ids = crate::note_media::project_note_media_ids(&store, &note_id)?;
             let orphaned = store
                 .delete_project_note(&note_id)
                 .map_err(|e| e.to_string())?;
+            crate::note_media::cleanup_unreferenced(&store, media_ids);
             // Mirrors note_commands::delete_project_note: child sessions can
             // still be running, so cancel before removing their rows.
             for sid in orphaned.all_session_ids() {
@@ -4126,5 +4205,76 @@ mod tests {
         }
 
         delta
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use crate::note_media::tests::{Fixture, PNG};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn media_route_requires_auth_and_streams_ranges() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.dir.path().join("shot.png"), PNG).unwrap();
+        let outcome = fixture.ingest("", "![a](shot.png)");
+        let id = outcome.kept_ids.iter().next().unwrap();
+        let store = fixture.store.clone();
+        let sessions = Arc::new(Mutex::new(HashSet::from(["session-token".into()])));
+        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let uri = format!("/api/media/{id}.png");
+        for (auth, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some("wrong"), StatusCode::UNAUTHORIZED),
+            (Some("session-token"), StatusCode::PARTIAL_CONTENT),
+        ] {
+            let mut request = axum::http::Request::builder()
+                .uri(&uri)
+                .header("Range", "bytes=2-5");
+            if let Some(auth) = auth {
+                request = request.header("Cookie", format!("staged_session={auth}"));
+            }
+            let response = router
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            if expected == StatusCode::PARTIAL_CONTENT {
+                assert_eq!(response.headers()["content-type"], "image/png");
+                assert_eq!(response.headers()["accept-ranges"], "bytes");
+                assert_eq!(
+                    axum::body::to_bytes(response.into_body(), 100)
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    &PNG[2..6]
+                );
+            }
+        }
+        let request = axum::http::Request::builder()
+            .uri(&uri)
+            .header("Authorization", "Bearer bearer-token")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            PNG
+        );
+        let request = axum::http::Request::builder()
+            .uri("/api/media/not-a-media-id.png")
+            .header("Authorization", "Bearer bearer-token")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.oneshot(request).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

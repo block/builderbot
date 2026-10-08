@@ -86,6 +86,7 @@ tar = "0.4"
 flate2 = "1"
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 # test-util: `#[tokio::test(start_paused = true)]` for the store-events
 # coalescer tests, so the 50ms window is driven by the paused clock instead
 # of a real sleep.

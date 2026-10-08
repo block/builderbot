@@ -24,6 +24,7 @@ pub mod managed_node;
 mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;
+mod note_media;
 pub mod paths;
 pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
@@ -1828,6 +1829,20 @@ fn dispatch_menu_event(id: &str, has_focused_window: bool) -> MenuDispatch {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("staged-media", |context, request, responder| {
+            let app = context.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let state = app.state::<Mutex<Option<Arc<store::Store>>>>();
+                let response = match get_store(&state) {
+                    Ok(store) => note_media::serving::response(&store, request),
+                    Err(_) => tauri::http::Response::builder()
+                        .status(503)
+                        .body(Vec::new())
+                        .unwrap(),
+                };
+                responder.respond(response);
+            });
+        })
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

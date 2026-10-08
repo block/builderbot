@@ -306,8 +306,8 @@ impl ProjectToolsHandler {
         }
     }
 
-    fn last_assistant_output(&self, session_id: &str) -> String {
-        self.store
+    fn last_assistant_output(store: &Store, session_id: &str) -> String {
+        store
             .get_session_messages(session_id)
             .ok()
             .and_then(|msgs| {
@@ -387,21 +387,22 @@ impl ProjectToolsHandler {
         activity
     }
 
-    fn repo_session_activity(&self, session: &Session) -> Result<RepoSessionActivity, String> {
-        let messages = self
-            .store
+    fn repo_session_activity(
+        store: &Store,
+        session: &Session,
+    ) -> Result<RepoSessionActivity, String> {
+        let messages = store
             .get_session_messages(&session.id)
             .map_err(|e| format!("Error loading session messages: {e}"))?;
         Ok(Self::summarize_session_activity(session, &messages))
     }
 
     fn repo_session_payload(
-        &self,
+        store: &Store,
         repo_session_id: &str,
         handle: &RepoSessionHandle,
     ) -> Result<serde_json::Value, String> {
-        let session = self
-            .store
+        let session = store
             .get_session(&handle.session_id)
             .map_err(|e| format!("Error loading repo session: {e}"))?
             .ok_or_else(|| format!("Repo session not found for id: {repo_session_id}"))?;
@@ -420,7 +421,7 @@ impl ProjectToolsHandler {
             },
         });
 
-        payload["activity"] = serde_json::json!(self.repo_session_activity(&session)?);
+        payload["activity"] = serde_json::json!(Self::repo_session_activity(store, &session)?);
 
         if state != "queued" {
             payload["session_id"] = serde_json::Value::String(handle.session_id.clone());
@@ -438,22 +439,27 @@ impl ProjectToolsHandler {
         ) {
             match handle.artifact_kind {
                 RepoArtifactKind::Note => {
-                    let note = self
-                        .store
+                    let note = store
                         .get_note(&handle.artifact_id)
                         .map_err(|e| format!("Error loading note: {e}"))?;
                     if let Some(note) = note {
+                        // The parent reads this reply with its own tools, so
+                        // durable `staged-media://` references are rewritten to
+                        // local temp paths the same way branch context does.
+                        // Project sessions always run locally (see
+                        // `start_project_session`), so there is no workspace.
+                        let content =
+                            crate::note_media::materialize_note_media(store, &note.content, None);
                         payload["note"] = serde_json::json!({
                             "id": note.id,
                             "title": note.title,
-                            "content": note.content,
+                            "content": content,
                             "completed_at": note.completed_at,
                         });
                     }
                 }
                 RepoArtifactKind::Commit => {
-                    let commit = self
-                        .store
+                    let commit = store
                         .get_commit(&handle.artifact_id)
                         .map_err(|e| format!("Error loading commit: {e}"))?;
                     if let Some(commit) = commit {
@@ -464,8 +470,7 @@ impl ProjectToolsHandler {
                     }
                 }
                 RepoArtifactKind::Review => {
-                    let review = self
-                        .store
+                    let review = store
                         .get_review(&handle.artifact_id)
                         .map_err(|e| format!("Error loading review: {e}"))?;
                     if let Some(review) = review {
@@ -493,7 +498,7 @@ impl ProjectToolsHandler {
             }
 
             payload["output"] =
-                serde_json::Value::String(self.last_assistant_output(&handle.session_id));
+                serde_json::Value::String(Self::last_assistant_output(store, &handle.session_id));
         }
 
         Ok(payload)
@@ -746,7 +751,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running."
     )]
     async fn wait_for_repo_session(
         &self,
@@ -763,7 +768,7 @@ impl ProjectToolsHandler {
             wait::duration(p.wait_for_completion_seconds, progress_token.is_some()),
             &ctx.ct,
             &self.cancel_token,
-            || self.repo_session_payload(&p.repo_session_id, &handle),
+            || Self::repo_session_payload(&self.store, &p.repo_session_id, &handle),
         );
         tokio::select! {
             result = wait => result,
@@ -855,7 +860,7 @@ impl ProjectToolsHandler {
             }
         }
 
-        match self.repo_session_payload(&p.repo_session_id, &handle) {
+        match Self::repo_session_payload(&self.store, &p.repo_session_id, &handle) {
             Ok(payload) => payload.to_string(),
             Err(e) => e,
         }
@@ -1169,7 +1174,7 @@ pub async fn start_project_mcp_server(
 mod tests {
     use super::{
         build_repo_note_stub, comment_line_range, inherited_acp_config_selection,
-        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
+        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind, RepoSessionHandle,
         REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
     use crate::git::Span;
@@ -1507,5 +1512,57 @@ mod tests {
         assert!(cancel_description.contains("surprised at how long the session is taking"));
         assert!(!cancel_description.contains("strong evidence"));
         assert!(!cancel_description.contains("taking a long time"));
+    }
+
+    /// A parent project agent reads a child's note through this payload, so
+    /// attached media must arrive as paths it can open, not `staged-media://`
+    /// references only the Staged renderer understands.
+    #[test]
+    fn completed_child_note_hands_media_to_the_parent_as_local_paths() {
+        use crate::note_media::refs::extract_media_refs;
+        use crate::note_media::tests::{Fixture, PNG};
+        use crate::store::{CompletionReason, Note, SessionStatus};
+
+        let f = Fixture::new();
+        std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();
+        let ingested = f.ingest("", "![Login form](shot.png)");
+        assert!(ingested.markdown.contains("staged-media://"));
+        let note =
+            Note::new(&f.branch.id, "Login form", &ingested.markdown).with_session(&f.session.id);
+        f.store.create_note(&note).unwrap();
+        f.store
+            .update_session_status(
+                &f.session.id,
+                SessionStatus::Completed,
+                None,
+                Some(&CompletionReason::TurnComplete),
+            )
+            .unwrap();
+        let handle = RepoSessionHandle {
+            session_id: f.session.id.clone(),
+            artifact_kind: RepoArtifactKind::Note,
+            artifact_id: note.id.clone(),
+        };
+
+        let payload =
+            ProjectToolsHandler::repo_session_payload(&f.store, "repo-session", &handle).unwrap();
+
+        assert_eq!(payload["state"], "completed");
+        let content = payload["note"]["content"].as_str().unwrap();
+        assert!(
+            !content.contains("staged-media://"),
+            "parent received an unreadable ref: {content}"
+        );
+        assert!(
+            content.starts_with("![Login form]("),
+            "caption must survive: {content}"
+        );
+        let refs = extract_media_refs(content);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            std::fs::read(&refs[0].target).unwrap(),
+            PNG,
+            "parent must be able to open the path"
+        );
     }
 }

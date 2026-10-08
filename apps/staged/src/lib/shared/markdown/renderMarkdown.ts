@@ -1,5 +1,6 @@
 import { marked, Renderer, type Tokens } from 'marked';
 
+import { renderMarkdownMedia } from './mediaRendering';
 import { sanitize } from '../sanitize';
 import {
   renderMarkdownDiagramCodeBlock,
@@ -41,6 +42,11 @@ function createMarkdownRenderer(
   trustedHtml: TrustedHtmlReplacement[]
 ): Renderer {
   const renderer = new Renderer();
+  const renderImage = renderer.image.bind(renderer);
+  renderer.image = (token: Tokens.Image) => {
+    const media = renderMarkdownMedia(token, renderer.parser);
+    return media ? stashTrustedHtml(media, trustedHtml) : renderImage(token);
+  };
   const renderCode = renderer.code.bind(renderer);
   const renderText = renderer.text.bind(renderer);
 
@@ -74,7 +80,10 @@ function restoreTrustedHtml(
   trustedHtml: TrustedHtmlReplacement[]
 ): string {
   return trustedHtml.reduce((html, replacement) => {
-    return html.replaceAll(replacement.placeholder, replacement.html);
+    // A string replacement would interpret `$&`, `` $` ``, and `$'` inside the
+    // trusted HTML (media captions carry free text), splicing surrounding
+    // author text into attributes. A function replacer is literal.
+    return html.replaceAll(replacement.placeholder, () => replacement.html);
   }, renderedMarkdown);
 }
 

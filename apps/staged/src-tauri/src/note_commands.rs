@@ -101,6 +101,10 @@ pub fn delete_note(
         .ok_or_else(|| format!("Note not found: {note_id}"))?;
 
     store.delete_note(&note_id).map_err(|e| e.to_string())?;
+    crate::note_media::cleanup_unreferenced(
+        &store,
+        crate::note_media::refs::media_ids(&note.content),
+    );
 
     if delete_session.unwrap_or(false) {
         if let Some(sid) = note.session_id {
@@ -230,9 +234,11 @@ pub fn delete_project_note(
     note_id: String,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
+    let media_ids = crate::note_media::project_note_media_ids(&store, &note_id)?;
     let orphaned = store
         .delete_project_note(&note_id)
         .map_err(|e| e.to_string())?;
+    crate::note_media::cleanup_unreferenced(&store, media_ids);
 
     for sid in orphaned.all_session_ids() {
         registry.cancel(&sid);

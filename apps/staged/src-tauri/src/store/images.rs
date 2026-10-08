@@ -8,6 +8,33 @@ use super::models::Image;
 use super::{Store, StoreChange, StoreError};
 
 impl Store {
+    /// Conservative reference check: even a reference inside an example keeps
+    /// its file. No note ownership columns or reconciliation state are needed.
+    pub(crate) fn media_is_referenced(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let needle = format!("staged-media://{id}.");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM notes WHERE instr(content, ?1) > 0
+             UNION ALL SELECT 1 FROM project_notes WHERE instr(content, ?1) > 0)",
+            params![needle],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn image_has_chat_references(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        // Image IDs are UUIDs; quote the exact JSON string to avoid substrings.
+        let needle = format!("\"{id}\"");
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_messages WHERE instr(image_ids, ?1) > 0
+             UNION ALL SELECT 1 FROM queued_session_messages WHERE instr(image_ids, ?1) > 0)",
+            params![needle],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn create_image(&self, image: &Image) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -108,19 +135,10 @@ impl Store {
             return Ok(filename.to_string());
         }
 
-        let path = std::path::Path::new(filename);
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(filename);
-        let ext = path.extension().and_then(|e| e.to_str());
-
+        let (stem, ext) = split_filename(filename);
         let mut counter = 2u32;
         loop {
-            let candidate = match ext {
-                Some(e) => format!("{stem} {counter}.{e}"),
-                None => format!("{stem} {counter}"),
-            };
+            let candidate = numbered_filename(stem, ext, counter);
             if !existing.contains(&candidate) {
                 return Ok(candidate);
             }
@@ -148,10 +166,13 @@ impl Store {
         Ok(())
     }
 
-    /// Return the IDs of all images linked to a session.
+    /// Return chat attachments linked to a session, excluding note-owned media
+    /// so restarted sessions don't send videos as ACP image input.
     pub fn get_image_ids_for_session(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1")?;
+        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1 AND mime_type LIKE 'image/%'
+             AND NOT EXISTS (SELECT 1 FROM notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)
+             AND NOT EXISTS (SELECT 1 FROM project_notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)")?;
         let ids = stmt
             .query_map(params![session_id], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?;
@@ -219,6 +240,45 @@ impl Store {
             created_at: row.get(7)?,
         })
     }
+}
+
+fn split_filename(filename: &str) -> (&str, Option<&str>) {
+    let path = std::path::Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    (stem, path.extension().and_then(|e| e.to_str()))
+}
+
+fn numbered_filename(stem: &str, ext: Option<&str>, counter: u32) -> String {
+    match ext {
+        Some(e) => format!("{stem} {counter}.{e}"),
+        None => format!("{stem} {counter}"),
+    }
+}
+
+/// Whether `stored` is `filename` itself or one of the ` 2`, ` 3`, … variants
+/// [`Store::unique_image_filename`] produces for it. Callers that only know
+/// the name a file was saved from use this to find its row.
+pub(crate) fn is_unique_filename_variant(stored: &str, filename: &str) -> bool {
+    if stored == filename {
+        return true;
+    }
+    let (stem, ext) = split_filename(filename);
+    let Some(rest) = stored
+        .strip_prefix(stem)
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        return false;
+    };
+    let counter = match ext {
+        Some(e) => rest.strip_suffix(e).and_then(|rest| rest.strip_suffix('.')),
+        None => Some(rest),
+    };
+    counter.is_some_and(|counter| {
+        counter.bytes().all(|b| b.is_ascii_digit()) && counter.parse::<u32>().is_ok_and(|n| n >= 2)
+    })
 }
 
 /// Compute the filesystem path for an image file.

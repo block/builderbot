@@ -119,6 +119,12 @@
   } from '../branches/branchCardHelpers';
   import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
   import {
+    attachBasename,
+    attachErrorReason,
+    formatAttachErrors,
+    type AttachRejection,
+  } from './attachErrors';
+  import {
     buildAcpTranscriptGroups,
     formatJson,
     groupRichToolsByVerb,
@@ -148,6 +154,10 @@
     extractMarkdownDiagramFences,
     fencedDiagramMarkdown,
   } from '../../shared/markdown/diagramFormats';
+  import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
+  import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
+  import { resolveStagedMediaUrl } from '../../shared/markdown/mediaUrl';
+  import '../../shared/markdown/mediaStyles.css';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -335,6 +345,7 @@
   );
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
+  let mediaViewer = $state<MarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
   let metadataFollowupConfig = $derived.by(() =>
     latestAcpConfigDiscoveryFromMetadata(session?.provider, acpMetadataMessages)
@@ -453,6 +464,7 @@
   let canAttachImages = $derived(!!projectId);
   let replyImageIds = $state<string[]>([]);
   let imagePreviews = $state<Map<string, string>>(new Map());
+  let attachError = $state<string | null>(null);
 
   // Drag-and-drop state
   let dragOver = $state(false);
@@ -510,14 +522,22 @@
     }
   });
 
+  // Picker and paste batches: the error is cleared once up front and reported
+  // once at the end, so a later success cannot hide an earlier rejection.
   async function handleAttachFiles(files: File[]) {
+    if (!projectId) return;
+    attachError = null;
+    const rejections: AttachRejection[] = [];
     for (const file of files) {
-      await addImageFile(file);
+      const reason = await addImageFile(file);
+      if (reason !== null) rejections.push({ name: file.name, reason });
     }
+    attachError = formatAttachErrors(rejections);
   }
 
-  async function addImageFile(file: File) {
-    if (!projectId) return;
+  /** Stores one file, returning the rejection reason or null on success. */
+  async function addImageFile(file: File): Promise<string | null> {
+    if (!projectId) return null;
     const buffer = await file.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     const chunks: string[] = [];
@@ -535,11 +555,13 @@
         true
       );
       replyImageIds = [...replyImageIds, image.id];
-      const dataUrl = `data:${file.type};base64,${base64}`;
+      const dataUrl = `data:${image.mimeType};base64,${base64}`;
       imagePreviews = new Map(imagePreviews);
       imagePreviews.set(image.id, dataUrl);
+      return null;
     } catch (err) {
       console.error('Failed to attach image:', err);
+      return attachErrorReason(err);
     }
   }
 
@@ -547,19 +569,22 @@
     if (!active || !canAttachImages || isLive) return;
     const items = e.clipboardData?.items;
     if (!items) return;
+    const files: File[] = [];
     for (const item of Array.from(items)) {
       if (item.type.startsWith('image/')) {
         e.preventDefault();
         const file = item.getAsFile();
-        if (file) void addImageFile(file);
+        if (file) files.push(file);
       }
     }
+    if (files.length > 0) void handleAttachFiles(files);
   }
 
   function removeReplyImage(imageId: string) {
     replyImageIds = replyImageIds.filter((id) => id !== imageId);
     imagePreviews = new Map(imagePreviews);
     imagePreviews.delete(imageId);
+    attachError = null;
     deleteImage(imageId).catch((err) => {
       console.error('Failed to delete image:', err);
     });
@@ -573,14 +598,20 @@
     const bid = branchId ?? null;
     const pid = projectId;
     const newIds: string[] = [];
+    // Surface rejection reasons (signature, size) as paste does, reporting
+    // the whole batch once so a later success cannot hide an earlier one.
+    attachError = null;
+    const rejections: AttachRejection[] = [];
     for (const path of imagePaths) {
       try {
         const image = await createImage(bid, pid, path, true);
         newIds.push(image.id);
       } catch (e) {
         console.error('Failed to create image from dropped file:', e);
+        rejections.push({ name: attachBasename(path), reason: attachErrorReason(e) });
       }
     }
+    attachError = formatAttachErrors(rejections);
     if (newIds.length > 0) {
       replyImageIds = [...replyImageIds, ...newIds];
     }
@@ -1009,6 +1040,7 @@
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];
     imagePreviews = new Map();
+    attachError = null;
     // Reset textarea height after clearing (oninput won't fire for programmatic changes)
     tick().then(() => autoResize());
 
@@ -1347,6 +1379,15 @@
     return html;
   }
 
+  function openMediaViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
+    const media = getMarkdownMediaFromEvent(event.target);
+    if (!media) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    mediaViewer = media;
+    return true;
+  }
+
   function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
     const svgMarkup = getMarkdownDiagramSvgMarkup(event.target);
     if (!svgMarkup) return false;
@@ -1386,7 +1427,7 @@
   }
 
   function handleContentClick(event: MouseEvent) {
-    if (openDiagramViewerFromEvent(event)) return;
+    if (openMediaViewerFromEvent(event) || openDiagramViewerFromEvent(event)) return;
 
     const click = hashtagClickFromTarget(event.target);
     if (click && onHashtagClick) {
@@ -1399,7 +1440,11 @@
   }
 
   function handleContentKeydown(event: KeyboardEvent) {
-    if (isMarkdownDiagramActivationKey(event) && openDiagramViewerFromEvent(event)) return;
+    if (
+      isMarkdownDiagramActivationKey(event) &&
+      (openMediaViewerFromEvent(event) || openDiagramViewerFromEvent(event))
+    )
+      return;
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const click = hashtagClickFromTarget(event.target);
     if (!click || !onHashtagClick) return;
@@ -2464,6 +2509,7 @@
         {imagePreviews}
         onAttachFiles={handleAttachFiles}
         onRemoveImage={removeReplyImage}
+        {attachError}
         {isLive}
         {sending}
         onSend={handleSend}
@@ -2490,6 +2536,16 @@
     {/if}
   </div>
 </div>
+
+{#if mediaViewer}
+  <MediaViewerModal
+    open={true}
+    src={resolveStagedMediaUrl(mediaViewer.id, mediaViewer.ext)}
+    kind={mediaViewer.kind}
+    title={mediaViewer.alt}
+    onClose={() => (mediaViewer = null)}
+  />
+{/if}
 
 <DiagramViewerModal
   open={diagramViewerSvg !== null}

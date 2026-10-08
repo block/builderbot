@@ -186,10 +186,10 @@ impl Store {
         suggested_next_note_step: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        // The session runner re-runs note extraction at the end of every turn for sessions
-        // with a linked note, even if the assistant didn't rewrite the note. Without this
-        // short-circuit, `updated_at` would advance on every turn, defeating any freshness
-        // comparison that relies on it.
+        // The session runner extracts the note from each completed turn's output, and a
+        // turn can legitimately re-emit an identical note. Without this short-circuit,
+        // `updated_at` would advance on such turns, defeating any freshness comparison
+        // that relies on it.
         let existing: Option<(String, String, Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT title, content, suggested_next_commit_step, suggested_next_note_step

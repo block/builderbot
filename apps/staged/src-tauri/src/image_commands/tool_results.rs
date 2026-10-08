@@ -1,4 +1,5 @@
-use super::{mime_type_for_extension, ALLOWED_IMAGE_EXTENSIONS, MAX_IMAGE_SIZE};
+use crate::note_media::files::{mime_for_extension, MAX_IMAGE_SIZE};
+const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 use base64::Engine;
 use std::io::Read;
 use std::path::Path;
@@ -37,7 +38,7 @@ pub fn read_image_file(file_path: String) -> Result<String, String> {
     }
     Ok(format!(
         "data:{};base64,{}",
-        mime_type_for_extension(&ext),
+        mime_for_extension(&ext).unwrap(),
         base64::engine::general_purpose::STANDARD.encode(&bytes)
     ))
 }

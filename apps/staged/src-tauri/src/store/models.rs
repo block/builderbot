@@ -1070,6 +1070,7 @@ impl ProjectNote {
 /// `<project_worktree_root>/images/<id>.<ext>`. The `project_id` field
 /// determines the filesystem location; the `filename` field preserves the
 /// original upload name (and its extension).
+/// Session-scoped note attachments also use this record for `video/*` media.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Image {

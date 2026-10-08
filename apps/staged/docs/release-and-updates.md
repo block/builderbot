@@ -111,6 +111,19 @@ alias (`staged-latest`), and asset names (`Staged.app.tar.gz`,
 the update contract. Renaming any of them strands existing installations, as does
 rotating the updater signing key without a migration path.
 
+## Multiple windows
+
+Update prompts, installs, and relaunches are app-wide, so exactly one window owns the
+updater: the backend grants a single-owner lease (`claim_updater_ownership`) and
+only that window runs checks, shows the consent dialog, and installs. Every other
+window mirrors the owner's status over frontend events
+(`src/lib/services/updaterBridge.ts`): the owner broadcasts `updater-state-sync` on
+every state change and in reply to a mirror's `updater-state-request`, and a
+"Check for updates" click in a mirror window sends `updater-check-request`, which
+the owner runs as a manual check. When the owner window is destroyed, the native
+`Destroyed` hook releases the lease and broadcasts `updater-owner-available`; the
+surviving window that wins the new claim stops mirroring and starts the service.
+
 ## One-time setup
 
 Generate updater signing keys once:

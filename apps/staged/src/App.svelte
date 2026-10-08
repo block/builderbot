@@ -77,7 +77,7 @@
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { sweepCache } from './lib/cache';
-  import { initUpdater } from './lib/services/updater.svelte';
+  import { initUpdater, initUpdaterMirror } from './lib/services/updater.svelte';
   import { isUpdaterAvailable, logUpdaterMessage } from './lib/services/updater';
   import type { StoreIncompatibility } from './lib/types';
 
@@ -92,7 +92,11 @@
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let unguardDocumentScroll: (() => void) | undefined;
+  // Set only while this window owns the updater loop; ensureUpdaterLoopStarted
+  // guards on it, so the mirror cleanup must live in its own handle or a later
+  // `updater-owner-available` could never promote this window to owner.
   let stopUpdaterLoop: (() => void) | null = null;
+  let stopUpdaterMirror: (() => void) | null = null;
   let updaterStartPending = false;
   let updaterStartQueued = false;
   let destroyed = false;
@@ -259,7 +263,7 @@
     return event.defaultPrevented;
   }
 
-  async function startUpdaterLoop(): Promise<(() => void) | null> {
+  async function startUpdaterLoop(): Promise<{ owner: boolean; stop: () => void } | null> {
     const windowLabel = getWindowLabel();
 
     // The updater service owns the build gate (see services/updater.ts); this
@@ -275,24 +279,32 @@
     // Update prompts and relaunches are app-wide. The backend grants one live
     // window ownership and releases it from the native Destroyed hook, allowing
     // a surviving peer to take over even if frontend teardown never runs.
+    // Losing windows mirror the owner's status and route manual checks to it,
+    // so their Settings panel stays accurate and usable.
     if (!(await commands.claimUpdaterOwnership())) {
       logUpdaterMessage(
-        `[updater] skipped because another window owns the updater loop (window=${windowLabel})`
+        `[updater] mirroring because another window owns the updater loop (window=${windowLabel})`
       );
-      return null;
+      return { owner: false, stop: initUpdaterMirror() };
     }
 
     logUpdaterMessage(`[updater] window=${windowLabel} owns the updater loop`);
-    return initUpdater();
+    return { owner: true, stop: initUpdater() };
   }
 
   async function ensureUpdaterLoopStarted() {
     if (destroyed || stopUpdaterLoop || updaterStartPending) return;
     updaterStartPending = true;
     try {
-      const stop = await startUpdaterLoop();
-      if (destroyed) stop?.();
-      else stopUpdaterLoop = stop;
+      const started = await startUpdaterLoop();
+      if (destroyed) {
+        started?.stop();
+      } else if (started) {
+        stopUpdaterMirror?.();
+        stopUpdaterMirror = null;
+        if (started.owner) stopUpdaterLoop = started.stop;
+        else stopUpdaterMirror = started.stop;
+      }
     } catch (error) {
       logUpdaterMessage(`[updater] failed to claim ownership: ${error}`);
     } finally {
@@ -606,6 +618,7 @@
     projectsDataStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();
+    stopUpdaterMirror?.();
   });
 
   async function handleResetStore() {

@@ -8,6 +8,7 @@ import {
   type UpdateHandle,
   type UpdaterAdapters,
   type UpdaterEnvironment,
+  type UpdaterState,
 } from './updater';
 
 // ── Test harness ────────────────────────────────────────────────────────────
@@ -558,5 +559,75 @@ describe('prompt and install flow', () => {
     resolveInstall();
     await flush();
     expect(harness.adapters.relaunch).not.toHaveBeenCalled();
+  });
+});
+
+// ── State-change hook ───────────────────────────────────────────────────────
+
+describe('onStateChange', () => {
+  function makeObservedService(harness: Harness) {
+    const transitions: Array<Pick<UpdaterState, 'status' | 'availableVersion' | 'error'>> = [];
+    const service = createUpdaterService({
+      env: releaseEnv,
+      adapters: harness.adapters,
+      onStateChange: ({ status, availableVersion, error }) =>
+        transitions.push({ status, availableVersion, error }),
+    });
+    return { service, transitions };
+  }
+
+  it('fires for each transition of an up-to-date check', async () => {
+    const harness = makeHarness();
+    const { service, transitions } = makeObservedService(harness);
+    service.start();
+    await flush();
+
+    expect(transitions.map((t) => t.status)).toEqual(['idle', 'checking', 'up-to-date']);
+  });
+
+  it('fires with the error message when a check fails', async () => {
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockRejectedValue(new Error('offline'));
+    const { service, transitions } = makeObservedService(harness);
+    service.start();
+    await flush();
+
+    expect(transitions.at(-2)).toEqual({ status: 'checking', availableVersion: null, error: null });
+    expect(transitions.at(-1)).toEqual({
+      status: 'error',
+      availableVersion: null,
+      error: 'offline',
+    });
+  });
+
+  it('fires through an accepted install', async () => {
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockResolvedValue(makeUpdate({ version: '2.0.0' }));
+    harness.adapters.confirmInstall.mockResolvedValue(true);
+    const { service, transitions } = makeObservedService(harness);
+    service.start();
+    await flush();
+
+    expect(transitions.map((t) => t.status)).toEqual([
+      'idle',
+      'checking',
+      'update-available',
+      'installing',
+      'restart-required',
+    ]);
+    expect(transitions.at(-1)?.availableVersion).toBe('2.0.0');
+  });
+
+  it('fires when the build is unavailable', () => {
+    const harness = makeHarness();
+    const onStateChange = vi.fn();
+    createUpdaterService({
+      env: { enabled: false, dev: false, isTauriApp: true },
+      adapters: harness.adapters,
+      onStateChange,
+    }).start();
+
+    expect(onStateChange).toHaveBeenCalledTimes(1);
+    expect(onStateChange.mock.calls[0][0].status).toBe('unavailable');
   });
 });

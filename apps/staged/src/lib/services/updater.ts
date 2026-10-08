@@ -25,7 +25,8 @@
  * endpoint and public key are fixed in the native release configuration.
  *
  * This module is rune-free; `updater.svelte.ts` wires it to shared reactive
- * state for the app shell and future Settings UI.
+ * state for the app shell and Settings UI, and `updaterBridge.ts` mirrors that
+ * state to windows that do not own the updater.
  */
 
 import { isTauri } from '../transport';
@@ -140,6 +141,11 @@ export interface UpdaterServiceOptions {
   checkIntervalMs?: number;
   checkTimeoutMs?: number;
   staleSettleGraceMs?: number;
+  /**
+   * Called after every state transition with the (mutated) state record. Lets
+   * the owning window mirror its status to other windows.
+   */
+  onStateChange?: (state: UpdaterState) => void;
 }
 
 export interface UpdaterService {
@@ -235,6 +241,12 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
   const staleSettleGraceMs = options.staleSettleGraceMs ?? UPDATER_STALE_SETTLE_GRACE_MS;
 
   const available = isUpdaterAvailable(env);
+
+  /** Apply a state transition, then notify the `onStateChange` hook. */
+  function setState(patch: Partial<UpdaterState>): void {
+    Object.assign(state, patch);
+    options.onStateChange?.(state);
+  }
 
   let started = false;
   let cancelled = false;
@@ -341,8 +353,7 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     let update: UpdateHandle | null = null;
     try {
       adapters.log(`[updater] checking for updates (${trigger})`);
-      state.status = 'checking';
-      state.error = null;
+      setState({ status: 'checking', error: null });
 
       const checkPromise = adapters.checkForUpdate({ timeoutMs: checkTimeoutMs });
       const timeoutPromise = new Promise<'timeout'>((resolve) => {
@@ -356,8 +367,7 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
         trackStaleCheck(checkPromise);
         adapters.log(`[updater] check timed out after ${checkTimeoutMs}ms`);
         if (!cancelled) {
-          state.status = 'error';
-          state.error = 'Update check timed out.';
+          setState({ status: 'error', error: 'Update check timed out.' });
         }
         return;
       }
@@ -367,15 +377,15 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
 
       if (!update) {
         adapters.log('[updater] no update available');
-        state.status = 'up-to-date';
-        state.availableVersion = null;
-        state.releaseNotes = null;
+        setState({ status: 'up-to-date', availableVersion: null, releaseNotes: null });
         return;
       }
 
-      state.status = 'update-available';
-      state.availableVersion = update.version;
-      state.releaseNotes = update.body ?? null;
+      setState({
+        status: 'update-available',
+        availableVersion: update.version,
+        releaseNotes: update.body ?? null,
+      });
 
       // Background checks prompt each version at most once per session, but a
       // manual check is an explicit request: always re-prompt so a user who
@@ -398,18 +408,20 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       }
 
       adapters.log('[updater] downloading and installing update');
-      state.status = 'installing';
+      setState({ status: 'installing' });
       await update.downloadAndInstall();
       if (cancelled) return;
 
-      state.status = 'restart-required';
+      setState({ status: 'restart-required' });
       await adapters.relaunch();
     } catch (error) {
       // Update failures are recoverable and must never block the app.
       adapters.log(`[updater] check failed: ${error}`);
       if (!cancelled) {
-        state.status = 'error';
-        state.error = error instanceof Error ? error.message : String(error);
+        setState({
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     } finally {
       runInFlight = false;
@@ -427,11 +439,11 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     );
     if (!available) {
       adapters.log('[updater] skipped because a gate condition was not met');
-      state.status = 'unavailable';
+      setState({ status: 'unavailable' });
       return;
     }
 
-    state.status = 'idle';
+    setState({ status: 'idle' });
     void runUpdater('startup');
     intervalHandle = adapters.setInterval(() => {
       void runUpdater('interval');

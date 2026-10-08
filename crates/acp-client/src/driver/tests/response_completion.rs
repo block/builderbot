@@ -500,6 +500,34 @@ async fn unsuccessful_unrelated_and_historical_results_do_not_accept_notes() {
 }
 
 #[tokio::test]
+async fn subagent_tool_call_mid_message_does_not_split_result_certification() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = Arc::new(AcpNotificationHandler::new(
+        writer.clone(),
+        false,
+        vec![],
+        CancellationToken::new(),
+    ));
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "complete artifact")).await;
+    feed(&handler, tool_call_notification("subagent-grep")).await;
+    feed(&handler, agent_text(Some("msg-1"), " with next steps")).await;
+    feed_sdk_frame(&handler, successful_result("interrupted", ARTIFACT)).await;
+    assert!(
+        handler
+            .subscribe_background_activity()
+            .borrow()
+            .finish_requested
+    );
+    assert!(writer
+        .metadata
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event.event_kind.as_deref() == Some("response_result")));
+}
+
+#[tokio::test]
 async fn result_only_fallback_and_duplicate_results_are_recorded_once() {
     let writer = Arc::new(ArtifactWriter::default());
     let handler = Arc::new(AcpNotificationHandler::new(

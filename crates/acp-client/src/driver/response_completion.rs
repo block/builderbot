@@ -6,6 +6,11 @@ use super::*;
 pub(super) struct ResponseState {
     session_id: Option<String>,
     pub(super) text: String,
+    /// Provider ACP message id of the chunk last appended to `text`.
+    pub(super) message_id: Option<String>,
+    /// A tool call arrived after `text` was streamed; the next chunk either
+    /// resumes that message (same id) or starts a new one.
+    pub(super) interrupted: bool,
     pub(super) completed: bool,
     fallback: String,
     seen_results: HashSet<String>,
@@ -29,9 +34,16 @@ impl ResponseState {
     }
 
     pub(super) fn reset_output(&mut self) {
-        self.text.clear();
+        self.close_message();
         self.completed = false;
         self.fallback.clear();
+    }
+
+    /// Forget the streamed message: the writer has closed (or will close) it.
+    pub(super) fn close_message(&mut self) {
+        self.text.clear();
+        self.message_id = None;
+        self.interrupted = false;
     }
 
     pub(super) fn suppress_fallback(&mut self, text: &str) -> bool {

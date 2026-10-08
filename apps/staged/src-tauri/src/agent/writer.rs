@@ -49,6 +49,10 @@ pub struct MessageWriter {
     /// Accumulated text for the current assistant message (complete, not
     /// a delta). Flushed wholesale on each DB write.
     current_text: Mutex<String>,
+    /// A tool call landed after the current message's text. The next append
+    /// starts a new message unless the driver resumes this one first — see
+    /// [`MessageWriter::resume_interrupted_text`].
+    text_interrupted: Mutex<bool>,
     /// When we last wrote to the DB — used to throttle flush frequency.
     last_flush_at: Mutex<Instant>,
     /// Maps external tool-call IDs → (DB row ID, last-known title).
@@ -117,6 +121,7 @@ impl MessageWriter {
             store,
             current_assistant_msg_id: Mutex::new(None),
             current_text: Mutex::new(String::new()),
+            text_interrupted: Mutex::new(false),
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
             tool_result_rows: Mutex::new(HashMap::new()),
@@ -132,6 +137,9 @@ impl MessageWriter {
     /// Flushes to the DB at most every [`FLUSH_INTERVAL`]; intermediate
     /// chunks accumulate in memory.
     pub async fn append_text(&self, text: &str) {
+        if std::mem::take(&mut *self.text_interrupted.lock().await) {
+            self.finalize().await;
+        }
         {
             let mut current = self.current_text.lock().await;
             current.push_str(text);
@@ -147,21 +155,31 @@ impl MessageWriter {
         self.flush_text().await;
         self.current_assistant_msg_id.lock().await.take();
         *self.current_text.lock().await = String::new();
+        *self.text_interrupted.lock().await = false;
+    }
+
+    /// Keep extending the message the latest tool call(s) interrupted instead
+    /// of starting a new one on the next append.
+    pub async fn resume_interrupted_text(&self) {
+        *self.text_interrupted.lock().await = false;
     }
 
     // =====================================================================
     // Tool calls
     // =====================================================================
 
-    /// Record a tool call. Finalizes any in-progress assistant text first
-    /// to maintain correct message ordering.
+    /// Record a tool call. Flushes any in-progress assistant text first so
+    /// its row precedes the tool call, and marks it interrupted: the next
+    /// append opens a new message unless the driver resumes this one (a
+    /// background subagent's tool call can land mid-message).
     pub async fn record_tool_call(
         &self,
         tool_call_id: &str,
         title: &str,
         raw_input: Option<&serde_json::Value>,
     ) {
-        self.finalize().await;
+        self.flush_text().await;
+        *self.text_interrupted.lock().await = true;
 
         let title = sanitize_title(title);
         let content = format_tool_call_content(&title, raw_input);
@@ -308,6 +326,10 @@ impl acp_client::MessageWriter for MessageWriter {
         raw_input: Option<&serde_json::Value>,
     ) {
         self.record_tool_call(tool_call_id, title, raw_input).await
+    }
+
+    async fn resume_interrupted_text(&self) {
+        self.resume_interrupted_text().await
     }
 
     async fn update_tool_call_title(
@@ -698,6 +720,47 @@ mod tests {
         assert_eq!(messages[3].role, MessageRole::ToolResult);
         assert_eq!(messages[3].content, "second final");
         assert_eq!(messages[3].acp.acp_tool_call_id.as_deref(), Some("tc-2"));
+    }
+
+    #[tokio::test]
+    async fn resumed_text_extends_the_row_a_tool_call_interrupted() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.append_text("The").await;
+        writer.record_tool_call("tc-sub", "Run grep", None).await;
+        writer.resume_interrupted_text().await;
+        writer.append_text(" search is back").await;
+        writer.finalize().await;
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::Assistant);
+        assert_eq!(messages[0].content, "The search is back");
+        assert_eq!(messages[1].role, MessageRole::ToolCall);
+    }
+
+    #[tokio::test]
+    async fn text_after_a_tool_call_starts_a_new_row_unless_resumed() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.append_text("Running tests").await;
+        writer.record_tool_call("tc-1", "Run tests", None).await;
+        writer.append_text("They passed").await;
+        writer.finalize().await;
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        let rows: Vec<_> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "Running tests"),
+                (MessageRole::ToolCall, "Run tests"),
+                (MessageRole::Assistant, "They passed"),
+            ]
+        );
     }
 
     #[tokio::test]

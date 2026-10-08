@@ -33,10 +33,17 @@ class MockWebSocket {
 
   open(): void {
     this.readyState = MockWebSocket.OPEN;
+    // Transport never detaches `onopen`, so even a socket already closed by
+    // its last unlisten fires the deferred imports when a test opens it.
+    deferred.opens += 1;
+    if (sockets.indexOf(this) > 0) deferred.reconnectOpens += 1;
     this.onopen?.(new Event('open'));
   }
 
   emit(data: unknown): void {
+    if (typeof data === 'object' && data !== null && 'event' in data) {
+      if (data.event === 'transport:event-gap') deferred.gaps += 1;
+    }
     this.onmessage?.(
       new MessageEvent('message', {
         data: typeof data === 'string' ? data : JSON.stringify(data),
@@ -47,29 +54,66 @@ class MockWebSocket {
 
 let sockets: MockWebSocket[];
 
+/**
+ * How many times the transport has been told to kick off its fire-and-forget
+ * imports: `onopen` replays PR-poll interest and re-hydrates busy state, a
+ * reconnect `onopen` also revalidates, and an event gap re-hydrates and
+ * revalidates without a new socket.
+ */
+let deferred: { opens: number; reconnectOpens: number; gaps: number };
+
 describe('web transport', () => {
   let hydrateActiveSessions: ReturnType<typeof vi.fn>;
   let revalidateAll: ReturnType<typeof vi.fn>;
+  let replayPrPollInterestHints: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'web-client-1') });
     sockets = [];
+    deferred = { opens: 0, reconnectOpens: 0, gaps: 0 };
     // The busy-state hydrator pulls in rune-based stores that plain vitest
     // can't compile, so it is mocked for every socket-opening test.
     hydrateActiveSessions = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./listeners/sessionStatusListener', () => ({ hydrateActiveSessions }));
     revalidateAll = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./listeners/pageLifecycleListener', () => ({ revalidateAll }));
+    // The replay is mocked everywhere, not just where a test asserts on it, so
+    // that `settleDeferredImports` can see every import the transport fires.
+    // `getPrPollClientId` stays real; tests that need it to fail re-mock below.
+    replayPrPollInterestHints = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./services/prPollingService', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('./services/prPollingService')>()),
+      replayPrPollInterestHints,
+    }));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await settleDeferredImports();
     vi.doUnmock('./services/prPollingService');
     vi.doUnmock('./listeners/sessionStatusListener');
     vi.doUnmock('./listeners/pageLifecycleListener');
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
+
+  /**
+   * Wait for every import the transport fired on `onopen` or an event gap to
+   * land before the mocks are torn down. `vi.doMock`/`vi.doUnmock` only queue;
+   * whichever module fetch runs next drains the queue asynchronously, and two
+   * fetches in flight each drain their own slice. An import that outlives its
+   * test therefore drains this `afterEach`'s unmocks concurrently with the next
+   * test's fetch draining its mocks, and if the unmock lands second the real
+   * `sessionStatusListener` (and its svelte-sonner dependency) loads under the
+   * next test, whose `hydrateActiveSessions` then never fires.
+   */
+  async function settleDeferredImports(): Promise<void> {
+    await vi.waitFor(() => {
+      expect(replayPrPollInterestHints).toHaveBeenCalledTimes(deferred.opens);
+      expect(hydrateActiveSessions).toHaveBeenCalledTimes(deferred.opens + deferred.gaps);
+      expect(revalidateAll).toHaveBeenCalledTimes(deferred.reconnectOpens + deferred.gaps);
+    });
+  }
 
   it('posts commands to the web invoke endpoint', async () => {
     const fetch = vi.fn().mockResolvedValue({
@@ -129,11 +173,6 @@ describe('web transport', () => {
   it('replays PR polling interest and re-hydrates busy state when the browser event socket opens and reconnects', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
-    const replayPrPollInterestHints = vi.fn().mockResolvedValue(undefined);
-    vi.doMock('./services/prPollingService', () => ({
-      getPrPollClientId: () => 'web-client-1',
-      replayPrPollInterestHints,
-    }));
 
     const { listenToEvent } = await import('./transport');
     const unlisten = listenToEvent('pr-refresh-state', vi.fn());
@@ -299,6 +338,12 @@ describe('web transport', () => {
 
     sockets[0].open();
     expect(onEstablished).toHaveBeenCalledTimes(1);
+    // Let the open's busy-state import land before the gap asks for the same
+    // module again. vitest marks a manual mock in flight on the importer's
+    // callstack while evaluating it, and a second import of that module from
+    // the same importer in the same tick sees the marker and falls through to
+    // the real module (vitest's `Promise.all(import(), import())` caveat).
+    await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(1));
 
     // Events the server shed under load are as gone as ones emitted while the
     // socket was down, so a consumer that catches up on `onEstablished` must
@@ -317,7 +362,7 @@ describe('web transport', () => {
       getPrPollClientId: () => {
         throw new Error('client id unavailable');
       },
-      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+      replayPrPollInterestHints,
     }));
     vi.stubGlobal('WebSocket', MockWebSocket);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -357,7 +402,7 @@ describe('web transport', () => {
         if (fail) throw new Error('client id unavailable');
         return 'web-client-1';
       },
-      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+      replayPrPollInterestHints,
     }));
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
@@ -403,7 +448,7 @@ describe('web transport', () => {
         if (fail) throw new Error('client id unavailable');
         return 'web-client-1';
       },
-      replayPrPollInterestHints: vi.fn().mockResolvedValue(undefined),
+      replayPrPollInterestHints,
     }));
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);

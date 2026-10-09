@@ -66,7 +66,8 @@ func (s *Server) listAllReviewGroups() []ReviewGroup {
 			continue
 		}
 
-		agentActive := s.agents != nil && s.agents.Status(qn) != nil && s.agents.Status(qn).Running
+		// E-PENPAL-AGENT-ACTIVE-UNIFIED: checks both spawned agents and CLI sessions.
+		agentActive := s.isAgentActive(qn)
 
 		// Build source name -> SourceTypeName lookup
 		sourceTypeMap := make(map[string]string)

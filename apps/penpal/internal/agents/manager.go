@@ -39,6 +39,7 @@ type Manager struct {
 	port      int
 	onChange  func(projectName string) // called when agent starts or stops
 	claudeBin func() string            // returns resolved path to claude binary
+	sm        *sessionManager           // E-PENPAL-SESSION-MGMT: external CLI session tracking
 }
 
 func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
@@ -47,6 +48,7 @@ func New(c *cache.Cache, cs *comments.Store, port int) *Manager {
 		cache:    c,
 		comments: cs,
 		port:     port,
+		sm:       newSessionManager(),
 	}
 }
 
@@ -65,27 +67,71 @@ func (m *Manager) SetOnChange(fn func(projectName string)) {
 }
 
 // Start launches a Claude agent for the given project.
-// Returns nil if an agent is already running for this project.
-// E-PENPAL-AGENT-SPAWN: writes temp MCP config, builds prompt, runs claude.
+// Returns nil, nil if a spawned agent is already running.
+// Returns an error if a CLI session is active.
+// E-PENPAL-AGENT-SPAWN: claims session, writes temp MCP config, builds prompt, runs claude.
 func (m *Manager) Start(projectName string) (*Agent, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if a, ok := m.agents[projectName]; ok {
-		select {
-		case <-a.done:
-			// Previous agent exited, clean up and proceed
-			delete(m.agents, projectName)
-		default:
-			return nil, nil // already running
-		}
-	}
-
 	proj := m.cache.FindProject(projectName)
 	if proj == nil {
 		return nil, fmt.Errorf("project %q not found", projectName)
 	}
 
+	// Claim a spawned session — this handles all contention.
+	// If a spawned session already exists (agent already running), claimSession
+	// returns an error; we map that to the idempotent nil,nil return.
+	// E-PENPAL-AGENT-SELF-ID: spawned agents are always claude.
+	sess, err := m.claimSession(projectName, "", "claude", false, SessionSpawned)
+	if err != nil {
+		// Check if a spawned agent is already running — return nil,nil (idempotent).
+		m.mu.Lock()
+		if a, ok := m.agents[projectName]; ok {
+			select {
+			case <-a.done:
+				// Agent exited but session not yet cleaned up — fall through to error.
+				delete(m.agents, projectName)
+			default:
+				m.mu.Unlock()
+				return nil, nil // already running
+			}
+		}
+		m.mu.Unlock()
+		return nil, err
+	}
+
+	// Build and launch the process outside the lock.
+	agent, err := m.launchAgent(projectName, proj.Path, sess.Token)
+	if err != nil {
+		// Claim failed at launch — release the session.
+		m.Detach(sess.Token)
+		return nil, err
+	}
+
+	// Install the agent under the lock, verifying we still own the session.
+	m.mu.Lock()
+	currentToken, owned := m.sm.projectSession[projectName]
+	if !owned || currentToken != sess.Token {
+		// Someone else claimed the project while we were launching.
+		m.mu.Unlock()
+		agent.cmd.Process.Kill()
+		<-agent.done
+		return nil, fmt.Errorf("session was replaced during agent launch for %q", projectName)
+	}
+	m.agents[projectName] = agent
+	m.mu.Unlock()
+
+	log.Printf("Agent started for %s (PID %d)", projectName, agent.PID)
+
+	if m.onChange != nil {
+		go m.onChange(projectName)
+	}
+
+	return agent, nil
+}
+
+// launchAgent builds the temp MCP config and starts the claude process.
+// Returns the Agent (with background goroutines running) or an error.
+// The sessionToken is captured so the exit goroutine can clean up the right session.
+func (m *Manager) launchAgent(projectName, projectPath, sessionToken string) (*Agent, error) {
 	// Write temporary MCP config
 	mcpConfigPath := filepath.Join(os.TempDir(),
 		fmt.Sprintf("penpal-agent-%s.json", sanitize(projectName)))
@@ -112,10 +158,10 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 		"--max-budget-usd", "5",
 		"--model", "opus",
 	)
-	cmd.Dir = proj.Path
+	cmd.Dir = projectPath
 
 	// Log agent output to a file
-	logPath := filepath.Join(proj.Path, ".penpal", "agent.log")
+	logPath := filepath.Join(projectPath, ".penpal", "agent.log")
 	os.MkdirAll(filepath.Dir(logPath), 0755)
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -135,7 +181,7 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 
 	agent := &Agent{
 		Project:       projectName,
-		ProjectPath:   proj.Path,
+		ProjectPath:   projectPath,
 		PID:           cmd.Process.Pid,
 		StartedAt:     time.Now(),
 		cmd:           cmd,
@@ -144,45 +190,37 @@ func (m *Manager) Start(projectName string) (*Agent, error) {
 	}
 
 	// Parse NDJSON stream in background, writing through to log file.
-	// streamDone is closed when parseStream finishes so we can safely
-	// close logFile only after all writes complete.
 	streamDone := make(chan struct{})
 	go func() {
 		agent.parseStream(stdout, logFile)
 		close(streamDone)
 	}()
-	m.agents[projectName] = agent
 
-	log.Printf("Agent started for %s (PID %d)", projectName, agent.PID)
-
-	// Monitor process exit in background
+	// Monitor process exit in background.
 	go func() {
 		agent.exitErr = cmd.Wait()
-		<-streamDone // wait for parseStream to finish before closing log
+		<-streamDone
 		logFile.Close()
 		os.Remove(mcpConfigPath)
 		close(agent.done)
 		log.Printf("Agent exited for %s (PID %d): %v", projectName, agent.PID, agent.exitErr)
 
-		m.comments.ClearProjectHeartbeats(projectName)
 		m.comments.ClearProjectWorking(projectName)
 
 		m.mu.Lock()
-		// Only delete if it's still the same agent (not replaced)
 		if current, ok := m.agents[projectName]; ok && current == agent {
 			delete(m.agents, projectName)
 		}
 		fn := m.onChange
 		m.mu.Unlock()
 
+		// Clean up the session by token (safe even if already replaced).
+		m.Detach(sessionToken)
+
 		if fn != nil {
 			fn(projectName)
 		}
 	}()
-
-	if m.onChange != nil {
-		go m.onChange(projectName)
-	}
 
 	return agent, nil
 }
@@ -287,15 +325,48 @@ func (m *Manager) SimulateFinished(projectName string) {
 	}
 }
 
+// AgentName returns the agent name from the active session for a project.
+// Returns "agent" if no active session is found.
+// E-PENPAL-AGENT-SELF-ID: used by MCP tools to derive comment author from session.
+func (m *Manager) AgentName(projectName string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	token, ok := m.sm.projectSession[projectName]
+	if !ok {
+		return "agent"
+	}
+	sess, exists := m.sm.sessions[token]
+	if !exists || sess.Evicted || sess.isExpired() {
+		return "agent"
+	}
+	if sess.AgentName == "" {
+		return "agent"
+	}
+	return sess.AgentName
+}
+
 // SimulateRunning inserts a synthetic agent entry that appears to be
-// actively running. This is intended for testing the "agent running" status
-// path without requiring an external binary.
+// actively running, with an associated spawned session.
 func (m *Manager) SimulateRunning(projectName string, contextUsed, contextWindow int, totalCostUSD float64, numTurns int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	now := time.Now()
+	sess := &Session{
+		Token:         generateToken(),
+		Project:       projectName,
+		AgentName:     "claude",
+		Kind:          SessionSpawned,
+		CreatedAt:     now,
+		LastHeartbeat: now,
+	}
+	m.sm.sessions[sess.Token] = sess
+	m.sm.projectSession[projectName] = sess.Token
+
 	m.agents[projectName] = &Agent{
 		Project:       projectName,
-		StartedAt:     time.Now(),
+		StartedAt:     now,
 		PID:           99999,
 		done:          make(chan struct{}), // not closed = still running
 		contextWindow: contextWindow,

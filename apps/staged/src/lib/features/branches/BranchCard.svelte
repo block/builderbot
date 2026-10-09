@@ -374,7 +374,8 @@
 
   async function startBranchCommandPipeline(
     kind: 'rebase' | 'squash',
-    rebaseTarget?: 'base' | 'origin'
+    rebaseTarget?: 'base' | 'origin',
+    options: { thenForcePush?: boolean } = {}
   ) {
     // Deliberately not gated on `branchSessionBusy`: the backend decides
     // between running now and queueing behind in-flight branch work, and it
@@ -387,8 +388,15 @@
     try {
       const result =
         kind === 'rebase'
-          ? await commands.rebaseBranch(branch.id, provider, rebaseTarget)
+          ? await commands.rebaseBranch(branch.id, provider, rebaseTarget, options.thenForcePush)
           : await commands.squashCommits(branch.id, provider);
+      // "Rebase and force push": the backend queued the push behind the rebase
+      // and only starts it if the rebase finishes, so the push chip just shows
+      // it waiting like any other queued push — unless the chip is already
+      // following a push, which keeps it.
+      if (result.followUpSessionId) {
+        pushStateStore.trackPushIfIdle(branch.id, result.followUpSessionId, 'queued', true);
+      }
       // Add a pending session item so the session stub appears instantly
       // instead of waiting for the full timeline refresh. Queued pipelines get
       // the same label the persisted row will show, so the stub doesn't flash a
@@ -1252,10 +1260,10 @@
     if (pushingOrigin || pushQueuedOrigin || commandPipelinePending) return;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
-    pushStateStore.setPushing(branch.id, '__pending__');
+    pushStateStore.setPushing(branch.id, '__pending__', false);
     try {
       const response = await commands.pushBranch(branch.id, provider, false);
-      pushStateStore.setPushLaunch(branch.id, response);
+      pushStateStore.setPushLaunch(branch.id, response, false);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Push failed', e);
@@ -1308,10 +1316,10 @@
     showForcePushDialog = false;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
-    pushStateStore.setPushing(branch.id, '__pending__');
+    pushStateStore.setPushing(branch.id, '__pending__', true);
     try {
       const response = await commands.pushBranch(branch.id, provider, true);
-      pushStateStore.setPushLaunch(branch.id, response);
+      pushStateStore.setPushLaunch(branch.id, response, true);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Force push failed', e);
@@ -1921,6 +1929,8 @@
           : formatBaseBranch(branch.baseBranch)}
         parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
         onRebase={rebaseAlreadyInFlight ? undefined : () => startBranchCommandPipeline('rebase')}
+        onRebaseAndForcePush={() =>
+          startBranchCommandPipeline('rebase', undefined, { thenForcePush: true })}
         rebaseDisabledReason={branchCommandDisabledReason}
         warning={branchIdentityWarning}
         {refreshingGitState}

@@ -3636,6 +3636,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // Forwarded so web mode honours "Rebase onto Origin" instead of
             // silently downgrading it to a base rebase.
             let target: Option<String> = opt_arg(&args, "target")?;
+            let then_force_push: Option<bool> = opt_arg(&args, "thenForcePush")?;
             let response = crate::prs::start_or_queue_commit_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
@@ -3644,6 +3645,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 store::PipelineKind::Rebase,
                 provider,
                 target,
+                then_force_push.unwrap_or(false),
             )
             .await?;
             Ok(serde_json::to_value(response).unwrap())
@@ -3660,6 +3662,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 store::PipelineKind::Squash,
                 provider,
                 None,
+                false,
             )
             .await?;
             Ok(serde_json::to_value(response).unwrap())

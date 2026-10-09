@@ -46,6 +46,7 @@ use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
 use crate::blox;
 use crate::git;
+use crate::pipeline_dependency::DependencyGate;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
 
@@ -1794,6 +1795,14 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                         session_type: None,
                     },
                 );
+                // A running session's cancel drains the branch, which settles
+                // anything gated on it; this write does not, so settle its
+                // dependents here.
+                if let Err(e) = crate::pipeline_dependency::skip_dependents_of_cancelled(
+                    &store, app_handle, session_id,
+                ) {
+                    log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
+                }
             }
         }
     }
@@ -3791,6 +3800,44 @@ pub async fn drain_queued_sessions(
     .await
 }
 
+/// What a queued row's dependency gate lets a start path do with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GatedQueuedStart {
+    /// No dependency, or it finished the way the row needs: start the row.
+    Proceed,
+    /// The dependency is still queued or running. The reason is user-facing.
+    Wait(String),
+    /// The dependency can never be satisfied, so the row was skipped: it is
+    /// cancelled with the reason recorded, and every client has been told.
+    Skipped,
+}
+
+/// Consult a queued row's dependency gate for a start path, skipping the row
+/// when the gate can never open.
+///
+/// Shared by the drain and "Start now" so that both skip the same way: the
+/// row is cancelled with the reason in `error_message`, and the
+/// `cancelled` status event that `skip_dependent_session` emits is what shows
+/// "Force push skipped" on every client. What `Wait` means is the caller's
+/// call — the drain stops, a forced start refuses.
+async fn gate_queued_session_start<R: tauri::Runtime>(
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+    session: &store::Session,
+) -> Result<GatedQueuedStart, String> {
+    match crate::pipeline_dependency::evaluate_dependency_gate(store, branch_id, session).await? {
+        DependencyGate::Ready => Ok(GatedQueuedStart::Proceed),
+        DependencyGate::Waiting(reason) => Ok(GatedQueuedStart::Wait(reason)),
+        DependencyGate::Unmet(reason) => {
+            crate::pipeline_dependency::skip_dependent_session(
+                store, app_handle, session, branch_id, &reason,
+            )?;
+            Ok(GatedQueuedStart::Skipped)
+        }
+    }
+}
+
 /// Start queued branch sessions while they can safely run together.
 ///
 /// This is shared by the Tauri command and backend lifecycle hooks so queue
@@ -3847,6 +3894,23 @@ pub async fn drain_queued_sessions_for_branch(
         // claim one by one on its way out.
         if crate::app_lifecycle::is_quitting(&app_handle) {
             break;
+        }
+
+        // A row gated on another session ("Rebase and force push") is asked
+        // last, since a rebase dependency's check reads the worktree.
+        match gate_queued_session_start(&store, &app_handle, &branch_id, &session).await? {
+            GatedQueuedStart::Proceed => {}
+            // The dependency is queued ahead of this row or running, so it has
+            // usually stopped the loop already. Not always: a queued dependency
+            // the schedule resolver returns `None` for is stepped over above,
+            // and stepping over its dependent too would let every row queued
+            // behind the pair start ahead of both. Stopping keeps the FIFO
+            // barrier the rest of the drain maintains, and costs nothing — a
+            // waiting row could not be started yet anyway.
+            GatedQueuedStart::Wait(_) => break,
+            // Never going to run. Cancelling it changes nothing on the branch,
+            // so the next row's pre-check decides as if it were never queued.
+            GatedQueuedStart::Skipped => continue,
         }
 
         let started = start_queued_session_for_branch(
@@ -3921,9 +3985,11 @@ pub async fn start_queued_session_now(
 ///
 /// Unlike the drain this reports refusals as errors rather than a silent
 /// `Ok(false)`: the user asked for this specific row, so "a commit is running"
-/// is something they need told. `Ok(false)` is kept for the outcome that is
-/// not a refusal — a concurrent drain started the row first — whichever side
-/// of this function's first look at the row the drain won on.
+/// is something they need told. `Ok(false)` is kept for the outcomes that are
+/// not refusals: a concurrent drain started the row first — whichever side of
+/// this function's first look at the row the drain won on — or the row's
+/// dependency can never be met and the row was skipped instead, which its
+/// own status event already reports.
 pub async fn start_queued_session_now_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -3943,6 +4009,18 @@ pub async fn start_queued_session_now_for_branch(
         ForcedStartPrecheck::AlreadyRunning => return Ok(false),
     };
     let kind = schedule.kind;
+
+    // "Start now" jumps queue order, not a dependency: a force push waiting on
+    // its rebase must not run ahead of it, or after it failed.
+    match gate_queued_session_start(&store, &app_handle, &branch_id, &session).await? {
+        GatedQueuedStart::Proceed => {}
+        GatedQueuedStart::Wait(reason) => return Err(reason),
+        // The row has left the queue, not been refused: the skip's own
+        // `cancelled` event is what tells the user ("Force push skipped"), so
+        // an `Err` here would toast the same reason a second time as "Start
+        // failed".
+        GatedQueuedStart::Skipped => return Ok(false),
+    }
 
     let started = start_queued_session_for_branch(
         store,
@@ -7320,6 +7398,116 @@ mod tests {
 
         let err = forced_start_precheck(&store, &branch.id, &session.id).unwrap_err();
         assert!(err.contains("still being set up"), "{err}");
+    }
+
+    /// A queued rebase pipeline on the branch, linked through its pending
+    /// commit like the real one, plus the force push gated on it.
+    fn create_rebase_and_gated_force_push(
+        store: &Arc<Store>,
+        branch_id: &str,
+        rebase_status: store::SessionStatus,
+    ) -> (store::Session, store::Session) {
+        let mut rebase = store::Session::new_queued("rebase");
+        rebase.pipeline =
+            Some(store::PipelineExecution::from_steps(&[]).with_kind(store::PipelineKind::Rebase));
+        store.create_session(&rebase).unwrap();
+        if rebase_status != store::SessionStatus::Queued {
+            store
+                .update_session_status(&rebase.id, rebase_status, None, None)
+                .unwrap();
+        }
+        let commit = store::Commit::new_pending(branch_id).with_session(&rebase.id);
+        store.create_commit(&commit).unwrap();
+
+        let mut push = store::Session::new_queued("force push").with_branch(branch_id);
+        push.pipeline = Some(
+            store::PipelineExecution::from_steps(&[])
+                .with_kind(store::PipelineKind::Push)
+                .with_push_force(true)
+                .with_depends_on_session_id(Some(rebase.id.clone())),
+        );
+        store.create_session(&push).unwrap();
+        (rebase, push)
+    }
+
+    /// The drain stops on `Wait` rather than stepping past the row, so the
+    /// rows behind a gated push cannot start ahead of it and its rebase. The
+    /// gate itself must leave both rows exactly as queued.
+    #[test]
+    fn gated_push_waits_while_its_rebase_is_queued_and_touches_nothing() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let (rebase, push) =
+            create_rebase_and_gated_force_push(&store, &branch.id, store::SessionStatus::Queued);
+        let app = mock_app();
+
+        let step = tauri::async_runtime::block_on(gate_queued_session_start(
+            &store,
+            app.handle(),
+            &branch.id,
+            &push,
+        ))
+        .unwrap();
+
+        assert!(matches!(step, GatedQueuedStart::Wait(_)), "{step:?}");
+        assert_eq!(
+            session_status(&store, &rebase.id),
+            store::SessionStatus::Queued
+        );
+        assert_eq!(
+            session_status(&store, &push.id),
+            store::SessionStatus::Queued
+        );
+    }
+
+    /// "Start now" on a push whose rebase was cancelled: the row is skipped
+    /// with its reason and reported as `Skipped`, which the forced start turns
+    /// into a quiet `Ok(false)` — the skip's own status event already told the
+    /// user, so there is no second toast to earn.
+    #[test]
+    fn gated_push_whose_rebase_was_cancelled_is_skipped_with_the_reason() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let (_rebase, push) =
+            create_rebase_and_gated_force_push(&store, &branch.id, store::SessionStatus::Cancelled);
+        let app = mock_app();
+
+        let step = tauri::async_runtime::block_on(gate_queued_session_start(
+            &store,
+            app.handle(),
+            &branch.id,
+            &push,
+        ))
+        .unwrap();
+
+        assert_eq!(step, GatedQueuedStart::Skipped);
+        let push = store.get_session(&push.id).unwrap().unwrap();
+        assert_eq!(push.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            push.error_message.as_deref(),
+            Some("Skipped because the rebase was cancelled.")
+        );
+        assert!(store
+            .get_queued_sessions_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn rows_without_a_dependency_proceed() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        let app = mock_app();
+
+        assert_eq!(
+            tauri::async_runtime::block_on(gate_queued_session_start(
+                &store,
+                app.handle(),
+                &branch.id,
+                &session,
+            ))
+            .unwrap(),
+            GatedQueuedStart::Proceed
+        );
     }
 
     #[test]

@@ -1,11 +1,14 @@
 <script lang="ts">
   import { fade, slide } from 'svelte/transition';
   import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import ParentBranchCommitsHover from './ParentBranchCommitsHover.svelte';
-  import { Button } from '$lib/components/ui/button';
+  import { Button, buttonVariants } from '$lib/components/ui/button';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { cn } from '$lib/components/utils';
   import type { ProjectRepo } from '../../types';
 
   interface Props {
@@ -15,6 +18,9 @@
     baseBranch?: string | null;
     parentAheadCount?: number;
     onRebase?: () => void;
+    /** Rebase, then force push once the rebase succeeds. Offered from the menu
+     *  joined to the Rebase button; shares its disabled state. */
+    onRebaseAndForcePush?: () => void;
     /** Why the visible Rebase button can't run right now, shown as its tooltip.
      *  Callers withhold `onRebase` instead when the button shouldn't be offered
      *  at all. */
@@ -31,6 +37,7 @@
     baseBranch = null,
     parentAheadCount = 0,
     onRebase,
+    onRebaseAndForcePush,
     rebaseDisabledReason = null,
     warning = null,
     refreshingGitState = false,
@@ -68,19 +75,49 @@
       {@render capsule()}
     {/if}
     {#if parentAheadCount > 0 && onRebase}
-      <span
-        class="inline-flex"
-        title={rebaseDisabledReason ??
-          'Rebase onto parent. Merge commits are linearised: pure automatic merges are dropped, and hand edits made inside a merge are kept as their own commit.'}
-        transition:slide={{ axis: 'x', duration: 150 }}
-      >
-        <Button
-          variant="outline"
-          size="xs"
-          disabled={!!rebaseDisabledReason}
-          onclick={onRebase}
-          class="h-[22px]">Rebase</Button
+      <span class="inline-flex" transition:slide={{ axis: 'x', duration: 150 }}>
+        <span
+          class="inline-flex"
+          title={rebaseDisabledReason ??
+            'Rebase onto parent. Merge commits are linearised: pure automatic merges are dropped, and hand edits made inside a merge are kept as their own commit.'}
         >
+          <Button
+            variant="outline"
+            size="xs"
+            disabled={!!rebaseDisabledReason}
+            onclick={onRebase}
+            class={cn('h-[22px]', onRebaseAndForcePush && 'rounded-r-none')}>Rebase</Button
+          >
+        </span>
+        {#if onRebaseAndForcePush}
+          <!-- Joined to the Rebase button: the chevron shares its outline and
+               height, with the touching corners squared and the border
+               overlapped so the pair reads as one control. The title sits on
+               a wrapping span, as on the Rebase button, because browsers
+               don't reliably show tooltips on a disabled element. -->
+          <DropdownMenu.Root>
+            <span class="inline-flex -ml-px" title={rebaseDisabledReason ?? 'More rebase options'}>
+              <DropdownMenu.Trigger
+                class={cn(
+                  buttonVariants({ variant: 'outline', size: 'xs' }),
+                  'h-[22px] w-[18px] rounded-l-none px-0'
+                )}
+                disabled={!!rebaseDisabledReason}
+                aria-label="More rebase options"
+              >
+                <ChevronDown size={12} />
+              </DropdownMenu.Trigger>
+            </span>
+            <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
+              <DropdownMenu.Item
+                title="Rebase onto parent, then force push the rewritten branch to origin once the rebase succeeds."
+                onSelect={() => onRebaseAndForcePush()}
+              >
+                Rebase and force push
+              </DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu.Root>
+        {/if}
       </span>
     {/if}
   {/if}

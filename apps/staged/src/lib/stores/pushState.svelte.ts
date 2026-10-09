@@ -28,6 +28,11 @@ interface BranchPushState {
   sessionId: string | null;
   error: string | null;
   rejectedNonFastForward: boolean;
+  /**
+   * Whether the push this entry follows is a force push. Kept through
+   * queued → pushing → error so "Retry" re-runs the same operation.
+   */
+  force: boolean;
   timestamp: number; // Track when state was last updated
 }
 
@@ -61,28 +66,67 @@ class PushStateStore {
     }
   }
 
-  setPushing(branchId: string, sessionId: string): void {
+  setPushing(branchId: string, sessionId: string, force: boolean): void {
     this.maybeCleanup();
     this.states.set(branchId, {
       state: 'pushing',
       sessionId,
       error: null,
       rejectedNonFastForward: false,
+      force,
       timestamp: Date.now(),
     });
     this.version++;
   }
 
-  setPushQueued(branchId: string, sessionId: string): void {
+  setPushQueued(branchId: string, sessionId: string, force: boolean): void {
     this.maybeCleanup();
     this.states.set(branchId, {
       state: 'queued',
       sessionId,
       error: null,
       rejectedNonFastForward: false,
+      force,
       timestamp: Date.now(),
     });
     this.version++;
+  }
+
+  /**
+   * Adopt a push the backend reports on this branch, unless the chip already
+   * follows a push in flight.
+   *
+   * Two kinds of push reach the chip this way rather than through a launch
+   * site: the force push "Rebase and force push" queues on the user's behalf,
+   * and pushes this client never launched (found in the active-session
+   * snapshot after a reload or reconnect, or started by another client).
+   *
+   * A push already queued or running on the branch keeps the chip, including
+   * the `'__pending__'` launch sentinel: replacing it would leave that push's
+   * completion events matching nothing, so the chip would never clear.
+   * Re-reporting the push the chip already follows (a repeat click dedupes
+   * onto the same queued row) changes nothing either.
+   */
+  trackPushIfIdle(
+    branchId: string,
+    sessionId: string,
+    state: 'queued' | 'pushing',
+    force: boolean
+  ): void {
+    if (this.isPushInFlight(branchId)) {
+      return;
+    }
+    if (state === 'queued') {
+      this.setPushQueued(branchId, sessionId, force);
+    } else {
+      this.setPushing(branchId, sessionId, force);
+    }
+  }
+
+  /** Whether the chip follows a queued or running push on this branch. */
+  isPushInFlight(branchId: string): boolean {
+    const state = this.states.get(branchId)?.state;
+    return state === 'queued' || state === 'pushing';
   }
 
   /**
@@ -92,11 +136,11 @@ class PushStateStore {
    * push entry points route their response through here rather than predicting
    * it from the timeline.
    */
-  setPushLaunch(branchId: string, response: BranchPipelineResponse): void {
+  setPushLaunch(branchId: string, response: BranchPipelineResponse, force: boolean): void {
     if (response.sessionStatus === 'queued') {
-      this.setPushQueued(branchId, response.sessionId);
+      this.setPushQueued(branchId, response.sessionId, force);
     } else {
-      this.setPushing(branchId, response.sessionId);
+      this.setPushing(branchId, response.sessionId, force);
     }
   }
 
@@ -111,7 +155,7 @@ class PushStateStore {
     if (existing?.state !== 'queued' || existing.sessionId !== sessionId) {
       return;
     }
-    this.setPushing(branchId, sessionId);
+    this.setPushing(branchId, sessionId, existing.force);
   }
 
   setPushDone(branchId: string): void {
@@ -121,11 +165,13 @@ class PushStateStore {
       sessionId: null,
       error: null,
       rejectedNonFastForward: false,
+      force: false,
       timestamp: Date.now(),
     });
     this.version++;
   }
 
+  /** Keeps the failed push's `force`, so a retry repeats it. */
   setPushError(branchId: string, error: string, rejectedNonFastForward = false): void {
     this.maybeCleanup();
     const existing = this.states.get(branchId);
@@ -134,6 +180,7 @@ class PushStateStore {
       sessionId: existing?.sessionId ?? null,
       error,
       rejectedNonFastForward,
+      force: existing?.force ?? false,
       timestamp: Date.now(),
     });
     this.version++;

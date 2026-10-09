@@ -48,8 +48,13 @@ export interface MergedSinceMessages {
  * overlapped this one may already have extended `existing` past it, and
  * cutting the last row alone would duplicate the rows both fetches returned.
  * When that happens the tail may also end before the cached one (the older
- * fetch landed last); the cached rows it does not reach are kept rather than
+ * fetch landed last); the cached rows past its last id are kept rather than
  * dropped until a next tick that, after the final poll, never comes.
+ *
+ * That is as far as the merge can go: for a row both the cache and the fetch
+ * hold it cannot tell which copy is newer, so it relies on the pane
+ * serialising since-fetches (`pollInFlight` / `finalPollPending`) and is not
+ * a full defence against out-of-order fetches.
  */
 export function mergeSinceMessages(
   existing: readonly SessionMessage[],
@@ -77,7 +82,7 @@ export function mergeSinceMessages(
       const base = next ?? existing;
       const previousTail = existing[existing.length - 1];
       const tailEnd = tail[tail.length - 1].id;
-      const kept = previousTail && tailEnd < previousTail.id ? base.slice(cut + tail.length) : [];
+      const kept = base.slice(cut).filter((m) => m.id > tailEnd);
       next = [...base.slice(0, cut), ...tail, ...kept];
       appended = !previousTail || tailEnd > previousTail.id;
     }

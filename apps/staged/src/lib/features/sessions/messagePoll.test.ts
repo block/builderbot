@@ -165,6 +165,23 @@ describe('mergeSinceMessages', () => {
     expect(merged!.messages[3]).toBe(existing[3]);
   });
 
+  it('neither duplicates nor revives a cached row the fetched tail skips', () => {
+    // Row 6 was cached but is absent from the tail (e.g. it no longer passes
+    // the visible-message filter). A positional keep would re-keep row 7.
+    const existing = [
+      message(4, 'user', 'hi'),
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const updated = [message(5, 'assistant', 'The end'), message(7, 'tool_result', 'ok')];
+    const merged = mergeSinceMessages(existing, updated, 5);
+
+    expect(merged!.appended).toBe(false);
+    expect(merged!.messages.map((m) => m.id)).toEqual([4, 5, 7]);
+    expect(merged!.messages[0]).toBe(existing[0]);
+  });
+
   it('does not report a stale-cursor update that ends at the cached tail as appended', () => {
     const existing = [message(5, 'assistant', 'The'), message(6, 'tool_call', 'Read')];
     const updated = [message(5, 'assistant', 'The end'), message(6, 'tool_call', 'Read')];

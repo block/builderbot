@@ -4156,8 +4156,11 @@ impl AcpNotificationHandler {
                 metadata,
             } => {
                 // Keep the streamed text: the next chunk decides whether this
-                // call ended the message or interrupted it.
-                response.interrupted |= !response.text.is_empty();
+                // call ended the message or interrupted it. Marked
+                // unconditionally, like the writer's own flag in
+                // `record_tool_call`: with an empty buffer there is no message
+                // id to match, so the next chunk just closes nothing.
+                response.interrupted = true;
                 self.writer
                     .record_tool_call(&id, &title, raw_input.as_ref())
                     .await;

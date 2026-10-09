@@ -8,8 +8,9 @@ pub(super) struct ResponseState {
     pub(super) text: String,
     /// Provider ACP message id of the chunk last appended to `text`.
     pub(super) message_id: Option<String>,
-    /// A tool call arrived after `text` was streamed; the next chunk either
-    /// resumes that message (same id) or starts a new one.
+    /// A tool call arrived since `text` was last extended (even when it is
+    /// empty); the next chunk either resumes that message (same id) or starts
+    /// a new one.
     pub(super) interrupted: bool,
     pub(super) completed: bool,
     fallback: String,
@@ -84,10 +85,16 @@ impl ResponseState {
         let final_text = message["result"].as_str().unwrap_or_default();
         // A result is the final assistant text, not necessarily all text in the
         // turn. Require agreement with streamed output before accepting it.
-        let missing = if final_text.is_empty() || self.text.ends_with(final_text) {
-            ""
+        let (missing, extends_buffer) = if final_text.is_empty() || self.text.ends_with(final_text)
+        {
+            ("", false)
         } else if let Some(suffix) = final_text.strip_prefix(&self.text) {
-            suffix
+            (suffix, true)
+        } else if self.interrupted {
+            // A tool call ended the buffered message and nothing came after
+            // it; the result is text that was never streamed, as when the
+            // buffer is empty.
+            (final_text, false)
         } else {
             // This boundary cannot certify the buffered text. Retire it so a
             // later result with no intervening output cannot accept it either.
@@ -95,13 +102,18 @@ impl ResponseState {
             return Ok(());
         };
         if successful && !missing.is_empty() {
+            let mut chunk = ContentChunk::new(AcpContentBlock::Text(TextContent::new(missing)));
+            // A suffix continues the buffered message, so it carries that
+            // message's id: if a tool call interrupted it, the chunk resumes
+            // the same row instead of opening a new one.
+            if extends_buffer {
+                chunk.message_id = self.message_id.clone().map(Into::into);
+            }
             handler
                 .session_notification_inner(
                     SessionNotification::new(
                         self.session_id.clone().expect("active prompt"),
-                        SessionUpdate::AgentMessageChunk(ContentChunk::new(AcpContentBlock::Text(
-                            TextContent::new(missing),
-                        ))),
+                        SessionUpdate::AgentMessageChunk(chunk),
                     ),
                     self,
                 )

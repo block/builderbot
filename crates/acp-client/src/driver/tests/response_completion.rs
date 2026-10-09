@@ -6,20 +6,56 @@ use std::task::Poll;
 
 const ARTIFACT: &str = "complete artifact with next steps";
 
+#[derive(Debug, Clone, PartialEq)]
+enum RowFlow {
+    Append(String),
+    Finalize,
+    Resume,
+}
+
+/// `text` is the open assistant row. Like the app's writer, a tool call only
+/// marks that row interrupted: the next append closes it unless the driver
+/// resumes it first.
 #[derive(Default)]
 struct ArtifactWriter {
     text: Mutex<String>,
+    interrupted: Mutex<bool>,
+    flow: Mutex<Vec<RowFlow>>,
     metadata: Mutex<Vec<super::super::AcpEventMetadata>>,
     acceptance_checks: std::sync::atomic::AtomicUsize,
+}
+
+impl ArtifactWriter {
+    fn flow(&self) -> Vec<RowFlow> {
+        self.flow.lock().unwrap().clone()
+    }
+
+    fn recorded_result(&self) -> bool {
+        self.metadata
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.event_kind.as_deref() == Some("response_result"))
+    }
 }
 
 #[async_trait::async_trait]
 impl MessageWriter for ArtifactWriter {
     async fn append_text(&self, text: &str) {
+        if std::mem::take(&mut *self.interrupted.lock().unwrap()) {
+            self.finalize().await;
+        }
+        self.flow.lock().unwrap().push(RowFlow::Append(text.into()));
         self.text.lock().unwrap().push_str(text);
     }
     async fn finalize(&self) {
+        self.flow.lock().unwrap().push(RowFlow::Finalize);
         self.text.lock().unwrap().clear();
+        *self.interrupted.lock().unwrap() = false;
+    }
+    async fn resume_interrupted_text(&self) {
+        self.flow.lock().unwrap().push(RowFlow::Resume);
+        *self.interrupted.lock().unwrap() = false;
     }
     async fn record_acp_event_metadata(&self, metadata: super::super::AcpEventMetadata) {
         self.metadata.lock().unwrap().push(metadata);
@@ -29,7 +65,9 @@ impl MessageWriter for ArtifactWriter {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         *self.text.lock().unwrap() == ARTIFACT
     }
-    async fn record_tool_call(&self, _: &str, _: &str, _: Option<&serde_json::Value>) {}
+    async fn record_tool_call(&self, _: &str, _: &str, _: Option<&serde_json::Value>) {
+        *self.interrupted.lock().unwrap() = true;
+    }
     async fn update_tool_call_title(
         &self,
         _: &str,
@@ -519,12 +557,105 @@ async fn subagent_tool_call_mid_message_does_not_split_result_certification() {
             .borrow()
             .finish_requested
     );
-    assert!(writer
-        .metadata
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|event| event.event_kind.as_deref() == Some("response_result")));
+    assert!(writer.recorded_result());
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("complete artifact".into()),
+            RowFlow::Resume,
+            RowFlow::Append(" with next steps".into()),
+        ]
+    );
+}
+
+fn artifact_handler(writer: &Arc<ArtifactWriter>) -> Arc<AcpNotificationHandler> {
+    Arc::new(AcpNotificationHandler::new(
+        writer.clone(),
+        false,
+        vec![],
+        CancellationToken::new(),
+    ))
+}
+
+fn finish_requested(handler: &AcpNotificationHandler) -> bool {
+    handler
+        .subscribe_background_activity()
+        .borrow()
+        .finish_requested
+}
+
+#[tokio::test]
+async fn result_after_a_tool_call_ended_the_message_lands_in_a_new_row() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "working")).await;
+    feed(&handler, tool_call_notification("call-1")).await;
+    // The final message was never streamed; the result alone carries it.
+    feed_sdk_frame(&handler, successful_result("ended", ARTIFACT)).await;
+
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("working".into()),
+            RowFlow::Finalize,
+            RowFlow::Append(ARTIFACT.into()),
+        ]
+    );
+    assert!(writer.recorded_result());
+    assert!(finish_requested(&handler));
+}
+
+#[tokio::test]
+async fn result_extending_an_interrupted_message_resumes_its_row() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "complete artifact")).await;
+    feed(&handler, tool_call_notification("subagent-grep")).await;
+    feed_sdk_frame(&handler, successful_result("extends", ARTIFACT)).await;
+
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("complete artifact".into()),
+            RowFlow::Resume,
+            RowFlow::Append(" with next steps".into()),
+        ]
+    );
+    assert_eq!(handler.response.lock().await.text, ARTIFACT);
+    assert!(writer.recorded_result());
+    assert!(finish_requested(&handler));
+}
+
+#[tokio::test]
+async fn unsuccessful_result_after_an_interrupted_message_is_still_recorded() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "working")).await;
+    feed(&handler, tool_call_notification("call-1")).await;
+    let mut result = successful_result("max-turns", ARTIFACT);
+    result["subtype"] = "error_max_turns".into();
+    result["is_error"] = true.into();
+    feed_sdk_frame(&handler, result).await;
+
+    assert_eq!(writer.flow(), vec![RowFlow::Append("working".into())]);
+    assert!(writer.recorded_result());
+    assert!(!finish_requested(&handler));
+}
+
+#[tokio::test]
+async fn mismatched_result_without_a_tool_call_certifies_nothing() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "working")).await;
+    feed_sdk_frame(&handler, successful_result("mismatch", ARTIFACT)).await;
+
+    assert_eq!(writer.flow(), vec![RowFlow::Append("working".into())]);
+    assert!(!writer.recorded_result());
+    assert!(!finish_requested(&handler));
 }
 
 #[tokio::test]

@@ -681,9 +681,19 @@ fn with_follow_up_force_push_locked(
 /// keeps the branch busy with nothing to drain it. This runs under the same
 /// launch lock and before the row is announced, so no client has seen the
 /// rebase running when it is failed.
-fn with_follow_up_force_push_or_fail_rebase_locked(
+///
+/// The failure goes through [`session_runner::finish_failed_before_run`], so
+/// the `error` status event is emitted the way every other pre-run failure
+/// emits it. The requesting client only toasts the returned error; without the
+/// event, the pending commit stub the rebase insert created would show as
+/// failed on every client only after the next unrelated timeline refresh.
+/// Nothing is drained on this path: the branch was idle when the rebase row
+/// went in, and the lock held since then kept it that way.
+fn with_follow_up_force_push_or_fail_rebase_locked<R: tauri::Runtime>(
     store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
     branch_id: &str,
+    project_id: &str,
     provider: Option<&str>,
     rebase_session_id: &str,
     then_force_push: bool,
@@ -696,16 +706,17 @@ fn with_follow_up_force_push_or_fail_rebase_locked(
         then_force_push,
     );
     if let Err(reason) = &result {
-        if let Err(e) = store.transition_from_running(
+        // The row was inserted under this lock and never announced, so no
+        // Stop can have taken it first; the transition is expected to win,
+        // and there is no queue to drain whichever way it goes.
+        let _ = session_runner::finish_failed_before_run(
             rebase_session_id,
-            store::SessionStatus::Error,
-            Some(reason),
-            None,
-        ) {
-            log::error!(
-                "Failed to mark rebase session {rebase_session_id} errored after its force push could not be queued: {e}"
-            );
-        }
+            Some(branch_id.to_string()),
+            Some(project_id.to_string()),
+            store,
+            app_handle,
+            reason,
+        );
     }
     result
 }
@@ -828,7 +839,9 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
         // push is queued before the rebase can possibly finish.
         let response = with_follow_up_force_push_or_fail_rebase_locked(
             &store,
+            &app_handle,
             &branch_id,
+            &ctx.branch.project_id,
             provider.as_deref(),
             &running.session_id,
             then_force_push,
@@ -2614,11 +2627,29 @@ mod tests {
         );
     }
 
+    /// A mock app whose web broadcast channel is managed, so a test can read
+    /// back exactly what `emit_to_all` sent to browser clients.
+    fn mock_app_with_web_events() -> (
+        tauri::App<tauri::test::MockRuntime>,
+        tokio::sync::broadcast::Receiver<crate::web_server::WebEvent>,
+    ) {
+        use tauri::Manager;
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app");
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::web_server::WebEvent>(8);
+        app.manage(tx);
+        (app, rx)
+    }
+
     /// The running rebase row goes in before its push, so a push insert that
-    /// fails must not leave a `running` rebase nobody is running.
+    /// fails must not leave a `running` rebase nobody is running — and every
+    /// client must hear about the failure, since the requesting one only
+    /// toasts the error and nobody else would otherwise refresh the timeline.
     #[test]
     fn running_rebase_is_failed_when_its_push_cannot_be_queued() {
         let (store, branch) = setup_branch_store();
+        let (app, mut web_events) = mock_app_with_web_events();
         let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
         let running = insert_running_commit_pipeline_session(
             &store,
@@ -2634,7 +2665,9 @@ mod tests {
         // store failure after the rebase row already exists.
         let err = with_follow_up_force_push_or_fail_rebase_locked(
             &store,
+            app.handle(),
             "missing-branch",
+            &branch.project_id,
             None,
             &running.session_id,
             true,
@@ -2650,8 +2683,19 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        // The same terminal event the dead-session sweep would have emitted,
+        // so timelines invalidate now rather than on the next refresh.
+        let event = web_events.try_recv().expect("the failure is announced");
+        assert_eq!(event.event_name, "session-status-changed");
+        let payload: serde_json::Value = serde_json::from_str(&event.payload).unwrap();
+        assert_eq!(payload["payload"]["sessionId"], running.session_id);
+        assert_eq!(payload["payload"]["status"], "error");
+        assert_eq!(payload["payload"]["errorMessage"], err);
+        assert_eq!(payload["payload"]["branchId"], "missing-branch");
+        assert_eq!(payload["payload"]["projectId"], branch.project_id);
+
         // Without a push to queue there is nothing that can fail, and the
-        // rebase is left running for the runner.
+        // rebase is left running for the runner, with nothing announced.
         let running = insert_running_commit_pipeline_session(
             &store,
             &pipeline_context(&branch),
@@ -2663,7 +2707,9 @@ mod tests {
         .unwrap();
         with_follow_up_force_push_or_fail_rebase_locked(
             &store,
+            app.handle(),
             "missing-branch",
+            &branch.project_id,
             None,
             &running.session_id,
             false,
@@ -2677,6 +2723,7 @@ mod tests {
                 .status,
             store::SessionStatus::Running
         );
+        assert!(web_events.try_recv().is_err());
     }
 
     #[test]

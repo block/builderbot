@@ -867,6 +867,27 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(pushStateStore.clearPushState).not.toHaveBeenCalled();
     });
 
+    it('invalidates the timeline without treating the never-run row as an unknown session', async () => {
+      await listen();
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'push-1',
+        status: 'cancelled',
+        errorMessage: skipReason,
+        branchId: 'branch-1',
+        sessionType: 'push',
+      });
+
+      // The skip is the row's whole lifecycle: it was never running, so it was
+      // never registered, and the generic end-of-session path has nothing to
+      // look up or clean up — only a spurious warning to log.
+      expect(invalidateBranchTimeline).toHaveBeenCalledWith('branch-1');
+      expect(consoleWarn).not.toHaveBeenCalled();
+      expect(sessionRegistry.cleanupSession).not.toHaveBeenCalled();
+      expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+    });
+
     it('ignores ordinary cancellations, which carry no session type', async () => {
       await listen();
       pushStateStore.states.set('branch-1', { state: 'queued', sessionId: 'push-1' });

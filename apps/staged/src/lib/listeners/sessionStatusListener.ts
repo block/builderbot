@@ -120,7 +120,10 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
       invalidateBranchTimeline(eventBranchId);
     }
     if (status === 'cancelled' && sessionType === 'push' && errorMessage && eventBranchId) {
+      // A skipped push never ran, so it was never registered: handleSessionEnd
+      // would only warn about an unknown session and clean up nothing.
       handleSkippedPush(sessionId, eventBranchId, errorMessage);
+      return;
     }
     handleSessionEnd(sessionId, status, errorMessage);
   }
@@ -362,9 +365,9 @@ function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage
  * fails, is cancelled, or ends without finishing, the branch drain cancels the
  * push with the reason as its `errorMessage` (see `pipeline_dependency.rs`).
  * Only that skip emits a terminal event typed `push`, and the row never ran,
- * so it was never in the session registry and `handleSessionEnd` can't
- * recognise it. Every client renders the same toast; the push chip is only
- * cleared where it tracks this session.
+ * so it was never in the session registry and `handleSessionEnd` is bypassed
+ * for it. Every client renders the same toast; the push chip is only cleared
+ * where it tracks this session.
  */
 function handleSkippedPush(sessionId: string, branchId: string, reason: string) {
   if (pushStateStore.getSessionId(branchId) === sessionId) {

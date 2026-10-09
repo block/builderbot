@@ -1578,10 +1578,60 @@ fn test_session_messages() {
     assert_eq!(all[1].role, MessageRole::Assistant);
 
     // Test since (inclusive — re-fetches id1 plus anything after it)
-    let since = store.get_session_messages_since(&session.id, id1).unwrap();
+    let since = store
+        .get_session_messages_since(&session.id, id1, &[])
+        .unwrap();
     assert_eq!(since.len(), 2);
     assert_eq!(since[0].id, id1);
     assert_eq!(since[1].id, id2);
+}
+
+#[test]
+fn test_session_messages_since_refetches_open_assistant_row() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let assistant_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "The")
+        .unwrap();
+    let tool_call_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read file")
+        .unwrap();
+    let tool_result_id = store
+        .add_session_message(&session.id, MessageRole::ToolResult, "contents")
+        .unwrap();
+    let hidden_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("session_info_update".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // The writer keeps extending the assistant row behind the tool rows.
+    store
+        .update_message_content(assistant_id, "The search is back")
+        .unwrap();
+
+    let tail_only = store
+        .get_session_messages_since(&session.id, tool_call_id, &[])
+        .unwrap();
+    assert_eq!(
+        tail_only.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![tool_call_id, tool_result_id]
+    );
+
+    let with_refetch = store
+        .get_session_messages_since(&session.id, tool_call_id, &[assistant_id, hidden_id])
+        .unwrap();
+    assert_eq!(
+        with_refetch.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![assistant_id, tool_call_id, tool_result_id]
+    );
+    assert_eq!(with_refetch[0].content, "The search is back");
 }
 
 #[test]

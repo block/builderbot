@@ -3026,8 +3026,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
             let since_id: i64 = arg(&args, "sinceId")?;
+            // Optional so an older frontend bundle keeps working against a
+            // newer server.
+            let refetch_ids: Vec<i64> = opt_arg(&args, "refetchIds")?.unwrap_or_default();
             let messages = store
-                .get_session_messages_since(&session_id, since_id)
+                .get_session_messages_since(&session_id, since_id, &refetch_ids)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(messages).unwrap())
         }

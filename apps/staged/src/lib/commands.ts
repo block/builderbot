@@ -959,11 +959,16 @@ export function getFreshSessionMessages(sessionId: string): Promise<SessionMessa
   return invokeCommand('get_session_messages', { sessionId });
 }
 
+/**
+ * Visible messages with id >= sinceId plus fresh copies of refetchIds — an
+ * assistant row the writer may still be extending behind later tool rows.
+ */
 export function getSessionMessagesSince(
   sessionId: string,
-  sinceId: number
+  sinceId: number,
+  refetchIds: number[] = []
 ): Promise<SessionMessage[]> {
-  return invokeCommand('get_session_messages_since', { sessionId, sinceId });
+  return invokeCommand('get_session_messages_since', { sessionId, sinceId, refetchIds });
 }
 
 export function getSessionAcpMetadataMessages(sessionId: string): Promise<SessionMessage[]> {

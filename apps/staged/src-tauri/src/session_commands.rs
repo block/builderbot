@@ -1143,9 +1143,10 @@ pub fn get_session_messages_since(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
     since_id: i64,
+    refetch_ids: Vec<i64>,
 ) -> Result<Vec<store::SessionMessage>, String> {
     get_store(&store)?
-        .get_session_messages_since(&session_id, since_id)
+        .get_session_messages_since(&session_id, since_id, &refetch_ids)
         .map_err(|e| e.to_string())
 }
 

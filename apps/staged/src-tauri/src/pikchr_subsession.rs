@@ -389,7 +389,7 @@ fn latest_assistant_reply_since(
     since_id: i64,
 ) -> Result<String, GenerationError> {
     store
-        .get_session_messages_since(session_id, since_id)
+        .get_session_messages_since(session_id, since_id, &[])
         .map_err(|e| GenerationError::Failed(format!("Failed to load Pikchr assistant reply: {e}")))
         .map(|messages| {
             messages

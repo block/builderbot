@@ -104,6 +104,7 @@
     statusEventSupersededLoad,
     type SessionBackgroundHold,
   } from './backgroundHold';
+  import { mergeSinceMessages, openAssistantRefetchIds } from './messagePoll';
   import {
     buildBranchHashtagItems,
     findHashtagItemForReference,
@@ -720,6 +721,9 @@
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
         stopPolling();
+        // Teardown writes the final text of an open assistant row just before
+        // the status flips, which the last interval tick may have missed.
+        void poll();
       }
     });
     unlistenStatus = unlisten;
@@ -940,19 +944,19 @@
           scrollToBottomIfNear(true);
         }
       } else {
+        // An assistant row interrupted by a mid-message tool call keeps
+        // growing behind the tool rows, so it is re-requested by id too.
         const lastId = messages[messages.length - 1].id;
         const [updated, acpUpdates] = await Promise.all([
-          getSessionMessagesSince(sessionId, lastId),
+          getSessionMessagesSince(sessionId, lastId, openAssistantRefetchIds(messages)),
           getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
         ]);
         if (closed) return;
         applyAcpMetadataUpdates(acpUpdates);
-        if (updated.length > 0 && !isUnchangedTail(updated, lastId)) {
-          const prev = messages.slice(0, -1);
-          messages = [...prev, ...updated];
-          if (updated.length > 1 || updated[0].id !== lastId) {
-            scrollToBottomIfNear(true);
-          }
+        const merged = mergeSinceMessages(messages, updated, lastId);
+        if (merged) {
+          messages = merged.messages;
+          if (merged.appended) scrollToBottomIfNear(true);
         }
       }
 
@@ -987,18 +991,6 @@
     }
     if (!changed) return;
     acpMetadataMessages = [...byId.values()].sort((a, b) => a.id - b.id);
-  }
-
-  /** Whether the since-fetch returned only an identical copy of the last
-   *  known message. Content is compared separately so the common streaming
-   *  case (the tail grew) skips the JSON pass over the metadata fields. */
-  function isUnchangedTail(updated: SessionMessage[], lastId: number): boolean {
-    if (updated.length !== 1 || updated[0].id !== lastId) return false;
-    const current = messages[messages.length - 1];
-    if (updated[0].content !== current.content) return false;
-    return (
-      JSON.stringify({ ...updated[0], content: '' }) === JSON.stringify({ ...current, content: '' })
-    );
   }
 
   async function refreshQueuedMessages() {

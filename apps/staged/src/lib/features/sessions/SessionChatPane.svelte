@@ -104,6 +104,7 @@
     statusEventSupersededLoad,
     type SessionBackgroundHold,
   } from './backgroundHold';
+  import { mergeSinceMessages, openAssistantRefetchIds } from './messagePoll';
   import {
     buildBranchHashtagItems,
     findHashtagItemForReference,
@@ -228,6 +229,9 @@
   let inputEl: HTMLElement | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
+  /** A terminal status arrived while a tick was in flight; poll once more
+   *  when that tick settles. */
+  let finalPollPending = false;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenBackgroundHold: UnlistenFn | null = null;
   let statusEventVersion = 0;
@@ -719,7 +723,7 @@
       } else {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
-        stopPolling();
+        finishPolling();
       }
     });
     unlistenStatus = unlisten;
@@ -940,19 +944,19 @@
           scrollToBottomIfNear(true);
         }
       } else {
+        // An assistant row interrupted by a mid-message tool call keeps
+        // growing behind the tool rows, so it is re-requested by id too.
         const lastId = messages[messages.length - 1].id;
         const [updated, acpUpdates] = await Promise.all([
-          getSessionMessagesSince(sessionId, lastId),
+          getSessionMessagesSince(sessionId, lastId, openAssistantRefetchIds(messages)),
           getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
         ]);
         if (closed) return;
         applyAcpMetadataUpdates(acpUpdates);
-        if (updated.length > 0 && !isUnchangedTail(updated, lastId)) {
-          const prev = messages.slice(0, -1);
-          messages = [...prev, ...updated];
-          if (updated.length > 1 || updated[0].id !== lastId) {
-            scrollToBottomIfNear(true);
-          }
+        const merged = mergeSinceMessages(messages, updated, lastId);
+        if (merged) {
+          messages = merged.messages;
+          if (merged.appended) scrollToBottomIfNear(true);
         }
       }
 
@@ -960,12 +964,16 @@
       // a fresh running event while this poll is in flight; that event is
       // fresher than this status fetch and keeps polling alive.
       if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
-        stopPolling();
+        clearPollTimer();
       }
     } catch {
       // Polling errors are expected during shutdown — silently ignore
     } finally {
       pollInFlight = false;
+      if (finalPollPending) {
+        finalPollPending = false;
+        void poll();
+      }
     }
   }
 
@@ -989,18 +997,6 @@
     acpMetadataMessages = [...byId.values()].sort((a, b) => a.id - b.id);
   }
 
-  /** Whether the since-fetch returned only an identical copy of the last
-   *  known message. Content is compared separately so the common streaming
-   *  case (the tail grew) skips the JSON pass over the metadata fields. */
-  function isUnchangedTail(updated: SessionMessage[], lastId: number): boolean {
-    if (updated.length !== 1 || updated[0].id !== lastId) return false;
-    const current = messages[messages.length - 1];
-    if (updated[0].content !== current.content) return false;
-    return (
-      JSON.stringify({ ...updated[0], content: '' }) === JSON.stringify({ ...current, content: '' })
-    );
-  }
-
   async function refreshQueuedMessages() {
     if (!sessionId || closed) return;
     try {
@@ -1018,12 +1014,40 @@
     pollTimer = setInterval(poll, 500);
   }
 
+  /** Abandon polling: the pane is closing or switching session. */
   function stopPolling() {
+    clearPollTimer();
+    pollInFlight = false;
+    finalPollPending = false;
+  }
+
+  /**
+   * Stop the interval and poll once more. Teardown writes the final text of an
+   * open assistant row just before the status flips, which the last interval
+   * tick may have missed. A tick still in flight read the same cursor this
+   * poll would, and the two merges would duplicate the rows both fetched, so
+   * the final poll is deferred until that tick settles instead.
+   *
+   * `pollInFlight` is left alone: it belongs to the tick's `finally`. Resetting
+   * it here would reopen the guard while that tick is still awaiting, and a
+   * `startPolling()` in the gap (a queue-drain running event right after the
+   * terminal status, or a send) could run a tick concurrently against the
+   * same cursor.
+   */
+  function finishPolling() {
+    clearPollTimer();
+    if (pollInFlight) {
+      finalPollPending = true;
+    } else {
+      void poll();
+    }
+  }
+
+  function clearPollTimer() {
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
-    pollInFlight = false;
   }
 
   // =========================================================================

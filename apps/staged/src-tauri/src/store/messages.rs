@@ -461,25 +461,44 @@ impl Store {
         Ok(count)
     }
 
-    /// Get messages with id >= since_id (inclusive — re-fetches the last known
-    /// message so the caller picks up streaming content updates).
+    /// Get messages with id >= since_id, plus fresh copies of `refetch_ids`.
+    ///
+    /// The inclusive `>=` re-fetches the last known message so the caller
+    /// picks up streaming content updates to the tail. `refetch_ids` covers an
+    /// assistant row the message writer is still extending behind later
+    /// tool-call rows (a mid-message tool call interrupts but does not close
+    /// it), which the tail re-fetch can no longer reach.
     pub fn get_session_messages_since(
         &self,
         session_id: &str,
         since_id: i64,
+        refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        let refetch_placeholders = refetch_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id_filter = if refetch_ids.is_empty() {
+            "id >= ?".to_string()
+        } else {
+            format!("(id >= ? OR id IN ({refetch_placeholders}))")
+        };
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
              FROM session_messages
-             WHERE session_id = ?1
-               AND id >= ?2
+             WHERE session_id = ?
+               AND {id_filter}
                AND {VISIBLE_MESSAGE_FILTER}
              ORDER BY id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![session_id, since_id], session_message_from_row)?;
-        let result: Vec<SessionMessage> = rows.collect::<Result<Vec<_>, _>>()?;
-        Ok(result)
+        let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![&session_id, &since_id];
+        for id in refetch_ids {
+            query_params.push(id);
+        }
+        let rows = stmt.query_map(&query_params[..], session_message_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

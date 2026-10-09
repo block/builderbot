@@ -85,6 +85,16 @@ pub trait MessageWriter: Send + Sync {
         raw_input: Option<&serde_json::Value>,
     );
 
+    /// Reopen the assistant message the latest tool call(s) interrupted, so
+    /// the next [`MessageWriter::append_text`] extends it rather than starting
+    /// a new block.
+    ///
+    /// Called just before appending a chunk that carries the same ACP message
+    /// id as the text streamed before the tool call: the call landed
+    /// mid-message (a background subagent's, typically) rather than ending it.
+    /// Writers that close the message at every tool call can ignore this.
+    async fn resume_interrupted_text(&self) {}
+
     /// Update a previously recorded tool call's title and/or raw input.
     ///
     /// When `title` is `None`, the implementation should preserve the
@@ -4110,17 +4120,28 @@ impl AcpNotificationHandler {
         // writer's next append lands in a row of its own.
         if decision.close_open_record {
             self.writer.finalize().await;
-            response.text.clear();
+            response.close_message();
         }
 
         // Execute the live action without holding the phase lock.
         match decision.action {
             LiveAction::AppendText { text, metadata } => {
+                // The provider's own id, not a continuation record's: only it
+                // says whether this chunk extends the message a tool call cut.
+                let chunk_id = text_chunk_message_id(&notification.update).flatten();
                 if response.completed {
                     self.writer.finalize().await;
-                    response.text.clear();
+                    response.close_message();
                     response.completed = false;
+                } else if response.interrupted {
+                    if chunk_id.is_some() && chunk_id == response.message_id.as_deref() {
+                        self.writer.resume_interrupted_text().await;
+                        response.interrupted = false;
+                    } else {
+                        response.close_message();
+                    }
                 }
+                response.message_id = chunk_id.map(str::to_string);
                 response.text.push_str(&text);
                 self.writer.append_text(&text).await;
                 self.writer.record_acp_event_metadata(metadata).await;
@@ -4134,7 +4155,12 @@ impl AcpNotificationHandler {
                 raw_input,
                 metadata,
             } => {
-                response.text.clear();
+                // Keep the streamed text: the next chunk decides whether this
+                // call ended the message or interrupted it. Marked
+                // unconditionally, like the writer's own flag in
+                // `record_tool_call`: with an empty buffer there is no message
+                // id to match, so the next chunk just closes nothing.
+                response.interrupted = true;
                 self.writer
                     .record_tool_call(&id, &title, raw_input.as_ref())
                     .await;
@@ -11420,6 +11446,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
     enum WriterCall {
         Append(String),
         Finalize,
+        Resume,
         Event(RecordedMetadata),
         ToolCall(String),
         ToolCallMetadata(RecordedMetadata),
@@ -11440,7 +11467,22 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         fn text_flow(&self) -> Vec<WriterCall> {
             self.calls()
                 .into_iter()
-                .filter(|call| matches!(call, WriterCall::Append(_) | WriterCall::Finalize))
+                .filter(|call| {
+                    matches!(
+                        call,
+                        WriterCall::Append(_) | WriterCall::Finalize | WriterCall::Resume
+                    )
+                })
+                .collect()
+        }
+
+        /// Text and tool-call rows in the order the writer received them.
+        fn row_flow(&self) -> Vec<WriterCall> {
+            self.calls()
+                .into_iter()
+                .filter(|call| {
+                    !matches!(call, WriterCall::Event(_) | WriterCall::ToolCallMetadata(_))
+                })
                 .collect()
         }
 
@@ -11482,6 +11524,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 .lock()
                 .unwrap()
                 .push(WriterCall::ToolCall(tool_call_id.to_string()));
+        }
+
+        async fn resume_interrupted_text(&self) {
+            self.calls.lock().unwrap().push(WriterCall::Resume);
         }
 
         async fn update_tool_call_title(
@@ -11712,6 +11758,52 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 chunk.origin.as_deref(),
                 Some(BACKGROUND_CONTINUATION_ORIGIN)
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_mid_message_resumes_the_same_message() {
+        let writer = Arc::new(TranscriptWriter::default());
+        let handler = Arc::new(transcript_handler(&writer));
+        handler.response.lock().await.start_prompt("sess-1".into());
+
+        // A background subagent's tool call lands while the parent is still
+        // streaming msg-1: the message continues past it under the same id.
+        feed(&handler, agent_text(Some("msg-1"), "The")).await;
+        feed(&handler, tool_call_notification("subagent-grep")).await;
+        feed(&handler, tool_call_notification("subagent-read")).await;
+        feed(&handler, agent_text(Some("msg-1"), " search is back")).await;
+
+        assert_eq!(
+            writer.row_flow(),
+            vec![
+                WriterCall::Append("The".to_string()),
+                WriterCall::ToolCall("subagent-grep".to_string()),
+                WriterCall::ToolCall("subagent-read".to_string()),
+                WriterCall::Resume,
+                WriterCall::Append(" search is back".to_string()),
+            ]
+        );
+        // The result certifies against the whole message, not the fragment
+        // after the tool calls.
+        assert_eq!(handler.response.lock().await.text, "The search is back");
+    }
+
+    #[tokio::test]
+    async fn text_after_a_tool_call_under_another_id_is_a_new_message() {
+        for (before, after) in [(Some("msg-1"), Some("msg-2")), (None, None)] {
+            let writer = Arc::new(TranscriptWriter::default());
+            let handler = Arc::new(transcript_handler(&writer));
+            handler.response.lock().await.start_prompt("sess-1".into());
+
+            feed(&handler, agent_text(before, "running the tests")).await;
+            feed(&handler, tool_call_notification("call-1")).await;
+            feed(&handler, agent_text(after, "they passed")).await;
+
+            // Without a matching id the writer is never asked to resume, so
+            // the tool call keeps closing the message as before.
+            assert!(!writer.calls().contains(&WriterCall::Resume), "{before:?}");
+            assert_eq!(handler.response.lock().await.text, "they passed");
         }
     }
 

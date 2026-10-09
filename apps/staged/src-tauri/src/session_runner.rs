@@ -3529,7 +3529,9 @@ fn run_post_completion_hooks(
 
     if !note_targets.is_empty() {
         // Scan this turn's assistant messages once for all note targets.
-        if let Ok(messages) = store.get_session_messages_since(session_id, turn_start_message_id) {
+        if let Ok(messages) =
+            store.get_session_messages_since(session_id, turn_start_message_id, &[])
+        {
             let note_content = messages
                 .iter()
                 .rev()

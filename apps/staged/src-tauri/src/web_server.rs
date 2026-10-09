@@ -5,17 +5,8 @@
 //!
 //! - `POST /api/invoke/{command}` — dispatches to the same logic as Tauri commands
 //! - `GET  /api/events`           — WebSocket that broadcasts Tauri events as JSON
-//! - `POST /api/auth`             — accepts bearer token and sets session cookie
 //! - `GET  /*`                    — static files from `../dist` (the built Svelte frontend)
-//!
-//! All `/api/*` routes (except `/api/auth`) require authentication via either
-//! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
 
-// The full implementation is preserved here but start() is currently stubbed out,
-// so most items appear unused to the compiler.
-#![allow(dead_code, unused_imports)]
-
-use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -25,17 +16,13 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, Query, Request, State, WebSocketUpgrade};
 use axum::http::StatusCode;
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::Router;
-use axum_extra::extract::cookie::{Cookie, CookieJar};
-use rand::RngExt;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;
-use subtle::ConstantTimeEq;
 use tauri::Manager;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -63,10 +50,6 @@ use crate::store::{self, Store};
 pub struct WebAppState {
     pub app_handle: tauri::AppHandle,
     pub event_tx: broadcast::Sender<WebEvent>,
-    /// Hex-encoded 256-bit token required to authenticate web clients.
-    pub auth_token: String,
-    /// Set of valid session IDs, one per authenticated client.
-    pub sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A serialized event for WebSocket broadcast.
@@ -129,12 +112,6 @@ pub fn emit_to_all<R: tauri::Runtime, S: serde::Serialize + Clone>(
 // =============================================================================
 // Server startup
 // =============================================================================
-
-/// Generate a cryptographically random hex-encoded token (256-bit).
-pub fn generate_token() -> String {
-    let bytes: [u8; 32] = rand::rng().random();
-    hex::encode(bytes)
-}
 
 const CERT_PATH_ENV: &str = "STAGED_WEB_CERT_PATH";
 const KEY_PATH_ENV: &str = "STAGED_WEB_KEY_PATH";
@@ -209,56 +186,87 @@ impl Listener for TlsListener {
 
 /// Start the Axum web server in a background tokio task.
 ///
-/// Stubbed — logs a warning and returns. The full implementation (TLS listener,
-/// Axum router with static file serving) is intentionally disabled in this build.
-/// All route handlers, auth middleware, and the `dispatch()` match block are kept
-/// compiling so they stay in sync with the rest of the codebase.
-///
-/// TODO(web): restore full web server startup from the `mobile-web` branch.
-/// That restore must mount [`media_router`] into the composed app: the
-/// frontend's `resolveStagedMediaUrl` already emits `/api/media/...` in
-/// non-Tauri builds, and only oneshot tests exercise the route today.
-pub fn start(_state: WebAppState) {
-    log::warn!("Web server requested but this build has the web server stubbed out");
+/// This should be called from the Tauri `setup` hook after all managed state
+/// has been registered.
+pub fn start(state: WebAppState) {
+    tauri::async_runtime::spawn(async move {
+        let dist_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            // In dev, the exe is in src-tauri/target/debug; dist is at ../../dist relative to src-tauri
+            .map(|p| {
+                // Try multiple candidate paths for the built frontend
+                let candidates = vec![
+                    p.join("../dist"),          // production bundle
+                    p.join("../../../../dist"), // dev (target/debug -> src-tauri -> apps/staged -> dist)
+                    PathBuf::from("../dist"),   // relative to cwd
+                ];
+                candidates
+                    .into_iter()
+                    .find(|c| c.exists())
+                    .unwrap_or_else(|| PathBuf::from("../dist"))
+            })
+            .unwrap_or_else(|| PathBuf::from("../dist"));
+
+        // Note media is served from `/api/media/...`, which the frontend's
+        // `resolveStagedMediaUrl` emits in non-Tauri builds.
+        let media_routes = match media_router(&state) {
+            Ok(router) => router,
+            Err(e) => {
+                log::warn!("[web_server] note media unavailable: {e}");
+                Router::new()
+            }
+        };
+
+        let app = Router::new()
+            .route("/api/invoke/{command}", post(invoke_command))
+            .route("/api/events", get(ws_events))
+            .with_state(state)
+            .merge(media_routes)
+            .fallback_service(ServeDir::new(&dist_dir).append_index_html_on_directories(true))
+            .layer(CorsLayer::permissive());
+
+        let addr = "0.0.0.0:5175";
+        let tls_acceptor = match load_tls_acceptor() {
+            Ok(acceptor) => acceptor,
+            Err(e) => {
+                log::error!("[web_server] {e}");
+                return;
+            }
+        };
+        log::info!(
+            "[web_server] starting HTTPS on {addr}, serving static files from {}",
+            dist_dir.display()
+        );
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[web_server] failed to bind {addr}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(TlsListener::new(listener, tls_acceptor), app).await {
+            log::error!("[web_server] server error: {e}");
+        }
+    });
 }
 
-/// Kept ready for the mobile-web startup restore. The route and auth layer are
-/// exercised together by oneshot tests, without starting a listener.
-pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
+/// Note media route, mounted by [`start`]. The route is exercised by oneshot
+/// tests, without starting a listener.
+pub(crate) fn media_router(state: &WebAppState) -> Result<Router, String> {
     let store = get_store(
         state
             .app_handle
             .state::<Mutex<Option<Arc<Store>>>>()
             .inner(),
     )?;
-    Ok(media_router_for_store(
-        store,
-        state.auth_token,
-        state.sessions,
-    ))
+    Ok(media_router_for_store(store))
 }
 
-fn media_router_for_store(
-    store: Arc<Store>,
-    token: String,
-    sessions: Arc<Mutex<HashSet<String>>>,
-) -> Router {
+fn media_router_for_store(store: Arc<Store>) -> Router {
     Router::new()
         .route("/api/media/{file}", get(serve_media))
         .with_state(store)
-        .route_layer(middleware::from_fn(
-            move |jar: CookieJar, request: Request, next: Next| {
-                let token = token.clone();
-                let sessions = sessions.clone();
-                async move {
-                    if is_authenticated(&token, &sessions, &jar, request.headers()) {
-                        next.run(request).await
-                    } else {
-                        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-                    }
-                }
-            },
-        ))
 }
 
 async fn serve_media(
@@ -285,95 +293,6 @@ async fn serve_media(
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-}
-
-// =============================================================================
-// Authentication
-// =============================================================================
-
-const SESSION_COOKIE_NAME: &str = "staged_session";
-const SESSION_MAX_AGE_DAYS: i64 = 7;
-
-/// Constant-time string comparison to prevent timing side-channel attacks.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-/// Middleware that rejects unauthenticated requests to protected routes.
-///
-/// Accepts either:
-/// - `Authorization: Bearer <token>` header matching the server's auth token
-/// - `staged_session` cookie matching the server's session ID
-async fn require_auth(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    request: Request,
-    next: Next,
-) -> Response {
-    if is_authenticated(&state.auth_token, &state.sessions, &jar, request.headers()) {
-        next.run(request).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-    }
-}
-
-fn is_authenticated(
-    token: &str,
-    sessions: &Mutex<HashSet<String>>,
-    jar: &CookieJar,
-    headers: &axum::http::HeaderMap,
-) -> bool {
-    if headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|value| constant_time_eq(value, token))
-    {
-        return true;
-    }
-    jar.get(SESSION_COOKIE_NAME).is_some_and(|cookie| {
-        sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|s| constant_time_eq(cookie.value(), s))
-    })
-}
-
-/// POST /api/auth — validate the bearer token and issue a session cookie.
-///
-/// Expects JSON body: `{ "token": "<auth_token>" }`
-async fn authenticate(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    Json(body): Json<Value>,
-) -> Response {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    if !constant_time_eq(token, &state.auth_token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
-    }
-
-    // Generate a unique session ID for this client and register it.
-    let new_session_id = generate_token();
-    state
-        .sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(new_session_id.clone());
-
-    let cookie = Cookie::build((SESSION_COOKIE_NAME, new_session_id))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .max_age(time::Duration::days(SESSION_MAX_AGE_DAYS))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .build();
-
-    (jar.add(cookie), Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 // =============================================================================
@@ -4221,47 +4140,31 @@ mod media_tests {
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn media_route_requires_auth_and_streams_ranges() {
+    async fn media_route_streams_ranges() {
         let fixture = Fixture::new();
         std::fs::write(fixture.dir.path().join("shot.png"), PNG).unwrap();
         let outcome = fixture.ingest("", "![a](shot.png)");
         let id = outcome.kept_ids.iter().next().unwrap();
-        let store = fixture.store.clone();
-        let sessions = Arc::new(Mutex::new(HashSet::from(["session-token".into()])));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let router = media_router_for_store(fixture.store.clone());
         let uri = format!("/api/media/{id}.png");
-        for (auth, expected) in [
-            (None, StatusCode::UNAUTHORIZED),
-            (Some("wrong"), StatusCode::UNAUTHORIZED),
-            (Some("session-token"), StatusCode::PARTIAL_CONTENT),
-        ] {
-            let mut request = axum::http::Request::builder()
-                .uri(&uri)
-                .header("Range", "bytes=2-5");
-            if let Some(auth) = auth {
-                request = request.header("Cookie", format!("staged_session={auth}"));
-            }
-            let response = router
-                .clone()
-                .oneshot(request.body(axum::body::Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), expected);
-            if expected == StatusCode::PARTIAL_CONTENT {
-                assert_eq!(response.headers()["content-type"], "image/png");
-                assert_eq!(response.headers()["accept-ranges"], "bytes");
-                assert_eq!(
-                    axum::body::to_bytes(response.into_body(), 100)
-                        .await
-                        .unwrap()
-                        .as_ref(),
-                    &PNG[2..6]
-                );
-            }
-        }
         let request = axum::http::Request::builder()
             .uri(&uri)
-            .header("Authorization", "Bearer bearer-token")
+            .header("Range", "bytes=2-5")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            &PNG[2..6]
+        );
+        let request = axum::http::Request::builder()
+            .uri(&uri)
             .body(axum::body::Body::empty())
             .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
@@ -4275,7 +4178,6 @@ mod media_tests {
         );
         let request = axum::http::Request::builder()
             .uri("/api/media/not-a-media-id.png")
-            .header("Authorization", "Bearer bearer-token")
             .body(axum::body::Body::empty())
             .unwrap();
         assert_eq!(

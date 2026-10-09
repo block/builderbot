@@ -1260,10 +1260,10 @@
     if (pushingOrigin || pushQueuedOrigin || commandPipelinePending) return;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
-    pushStateStore.setPushing(branch.id, '__pending__');
+    pushStateStore.setPushing(branch.id, '__pending__', false);
     try {
       const response = await commands.pushBranch(branch.id, provider, false);
-      pushStateStore.setPushLaunch(branch.id, response);
+      pushStateStore.setPushLaunch(branch.id, response, false);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Push failed', e);
@@ -1316,10 +1316,10 @@
     showForcePushDialog = false;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
-    pushStateStore.setPushing(branch.id, '__pending__');
+    pushStateStore.setPushing(branch.id, '__pending__', true);
     try {
       const response = await commands.pushBranch(branch.id, provider, true);
-      pushStateStore.setPushLaunch(branch.id, response);
+      pushStateStore.setPushLaunch(branch.id, response, true);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Force push failed', e);

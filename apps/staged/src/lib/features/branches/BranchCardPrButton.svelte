@@ -168,6 +168,7 @@
   let pushSessionId = $derived(storePushState?.sessionId ?? null);
   let pushError = $derived(storePushState?.error ?? null);
   let pushRejectedNonFastForward = $derived(storePushState?.rejectedNonFastForward ?? false);
+  let pushForce = $derived(storePushState?.force ?? false);
   let showPushErrorDialog = $state(false);
   let showForcePushDialog = $state(false);
 
@@ -558,7 +559,7 @@
   function handlePush(force = false) {
     if (pushState === 'pushing' || pushState === 'queued') return;
 
-    pushStateStore.setPushing(branch.id, '__pending__');
+    pushStateStore.setPushing(branch.id, '__pending__', force);
 
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
@@ -570,7 +571,7 @@
         // the backend's "running" event — this just records the real session ID
         // (and whether the push is waiting on the branch queue) so the fallback
         // poller can track it.
-        pushStateStore.setPushLaunch(branch.id, response);
+        pushStateStore.setPushLaunch(branch.id, response, force);
       })
       .catch((e) => {
         pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
@@ -691,9 +692,11 @@
     pushStateStore.clearPushState(branch.id);
   }
 
+  // Retry repeats the failed push as it was asked for: a force push that
+  // errored must not come back as a plain push the diverged remote rejects.
   function handlePushErrorRetry() {
     showPushErrorDialog = false;
-    handlePush();
+    handlePush(pushForce);
   }
 
   function handlePushErrorClose() {
@@ -882,7 +885,7 @@
   <AlertDialog.Root bind:open={showPushErrorDialog}>
     <AlertDialog.Content>
       <AlertDialog.Header>
-        <AlertDialog.Title>Push Failed</AlertDialog.Title>
+        <AlertDialog.Title>{pushForce ? 'Force Push Failed' : 'Push Failed'}</AlertDialog.Title>
         <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
           {pushError ?? 'An unknown error occurred while pushing.'}
         </AlertDialog.Description>

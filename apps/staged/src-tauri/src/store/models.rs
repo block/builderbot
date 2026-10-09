@@ -1565,12 +1565,27 @@ pub struct PipelineExecution {
     #[serde(default, skip_serializing_if = "is_false")]
     pub push_force: bool,
     /// Session this queued pipeline may only run after, and only if it
-    /// succeeded ("Rebase and force push" queues the push behind its rebase).
+    /// succeeded.
     ///
-    /// The branch drain checks the gate when the row reaches the front of the
-    /// queue: it waits while the dependency is active, starts once it finished
-    /// cleanly, and cancels the row with an explanation otherwise (see
-    /// `pipeline_dependency`). `None` for ordinary queued work.
+    /// What it means today, exactly: it is set on one kind of row only — the
+    /// force push that `rebase_branch(thenForcePush)` queues behind its
+    /// rebase — and it always names that rebase, a pipeline session on the
+    /// same branch. `None` for every other row, including plain queued pushes.
+    ///
+    /// The branch drain and "Start now" consult the gate before starting a
+    /// row that carries it (see `pipeline_dependency`): the row waits while
+    /// the dependency is queued or running, and is cancelled with the reason
+    /// recorded in `error_message` if the dependency failed, was cancelled, or
+    /// no longer exists. When the dependency is a rebase, a `completed` status
+    /// is not enough on its own: the branch's worktree must have HEAD back on
+    /// the branch and contain the rebase target, since a conflict handoff or
+    /// an aborted rebase ends `completed` too. A completed dependency of any
+    /// other kind releases the row on status alone (nothing creates one yet).
+    ///
+    /// The field is a generic "depends on session X" edge, while its only use
+    /// is rebase→push and the gate's meaning turns on the dependency's kind;
+    /// whether a narrower shape would be easier to reason about is an open
+    /// data-model question for human review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on_session_id: Option<String>,
     pub steps: Vec<PipelineStepStatus>,

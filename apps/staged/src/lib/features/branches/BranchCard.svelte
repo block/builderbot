@@ -392,9 +392,10 @@
           : await commands.squashCommits(branch.id, provider);
       // "Rebase and force push": the backend queued the push behind the rebase
       // and only starts it if the rebase finishes, so the push chip just shows
-      // it waiting like any other queued push.
+      // it waiting like any other queued push — unless the chip is already
+      // following a push, which keeps it.
       if (result.followUpSessionId) {
-        pushStateStore.setPushQueued(branch.id, result.followUpSessionId);
+        pushStateStore.trackQueuedPushIfIdle(branch.id, result.followUpSessionId);
       }
       // Add a pending session item so the session stub appears instantly
       // instead of waiting for the full timeline refresh. Queued pipelines get

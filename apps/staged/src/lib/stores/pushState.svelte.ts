@@ -86,6 +86,24 @@ class PushStateStore {
   }
 
   /**
+   * Track a push the backend queued on the user's behalf (the force push of
+   * "Rebase and force push"), unless the chip already follows a push in
+   * flight.
+   *
+   * A plain push queued or running on the branch keeps the chip: replacing it
+   * would leave that push's completion events matching nothing, so the chip
+   * would never clear. Re-reporting the push the chip already follows (a
+   * repeat click dedupes onto the same queued row) changes nothing either.
+   */
+  trackQueuedPushIfIdle(branchId: string, sessionId: string): void {
+    const existing = this.states.get(branchId);
+    if (existing?.state === 'queued' || existing?.state === 'pushing') {
+      return;
+    }
+    this.setPushQueued(branchId, sessionId);
+  }
+
+  /**
    * Record the backend's queued-vs-running verdict for a push request.
    *
    * The backend owns that decision (it holds the branch launch lock), so both

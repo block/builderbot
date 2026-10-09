@@ -92,19 +92,22 @@
         {#if onRebaseAndForcePush}
           <!-- Joined to the Rebase button: the chevron shares its outline and
                height, with the touching corners squared and the border
-               overlapped so the pair reads as one control. -->
+               overlapped so the pair reads as one control. The title sits on
+               a wrapping span, as on the Rebase button, because browsers
+               don't reliably show tooltips on a disabled element. -->
           <DropdownMenu.Root>
-            <DropdownMenu.Trigger
-              class={cn(
-                buttonVariants({ variant: 'outline', size: 'xs' }),
-                'h-[22px] w-[18px] rounded-l-none -ml-px px-0'
-              )}
-              disabled={!!rebaseDisabledReason}
-              aria-label="More rebase options"
-              title={rebaseDisabledReason ?? 'More rebase options'}
-            >
-              <ChevronDown size={12} />
-            </DropdownMenu.Trigger>
+            <span class="inline-flex -ml-px" title={rebaseDisabledReason ?? 'More rebase options'}>
+              <DropdownMenu.Trigger
+                class={cn(
+                  buttonVariants({ variant: 'outline', size: 'xs' }),
+                  'h-[22px] w-[18px] rounded-l-none px-0'
+                )}
+                disabled={!!rebaseDisabledReason}
+                aria-label="More rebase options"
+              >
+                <ChevronDown size={12} />
+              </DropdownMenu.Trigger>
+            </span>
             <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
               <DropdownMenu.Item
                 title="Rebase onto parent, then force push the rewritten branch to origin once the rebase succeeds."

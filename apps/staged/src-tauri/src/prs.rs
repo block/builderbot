@@ -667,6 +667,49 @@ fn with_follow_up_force_push_locked(
     Ok(response)
 }
 
+/// [`with_follow_up_force_push_locked`] for a rebase row already inserted as
+/// `running`, with the failure path repaired: if the push cannot be queued,
+/// the rebase is marked errored with the store error rather than left
+/// `running`. Left as it was, the row would have no runner and no cancel
+/// token, and would keep the branch busy until the startup sweep.
+///
+/// Failing the rebase is simpler than inserting the push first. The push row
+/// is stamped from the rebase row — its id as the dependency and a
+/// `created_at` strictly after it — so the inserts cannot be swapped without
+/// restructuring the push path, and a push left behind by a failed rebase
+/// insert would be a queued row gated on a session that never existed, which
+/// keeps the branch busy with nothing to drain it. This runs under the same
+/// launch lock and before the row is announced, so no client has seen the
+/// rebase running when it is failed.
+fn with_follow_up_force_push_or_fail_rebase_locked(
+    store: &Arc<Store>,
+    branch_id: &str,
+    provider: Option<&str>,
+    rebase_session_id: &str,
+    then_force_push: bool,
+) -> Result<BranchPipelineResponse, String> {
+    let result = with_follow_up_force_push_locked(
+        store,
+        branch_id,
+        provider,
+        BranchPipelineResponse::running(rebase_session_id.to_string()),
+        then_force_push,
+    );
+    if let Err(reason) = &result {
+        if let Err(e) = store.transition_from_running(
+            rebase_session_id,
+            store::SessionStatus::Error,
+            Some(reason),
+            None,
+        ) {
+            log::error!(
+                "Failed to mark rebase session {rebase_session_id} errored after its force push could not be queued: {e}"
+            );
+        }
+    }
+    result
+}
+
 /// The body of [`queue_commit_pipeline_if_branch_busy`], for the run-now path,
 /// which re-checks while already holding the branch launch lock.
 fn queue_commit_pipeline_locked(
@@ -783,11 +826,11 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
         )?;
         // Still under the lock and before the runner has the rebase, so the
         // push is queued before the rebase can possibly finish.
-        let response = with_follow_up_force_push_locked(
+        let response = with_follow_up_force_push_or_fail_rebase_locked(
             &store,
             &branch_id,
             provider.as_deref(),
-            BranchPipelineResponse::running(running.session_id.clone()),
+            &running.session_id,
             then_force_push,
         )?;
         (running, response)
@@ -2568,6 +2611,71 @@ mod tests {
         assert_eq!(
             push.pipeline.unwrap().depends_on_session_id,
             Some(running.session_id)
+        );
+    }
+
+    /// The running rebase row goes in before its push, so a push insert that
+    /// fails must not leave a `running` rebase nobody is running.
+    #[test]
+    fn running_rebase_is_failed_when_its_push_cannot_be_queued() {
+        let (store, branch) = setup_branch_store();
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
+        let running = insert_running_commit_pipeline_session(
+            &store,
+            &pipeline_context(&branch),
+            PipelineKind::Rebase,
+            &steps,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // The push insert looks the branch up by id, so an unknown id is a
+        // store failure after the rebase row already exists.
+        let err = with_follow_up_force_push_or_fail_rebase_locked(
+            &store,
+            "missing-branch",
+            None,
+            &running.session_id,
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("Branch not found"), "{err}");
+
+        let rebase = store.get_session(&running.session_id).unwrap().unwrap();
+        assert_eq!(rebase.status, store::SessionStatus::Error);
+        assert_eq!(rebase.error_message.as_deref(), Some(err.as_str()));
+        assert!(store
+            .get_queued_sessions_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+
+        // Without a push to queue there is nothing that can fail, and the
+        // rebase is left running for the runner.
+        let running = insert_running_commit_pipeline_session(
+            &store,
+            &pipeline_context(&branch),
+            PipelineKind::Rebase,
+            &steps,
+            None,
+            None,
+        )
+        .unwrap();
+        with_follow_up_force_push_or_fail_rebase_locked(
+            &store,
+            "missing-branch",
+            None,
+            &running.session_id,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .get_session(&running.session_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            store::SessionStatus::Running
         );
     }
 

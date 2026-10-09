@@ -1027,11 +1027,16 @@
    * tick may have missed. A tick still in flight read the same cursor this
    * poll would, and the two merges would duplicate the rows both fetched, so
    * the final poll is deferred until that tick settles instead.
+   *
+   * `pollInFlight` is left alone: it belongs to the tick's `finally`. Resetting
+   * it here would reopen the guard while that tick is still awaiting, and a
+   * `startPolling()` in the gap (a queue-drain running event right after the
+   * terminal status, or a send) could run a tick concurrently against the
+   * same cursor.
    */
   function finishPolling() {
-    const tickInFlight = pollInFlight;
-    stopPolling();
-    if (tickInFlight) {
+    clearPollTimer();
+    if (pollInFlight) {
       finalPollPending = true;
     } else {
       void poll();

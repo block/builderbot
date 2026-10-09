@@ -134,6 +134,37 @@ describe('mergeSinceMessages', () => {
     expect(mergeSinceMessages(existing, updated, 5)).toBeNull();
   });
 
+  it('returns null when an older fetch re-covers rows a newer one already applied', () => {
+    // Poll A read lastId=5 and fetched [5,6]; poll B then extended the cache to
+    // 7 before A's fetch settled. A brings nothing new.
+    const existing = [
+      message(4, 'user', 'hi'),
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const updated = [message(5, 'assistant', 'The'), message(6, 'tool_call', 'Read')];
+    expect(mergeSinceMessages(existing, updated, 5)).toBeNull();
+  });
+
+  it('keeps cached rows an older fetch does not reach', () => {
+    const existing = [
+      message(4, 'user', 'hi'),
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const changed = message(5, 'assistant', 'The search');
+    const merged = mergeSinceMessages(existing, [changed, message(6, 'tool_call', 'Read')], 5);
+
+    expect(merged!.appended).toBe(false);
+    expect(merged!.messages.map((m) => m.id)).toEqual([4, 5, 6, 7]);
+    expect(merged!.messages[0]).toBe(existing[0]);
+    expect(merged!.messages[1]).toBe(changed);
+    expect(merged!.messages[2]).not.toBe(existing[2]);
+    expect(merged!.messages[3]).toBe(existing[3]);
+  });
+
   it('does not report a stale-cursor update that ends at the cached tail as appended', () => {
     const existing = [message(5, 'assistant', 'The'), message(6, 'tool_call', 'Read')];
     const updated = [message(5, 'assistant', 'The end'), message(6, 'tool_call', 'Read')];

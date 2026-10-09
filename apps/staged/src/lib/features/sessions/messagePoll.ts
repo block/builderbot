@@ -47,6 +47,9 @@ export interface MergedSinceMessages {
  * at the end: `lastId` is read before the fetch awaits, so another poll that
  * overlapped this one may already have extended `existing` past it, and
  * cutting the last row alone would duplicate the rows both fetches returned.
+ * When that happens the tail may also end before the cached one (the older
+ * fetch landed last); the cached rows it does not reach are kept rather than
+ * dropped until a next tick that, after the final poll, never comes.
  */
 export function mergeSinceMessages(
   existing: readonly SessionMessage[],
@@ -71,23 +74,27 @@ export function mergeSinceMessages(
     const cursor = findIndexFromEnd(existing, lastId);
     const cut = cursor < 0 ? Math.max(existing.length - 1, 0) : cursor;
     if (!isUnchangedTail(existing, tail, cut)) {
-      next = [...(next ?? existing).slice(0, cut), ...tail];
+      const base = next ?? existing;
       const previousTail = existing[existing.length - 1];
-      appended = !previousTail || tail[tail.length - 1].id > previousTail.id;
+      const tailEnd = tail[tail.length - 1].id;
+      const kept = previousTail && tailEnd < previousTail.id ? base.slice(cut + tail.length) : [];
+      next = [...base.slice(0, cut), ...tail, ...kept];
+      appended = !previousTail || tailEnd > previousTail.id;
     }
   }
 
   return next ? { messages: next, appended } : null;
 }
 
-/** Whether the tail re-fetch returned only identical copies of the rows
- *  already cached from `cut` on. */
+/** Whether the tail re-fetch returned only identical copies of rows already
+ *  cached from `cut` on. A tail shorter than the cached span still counts:
+ *  the rows it does not reach are kept, so the result would be unchanged. */
 function isUnchangedTail(
   existing: readonly SessionMessage[],
   tail: readonly SessionMessage[],
   cut: number
 ): boolean {
-  if (existing.length - cut !== tail.length) return false;
+  if (tail.length > existing.length - cut) return false;
   return tail.every((message, offset) => isSameMessage(existing[cut + offset], message));
 }
 

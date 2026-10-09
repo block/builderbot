@@ -94,7 +94,6 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { pullStateStore } from '../../stores/pullState.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
-  import { rebaseFollowUpStore } from '../../stores/rebaseFollowUp';
   import {
     onBranchGitStateUpdated,
     onBranchSetupProgress,
@@ -389,14 +388,13 @@
     try {
       const result =
         kind === 'rebase'
-          ? await commands.rebaseBranch(branch.id, provider, rebaseTarget)
+          ? await commands.rebaseBranch(branch.id, provider, rebaseTarget, options.thenForcePush)
           : await commands.squashCommits(branch.id, provider);
-      // "Rebase and force push": the push is requested by sessionStatusListener
-      // once this rebase session completes, so a failed rebase never pushes.
-      // The backend may have returned an already-queued identical rebase; the
-      // follow-up attaches to whichever session will do the work.
-      if (kind === 'rebase' && options.thenForcePush) {
-        rebaseFollowUpStore.set(branch.id, { rebaseSessionId: result.sessionId, provider });
+      // "Rebase and force push": the backend queued the push behind the rebase
+      // and only starts it if the rebase finishes, so the push chip just shows
+      // it waiting like any other queued push.
+      if (result.followUpSessionId) {
+        pushStateStore.setPushQueued(branch.id, result.followUpSessionId);
       }
       // Add a pending session item so the session stub appears instantly
       // instead of waiting for the full timeline refresh. Queued pipelines get

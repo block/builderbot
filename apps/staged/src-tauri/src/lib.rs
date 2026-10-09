@@ -29,6 +29,7 @@ pub mod paths;
 pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
 pub(crate) mod pikchr_validation;
+pub(crate) mod pipeline_dependency;
 pub mod pr_poll_scheduler;
 mod preference_events;
 pub mod project_commands;

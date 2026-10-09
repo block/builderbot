@@ -46,6 +46,7 @@ use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
 use crate::blox;
 use crate::git;
+use crate::pipeline_dependency::DependencyGate;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
 
@@ -1794,6 +1795,14 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                         session_type: None,
                     },
                 );
+                // A running session's cancel drains the branch, which settles
+                // anything gated on it; this write does not, so settle its
+                // dependents here.
+                if let Err(e) = crate::pipeline_dependency::skip_dependents_of_cancelled(
+                    &store, app_handle, session_id,
+                ) {
+                    log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
+                }
             }
         }
     }
@@ -3849,6 +3858,30 @@ pub async fn drain_queued_sessions_for_branch(
             break;
         }
 
+        // A row gated on another session ("Rebase and force push") is asked
+        // last, since a rebase dependency's check reads the worktree.
+        match crate::pipeline_dependency::evaluate_dependency_gate(&store, &branch_id, &session)
+            .await?
+        {
+            DependencyGate::Ready => {}
+            // The dependency is queued ahead of this row or running, so in
+            // practice it has already stopped the loop above. Not a barrier
+            // either way: it waits on one specific session, not on queue order.
+            DependencyGate::Waiting(_) => continue,
+            // Never going to run. Cancelling it changes nothing on the branch,
+            // so the next row's pre-check decides as if it were never queued.
+            DependencyGate::Unmet(reason) => {
+                crate::pipeline_dependency::skip_dependent_session(
+                    &store,
+                    &app_handle,
+                    &session,
+                    &branch_id,
+                    &reason,
+                )?;
+                continue;
+            }
+        }
+
         let started = start_queued_session_for_branch(
             Arc::clone(&store),
             Arc::clone(&registry),
@@ -3943,6 +3976,24 @@ pub async fn start_queued_session_now_for_branch(
         ForcedStartPrecheck::AlreadyRunning => return Ok(false),
     };
     let kind = schedule.kind;
+
+    // "Start now" jumps queue order, not a dependency: a force push waiting on
+    // its rebase must not run ahead of it, or after it failed.
+    match crate::pipeline_dependency::evaluate_dependency_gate(&store, &branch_id, &session).await?
+    {
+        DependencyGate::Ready => {}
+        DependencyGate::Waiting(reason) => return Err(reason),
+        DependencyGate::Unmet(reason) => {
+            crate::pipeline_dependency::skip_dependent_session(
+                &store,
+                &app_handle,
+                &session,
+                &branch_id,
+                &reason,
+            )?;
+            return Err(reason);
+        }
+    }
 
     let started = start_queued_session_for_branch(
         store,

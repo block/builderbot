@@ -38,7 +38,6 @@ import { projectStateStore } from '../stores/projectState.svelte';
 import { prStateStore } from '../stores/prState.svelte';
 import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
-import { rebaseFollowUpStore, type RebaseFollowUp } from '../stores/rebaseFollowUp';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
 import type {
   ActiveSessionInfo,
@@ -120,7 +119,10 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
     }
-    handleSessionEnd(sessionId, status, errorMessage, eventBranchId);
+    if (status === 'cancelled' && sessionType === 'push' && errorMessage && eventBranchId) {
+      handleSkippedPush(sessionId, eventBranchId, errorMessage);
+    }
+    handleSessionEnd(sessionId, status, errorMessage);
   }
 }
 
@@ -320,24 +322,11 @@ function handlePushCompleted(payload: PushCompletedPayload): void {
   }
 }
 
-function handleSessionEnd(
-  sessionId: string,
-  status: SessionStatus,
-  errorMessage?: string | null,
-  eventBranchId?: string
-) {
+function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage?: string | null) {
   const sessionProjectId = sessionRegistry.getProjectId(sessionId);
   const sessionType = sessionRegistry.getType(sessionId);
   const branchId = sessionRegistry.getBranchId(sessionId);
   const currentProjectId = navigation.selectedProjectId;
-
-  // A rebase that never ran (cancelled while queued) is not in the registry,
-  // so the event's own branch id is the only way to find its follow-up.
-  const followUpBranchId = branchId ?? eventBranchId;
-  const followUp = followUpBranchId ? rebaseFollowUpStore.take(followUpBranchId, sessionId) : null;
-  if (followUp && followUpBranchId) {
-    handleRebaseFollowUp(followUpBranchId, status, followUp);
-  }
 
   if (!sessionProjectId && !sessionType && !branchId) {
     console.warn('Received completion event for unknown session ID', { sessionId, status });
@@ -367,41 +356,21 @@ function handleSessionEnd(
 }
 
 /**
- * Start the force push armed behind a finished "Rebase and force push".
+ * Report a queued push the backend skipped without running.
  *
- * Only a `completed` rebase releases it: a failed or cancelled rebase can
- * leave the worktree mid-rebase, and force pushing that would publish the
- * broken state. The push goes through the normal `push_branch` path, so the
- * backend still queues it behind anything else in flight and the push chip
- * tracks it like a hand-started force push.
+ * "Rebase and force push" queues its push gated on the rebase; when the rebase
+ * fails, is cancelled, or ends without finishing, the branch drain cancels the
+ * push with the reason as its `errorMessage` (see `pipeline_dependency.rs`).
+ * Only that skip emits a terminal event typed `push`, and the row never ran,
+ * so it was never in the session registry and `handleSessionEnd` can't
+ * recognise it. Every client renders the same toast; the push chip is only
+ * cleared where it tracks this session.
  */
-function handleRebaseFollowUp(branchId: string, status: SessionStatus, followUp: RebaseFollowUp) {
-  if (status !== 'completed') {
-    toast.error('Force push skipped', {
-      description: `The rebase ${status === 'error' ? 'failed' : 'was cancelled'}, so the branch was not force pushed.`,
-    });
-    return;
+function handleSkippedPush(sessionId: string, branchId: string, reason: string) {
+  if (pushStateStore.getSessionId(branchId) === sessionId) {
+    pushStateStore.clearPushState(branchId);
   }
-  const pushState = pushStateStore.getPushState(branchId)?.state;
-  if (pushState === 'pushing' || pushState === 'queued') {
-    toast.error('Force push skipped', {
-      description: 'Another push is already in progress on this branch.',
-    });
-    return;
-  }
-  void startFollowUpForcePush(branchId, followUp.provider);
-}
-
-async function startFollowUpForcePush(branchId: string, provider?: string) {
-  pushStateStore.setPushing(branchId, '__pending__');
-  try {
-    const response = await commands.pushBranch(branchId, provider, true);
-    pushStateStore.setPushLaunch(branchId, response);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    pushStateStore.setPushError(branchId, message);
-    toast.error('Force push failed', { description: message });
-  }
+  toast.error('Force push skipped', { description: reason });
 }
 
 /**

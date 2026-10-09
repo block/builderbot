@@ -76,7 +76,6 @@ describe('sessionStatusListener busy-state hydration', () => {
   let updateBranchPr: ReturnType<typeof vi.fn>;
   let refreshPrStatus: ReturnType<typeof vi.fn>;
   let clearBranchPrStatus: ReturnType<typeof vi.fn>;
-  let pushBranch: ReturnType<typeof vi.fn>;
   let toastError: ReturnType<typeof vi.fn>;
   let listenToEvent: ReturnType<typeof vi.fn>;
   let unlistenEvents: ReturnType<typeof vi.fn>;
@@ -98,8 +97,6 @@ describe('sessionStatusListener busy-state hydration', () => {
     markQueuedPushStarted: ReturnType<typeof vi.fn>;
     setPushDone: ReturnType<typeof vi.fn>;
     setPushError: ReturnType<typeof vi.fn>;
-    setPushing: ReturnType<typeof vi.fn>;
-    setPushLaunch: ReturnType<typeof vi.fn>;
     clearPushState: ReturnType<typeof vi.fn>;
     getPushState: ReturnType<typeof vi.fn>;
   };
@@ -116,7 +113,6 @@ describe('sessionStatusListener busy-state hydration', () => {
     updateBranchPr = vi.fn().mockResolvedValue(undefined);
     refreshPrStatus = vi.fn().mockResolvedValue(undefined);
     clearBranchPrStatus = vi.fn().mockResolvedValue(undefined);
-    pushBranch = vi.fn().mockResolvedValue({ sessionId: 'force-push-1', sessionStatus: 'running' });
     toastError = vi.fn();
     unlistenEvents = vi.fn();
     eventCallbacks = new Map();
@@ -144,8 +140,6 @@ describe('sessionStatusListener busy-state hydration', () => {
       markQueuedPushStarted: vi.fn(),
       setPushDone: vi.fn(),
       setPushError: vi.fn(),
-      setPushing: vi.fn(),
-      setPushLaunch: vi.fn(),
       clearPushState: vi.fn(),
       getPushState: vi.fn().mockReturnValue(undefined),
     };
@@ -159,7 +153,6 @@ describe('sessionStatusListener busy-state hydration', () => {
       updateBranchPr,
       refreshPrStatus,
       clearBranchPrStatus,
-      pushBranch,
     }));
     vi.doMock('../features/layout/navigation.svelte', () => ({
       navigation: { selectedProjectId: null },
@@ -833,124 +826,60 @@ describe('sessionStatusListener busy-state hydration', () => {
     });
   });
 
-  describe('rebase follow-up force push', () => {
+  describe('skipped dependent force push', () => {
     async function listen() {
       const { listenForSessionStatus } = await import('./sessionStatusListener');
       listenForSessionStatus();
       await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
-      const { rebaseFollowUpStore } = await import('../stores/rebaseFollowUp');
-      rebaseFollowUpStore.reset();
-      return rebaseFollowUpStore;
     }
 
-    function registerRebase(sessionId: string, branchId = 'branch-1') {
-      sessionRegistry.sessions.set(sessionId, {
-        sessionId,
-        projectId: 'project-1',
-        branchId,
-        type: 'commit',
-        timestamp: 500,
-      });
-    }
+    const skipReason = 'Skipped because the rebase failed.';
 
-    it('force pushes once the armed rebase completes', async () => {
-      const store = await listen();
-      registerRebase('rebase-1');
-      store.set('branch-1', { rebaseSessionId: 'rebase-1', provider: 'claude' });
+    it('toasts the reason and clears the queued chip tracking that push', async () => {
+      await listen();
+      pushStateStore.states.set('branch-1', { state: 'queued', sessionId: 'push-1' });
 
       eventCallbacks.get('session-status-changed')?.({
-        sessionId: 'rebase-1',
-        status: 'completed',
-        branchId: 'branch-1',
-      });
-
-      expect(pushStateStore.setPushing).toHaveBeenCalledWith('branch-1', '__pending__');
-      expect(pushBranch).toHaveBeenCalledWith('branch-1', 'claude', true);
-      await vi.waitFor(() =>
-        expect(pushStateStore.setPushLaunch).toHaveBeenCalledWith('branch-1', {
-          sessionId: 'force-push-1',
-          sessionStatus: 'running',
-        })
-      );
-      expect(store.take('branch-1', 'rebase-1')).toBeNull();
-    });
-
-    it('ignores other sessions ending on the branch', async () => {
-      const store = await listen();
-      registerRebase('rebase-1');
-      registerRebase('commit-1');
-      store.set('branch-1', { rebaseSessionId: 'rebase-1' });
-
-      eventCallbacks.get('session-status-changed')?.({
-        sessionId: 'commit-1',
-        status: 'completed',
-        branchId: 'branch-1',
-      });
-
-      expect(pushBranch).not.toHaveBeenCalled();
-      expect(store.take('branch-1', 'rebase-1')).toEqual({ rebaseSessionId: 'rebase-1' });
-    });
-
-    it('skips the push when the rebase fails or is cancelled', async () => {
-      const store = await listen();
-      registerRebase('rebase-1');
-      store.set('branch-1', { rebaseSessionId: 'rebase-1' });
-      // A rebase cancelled while still queued never ran, so it is not in the
-      // registry and only the event carries the branch id.
-      store.set('branch-2', { rebaseSessionId: 'rebase-2' });
-
-      eventCallbacks.get('session-status-changed')?.({
-        sessionId: 'rebase-1',
-        status: 'error',
-        branchId: 'branch-1',
-      });
-      eventCallbacks.get('session-status-changed')?.({
-        sessionId: 'rebase-2',
+        sessionId: 'push-1',
         status: 'cancelled',
-        branchId: 'branch-2',
+        errorMessage: skipReason,
+        branchId: 'branch-1',
+        sessionType: 'push',
       });
 
-      expect(pushBranch).not.toHaveBeenCalled();
-      expect(toastError).toHaveBeenCalledTimes(2);
-      expect(toastError.mock.calls[0][1].description).toContain('failed');
-      expect(toastError.mock.calls[1][1].description).toContain('cancelled');
-      expect(store.take('branch-1', 'rebase-1')).toBeNull();
-      expect(store.take('branch-2', 'rebase-2')).toBeNull();
+      expect(toastError).toHaveBeenCalledWith('Force push skipped', { description: skipReason });
+      expect(pushStateStore.clearPushState).toHaveBeenCalledWith('branch-1');
     });
 
-    it('does not stack on a push already in flight', async () => {
-      const store = await listen();
-      registerRebase('rebase-1');
-      store.set('branch-1', { rebaseSessionId: 'rebase-1' });
-      pushStateStore.getPushState.mockReturnValue({ state: 'queued', sessionId: 'push-9' });
+    it('still toasts on clients that are not tracking the push', async () => {
+      await listen();
+      pushStateStore.states.set('branch-1', { state: 'pushing', sessionId: 'push-9' });
 
       eventCallbacks.get('session-status-changed')?.({
-        sessionId: 'rebase-1',
-        status: 'completed',
+        sessionId: 'push-1',
+        status: 'cancelled',
+        errorMessage: skipReason,
+        branchId: 'branch-1',
+        sessionType: 'push',
+      });
+
+      expect(toastError).toHaveBeenCalledWith('Force push skipped', { description: skipReason });
+      expect(pushStateStore.clearPushState).not.toHaveBeenCalled();
+    });
+
+    it('ignores ordinary cancellations, which carry no session type', async () => {
+      await listen();
+      pushStateStore.states.set('branch-1', { state: 'queued', sessionId: 'push-1' });
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'push-1',
+        status: 'cancelled',
+        completionReason: 'interrupted',
         branchId: 'branch-1',
       });
 
-      expect(pushBranch).not.toHaveBeenCalled();
-      expect(pushStateStore.setPushing).not.toHaveBeenCalled();
-      expect(toastError).toHaveBeenCalledWith('Force push skipped', expect.anything());
-    });
-
-    it('reports a push request that fails to launch', async () => {
-      const store = await listen();
-      registerRebase('rebase-1');
-      store.set('branch-1', { rebaseSessionId: 'rebase-1' });
-      pushBranch.mockRejectedValue(new Error('no remote'));
-
-      eventCallbacks.get('session-status-changed')?.({
-        sessionId: 'rebase-1',
-        status: 'completed',
-        branchId: 'branch-1',
-      });
-
-      await vi.waitFor(() =>
-        expect(pushStateStore.setPushError).toHaveBeenCalledWith('branch-1', 'no remote')
-      );
-      expect(toastError).toHaveBeenCalledWith('Force push failed', { description: 'no remote' });
+      expect(toastError).not.toHaveBeenCalled();
+      expect(pushStateStore.clearPushState).not.toHaveBeenCalled();
     });
   });
 });

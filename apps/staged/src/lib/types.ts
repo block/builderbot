@@ -639,6 +639,9 @@ export interface BranchSessionResponse {
 export interface BranchPipelineResponse {
   sessionId: string;
   sessionStatus: BranchSessionLaunchStatus;
+  /** The queued session that runs after this one, and only if it succeeds:
+   *  the force push of "Rebase and force push". Always queued. */
+  followUpSessionId?: string;
 }
 
 // =============================================================================

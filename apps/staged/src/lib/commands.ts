@@ -1525,16 +1525,20 @@ export interface GitHubCommentResult {
  *  When target is 'base' (default), rebases onto origin/{base_branch}.
  *  When target is 'origin', rebases onto origin/{branch_name}.
  *  Queues behind in-flight branch sessions, so the response reports whether the
- *  returned session is running or waiting on the branch queue. */
+ *  returned session is running or waiting on the branch queue.
+ *  With `thenForcePush`, the backend also queues a force push that only runs
+ *  if the rebase finishes, returned as `followUpSessionId`. */
 export function rebaseBranch(
   branchId: string,
   provider?: string,
-  target?: 'base' | 'origin'
+  target?: 'base' | 'origin',
+  thenForcePush?: boolean
 ): Promise<BranchPipelineResponse> {
   return invokeCommand('rebase_branch', {
     branchId,
     provider: provider ?? null,
     target: target ?? null,
+    thenForcePush: thenForcePush ?? null,
   });
 }
 

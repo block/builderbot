@@ -154,6 +154,10 @@ impl Store {
     ///
     /// Returns `true` if the row was updated, `false` if the session was
     /// no longer queued (e.g. it was already picked up by the drain loop).
+    ///
+    /// Like [`Self::transition_from_running`], `error_message` is kept for
+    /// `Cancelled` as well as `Error`: a queued row the branch drain skips
+    /// (its dependency failed) records why it never ran.
     pub fn transition_from_queued(
         &self,
         id: &str,
@@ -162,7 +166,7 @@ impl Store {
         completion_reason: Option<&CompletionReason>,
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let error_msg = if new_status == SessionStatus::Error {
+        let error_msg = if matches!(new_status, SessionStatus::Error | SessionStatus::Cancelled) {
             error_message
         } else {
             None

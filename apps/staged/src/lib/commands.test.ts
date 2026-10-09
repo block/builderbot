@@ -263,7 +263,12 @@ describe('browser-native command wrappers', () => {
     const invokeCommand = vi
       .fn()
       .mockResolvedValueOnce({ sessionId: 'session-1', sessionStatus: 'queued' })
-      .mockResolvedValueOnce({ sessionId: 'session-2', sessionStatus: 'running' });
+      .mockResolvedValueOnce({ sessionId: 'session-2', sessionStatus: 'running' })
+      .mockResolvedValueOnce({
+        sessionId: 'session-3',
+        sessionStatus: 'running',
+        followUpSessionId: 'session-4',
+      });
     vi.doMock('./transport', () => ({
       invokeCommand,
       isTauri: true,
@@ -279,10 +284,22 @@ describe('browser-native command wrappers', () => {
       sessionId: 'session-2',
       sessionStatus: 'running',
     });
+    await expect(rebaseBranch('branch-1', 'codex', undefined, true)).resolves.toEqual({
+      sessionId: 'session-3',
+      sessionStatus: 'running',
+      followUpSessionId: 'session-4',
+    });
 
     expect(invokeCommand.mock.calls).toEqual([
-      ['rebase_branch', { branchId: 'branch-1', provider: 'codex', target: 'origin' }],
+      [
+        'rebase_branch',
+        { branchId: 'branch-1', provider: 'codex', target: 'origin', thenForcePush: null },
+      ],
       ['squash_commits', { branchId: 'branch-1', provider: 'codex' }],
+      [
+        'rebase_branch',
+        { branchId: 'branch-1', provider: 'codex', target: null, thenForcePush: true },
+      ],
     ]);
   });
 

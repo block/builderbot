@@ -1564,6 +1564,15 @@ pub struct PipelineExecution {
     /// `false` for non-push pipelines.
     #[serde(default, skip_serializing_if = "is_false")]
     pub push_force: bool,
+    /// Session this queued pipeline may only run after, and only if it
+    /// succeeded ("Rebase and force push" queues the push behind its rebase).
+    ///
+    /// The branch drain checks the gate when the row reaches the front of the
+    /// queue: it waits while the dependency is active, starts once it finished
+    /// cleanly, and cancels the row with an explanation otherwise (see
+    /// `pipeline_dependency`). `None` for ordinary queued work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on_session_id: Option<String>,
     pub steps: Vec<PipelineStepStatus>,
     pub current_step: usize,
     /// Set when pipeline completes without needing AI.
@@ -1601,6 +1610,7 @@ impl PipelineExecution {
             kind: None,
             rebase_target: None,
             push_force: false,
+            depends_on_session_id: None,
             steps: step_statuses,
             current_step: 0,
             completed_without_ai: false,
@@ -1619,6 +1629,11 @@ impl PipelineExecution {
 
     pub fn with_push_force(mut self, force: bool) -> Self {
         self.push_force = force;
+        self
+    }
+
+    pub fn with_depends_on_session_id(mut self, session_id: Option<String>) -> Self {
+        self.depends_on_session_id = session_id;
         self
     }
 }
@@ -1707,6 +1722,31 @@ mod pipeline_tests {
         assert!(!serde_json::to_string(&rebase)
             .unwrap()
             .contains("pushForce"));
+    }
+
+    #[test]
+    fn pipeline_dependency_round_trips_and_is_optional_for_legacy_json() {
+        let legacy: PipelineExecution = serde_json::from_str(
+            r#"{"kind":"push","pushForce":true,"steps":[],"currentStep":0,"completedWithoutAi":false}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.depends_on_session_id, None);
+        assert!(!serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("dependsOnSessionId"));
+
+        let gated = PipelineExecution::from_steps(&[])
+            .with_kind(PipelineKind::Push)
+            .with_depends_on_session_id(Some("rebase-1".to_string()));
+        let json = serde_json::to_string(&gated).unwrap();
+        assert!(json.contains("\"dependsOnSessionId\":\"rebase-1\""));
+        assert_eq!(
+            serde_json::from_str::<PipelineExecution>(&json)
+                .unwrap()
+                .depends_on_session_id
+                .as_deref(),
+            Some("rebase-1")
+        );
     }
 
     #[test]

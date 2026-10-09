@@ -99,6 +99,8 @@ describe('sessionStatusListener busy-state hydration', () => {
     setPushError: ReturnType<typeof vi.fn>;
     clearPushState: ReturnType<typeof vi.fn>;
     getPushState: ReturnType<typeof vi.fn>;
+    isPushInFlight: ReturnType<typeof vi.fn>;
+    trackPushIfIdle: ReturnType<typeof vi.fn>;
   };
   let sessionRegistry: ReturnType<typeof createFakeRegistry>;
 
@@ -134,14 +136,20 @@ describe('sessionStatusListener busy-state hydration', () => {
       clearPrState: vi.fn(),
       getPrState: vi.fn().mockReturnValue(undefined),
     };
+    const pushWorkflowStore = createFakeWorkflowStore(sessionRegistry, 'pushing');
     pushStateStore = {
-      ...createFakeWorkflowStore(sessionRegistry, 'pushing'),
+      ...pushWorkflowStore,
       clearSessionTracking: vi.fn(),
       markQueuedPushStarted: vi.fn(),
       setPushDone: vi.fn(),
       setPushError: vi.fn(),
       clearPushState: vi.fn(),
       getPushState: vi.fn().mockReturnValue(undefined),
+      isPushInFlight: vi.fn((branchId: string) => {
+        const state = pushWorkflowStore.states.get(branchId)?.state;
+        return state === 'queued' || state === 'pushing';
+      }),
+      trackPushIfIdle: vi.fn(),
     };
 
     vi.doMock('../transport', () => ({ isTauri: true, listenToEvent }));
@@ -625,6 +633,198 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(prStateStore.setPrError).not.toHaveBeenCalled();
       expect(pushStateStore.setPushError).not.toHaveBeenCalled();
       expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('commit-1');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Untracked pushes: push sessions have no timeline row, so a client that
+  // didn't launch one (reload, reconnect, another client) adopts it onto the
+  // push chip from the snapshot or its running event.
+  // -------------------------------------------------------------------------
+
+  describe('untracked push adoption', () => {
+    function activePush(sessionId: string, status: 'queued' | 'running', branchId = 'branch-1') {
+      return { sessionId, projectId: 'project-1', branchId, sessionType: 'push', status };
+    }
+
+    function pushSession(id: string, status: string, pushForce: boolean) {
+      return { id, status, pipeline: { kind: 'push', pushForce, steps: [], currentStep: 0 } };
+    }
+
+    async function hydrate() {
+      const { hydrateActiveSessions } = await import('./sessionStatusListener');
+      await hydrateActiveSessions();
+    }
+
+    it('seeds a queued force push from the snapshot', async () => {
+      getActiveSessions.mockResolvedValue([activePush('gated-push', 'queued')]);
+      getSession.mockResolvedValue(pushSession('gated-push', 'queued', true));
+
+      await hydrate();
+
+      expect(getSession).toHaveBeenCalledWith('gated-push');
+      expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledWith(
+        'branch-1',
+        'gated-push',
+        'queued',
+        true
+      );
+    });
+
+    it('seeds a running plain push as pushing and still registers it', async () => {
+      getActiveSessions.mockResolvedValue([activePush('push-1', 'running')]);
+      getSession.mockResolvedValue(pushSession('push-1', 'running', false));
+
+      await hydrate();
+
+      expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledWith(
+        'branch-1',
+        'push-1',
+        'pushing',
+        false
+      );
+      expect(sessionRegistry.register).toHaveBeenCalledWith(
+        'push-1',
+        'project-1',
+        'push',
+        'branch-1'
+      );
+    });
+
+    it('adopts the running push over one queued behind it on the same branch', async () => {
+      getActiveSessions.mockResolvedValue([
+        activePush('queued-push', 'queued'),
+        activePush('running-push', 'running'),
+      ]);
+      getSession.mockResolvedValue(pushSession('running-push', 'running', false));
+
+      await hydrate();
+
+      expect(getSession).toHaveBeenCalledTimes(1);
+      expect(getSession).toHaveBeenCalledWith('running-push');
+    });
+
+    it('skips a branch whose chip already follows a push', async () => {
+      pushStateStore.states.set('branch-1', { state: 'queued', sessionId: 'launched-push' });
+      getActiveSessions.mockResolvedValue([activePush('other-push', 'queued')]);
+
+      await hydrate();
+
+      expect(getSession).not.toHaveBeenCalled();
+      expect(pushStateStore.trackPushIfIdle).not.toHaveBeenCalled();
+    });
+
+    it('leaves a push that finished before the lookup to its terminal events', async () => {
+      getActiveSessions.mockResolvedValue([activePush('push-1', 'queued')]);
+      getSession.mockResolvedValue(pushSession('push-1', 'cancelled', true));
+
+      await hydrate();
+
+      expect(pushStateStore.trackPushIfIdle).not.toHaveBeenCalled();
+    });
+
+    it('leaves the chip idle when the session lookup throws', async () => {
+      getActiveSessions.mockResolvedValue([activePush('push-1', 'queued')]);
+      getSession.mockRejectedValue(new Error('socket not ready'));
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await hydrate();
+
+      expect(pushStateStore.trackPushIfIdle).not.toHaveBeenCalled();
+      expect(consoleError).toHaveBeenCalled();
+    });
+
+    it('skips a push whose terminal event arrived during the lookup', async () => {
+      const { listenForSessionStatus, hydrateActiveSessions } =
+        await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      getActiveSessions.mockResolvedValue([activePush('gated-push', 'queued')]);
+      getSession.mockImplementation(async () => {
+        eventCallbacks.get('session-status-changed')?.({
+          sessionId: 'gated-push',
+          status: 'cancelled',
+          branchId: 'branch-1',
+          sessionType: 'push',
+          errorMessage: 'The rebase was cancelled.',
+        });
+        return pushSession('gated-push', 'queued', true);
+      });
+
+      await hydrateActiveSessions();
+
+      expect(pushStateStore.trackPushIfIdle).not.toHaveBeenCalled();
+    });
+
+    it('adopts as pushing a queued push whose running event arrived during the lookup', async () => {
+      const { listenForSessionStatus, hydrateActiveSessions } =
+        await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      getActiveSessions.mockResolvedValue([activePush('gated-push', 'queued')]);
+      getSession.mockImplementation(async () => {
+        eventCallbacks.get('session-status-changed')?.({
+          sessionId: 'gated-push',
+          status: 'running',
+          projectId: 'project-1',
+          branchId: 'branch-1',
+          sessionType: 'push',
+        });
+        return pushSession('gated-push', 'queued', true);
+      });
+
+      await hydrateActiveSessions();
+
+      // The running event's own adoption dedupes onto the one in flight.
+      expect(getSession).toHaveBeenCalledTimes(1);
+      expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledTimes(1);
+      expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledWith(
+        'branch-1',
+        'gated-push',
+        'pushing',
+        true
+      );
+    });
+
+    it('adopts a push whose running event reaches a client with an idle chip', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      getSession.mockResolvedValue(pushSession('gated-push', 'running', true));
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'gated-push',
+        status: 'running',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'push',
+      });
+
+      await vi.waitFor(() =>
+        expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledWith(
+          'branch-1',
+          'gated-push',
+          'pushing',
+          true
+        )
+      );
+    });
+
+    it('does not look up a running push the chip already follows', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      pushStateStore.states.set('branch-1', { state: 'pushing', sessionId: 'push-1' });
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'push-1',
+        status: 'running',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'push',
+      });
+
+      expect(getSession).not.toHaveBeenCalled();
     });
   });
 

@@ -395,7 +395,7 @@
       // it waiting like any other queued push — unless the chip is already
       // following a push, which keeps it.
       if (result.followUpSessionId) {
-        pushStateStore.trackQueuedPushIfIdle(branch.id, result.followUpSessionId);
+        pushStateStore.trackPushIfIdle(branch.id, result.followUpSessionId, 'queued', true);
       }
       // Add a pending session item so the session stub appears instantly
       // instead of waiting for the full timeline refresh. Queued pipelines get

@@ -43,6 +43,7 @@ import type {
   ActiveSessionInfo,
   PrCreatedPayload,
   PushCompletedPayload,
+  Session,
   SessionStatus,
   SessionStatusPayload,
 } from '../types';
@@ -104,6 +105,12 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     // when the branch queue drains it; this event is the only signal of that.
     if (sessionType === 'push' && eventBranchId) {
       pushStateStore.markQueuedPushStarted(eventBranchId, sessionId);
+      // Nothing announces a push when it is queued, so a client that didn't
+      // launch it (another client, or "Rebase and force push" requested
+      // elsewhere) first hears of it here.
+      if (!pushStateStore.isPushInFlight(eventBranchId)) {
+        void adoptUntrackedPush({ sessionId, branchId: eventBranchId });
+      }
     }
     if (sessionType === 'pull' && eventBranchId) {
       pullStateStore.markQueuedPullStarted(eventBranchId, sessionId);
@@ -115,6 +122,8 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     if (hydrationFetchesInFlight > 0) {
       terminalWhileFetching.set(sessionId, Date.now());
     }
+    const adoption = pushAdoptions.get(sessionId);
+    if (adoption) adoption.ended = true;
     // Invalidate cached timeline for the branch affected by this session
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
@@ -149,7 +158,8 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
  *
  * Swept sessions that a workflow store is still rendering as in-progress are
  * reconciled against their persisted status once the snapshot window closes
- * (see `reconcileSweptWorkflowSession`).
+ * (see `reconcileSweptWorkflowSession`). Active pushes on a branch whose push
+ * chip is idle are adopted the same way (see `adoptUntrackedPush`).
  */
 export async function hydrateActiveSessions(): Promise<void> {
   // Anything that happens while the fetch is in flight is newer than the
@@ -159,6 +169,7 @@ export async function hydrateActiveSessions(): Promise<void> {
   // snapshot's stale "running" claim.
   const fetchStartedAt = Date.now();
   const sweptWorkflows: SweptWorkflowSession[] = [];
+  const untrackedPushes = new Map<string, UntrackedPush>();
   hydrationFetchesInFlight++;
   try {
     let active: ActiveSessionInfo[];
@@ -186,10 +197,24 @@ export async function hydrateActiveSessions(): Promise<void> {
     }
 
     for (const session of active) {
+      if ((terminalWhileFetching.get(session.sessionId) ?? 0) >= fetchStartedAt) continue;
+      // One push per branch with an idle chip: the running one if any, else
+      // the first queued (the snapshot is in creation order, which is the
+      // order the branch queue drains in).
+      if (
+        session.sessionType === 'push' &&
+        session.branchId &&
+        !pushStateStore.isPushInFlight(session.branchId) &&
+        (!untrackedPushes.has(session.branchId) || session.status === 'running')
+      ) {
+        untrackedPushes.set(session.branchId, {
+          sessionId: session.sessionId,
+          branchId: session.branchId,
+        });
+      }
       if (session.status !== 'running') continue;
       if (!session.projectId) continue;
       if (sessionRegistry.getMetadata(session.sessionId)) continue;
-      if ((terminalWhileFetching.get(session.sessionId) ?? 0) >= fetchStartedAt) continue;
       sessionRegistry.register(
         session.sessionId,
         session.projectId,
@@ -209,7 +234,63 @@ export async function hydrateActiveSessions(): Promise<void> {
   // `terminalWhileFetching` guard cover the snapshot fetch/apply only, and
   // these lookups must not extend it. Awaited so callers (and tests) can
   // observe the reconciliation.
-  await Promise.all(sweptWorkflows.map(reconcileSweptWorkflowSession));
+  await Promise.all([
+    ...sweptWorkflows.map(reconcileSweptWorkflowSession),
+    ...Array.from(untrackedPushes.values(), adoptUntrackedPush),
+  ]);
+}
+
+interface UntrackedPush {
+  sessionId: string;
+  branchId: string;
+}
+
+// Pushes `adoptUntrackedPush` is looking up. `ended` records a terminal event
+// that arrived during the lookup, whose answer may then be stale.
+const pushAdoptions = new Map<string, { ended: boolean }>();
+
+/**
+ * Show an active push this client never launched on its branch's push chip.
+ *
+ * Push sessions create no timeline artifact, so the chip is the only place a
+ * push shows up, and only launch sites write it. Without this, a client that
+ * reloads, reconnects, or watches from elsewhere shows no "Push queued",
+ * Cancel, or "Pushing…" for a push it didn't start. That matters most for
+ * the force push "Rebase and force push" queues: it runs later and on its
+ * own, and meanwhile the PR button offers a second, plain push.
+ *
+ * The snapshot and the running event both lack the force flag, so this looks
+ * the session up (one `getSession` per untracked push, normally zero). As in
+ * `reconcileSweptWorkflowSession`, a thrown lookup paints nothing. A session
+ * that has since finished is left to its terminal events, as is one whose
+ * terminal event arrived during the lookup. Once adopted, the chip behaves
+ * as if this client had launched the push.
+ */
+async function adoptUntrackedPush({ sessionId, branchId }: UntrackedPush): Promise<void> {
+  if (pushAdoptions.has(sessionId)) return;
+  const adoption = { ended: false };
+  pushAdoptions.set(sessionId, adoption);
+  let session: Session | null;
+  try {
+    session = await commands.getSession(sessionId);
+  } catch (e) {
+    console.error('Failed to look up untracked push session:', sessionId, e);
+    return;
+  } finally {
+    pushAdoptions.delete(sessionId);
+  }
+
+  if (adoption.ended || !session || session.pipeline?.kind !== 'push') return;
+  if (session.status !== 'queued' && session.status !== 'running') return;
+  // Only running sessions are registered, so a registered one started during
+  // the lookup even if the backend answered `queued`.
+  const started = session.status === 'running' || sessionRegistry.getMetadata(sessionId) !== null;
+  pushStateStore.trackPushIfIdle(
+    branchId,
+    sessionId,
+    started ? 'pushing' : 'queued',
+    session.pipeline.pushForce ?? false
+  );
 }
 
 interface SweptWorkflowSession {

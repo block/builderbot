@@ -18,11 +18,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('pushStateStore.trackQueuedPushIfIdle', () => {
+describe('pushStateStore.trackPushIfIdle', () => {
   it('tracks the queued push when nothing is in flight', async () => {
     const store = await importStore();
 
-    store.trackQueuedPushIfIdle('branch', 'gated-push');
+    store.trackPushIfIdle('branch', 'gated-push', 'queued', true);
 
     expect(store.getPushState('branch')).toMatchObject({
       state: 'queued',
@@ -34,14 +34,39 @@ describe('pushStateStore.trackQueuedPushIfIdle', () => {
   it('replaces a finished or failed push', async () => {
     const store = await importStore();
     store.setPushDone('branch');
-    store.trackQueuedPushIfIdle('branch', 'after-done');
+    store.trackPushIfIdle('branch', 'after-done', 'queued', true);
     expect(store.getSessionId('branch')).toBe('after-done');
 
     store.setPushError('branch', 'rejected');
-    store.trackQueuedPushIfIdle('branch', 'after-error');
+    store.trackPushIfIdle('branch', 'after-error', 'queued', true);
     expect(store.getPushState('branch')).toMatchObject({
       state: 'queued',
       sessionId: 'after-error',
+    });
+  });
+
+  it('adopts a running push with the force flag it is given', async () => {
+    const store = await importStore();
+
+    store.trackPushIfIdle('branch', 'snapshot-push', 'pushing', false);
+
+    expect(store.getPushState('branch')).toMatchObject({
+      state: 'pushing',
+      sessionId: 'snapshot-push',
+      force: false,
+    });
+  });
+
+  it('keeps a push whose launch has not resolved yet', async () => {
+    const store = await importStore();
+    store.setPushing('branch', '__pending__', false);
+
+    store.trackPushIfIdle('branch', 'snapshot-push', 'queued', true);
+
+    expect(store.getPushState('branch')).toMatchObject({
+      state: 'pushing',
+      sessionId: '__pending__',
+      force: false,
     });
   });
 
@@ -49,14 +74,14 @@ describe('pushStateStore.trackQueuedPushIfIdle', () => {
     const store = await importStore();
 
     store.setPushQueued('branch', 'plain-queued', false);
-    store.trackQueuedPushIfIdle('branch', 'gated-push');
+    store.trackPushIfIdle('branch', 'gated-push', 'queued', true);
     expect(store.getPushState('branch')).toMatchObject({
       state: 'queued',
       sessionId: 'plain-queued',
     });
 
     store.setPushing('branch', 'plain-running', false);
-    store.trackQueuedPushIfIdle('branch', 'gated-push');
+    store.trackPushIfIdle('branch', 'gated-push', 'queued', true);
     expect(store.getPushState('branch')).toMatchObject({
       state: 'pushing',
       sessionId: 'plain-running',
@@ -69,7 +94,7 @@ describe('pushStateStore.trackQueuedPushIfIdle', () => {
     store.markQueuedPushStarted('branch', 'gated-push');
 
     // A repeat "Rebase and force push" dedupes onto the same queued row.
-    store.trackQueuedPushIfIdle('branch', 'gated-push');
+    store.trackPushIfIdle('branch', 'gated-push', 'queued', true);
 
     expect(store.getPushState('branch')).toMatchObject({
       state: 'pushing',
@@ -95,7 +120,7 @@ describe('pushStateStore force flag', () => {
 
   it('keeps the gated push of "Rebase and force push" forced when it fails', async () => {
     const store = await importStore();
-    store.trackQueuedPushIfIdle('branch', 'gated-push');
+    store.trackPushIfIdle('branch', 'gated-push', 'queued', true);
 
     store.setPushError('branch', 'Push session was cancelled.');
 

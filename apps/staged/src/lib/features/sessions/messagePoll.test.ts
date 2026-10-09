@@ -98,6 +98,54 @@ describe('mergeSinceMessages', () => {
     ]);
   });
 
+  it('splices the tail at a stale cursor instead of duplicating rows', () => {
+    // A poll read lastId=5, then an overlapping poll extended the transcript
+    // to 7 before this one's fetch (which also saw 8) came back.
+    const existing = [
+      message(4, 'user', 'hi'),
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const updated = [
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+      message(8, 'assistant', 'Done'),
+    ];
+    const merged = mergeSinceMessages(existing, updated, 5);
+
+    expect(merged!.appended).toBe(true);
+    expect(merged!.messages.map((m) => m.id)).toEqual([4, 5, 6, 7, 8]);
+    expect(merged!.messages[0]).toBe(existing[0]);
+  });
+
+  it('returns null when an overlapping poll already applied the same tail', () => {
+    const existing = [
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    const updated = [
+      message(5, 'assistant', 'The'),
+      message(6, 'tool_call', 'Read'),
+      message(7, 'tool_result', 'ok'),
+    ];
+    expect(mergeSinceMessages(existing, updated, 5)).toBeNull();
+  });
+
+  it('does not report a stale-cursor update that ends at the cached tail as appended', () => {
+    const existing = [message(5, 'assistant', 'The'), message(6, 'tool_call', 'Read')];
+    const updated = [message(5, 'assistant', 'The end'), message(6, 'tool_call', 'Read')];
+    const merged = mergeSinceMessages(existing, updated, 5);
+
+    expect(merged!.appended).toBe(false);
+    expect(merged!.messages.map((m) => [m.id, m.content])).toEqual([
+      [5, 'The end'],
+      [6, 'Read'],
+    ]);
+  });
+
   it('notices metadata-only changes to a refetched row', () => {
     const existing = [message(2, 'assistant', 'The'), message(3, 'tool_call', 'Read')];
     const updated = [

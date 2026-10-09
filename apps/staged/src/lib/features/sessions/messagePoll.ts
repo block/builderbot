@@ -42,6 +42,11 @@ export interface MergedSinceMessages {
  * data under a fresh identity would invalidate the grouped transcript and
  * re-render the entire message list on every tick. Rows from `lastId` on
  * replace the tail.
+ *
+ * The tail is spliced in at the `lastId` row's current position rather than
+ * at the end: `lastId` is read before the fetch awaits, so another poll that
+ * overlapped this one may already have extended `existing` past it, and
+ * cutting the last row alone would duplicate the rows both fetches returned.
  */
 export function mergeSinceMessages(
   existing: readonly SessionMessage[],
@@ -62,23 +67,28 @@ export function mergeSinceMessages(
   }
 
   let appended = false;
-  if (tail.length > 0 && !isUnchangedTail(existing, tail, lastId)) {
-    next = [...(next ?? existing).slice(0, -1), ...tail];
-    appended = tail.length > 1 || tail[0].id !== lastId;
+  if (tail.length > 0) {
+    const cursor = findIndexFromEnd(existing, lastId);
+    const cut = cursor < 0 ? Math.max(existing.length - 1, 0) : cursor;
+    if (!isUnchangedTail(existing, tail, cut)) {
+      next = [...(next ?? existing).slice(0, cut), ...tail];
+      const previousTail = existing[existing.length - 1];
+      appended = !previousTail || tail[tail.length - 1].id > previousTail.id;
+    }
   }
 
   return next ? { messages: next, appended } : null;
 }
 
-/** Whether the tail re-fetch returned only an identical copy of the last
- *  known message. */
+/** Whether the tail re-fetch returned only identical copies of the rows
+ *  already cached from `cut` on. */
 function isUnchangedTail(
   existing: readonly SessionMessage[],
   tail: readonly SessionMessage[],
-  lastId: number
+  cut: number
 ): boolean {
-  if (tail.length !== 1 || tail[0].id !== lastId) return false;
-  return isSameMessage(existing[existing.length - 1], tail[0]);
+  if (existing.length - cut !== tail.length) return false;
+  return tail.every((message, offset) => isSameMessage(existing[cut + offset], message));
 }
 
 /** Content is compared separately so the common streaming case (the row

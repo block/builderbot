@@ -229,6 +229,9 @@
   let inputEl: HTMLElement | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
+  /** A terminal status arrived while a tick was in flight; poll once more
+   *  when that tick settles. */
+  let finalPollPending = false;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenBackgroundHold: UnlistenFn | null = null;
   let statusEventVersion = 0;
@@ -720,10 +723,7 @@
       } else {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
-        stopPolling();
-        // Teardown writes the final text of an open assistant row just before
-        // the status flips, which the last interval tick may have missed.
-        void poll();
+        finishPolling();
       }
     });
     unlistenStatus = unlisten;
@@ -964,12 +964,16 @@
       // a fresh running event while this poll is in flight; that event is
       // fresher than this status fetch and keeps polling alive.
       if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
-        stopPolling();
+        clearPollTimer();
       }
     } catch {
       // Polling errors are expected during shutdown — silently ignore
     } finally {
       pollInFlight = false;
+      if (finalPollPending) {
+        finalPollPending = false;
+        void poll();
+      }
     }
   }
 
@@ -1010,12 +1014,35 @@
     pollTimer = setInterval(poll, 500);
   }
 
+  /** Abandon polling: the pane is closing or switching session. */
   function stopPolling() {
+    clearPollTimer();
+    pollInFlight = false;
+    finalPollPending = false;
+  }
+
+  /**
+   * Stop the interval and poll once more. Teardown writes the final text of an
+   * open assistant row just before the status flips, which the last interval
+   * tick may have missed. A tick still in flight read the same cursor this
+   * poll would, and the two merges would duplicate the rows both fetched, so
+   * the final poll is deferred until that tick settles instead.
+   */
+  function finishPolling() {
+    const tickInFlight = pollInFlight;
+    stopPolling();
+    if (tickInFlight) {
+      finalPollPending = true;
+    } else {
+      void poll();
+    }
+  }
+
+  function clearPollTimer() {
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
-    pollInFlight = false;
   }
 
   // =========================================================================

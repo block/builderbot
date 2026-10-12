@@ -949,20 +949,23 @@
     {#if showCreatePrMenu}
       <!-- Joined to the Create PR button, as the rebase chevron is in
            BranchCardHeaderInfo: same outline and height, touching corners
-           squared, border overlapped so the pair reads as one control. -->
+           squared, border overlapped so the pair reads as one control.
+           The tooltip lives on a wrapping span, as it does there, because
+           browsers don't reliably show tooltips on a disabled element. -->
       <DropdownMenu.Root>
-        <DropdownMenu.Trigger
-          class={cn(
-            buttonVariants({ variant: 'outline', size: 'sm' }),
-            '-ml-px w-6 shrink-0 rounded-l-none px-0 [&_svg]:!size-3.5',
-            detectingPr && 'border-[var(--border-muted)]'
-          )}
-          disabled={showPrDetectionDialog || detectingPr}
-          aria-label="More PR options"
-          title="More PR options"
-        >
-          <ChevronDown size={13} />
-        </DropdownMenu.Trigger>
+        <span class="inline-flex -ml-px shrink-0" title="More PR options">
+          <DropdownMenu.Trigger
+            class={cn(
+              buttonVariants({ variant: 'outline', size: 'sm' }),
+              'w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
+              detectingPr && 'border-[var(--border-muted)]'
+            )}
+            disabled={showPrDetectionDialog || detectingPr}
+            aria-label="More PR options"
+          >
+            <ChevronDown size={13} />
+          </DropdownMenu.Trigger>
+        </span>
         <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
           <DropdownMenu.Item onSelect={() => handleCreatePr(true)}>
             <GitPullRequestDraft size={14} /> Create draft PR

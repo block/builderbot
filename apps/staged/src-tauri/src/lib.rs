@@ -2430,6 +2430,7 @@ pub fn run() {
             prs::clear_branch_pr_status,
             prs::recover_branch_pr,
             pr_detection::detect_branch_pr,
+            pr_detection::link_branch_pr,
             // PR poll scheduler (frontend interest/hint layer)
             pr_poll_scheduler::set_foreground_project,
             pr_poll_scheduler::set_focus,

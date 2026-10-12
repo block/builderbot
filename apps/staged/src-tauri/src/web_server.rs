@@ -3912,6 +3912,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let result = crate::pr_detection::detect_branch_pr_impl(store, branch_id).await?;
             Ok(serde_json::to_value(result).unwrap())
         }
+        "link_branch_pr" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let pr_number: u64 = arg(&args, "prNumber")?;
+            let linked =
+                crate::pr_detection::link_branch_pr_impl(store, branch_id, pr_number).await?;
+            Ok(serde_json::to_value(linked).unwrap())
+        }
         "refresh_pr_status" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;

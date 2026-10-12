@@ -527,6 +527,10 @@
   // A match only updates the button (the PR badge is the confirmation); every
   // other outcome opens an alert dialog so the user can tell "no PR" apart from
   // "a PR exists but targets develop" or "gh failed".
+  //
+  // A candidate rejected on its base branch alone (the backend marks it
+  // `linkable`) gets a "Link anyway" action: the stored base can be stale after
+  // a stack restructure, or the PR may have been retargeted on GitHub.
   type PrDetectionFailure =
     | { kind: 'notFound' }
     | { kind: 'rejected'; candidates: RejectedPrCandidate[] }
@@ -535,9 +539,18 @@
   let detectingPr = $state(false);
   let prDetectionFailure = $state<PrDetectionFailure | null>(null);
   let showPrDetectionDialog = $derived(prDetectionFailure !== null);
+  let linkingPrNumber = $state<number | null>(null);
+  let prLinkError = $state<string | null>(null);
 
   // The secondary menu only joins the button while it still reads "Create PR".
   let showCreatePrMenu = $derived(prState === 'idle' && pushState === 'idle');
+
+  // Mirror what the backend persisted, as handlePrSessionComplete does.
+  function adoptLinkedPr(prNumber: number, prUrl: string) {
+    branch.prNumber = prNumber;
+    prStateStore.setPrCreated(branch.id, prUrl);
+    prPollingService.refreshNow(branch.projectId);
+  }
 
   async function handleDetectExistingPr() {
     if (detectingPr || prState !== 'idle') return;
@@ -547,10 +560,7 @@
       const result = await commands.detectBranchPr(branch.id);
       switch (result.kind) {
         case 'found':
-          // Mirror what the backend persisted, as handlePrSessionComplete does.
-          branch.prNumber = result.prNumber;
-          prStateStore.setPrCreated(branch.id, result.prUrl);
-          prPollingService.refreshNow(branch.projectId);
+          adoptLinkedPr(result.prNumber, result.prUrl);
           break;
         case 'notFound':
           prDetectionFailure = { kind: 'notFound' };
@@ -566,8 +576,27 @@
     }
   }
 
+  // The failure is shown inside the open dialog rather than replacing it, so
+  // the candidate list stays visible next to the explanation.
+  async function handleLinkPrAnyway(candidate: RejectedPrCandidate) {
+    if (linkingPrNumber !== null) return;
+
+    linkingPrNumber = candidate.prNumber;
+    prLinkError = null;
+    try {
+      const linked = await commands.linkBranchPr(branch.id, candidate.prNumber);
+      adoptLinkedPr(linked.prNumber, linked.prUrl);
+      prDetectionFailure = null;
+    } catch (e) {
+      prLinkError = e instanceof Error ? e.message : String(e);
+    } finally {
+      linkingPrNumber = null;
+    }
+  }
+
   function handlePrDetectionDialogClose() {
     prDetectionFailure = null;
+    prLinkError = null;
   }
 
   let prCompletionInFlight = false;
@@ -985,7 +1014,7 @@
 {#if prDetectionFailure}
   <AlertDialog.Root
     open={showPrDetectionDialog}
-    onOpenChange={(open) => !open && handlePrDetectionDialogClose()}
+    onOpenChange={(open) => !open && linkingPrNumber === null && handlePrDetectionDialogClose()}
   >
     <AlertDialog.Content>
       {#if prDetectionFailure.kind === 'notFound'}
@@ -1004,28 +1033,47 @@
         </AlertDialog.Header>
       {:else}
         {@const candidates = prDetectionFailure.candidates}
+        {@const anyLinkable = candidates.some((c) => c.linkable)}
         <AlertDialog.Header>
           <AlertDialog.Title>Existing PR not linked</AlertDialog.Title>
           <AlertDialog.Description>
             GitHub has {candidates.length === 1
               ? 'a pull request'
               : `${candidates.length} pull requests`} with {branch.branchName} as the head branch, but
-            none can be linked to this branch:
+            none {candidates.length === 1 ? 'matches' : 'match'} this branch:
           </AlertDialog.Description>
         </AlertDialog.Header>
         <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">
           {#each candidates as candidate (candidate.prNumber)}
             <li>
-              <button
-                type="button"
-                class="font-medium underline-offset-2 hover:underline"
-                onclick={() =>
-                  commands.openUrl(candidate.prUrl).catch((e) => {
-                    console.error('Failed to open PR URL:', e);
-                  })}
-              >
-                #{candidate.prNumber}
-              </button>
+              <div class="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  class="font-medium underline-offset-2 hover:underline"
+                  onclick={() =>
+                    commands.openUrl(candidate.prUrl).catch((e) => {
+                      console.error('Failed to open PR URL:', e);
+                    })}
+                >
+                  #{candidate.prNumber}
+                </button>
+                {#if candidate.linkable}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-7 gap-1.5 text-xs"
+                    title="Link PR #{candidate.prNumber} to this branch even though it targets a different base."
+                    disabled={linkingPrNumber !== null}
+                    onclick={() => handleLinkPrAnyway(candidate)}
+                  >
+                    {#if linkingPrNumber === candidate.prNumber}
+                      <Spinner size={12} /> Linking…
+                    {:else}
+                      Link anyway
+                    {/if}
+                  </Button>
+                {/if}
+              </div>
               <ul class="mt-1 list-disc space-y-0.5 pl-5 text-[var(--text-muted)]">
                 {#each candidate.reasons as reason, i (i)}
                   <li>{describePrRejectionReason(reason)}</li>
@@ -1034,9 +1082,23 @@
             </li>
           {/each}
         </ul>
+        {#if anyLinkable}
+          <p class="text-xs text-[var(--text-muted)]">
+            A base mismatch can be overridden if the PR was retargeted on GitHub or this branch's
+            base is out of date. Closed, merged and fork pull requests cannot be linked.
+          </p>
+        {/if}
+        {#if prLinkError}
+          <p class="whitespace-pre-line text-sm text-destructive">{prLinkError}</p>
+        {/if}
       {/if}
       <AlertDialog.Footer>
-        <AlertDialog.Cancel onclick={handlePrDetectionDialogClose}>Close</AlertDialog.Cancel>
+        <AlertDialog.Cancel
+          disabled={linkingPrNumber !== null}
+          onclick={handlePrDetectionDialogClose}
+        >
+          Close
+        </AlertDialog.Cancel>
       </AlertDialog.Footer>
     </AlertDialog.Content>
   </AlertDialog.Root>

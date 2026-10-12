@@ -47,6 +47,7 @@ import type {
   Issue,
   PrStatus,
   PrDetectionResult,
+  LinkedBranchPr,
   PollWorkspaceResult,
   Image,
   SuggestedRepo,
@@ -1541,6 +1542,13 @@ export function recoverBranchPr(branchId: string): Promise<number | null> {
  *  matched only on branch name come back as `rejected` with reasons. */
 export function detectBranchPr(branchId: string): Promise<PrDetectionResult> {
   return invokeCommand('detect_branch_pr', { branchId });
+}
+
+/** Link a PR that `detectBranchPr` reported as `linkable` (rejected on its
+ *  base branch alone). The backend re-checks the PR and refuses one that is
+ *  closed, merged or whose head lives in another repository. */
+export function linkBranchPr(branchId: string, prNumber: number): Promise<LinkedBranchPr> {
+  return invokeCommand('link_branch_pr', { branchId, prNumber });
 }
 
 /** Check whether a branch has local commits not yet pushed to the remote. */

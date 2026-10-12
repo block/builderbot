@@ -8,13 +8,19 @@
 //! head is the branch name, adopts the first one that belongs to this branch,
 //! and otherwise explains why each candidate was passed over so the user can
 //! tell "no PR" apart from "a PR exists but targets the wrong base".
+//!
+//! A base mismatch is the one check the user may legitimately want to
+//! override (the PR was retargeted on GitHub, or the stored base is stale
+//! after a stack restructure), so candidates rejected on that alone are
+//! flagged `linkable` and `link_branch_pr` adopts one on request. It re-runs
+//! the same checks so a closed PR or a fork's PR can't be linked by hand.
 
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
 use crate::git;
-use crate::store::Store;
+use crate::store::{Branch, Store};
 
 /// Why a PR with the right head branch name was not adopted.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -34,6 +40,34 @@ pub enum PrRejectionReason {
     },
 }
 
+impl PrRejectionReason {
+    /// Whether the user may link the PR despite this reason. Only a base
+    /// mismatch is soft: a closed or merged PR is not this branch's PR any
+    /// more, and a PR whose head is in another repository never was.
+    fn is_overridable(&self) -> bool {
+        matches!(self, PrRejectionReason::WrongBase { .. })
+    }
+
+    /// Sentence for error messages; the frontend has its own copy for the
+    /// dialog list.
+    fn describe(&self) -> String {
+        match self {
+            PrRejectionReason::NotOpen { state } => format!("it is {state}"),
+            PrRejectionReason::WrongBase { expected, actual } => {
+                format!("it targets {actual}, not {expected}")
+            }
+            PrRejectionReason::WrongHeadRepo {
+                expected,
+                actual: Some(actual),
+            } => format!("its head branch lives in {actual}, not {expected}"),
+            PrRejectionReason::WrongHeadRepo {
+                expected,
+                actual: None,
+            } => format!("its head repository no longer exists (this branch pushes to {expected})"),
+        }
+    }
+}
+
 /// A PR that matched on branch name but failed at least one check.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +75,29 @@ pub struct RejectedPrCandidate {
     pub pr_number: u64,
     pub pr_url: String,
     pub reasons: Vec<PrRejectionReason>,
+    /// True when every reason is overridable, so the UI can offer to link
+    /// the PR anyway via `link_branch_pr`.
+    pub linkable: bool,
+}
+
+impl RejectedPrCandidate {
+    fn new(pr: &git::HeadBranchPr, reasons: Vec<PrRejectionReason>) -> Self {
+        let linkable = !reasons.is_empty() && reasons.iter().all(PrRejectionReason::is_overridable);
+        RejectedPrCandidate {
+            pr_number: pr.number,
+            pr_url: pr.url.clone(),
+            reasons,
+            linkable,
+        }
+    }
+}
+
+/// A PR linked by explicit user choice via `link_branch_pr`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedBranchPr {
+    pub pr_number: u64,
+    pub pr_url: String,
 }
 
 /// Outcome of a detection pass, as returned to the frontend.
@@ -117,11 +174,7 @@ pub(crate) fn classify_candidates(
                 pr_url: pr.url.clone(),
             };
         }
-        rejected.push(RejectedPrCandidate {
-            pr_number: pr.number,
-            pr_url: pr.url.clone(),
-            reasons,
-        });
+        rejected.push(RejectedPrCandidate::new(pr, reasons));
     }
 
     if rejected.is_empty() {
@@ -133,33 +186,50 @@ pub(crate) fn classify_candidates(
     }
 }
 
-/// Look up PRs on GitHub whose head is this branch and link the first one
-/// that belongs to it.
+/// Find `pr_number` among the PRs whose head is `branch_name` and check it
+/// may be linked by hand: every failed check must be overridable.
 ///
-/// Shared by the `detect_branch_pr` command and the web-mode `dispatch()`
-/// arm. Errors if the branch already has a PR: the UI only offers detection
-/// when it doesn't, so reaching here means the caller's view is stale.
-pub(crate) async fn detect_branch_pr_impl(
-    store: Arc<Store>,
-    branch_id: String,
-) -> Result<PrDetectionResult, String> {
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+/// The candidate list is re-fetched by the caller rather than trusted from
+/// the earlier detection pass, so a PR that was closed in between is caught.
+pub(crate) fn pick_candidate_to_link<'a>(
+    candidates: &'a [git::HeadBranchPr],
+    pr_number: u64,
+    expected: &PrExpectations,
+    branch_name: &str,
+) -> Result<&'a git::HeadBranchPr, String> {
+    let pr = candidates
+        .iter()
+        .find(|pr| pr.number == pr_number)
+        .ok_or_else(|| format!("PR #{pr_number} no longer has {branch_name} as its head branch"))?;
 
-    if let Some(pr_number) = branch.pr_number {
-        return Err(format!(
-            "Branch is already linked to PR #{pr_number}; nothing to detect"
-        ));
+    let blocking: Vec<String> = rejection_reasons(pr, expected)
+        .iter()
+        .filter(|reason| !reason.is_overridable())
+        .map(PrRejectionReason::describe)
+        .collect();
+
+    if blocking.is_empty() {
+        Ok(pr)
+    } else {
+        Err(format!(
+            "PR #{pr_number} cannot be linked to this branch: {}",
+            blocking.join("; ")
+        ))
     }
+}
 
+/// Resolve the repo a branch's PRs are listed in and what one must satisfy
+/// to be adopted.
+fn branch_pr_expectations(
+    store: &Arc<Store>,
+    branch: &Branch,
+) -> Result<(String, PrExpectations), String> {
     let project = store
         .get_project(&branch.project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-    let (repo_slug, _) = crate::prs::resolve_branch_repo_and_subpath(&store, &project, &branch)?;
+    let (repo_slug, _) = crate::prs::resolve_branch_repo_and_subpath(store, &project, branch)?;
 
     // For fork setups the branch is pushed to `head_repo`, and that is where
     // GitHub reports the PR's head as living.
@@ -177,14 +247,58 @@ pub(crate) async fn detect_branch_pr_impl(
         head_repo,
     };
 
-    let branch_name = branch.branch_name.clone();
-    let lookup_slug = repo_slug.clone();
-    let candidates = tauri::async_runtime::spawn_blocking(move || {
-        git::list_prs_for_head_branch(&lookup_slug, &branch_name)
+    Ok((repo_slug, expected))
+}
+
+/// Load an unlinked branch. Errors if it already has a PR: the UI only
+/// offers detection and linking when it doesn't, so reaching here means the
+/// caller's view is stale.
+fn load_unlinked_branch(store: &Store, branch_id: &str, action: &str) -> Result<Branch, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    if let Some(pr_number) = branch.pr_number {
+        return Err(format!(
+            "Branch is already linked to PR #{pr_number}; nothing to {action}"
+        ));
+    }
+
+    Ok(branch)
+}
+
+async fn list_head_branch_prs(
+    repo_slug: String,
+    branch_name: String,
+    task: &str,
+) -> Result<Vec<git::HeadBranchPr>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_prs_for_head_branch(&repo_slug, &branch_name)
     })
     .await
-    .map_err(|e| format!("detect_branch_pr task failed: {e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("{task} task failed: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+/// Look up PRs on GitHub whose head is this branch and link the first one
+/// that belongs to it.
+///
+/// Shared by the `detect_branch_pr` command and the web-mode `dispatch()`
+/// arm.
+pub(crate) async fn detect_branch_pr_impl(
+    store: Arc<Store>,
+    branch_id: String,
+) -> Result<PrDetectionResult, String> {
+    let branch = load_unlinked_branch(&store, &branch_id, "detect")?;
+    let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
+
+    let candidates = list_head_branch_prs(
+        repo_slug.clone(),
+        branch.branch_name.clone(),
+        "detect_branch_pr",
+    )
+    .await?;
 
     let result = classify_candidates(&candidates, &expected);
 
@@ -219,6 +333,58 @@ pub async fn detect_branch_pr(
 ) -> Result<PrDetectionResult, String> {
     let store = crate::get_store(&store)?;
     detect_branch_pr_impl(store, branch_id).await
+}
+
+/// Link a PR that `detect_branch_pr` reported as `linkable`, at the user's
+/// request. The PR is looked up again and the checks re-run; only
+/// overridable failures (a base mismatch) are waved through.
+///
+/// Shared by the `link_branch_pr` command and the web-mode `dispatch()` arm.
+pub(crate) async fn link_branch_pr_impl(
+    store: Arc<Store>,
+    branch_id: String,
+    pr_number: u64,
+) -> Result<LinkedBranchPr, String> {
+    let branch = load_unlinked_branch(&store, &branch_id, "link")?;
+    let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
+
+    let candidates = list_head_branch_prs(
+        repo_slug.clone(),
+        branch.branch_name.clone(),
+        "link_branch_pr",
+    )
+    .await?;
+
+    let pr = pick_candidate_to_link(&candidates, pr_number, &expected, &branch.branch_name)?;
+
+    store
+        .update_branch_pr_number(&branch_id, Some(pr.number))
+        .map_err(|e| e.to_string())?;
+    log::info!(
+        "link_branch_pr: linked PR #{} in {} to branch_id={} (PR base {}, branch base {})",
+        pr.number,
+        repo_slug,
+        branch_id,
+        pr.base_ref,
+        expected.base_ref
+    );
+
+    Ok(LinkedBranchPr {
+        pr_number: pr.number,
+        pr_url: pr.url.clone(),
+    })
+}
+
+/// User-chosen "Link anyway" for a PR detection passed over on its base
+/// branch alone. Persists the PR number; the frontend renders the outcome.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn link_branch_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: u64,
+) -> Result<LinkedBranchPr, String> {
+    let store = crate::get_store(&store)?;
+    link_branch_pr_impl(store, branch_id, pr_number).await
 }
 
 #[cfg(test)]
@@ -305,6 +471,7 @@ mod tests {
                                 actual: "develop".to_string(),
                             },
                         ],
+                        linkable: false,
                     },
                     RejectedPrCandidate {
                         pr_number: 5,
@@ -313,6 +480,7 @@ mod tests {
                             expected: "acme/widgets".to_string(),
                             actual: Some("fork-owner/widgets".to_string()),
                         }],
+                        linkable: false,
                     },
                     RejectedPrCandidate {
                         pr_number: 6,
@@ -321,10 +489,84 @@ mod tests {
                             expected: "acme/widgets".to_string(),
                             actual: None,
                         }],
+                        linkable: false,
                     },
                 ],
             }
         );
+    }
+
+    #[test]
+    fn only_a_base_mismatch_leaves_a_candidate_linkable() {
+        let candidates = [
+            pr(4, "OPEN", "develop", Some("acme/widgets")),
+            pr(5, "CLOSED", "develop", Some("acme/widgets")),
+            pr(6, "OPEN", "develop", Some("fork-owner/widgets")),
+        ];
+
+        let PrDetectionResult::Rejected { candidates } =
+            classify_candidates(&candidates, &expectations())
+        else {
+            panic!("expected every candidate to be rejected");
+        };
+
+        let linkable: Vec<(u64, bool)> = candidates
+            .iter()
+            .map(|c| (c.pr_number, c.linkable))
+            .collect();
+        assert_eq!(linkable, vec![(4, true), (5, false), (6, false)]);
+    }
+
+    #[test]
+    fn link_accepts_an_open_pr_that_only_differs_on_base() {
+        let candidates = [
+            pr(4, "OPEN", "develop", Some("acme/widgets")),
+            pr(9, "OPEN", "main", Some("acme/widgets")),
+        ];
+
+        let picked = pick_candidate_to_link(&candidates, 4, &expectations(), "feature").unwrap();
+        assert_eq!(picked.number, 4);
+    }
+
+    #[test]
+    fn link_also_accepts_a_pr_that_detection_would_have_adopted() {
+        // Linking by hand after a stale detection pass should not fail just
+        // because GitHub now matches; the PR is simply linked.
+        let candidates = [pr(9, "OPEN", "main", Some("acme/widgets"))];
+
+        assert!(pick_candidate_to_link(&candidates, 9, &expectations(), "feature").is_ok());
+    }
+
+    #[test]
+    fn link_refuses_closed_and_foreign_head_prs() {
+        let candidates = [
+            pr(4, "MERGED", "develop", Some("acme/widgets")),
+            pr(5, "OPEN", "develop", Some("fork-owner/widgets")),
+            pr(6, "OPEN", "main", None),
+        ];
+
+        let err = pick_candidate_to_link(&candidates, 4, &expectations(), "feature").unwrap_err();
+        assert_eq!(err, "PR #4 cannot be linked to this branch: it is merged");
+
+        let err = pick_candidate_to_link(&candidates, 5, &expectations(), "feature").unwrap_err();
+        assert_eq!(
+            err,
+            "PR #5 cannot be linked to this branch: its head branch lives in fork-owner/widgets, not acme/widgets"
+        );
+
+        let err = pick_candidate_to_link(&candidates, 6, &expectations(), "feature").unwrap_err();
+        assert_eq!(
+            err,
+            "PR #6 cannot be linked to this branch: its head repository no longer exists (this branch pushes to acme/widgets)"
+        );
+    }
+
+    #[test]
+    fn link_refuses_a_pr_whose_head_is_no_longer_this_branch() {
+        let candidates = [pr(4, "OPEN", "develop", Some("acme/widgets"))];
+
+        let err = pick_candidate_to_link(&candidates, 42, &expectations(), "feature").unwrap_err();
+        assert_eq!(err, "PR #42 no longer has feature as its head branch");
     }
 
     #[test]
@@ -383,6 +625,7 @@ mod tests {
                         actual: None,
                     },
                 ],
+                linkable: false,
             }],
         };
         assert_eq!(
@@ -397,7 +640,20 @@ mod tests {
                         { "kind": "wrongBase", "expected": "main", "actual": "develop" },
                         { "kind": "wrongHeadRepo", "expected": "acme/widgets", "actual": null },
                     ],
+                    "linkable": false,
                 }],
+            })
+        );
+
+        let linked = LinkedBranchPr {
+            pr_number: 4,
+            pr_url: "https://github.com/acme/widgets/pull/4".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&linked).unwrap(),
+            serde_json::json!({
+                "prNumber": 4,
+                "prUrl": "https://github.com/acme/widgets/pull/4",
             })
         );
     }

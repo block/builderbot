@@ -730,6 +730,9 @@ export interface RejectedPrCandidate {
   prNumber: number;
   prUrl: string;
   reasons: PrRejectionReason[];
+  /** Every reason is one the user may override (only `wrongBase` is), so
+   *  `link_branch_pr` will accept this PR. */
+  linkable: boolean;
 }
 
 /**
@@ -740,6 +743,12 @@ export type PrDetectionResult =
   | { kind: 'found'; prNumber: number; prUrl: string }
   | { kind: 'notFound' }
   | { kind: 'rejected'; candidates: RejectedPrCandidate[] };
+
+/** A PR linked by explicit user choice via `link_branch_pr`; already persisted. */
+export interface LinkedBranchPr {
+  prNumber: number;
+  prUrl: string;
+}
 
 export type PushCompletedOutcome = 'succeeded' | 'rejectedNonFastForward';
 

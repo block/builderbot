@@ -12,15 +12,20 @@
   import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Clock from '@lucide/svelte/icons/clock';
+  import Search from '@lucide/svelte/icons/search';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
-  import { Button } from '$lib/components/ui/button';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { Button, buttonVariants } from '$lib/components/ui/button';
+  import { cn } from '$lib/components/utils';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
     PrFailedCheck,
+    RejectedPrCandidate,
     Session,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -36,6 +41,7 @@
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
   import { derivePrPushAction } from './prButtonGitState';
+  import { describePrRejectionReason } from './prDetection';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
@@ -509,6 +515,59 @@
       });
   }
 
+  // =========================================================================
+  // Detect existing PR
+  // =========================================================================
+  //
+  // Staged only learns a PR number when it drove the creation, so a PR opened
+  // from a session's `gh pr create`, the browser or a terminal leaves the
+  // button on "Create PR". This asks the backend to look the branch up on
+  // GitHub; the backend persists a match and reports near-misses with reasons.
+  let detectingPr = $state(false);
+  let rejectedPrCandidates = $state<RejectedPrCandidate[]>([]);
+  let showRejectedPrDialog = $state(false);
+
+  // The secondary menu only joins the button while it still reads "Create PR".
+  let showCreatePrMenu = $derived(prState === 'idle' && pushState === 'idle');
+
+  async function handleDetectExistingPr() {
+    if (detectingPr || prState !== 'idle') return;
+
+    detectingPr = true;
+    try {
+      const result = await commands.detectBranchPr(branch.id);
+      switch (result.kind) {
+        case 'found':
+          // Mirror what the backend persisted, as handlePrSessionComplete does.
+          branch.prNumber = result.prNumber;
+          prStateStore.setPrCreated(branch.id, result.prUrl);
+          prPollingService.refreshNow(branch.projectId);
+          toast.success(`Linked PR #${result.prNumber}`, { description: branch.branchName });
+          break;
+        case 'notFound':
+          toast.info('No pull request found', {
+            description: `GitHub has no pull request with ${branch.branchName} as its head branch.`,
+          });
+          break;
+        case 'rejected':
+          rejectedPrCandidates = result.candidates;
+          showRejectedPrDialog = true;
+          break;
+      }
+    } catch (e) {
+      toast.error('Could not check GitHub for an existing PR', {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      detectingPr = false;
+    }
+  }
+
+  function handleRejectedPrDialogClose() {
+    showRejectedPrDialog = false;
+    rejectedPrCandidates = [];
+  }
+
   let prCompletionInFlight = false;
 
   // Renderer-only fallback for completions observed outside the event stream
@@ -793,9 +852,15 @@
         pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
         pushState === 'queued' && 'border-[var(--border-muted)]',
         prState === 'created' && prStatusState === 'MERGED' && '[&_svg]:text-[var(--status-added)]',
+        showCreatePrMenu && 'rounded-r-none',
+        detectingPr && 'cursor-default border-[var(--border-muted)]',
       ]}
       onclick={handlePrButtonClick}
-      disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+      disabled={showPushErrorDialog ||
+        showForcePushDialog ||
+        showPrErrorDialog ||
+        showRejectedPrDialog ||
+        detectingPr}
     >
       {#if pushState === 'queued'}
         <Clock size={13} />
@@ -813,6 +878,8 @@
         <GitPullRequestDraft size={13} />
       {:else if prState === 'created'}
         <GitPullRequestArrow size={13} />
+      {:else if detectingPr}
+        <Spinner size={13} />
       {:else}
         <GitPullRequestCreateArrow size={13} />
       {/if}
@@ -835,6 +902,8 @@
           Creating PR…
         {:else if prState === 'error'}
           PR failed
+        {:else if detectingPr}
+          Detecting PR…
         {:else}
           {optionHeld ? 'Create draft PR' : 'Create PR'}
         {/if}
@@ -845,6 +914,36 @@
         <span class="pr-status-indicator {prStatusIndicator}"></span>
       {/if}
     </Button>
+    {#if showCreatePrMenu}
+      <!-- Joined to the Create PR button, as the rebase chevron is in
+           BranchCardHeaderInfo: same outline and height, touching corners
+           squared, border overlapped so the pair reads as one control. -->
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger
+          class={cn(
+            buttonVariants({ variant: 'outline', size: 'sm' }),
+            '-ml-px w-6 shrink-0 rounded-l-none px-0 [&_svg]:!size-3.5',
+            detectingPr && 'border-[var(--border-muted)]'
+          )}
+          disabled={showRejectedPrDialog || detectingPr}
+          aria-label="More PR options"
+          title="More PR options"
+        >
+          <ChevronDown size={13} />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
+          <DropdownMenu.Item onSelect={() => handleCreatePr(true)}>
+            <GitPullRequestDraft size={14} /> Create draft PR
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            title="Look up GitHub for a pull request already opened from this branch and link it here."
+            onSelect={handleDetectExistingPr}
+          >
+            <Search size={14} /> Detect existing PR
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/if}
   </span>
 {/snippet}
 
@@ -876,6 +975,49 @@
         <AlertDialog.Action variant="outline" onclick={handlePrErrorRetry}>
           Retry
         </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
+
+{#if showRejectedPrDialog}
+  <AlertDialog.Root
+    bind:open={showRejectedPrDialog}
+    onOpenChange={(open) => !open && handleRejectedPrDialogClose()}
+  >
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Existing PR not linked</AlertDialog.Title>
+        <AlertDialog.Description>
+          GitHub has {rejectedPrCandidates.length === 1
+            ? 'a pull request'
+            : `${rejectedPrCandidates.length} pull requests`} with {branch.branchName} as the head branch,
+          but none belongs to this branch:
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">
+        {#each rejectedPrCandidates as candidate (candidate.prNumber)}
+          <li>
+            <button
+              type="button"
+              class="font-medium underline-offset-2 hover:underline"
+              onclick={() =>
+                commands.openUrl(candidate.prUrl).catch((e) => {
+                  console.error('Failed to open PR URL:', e);
+                })}
+            >
+              #{candidate.prNumber}
+            </button>
+            <ul class="mt-1 list-disc space-y-0.5 pl-5 text-[var(--text-muted)]">
+              {#each candidate.reasons as reason, i (i)}
+                <li>{describePrRejectionReason(reason)}</li>
+              {/each}
+            </ul>
+          </li>
+        {/each}
+      </ul>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel onclick={handleRejectedPrDialogClose}>Close</AlertDialog.Cancel>
       </AlertDialog.Footer>
     </AlertDialog.Content>
   </AlertDialog.Root>

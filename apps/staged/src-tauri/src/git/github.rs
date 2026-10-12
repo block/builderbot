@@ -617,6 +617,79 @@ pub fn get_pr_for_branch_for_repo(
     Ok(items.into_iter().next().map(Into::into))
 }
 
+/// A pull request whose head branch has a given name, in whatever state it
+/// is in. Narrower than [`PullRequest`]: only the fields needed to decide
+/// whether the PR belongs to a local branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadBranchPr {
+    pub number: u64,
+    pub url: String,
+    /// Upper-case GitHub state: `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    pub base_ref: String,
+    /// `owner/repo` the head branch lives in; `None` once a fork is deleted.
+    pub head_repo: Option<String>,
+    pub draft: bool,
+    pub author: String,
+}
+
+/// Response from `gh pr list --head … --state all --json`
+#[derive(Debug, Deserialize)]
+struct GhHeadBranchPrItem {
+    number: u64,
+    url: String,
+    state: String,
+    author: GhAuthor,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(rename = "headRepository")]
+    head_repository: Option<GhRepository>,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+}
+
+impl From<GhHeadBranchPrItem> for HeadBranchPr {
+    fn from(item: GhHeadBranchPrItem) -> Self {
+        HeadBranchPr {
+            number: item.number,
+            url: item.url,
+            state: item.state,
+            base_ref: item.base_ref_name,
+            head_repo: item.head_repository.map(|r| r.name_with_owner),
+            draft: item.is_draft,
+            author: item.author.login,
+        }
+    }
+}
+
+/// List pull requests in any state whose head branch is `branch_name`, using
+/// `-R owner/repo` (no local dir needed).
+///
+/// `--head` filters on the head ref name alone, so PRs opened from forks of
+/// `github_repo` under the same branch name are included; callers that care
+/// which repository the head lives in compare [`HeadBranchPr::head_repo`].
+pub fn list_prs_for_head_branch(
+    github_repo: &str,
+    branch_name: &str,
+) -> Result<Vec<HeadBranchPr>, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        "-R",
+        github_repo,
+        "--head",
+        branch_name,
+        "--state=all",
+        "--limit=10",
+        "--json=number,url,state,author,baseRefName,headRepository,isDraft",
+    ])?;
+
+    let items: Vec<GhHeadBranchPrItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
 /// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
     let output = run_gh_global(&[

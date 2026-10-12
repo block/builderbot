@@ -3906,6 +3906,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let pr_number = crate::prs::recover_branch_pr_impl(store, branch_id).await?;
             Ok(serde_json::to_value(pr_number).unwrap())
         }
+        "detect_branch_pr" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let result = crate::pr_detection::detect_branch_pr_impl(store, branch_id).await?;
+            Ok(serde_json::to_value(result).unwrap())
+        }
         "refresh_pr_status" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;

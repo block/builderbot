@@ -717,6 +717,30 @@ export interface PrCreatedPayload {
   prNumber: number;
 }
 
+/**
+ * Why a PR whose head branch matches a local branch was not linked to it by
+ * `detect_branch_pr`. Mirrors `pr_detection::PrRejectionReason`.
+ */
+export type PrRejectionReason =
+  | { kind: 'notOpen'; state: string }
+  | { kind: 'wrongBase'; expected: string; actual: string }
+  | { kind: 'wrongHeadRepo'; expected: string; actual: string | null };
+
+export interface RejectedPrCandidate {
+  prNumber: number;
+  prUrl: string;
+  reasons: PrRejectionReason[];
+}
+
+/**
+ * Outcome of the user-triggered "Detect existing PR" lookup. On `found` the
+ * backend has already persisted the PR number; clients only render.
+ */
+export type PrDetectionResult =
+  | { kind: 'found'; prNumber: number; prUrl: string }
+  | { kind: 'notFound' }
+  | { kind: 'rejected'; candidates: RejectedPrCandidate[] };
+
 export type PushCompletedOutcome = 'succeeded' | 'rejectedNonFastForward';
 
 /**

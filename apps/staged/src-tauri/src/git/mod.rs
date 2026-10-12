@@ -33,7 +33,7 @@ pub use github::{
     search_github_repos, search_issues, search_pull_requests, update_clone_to_remote_head,
     update_comment_on_github, update_pull_request, validate_subpath_in_repo, ChecksSummary,
     CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, HeadBranchPr,
-    Issue, PrStatus, PullRequest, PullRequestInfo,
+    Issue, PrListState, PrStatus, PullRequest, PullRequestInfo,
 };
 pub use rebase::{rebase_preserving_merge_edits_command, HAND_EDIT_COMMIT_SUBJECT_PREFIX};
 pub use refs::{

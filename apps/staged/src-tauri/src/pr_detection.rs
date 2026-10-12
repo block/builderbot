@@ -271,14 +271,67 @@ fn load_unlinked_branch(store: &Store, branch_id: &str, action: &str) -> Result<
 async fn list_head_branch_prs(
     repo_slug: String,
     branch_name: String,
+    state: git::PrListState,
     task: &str,
 ) -> Result<Vec<git::HeadBranchPr>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        git::list_prs_for_head_branch(&repo_slug, &branch_name)
+        git::list_prs_for_head_branch(&repo_slug, &branch_name, state)
     })
     .await
     .map_err(|e| format!("{task} task failed: {e}"))?
     .map_err(|e| e.to_string())
+}
+
+/// Open PRs first, then the newest closed/merged ones.
+///
+/// `gh pr list --head` matches the branch name across every fork, newest
+/// first, so with `--state=all` a branch's own open PR can fall outside the
+/// limit when the name has a long history (fork contributors opening PRs
+/// from `main` or `patch-1`). The open list is fetched on its own so what
+/// can be adopted or linked never depends on that history; the all-states
+/// list is only consulted when `need_history(open)` says the open PRs alone
+/// don't settle the outcome, and contributes just the non-open ones.
+async fn list_head_branch_prs_with_history(
+    repo_slug: &str,
+    branch_name: &str,
+    task: &str,
+    need_history: impl FnOnce(&[git::HeadBranchPr]) -> bool,
+) -> Result<Vec<git::HeadBranchPr>, String> {
+    let open = list_head_branch_prs(
+        repo_slug.to_string(),
+        branch_name.to_string(),
+        git::PrListState::Open,
+        task,
+    )
+    .await?;
+
+    if !need_history(&open) {
+        return Ok(open);
+    }
+
+    let all = list_head_branch_prs(
+        repo_slug.to_string(),
+        branch_name.to_string(),
+        git::PrListState::All,
+        task,
+    )
+    .await?;
+
+    Ok(merge_open_with_history(open, all))
+}
+
+/// Append the non-open PRs from `all` to `open`, keeping each list's order.
+/// Open PRs are taken from `open` alone: it is the complete list, while
+/// `all` is a capped sample that may have missed some of them.
+fn merge_open_with_history(
+    mut open: Vec<git::HeadBranchPr>,
+    all: Vec<git::HeadBranchPr>,
+) -> Vec<git::HeadBranchPr> {
+    open.extend(
+        all.into_iter()
+            .filter(|pr| !pr.state.eq_ignore_ascii_case("open")),
+    );
+    open
 }
 
 /// Look up PRs on GitHub whose head is this branch and link the first one
@@ -293,10 +346,18 @@ pub(crate) async fn detect_branch_pr_impl(
     let branch = load_unlinked_branch(&store, &branch_id, "detect")?;
     let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
 
-    let candidates = list_head_branch_prs(
-        repo_slug.clone(),
-        branch.branch_name.clone(),
+    // Closed and merged PRs are never adopted, so they are only fetched when
+    // no open PR satisfies the checks and the user needs to be told why.
+    let candidates = list_head_branch_prs_with_history(
+        &repo_slug,
+        &branch.branch_name,
         "detect_branch_pr",
+        |open| {
+            !matches!(
+                classify_candidates(open, &expected),
+                PrDetectionResult::Found { .. }
+            )
+        },
     )
     .await?;
 
@@ -348,10 +409,14 @@ pub(crate) async fn link_branch_pr_impl(
     let branch = load_unlinked_branch(&store, &branch_id, "link")?;
     let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
 
-    let candidates = list_head_branch_prs(
-        repo_slug.clone(),
-        branch.branch_name.clone(),
+    // Only an open PR can be linked, but a PR closed since detection should
+    // be refused as "closed" rather than "no longer has this head", so the
+    // history is consulted when the number isn't among the open PRs.
+    let candidates = list_head_branch_prs_with_history(
+        &repo_slug,
+        &branch.branch_name,
         "link_branch_pr",
+        |open| !open.iter().any(|pr| pr.number == pr_number),
     )
     .await?;
 
@@ -433,6 +498,28 @@ mod tests {
                 pr_url: "https://github.com/acme/widgets/pull/9".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn history_merge_keeps_open_prs_from_the_open_list_only() {
+        // The all-states list is a newest-first sample: it repeats one open
+        // PR, missed another (#2), and carries the closed/merged history.
+        let open = vec![
+            pr(40, "OPEN", "develop", Some("acme/widgets")),
+            pr(2, "OPEN", "main", Some("fork/widgets")),
+        ];
+        let all = vec![
+            pr(41, "CLOSED", "main", Some("acme/widgets")),
+            pr(40, "OPEN", "develop", Some("acme/widgets")),
+            pr(39, "MERGED", "main", Some("acme/widgets")),
+        ];
+
+        let merged: Vec<u64> = merge_open_with_history(open, all)
+            .iter()
+            .map(|pr| pr.number)
+            .collect();
+
+        assert_eq!(merged, vec![40, 2, 41, 39]);
     }
 
     #[test]

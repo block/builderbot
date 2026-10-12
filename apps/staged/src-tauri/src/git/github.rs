@@ -662,7 +662,28 @@ impl From<GhHeadBranchPrItem> for HeadBranchPr {
     }
 }
 
-/// List pull requests in any state whose head branch is `branch_name`, using
+/// Which PR states [`list_prs_for_head_branch`] asks `gh` for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrListState {
+    /// Open PRs only. The limit is generous so a branch's own open PR is
+    /// returned no matter how many forks reuse the branch name.
+    Open,
+    /// Open, closed and merged PRs, newest first. Capped low: a popular
+    /// branch name (`main`, `patch-1`) can have a long history across forks
+    /// and this list only exists to explain near-misses.
+    All,
+}
+
+impl PrListState {
+    fn gh_args(self) -> [&'static str; 2] {
+        match self {
+            PrListState::Open => ["--state=open", "--limit=50"],
+            PrListState::All => ["--state=all", "--limit=10"],
+        }
+    }
+}
+
+/// List pull requests whose head branch is `branch_name`, using
 /// `-R owner/repo` (no local dir needed).
 ///
 /// `--head` filters on the head ref name alone, so PRs opened from forks of
@@ -671,7 +692,9 @@ impl From<GhHeadBranchPrItem> for HeadBranchPr {
 pub fn list_prs_for_head_branch(
     github_repo: &str,
     branch_name: &str,
+    state: PrListState,
 ) -> Result<Vec<HeadBranchPr>, GitError> {
+    let [state_arg, limit_arg] = state.gh_args();
     let output = run_gh_global(&[
         "pr",
         "list",
@@ -679,8 +702,8 @@ pub fn list_prs_for_head_branch(
         github_repo,
         "--head",
         branch_name,
-        "--state=all",
-        "--limit=10",
+        state_arg,
+        limit_arg,
         "--json=number,url,state,author,baseRefName,headRepository,isDraft",
     ])?;
 

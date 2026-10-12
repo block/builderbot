@@ -74,6 +74,10 @@ impl PrRejectionReason {
 pub struct RejectedPrCandidate {
     pub pr_number: u64,
     pub pr_url: String,
+    /// GitHub login of the PR author, so the user can tell a teammate's
+    /// same-named PR apart from their own.
+    pub author: String,
+    pub draft: bool,
     pub reasons: Vec<PrRejectionReason>,
     /// True when every reason is overridable, so the UI can offer to link
     /// the PR anyway via `link_branch_pr`.
@@ -86,6 +90,8 @@ impl RejectedPrCandidate {
         RejectedPrCandidate {
             pr_number: pr.number,
             pr_url: pr.url.clone(),
+            author: pr.author.clone(),
+            draft: pr.draft,
             reasons,
             linkable,
         }
@@ -534,9 +540,16 @@ mod tests {
 
     #[test]
     fn reports_every_reason_for_each_rejected_candidate() {
+        // The author and draft flag are passed through untouched so the
+        // dialog can show whose PR each candidate is.
+        let fork_pr = git::HeadBranchPr {
+            author: "fork-owner".to_string(),
+            draft: true,
+            ..pr(5, "OPEN", "main", Some("fork-owner/widgets"))
+        };
         let candidates = [
             pr(4, "CLOSED", "develop", Some("acme/widgets")),
-            pr(5, "OPEN", "main", Some("fork-owner/widgets")),
+            fork_pr,
             pr(6, "OPEN", "main", None),
         ];
 
@@ -549,6 +562,8 @@ mod tests {
                     RejectedPrCandidate {
                         pr_number: 4,
                         pr_url: "https://github.com/acme/widgets/pull/4".to_string(),
+                        author: "octocat".to_string(),
+                        draft: false,
                         reasons: vec![
                             PrRejectionReason::NotOpen {
                                 state: "closed".to_string()
@@ -563,6 +578,8 @@ mod tests {
                     RejectedPrCandidate {
                         pr_number: 5,
                         pr_url: "https://github.com/acme/widgets/pull/5".to_string(),
+                        author: "fork-owner".to_string(),
+                        draft: true,
                         reasons: vec![PrRejectionReason::WrongHeadRepo {
                             expected: "acme/widgets".to_string(),
                             actual: Some("fork-owner/widgets".to_string()),
@@ -572,6 +589,8 @@ mod tests {
                     RejectedPrCandidate {
                         pr_number: 6,
                         pr_url: "https://github.com/acme/widgets/pull/6".to_string(),
+                        author: "octocat".to_string(),
+                        draft: false,
                         reasons: vec![PrRejectionReason::WrongHeadRepo {
                             expected: "acme/widgets".to_string(),
                             actual: None,
@@ -699,6 +718,8 @@ mod tests {
             candidates: vec![RejectedPrCandidate {
                 pr_number: 4,
                 pr_url: "https://github.com/acme/widgets/pull/4".to_string(),
+                author: "octocat".to_string(),
+                draft: true,
                 reasons: vec![
                     PrRejectionReason::NotOpen {
                         state: "merged".to_string(),
@@ -722,6 +743,8 @@ mod tests {
                 "candidates": [{
                     "prNumber": 4,
                     "prUrl": "https://github.com/acme/widgets/pull/4",
+                    "author": "octocat",
+                    "draft": true,
                     "reasons": [
                         { "kind": "notOpen", "state": "merged" },
                         { "kind": "wrongBase", "expected": "main", "actual": "develop" },

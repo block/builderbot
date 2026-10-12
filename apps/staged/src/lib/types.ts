@@ -729,6 +729,9 @@ export type PrRejectionReason =
 export interface RejectedPrCandidate {
   prNumber: number;
   prUrl: string;
+  /** GitHub login of the PR author. */
+  author: string;
+  draft: boolean;
   reasons: PrRejectionReason[];
   /** Every reason is one the user may override (only `wrongBase` is), so
    *  `link_branch_pr` will accept this PR. */

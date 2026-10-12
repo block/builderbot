@@ -18,6 +18,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { Badge } from '$lib/components/ui/badge';
   import { Button, buttonVariants } from '$lib/components/ui/button';
   import { cn } from '$lib/components/utils';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
@@ -1047,16 +1048,24 @@
           {#each candidates as candidate (candidate.prNumber)}
             <li>
               <div class="flex items-center justify-between gap-3">
-                <button
-                  type="button"
-                  class="font-medium underline-offset-2 hover:underline"
-                  onclick={() =>
-                    commands.openUrl(candidate.prUrl).catch((e) => {
-                      console.error('Failed to open PR URL:', e);
-                    })}
-                >
-                  #{candidate.prNumber}
-                </button>
+                <div class="flex min-w-0 items-center gap-2">
+                  <button
+                    type="button"
+                    class="font-medium underline-offset-2 hover:underline"
+                    onclick={() =>
+                      commands.openUrl(candidate.prUrl).catch((e) => {
+                        console.error('Failed to open PR URL:', e);
+                      })}
+                  >
+                    #{candidate.prNumber}
+                  </button>
+                  <span class="truncate text-[var(--text-muted)]">by {candidate.author}</span>
+                  {#if candidate.draft}
+                    <Badge variant="outline" title="Draft pull request">
+                      <GitPullRequestDraft /> Draft
+                    </Badge>
+                  {/if}
+                </div>
                 {#if candidate.linkable}
                   <Button
                     variant="outline"

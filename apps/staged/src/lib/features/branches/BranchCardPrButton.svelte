@@ -1044,7 +1044,7 @@
             GitHub has {candidates.length === 1
               ? 'a pull request'
               : `${candidates.length} pull requests`} with {branch.branchName} as the head branch, but
-            none {candidates.length === 1 ? 'matches' : 'match'} this branch:
+            none can be linked to this branch:
           </AlertDialog.Description>
         </AlertDialog.Header>
         <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">

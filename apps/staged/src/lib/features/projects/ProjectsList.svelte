@@ -489,14 +489,14 @@
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
-                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
-                  <ContextMenu.Separator />
                   <ContextMenu.Item
                     disabled={status.kind === 'deleting'}
                     onSelect={() => projectActions.markProjectUnread(project)}
                   >
                     <Mail size={14} /> Mark as Unread
                   </ContextMenu.Item>
+                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
+                  <ContextMenu.Separator />
                   <ContextMenu.Item
                     variant="destructive"
                     disabled={status.kind === 'deleting'}

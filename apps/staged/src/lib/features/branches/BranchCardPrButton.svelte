@@ -523,9 +523,18 @@
   // from a session's `gh pr create`, the browser or a terminal leaves the
   // button on "Create PR". This asks the backend to look the branch up on
   // GitHub; the backend persists a match and reports near-misses with reasons.
+  //
+  // A match only updates the button (the PR badge is the confirmation); every
+  // other outcome opens an alert dialog so the user can tell "no PR" apart from
+  // "a PR exists but targets develop" or "gh failed".
+  type PrDetectionFailure =
+    | { kind: 'notFound' }
+    | { kind: 'rejected'; candidates: RejectedPrCandidate[] }
+    | { kind: 'error'; message: string };
+
   let detectingPr = $state(false);
-  let rejectedPrCandidates = $state<RejectedPrCandidate[]>([]);
-  let showRejectedPrDialog = $state(false);
+  let prDetectionFailure = $state<PrDetectionFailure | null>(null);
+  let showPrDetectionDialog = $derived(prDetectionFailure !== null);
 
   // The secondary menu only joins the button while it still reads "Create PR".
   let showCreatePrMenu = $derived(prState === 'idle' && pushState === 'idle');
@@ -542,30 +551,23 @@
           branch.prNumber = result.prNumber;
           prStateStore.setPrCreated(branch.id, result.prUrl);
           prPollingService.refreshNow(branch.projectId);
-          toast.success(`Linked PR #${result.prNumber}`, { description: branch.branchName });
           break;
         case 'notFound':
-          toast.info('No pull request found', {
-            description: `GitHub has no pull request with ${branch.branchName} as its head branch.`,
-          });
+          prDetectionFailure = { kind: 'notFound' };
           break;
         case 'rejected':
-          rejectedPrCandidates = result.candidates;
-          showRejectedPrDialog = true;
+          prDetectionFailure = { kind: 'rejected', candidates: result.candidates };
           break;
       }
     } catch (e) {
-      toast.error('Could not check GitHub for an existing PR', {
-        description: e instanceof Error ? e.message : String(e),
-      });
+      prDetectionFailure = { kind: 'error', message: e instanceof Error ? e.message : String(e) };
     } finally {
       detectingPr = false;
     }
   }
 
-  function handleRejectedPrDialogClose() {
-    showRejectedPrDialog = false;
-    rejectedPrCandidates = [];
+  function handlePrDetectionDialogClose() {
+    prDetectionFailure = null;
   }
 
   let prCompletionInFlight = false;
@@ -859,7 +861,7 @@
       disabled={showPushErrorDialog ||
         showForcePushDialog ||
         showPrErrorDialog ||
-        showRejectedPrDialog ||
+        showPrDetectionDialog ||
         detectingPr}
     >
       {#if pushState === 'queued'}
@@ -925,7 +927,7 @@
             '-ml-px w-6 shrink-0 rounded-l-none px-0 [&_svg]:!size-3.5',
             detectingPr && 'border-[var(--border-muted)]'
           )}
-          disabled={showRejectedPrDialog || detectingPr}
+          disabled={showPrDetectionDialog || detectingPr}
           aria-label="More PR options"
           title="More PR options"
         >
@@ -980,44 +982,61 @@
   </AlertDialog.Root>
 {/if}
 
-{#if showRejectedPrDialog}
+{#if prDetectionFailure}
   <AlertDialog.Root
-    bind:open={showRejectedPrDialog}
-    onOpenChange={(open) => !open && handleRejectedPrDialogClose()}
+    open={showPrDetectionDialog}
+    onOpenChange={(open) => !open && handlePrDetectionDialogClose()}
   >
     <AlertDialog.Content>
-      <AlertDialog.Header>
-        <AlertDialog.Title>Existing PR not linked</AlertDialog.Title>
-        <AlertDialog.Description>
-          GitHub has {rejectedPrCandidates.length === 1
-            ? 'a pull request'
-            : `${rejectedPrCandidates.length} pull requests`} with {branch.branchName} as the head branch,
-          but none belongs to this branch:
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">
-        {#each rejectedPrCandidates as candidate (candidate.prNumber)}
-          <li>
-            <button
-              type="button"
-              class="font-medium underline-offset-2 hover:underline"
-              onclick={() =>
-                commands.openUrl(candidate.prUrl).catch((e) => {
-                  console.error('Failed to open PR URL:', e);
-                })}
-            >
-              #{candidate.prNumber}
-            </button>
-            <ul class="mt-1 list-disc space-y-0.5 pl-5 text-[var(--text-muted)]">
-              {#each candidate.reasons as reason, i (i)}
-                <li>{describePrRejectionReason(reason)}</li>
-              {/each}
-            </ul>
-          </li>
-        {/each}
-      </ul>
+      {#if prDetectionFailure.kind === 'notFound'}
+        <AlertDialog.Header>
+          <AlertDialog.Title>No pull request found</AlertDialog.Title>
+          <AlertDialog.Description>
+            GitHub has no pull request with {branch.branchName} as its head branch.
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+      {:else if prDetectionFailure.kind === 'error'}
+        <AlertDialog.Header>
+          <AlertDialog.Title>Could not check GitHub for an existing PR</AlertDialog.Title>
+          <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+            {prDetectionFailure.message}
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+      {:else}
+        {@const candidates = prDetectionFailure.candidates}
+        <AlertDialog.Header>
+          <AlertDialog.Title>Existing PR not linked</AlertDialog.Title>
+          <AlertDialog.Description>
+            GitHub has {candidates.length === 1
+              ? 'a pull request'
+              : `${candidates.length} pull requests`} with {branch.branchName} as the head branch, but
+            none can be linked to this branch:
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+        <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">
+          {#each candidates as candidate (candidate.prNumber)}
+            <li>
+              <button
+                type="button"
+                class="font-medium underline-offset-2 hover:underline"
+                onclick={() =>
+                  commands.openUrl(candidate.prUrl).catch((e) => {
+                    console.error('Failed to open PR URL:', e);
+                  })}
+              >
+                #{candidate.prNumber}
+              </button>
+              <ul class="mt-1 list-disc space-y-0.5 pl-5 text-[var(--text-muted)]">
+                {#each candidate.reasons as reason, i (i)}
+                  <li>{describePrRejectionReason(reason)}</li>
+                {/each}
+              </ul>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       <AlertDialog.Footer>
-        <AlertDialog.Cancel onclick={handleRejectedPrDialogClose}>Close</AlertDialog.Cancel>
+        <AlertDialog.Cancel onclick={handlePrDetectionDialogClose}>Close</AlertDialog.Cancel>
       </AlertDialog.Footer>
     </AlertDialog.Content>
   </AlertDialog.Root>

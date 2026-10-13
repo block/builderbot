@@ -3122,7 +3122,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "get_session_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            blocking_store_json(move || store.get_session_messages(&session_id)).await
+            // Both optional: absent means the whole transcript, which is what
+            // every caller other than the windowed session pane still asks for.
+            let window = store::TranscriptWindow {
+                limit: opt_arg(&args, "limit")?,
+                before_id: opt_arg(&args, "beforeId")?,
+            };
+            blocking_store_json(move || store.get_session_messages_window(&session_id, window))
+                .await
         }
         "get_session_messages_since" => {
             let store = get_store(store_mutex)?;
@@ -4197,6 +4204,27 @@ mod tests {
             "the web `cancel_session` arm must call the shared body, not cancel \
              through the registry alone: {arm}"
         );
+    }
+
+    /// The windowed transcript read must accept the same optional window the
+    /// Tauri command does, and keep reading off the runtime thread: this is the
+    /// largest payload the server produces, and the client pages through it
+    /// while the same worker services `/api/events`.
+    #[test]
+    fn web_get_session_messages_windows_under_spawn_blocking() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_session_messages");
+
+        for needle in [
+            "opt_arg(&args, \"limit\")",
+            "opt_arg(&args, \"beforeId\")",
+            "get_session_messages_window(",
+            "blocking_store_json(",
+        ] {
+            assert!(
+                arm.contains(needle),
+                "the web `get_session_messages` arm must contain `{needle}`: {arm}"
+            );
+        }
     }
 
     /// The source of one `dispatch` arm, from its `"command" =>` pattern to the

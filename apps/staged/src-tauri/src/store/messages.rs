@@ -30,6 +30,24 @@ const TRANSCRIPT_METADATA_FILTER: &str = "(
             'completed', 'succeeded', 'success', 'failed', 'error', 'cancelled', 'canceled'))
 )";
 
+/// Which slice of the visible transcript [`Store::get_session_messages_window`]
+/// returns. `limit` keeps only the newest rows (still delivered oldest first);
+/// `before_id` restricts the query to rows older than a loaded one, which is
+/// how the UI pages backwards from the window it opened with. Both unset is
+/// the whole transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TranscriptWindow {
+    pub limit: Option<u32>,
+    pub before_id: Option<i64>,
+}
+
+impl TranscriptWindow {
+    pub const ALL: Self = Self {
+        limit: None,
+        before_id: None,
+    };
+}
+
 /// Parse a JSON array string into a Vec<String>, returning an empty vec on
 /// NULL or invalid JSON.
 pub(super) fn parse_image_ids(raw: Option<String>) -> Vec<String> {
@@ -51,6 +69,41 @@ pub(super) fn image_ids_json(image_ids: &[String]) -> Option<String> {
     } else {
         Some(serde_json::to_string(image_ids).unwrap())
     }
+}
+
+/// The visible-transcript query for a [`TranscriptWindow`]; positional
+/// placeholders in the order [`session_messages_window_params`] binds them.
+pub(super) fn session_messages_window_sql(window: &TranscriptWindow) -> String {
+    let before_filter = if window.before_id.is_some() {
+        " AND id < ?"
+    } else {
+        ""
+    };
+    let (order, limit_clause) = if window.limit.is_some() {
+        ("DESC", " LIMIT ?")
+    } else {
+        ("ASC", "")
+    };
+    format!(
+        "SELECT {SESSION_MESSAGE_COLUMNS}
+         FROM session_messages
+         WHERE session_id = ? AND {VISIBLE_MESSAGE_FILTER}{before_filter}
+         ORDER BY id {order}{limit_clause}"
+    )
+}
+
+pub(super) fn session_messages_window_params<'a>(
+    session_id: &'a &str,
+    window: &'a TranscriptWindow,
+) -> Vec<&'a dyn rusqlite::ToSql> {
+    let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![session_id];
+    if let Some(before_id) = &window.before_id {
+        query_params.push(before_id);
+    }
+    if let Some(limit) = &window.limit {
+        query_params.push(limit);
+    }
+    query_params
 }
 
 fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
@@ -213,16 +266,34 @@ impl Store {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
+        self.get_session_messages_window(session_id, TranscriptWindow::ALL)
+    }
+
+    /// [`Self::get_session_messages`] restricted to a [`TranscriptWindow`].
+    /// Rows come back in ascending id order whatever the window; a `limit`
+    /// is applied from the newest row backwards.
+    ///
+    /// The limited query reads `idx_session_messages_session` in descending
+    /// rowid order and the result is reversed here rather than in SQL: a
+    /// subquery with an outer `ORDER BY id ASC` would sort through a temp
+    /// B-tree, while the index already yields the newest-first order for
+    /// free (pinned by `test_session_messages_window_query_plan`).
+    pub fn get_session_messages_window(
+        &self,
+        session_id: &str,
+        window: TranscriptWindow,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let sql = format!(
-            "SELECT {SESSION_MESSAGE_COLUMNS}
-             FROM session_messages
-             WHERE session_id = ?1 AND {VISIBLE_MESSAGE_FILTER}
-             ORDER BY id ASC"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![session_id], transcript_message_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut stmt = conn.prepare(&session_messages_window_sql(&window))?;
+        let rows = stmt.query_map(
+            &session_messages_window_params(&session_id, &window)[..],
+            transcript_message_from_row,
+        )?;
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        if window.limit.is_some() {
+            messages.reverse();
+        }
+        Ok(messages)
     }
 
     /// Return visible transcript rows plus hidden ACP rows that can identify

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::models::*;
-use super::Store;
+use super::{Store, TranscriptWindow};
 
 #[test]
 fn test_create_and_get_project() {
@@ -1739,6 +1739,208 @@ fn test_acp_metadata_archive_keeps_rows_the_transcript_projection_drops() {
         Some("user-msg-1")
     );
     assert_eq!(archive_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+}
+
+/// Six visible rows with a hidden metadata row between each pair, so a
+/// window's `limit` is shown to count visible rows only.
+fn seed_windowed_transcript(store: &Store) -> (Session, Vec<i64>) {
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let mut visible_ids = Vec::new();
+    for turn in 0..3 {
+        visible_ids.push(
+            store
+                .add_session_message(&session.id, MessageRole::User, &format!("ask {turn}"))
+                .unwrap(),
+        );
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &AcpMessageMetadata {
+                    acp_event_kind: Some("agent_message_chunk".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        visible_ids.push(
+            store
+                .add_session_message(
+                    &session.id,
+                    MessageRole::Assistant,
+                    &format!("answer {turn}"),
+                )
+                .unwrap(),
+        );
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &AcpMessageMetadata {
+                    acp_event_kind: Some("usage_update".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    (session, visible_ids)
+}
+
+fn ids(messages: &[SessionMessage]) -> Vec<i64> {
+    messages.iter().map(|m| m.id).collect()
+}
+
+#[test]
+fn test_session_messages_window_returns_newest_visible_rows_ascending() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let window = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: Some(3),
+                before_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&window), visible[3..].to_vec());
+    assert_eq!(window[0].content, "answer 1");
+    assert_eq!(window[2].content, "answer 2");
+}
+
+#[test]
+fn test_session_messages_window_pages_backwards_with_before_id() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let page = |before_id: i64| {
+        ids(&store
+            .get_session_messages_window(
+                &session.id,
+                TranscriptWindow {
+                    limit: Some(2),
+                    before_id: Some(before_id),
+                },
+            )
+            .unwrap())
+    };
+    assert_eq!(page(visible[4]), visible[2..4].to_vec());
+    assert_eq!(page(visible[2]), visible[0..2].to_vec());
+    assert_eq!(page(visible[0]), Vec::<i64>::new());
+    // A short final page: fewer rows than asked for is how the caller learns
+    // it has reached the start (it requests one more than it will show).
+    assert_eq!(
+        ids(&store
+            .get_session_messages_window(
+                &session.id,
+                TranscriptWindow {
+                    limit: Some(5),
+                    before_id: Some(visible[3]),
+                },
+            )
+            .unwrap()),
+        visible[0..3].to_vec()
+    );
+}
+
+#[test]
+fn test_session_messages_window_limit_larger_than_transcript_returns_everything() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let window = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: Some(visible.len() as u32 + 1),
+                before_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&window), visible);
+    // Exactly the transcript's length is indistinguishable from "more exist"
+    // on the server side, which is why the client over-fetches by one.
+    let exact = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: Some(visible.len() as u32),
+                before_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&exact), visible);
+}
+
+#[test]
+fn test_session_messages_window_without_params_matches_full_query() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let full = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(ids(&full), visible);
+    let all = store
+        .get_session_messages_window(&session.id, TranscriptWindow::ALL)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&all).unwrap(),
+        serde_json::to_string(&full).unwrap()
+    );
+    // `before_id` alone is the whole prefix, still oldest first.
+    let prefix = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: None,
+                before_id: Some(visible[4]),
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&prefix), visible[..4].to_vec());
+}
+
+/// The windowed read must stay on the session index and must not sort through
+/// a temp B-tree: the index yields rowid order in either direction, and the
+/// store reverses the (at most `limit`) rows itself.
+#[test]
+fn test_session_messages_window_query_plan() {
+    let store = Store::in_memory().unwrap();
+    let session_id = "s";
+    for window in [
+        TranscriptWindow::ALL,
+        TranscriptWindow {
+            limit: Some(10),
+            before_id: None,
+        },
+        TranscriptWindow {
+            limit: Some(10),
+            before_id: Some(5),
+        },
+        TranscriptWindow {
+            limit: None,
+            before_id: Some(5),
+        },
+    ] {
+        let conn = store.conn.lock().unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::messages::session_messages_window_sql(&window)
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(
+                &super::messages::session_messages_window_params(&session_id, &window)[..],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("USING INDEX idx_session_messages_session"),
+            "{window:?}: {plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{window:?}: {plan}");
+    }
 }
 
 #[test]

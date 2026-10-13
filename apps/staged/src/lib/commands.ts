@@ -950,8 +950,42 @@ export function getActiveSessions(): Promise<ActiveSessionInfo[]> {
   return invokeCommand('get_active_sessions');
 }
 
+const SESSION_MESSAGES_CACHE_TTL = 5 * 60_000;
+
+/** The whole visible transcript. */
 export function getSessionMessages(sessionId: string): Promise<SwrResult<SessionMessage[]>> {
-  return cachedCommand('get_session_messages', { sessionId }, { ttl: 5 * 60_000 });
+  return cachedCommand('get_session_messages', { sessionId }, { ttl: SESSION_MESSAGES_CACHE_TTL });
+}
+
+/**
+ * The newest `limit` visible rows, oldest first — what the session pane opens
+ * with. Cached under its own key (the args include `limit`), so a window is
+ * never served in place of the full transcript or vice versa. `bypassCache`
+ * reads from the server and refreshes the entry.
+ */
+export function getLatestSessionMessages(
+  sessionId: string,
+  limit: number,
+  options: { bypassCache?: boolean } = {}
+): Promise<SwrResult<SessionMessage[]>> {
+  return cachedCommand(
+    'get_session_messages',
+    { sessionId, limit },
+    { ttl: SESSION_MESSAGES_CACHE_TTL, bypassRead: options.bypassCache }
+  );
+}
+
+/**
+ * The `limit` visible rows older than `beforeId`, oldest first — the page the
+ * pane fetches when the user scrolls towards the top. Not cached: history is
+ * immutable, so a page is only ever requested once per open.
+ */
+export function getOlderSessionMessages(
+  sessionId: string,
+  limit: number,
+  beforeId: number
+): Promise<SessionMessage[]> {
+  return invokeCommand('get_session_messages', { sessionId, limit, beforeId });
 }
 
 /** Fetch session messages without SWR cache, for terminal status handlers. */

@@ -67,7 +67,8 @@
     getSessionAcpMetadataMessages,
     getSessionAcpMetadataMessagesSince,
     getSessionBackgroundHold,
-    getSessionMessages,
+    getLatestSessionMessages,
+    getOlderSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
     deleteQueuedSessionMessage,
@@ -105,6 +106,15 @@
     type SessionBackgroundHold,
   } from './backgroundHold';
   import { mergeSinceMessages, openAssistantRefetchIds } from './messagePoll';
+  import {
+    applyLatestWindow,
+    LOAD_OLDER_THRESHOLD_PX,
+    metadataRowsForWindow,
+    pageRequestLimit,
+    prependOlderMessages,
+    TRANSCRIPT_PAGE_ROWS,
+    transcriptPageFromRows,
+  } from './transcriptWindow';
   import {
     buildBranchHashtagItems,
     findHashtagItemForReference,
@@ -220,7 +230,15 @@
   // =========================================================================
 
   let session = $state<Session | null>(null);
+  /**
+   * The loaded suffix of the visible transcript: the newest page on open,
+   * extended backwards by `loadOlderMessages` as the user scrolls up and
+   * forwards by the poll. See `transcriptWindow.ts`.
+   */
   let messages = $state<SessionMessage[]>([]);
+  /** Whether visible rows older than `messages[0]` exist on the server. */
+  let hasOlderMessages = $state(false);
+  let loadingOlder = $state(false);
   let acpMetadataMessages = $state<SessionMessage[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -317,7 +335,11 @@
   let grouped = $derived.by(() => {
     previousGrouped = stabilizeAcpTranscriptGroups(
       previousGrouped,
-      buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
+      buildAcpTranscriptGroups(
+        messages,
+        metadataRowsForWindow(acpMetadataMessages, messages, hasOlderMessages),
+        displayRoots
+      )
     );
     return previousGrouped;
   });
@@ -842,6 +864,7 @@
     if (untrack(() => session?.id) !== sessionId) {
       session = null;
       messages = [];
+      hasOlderMessages = false;
       acpMetadataMessages = [];
       queuedMessages = [];
     }
@@ -852,10 +875,13 @@
     // may judge a hold report against it until the load below replaces it.
     statusLoadedForSessionId = null;
     const statusVersionBeforeFetch = statusEventVersion;
+    const id = sessionId;
     try {
+      // Only the newest page of the transcript; older pages arrive through
+      // `loadOlderMessages` as the user scrolls up.
       const [s, msgsResult, acpMsgs, queued] = await Promise.all([
         getSession(sessionId),
-        getSessionMessages(sessionId),
+        getLatestSessionMessages(sessionId, pageRequestLimit(TRANSCRIPT_PAGE_ROWS)),
         getSessionAcpMetadataMessages(sessionId),
         listQueuedSessionMessages(sessionId),
       ]);
@@ -879,13 +905,22 @@
       // session that had already finished would otherwise sit unrendered
       // behind `isLive` until some later flip back to `running` surfaced it.
       if (backgroundHold) applyBackgroundHold(s.id, backgroundHold);
-      messages = msgsResult.data;
+      const page = transcriptPageFromRows(msgsResult.data, TRANSCRIPT_PAGE_ROWS);
+      messages = page.messages;
+      hasOlderMessages = page.hasMore;
       queuedMessages = queued;
       if (msgsResult.revalidating) {
         msgsResult.revalidating
           .then((fresh) => {
-            if (closed) return;
-            messages = fresh;
+            if (closed || sessionId !== id) return;
+            // The user may have paged back past the cached window by now;
+            // those pages are kept below the fresh copy of the window.
+            const next = applyLatestWindow(
+              { messages, hasMore: hasOlderMessages },
+              transcriptPageFromRows(fresh, TRANSCRIPT_PAGE_ROWS)
+            );
+            messages = next.messages;
+            hasOlderMessages = next.hasMore;
             scrollToBottomIfNear(true);
           })
           .catch(() => {});
@@ -901,6 +936,10 @@
       await tick();
       animateNewMessages = true;
       scrollToBottom();
+      // A first page shorter than the viewport leaves nothing to scroll, so
+      // the scroll handler alone could never ask for the next one.
+      await tick();
+      loadOlderMessagesIfNearTop();
     }
   }
 
@@ -933,14 +972,20 @@
         .filter((message) => message.acpToolCallId && !isToolMetadataSettled(message))
         .map((message) => message.id);
       if (messages.length === 0) {
-        const [{ data: msgs }, acpUpdates] = await Promise.all([
-          getSessionMessages(sessionId),
+        // Straight from the server: the SWR cache would hand back the empty
+        // list this very pane just stored, for as long as its TTL.
+        const [{ data: rows }, acpUpdates] = await Promise.all([
+          getLatestSessionMessages(sessionId, pageRequestLimit(TRANSCRIPT_PAGE_ROWS), {
+            bypassCache: true,
+          }),
           getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
         ]);
         if (closed) return;
         applyAcpMetadataUpdates(acpUpdates);
-        if (msgs.length > 0) {
-          messages = msgs;
+        const page = transcriptPageFromRows(rows, TRANSCRIPT_PAGE_ROWS);
+        if (page.messages.length > 0) {
+          messages = page.messages;
+          hasOlderMessages = page.hasMore;
           scrollToBottomIfNear(true);
         }
       } else {
@@ -1338,6 +1383,64 @@
       userScrolledUp = false;
     }
     lastScrollTop = scrollTop;
+    if (scrollTop < LOAD_OLDER_THRESHOLD_PX) void loadOlderMessages();
+  }
+
+  /** Ask for the next page while the top of the window is in or near view. */
+  function loadOlderMessagesIfNearTop() {
+    if (messagesEl && messagesEl.scrollTop < LOAD_OLDER_THRESHOLD_PX) void loadOlderMessages();
+  }
+
+  /**
+   * Fetch the page of visible rows above `messages[0]` and prepend it, keeping
+   * what the user is looking at where it is. One request at a time: the scroll
+   * handler fires continuously near the top, and a second request for the same
+   * `beforeId` would only return the same page.
+   */
+  async function loadOlderMessages() {
+    if (!hasOlderMessages || loadingOlder || loading || closed) return;
+    const el = messagesEl;
+    const first = messages[0];
+    if (!el || !first) return;
+    const id = sessionId;
+    loadingOlder = true;
+    try {
+      const rows = await getOlderSessionMessages(
+        id,
+        pageRequestLimit(TRANSCRIPT_PAGE_ROWS),
+        first.id
+      );
+      // The pane may have moved on: another session, or a reload that
+      // replaced the window this page was fetched for.
+      if (closed || sessionId !== id || messages[0]?.id !== first.id) return;
+      const page = transcriptPageFromRows(rows, TRANSCRIPT_PAGE_ROWS);
+      // Anchor on the first rendered group: after the prepend it must sit at
+      // the same viewport offset, so the scroll position moves by exactly the
+      // height inserted above it. The keyed each re-creates that group when
+      // the page extends the tool run it starts with; the container's growth
+      // is the same quantity while every change is above the viewport.
+      const anchor = el.querySelector<HTMLElement>('.transcript-group');
+      const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
+      const heightBefore = el.scrollHeight;
+      const animate = animateNewMessages;
+      animateNewMessages = false;
+      messages = prependOlderMessages(messages, page.messages);
+      hasOlderMessages = page.hasMore;
+      await tick();
+      animateNewMessages = animate;
+      el.scrollTop += anchor?.isConnected
+        ? anchor.getBoundingClientRect().top - anchorTop
+        : el.scrollHeight - heightBefore;
+      // That jump is ours, not the user's.
+      lastScrollTop = el.scrollTop;
+    } catch (e) {
+      // Left for the next scroll to retry rather than looping on a dead server.
+      console.error('Failed to load earlier messages:', e);
+      return;
+    } finally {
+      loadingOlder = false;
+    }
+    loadOlderMessagesIfNearTop();
   }
 
   /** Scroll to bottom unconditionally (e.g. initial load, user sends message).
@@ -2086,8 +2189,21 @@
       <!-- Pipeline is present but no messages yet — pipeline steps are the entire view -->
     {:else}
       <div class="messages">
+        {#if hasOlderMessages}
+          <!-- Fixed-height slot, so the spinner appearing does not move the
+               transcript below it. -->
+          <div class="load-older" aria-live="polite">
+            {#if loadingOlder}
+              <Spinner size={14} />
+              <span>Loading earlier messages…</span>
+            {/if}
+          </div>
+        {/if}
         {#each grouped as group, groupIdx (transcriptGroupKey(group))}
-          <div in:messageSlide class={group.type === 'user' ? 'user-group' : ''}>
+          <div
+            in:messageSlide
+            class={group.type === 'user' ? 'transcript-group user-group' : 'transcript-group'}
+          >
             {#if group.type === 'user'}
               {@const hasBlocks = cachedHasXmlBlocks(group.message.content)}
               {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
@@ -2621,6 +2737,10 @@
     /* Keep scroll momentum inside the transcript so it doesn't chain to the
        page behind the keyboard-shrunk full-screen dialog. */
     overscroll-behavior: contain;
+    /* Older pages are prepended with the scroll position corrected by hand
+       (`loadOlderMessages`); the browser's own anchoring would correct it a
+       second time. */
+    overflow-anchor: none;
     padding: 16px;
     min-height: 0;
     background: var(--bg-primary);
@@ -2668,6 +2788,16 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  .load-older {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 24px;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
   }
 
   .message-row {

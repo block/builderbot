@@ -1128,13 +1128,18 @@ pub fn get_session(
         .map_err(|e| e.to_string())
 }
 
+/// The visible transcript, or with `limit` its newest rows and with
+/// `before_id` the rows older than one already loaded — see
+/// [`store::TranscriptWindow`]. Neither set returns the whole transcript.
 #[tauri::command]
 pub fn get_session_messages(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
+    limit: Option<u32>,
+    before_id: Option<i64>,
 ) -> Result<Vec<store::SessionMessage>, String> {
     get_store(&store)?
-        .get_session_messages(&session_id)
+        .get_session_messages_window(&session_id, store::TranscriptWindow { limit, before_id })
         .map_err(|e| e.to_string())
 }
 

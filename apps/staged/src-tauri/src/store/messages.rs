@@ -11,6 +11,23 @@ const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at
     acp_raw_input, acp_raw_output, acp_content, acp_locations, acp_usage,
     acp_session_info, acp_config_options, acp_session_mode_state, acp_origin";
 const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
+/// ACP rows the transcript needs on top of [`Store::get_session_messages`]:
+/// hidden rows of the kinds the frontend reads (`acpTranscript.ts`,
+/// `acpConfigMetadata.ts`), plus visible tool rows still in flight — the
+/// writer mutates those in place, so the poll re-reads them by id until they
+/// settle. Everything else (`agent_message_chunk`, `usage_update`,
+/// `session_info_update`, settled visible tool rows, …) stays in the table
+/// for replay but is not shipped to the UI; chunk rows alone are ~90% of a
+/// long session's ACP rows, and settled tool rows duplicate the visible
+/// transcript byte for byte.
+const TRANSCRIPT_METADATA_FILTER: &str = "(
+    (content = '' AND acp_event_kind IN (
+        'tool_call', 'tool_call_update', 'plan_update', 'available_commands_update',
+        'config_options_update', 'pikchr_session_started'))
+    OR (content != '' AND acp_event_kind IN ('tool_call', 'tool_call_update')
+        AND COALESCE(acp_tool_status, '') NOT IN (
+            'completed', 'succeeded', 'success', 'failed', 'error', 'cancelled', 'canceled'))
+)";
 
 /// Parse a JSON array string into a Vec<String>, returning an empty vec on
 /// NULL or invalid JSON.
@@ -363,9 +380,29 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Return rows carrying ACP metadata, including rows hidden from the legacy
-    /// transcript projection.
+    /// Return the ACP metadata rows the transcript needs beyond
+    /// [`Self::get_session_messages`]; see [`TRANSCRIPT_METADATA_FILTER`].
     pub fn get_session_acp_metadata_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ?1 AND {TRANSCRIPT_METADATA_FILTER}
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![session_id], session_message_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every row carrying ACP metadata, unfiltered — the replay archive the
+    /// writer persists. Tests use it to assert on rows the transcript
+    /// projection deliberately leaves out.
+    #[cfg(test)]
+    pub fn get_session_acp_metadata_archive(
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
@@ -386,6 +423,8 @@ impl Store {
     /// `refetch_ids`. Rows for tool calls that have not reached a terminal
     /// status are updated in place by the message writer rather than
     /// re-inserted, so callers pass those ids to observe the mutations.
+    /// Re-fetched rows bypass the transcript filter so a caller sees the row
+    /// settle (and stops asking for it) instead of it silently vanishing.
     pub fn get_session_acp_metadata_messages_since(
         &self,
         session_id: &str,
@@ -399,9 +438,9 @@ impl Store {
             .collect::<Vec<_>>()
             .join(", ");
         let id_filter = if refetch_ids.is_empty() {
-            "id > ?".to_string()
+            format!("(id > ? AND {TRANSCRIPT_METADATA_FILTER})")
         } else {
-            format!("(id > ? OR id IN ({refetch_placeholders}))")
+            format!("((id > ? AND {TRANSCRIPT_METADATA_FILTER}) OR id IN ({refetch_placeholders}))")
         };
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}

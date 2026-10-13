@@ -41,6 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -157,7 +158,7 @@ fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
 
     let key = PrivateKeyDer::from_pem_file(&key_path)
         .map_err(|e| format!("failed to read TLS private key {key_path}: {e}"))?;
-    let config = rustls::ServerConfig::builder_with_provider(
+    let mut config = rustls::ServerConfig::builder_with_provider(
         rustls::crypto::aws_lc_rs::default_provider().into(),
     )
     .with_safe_default_protocol_versions()
@@ -165,6 +166,11 @@ fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
     .with_no_client_auth()
     .with_single_cert(certs, key)
     .map_err(|e| format!("failed to configure TLS certificate/key pair: {e}"))?;
+    // Browsers only speak HTTP/2 when the server offers it over ALPN; without
+    // this they stay on HTTP/1.1 and its six-connection cap, which the 500 ms
+    // session poll (four requests per tick) shares with multi-MB transcript
+    // bodies. `axum::serve` already runs hyper's auto h1/h2 builder.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
@@ -215,11 +221,36 @@ impl Listener for TlsListener {
 /// compiling so they stay in sync with the rest of the codebase.
 ///
 /// TODO(web): restore full web server startup from the `mobile-web` branch.
-/// That restore must mount [`media_router`] into the composed app: the
-/// frontend's `resolveStagedMediaUrl` already emits `/api/media/...` in
-/// non-Tauri builds, and only oneshot tests exercise the route today.
+/// That restore should serve [`app_router`], which already composes the API
+/// routes, [`media_router`] (the frontend's `resolveStagedMediaUrl` emits
+/// `/api/media/...` in non-Tauri builds) and the static bundle.
 pub fn start(_state: WebAppState) {
     log::warn!("Web server requested but this build has the web server stubbed out");
+}
+
+/// The composed app: API routes, note media, and the built frontend from
+/// `dist_dir`. Responses are compressed (brotli, then gzip, by client
+/// preference): a session transcript is 10–25 MB of JSON uncompressed and
+/// brotli at tower-http's default quality brings a text-heavy one down ~10×
+/// and a base64-image-heavy one ~3×. The default predicate skips images and
+/// bodies under 32 bytes, so WebSocket upgrades and media are untouched.
+pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Router {
+    let media_routes = match media_router(state.clone()) {
+        Ok(router) => router,
+        Err(e) => {
+            log::warn!("[web_server] note media unavailable: {e}");
+            Router::new()
+        }
+    };
+
+    Router::new()
+        .route("/api/invoke/{command}", post(invoke_command))
+        .route("/api/events", get(ws_events))
+        .with_state(state)
+        .merge(media_routes)
+        .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
+        .layer(CompressionLayer::new())
+        .layer(CorsLayer::permissive())
 }
 
 /// Kept ready for the mobile-web startup restore. The route and auth layer are
@@ -567,6 +598,23 @@ fn web_client_id(args: &Value) -> Result<String, String> {
 }
 
 /// Helper to get the Store Arc from the shared mutex slot.
+/// Run a store read and its JSON serialization on the blocking pool. The
+/// session-transcript reads produce tens of MB of JSON; doing that inline
+/// would stall the tokio worker that is also servicing `/api/events`.
+async fn blocking_store_json<T>(
+    read: impl FnOnce() -> Result<T, store::StoreError> + Send + 'static,
+) -> Result<Value, String>
+where
+    T: serde::Serialize + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let value = read().map_err(|e| e.to_string())?;
+        Ok(serde_json::to_value(value).unwrap())
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
+}
+
 fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
@@ -3011,16 +3059,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "get_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let session = store.get_session(&session_id).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(session).unwrap())
+            blocking_store_json(move || store.get_session(&session_id)).await
         }
         "get_session_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let messages = store
-                .get_session_messages(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || store.get_session_messages(&session_id)).await
         }
         "get_session_messages_since" => {
             let store = get_store(store_mutex)?;
@@ -3029,10 +3073,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // Optional so an older frontend bundle keeps working against a
             // newer server.
             let refetch_ids: Vec<i64> = opt_arg(&args, "refetchIds")?.unwrap_or_default();
-            let messages = store
-                .get_session_messages_since(&session_id, since_id, &refetch_ids)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || {
+                store.get_session_messages_since(&session_id, since_id, &refetch_ids)
+            })
+            .await
         }
         "count_assistant_messages_after" => {
             let store = get_store(store_mutex)?;
@@ -3046,20 +3090,17 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "get_session_acp_metadata_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let messages = store
-                .get_session_acp_metadata_messages(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || store.get_session_acp_metadata_messages(&session_id)).await
         }
         "get_session_acp_metadata_messages_since" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
             let since_id: i64 = arg(&args, "sinceId")?;
             let refetch_ids: Vec<i64> = arg(&args, "refetchIds")?;
-            let messages = store
-                .get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || {
+                store.get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
+            })
+            .await
         }
         "get_session_acp_initialization" => {
             let store = get_store(store_mutex)?;
@@ -3341,10 +3382,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "list_queued_session_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let messages = store
-                .list_queued_session_messages(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || store.list_queued_session_messages(&session_id)).await
         }
         "delete_queued_session_message" => {
             let store = get_store(store_mutex)?;

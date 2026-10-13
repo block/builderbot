@@ -1685,7 +1685,7 @@ fn test_acp_metadata_rows_are_hidden_from_legacy_session_messages() {
 }
 
 #[test]
-fn test_acp_metadata_messages_query_includes_hidden_rows() {
+fn test_acp_metadata_archive_keeps_rows_the_transcript_projection_drops() {
     let store = Store::in_memory().unwrap();
 
     let session = Session::new_running("test", Path::new("/tmp"));
@@ -1723,17 +1723,92 @@ fn test_acp_metadata_messages_query_includes_hidden_rows() {
         store.get_session_messages(&session.id).unwrap().is_empty(),
         "ACP metadata rows must stay hidden from legacy transcript reads"
     );
+    assert!(
+        store
+            .get_session_acp_metadata_messages(&session.id)
+            .unwrap()
+            .is_empty(),
+        "chunk and usage rows are replay-only and never shipped to the transcript"
+    );
 
-    let metadata_rows = store
-        .get_session_acp_metadata_messages(&session.id)
-        .unwrap();
-    assert_eq!(metadata_rows.len(), 2);
-    assert_eq!(metadata_rows[0].role, MessageRole::User);
+    let archive_rows = store.get_session_acp_metadata_archive(&session.id).unwrap();
+    assert_eq!(archive_rows.len(), 2);
+    assert_eq!(archive_rows[0].role, MessageRole::User);
     assert_eq!(
-        metadata_rows[0].acp.acp_message_id.as_deref(),
+        archive_rows[0].acp.acp_message_id.as_deref(),
         Some("user-msg-1")
     );
-    assert_eq!(metadata_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+    assert_eq!(archive_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+}
+
+#[test]
+fn test_acp_metadata_messages_query_returns_only_transcript_rows() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let tool_metadata = |status: &str| AcpMessageMetadata {
+        acp_event_kind: Some("tool_call".to_string()),
+        acp_tool_call_id: Some(format!("tc-{status}")),
+        acp_tool_status: Some(status.to_string()),
+        ..Default::default()
+    };
+    // Visible, settled: already in `get_session_messages`, so sending it
+    // again would ship the (large) raw output twice.
+    let settled_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read file")
+        .unwrap();
+    store
+        .update_message_acp_metadata(settled_id, &tool_metadata("completed"))
+        .unwrap();
+    // Visible, in flight: the poll must learn about it to re-read it by id.
+    let in_flight_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Run tests")
+        .unwrap();
+    store
+        .update_message_acp_metadata(in_flight_id, &tool_metadata("in_progress"))
+        .unwrap();
+    // Hidden rows: one of each side of the allowlist.
+    let plan_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("plan_update".to_string()),
+                acp_content: Some(serde_json::json!({"entries": []})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("agent_message_chunk".to_string()),
+                acp_content: Some(serde_json::json!({"content": {"type": "text", "text": "hi"}})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let hidden_tool_id = store
+        .add_acp_metadata_message(&session.id, &tool_metadata("completed"))
+        .unwrap();
+
+    let ids: Vec<i64> = store
+        .get_session_acp_metadata_messages(&session.id)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids, vec![in_flight_id, plan_id, hidden_tool_id]);
+    assert_eq!(
+        store
+            .get_session_acp_metadata_archive(&session.id)
+            .unwrap()
+            .len(),
+        5,
+        "filtering is read-side only; every row stays in the table"
+    );
 }
 
 #[test]
@@ -1759,7 +1834,22 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
             },
         )
         .unwrap();
-    let usage_id = store
+    let plan_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("plan_update".to_string()),
+                acp_content: Some(serde_json::json!({"entries": []})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // A visible row without ACP metadata never shows up in the metadata query,
+    // and neither does a replay-only hidden kind.
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "text")
+        .unwrap();
+    store
         .add_acp_metadata_message(
             &session.id,
             &AcpMessageMetadata {
@@ -1769,14 +1859,10 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
             },
         )
         .unwrap();
-    // A visible row without ACP metadata never shows up in the metadata query.
-    store
-        .add_session_message(&session.id, MessageRole::Assistant, "text")
-        .unwrap();
 
     // Cursor past everything, no refetch ids: nothing to return.
     let none = store
-        .get_session_acp_metadata_messages_since(&session.id, usage_id, &[])
+        .get_session_acp_metadata_messages_since(&session.id, plan_id, &[])
         .unwrap();
     assert!(none.is_empty());
 
@@ -1785,10 +1871,12 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
         .get_session_acp_metadata_messages_since(&session.id, tool_id, &[])
         .unwrap();
     assert_eq!(after_tool.len(), 1);
-    assert_eq!(after_tool[0].id, usage_id);
+    assert_eq!(after_tool[0].id, plan_id);
 
     // An in-place status update on a row behind the cursor is only observable
-    // when the caller re-requests that row explicitly.
+    // when the caller re-requests that row explicitly. The settled row comes
+    // back even though it no longer passes the transcript filter, so the
+    // caller observes the terminal status and stops re-requesting it.
     store
         .update_message_acp_metadata(
             tool_id,
@@ -1799,13 +1887,21 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
         )
         .unwrap();
     let refetched = store
-        .get_session_acp_metadata_messages_since(&session.id, usage_id, &[tool_id])
+        .get_session_acp_metadata_messages_since(&session.id, plan_id, &[tool_id])
         .unwrap();
     assert_eq!(refetched.len(), 1);
     assert_eq!(refetched[0].id, tool_id);
     assert_eq!(
         refetched[0].acp.acp_tool_status.as_deref(),
         Some("completed")
+    );
+    assert!(
+        store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[])
+            .unwrap()
+            .iter()
+            .all(|m| m.id != tool_id),
+        "a settled visible tool row is only ever delivered by explicit refetch"
     );
 
     // The full metadata query and the since-query with a zero cursor agree.

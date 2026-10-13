@@ -1403,14 +1403,9 @@
                   <MoreHorizontal size={16} />
                 </DropdownMenu.Trigger>
                 <DropdownMenu.Content align="start" sideOffset={4} class="min-w-[180px]">
-                  {#if onWriteNote}
-                    <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
-                      <PencilLine size={14} /> Write note
-                    </DropdownMenu.Item>
-                    {#if overflowMenuActions.length > 0}
-                      <DropdownMenu.Separator />
-                    {/if}
-                  {/if}
+                  <!-- Overflowed buttons lead, in their footer order, so the menu
+                       reads as a continuation of the button row; the manual
+                       "Write note" action sits below them. -->
                   {#each overflowMenuActions as action (action)}
                     {#if action === 'note'}
                       <DropdownMenu.Item
@@ -1437,6 +1432,14 @@
                       </DropdownMenu.Item>
                     {/if}
                   {/each}
+                  {#if onWriteNote}
+                    {#if overflowMenuActions.length > 0}
+                      <DropdownMenu.Separator />
+                    {/if}
+                    <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
+                      <PencilLine size={14} /> Write note
+                    </DropdownMenu.Item>
+                  {/if}
                 </DropdownMenu.Content>
               </DropdownMenu.Root>
             {/if}

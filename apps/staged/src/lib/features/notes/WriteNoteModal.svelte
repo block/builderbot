@@ -22,6 +22,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import MarkdownWysiwygEditor from './MarkdownWysiwygEditor.svelte';
+  import NoteTransferMenu from './NoteTransferMenu.svelte';
   import { noteMarkdownWithTitle, splitNoteMarkdown } from './noteMarkdown';
 
   interface Props {
@@ -31,9 +32,13 @@
     /** Persist the note. Receives the title taken from the note's first line. */
     onSave: (note: { title: string; content: string }) => Promise<void>;
     onClose: () => void;
+    /** The project the note is in, for the move/copy menu when editing. */
+    projectId?: string | null;
+    /** The repo the note's branch is bound to, for the move/copy picker's hint. */
+    repoLabel?: { githubRepo: string; subpath: string | null } | null;
   }
 
-  let { open, note = null, onSave, onClose }: Props = $props();
+  let { open, note = null, onSave, onClose, projectId = null, repoLabel = null }: Props = $props();
 
   let editor = $state<ReturnType<typeof MarkdownWysiwygEditor> | null>(null);
   let markdown = $state('');
@@ -124,6 +129,16 @@
           {isEdit ? 'Edit note' : 'Write note'}
         </Dialog.Title>
         <div class="header-actions">
+          {#if note}
+            <NoteTransferMenu
+              noteId={note.id}
+              noteKind="branch"
+              noteTitle={note.title}
+              {projectId}
+              {repoLabel}
+              onMoved={onClose}
+            />
+          {/if}
           <Button
             variant="ghost"
             size="icon-sm"

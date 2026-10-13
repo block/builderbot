@@ -20,6 +20,7 @@ mod commits;
 pub mod images;
 mod messages;
 mod migrations;
+mod note_transfer;
 mod notes;
 mod project_notes;
 mod project_repos;

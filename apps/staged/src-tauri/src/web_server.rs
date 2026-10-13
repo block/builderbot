@@ -2873,6 +2873,51 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
 
+        "move_note_to_project" | "copy_note_to_project" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            let target_project_id: String = arg(&args, "targetProjectId")?;
+            let mode = if command == "move_note_to_project" {
+                crate::note_transfer::TransferMode::Move
+            } else {
+                crate::note_transfer::TransferMode::Copy
+            };
+            let note = crate::note_transfer::transfer_branch_note(
+                &store,
+                &note_id,
+                &target_project_id,
+                mode,
+                |key| {
+                    crate::note_transfer::add_repo_to_project(
+                        app_handle.clone(),
+                        Arc::clone(&store),
+                        target_project_id.clone(),
+                        key,
+                    )
+                },
+            )
+            .await?;
+            let item = crate::note_commands::note_to_timeline_item(&store, note);
+            Ok(serde_json::to_value(item).unwrap())
+        }
+        "move_project_note_to_project" | "copy_project_note_to_project" => {
+            let store = get_store(store_mutex)?;
+            let project_note_id: String = arg(&args, "projectNoteId")?;
+            let target_project_id: String = arg(&args, "targetProjectId")?;
+            let mode = if command == "move_project_note_to_project" {
+                crate::note_transfer::TransferMode::Move
+            } else {
+                crate::note_transfer::TransferMode::Copy
+            };
+            let note = crate::note_transfer::transfer_project_note(
+                &store,
+                &project_note_id,
+                &target_project_id,
+                mode,
+            )?;
+            Ok(serde_json::to_value(note).unwrap())
+        }
+
         // =====================================================================
         // Images
         // =====================================================================

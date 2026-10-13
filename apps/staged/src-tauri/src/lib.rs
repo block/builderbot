@@ -25,6 +25,7 @@ mod mcp_progress;
 pub mod migrations;
 pub mod note_commands;
 mod note_media;
+pub mod note_transfer;
 pub mod paths;
 pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
@@ -594,105 +595,7 @@ async fn add_project_repo(
     )
     .await?;
 
-    // Spawn background worktree + prerun-actions setup — fire and forget.
-    log::info!(
-        "[add_project_repo] spawning background setup for repo {} in project {}",
-        repo.id,
-        project_id
-    );
-    tauri::async_runtime::spawn({
-        let repo_id = repo.id.clone();
-        async move {
-            web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
-
-            let branch = match store.list_branches_for_project(&project_id) {
-                Ok(branches) => branches
-                    .into_iter()
-                    .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str())),
-                Err(e) => {
-                    log::warn!("[add_project_repo] failed to list branches: {e}");
-                    return;
-                }
-            };
-            let branch = match branch {
-                Some(b) => b,
-                None => {
-                    log::warn!("[add_project_repo] no branch found for repo {repo_id}");
-                    return;
-                }
-            };
-
-            if branch.workspace_name.is_none() {
-                // Local branch: set up git worktree and run prerun actions.
-                let branch_id = branch.id.clone();
-                let store_clone = Arc::clone(&store);
-                let app_handle_clone = app_handle.clone();
-                let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    branches::setup_worktree_sync(&store_clone, &branch_id, Some(&app_handle_clone))
-                })
-                .await;
-
-                match worktree_result {
-                    Ok(Ok(path)) => {
-                        log::info!("[add_project_repo] worktree ready at {path}");
-                        web_server::emit_to_all(
-                            &app_handle,
-                            "project-setup-progress",
-                            project_id.clone(),
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("[add_project_repo] worktree setup failed: {e}");
-                        return;
-                    }
-                    Err(e) => {
-                        log::warn!("[add_project_repo] worktree task panicked: {e}");
-                        return;
-                    }
-                }
-
-                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-                let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                if let branches::PrerunOutcome::Ran(_) = branches::claim_and_run_prerun_actions(
-                    &store,
-                    &app_handle,
-                    &branch.id,
-                    &executor,
-                    &act_registry,
-                    None,
-                    "add_project_repo",
-                )
-                .await
-                {
-                    web_server::emit_to_all(
-                        &app_handle,
-                        "project-setup-progress",
-                        project_id.clone(),
-                    );
-                }
-            } else {
-                // Remote branch: clone the repo into the running workspace,
-                // fetch the base branch, and create the feature branch.
-                match branches::setup_remote_repo_clone(&store, &branch.id).await {
-                    Ok(()) => {
-                        log::info!(
-                            "[add_project_repo] remote repo cloned for branch '{}'",
-                            branch.branch_name
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "[add_project_repo] remote repo clone failed for branch '{}': {e}",
-                            branch.branch_name
-                        );
-                        web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
-                        return;
-                    }
-                }
-                web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
-            }
-        }
-    });
+    project_commands::spawn_project_repo_setup(app_handle, store, project_id, repo.id.clone());
 
     Ok(repo)
 }
@@ -2390,6 +2293,10 @@ pub fn run() {
             note_commands::get_project_note_by_session,
             note_commands::get_branch_note_by_session,
             note_commands::delete_project_note,
+            note_transfer::move_note_to_project,
+            note_transfer::copy_note_to_project,
+            note_transfer::move_project_note_to_project,
+            note_transfer::copy_project_note_to_project,
             // Images
             image_commands::create_image,
             image_commands::get_image_path,

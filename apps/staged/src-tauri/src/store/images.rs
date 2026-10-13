@@ -38,6 +38,25 @@ impl Store {
 
     pub fn create_image(&self, image: &Image) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::insert_image(&conn, image)?;
+        // Only branch-attached images without a session appear on the
+        // timeline; session-scoped attachments live in the chat history,
+        // which polls.
+        if image.session_id.is_none() {
+            if let Some(branch_id) = &image.branch_id {
+                self.publish_with(|| StoreChange::Branch {
+                    branch_id: branch_id.clone(),
+                    project_id: Some(image.project_id.clone()),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn insert_image(
+        conn: &rusqlite::Connection,
+        image: &Image,
+    ) -> Result<(), StoreError> {
         conn.execute(
             "INSERT INTO images (id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -52,17 +71,6 @@ impl Store {
                 image.created_at,
             ],
         )?;
-        // Only branch-attached images without a session appear on the
-        // timeline; session-scoped attachments live in the chat history,
-        // which polls.
-        if image.session_id.is_none() {
-            if let Some(branch_id) = &image.branch_id {
-                self.publish_with(|| StoreChange::Branch {
-                    branch_id: branch_id.clone(),
-                    project_id: Some(image.project_id.clone()),
-                });
-            }
-        }
         Ok(())
     }
 

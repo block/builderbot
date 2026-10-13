@@ -32,6 +32,18 @@ impl DeletedProjectNoteSessions {
 impl Store {
     pub fn create_project_note(&self, note: &ProjectNote) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::insert_project_note(&conn, note)?;
+        self.publish(StoreChange::Notes {
+            branch_id: None,
+            project_id: Some(note.project_id.clone()),
+        });
+        Ok(())
+    }
+
+    pub(super) fn insert_project_note(
+        conn: &rusqlite::Connection,
+        note: &ProjectNote,
+    ) -> Result<(), StoreError> {
         conn.execute(
             "INSERT INTO project_notes (id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -48,10 +60,6 @@ impl Store {
                 note.suggested_next_note_step,
             ],
         )?;
-        self.publish(StoreChange::Notes {
-            branch_id: None,
-            project_id: Some(note.project_id.clone()),
-        });
         Ok(())
     }
 
@@ -227,7 +235,7 @@ impl Store {
         })
     }
 
-    fn row_to_project_note(row: &rusqlite::Row) -> rusqlite::Result<ProjectNote> {
+    pub(super) fn row_to_project_note(row: &rusqlite::Row) -> rusqlite::Result<ProjectNote> {
         Ok(ProjectNote {
             id: row.get(0)?,
             project_id: row.get(1)?,

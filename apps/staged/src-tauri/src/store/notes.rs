@@ -38,7 +38,7 @@ impl Store {
         Ok(())
     }
 
-    fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
+    pub(super) fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
         conn.execute(
             "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -63,7 +63,7 @@ impl Store {
     /// Pick a title that is unique among the branch's notes. `exclude_id` is the
     /// note being renamed, so re-saving a written note under its own title keeps
     /// that title instead of collecting a ` (2)` suffix on every save.
-    fn resolve_unique_note_title(
+    pub(super) fn resolve_unique_note_title(
         conn: &rusqlite::Connection,
         branch_id: &str,
         base: &str,
@@ -320,7 +320,7 @@ impl Store {
         Ok(())
     }
 
-    fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
+    pub(super) fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         Ok(Note {
             id: row.get(0)?,
             branch_id: row.get(1)?,

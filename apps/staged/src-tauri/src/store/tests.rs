@@ -1918,6 +1918,120 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
 }
 
 #[test]
+fn test_transcript_reads_project_tool_images_to_refs_and_keep_raw_bytes() {
+    use super::ToolImageField;
+    use base64::Engine;
+
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let png: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+    let jpeg: &[u8] = b"\xff\xd8\xff\xe0jpeg";
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    // Claude's raw result nests the payload in `source`; ACP content wraps
+    // the block in a `content` envelope and puts `data`/`mimeType` on it.
+    let raw_output = serde_json::json!([
+        {"type": "text", "text": "Read 1 image"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encode(png)}},
+    ]);
+    let content = serde_json::json!([
+        {"type": "content", "content": {"type": "image", "mimeType": "image/jpeg", "data": encode(jpeg), "annotations": {"audience": ["user"]}}},
+    ]);
+    let id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read screenshot.png")
+        .unwrap();
+    store
+        .update_message_acp_metadata(
+            id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-1".to_string()),
+                acp_tool_status: Some("in_progress".to_string()),
+                acp_raw_output: Some(raw_output.clone()),
+                acp_content: Some(content.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let expected_output = serde_json::json!([
+        {"type": "text", "text": "Read 1 image"},
+        {"type": "image", "ref": format!("{id}/output/1"), "mimeType": "image/png"},
+    ]);
+    let expected_content = serde_json::json!([
+        {"type": "content", "content": {
+            "type": "image", "ref": format!("{id}/content/0"), "mimeType": "image/jpeg",
+            "annotations": {"audience": ["user"]},
+        }},
+    ]);
+    let visible = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(visible[0].acp.acp_raw_output, Some(expected_output.clone()));
+    assert_eq!(visible[0].acp.acp_content, Some(expected_content.clone()));
+    for message in [
+        &store
+            .get_session_messages_since(&session.id, id, &[])
+            .unwrap()[0],
+        // In flight, so the metadata query ships it too.
+        &store
+            .get_session_acp_metadata_messages(&session.id)
+            .unwrap()[0],
+        &store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
+            .unwrap()[0],
+    ] {
+        assert_eq!(message.acp.acp_raw_output, Some(expected_output.clone()));
+        assert_eq!(message.acp.acp_content, Some(expected_content.clone()));
+    }
+
+    // Replay and archive readers still see the base64.
+    let replay = store.get_session_replay_messages(&session.id).unwrap();
+    assert_eq!(replay[0].acp.acp_raw_output, Some(raw_output));
+    assert_eq!(replay[0].acp.acp_content, Some(content));
+    assert_eq!(
+        store.get_session_acp_metadata_archive(&session.id).unwrap()[0]
+            .acp
+            .acp_content
+            .as_ref()
+            .unwrap()[0]["content"]["data"],
+        encode(jpeg)
+    );
+
+    // The refs resolve to the decoded bytes…
+    let image = store
+        .get_tool_image(id, ToolImageField::Output, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (image.mime_type.as_str(), image.bytes.as_slice()),
+        ("image/png", png)
+    );
+    let image = store
+        .get_tool_image(id, ToolImageField::Content, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (image.mime_type.as_str(), image.bytes.as_slice()),
+        ("image/jpeg", jpeg)
+    );
+    // …and anything that is not a base64 image block is `None`.
+    assert_eq!(
+        store.get_tool_image(id, ToolImageField::Output, 0).unwrap(),
+        None
+    );
+    assert_eq!(
+        store.get_tool_image(id, ToolImageField::Output, 2).unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_tool_image(id + 1, ToolImageField::Output, 1)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn test_acp_initialization_metadata_is_queryable() {
     let store = Store::in_memory().unwrap();
 

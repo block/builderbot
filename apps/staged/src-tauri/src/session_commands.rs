@@ -1172,6 +1172,37 @@ pub fn get_session_acp_metadata_messages_since(
         .map_err(|e| e.to_string())
 }
 
+/// Resolve a tool-result image reference (`<message_id>/<field>/<index>`, as
+/// projected into the transcript by the store) to a data URL. The web client
+/// fetches `/api/tool-images/…` directly; this is the Tauri IPC equivalent.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_tool_image(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    message_id: i64,
+    field: String,
+    index: usize,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    tool_image_data_url(&store, message_id, &field, index)
+}
+
+pub(crate) fn tool_image_data_url(
+    store: &Store,
+    message_id: i64,
+    field: &str,
+    index: usize,
+) -> Result<String, String> {
+    let not_found = || format!("Tool image not found: {message_id}/{field}/{index}");
+    let field = store::ToolImageField::parse(field).ok_or_else(not_found)?;
+    let image = store
+        .get_tool_image(message_id, field, index)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(not_found)?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+    Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+}
+
 #[tauri::command]
 pub fn get_session_acp_initialization(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,

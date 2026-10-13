@@ -1,21 +1,27 @@
 <script lang="ts">
-  import { readImageFile } from '$lib/api/commands';
   import * as Dialog from '$lib/components/ui/dialog';
   import type { ToolCallImage } from '../toolCallImages';
+  import { fetchToolImageSrc, immediateToolImageSrc } from '../toolImageSource';
 
   let { image }: { image: ToolCallImage } = $props();
+  let container = $state<HTMLElement | null>(null);
   let dataUrl = $state<string | null>(null);
   let failed = $state(false);
   let open = $state(false);
 
+  // Inline payloads and web `ref`s have a src straight away (the browser's
+  // `loading="lazy"` defers the actual download). Anything that needs an IPC
+  // round trip — refs under Tauri, file reads — waits until the image is
+  // within a viewport of being seen, so expanding a card with twenty
+  // screenshots doesn't decode all twenty at once.
   $effect(() => {
     let active = true;
-    dataUrl = null;
+    dataUrl = immediateToolImageSrc(image);
     failed = false;
-    if (image.kind === 'inline') {
-      dataUrl = image.dataUrl;
-    } else {
-      readImageFile(image.path).then(
+    if (dataUrl !== null) return;
+
+    const load = () => {
+      fetchToolImageSrc(image).then(
         (url) => {
           if (active) dataUrl = url;
         },
@@ -23,14 +29,32 @@
           if (active) failed = true;
         }
       );
+    };
+    const element = container;
+    if (!element || typeof IntersectionObserver === 'undefined') {
+      load();
+      return () => {
+        active = false;
+      };
     }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          load();
+        }
+      },
+      { rootMargin: '100%' }
+    );
+    observer.observe(element);
     return () => {
       active = false;
+      observer.disconnect();
     };
   });
 </script>
 
-<div class="tool-result-image">
+<div class="tool-result-image" bind:this={container}>
   {#if failed}
     <div class="image-placeholder" title={image.label}>Image unavailable</div>
   {:else if dataUrl}

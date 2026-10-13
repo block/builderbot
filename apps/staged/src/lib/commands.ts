@@ -1897,6 +1897,19 @@ export function readImageFile(filePath: string): Promise<string> {
   return invokeCommand('read_image_file', { filePath });
 }
 
+/**
+ * Data URL for a tool-result image the store projected to a
+ * `<messageId>/<field>/<index>` ref. The web build loads
+ * `/api/tool-images/…` directly instead (see `toolImageSource.ts`).
+ */
+export function getToolImage(
+  messageId: number,
+  field: 'output' | 'content',
+  index: number
+): Promise<string> {
+  return invokeCommand('get_tool_image', { messageId, field, index });
+}
+
 /** Create an image from base64-encoded data (browser file input / clipboard paste). */
 export function createImageFromData(
   branchId: string | null,

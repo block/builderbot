@@ -3,6 +3,7 @@
 use rusqlite::{params, Row};
 
 use super::models::{AcpMessageMetadata, MessageRole, SessionMessage};
+use super::tool_images::project_tool_images;
 use super::{now_timestamp, Store, StoreError};
 
 const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at, image_ids,
@@ -83,6 +84,16 @@ fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
             acp_origin: row.get(23)?,
         },
     })
+}
+
+/// [`session_message_from_row`] for the queries that feed the UI: base64
+/// image blocks in the ACP output/content become `/api/tool-images` refs
+/// (see `tool_images.rs`). Replay, archive and initialization readers keep
+/// the raw row.
+fn transcript_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
+    let mut message = session_message_from_row(row)?;
+    project_tool_images(&mut message);
+    Ok(message)
 }
 
 impl Store {
@@ -197,6 +208,7 @@ impl Store {
         Ok(message_id)
     }
 
+    /// The visible transcript, with tool-result images projected to refs.
     pub fn get_session_messages(
         &self,
         session_id: &str,
@@ -209,7 +221,7 @@ impl Store {
              ORDER BY id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![session_id], session_message_from_row)?;
+        let rows = stmt.query_map(params![session_id], transcript_message_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -394,7 +406,7 @@ impl Store {
              ORDER BY id ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![session_id], session_message_from_row)?;
+        let rows = stmt.query_map(params![session_id], transcript_message_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -453,7 +465,7 @@ impl Store {
         for id in refetch_ids {
             query_params.push(id);
         }
-        let rows = stmt.query_map(&query_params[..], session_message_from_row)?;
+        let rows = stmt.query_map(&query_params[..], transcript_message_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -537,7 +549,7 @@ impl Store {
         for id in refetch_ids {
             query_params.push(id);
         }
-        let rows = stmt.query_map(&query_params[..], session_message_from_row)?;
+        let rows = stmt.query_map(&query_params[..], transcript_message_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

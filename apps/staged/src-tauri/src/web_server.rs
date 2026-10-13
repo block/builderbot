@@ -276,6 +276,10 @@ fn media_router_for_store(
 ) -> Router {
     Router::new()
         .route("/api/media/{file}", get(serve_media))
+        .route(
+            "/api/tool-images/{message_id}/{field}/{index}",
+            get(serve_tool_image),
+        )
         .with_state(store)
         .route_layer(middleware::from_fn(
             move |jar: CookieJar, request: Request, next: Next| {
@@ -316,6 +320,60 @@ async fn serve_media(
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Serve the bytes behind a tool-result image reference. The transcript
+/// queries replace base64 image blocks with
+/// `{"type":"image","ref":"<message_id>/<output|content>/<index>",…}` (see
+/// `store/tool_images.rs`); the `<img>` then requests this route lazily.
+///
+/// Anything that does not resolve to a base64 image block — unknown row,
+/// bad field, index past the end, a text block — is a 404, including
+/// unparseable ids, so a stale ref never surfaces as a 400 in the console.
+/// `Cache-Control` is long-lived: a settled tool result never changes, and
+/// the id/index pair is a stable identity for the block. The compression
+/// layer's default predicate skips `image/*` bodies, so these go out as-is.
+async fn serve_tool_image(
+    State(store): State<Arc<Store>>,
+    Path((message_id, field, index)): Path<(String, String, String)>,
+) -> Response {
+    let (Ok(message_id), Some(field), Ok(index)) = (
+        message_id.parse::<i64>(),
+        store::ToolImageField::parse(&field),
+        index.parse::<usize>(),
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let image = tokio::task::spawn_blocking(move || store.get_tool_image(message_id, field, index))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result.map_err(|e| e.to_string()));
+    let image = match image {
+        Ok(Some(image)) => image,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::warn!("[web_server] tool image {message_id}/{field}/{index} unreadable: {e}");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let Ok(content_type) = axum::http::HeaderValue::from_str(&image.mime_type) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("x-content-type-options"),
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        image.bytes,
+    )
+        .into_response()
 }
 
 // =============================================================================
@@ -3110,6 +3168,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(metadata).unwrap())
         }
+        // The browser normally loads `/api/tool-images/…` straight into an
+        // `<img>`; this arm keeps the command callable from both transports.
+        "get_tool_image" => {
+            let store = get_store(store_mutex)?;
+            let message_id: i64 = arg(&args, "messageId")?;
+            let field: String = arg(&args, "field")?;
+            let index: usize = arg(&args, "index")?;
+            tokio::task::spawn_blocking(move || {
+                session_commands::tool_image_data_url(&store, message_id, &field, index)
+                    .map(Value::String)
+            })
+            .await
+            .map_err(|e| format!("task failed: {e}"))?
+        }
         "start_session" => {
             let store = get_store(store_mutex)?;
             let prompt: String = arg(&args, "prompt")?;
@@ -4320,5 +4392,89 @@ mod media_tests {
             router.oneshot(request).await.unwrap().status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn tool_image_route_serves_decoded_block_or_404() {
+        use base64::Engine;
+        let fixture = Fixture::new();
+        let store = fixture.store.clone();
+        let id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Read")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("completed".into()),
+                    acp_raw_output: Some(serde_json::json!([
+                        {"type": "text", "text": "ok"},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/png",
+                            "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                        }},
+                    ])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let sessions = Arc::new(Mutex::new(HashSet::new()));
+        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let get = |uri: String, auth: Option<&str>| {
+            let mut request = axum::http::Request::builder().uri(uri);
+            if let Some(auth) = auth {
+                request = request.header("Authorization", format!("Bearer {auth}"));
+            }
+            router
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+        };
+
+        let response = get(
+            format!("/api/tool-images/{id}/output/1"),
+            Some("bearer-token"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            PNG
+        );
+
+        assert_eq!(
+            get(format!("/api/tool-images/{id}/output/1"), None)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for uri in [
+            format!("/api/tool-images/{id}/output/0"),
+            format!("/api/tool-images/{id}/output/2"),
+            format!("/api/tool-images/{id}/content/0"),
+            format!("/api/tool-images/{id}/source/1"),
+            format!("/api/tool-images/{}/output/1", id + 1),
+            "/api/tool-images/not-an-id/output/1".to_string(),
+        ] {
+            assert_eq!(
+                get(uri.clone(), Some("bearer-token"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
     }
 }

@@ -266,6 +266,55 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.hasDetails).toBe(true);
   });
 
+  it('renders store-projected image refs without any inline payload', () => {
+    // What the server now ships in place of a base64 block, in both the ACP
+    // content envelope and Claude's raw output (store/tool_images.rs).
+    const model = buildToolCallViewModel(
+      richTool({
+        toolKind: 'read',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'image', ref: '42/content/0', mimeType: 'image/png' },
+          },
+        ],
+        rawOutput: [
+          { type: 'text', text: 'Read 1 image' },
+          { type: 'image', ref: '42/output/1', mimeType: 'image/png' },
+        ],
+      })
+    );
+
+    expect(model.output.images).toEqual([
+      {
+        kind: 'ref',
+        ref: { ref: '42/content/0', messageId: 42, field: 'content', index: 0 },
+        mimeType: 'image/png',
+        label: 'Tool result image',
+      },
+    ]);
+    // The sibling text block still renders; only the image payload moved.
+    expect(model.sections.map((section) => section.kind)).toEqual(['image', 'output', 'status']);
+    expect(model.output.primaryText).toBe('Read 1 image');
+    expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
+    expect(model.hasDetails).toBe(true);
+  });
+
+  it('ignores malformed refs and falls back to inline data when present', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        rawOutput: [
+          { type: 'image', ref: 'not/a/ref', mimeType: 'image/png' },
+          { type: 'image', ref: '../etc/passwd', mimeType: 'image/png', data: png },
+        ],
+      })
+    );
+
+    expect(model.output.images).toEqual([
+      { kind: 'inline', dataUrl: `data:image/png;base64,${png}`, label: 'Tool result image' },
+    ]);
+  });
+
   it('keeps accompanying text and multiple images in ACP output', () => {
     const model = buildToolCallViewModel(
       richTool({

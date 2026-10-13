@@ -2,6 +2,7 @@ import type { DisplayRootInput } from './pathDisplayRoots';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
 import { formatJson, terminalRefsFromAcpContent, textFromAcpContent } from './acpTranscript';
 import { makePathsRelative, parseToolCall, stripCodeFences } from './sessionModalHelpers';
+import { deferredToolBodyIds } from './toolCallBodies';
 import { toolCallImageContent, toolCallOutputText, type ToolCallImage } from './toolCallImages';
 
 export type ToolCallCategory = 'edit' | 'command' | 'read' | 'search' | 'network' | 'generic';
@@ -188,8 +189,13 @@ export function buildToolCallViewModel(
     output,
     sections,
     // Status and empty-state rows only echo what the collapsed header already
-    // shows, so they alone don't make a card worth expanding.
-    hasDetails: sections.some((section) => section.kind !== 'status' && section.kind !== 'empty'),
+    // shows, so they alone don't make a card worth expanding. A deferred body
+    // (`toolCallBodies.ts`) is one the store judged large, so there is
+    // something to show once it is fetched — `ToolCallCard` does that before
+    // it renders the sections built here.
+    hasDetails:
+      sections.some((section) => section.kind !== 'status' && section.kind !== 'empty') ||
+      deferredToolBodyIds(item).length > 0,
   };
 }
 

@@ -31,6 +31,7 @@ import type {
   ActiveSessionInfo,
   Session,
   SessionMessage,
+  ToolCallBody,
   SessionBackgroundHoldSnapshot,
   QueuedSessionMessage,
   DiffFilesResponse,
@@ -1942,6 +1943,14 @@ export function getToolImage(
   index: number
 ): Promise<string> {
   return invokeCommand('get_tool_image', { messageId, field, index });
+}
+
+/**
+ * The bodies behind a tool row's `$deferred` markers. The web build fetches
+ * `/api/tool-bodies/{messageId}` directly instead (see `toolBodySource.ts`).
+ */
+export function getToolCallBody(messageId: number): Promise<ToolCallBody> {
+  return invokeCommand('get_tool_call_body', { messageId });
 }
 
 /** Create an image from base64-encoded data (browser file input / clipboard paste). */

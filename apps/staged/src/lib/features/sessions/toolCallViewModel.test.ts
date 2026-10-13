@@ -571,6 +571,35 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.hasDetails).toBe(true);
   });
 
+  it('is expandable when a body was deferred by the store, before it is fetched', () => {
+    // The store ships settled bodies past its size threshold as markers; the
+    // collapsed card must look exactly as it would with the body inline —
+    // expandable, with output — and nothing may pretty-print the marker.
+    const marker = (field: 'input' | 'output' | 'content') => ({
+      $deferred: { messageId: 42, field, bytes: 9000 },
+    });
+
+    const outputOnly = buildToolCallViewModel(richTool({ rawOutput: marker('output') }));
+    expect(outputOnly.hasDetails).toBe(true);
+    expect(outputOnly.output.state).toBe('output');
+    expect(outputOnly.output.images).toEqual([]);
+    expect(outputOnly.output.errorText).toBe('');
+    // Classification comes from the verb here, as it would with the body
+    // inline; the marker's keys never read as network evidence.
+    expect(outputOnly.category).toBe('command');
+
+    // ACP content alone contributes nothing to the sections until it is a
+    // real block list, so the marker is what keeps the card expandable.
+    const contentOnly = buildToolCallViewModel(richTool({ content: marker('content') }));
+    expect(contentOnly.hasDetails).toBe(true);
+    expect(contentOnly.metadata.diffs).toEqual([]);
+
+    const inputOnly = buildToolCallViewModel(richTool({ rawInput: marker('input') }));
+    expect(inputOnly.hasDetails).toBe(true);
+    expect(inputOnly.metadata.command).toBeNull();
+    expect(inputOnly.metadata.targetPath).toBeNull();
+  });
+
   it('defers raw output JSON formatting until the value is read', () => {
     let reads = 0;
     const rawOutput = {

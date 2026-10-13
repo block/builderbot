@@ -553,6 +553,18 @@ export interface PipelineStepPayload {
 
 export type MessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result';
 
+/**
+ * The bodies of one tool row, fetched on demand when the transcript shipped
+ * them as `$deferred` markers (see `toolCallBodies.ts`). Field names match
+ * {@link SessionMessage} so a body slots straight into the row it came from.
+ */
+export interface ToolCallBody {
+  messageId: number;
+  acpRawInput?: unknown;
+  acpRawOutput?: unknown;
+  acpContent?: unknown;
+}
+
 export interface SessionMessage {
   id: number;
   sessionId: string;

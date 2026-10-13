@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::models::*;
-use super::{Store, TranscriptWindow};
+use super::{Store, ToolCallBody, TranscriptWindow, DEFERRED_TOOL_BODY_MIN_BYTES};
 
 #[test]
 fn test_create_and_get_project() {
@@ -2231,6 +2231,198 @@ fn test_transcript_reads_project_tool_images_to_refs_and_keep_raw_bytes() {
             .unwrap(),
         None
     );
+}
+
+/// A body one byte past the deferral threshold: `{"text":"xxxx…"}`.
+fn oversized_tool_body(key: &str) -> serde_json::Value {
+    let envelope = format!("{{\"{key}\":\"\"}}").len();
+    serde_json::json!({ key: "x".repeat(DEFERRED_TOOL_BODY_MIN_BYTES + 1 - envelope) })
+}
+
+fn deferred_marker(id: i64, field: &str, body: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"$deferred": {
+        "messageId": id,
+        "field": field,
+        "bytes": serde_json::to_vec(body).unwrap().len(),
+    }})
+}
+
+#[test]
+fn test_transcript_reads_defer_large_bodies_of_settled_tool_rows_only() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let big_input = oversized_tool_body("content");
+    let big_output = oversized_tool_body("stdout");
+    let small_content = serde_json::json!([
+        {"type": "content", "content": {"type": "text", "text": "ok"}},
+    ]);
+    let metadata = |status: &str| AcpMessageMetadata {
+        acp_event_kind: Some("tool_call".to_string()),
+        acp_tool_call_id: Some("tc-1".to_string()),
+        acp_tool_status: Some(status.to_string()),
+        acp_raw_input: Some(big_input.clone()),
+        acp_raw_output: Some(big_output.clone()),
+        acp_content: Some(small_content.clone()),
+        ..Default::default()
+    };
+    let id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Write notes.md")
+        .unwrap();
+    store
+        .update_message_acp_metadata(id, &metadata("in_progress"))
+        .unwrap();
+
+    // In flight: the writer still mutates the row and the poll re-reads it,
+    // so every body ships whole.
+    let in_flight = &store.get_session_messages(&session.id).unwrap()[0];
+    assert_eq!(in_flight.acp.acp_raw_input, Some(big_input.clone()));
+    assert_eq!(in_flight.acp.acp_raw_output, Some(big_output.clone()));
+    assert_eq!(in_flight.acp.acp_content, Some(small_content.clone()));
+
+    // Settled: the two large bodies become markers, the small one stays.
+    store
+        .update_message_acp_metadata(id, &metadata("completed"))
+        .unwrap();
+    let expected_input = deferred_marker(id, "input", &big_input);
+    let expected_output = deferred_marker(id, "output", &big_output);
+    assert!(
+        expected_input["$deferred"]["bytes"].as_u64().unwrap()
+            == DEFERRED_TOOL_BODY_MIN_BYTES as u64 + 1,
+        "fixture should sit one byte past the threshold"
+    );
+    for message in [
+        &store.get_session_messages(&session.id).unwrap()[0],
+        &store
+            .get_session_messages_since(&session.id, id, &[])
+            .unwrap()[0],
+        // Settled visible rows leave the metadata query, but a refetch by id
+        // still delivers the row (now projected) so the poll sees it settle.
+        &store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
+            .unwrap()[0],
+    ] {
+        assert_eq!(message.acp.acp_raw_input, Some(expected_input.clone()));
+        assert_eq!(message.acp.acp_raw_output, Some(expected_output.clone()));
+        assert_eq!(message.acp.acp_content, Some(small_content.clone()));
+        assert_eq!(message.acp.acp_tool_status.as_deref(), Some("completed"));
+    }
+
+    // Replay and archive readers still see the bodies, and the table does too.
+    let replay = store.get_session_replay_messages(&session.id).unwrap();
+    assert_eq!(replay[0].acp.acp_raw_input, Some(big_input.clone()));
+    assert_eq!(replay[0].acp.acp_raw_output, Some(big_output.clone()));
+    assert_eq!(
+        store.get_session_acp_metadata_archive(&session.id).unwrap()[0]
+            .acp
+            .acp_raw_output,
+        Some(big_output.clone())
+    );
+
+    // The marker resolves to the row's bodies…
+    let body = store.get_tool_call_body(id).unwrap().unwrap();
+    assert_eq!(
+        body,
+        ToolCallBody {
+            message_id: id,
+            acp_raw_input: Some(big_input),
+            acp_raw_output: Some(big_output),
+            acp_content: Some(small_content),
+        }
+    );
+    let wire = serde_json::to_value(&body).unwrap();
+    assert_eq!(wire["messageId"], serde_json::json!(id));
+    for key in ["acpRawInput", "acpRawOutput", "acpContent"] {
+        assert!(
+            wire.get(key).is_some(),
+            "wire field names follow SessionMessage: {key}"
+        );
+    }
+    // …and an unknown row is `None`.
+    assert_eq!(store.get_tool_call_body(id + 1).unwrap(), None);
+}
+
+#[test]
+fn test_tool_body_deferral_judges_the_projected_size_and_keeps_pikchr_hints() {
+    use base64::Engine;
+
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // A screenshot result: far past the threshold as stored, tiny once the
+    // image is a ref — so it ships inline, and the body route projects the
+    // same ref.
+    let png = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 4096]);
+    let image_output = serde_json::json!([
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}},
+    ]);
+    let image_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read shot.png")
+        .unwrap();
+    store
+        .update_message_acp_metadata(
+            image_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-img".to_string()),
+                acp_tool_status: Some("completed".to_string()),
+                acp_raw_output: Some(image_output),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let projected = serde_json::json!([
+        {"type": "image", "ref": format!("{image_id}/output/0"), "mimeType": "image/png"},
+    ]);
+    assert_eq!(
+        store.get_session_messages(&session.id).unwrap()[0]
+            .acp
+            .acp_raw_output,
+        Some(projected.clone())
+    );
+    assert_eq!(
+        store
+            .get_tool_call_body(image_id)
+            .unwrap()
+            .unwrap()
+            .acp_raw_output,
+        Some(projected)
+    );
+
+    // A `render_pikchr` call keeps its source in the marker (the collapsed
+    // card draws it), and a `generate_pikchr` result keeps the child session
+    // id it names however deeply.
+    let pikchr_source = format!("box \"{}\"", "x".repeat(DEFERRED_TOOL_BODY_MIN_BYTES));
+    let pikchr_input = serde_json::json!({"pikchr": pikchr_source, "description": "big"});
+    let pikchr_output = serde_json::json!({
+        "content": [{"type": "text", "text": "x".repeat(DEFERRED_TOOL_BODY_MIN_BYTES)}],
+        "result": {"structured_content": {"inner_session_id": "child-1"}},
+    });
+    let pikchr_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "render_pikchr")
+        .unwrap();
+    store
+        .update_message_acp_metadata(
+            pikchr_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-pikchr".to_string()),
+                acp_tool_status: Some("completed".to_string()),
+                acp_raw_input: Some(pikchr_input.clone()),
+                acp_raw_output: Some(pikchr_output.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let row = &store.get_session_messages(&session.id).unwrap()[1];
+    let mut expected_input = deferred_marker(pikchr_id, "input", &pikchr_input);
+    expected_input["$deferred"]["pikchr"] = serde_json::Value::String(pikchr_source);
+    assert_eq!(row.acp.acp_raw_input, Some(expected_input));
+    let mut expected_output = deferred_marker(pikchr_id, "output", &pikchr_output);
+    expected_output["$deferred"]["innerSessionId"] = serde_json::Value::String("child-1".into());
+    assert_eq!(row.acp.acp_raw_output, Some(expected_output));
 }
 
 #[test]

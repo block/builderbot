@@ -1208,6 +1208,27 @@ pub(crate) fn tool_image_data_url(
     Ok(format!("data:{};base64,{}", image.mime_type, encoded))
 }
 
+/// The bodies behind a transcript `$deferred` marker (`store/tool_bodies.rs`).
+/// The web client fetches `/api/tool-bodies/{message_id}` directly; this is
+/// the Tauri IPC equivalent.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_tool_call_body(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    message_id: i64,
+) -> Result<store::ToolCallBody, String> {
+    let store = get_store(&store)?;
+    tool_call_body(&store, message_id).map_err(|e| e.to_string())
+}
+
+pub(crate) fn tool_call_body(
+    store: &Store,
+    message_id: i64,
+) -> Result<store::ToolCallBody, store::StoreError> {
+    store
+        .get_tool_call_body(message_id)?
+        .ok_or_else(|| store::StoreError(format!("Tool call body not found: {message_id}")))
+}
+
 #[tauri::command]
 pub fn get_session_acp_initialization(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,

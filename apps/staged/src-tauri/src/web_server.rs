@@ -280,6 +280,7 @@ fn media_router_for_store(
             "/api/tool-images/{message_id}/{field}/{index}",
             get(serve_tool_image),
         )
+        .route("/api/tool-bodies/{message_id}", get(serve_tool_call_body))
         .with_state(store)
         .route_layer(middleware::from_fn(
             move |jar: CookieJar, request: Request, next: Next| {
@@ -372,6 +373,50 @@ async fn serve_tool_image(
             ),
         ],
         image.bytes,
+    )
+        .into_response()
+}
+
+/// Serve the bodies behind a tool row's `$deferred` markers. The transcript
+/// queries replace the large input/output/content of settled tool rows with
+/// `{"$deferred":{"messageId":…}}` (see `store/tool_bodies.rs`); the card
+/// requests this route when it is expanded.
+///
+/// An unknown or unparseable id is a 404, as for tool images. The bodies are
+/// JSON, so the compression layer applies, and `Cache-Control` is long-lived
+/// for the same reason as the image route: only settled rows are deferred,
+/// and a settled row's bodies never change.
+async fn serve_tool_call_body(
+    State(store): State<Arc<Store>>,
+    Path(message_id): Path<String>,
+) -> Response {
+    let Ok(message_id) = message_id.parse::<i64>() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let body = tokio::task::spawn_blocking(move || store.get_tool_call_body(message_id))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result.map_err(|e| e.to_string()));
+    let body = match body {
+        Ok(Some(body)) => body,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::warn!("[web_server] tool call body {message_id} unreadable: {e}");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    (
+        [
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("x-content-type-options"),
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        Json(body),
     )
         .into_response()
 }
@@ -3189,6 +3234,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .await
             .map_err(|e| format!("task failed: {e}"))?
         }
+        // The browser normally fetches `/api/tool-bodies/{id}` directly; this
+        // arm keeps the command callable from both transports. A body can be
+        // hundreds of KB, so it is read and serialized off the runtime thread.
+        "get_tool_call_body" => {
+            let store = get_store(store_mutex)?;
+            let message_id: i64 = arg(&args, "messageId")?;
+            blocking_store_json(move || session_commands::tool_call_body(&store, message_id)).await
+        }
         "start_session" => {
             let store = get_store(store_mutex)?;
             let prompt: String = arg(&args, "prompt")?;
@@ -4227,6 +4280,20 @@ mod tests {
         }
     }
 
+    /// A deferred body is read on expand while the same worker services
+    /// `/api/events`, and can be hundreds of KB; keep it off the runtime
+    /// thread like the transcript reads.
+    #[test]
+    fn web_get_tool_call_body_reads_under_spawn_blocking() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_tool_call_body");
+        for needle in ["session_commands::tool_call_body(", "blocking_store_json("] {
+            assert!(
+                arm.contains(needle),
+                "the web `get_tool_call_body` arm must contain `{needle}`: {arm}"
+            );
+        }
+    }
+
     /// The source of one `dispatch` arm, from its `"command" =>` pattern to the
     /// end of its block. Source-level for the same reason as
     /// `web_dispatch_covers_tauri_commands`: `dispatch` needs a `WebAppState`
@@ -4494,6 +4561,101 @@ mod media_tests {
             format!("/api/tool-images/{id}/source/1"),
             format!("/api/tool-images/{}/output/1", id + 1),
             "/api/tool-images/not-an-id/output/1".to_string(),
+        ] {
+            assert_eq!(
+                get(uri.clone(), Some("bearer-token"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_body_route_serves_the_row_bodies_or_404() {
+        use base64::Engine;
+        let fixture = Fixture::new();
+        let store = fixture.store.clone();
+        let stdout = "x".repeat(store::DEFERRED_TOOL_BODY_MIN_BYTES);
+        let id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Bash")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("completed".into()),
+                    acp_raw_input: Some(serde_json::json!({"command": "make"})),
+                    acp_raw_output: Some(serde_json::json!({"stdout": stdout})),
+                    acp_content: Some(serde_json::json!([{"type": "content", "content": {
+                        "type": "image", "mimeType": "image/png",
+                        "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                    }}])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // The transcript ships the output as a marker…
+        let shipped = &store.get_session_messages(&fixture.session.id).unwrap()[0];
+        assert_eq!(
+            shipped.acp.acp_raw_output.as_ref().unwrap()["$deferred"]["messageId"],
+            serde_json::json!(id)
+        );
+
+        let sessions = Arc::new(Mutex::new(HashSet::new()));
+        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let get = |uri: String, auth: Option<&str>| {
+            let mut request = axum::http::Request::builder().uri(uri);
+            if let Some(auth) = auth {
+                request = request.header("Authorization", format!("Bearer {auth}"));
+            }
+            router
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+        };
+
+        // …and the route serves the bodies, images projected to refs.
+        let response = get(format!("/api/tool-bodies/{id}"), Some("bearer-token"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "messageId": id,
+                "acpRawInput": {"command": "make"},
+                "acpRawOutput": {"stdout": stdout},
+                "acpContent": [{"type": "content", "content": {
+                    "type": "image", "ref": format!("{id}/content/0"), "mimeType": "image/png",
+                }}],
+            })
+        );
+
+        assert_eq!(
+            get(format!("/api/tool-bodies/{id}"), None)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for uri in [
+            format!("/api/tool-bodies/{}", id + 1),
+            "/api/tool-bodies/not-an-id".to_string(),
         ] {
             assert_eq!(
                 get(uri.clone(), Some("bearer-token"))

@@ -30,6 +30,7 @@ pub mod repo_affinities;
 pub mod repo_badges;
 mod reviews;
 mod sessions;
+mod tool_bodies;
 mod tool_images;
 mod workdirs;
 
@@ -44,6 +45,7 @@ pub use messages::TranscriptWindow;
 pub use models::*;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use repo_badges::{fallback_short_name, next_hue};
+pub use tool_bodies::{ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES};
 pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
 use rusqlite::{Connection, OptionalExtension};

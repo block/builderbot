@@ -3,6 +3,7 @@
 use rusqlite::{params, Row};
 
 use super::models::{AcpMessageMetadata, MessageRole, SessionMessage};
+use super::tool_bodies::project_tool_bodies;
 use super::tool_images::project_tool_images;
 use super::{now_timestamp, Store, StoreError};
 
@@ -141,11 +142,14 @@ fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
 
 /// [`session_message_from_row`] for the queries that feed the UI: base64
 /// image blocks in the ACP output/content become `/api/tool-images` refs
-/// (see `tool_images.rs`). Replay, archive and initialization readers keep
-/// the raw row.
+/// (see `tool_images.rs`), then the large bodies of settled tool rows become
+/// `/api/tool-bodies` markers (see `tool_bodies.rs`; images first so the
+/// size judged is the size that would ship). Replay, archive and
+/// initialization readers keep the raw row.
 fn transcript_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
     let mut message = session_message_from_row(row)?;
     project_tool_images(&mut message);
+    project_tool_bodies(&mut message);
     Ok(message)
 }
 

@@ -83,7 +83,7 @@ pub(super) fn project_tool_images(message: &mut SessionMessage) {
     }
 }
 
-fn project_blocks(value: &mut Value, message_id: i64, field: ToolImageField) {
+pub(super) fn project_blocks(value: &mut Value, message_id: i64, field: ToolImageField) {
     let Some(blocks) = blocks_mut(value) else {
         return;
     };

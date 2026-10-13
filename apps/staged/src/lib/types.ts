@@ -618,6 +618,26 @@ export interface SessionMessage {
   acpOrigin?: string;
 }
 
+/** The session pane's poll cursors (`sessionPollRequest` in `messagePoll.ts`). */
+export interface SessionPollRequest {
+  /** Visible rows with `id >= sinceId` (inclusive: the tail may still grow). */
+  sinceId: number;
+  /** Visible rows re-read by id: an assistant row extended behind tool rows. */
+  refetchIds: number[];
+  /** Metadata rows with `id > metadataSinceId`. */
+  metadataSinceId: number;
+  /** Unsettled tool rows re-read by id. */
+  metadataRefetchIds: number[];
+}
+
+/** One poll tick, read from a single backend snapshot. */
+export interface SessionPoll {
+  session: Session | null;
+  queuedMessages: QueuedSessionMessage[];
+  messages: SessionMessage[];
+  acpMetadataMessages: SessionMessage[];
+}
+
 // =============================================================================
 // Branch sessions
 // =============================================================================

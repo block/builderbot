@@ -1177,6 +1177,19 @@ pub fn get_session_acp_metadata_messages_since(
         .map_err(|e| e.to_string())
 }
 
+/// One tick of the session pane's poll: status, follow-up queue and both
+/// transcript increments from a single snapshot (see `store/session_poll.rs`).
+#[tauri::command(rename_all = "camelCase")]
+pub fn poll_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+    request: store::SessionPollRequest,
+) -> Result<store::SessionPoll, String> {
+    get_store(&store)?
+        .poll_session(&session_id, &request)
+        .map_err(|e| e.to_string())
+}
+
 /// Resolve a tool-result image reference (`<message_id>/<field>/<index>`, as
 /// projected into the transcript by the store) to a data URL. The web client
 /// fetches `/api/tool-images/…` directly; this is the Tauri IPC equivalent.

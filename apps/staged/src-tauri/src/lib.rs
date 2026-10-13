@@ -2452,6 +2452,7 @@ pub fn run() {
             session_commands::get_session_messages_since,
             session_commands::get_session_acp_metadata_messages,
             session_commands::get_session_acp_metadata_messages_since,
+            session_commands::poll_session,
             session_commands::get_session_acp_initialization,
             session_commands::get_tool_image,
             session_commands::get_tool_call_body,

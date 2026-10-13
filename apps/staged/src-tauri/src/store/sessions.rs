@@ -1,6 +1,6 @@
 //! Session CRUD operations.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::models::{
     AcpConfigSelection, CompletionReason, PipelineExecution, Session, SessionStatus,
@@ -45,6 +45,15 @@ impl Store {
 
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::get_session_with_conn(&conn, id)
+    }
+
+    /// [`Self::get_session`] on a connection the caller already holds, so
+    /// `poll_session` can read it under the same lock as the transcript.
+    pub(super) fn get_session_with_conn(
+        conn: &Connection,
+        id: &str,
+    ) -> Result<Option<Session>, StoreError> {
         conn.query_row(
             "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
              FROM sessions WHERE id = ?1",

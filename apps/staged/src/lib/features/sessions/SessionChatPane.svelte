@@ -65,14 +65,13 @@
     getImageData,
     getSession,
     getSessionAcpMetadataMessages,
-    getSessionAcpMetadataMessagesSince,
     getSessionBackgroundHold,
     getLatestSessionMessages,
     getOlderSessionMessages,
-    getSessionMessagesSince,
     handleExternalLinkClick,
     deleteQueuedSessionMessage,
     listQueuedSessionMessages,
+    pollSession,
     queueSessionMessage,
     resumeSession,
     sendQueuedSessionMessage,
@@ -105,7 +104,7 @@
     statusEventSupersededLoad,
     type SessionBackgroundHold,
   } from './backgroundHold';
-  import { mergeSinceMessages, openAssistantRefetchIds } from './messagePoll';
+  import { mergeSinceMessages, sessionPollRequest } from './messagePoll';
   import {
     applyLatestWindow,
     LOAD_OLDER_THRESHOLD_PX,
@@ -139,7 +138,6 @@
     buildAcpTranscriptGroups,
     formatJson,
     groupRichToolsByVerb,
-    isToolMetadataSettled,
     latestAvailableCommands,
     latestPlan,
     stabilizeAcpTranscriptGroups,
@@ -943,7 +941,9 @@
     }
   }
 
-  /** Incremental poll — re-fetch last message (may have grown) + any new ones.
+  /** Incremental poll — one `pollSession` request per tick returns the status,
+   *  the follow-up queue, the last message (may have grown) + any new ones, and
+   *  the metadata rows past the cursor, all from one backend snapshot.
    *
    *  State assignments are skipped whenever a tick brings no actual change:
    *  reassigning the same data under a fresh identity would invalidate the
@@ -953,61 +953,33 @@
     if (!session || closed || pollInFlight) return;
     pollInFlight = true;
     try {
-      // Fetch session status
       const statusVersionBeforeFetch = statusEventVersion;
-      const s = await getSession(sessionId);
+      // An empty transcript polls from 0, which returns every visible row, so
+      // there is nothing older to page in: `hasOlderMessages` stays false.
+      const request = sessionPollRequest(messages, acpMetadataMessages);
+      const result = await pollSession(sessionId, request);
       if (closed) return;
+      const s = result.session;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
       if (s && !statusEventDuringFetch && JSON.stringify(s) !== JSON.stringify(session)) {
         session = s;
       }
-      await refreshQueuedMessages();
+      if (JSON.stringify(result.queuedMessages) !== JSON.stringify(queuedMessages)) {
+        queuedMessages = result.queuedMessages;
+      }
 
-      // Incremental message fetch. Metadata rows for unsettled tool calls are
-      // mutated in place by the backend writer rather than re-inserted, so
-      // they're re-requested by id alongside rows past the cursor.
-      const metadataCursor =
-        acpMetadataMessages.length > 0 ? acpMetadataMessages[acpMetadataMessages.length - 1].id : 0;
-      const unsettledIds = acpMetadataMessages
-        .filter((message) => message.acpToolCallId && !isToolMetadataSettled(message))
-        .map((message) => message.id);
-      if (messages.length === 0) {
-        // Straight from the server: the SWR cache would hand back the empty
-        // list this very pane just stored, for as long as its TTL.
-        const [{ data: rows }, acpUpdates] = await Promise.all([
-          getLatestSessionMessages(sessionId, pageRequestLimit(TRANSCRIPT_PAGE_ROWS), {
-            bypassCache: true,
-          }),
-          getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
-        ]);
-        if (closed) return;
-        applyAcpMetadataUpdates(acpUpdates);
-        const page = transcriptPageFromRows(rows, TRANSCRIPT_PAGE_ROWS);
-        if (page.messages.length > 0) {
-          messages = page.messages;
-          hasOlderMessages = page.hasMore;
-          scrollToBottomIfNear(true);
-        }
-      } else {
-        // An assistant row interrupted by a mid-message tool call keeps
-        // growing behind the tool rows, so it is re-requested by id too.
-        const lastId = messages[messages.length - 1].id;
-        const [updated, acpUpdates] = await Promise.all([
-          getSessionMessagesSince(sessionId, lastId, openAssistantRefetchIds(messages)),
-          getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
-        ]);
-        if (closed) return;
-        applyAcpMetadataUpdates(acpUpdates);
-        const merged = mergeSinceMessages(messages, updated, lastId);
-        if (merged) {
-          messages = merged.messages;
-          if (merged.appended) scrollToBottomIfNear(true);
-        }
+      applyAcpMetadataUpdates(result.acpMetadataMessages);
+      const merged = mergeSinceMessages(messages, result.messages, request.sinceId);
+      if (merged) {
+        messages = merged.messages;
+        if (merged.appended) scrollToBottomIfNear(true);
       }
 
       // Stop polling when session is done. Backend-owned queue drain may emit
       // a fresh running event while this poll is in flight; that event is
-      // fresher than this status fetch and keeps polling alive.
+      // fresher than this status fetch and keeps polling alive. The snapshot
+      // that reports a terminal status already holds the rows written before
+      // the flip, so the last text is in `merged` above.
       if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
         clearPollTimer();
       }

@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::models::*;
-use super::{Store, ToolCallBody, TranscriptWindow, DEFERRED_TOOL_BODY_MIN_BYTES};
+use super::{
+    SessionPollRequest, Store, ToolCallBody, TranscriptWindow, DEFERRED_TOOL_BODY_MIN_BYTES,
+};
 
 #[test]
 fn test_create_and_get_project() {
@@ -2231,6 +2233,197 @@ fn test_transcript_reads_project_tool_images_to_refs_and_keep_raw_bytes() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn test_poll_session_matches_the_four_standalone_reads() {
+    use base64::Engine;
+
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("poll me", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .add_queued_session_message(&session.id, "first follow-up", &[], None)
+        .unwrap();
+    store
+        .add_queued_session_message(&session.id, "second follow-up", &[], None)
+        .unwrap();
+
+    // What the pane has loaded: a prompt, an assistant row a tool call then
+    // interrupted, and that tool call (in flight, with a screenshot result).
+    store
+        .add_session_message(&session.id, MessageRole::User, "look at this")
+        .unwrap();
+    let assistant_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "Taking a")
+        .unwrap();
+    let tool_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read screenshot.png")
+        .unwrap();
+    let png: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+    store
+        .update_message_acp_metadata(
+            tool_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-1".to_string()),
+                acp_tool_status: Some("in_progress".to_string()),
+                acp_raw_output: Some(serde_json::json!([{
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": base64::engine::general_purpose::STANDARD.encode(png),
+                    },
+                }])),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Since then: the interrupted row grew, a new tail row and a plan arrived,
+    // and a replay-only row the transcript never ships.
+    store
+        .update_message_content(assistant_id, "Taking a look")
+        .unwrap();
+    let tail_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "Done.")
+        .unwrap();
+    let plan_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("plan_update".to_string()),
+                acp_content: Some(serde_json::json!({"entries": []})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("usage_update".to_string()),
+                acp_usage: Some(serde_json::json!({"used": 1})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let request = SessionPollRequest {
+        since_id: tool_id,
+        refetch_ids: vec![assistant_id],
+        metadata_since_id: tool_id,
+        metadata_refetch_ids: vec![tool_id],
+    };
+    let poll = store.poll_session(&session.id, &request).unwrap();
+
+    // Field for field what the standalone reads return for the same cursors.
+    fn json(value: &impl serde::Serialize) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+    assert_eq!(
+        json(&poll.session),
+        json(&store.get_session(&session.id).unwrap())
+    );
+    assert_eq!(
+        json(&poll.queued_messages),
+        json(&store.list_queued_session_messages(&session.id).unwrap())
+    );
+    assert_eq!(
+        json(&poll.messages),
+        json(
+            &store
+                .get_session_messages_since(&session.id, tool_id, &[assistant_id])
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        json(&poll.acp_metadata_messages),
+        json(
+            &store
+                .get_session_acp_metadata_messages_since(&session.id, tool_id, &[tool_id])
+                .unwrap()
+        )
+    );
+
+    // And those are the rows the pane needs.
+    assert_eq!(poll.session.unwrap().status, SessionStatus::Running);
+    assert_eq!(
+        poll.queued_messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        ["first follow-up", "second follow-up"]
+    );
+    assert_eq!(
+        poll.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+        [assistant_id, tool_id, tail_id]
+    );
+    assert_eq!(poll.messages[0].content, "Taking a look");
+    assert_eq!(
+        poll.acp_metadata_messages
+            .iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>(),
+        [tool_id, plan_id]
+    );
+    let projected = serde_json::json!([
+        {"type": "image", "ref": format!("{tool_id}/output/0"), "mimeType": "image/png"},
+    ]);
+    assert_eq!(poll.messages[1].acp.acp_raw_output, Some(projected.clone()));
+    assert_eq!(
+        poll.acp_metadata_messages[0].acp.acp_raw_output,
+        Some(projected)
+    );
+}
+
+#[test]
+fn test_poll_session_from_an_empty_transcript_returns_every_visible_row() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("poll me", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    for (role, content) in [
+        (MessageRole::User, "hi"),
+        (MessageRole::Assistant, "hello"),
+        (MessageRole::User, "again"),
+    ] {
+        store
+            .add_session_message(&session.id, role, content)
+            .unwrap();
+    }
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("agent_message_chunk".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let poll = store
+        .poll_session(&session.id, &SessionPollRequest::default())
+        .unwrap();
+    assert_eq!(
+        poll.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+        store
+            .get_session_messages(&session.id)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(poll.messages.len(), 3);
+    assert!(poll.queued_messages.is_empty());
+    assert!(poll.acp_metadata_messages.is_empty());
+
+    // An unknown session is an empty poll, not an error, as `get_session` is.
+    let missing = store
+        .poll_session("no-such-session", &SessionPollRequest::default())
+        .unwrap();
+    assert!(missing.session.is_none());
+    assert!(missing.messages.is_empty());
 }
 
 /// A body one byte past the deferral threshold: `{"text":"xxxx…"}`.

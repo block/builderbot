@@ -1,6 +1,6 @@
 //! Session message CRUD operations.
 
-use rusqlite::{params, Row};
+use rusqlite::{params, Connection, Row};
 
 use super::models::{AcpMessageMetadata, MessageRole, SessionMessage};
 use super::tool_bodies::project_tool_bodies;
@@ -519,6 +519,22 @@ impl Store {
         refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::get_session_acp_metadata_messages_since_with_conn(
+            &conn,
+            session_id,
+            since_id,
+            refetch_ids,
+        )
+    }
+
+    /// [`Self::get_session_acp_metadata_messages_since`] on a connection the
+    /// caller already holds (see `poll_session`).
+    pub(super) fn get_session_acp_metadata_messages_since_with_conn(
+        conn: &Connection,
+        session_id: &str,
+        since_id: i64,
+        refetch_ids: &[i64],
+    ) -> Result<Vec<SessionMessage>, StoreError> {
         let refetch_placeholders = refetch_ids
             .iter()
             .map(|_| "?")
@@ -601,6 +617,17 @@ impl Store {
         refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::get_session_messages_since_with_conn(&conn, session_id, since_id, refetch_ids)
+    }
+
+    /// [`Self::get_session_messages_since`] on a connection the caller already
+    /// holds (see `poll_session`).
+    pub(super) fn get_session_messages_since_with_conn(
+        conn: &Connection,
+        session_id: &str,
+        since_id: i64,
+        refetch_ids: &[i64],
+    ) -> Result<Vec<SessionMessage>, StoreError> {
         let refetch_placeholders = refetch_ids
             .iter()
             .map(|_| "?")

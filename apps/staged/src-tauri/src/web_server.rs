@@ -3212,6 +3212,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             })
             .await
         }
+        // The session pane's whole tick in one request. The standalone arms
+        // above stay for the timeline's live hints and other callers.
+        "poll_session" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let request: store::SessionPollRequest = arg(&args, "request")?;
+            blocking_store_json(move || store.poll_session(&session_id, &request)).await
+        }
         "get_session_acp_initialization" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
@@ -4290,6 +4298,24 @@ mod tests {
             assert!(
                 arm.contains(needle),
                 "the web `get_tool_call_body` arm must contain `{needle}`: {arm}"
+            );
+        }
+    }
+
+    /// The poll runs twice a second per open running pane and carries the
+    /// transcript tail; keep it off the runtime thread like the reads it
+    /// replaced.
+    #[test]
+    fn web_poll_session_reads_under_spawn_blocking() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "poll_session");
+        for needle in [
+            "arg(&args, \"request\")",
+            ".poll_session(",
+            "blocking_store_json(",
+        ] {
+            assert!(
+                arm.contains(needle),
+                "the web `poll_session` arm must contain `{needle}`: {arm}"
             );
         }
     }

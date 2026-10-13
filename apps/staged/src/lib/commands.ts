@@ -31,6 +31,8 @@ import type {
   ActiveSessionInfo,
   Session,
   SessionMessage,
+  SessionPoll,
+  SessionPollRequest,
   ToolCallBody,
   SessionBackgroundHoldSnapshot,
   QueuedSessionMessage,
@@ -1025,6 +1027,16 @@ export function getSessionAcpMetadataMessagesSince(
     sinceId,
     refetchIds,
   });
+}
+
+/**
+ * One tick of the session pane's poll: the session row, its follow-up queue
+ * and both transcript increments (as getSessionMessagesSince and
+ * getSessionAcpMetadataMessagesSince return them) from one backend snapshot.
+ * Never cached — every tick must see the server.
+ */
+export function pollSession(sessionId: string, request: SessionPollRequest): Promise<SessionPoll> {
+  return invokeCommand('poll_session', { sessionId, request });
 }
 
 export function countAssistantMessagesAfter(

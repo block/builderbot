@@ -109,11 +109,17 @@ export function createScrollController() {
   let afterScrollX = $state(0);
 
   /**
+   * Maximum vertical scroll position for a pane.
+   */
+  function maxScrollY(dims: PaneDimensions): number {
+    return Math.max(0, dims.contentHeight - dims.viewportHeight);
+  }
+
+  /**
    * Clamp a vertical scroll position to valid bounds.
    */
   function clampScroll(scrollY: number, dims: PaneDimensions): number {
-    const maxScroll = Math.max(0, dims.contentHeight - dims.viewportHeight);
-    return Math.max(0, Math.min(maxScroll, scrollY));
+    return Math.max(0, Math.min(maxScrollY(dims), scrollY));
   }
 
   /**
@@ -181,6 +187,26 @@ export function createScrollController() {
     return clampScroll(targetY, targetDims);
   }
 
+  /**
+   * How far the target pane sits past its alignment-derived position because
+   * scrolling was handed off to it while the source pane was pinned at an edge
+   * (see scrollBy). Only counts while the source is still at that edge; any
+   * other discrepancy is alignment rounding and keeps snapping as before.
+   */
+  function edgeOverscroll(
+    sourceScrollY: number,
+    sourceSide: 'before' | 'after',
+    sourceDims: PaneDimensions,
+    targetScrollY: number,
+    targetDims: PaneDimensions
+  ): number {
+    const aligned = transferScroll(sourceScrollY, sourceSide, sourceDims, targetDims);
+    const overscroll = targetScrollY - aligned;
+    if (overscroll > 0 && sourceScrollY >= maxScrollY(sourceDims)) return overscroll;
+    if (overscroll < 0 && sourceScrollY <= 0) return overscroll;
+    return 0;
+  }
+
   return {
     // Expose reactive state
     get beforeScrollY() {
@@ -234,18 +260,39 @@ export function createScrollController() {
 
     /**
      * Scroll by a delta amount. Updates both panes in sync.
+     *
+     * The alignment transfer keeps shared rows level, so content that exists on
+     * only one side past the last shared row (e.g. lines deleted from the end
+     * of a file) sits beyond the other pane's scroll range. Once the source
+     * pane is pinned at an edge, the delta it cannot consume is handed off to
+     * the other pane so that content stays reachable; reversing direction
+     * unwinds the handoff first so neither pane jumps.
      */
     scrollBy(side: 'before' | 'after', deltaY: number) {
+      const sourceDims = side === 'before' ? beforeDims : afterDims;
+      const targetDims = side === 'before' ? afterDims : beforeDims;
+      const sourceScrollY = side === 'before' ? beforeScrollY : afterScrollY;
+      const targetScrollY = side === 'before' ? afterScrollY : beforeScrollY;
+
+      let overscroll = edgeOverscroll(sourceScrollY, side, sourceDims, targetScrollY, targetDims);
+      let remaining = deltaY;
+      if (overscroll !== 0 && Math.sign(remaining) === -Math.sign(overscroll)) {
+        const unwind = Math.sign(remaining) * Math.min(Math.abs(remaining), Math.abs(overscroll));
+        overscroll += unwind;
+        remaining -= unwind;
+      }
+
+      const newSource = clampScroll(sourceScrollY + remaining, sourceDims);
+      const residual = sourceScrollY + remaining - newSource;
+      const aligned = transferScroll(newSource, side, sourceDims, targetDims);
+      const newTarget = clampScroll(aligned + overscroll + residual, targetDims);
+
       if (side === 'before') {
-        // Update before, compute after
-        const newBefore = clampScroll(beforeScrollY + deltaY, beforeDims);
-        beforeScrollY = newBefore;
-        afterScrollY = transferScroll(newBefore, 'before', beforeDims, afterDims);
+        beforeScrollY = newSource;
+        afterScrollY = newTarget;
       } else {
-        // Update after, compute before
-        const newAfter = clampScroll(afterScrollY + deltaY, afterDims);
-        afterScrollY = newAfter;
-        beforeScrollY = transferScroll(newAfter, 'after', afterDims, beforeDims);
+        afterScrollY = newSource;
+        beforeScrollY = newTarget;
       }
     },
 

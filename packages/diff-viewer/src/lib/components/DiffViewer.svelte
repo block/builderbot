@@ -473,8 +473,11 @@
     // Wait for next frame to ensure dimensions are set
     requestAnimationFrame(() => {
       const firstHunk = changedAlignments[0].alignment;
-      // Scroll to first change in the after pane (or before pane for deleted files)
-      const side = isDeletedFile ? 'before' : 'after';
+      // Scroll to the first change in the after pane, unless it only exists on
+      // the before side (deleted file or pure deletion) – anchoring on the after
+      // pane there would leave the removed lines just past the before viewport.
+      const side =
+        isDeletedFile || firstHunk.after.end === firstHunk.after.start ? 'before' : 'after';
       const startRow = side === 'before' ? firstHunk.before.start : firstHunk.after.start;
       scrollController.scrollToRow(startRow, side);
     });

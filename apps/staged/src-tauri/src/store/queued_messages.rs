@@ -1,6 +1,6 @@
 //! Persistent follow-up message queue operations.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::messages::{image_ids_json, parse_image_ids};
 use super::models::{QueuedSessionMessage, QueuedSessionMessageStatus, SessionStatus};
@@ -72,6 +72,15 @@ impl Store {
         session_id: &str,
     ) -> Result<Vec<QueuedSessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::list_queued_session_messages_with_conn(&conn, session_id)
+    }
+
+    /// [`Self::list_queued_session_messages`] on a connection the caller
+    /// already holds (see `poll_session`).
+    pub(super) fn list_queued_session_messages_with_conn(
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<Vec<QueuedSessionMessage>, StoreError> {
         let mut stmt = conn.prepare(
             "SELECT id, session_id, branch_id, content, image_ids, status, last_error,
                     created_at, updated_at, claimed_at, owner_pid, sent_message_id

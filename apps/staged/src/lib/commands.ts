@@ -31,6 +31,9 @@ import type {
   ActiveSessionInfo,
   Session,
   SessionMessage,
+  SessionPoll,
+  SessionPollRequest,
+  ToolCallBody,
   SessionBackgroundHoldSnapshot,
   QueuedSessionMessage,
   DiffFilesResponse,
@@ -950,8 +953,42 @@ export function getActiveSessions(): Promise<ActiveSessionInfo[]> {
   return invokeCommand('get_active_sessions');
 }
 
+const SESSION_MESSAGES_CACHE_TTL = 5 * 60_000;
+
+/** The whole visible transcript. */
 export function getSessionMessages(sessionId: string): Promise<SwrResult<SessionMessage[]>> {
-  return cachedCommand('get_session_messages', { sessionId }, { ttl: 5 * 60_000 });
+  return cachedCommand('get_session_messages', { sessionId }, { ttl: SESSION_MESSAGES_CACHE_TTL });
+}
+
+/**
+ * The newest `limit` visible rows, oldest first — what the session pane opens
+ * with. Cached under its own key (the args include `limit`), so a window is
+ * never served in place of the full transcript or vice versa. `bypassCache`
+ * reads from the server and refreshes the entry.
+ */
+export function getLatestSessionMessages(
+  sessionId: string,
+  limit: number,
+  options: { bypassCache?: boolean } = {}
+): Promise<SwrResult<SessionMessage[]>> {
+  return cachedCommand(
+    'get_session_messages',
+    { sessionId, limit },
+    { ttl: SESSION_MESSAGES_CACHE_TTL, bypassRead: options.bypassCache }
+  );
+}
+
+/**
+ * The `limit` visible rows older than `beforeId`, oldest first — the page the
+ * pane fetches when the user scrolls towards the top. Not cached: history is
+ * immutable, so a page is only ever requested once per open.
+ */
+export function getOlderSessionMessages(
+  sessionId: string,
+  limit: number,
+  beforeId: number
+): Promise<SessionMessage[]> {
+  return invokeCommand('get_session_messages', { sessionId, limit, beforeId });
 }
 
 /** Fetch session messages without SWR cache, for terminal status handlers. */
@@ -990,6 +1027,16 @@ export function getSessionAcpMetadataMessagesSince(
     sinceId,
     refetchIds,
   });
+}
+
+/**
+ * One tick of the session pane's poll: the session row, its follow-up queue
+ * and both transcript increments (as getSessionMessagesSince and
+ * getSessionAcpMetadataMessagesSince return them) from one backend snapshot.
+ * Never cached — every tick must see the server.
+ */
+export function pollSession(sessionId: string, request: SessionPollRequest): Promise<SessionPoll> {
+  return invokeCommand('poll_session', { sessionId, request });
 }
 
 export function countAssistantMessagesAfter(
@@ -1895,6 +1942,27 @@ export function getImageData(imageId: string): Promise<string> {
 /** Load an image referenced by a tool result without creating an attachment. */
 export function readImageFile(filePath: string): Promise<string> {
   return invokeCommand('read_image_file', { filePath });
+}
+
+/**
+ * Data URL for a tool-result image the store projected to a
+ * `<messageId>/<field>/<index>` ref. The web build loads
+ * `/api/tool-images/…` directly instead (see `toolImageSource.ts`).
+ */
+export function getToolImage(
+  messageId: number,
+  field: 'output' | 'content',
+  index: number
+): Promise<string> {
+  return invokeCommand('get_tool_image', { messageId, field, index });
+}
+
+/**
+ * The bodies behind a tool row's `$deferred` markers. The web build fetches
+ * `/api/tool-bodies/{messageId}` directly instead (see `toolBodySource.ts`).
+ */
+export function getToolCallBody(messageId: number): Promise<ToolCallBody> {
+  return invokeCommand('get_tool_call_body', { messageId });
 }
 
 /** Create an image from base64-encoded data (browser file input / clipboard paste). */

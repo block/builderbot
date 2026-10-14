@@ -134,7 +134,9 @@ export function listenForCacheInvalidation(): UnlistenFn {
   );
 
   // Session status changed → invalidate cached session messages when a session
-  // completes, errors, or is cancelled (messages are now final)
+  // completes, errors, or is cancelled (messages are now final). Matched on
+  // the session alone so the pane's newest-window entry (keyed with its
+  // `limit`) is dropped along with the full-transcript entry.
   unlisteners.push(
     listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
       if (
@@ -142,7 +144,7 @@ export function listenForCacheInvalidation(): UnlistenFn {
         payload.status === 'error' ||
         payload.status === 'cancelled'
       ) {
-        invalidateCache('get_session_messages', { sessionId: payload.sessionId });
+        invalidateCacheByArgs('get_session_messages', { sessionId: payload.sessionId });
       }
     })
   );

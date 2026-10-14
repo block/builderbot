@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeSinceMessages, openAssistantRefetchIds } from './messagePoll';
+import { mergeSinceMessages, openAssistantRefetchIds, sessionPollRequest } from './messagePoll';
 import type { MessageRole, SessionMessage } from '../../types';
 
 function message(id: number, role: MessageRole, content: string): SessionMessage {
@@ -204,5 +204,87 @@ describe('mergeSinceMessages', () => {
 
     expect(merged!.messages[0].acpMessageId).toBe('msg-1');
     expect(merged!.messages[1]).toBe(existing[1]);
+  });
+
+  it('keeps the inline body of a tail tool row that comes back settled and deferred', () => {
+    const input = { file_path: '/tmp/a.txt', content: 'x'.repeat(3000) };
+    const inFlight: SessionMessage = {
+      ...message(3, 'tool_call', 'Write'),
+      acpEventKind: 'tool_call',
+      acpToolCallId: 'tc-3',
+      acpToolStatus: 'in_progress',
+      acpRawInput: input,
+    };
+    const settled: SessionMessage = {
+      ...inFlight,
+      acpToolStatus: 'completed',
+      acpRawInput: {
+        $deferred: { messageId: 3, field: 'input', bytes: JSON.stringify(input).length },
+      },
+      acpContent: [{ type: 'content', content: { type: 'text', text: 'ok' } }],
+    };
+    const existing = [message(2, 'assistant', 'The'), inFlight];
+    const merged = mergeSinceMessages(existing, [settled, message(4, 'assistant', 'Done')], 3);
+
+    expect(merged!.appended).toBe(true);
+    expect(merged!.messages.map((m) => m.id)).toEqual([2, 3, 4]);
+    expect(merged!.messages[1].acpToolStatus).toBe('completed');
+    expect(merged!.messages[1].acpRawInput).toBe(input);
+    expect(merged!.messages[1].acpContent).toBe(settled.acpContent);
+  });
+});
+
+describe('sessionPollRequest', () => {
+  function toolRow(id: number, status: string | undefined): SessionMessage {
+    return {
+      ...message(id, 'tool_call', ''),
+      acpEventKind: 'tool_call',
+      acpToolCallId: `tc-${id}`,
+      acpToolStatus: status,
+    };
+  }
+
+  it('polls an empty transcript from the start', () => {
+    expect(sessionPollRequest([], [])).toEqual({
+      sinceId: 0,
+      refetchIds: [],
+      metadataSinceId: 0,
+      metadataRefetchIds: [],
+    });
+  });
+
+  it('keys off the loaded tails and re-requests rows still being written', () => {
+    const messages = [
+      message(1, 'user', 'hi'),
+      message(2, 'assistant', 'The'),
+      message(3, 'tool_call', 'Read'),
+    ];
+    const metadata = [
+      toolRow(4, 'completed'),
+      toolRow(5, 'in_progress'),
+      { ...message(6, 'assistant', ''), acpEventKind: 'plan_update' },
+      toolRow(7, undefined),
+    ];
+    expect(sessionPollRequest(messages, metadata)).toEqual({
+      sinceId: 3,
+      refetchIds: [2],
+      metadataSinceId: 7,
+      metadataRefetchIds: [5, 7],
+    });
+  });
+});
+
+describe('mergeSinceMessages from an empty transcript', () => {
+  it('takes every row a zero-cursor poll returns as appended', () => {
+    const rows = [message(1, 'user', 'hi'), message(2, 'assistant', 'hello')];
+    const merged = mergeSinceMessages([], rows, 0);
+
+    expect(merged).not.toBeNull();
+    expect(merged!.appended).toBe(true);
+    expect(merged!.messages).toEqual(rows);
+  });
+
+  it('reports no change while the transcript is still empty', () => {
+    expect(mergeSinceMessages([], [], 0)).toBeNull();
   });
 });

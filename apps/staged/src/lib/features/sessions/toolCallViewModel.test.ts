@@ -266,6 +266,55 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.hasDetails).toBe(true);
   });
 
+  it('renders store-projected image refs without any inline payload', () => {
+    // What the server now ships in place of a base64 block, in both the ACP
+    // content envelope and Claude's raw output (store/tool_images.rs).
+    const model = buildToolCallViewModel(
+      richTool({
+        toolKind: 'read',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'image', ref: '42/content/0', mimeType: 'image/png' },
+          },
+        ],
+        rawOutput: [
+          { type: 'text', text: 'Read 1 image' },
+          { type: 'image', ref: '42/output/1', mimeType: 'image/png' },
+        ],
+      })
+    );
+
+    expect(model.output.images).toEqual([
+      {
+        kind: 'ref',
+        ref: { ref: '42/content/0', messageId: 42, field: 'content', index: 0 },
+        mimeType: 'image/png',
+        label: 'Tool result image',
+      },
+    ]);
+    // The sibling text block still renders; only the image payload moved.
+    expect(model.sections.map((section) => section.kind)).toEqual(['image', 'output', 'status']);
+    expect(model.output.primaryText).toBe('Read 1 image');
+    expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
+    expect(model.hasDetails).toBe(true);
+  });
+
+  it('ignores malformed refs and falls back to inline data when present', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        rawOutput: [
+          { type: 'image', ref: 'not/a/ref', mimeType: 'image/png' },
+          { type: 'image', ref: '../etc/passwd', mimeType: 'image/png', data: png },
+        ],
+      })
+    );
+
+    expect(model.output.images).toEqual([
+      { kind: 'inline', dataUrl: `data:image/png;base64,${png}`, label: 'Tool result image' },
+    ]);
+  });
+
   it('keeps accompanying text and multiple images in ACP output', () => {
     const model = buildToolCallViewModel(
       richTool({
@@ -520,6 +569,70 @@ describe('buildToolCallViewModel output handling', () => {
     const model = buildToolCallViewModel(richTool({ rawInput: { option: 'value' } }));
 
     expect(model.hasDetails).toBe(true);
+  });
+
+  it('is expandable when a body was deferred by the store, before it is fetched', () => {
+    // The store ships settled bodies past its size threshold as markers; the
+    // collapsed card must look exactly as it would with the body inline —
+    // expandable, with output — and nothing may pretty-print the marker.
+    const marker = (field: 'input' | 'output' | 'content') => ({
+      $deferred: { messageId: 42, field, bytes: 9000 },
+    });
+
+    const outputOnly = buildToolCallViewModel(richTool({ rawOutput: marker('output') }));
+    expect(outputOnly.hasDetails).toBe(true);
+    expect(outputOnly.output.state).toBe('output');
+    expect(outputOnly.output.images).toEqual([]);
+    expect(outputOnly.output.errorText).toBe('');
+    // Classification comes from the verb here, as it would with the body
+    // inline; the marker's keys never read as network evidence.
+    expect(outputOnly.category).toBe('command');
+
+    // ACP content alone contributes nothing to the sections until it is a
+    // real block list, so the marker is what keeps the card expandable.
+    const contentOnly = buildToolCallViewModel(richTool({ content: marker('content') }));
+    expect(contentOnly.hasDetails).toBe(true);
+    expect(contentOnly.metadata.diffs).toEqual([]);
+
+    const inputOnly = buildToolCallViewModel(richTool({ rawInput: marker('input') }));
+    expect(inputOnly.hasDetails).toBe(true);
+    expect(inputOnly.metadata.input).toBeNull();
+    expect(inputOnly.metadata.hasInputText).toBe(false);
+    expect(inputOnly.metadata.command).toBeNull();
+    expect(inputOnly.metadata.targetPath).toBeNull();
+  });
+
+  it('reads a deferred input from the tool_call content copy so the card does not reclassify on expand', () => {
+    // The visible `tool_call.content` is `{"name","input":<raw_input>}`, the
+    // same input the store deferred, so the collapsed card must classify and
+    // extract metadata from it exactly as it will once the body is fetched.
+    const input = { command: 'curl https://example.com/api', cwd: '/repo/apps' };
+    const call = message({
+      id: 1,
+      role: 'tool_call',
+      content: JSON.stringify({ name: 'shell', input }),
+    });
+    const deferred = buildToolCallViewModel(
+      richTool({
+        call,
+        verb: 'Processed',
+        rawInput: { $deferred: { messageId: 1, field: 'input', bytes: 9000 } },
+      }),
+      '/repo'
+    );
+    const hydrated = buildToolCallViewModel(
+      richTool({ call, verb: 'Processed', rawInput: input }),
+      '/repo'
+    );
+
+    expect(deferred.metadata.input).toEqual(input);
+    expect(deferred.metadata.command).toBe('curl https://example.com/api');
+    expect(deferred.metadata.workingDirectory).toBe('apps');
+    expect(deferred.metadata.parsedCommands).toEqual(hydrated.metadata.parsedCommands);
+    expect(deferred.category).toBe(hydrated.category);
+    expect(deferred.metadata.hasInputText).toBe(true);
+    expect(deferred.metadata.inputText).toBe(hydrated.metadata.inputText);
+    expect(deferred.metadata.inputText).not.toContain('$deferred');
   });
 
   it('defers raw output JSON formatting until the value is read', () => {

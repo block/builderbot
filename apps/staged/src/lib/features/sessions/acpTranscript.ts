@@ -1,6 +1,7 @@
 import type { SessionMessage } from '../../types';
 import type { DisplayRootInput } from './pathDisplayRoots';
 import { formatToolDisplay, parseToolCall, verbGroupSummary } from './sessionModalHelpers';
+import { deferredToolBody } from './toolCallBodies';
 
 export type ToolStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
@@ -661,6 +662,9 @@ function isPikchrRenderTool(tool: ToolAssembly): boolean {
 
 function pikchrSourceFromInput(input: unknown): string | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  // A deferred input carries the source as a hint: the collapsed card draws it.
+  const deferred = deferredToolBody(input);
+  if (deferred) return deferred.pikchr;
   const source = (input as Record<string, unknown>).pikchr;
   return typeof source === 'string' && source.trim() ? source : null;
 }
@@ -757,6 +761,11 @@ function innerSessionIdFromValue(value: unknown): string | null {
     }
     return null;
   }
+
+  // The store searched the deferred body the same way and left the answer
+  // on the marker (`store/tool_bodies.rs`).
+  const deferred = deferredToolBody(value);
+  if (deferred) return deferred.innerSessionId;
 
   const record = value as Record<string, unknown>;
   const direct = stringValue(record.innerSessionId) ?? stringValue(record.inner_session_id);

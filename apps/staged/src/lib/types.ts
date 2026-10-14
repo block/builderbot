@@ -553,6 +553,18 @@ export interface PipelineStepPayload {
 
 export type MessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result';
 
+/**
+ * The bodies of one tool row, fetched on demand when the transcript shipped
+ * them as `$deferred` markers (see `toolCallBodies.ts`). Field names match
+ * {@link SessionMessage} so a body slots straight into the row it came from.
+ */
+export interface ToolCallBody {
+  messageId: number;
+  acpRawInput?: unknown;
+  acpRawOutput?: unknown;
+  acpContent?: unknown;
+}
+
 export interface SessionMessage {
   id: number;
   sessionId: string;
@@ -604,6 +616,26 @@ export interface SessionMessage {
    * the recovered name as a hint, not a key to match a task by.
    */
   acpOrigin?: string;
+}
+
+/** The session pane's poll cursors (`sessionPollRequest` in `messagePoll.ts`). */
+export interface SessionPollRequest {
+  /** Visible rows with `id >= sinceId` (inclusive: the tail may still grow). */
+  sinceId: number;
+  /** Visible rows re-read by id: an assistant row extended behind tool rows. */
+  refetchIds: number[];
+  /** Metadata rows with `id > metadataSinceId`. */
+  metadataSinceId: number;
+  /** Unsettled tool rows re-read by id. */
+  metadataRefetchIds: number[];
+}
+
+/** One poll tick, read from a single backend snapshot. */
+export interface SessionPoll {
+  session: Session | null;
+  queuedMessages: QueuedSessionMessage[];
+  messages: SessionMessage[];
+  acpMetadataMessages: SessionMessage[];
 }
 
 // =============================================================================

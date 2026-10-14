@@ -457,6 +457,46 @@ describe('buildAcpTranscriptGroups', () => {
     }
   });
 
+  it('reads the pikchr hints off deferred bodies', () => {
+    // The store ships large settled bodies as `$deferred` markers that keep
+    // the two facts the collapsed card needs: the render source (drawn
+    // inline) and the child session id (the diagram-session button).
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'mcp__pikchr-preview__render_pikchr' }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-render',
+          acpToolStatus: 'completed',
+          acpRawInput: {
+            $deferred: { messageId: 1, field: 'input', bytes: 5000, pikchr: 'box "Deferred"' },
+          },
+        }),
+        message({
+          id: 2,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'generate_pikchr' }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-generate',
+          acpToolStatus: 'completed',
+          acpRawOutput: {
+            $deferred: { messageId: 2, field: 'output', bytes: 5000, innerSessionId: 'child-9' },
+          },
+        }),
+      ],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].pikchrRenderSource).toBe('box "Deferred"');
+      expect(groups[0].items[1].isPikchrDiagramTool).toBe(true);
+      expect(groups[0].items[1].innerSessionId).toBe('child-9');
+    }
+  });
+
   it('extracts the render_pikchr source from the call content when raw input is missing', () => {
     const groups = buildAcpTranscriptGroups(
       [

@@ -29,7 +29,10 @@ mod recent_repos;
 pub mod repo_affinities;
 pub mod repo_badges;
 mod reviews;
+mod session_poll;
 mod sessions;
+mod tool_bodies;
+mod tool_images;
 mod workdirs;
 
 #[cfg(test)]
@@ -39,9 +42,13 @@ mod tests;
 
 // Re-export all model types for backwards compatibility.
 pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
+pub use messages::TranscriptWindow;
 pub use models::*;
 pub use project_notes::DeletedProjectNoteSessions;
 pub use repo_badges::{fallback_short_name, next_hue};
+pub use session_poll::{SessionPoll, SessionPollRequest};
+pub use tool_bodies::{ToolBodyField, ToolCallBody, DEFERRED_TOOL_BODY_MIN_BYTES};
+pub use tool_images::{is_image_mime_type, ToolImage, ToolImageField};
 
 use rusqlite::{Connection, OptionalExtension};
 use std::path::{Path, PathBuf};

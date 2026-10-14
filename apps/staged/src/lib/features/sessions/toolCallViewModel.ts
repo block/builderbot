@@ -2,6 +2,7 @@ import type { DisplayRootInput } from './pathDisplayRoots';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
 import { formatJson, terminalRefsFromAcpContent, textFromAcpContent } from './acpTranscript';
 import { makePathsRelative, parseToolCall, stripCodeFences } from './sessionModalHelpers';
+import { deferredToolBody, deferredToolBodyIds } from './toolCallBodies';
 import { toolCallImageContent, toolCallOutputText, type ToolCallImage } from './toolCallImages';
 
 export type ToolCallCategory = 'edit' | 'command' | 'read' | 'search' | 'network' | 'generic';
@@ -188,8 +189,13 @@ export function buildToolCallViewModel(
     output,
     sections,
     // Status and empty-state rows only echo what the collapsed header already
-    // shows, so they alone don't make a card worth expanding.
-    hasDetails: sections.some((section) => section.kind !== 'status' && section.kind !== 'empty'),
+    // shows, so they alone don't make a card worth expanding. A deferred body
+    // (`toolCallBodies.ts`) is one the store judged large, so there is
+    // something to show once it is fetched — `ToolCallCard` does that before
+    // it renders the sections built here.
+    hasDetails:
+      sections.some((section) => section.kind !== 'status' && section.kind !== 'empty') ||
+      deferredToolBodyIds(item).length > 0,
   };
 }
 
@@ -199,14 +205,20 @@ export function extractToolCallMetadata(
 ): ToolCallMetadata {
   const parsed = parseToolCall(item.call.content);
   const parsedArgs = parsed ? recordOrNull(parsed.args) : null;
-  const rawInput = recordOrNull(item.rawInput);
+  // A deferred input (`toolCallBodies.ts`) is a marker, not the input, and the
+  // visible `tool_call.content` carries the same input verbatim, so fall
+  // through to `parsedArgs` rather than reading the marker's keys. This keeps
+  // the collapsed card's classification identical before and after the body
+  // is fetched on expand.
+  const presentRawInput = deferredToolBody(item.rawInput) ? undefined : item.rawInput;
+  const rawInput = recordOrNull(presentRawInput);
   const input = rawInput ?? parsedArgs;
   // Formatting input to JSON is costly for large payloads and a collapsed card
   // never shows it, so keep `inputText` behind a memoized getter and decide
   // whether to render it from the cheap `hasInputText` flag instead.
   const inputSource =
-    item.rawInput !== undefined && item.rawInput !== null
-      ? item.rawInput
+    presentRawInput !== undefined && presentRawInput !== null
+      ? presentRawInput
       : parsedArgs && Object.keys(parsedArgs).length > 0
         ? parsedArgs
         : null;

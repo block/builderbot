@@ -1128,13 +1128,18 @@ pub fn get_session(
         .map_err(|e| e.to_string())
 }
 
+/// The visible transcript, or with `limit` its newest rows and with
+/// `before_id` the rows older than one already loaded — see
+/// [`store::TranscriptWindow`]. Neither set returns the whole transcript.
 #[tauri::command]
 pub fn get_session_messages(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
+    limit: Option<u32>,
+    before_id: Option<i64>,
 ) -> Result<Vec<store::SessionMessage>, String> {
     get_store(&store)?
-        .get_session_messages(&session_id)
+        .get_session_messages_window(&session_id, store::TranscriptWindow { limit, before_id })
         .map_err(|e| e.to_string())
 }
 
@@ -1170,6 +1175,71 @@ pub fn get_session_acp_metadata_messages_since(
     get_store(&store)?
         .get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
         .map_err(|e| e.to_string())
+}
+
+/// One tick of the session pane's poll: status, follow-up queue and both
+/// transcript increments from a single snapshot (see `store/session_poll.rs`).
+#[tauri::command(rename_all = "camelCase")]
+pub fn poll_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+    request: store::SessionPollRequest,
+) -> Result<store::SessionPoll, String> {
+    get_store(&store)?
+        .poll_session(&session_id, &request)
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve a tool-result image reference (`<message_id>/<field>/<index>`, as
+/// projected into the transcript by the store) to a data URL. The web client
+/// fetches `/api/tool-images/…` directly; this is the Tauri IPC equivalent.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_tool_image(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    message_id: i64,
+    field: String,
+    index: usize,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    tool_image_data_url(&store, message_id, &field, index)
+}
+
+pub(crate) fn tool_image_data_url(
+    store: &Store,
+    message_id: i64,
+    field: &str,
+    index: usize,
+) -> Result<String, String> {
+    let not_found = || format!("Tool image not found: {message_id}/{field}/{index}");
+    let field = store::ToolImageField::parse(field).ok_or_else(not_found)?;
+    let image = store
+        .get_tool_image(message_id, field, index)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(not_found)?;
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&image.bytes);
+    Ok(format!("data:{};base64,{}", image.mime_type, encoded))
+}
+
+/// The bodies behind a transcript `$deferred` marker (`store/tool_bodies.rs`).
+/// The web client fetches `/api/tool-bodies/{message_id}` directly; this is
+/// the Tauri IPC equivalent.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_tool_call_body(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    message_id: i64,
+) -> Result<store::ToolCallBody, String> {
+    let store = get_store(&store)?;
+    tool_call_body(&store, message_id).map_err(|e| e.to_string())
+}
+
+pub(crate) fn tool_call_body(
+    store: &Store,
+    message_id: i64,
+) -> Result<store::ToolCallBody, store::StoreError> {
+    store
+        .get_tool_call_body(message_id)?
+        .ok_or_else(|| store::StoreError(format!("Tool call body not found: {message_id}")))
 }
 
 #[tauri::command]

@@ -41,6 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -157,7 +158,7 @@ fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
 
     let key = PrivateKeyDer::from_pem_file(&key_path)
         .map_err(|e| format!("failed to read TLS private key {key_path}: {e}"))?;
-    let config = rustls::ServerConfig::builder_with_provider(
+    let mut config = rustls::ServerConfig::builder_with_provider(
         rustls::crypto::aws_lc_rs::default_provider().into(),
     )
     .with_safe_default_protocol_versions()
@@ -165,6 +166,11 @@ fn load_tls_acceptor() -> Result<TlsAcceptor, String> {
     .with_no_client_auth()
     .with_single_cert(certs, key)
     .map_err(|e| format!("failed to configure TLS certificate/key pair: {e}"))?;
+    // Browsers only speak HTTP/2 when the server offers it over ALPN; without
+    // this they stay on HTTP/1.1 and its six-connection cap, which the 500 ms
+    // session poll (four requests per tick) shares with multi-MB transcript
+    // bodies. `axum::serve` already runs hyper's auto h1/h2 builder.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
@@ -215,11 +221,36 @@ impl Listener for TlsListener {
 /// compiling so they stay in sync with the rest of the codebase.
 ///
 /// TODO(web): restore full web server startup from the `mobile-web` branch.
-/// That restore must mount [`media_router`] into the composed app: the
-/// frontend's `resolveStagedMediaUrl` already emits `/api/media/...` in
-/// non-Tauri builds, and only oneshot tests exercise the route today.
+/// That restore should serve [`app_router`], which already composes the API
+/// routes, [`media_router`] (the frontend's `resolveStagedMediaUrl` emits
+/// `/api/media/...` in non-Tauri builds) and the static bundle.
 pub fn start(_state: WebAppState) {
     log::warn!("Web server requested but this build has the web server stubbed out");
+}
+
+/// The composed app: API routes, note media, and the built frontend from
+/// `dist_dir`. Responses are compressed (brotli, then gzip, by client
+/// preference): a session transcript is 10–25 MB of JSON uncompressed and
+/// brotli at tower-http's default quality brings a text-heavy one down ~10×
+/// and a base64-image-heavy one ~3×. The default predicate skips images and
+/// bodies under 32 bytes, so WebSocket upgrades and media are untouched.
+pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Router {
+    let media_routes = match media_router(state.clone()) {
+        Ok(router) => router,
+        Err(e) => {
+            log::warn!("[web_server] note media unavailable: {e}");
+            Router::new()
+        }
+    };
+
+    Router::new()
+        .route("/api/invoke/{command}", post(invoke_command))
+        .route("/api/events", get(ws_events))
+        .with_state(state)
+        .merge(media_routes)
+        .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
+        .layer(CompressionLayer::new())
+        .layer(CorsLayer::permissive())
 }
 
 /// Kept ready for the mobile-web startup restore. The route and auth layer are
@@ -238,6 +269,14 @@ pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
     ))
 }
 
+/// Tool and note media are user/agent-supplied bytes served from the app
+/// origin. Viewed top-level (e.g. "Open image in new tab") an SVG would run
+/// script with the session cookie in scope; `sandbox` puts it in an opaque
+/// origin with script disabled and `default-src 'none'` blocks its subresource
+/// loads, while `style-src 'unsafe-inline'` keeps its own `<style>` working.
+/// `<img>` rendering ignores response CSP, so this costs nothing there.
+const UNTRUSTED_MEDIA_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
 fn media_router_for_store(
     store: Arc<Store>,
     token: String,
@@ -245,6 +284,11 @@ fn media_router_for_store(
 ) -> Router {
     Router::new()
         .route("/api/media/{file}", get(serve_media))
+        .route(
+            "/api/tool-images/{message_id}/{field}/{index}",
+            get(serve_tool_image),
+        )
+        .route("/api/tool-bodies/{message_id}", get(serve_tool_call_body))
         .with_state(store)
         .route_layer(middleware::from_fn(
             move |jar: CookieJar, request: Request, next: Next| {
@@ -281,10 +325,122 @@ async fn serve_media(
                 "X-Content-Type-Options",
                 axum::http::HeaderValue::from_static("nosniff"),
             );
+            // `mime_for_extension` has no SVG entry today; this keeps a future
+            // one from reopening the top-level script hole.
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static(UNTRUSTED_MEDIA_CSP),
+            );
             response
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Serve the bytes behind a tool-result image reference. The transcript
+/// queries replace base64 image blocks with
+/// `{"type":"image","ref":"<message_id>/<output|content>/<index>",…}` (see
+/// `store/tool_images.rs`); the `<img>` then requests this route lazily.
+///
+/// Anything that does not resolve to a base64 image block — unknown row,
+/// bad field, index past the end, a text block, a row still in flight — is a
+/// 404, including unparseable ids, so a stale ref never surfaces as a 400 in
+/// the console. `Cache-Control` is long-lived: the store only projects and
+/// resolves refs for settled tool rows, whose block lists never change again,
+/// so the id/index pair is a stable identity for the block. The compression
+/// layer's default predicate skips `image/*` bodies, so these go out as-is.
+/// Every response carries [`UNTRUSTED_MEDIA_CSP`]: `is_image_mime_type`
+/// admits `image/svg+xml`, and an SVG opened as a document must not run on
+/// this origin.
+async fn serve_tool_image(
+    State(store): State<Arc<Store>>,
+    Path((message_id, field, index)): Path<(String, String, String)>,
+) -> Response {
+    let (Ok(message_id), Some(field), Ok(index)) = (
+        message_id.parse::<i64>(),
+        store::ToolImageField::parse(&field),
+        index.parse::<usize>(),
+    ) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let image = tokio::task::spawn_blocking(move || store.get_tool_image(message_id, field, index))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result.map_err(|e| e.to_string()));
+    let image = match image {
+        Ok(Some(image)) => image,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::warn!("[web_server] tool image {message_id}/{field}/{index} unreadable: {e}");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    let Ok(content_type) = axum::http::HeaderValue::from_str(&image.mime_type) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("x-content-type-options"),
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+            (
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static(UNTRUSTED_MEDIA_CSP),
+            ),
+        ],
+        image.bytes,
+    )
+        .into_response()
+}
+
+/// Serve the bodies behind a tool row's `$deferred` markers. The transcript
+/// queries replace the large input/output/content of settled tool rows with
+/// `{"$deferred":{"messageId":…}}` (see `store/tool_bodies.rs`); the card
+/// requests this route when it is expanded.
+///
+/// An unknown or unparseable id is a 404, as for tool images. The bodies are
+/// JSON, so the compression layer applies, and `Cache-Control` is long-lived
+/// for the same reason as the image route: only settled rows are deferred,
+/// and a settled row's bodies never change.
+async fn serve_tool_call_body(
+    State(store): State<Arc<Store>>,
+    Path(message_id): Path<String>,
+) -> Response {
+    let Ok(message_id) = message_id.parse::<i64>() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let body = tokio::task::spawn_blocking(move || store.get_tool_call_body(message_id))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result.map_err(|e| e.to_string()));
+    let body = match body {
+        Ok(Some(body)) => body,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            log::warn!("[web_server] tool call body {message_id} unreadable: {e}");
+            return StatusCode::NOT_FOUND.into_response();
+        }
+    };
+    (
+        [
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+            ),
+            (
+                axum::http::header::HeaderName::from_static("x-content-type-options"),
+                axum::http::HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        Json(body),
+    )
+        .into_response()
 }
 
 // =============================================================================
@@ -564,6 +720,23 @@ fn web_client_id(args: &Value) -> Result<String, String> {
         ));
     }
     Ok(client_id)
+}
+
+/// Run a store read and its JSON serialization on the blocking pool. The
+/// session-transcript reads produce tens of MB of JSON; doing that inline
+/// would stall the tokio worker that is also servicing `/api/events`.
+async fn blocking_store_json<T>(
+    read: impl FnOnce() -> Result<T, store::StoreError> + Send + 'static,
+) -> Result<Value, String>
+where
+    T: serde::Serialize + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let value = read().map_err(|e| e.to_string())?;
+        Ok(serde_json::to_value(value).unwrap())
+    })
+    .await
+    .map_err(|e| format!("task failed: {e}"))?
 }
 
 /// Helper to get the Store Arc from the shared mutex slot.
@@ -3011,16 +3184,19 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "get_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let session = store.get_session(&session_id).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(session).unwrap())
+            blocking_store_json(move || store.get_session(&session_id)).await
         }
         "get_session_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let messages = store
-                .get_session_messages(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            // Both optional: absent means the whole transcript, which is what
+            // every caller other than the windowed session pane still asks for.
+            let window = store::TranscriptWindow {
+                limit: opt_arg(&args, "limit")?,
+                before_id: opt_arg(&args, "beforeId")?,
+            };
+            blocking_store_json(move || store.get_session_messages_window(&session_id, window))
+                .await
         }
         "get_session_messages_since" => {
             let store = get_store(store_mutex)?;
@@ -3029,10 +3205,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // Optional so an older frontend bundle keeps working against a
             // newer server.
             let refetch_ids: Vec<i64> = opt_arg(&args, "refetchIds")?.unwrap_or_default();
-            let messages = store
-                .get_session_messages_since(&session_id, since_id, &refetch_ids)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || {
+                store.get_session_messages_since(&session_id, since_id, &refetch_ids)
+            })
+            .await
         }
         "count_assistant_messages_after" => {
             let store = get_store(store_mutex)?;
@@ -3046,20 +3222,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "get_session_acp_metadata_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let messages = store
-                .get_session_acp_metadata_messages(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || store.get_session_acp_metadata_messages(&session_id)).await
         }
         "get_session_acp_metadata_messages_since" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
             let since_id: i64 = arg(&args, "sinceId")?;
             let refetch_ids: Vec<i64> = arg(&args, "refetchIds")?;
-            let messages = store
-                .get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || {
+                store.get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
+            })
+            .await
+        }
+        // The session pane's whole tick in one request. The standalone arms
+        // above stay for the timeline's live hints and other callers.
+        "poll_session" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let request: store::SessionPollRequest = arg(&args, "request")?;
+            blocking_store_json(move || store.poll_session(&session_id, &request)).await
         }
         "get_session_acp_initialization" => {
             let store = get_store(store_mutex)?;
@@ -3068,6 +3249,28 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .get_session_acp_initialization(&session_id)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(metadata).unwrap())
+        }
+        // The browser normally loads `/api/tool-images/…` straight into an
+        // `<img>`; this arm keeps the command callable from both transports.
+        "get_tool_image" => {
+            let store = get_store(store_mutex)?;
+            let message_id: i64 = arg(&args, "messageId")?;
+            let field: String = arg(&args, "field")?;
+            let index: usize = arg(&args, "index")?;
+            tokio::task::spawn_blocking(move || {
+                session_commands::tool_image_data_url(&store, message_id, &field, index)
+                    .map(Value::String)
+            })
+            .await
+            .map_err(|e| format!("task failed: {e}"))?
+        }
+        // The browser normally fetches `/api/tool-bodies/{id}` directly; this
+        // arm keeps the command callable from both transports. A body can be
+        // hundreds of KB, so it is read and serialized off the runtime thread.
+        "get_tool_call_body" => {
+            let store = get_store(store_mutex)?;
+            let message_id: i64 = arg(&args, "messageId")?;
+            blocking_store_json(move || session_commands::tool_call_body(&store, message_id)).await
         }
         "start_session" => {
             let store = get_store(store_mutex)?;
@@ -3341,10 +3544,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "list_queued_session_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            let messages = store
-                .list_queued_session_messages(&session_id)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(messages).unwrap())
+            blocking_store_json(move || store.list_queued_session_messages(&session_id)).await
         }
         "delete_queued_session_message" => {
             let store = get_store(store_mutex)?;
@@ -4089,6 +4289,59 @@ mod tests {
         );
     }
 
+    /// The windowed transcript read must accept the same optional window the
+    /// Tauri command does, and keep reading off the runtime thread: this is the
+    /// largest payload the server produces, and the client pages through it
+    /// while the same worker services `/api/events`.
+    #[test]
+    fn web_get_session_messages_windows_under_spawn_blocking() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_session_messages");
+
+        for needle in [
+            "opt_arg(&args, \"limit\")",
+            "opt_arg(&args, \"beforeId\")",
+            "get_session_messages_window(",
+            "blocking_store_json(",
+        ] {
+            assert!(
+                arm.contains(needle),
+                "the web `get_session_messages` arm must contain `{needle}`: {arm}"
+            );
+        }
+    }
+
+    /// A deferred body is read on expand while the same worker services
+    /// `/api/events`, and can be hundreds of KB; keep it off the runtime
+    /// thread like the transcript reads.
+    #[test]
+    fn web_get_tool_call_body_reads_under_spawn_blocking() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "get_tool_call_body");
+        for needle in ["session_commands::tool_call_body(", "blocking_store_json("] {
+            assert!(
+                arm.contains(needle),
+                "the web `get_tool_call_body` arm must contain `{needle}`: {arm}"
+            );
+        }
+    }
+
+    /// The poll runs twice a second per open running pane and carries the
+    /// transcript tail; keep it off the runtime thread like the reads it
+    /// replaced.
+    #[test]
+    fn web_poll_session_reads_under_spawn_blocking() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "poll_session");
+        for needle in [
+            "arg(&args, \"request\")",
+            ".poll_session(",
+            "blocking_store_json(",
+        ] {
+            assert!(
+                arm.contains(needle),
+                "the web `poll_session` arm must contain `{needle}`: {arm}"
+            );
+        }
+    }
+
     /// The source of one `dispatch` arm, from its `"command" =>` pattern to the
     /// end of its block. Source-level for the same reason as
     /// `web_dispatch_covers_tauri_commands`: `dispatch` needs a `WebAppState`
@@ -4266,6 +4519,11 @@ mod media_tests {
             .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
         assert_eq!(
             axum::body::to_bytes(response.into_body(), 100)
                 .await
@@ -4282,5 +4540,260 @@ mod media_tests {
             router.oneshot(request).await.unwrap().status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn tool_image_route_serves_decoded_block_or_404() {
+        use base64::Engine;
+        let fixture = Fixture::new();
+        let store = fixture.store.clone();
+        // An SVG is an image to the store and the client, but opened as a
+        // document it is a script host; the route must serve it sandboxed.
+        const SVG: &[u8] =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>";
+        let id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Read")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("completed".into()),
+                    acp_raw_output: Some(serde_json::json!([
+                        {"type": "text", "text": "ok"},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/png",
+                            "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                        }},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/svg+xml",
+                            "data": base64::engine::general_purpose::STANDARD.encode(SVG),
+                        }},
+                    ])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // The same block on a row that has not settled: never projected to a
+        // ref, and not served either, since the response would be cached as
+        // immutable while a later update could still replace the block.
+        let in_flight_id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Read")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                in_flight_id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("in_progress".into()),
+                    acp_raw_output: Some(serde_json::json!([
+                        {"type": "text", "text": "ok"},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/png",
+                            "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                        }},
+                    ])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let sessions = Arc::new(Mutex::new(HashSet::new()));
+        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let get = |uri: String, auth: Option<&str>| {
+            let mut request = axum::http::Request::builder().uri(uri);
+            if let Some(auth) = auth {
+                request = request.header("Authorization", format!("Bearer {auth}"));
+            }
+            router
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+        };
+
+        let response = get(
+            format!("/api/tool-images/{id}/output/1"),
+            Some("bearer-token"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            PNG
+        );
+
+        // The SVG is still served with its own type (the `<img>` needs it),
+        // only ever under the sandboxing policy.
+        let response = get(
+            format!("/api/tool-images/{id}/output/2"),
+            Some("bearer-token"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/svg+xml");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1000)
+                .await
+                .unwrap()
+                .as_ref(),
+            SVG
+        );
+
+        assert_eq!(
+            get(format!("/api/tool-images/{id}/output/1"), None)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for uri in [
+            format!("/api/tool-images/{id}/output/0"),
+            format!("/api/tool-images/{id}/output/3"),
+            format!("/api/tool-images/{id}/content/0"),
+            format!("/api/tool-images/{id}/source/1"),
+            format!("/api/tool-images/{in_flight_id}/output/1"),
+            format!("/api/tool-images/{}/output/1", in_flight_id + 1),
+            "/api/tool-images/not-an-id/output/1".to_string(),
+        ] {
+            assert_eq!(
+                get(uri.clone(), Some("bearer-token"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_body_route_serves_the_row_bodies_or_404() {
+        use base64::Engine;
+        let fixture = Fixture::new();
+        let store = fixture.store.clone();
+        let stdout = "x".repeat(store::DEFERRED_TOOL_BODY_MIN_BYTES);
+        let id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Bash")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("completed".into()),
+                    acp_raw_input: Some(serde_json::json!({"command": "make"})),
+                    acp_raw_output: Some(serde_json::json!({"stdout": stdout})),
+                    acp_content: Some(serde_json::json!([{"type": "content", "content": {
+                        "type": "image", "mimeType": "image/png",
+                        "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                    }}])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // The transcript ships the output as a marker…
+        let shipped = &store.get_session_messages(&fixture.session.id).unwrap()[0];
+        assert_eq!(
+            shipped.acp.acp_raw_output.as_ref().unwrap()["$deferred"]["messageId"],
+            serde_json::json!(id)
+        );
+        // An in-flight row never gets a marker, and the route must not serve
+        // it under the `immutable` cache header either.
+        let in_flight_id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Bash")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                in_flight_id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("in_progress".into()),
+                    acp_raw_input: Some(serde_json::json!({"command": "make"})),
+                    acp_raw_output: Some(serde_json::json!({"stdout": stdout.clone()})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let sessions = Arc::new(Mutex::new(HashSet::new()));
+        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let get = |uri: String, auth: Option<&str>| {
+            let mut request = axum::http::Request::builder().uri(uri);
+            if let Some(auth) = auth {
+                request = request.header("Authorization", format!("Bearer {auth}"));
+            }
+            router
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+        };
+
+        // …and the route serves the bodies, images projected to refs.
+        let response = get(format!("/api/tool-bodies/{id}"), Some("bearer-token"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "messageId": id,
+                "acpRawInput": {"command": "make"},
+                "acpRawOutput": {"stdout": stdout},
+                "acpContent": [{"type": "content", "content": {
+                    "type": "image", "ref": format!("{id}/content/0"), "mimeType": "image/png",
+                }}],
+            })
+        );
+
+        assert_eq!(
+            get(format!("/api/tool-bodies/{id}"), None)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for uri in [
+            format!("/api/tool-bodies/{in_flight_id}"),
+            format!("/api/tool-bodies/{}", in_flight_id + 1),
+            "/api/tool-bodies/not-an-id".to_string(),
+        ] {
+            assert_eq!(
+                get(uri.clone(), Some("bearer-token"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::NOT_FOUND,
+                "{uri}"
+            );
+        }
     }
 }

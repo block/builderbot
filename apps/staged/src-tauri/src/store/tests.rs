@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::models::*;
-use super::Store;
+use super::{
+    SessionPollRequest, Store, ToolCallBody, TranscriptWindow, DEFERRED_TOOL_BODY_MIN_BYTES,
+};
 
 #[test]
 fn test_create_and_get_project() {
@@ -1685,7 +1687,7 @@ fn test_acp_metadata_rows_are_hidden_from_legacy_session_messages() {
 }
 
 #[test]
-fn test_acp_metadata_messages_query_includes_hidden_rows() {
+fn test_acp_metadata_archive_keeps_rows_the_transcript_projection_drops() {
     let store = Store::in_memory().unwrap();
 
     let session = Session::new_running("test", Path::new("/tmp"));
@@ -1723,17 +1725,294 @@ fn test_acp_metadata_messages_query_includes_hidden_rows() {
         store.get_session_messages(&session.id).unwrap().is_empty(),
         "ACP metadata rows must stay hidden from legacy transcript reads"
     );
+    assert!(
+        store
+            .get_session_acp_metadata_messages(&session.id)
+            .unwrap()
+            .is_empty(),
+        "chunk and usage rows are replay-only and never shipped to the transcript"
+    );
 
-    let metadata_rows = store
-        .get_session_acp_metadata_messages(&session.id)
-        .unwrap();
-    assert_eq!(metadata_rows.len(), 2);
-    assert_eq!(metadata_rows[0].role, MessageRole::User);
+    let archive_rows = store.get_session_acp_metadata_archive(&session.id).unwrap();
+    assert_eq!(archive_rows.len(), 2);
+    assert_eq!(archive_rows[0].role, MessageRole::User);
     assert_eq!(
-        metadata_rows[0].acp.acp_message_id.as_deref(),
+        archive_rows[0].acp.acp_message_id.as_deref(),
         Some("user-msg-1")
     );
-    assert_eq!(metadata_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+    assert_eq!(archive_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+}
+
+/// Six visible rows with a hidden metadata row between each pair, so a
+/// window's `limit` is shown to count visible rows only.
+fn seed_windowed_transcript(store: &Store) -> (Session, Vec<i64>) {
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let mut visible_ids = Vec::new();
+    for turn in 0..3 {
+        visible_ids.push(
+            store
+                .add_session_message(&session.id, MessageRole::User, &format!("ask {turn}"))
+                .unwrap(),
+        );
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &AcpMessageMetadata {
+                    acp_event_kind: Some("agent_message_chunk".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        visible_ids.push(
+            store
+                .add_session_message(
+                    &session.id,
+                    MessageRole::Assistant,
+                    &format!("answer {turn}"),
+                )
+                .unwrap(),
+        );
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &AcpMessageMetadata {
+                    acp_event_kind: Some("usage_update".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    (session, visible_ids)
+}
+
+fn ids(messages: &[SessionMessage]) -> Vec<i64> {
+    messages.iter().map(|m| m.id).collect()
+}
+
+#[test]
+fn test_session_messages_window_returns_newest_visible_rows_ascending() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let window = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: Some(3),
+                before_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&window), visible[3..].to_vec());
+    assert_eq!(window[0].content, "answer 1");
+    assert_eq!(window[2].content, "answer 2");
+}
+
+#[test]
+fn test_session_messages_window_pages_backwards_with_before_id() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let page = |before_id: i64| {
+        ids(&store
+            .get_session_messages_window(
+                &session.id,
+                TranscriptWindow {
+                    limit: Some(2),
+                    before_id: Some(before_id),
+                },
+            )
+            .unwrap())
+    };
+    assert_eq!(page(visible[4]), visible[2..4].to_vec());
+    assert_eq!(page(visible[2]), visible[0..2].to_vec());
+    assert_eq!(page(visible[0]), Vec::<i64>::new());
+    // A short final page: fewer rows than asked for is how the caller learns
+    // it has reached the start (it requests one more than it will show).
+    assert_eq!(
+        ids(&store
+            .get_session_messages_window(
+                &session.id,
+                TranscriptWindow {
+                    limit: Some(5),
+                    before_id: Some(visible[3]),
+                },
+            )
+            .unwrap()),
+        visible[0..3].to_vec()
+    );
+}
+
+#[test]
+fn test_session_messages_window_limit_larger_than_transcript_returns_everything() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let window = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: Some(visible.len() as u32 + 1),
+                before_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&window), visible);
+    // Exactly the transcript's length is indistinguishable from "more exist"
+    // on the server side, which is why the client over-fetches by one.
+    let exact = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: Some(visible.len() as u32),
+                before_id: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&exact), visible);
+}
+
+#[test]
+fn test_session_messages_window_without_params_matches_full_query() {
+    let store = Store::in_memory().unwrap();
+    let (session, visible) = seed_windowed_transcript(&store);
+
+    let full = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(ids(&full), visible);
+    let all = store
+        .get_session_messages_window(&session.id, TranscriptWindow::ALL)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_string(&all).unwrap(),
+        serde_json::to_string(&full).unwrap()
+    );
+    // `before_id` alone is the whole prefix, still oldest first.
+    let prefix = store
+        .get_session_messages_window(
+            &session.id,
+            TranscriptWindow {
+                limit: None,
+                before_id: Some(visible[4]),
+            },
+        )
+        .unwrap();
+    assert_eq!(ids(&prefix), visible[..4].to_vec());
+}
+
+/// The windowed read must stay on the session index and must not sort through
+/// a temp B-tree: the index yields rowid order in either direction, and the
+/// store reverses the (at most `limit`) rows itself.
+#[test]
+fn test_session_messages_window_query_plan() {
+    let store = Store::in_memory().unwrap();
+    let session_id = "s";
+    for window in [
+        TranscriptWindow::ALL,
+        TranscriptWindow {
+            limit: Some(10),
+            before_id: None,
+        },
+        TranscriptWindow {
+            limit: Some(10),
+            before_id: Some(5),
+        },
+        TranscriptWindow {
+            limit: None,
+            before_id: Some(5),
+        },
+    ] {
+        let conn = store.conn.lock().unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            super::messages::session_messages_window_sql(&window)
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(
+                &super::messages::session_messages_window_params(&session_id, &window)[..],
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let plan = plan.join("\n");
+        assert!(
+            plan.contains("USING INDEX idx_session_messages_session"),
+            "{window:?}: {plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{window:?}: {plan}");
+    }
+}
+
+#[test]
+fn test_acp_metadata_messages_query_returns_only_transcript_rows() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let tool_metadata = |status: &str| AcpMessageMetadata {
+        acp_event_kind: Some("tool_call".to_string()),
+        acp_tool_call_id: Some(format!("tc-{status}")),
+        acp_tool_status: Some(status.to_string()),
+        ..Default::default()
+    };
+    // Visible, settled: already in `get_session_messages`, so sending it
+    // again would ship the (large) raw output twice.
+    let settled_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read file")
+        .unwrap();
+    store
+        .update_message_acp_metadata(settled_id, &tool_metadata("completed"))
+        .unwrap();
+    // Visible, in flight: the poll must learn about it to re-read it by id.
+    let in_flight_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Run tests")
+        .unwrap();
+    store
+        .update_message_acp_metadata(in_flight_id, &tool_metadata("in_progress"))
+        .unwrap();
+    // Hidden rows: one of each side of the allowlist.
+    let plan_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("plan_update".to_string()),
+                acp_content: Some(serde_json::json!({"entries": []})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("agent_message_chunk".to_string()),
+                acp_content: Some(serde_json::json!({"content": {"type": "text", "text": "hi"}})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let hidden_tool_id = store
+        .add_acp_metadata_message(&session.id, &tool_metadata("completed"))
+        .unwrap();
+
+    let ids: Vec<i64> = store
+        .get_session_acp_metadata_messages(&session.id)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(ids, vec![in_flight_id, plan_id, hidden_tool_id]);
+    assert_eq!(
+        store
+            .get_session_acp_metadata_archive(&session.id)
+            .unwrap()
+            .len(),
+        5,
+        "filtering is read-side only; every row stays in the table"
+    );
 }
 
 #[test]
@@ -1759,7 +2038,22 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
             },
         )
         .unwrap();
-    let usage_id = store
+    let plan_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("plan_update".to_string()),
+                acp_content: Some(serde_json::json!({"entries": []})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // A visible row without ACP metadata never shows up in the metadata query,
+    // and neither does a replay-only hidden kind.
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "text")
+        .unwrap();
+    store
         .add_acp_metadata_message(
             &session.id,
             &AcpMessageMetadata {
@@ -1769,14 +2063,10 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
             },
         )
         .unwrap();
-    // A visible row without ACP metadata never shows up in the metadata query.
-    store
-        .add_session_message(&session.id, MessageRole::Assistant, "text")
-        .unwrap();
 
     // Cursor past everything, no refetch ids: nothing to return.
     let none = store
-        .get_session_acp_metadata_messages_since(&session.id, usage_id, &[])
+        .get_session_acp_metadata_messages_since(&session.id, plan_id, &[])
         .unwrap();
     assert!(none.is_empty());
 
@@ -1785,10 +2075,12 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
         .get_session_acp_metadata_messages_since(&session.id, tool_id, &[])
         .unwrap();
     assert_eq!(after_tool.len(), 1);
-    assert_eq!(after_tool[0].id, usage_id);
+    assert_eq!(after_tool[0].id, plan_id);
 
     // An in-place status update on a row behind the cursor is only observable
-    // when the caller re-requests that row explicitly.
+    // when the caller re-requests that row explicitly. The settled row comes
+    // back even though it no longer passes the transcript filter, so the
+    // caller observes the terminal status and stops re-requesting it.
     store
         .update_message_acp_metadata(
             tool_id,
@@ -1799,13 +2091,21 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
         )
         .unwrap();
     let refetched = store
-        .get_session_acp_metadata_messages_since(&session.id, usage_id, &[tool_id])
+        .get_session_acp_metadata_messages_since(&session.id, plan_id, &[tool_id])
         .unwrap();
     assert_eq!(refetched.len(), 1);
     assert_eq!(refetched[0].id, tool_id);
     assert_eq!(
         refetched[0].acp.acp_tool_status.as_deref(),
         Some("completed")
+    );
+    assert!(
+        store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[])
+            .unwrap()
+            .iter()
+            .all(|m| m.id != tool_id),
+        "a settled visible tool row is only ever delivered by explicit refetch"
     );
 
     // The full metadata query and the since-query with a zero cursor agree.
@@ -1819,6 +2119,571 @@ fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
         full.iter().map(|m| m.id).collect::<Vec<_>>(),
         since_zero.iter().map(|m| m.id).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn test_transcript_reads_project_tool_images_to_refs_and_keep_raw_bytes() {
+    use super::ToolImageField;
+    use base64::Engine;
+
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let png: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+    let jpeg: &[u8] = b"\xff\xd8\xff\xe0jpeg";
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    // Claude's raw result nests the payload in `source`; ACP content wraps
+    // the block in a `content` envelope and puts `data`/`mimeType` on it.
+    let raw_output = serde_json::json!([
+        {"type": "text", "text": "Read 1 image"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": encode(png)}},
+    ]);
+    let content = serde_json::json!([
+        {"type": "content", "content": {"type": "image", "mimeType": "image/jpeg", "data": encode(jpeg), "annotations": {"audience": ["user"]}}},
+    ]);
+    let metadata = |status: &str| AcpMessageMetadata {
+        acp_event_kind: Some("tool_call".to_string()),
+        acp_tool_call_id: Some("tc-1".to_string()),
+        acp_tool_status: Some(status.to_string()),
+        acp_raw_output: Some(raw_output.clone()),
+        acp_content: Some(content.clone()),
+        ..Default::default()
+    };
+    let id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read screenshot.png")
+        .unwrap();
+    store
+        .update_message_acp_metadata(id, &metadata("in_progress"))
+        .unwrap();
+
+    // In flight: a later update may still replace or reorder the block list,
+    // and a ref is cached as immutable, so the base64 ships inline from every
+    // transcript read and the ref lookup refuses the row.
+    for message in [
+        &store.get_session_messages(&session.id).unwrap()[0],
+        &store
+            .get_session_messages_since(&session.id, id, &[])
+            .unwrap()[0],
+        // In flight, so the metadata query ships it too.
+        &store
+            .get_session_acp_metadata_messages(&session.id)
+            .unwrap()[0],
+        &store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
+            .unwrap()[0],
+    ] {
+        assert_eq!(message.acp.acp_raw_output, Some(raw_output.clone()));
+        assert_eq!(message.acp.acp_content, Some(content.clone()));
+    }
+    assert_eq!(
+        store.get_tool_image(id, ToolImageField::Output, 1).unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_tool_image(id, ToolImageField::Content, 0)
+            .unwrap(),
+        None
+    );
+
+    // Settled: the block list is final, so every transcript read projects it.
+    store
+        .update_message_acp_metadata(id, &metadata("completed"))
+        .unwrap();
+    let expected_output = serde_json::json!([
+        {"type": "text", "text": "Read 1 image"},
+        {"type": "image", "ref": format!("{id}/output/1"), "mimeType": "image/png"},
+    ]);
+    let expected_content = serde_json::json!([
+        {"type": "content", "content": {
+            "type": "image", "ref": format!("{id}/content/0"), "mimeType": "image/jpeg",
+            "annotations": {"audience": ["user"]},
+        }},
+    ]);
+    for message in [
+        &store.get_session_messages(&session.id).unwrap()[0],
+        &store
+            .get_session_messages_since(&session.id, id, &[])
+            .unwrap()[0],
+        // Settled visible rows leave the metadata query, but a refetch by id
+        // still delivers the row so the poll sees it settle.
+        &store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
+            .unwrap()[0],
+    ] {
+        assert_eq!(message.acp.acp_raw_output, Some(expected_output.clone()));
+        assert_eq!(message.acp.acp_content, Some(expected_content.clone()));
+    }
+
+    // Replay and archive readers still see the base64.
+    let replay = store.get_session_replay_messages(&session.id).unwrap();
+    assert_eq!(replay[0].acp.acp_raw_output, Some(raw_output));
+    assert_eq!(replay[0].acp.acp_content, Some(content));
+    assert_eq!(
+        store.get_session_acp_metadata_archive(&session.id).unwrap()[0]
+            .acp
+            .acp_content
+            .as_ref()
+            .unwrap()[0]["content"]["data"],
+        encode(jpeg)
+    );
+
+    // The refs resolve to the decoded bytes…
+    let image = store
+        .get_tool_image(id, ToolImageField::Output, 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (image.mime_type.as_str(), image.bytes.as_slice()),
+        ("image/png", png)
+    );
+    let image = store
+        .get_tool_image(id, ToolImageField::Content, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (image.mime_type.as_str(), image.bytes.as_slice()),
+        ("image/jpeg", jpeg)
+    );
+    // …and anything that is not a base64 image block is `None`.
+    assert_eq!(
+        store.get_tool_image(id, ToolImageField::Output, 0).unwrap(),
+        None
+    );
+    assert_eq!(
+        store.get_tool_image(id, ToolImageField::Output, 2).unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_tool_image(id + 1, ToolImageField::Output, 1)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn test_poll_session_matches_the_four_standalone_reads() {
+    use base64::Engine;
+
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("poll me", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .add_queued_session_message(&session.id, "first follow-up", &[], None)
+        .unwrap();
+    // Queued ids are UUIDs, so rows sharing a millisecond `created_at` sort
+    // randomly; keep the two apart so the order assertion below is stable.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .add_queued_session_message(&session.id, "second follow-up", &[], None)
+        .unwrap();
+
+    // What the pane has loaded: a prompt, an assistant row a tool call then
+    // interrupted, and that tool call (in flight, with a screenshot result
+    // that ships inline until the row settles).
+    store
+        .add_session_message(&session.id, MessageRole::User, "look at this")
+        .unwrap();
+    let assistant_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "Taking a")
+        .unwrap();
+    let tool_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read screenshot.png")
+        .unwrap();
+    let png: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+    let inline_output = serde_json::json!([{
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(png),
+        },
+    }]);
+    store
+        .update_message_acp_metadata(
+            tool_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-1".to_string()),
+                acp_tool_status: Some("in_progress".to_string()),
+                acp_raw_output: Some(inline_output.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    // Since then: the interrupted row grew, a new tail row and a plan arrived,
+    // and a replay-only row the transcript never ships.
+    store
+        .update_message_content(assistant_id, "Taking a look")
+        .unwrap();
+    let tail_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "Done.")
+        .unwrap();
+    let plan_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("plan_update".to_string()),
+                acp_content: Some(serde_json::json!({"entries": []})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("usage_update".to_string()),
+                acp_usage: Some(serde_json::json!({"used": 1})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let request = SessionPollRequest {
+        since_id: tool_id,
+        refetch_ids: vec![assistant_id],
+        metadata_since_id: tool_id,
+        metadata_refetch_ids: vec![tool_id],
+    };
+    let poll = store.poll_session(&session.id, &request).unwrap();
+
+    // Field for field what the standalone reads return for the same cursors.
+    fn json(value: &impl serde::Serialize) -> serde_json::Value {
+        serde_json::to_value(value).unwrap()
+    }
+    assert_eq!(
+        json(&poll.session),
+        json(&store.get_session(&session.id).unwrap())
+    );
+    assert_eq!(
+        json(&poll.queued_messages),
+        json(&store.list_queued_session_messages(&session.id).unwrap())
+    );
+    assert_eq!(
+        json(&poll.messages),
+        json(
+            &store
+                .get_session_messages_since(&session.id, tool_id, &[assistant_id])
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        json(&poll.acp_metadata_messages),
+        json(
+            &store
+                .get_session_acp_metadata_messages_since(&session.id, tool_id, &[tool_id])
+                .unwrap()
+        )
+    );
+
+    // And those are the rows the pane needs.
+    assert_eq!(poll.session.unwrap().status, SessionStatus::Running);
+    assert_eq!(
+        poll.queued_messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>(),
+        ["first follow-up", "second follow-up"]
+    );
+    assert_eq!(
+        poll.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+        [assistant_id, tool_id, tail_id]
+    );
+    assert_eq!(poll.messages[0].content, "Taking a look");
+    assert_eq!(
+        poll.acp_metadata_messages
+            .iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>(),
+        [tool_id, plan_id]
+    );
+    assert_eq!(
+        poll.messages[1].acp.acp_raw_output,
+        Some(inline_output.clone())
+    );
+    assert_eq!(
+        poll.acp_metadata_messages[0].acp.acp_raw_output,
+        Some(inline_output.clone())
+    );
+
+    // Once the tool settles, the refetch delivers the row with the image
+    // projected to a ref, through the poll exactly as through the standalone
+    // read.
+    store
+        .update_message_acp_metadata(
+            tool_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-1".to_string()),
+                acp_tool_status: Some("completed".to_string()),
+                acp_raw_output: Some(inline_output),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let settled = store.poll_session(&session.id, &request).unwrap();
+    let projected = serde_json::json!([
+        {"type": "image", "ref": format!("{tool_id}/output/0"), "mimeType": "image/png"},
+    ]);
+    assert_eq!(
+        settled.acp_metadata_messages[0].acp.acp_raw_output,
+        Some(projected.clone())
+    );
+    assert_eq!(
+        json(&settled.acp_metadata_messages),
+        json(
+            &store
+                .get_session_acp_metadata_messages_since(&session.id, tool_id, &[tool_id])
+                .unwrap()
+        )
+    );
+}
+
+#[test]
+fn test_poll_session_from_an_empty_transcript_returns_every_visible_row() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("poll me", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    for (role, content) in [
+        (MessageRole::User, "hi"),
+        (MessageRole::Assistant, "hello"),
+        (MessageRole::User, "again"),
+    ] {
+        store
+            .add_session_message(&session.id, role, content)
+            .unwrap();
+    }
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("agent_message_chunk".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let poll = store
+        .poll_session(&session.id, &SessionPollRequest::default())
+        .unwrap();
+    assert_eq!(
+        poll.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+        store
+            .get_session_messages(&session.id)
+            .unwrap()
+            .iter()
+            .map(|m| m.id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(poll.messages.len(), 3);
+    assert!(poll.queued_messages.is_empty());
+    assert!(poll.acp_metadata_messages.is_empty());
+
+    // An unknown session is an empty poll, not an error, as `get_session` is.
+    let missing = store
+        .poll_session("no-such-session", &SessionPollRequest::default())
+        .unwrap();
+    assert!(missing.session.is_none());
+    assert!(missing.messages.is_empty());
+}
+
+/// A body one byte past the deferral threshold: `{"text":"xxxx…"}`.
+fn oversized_tool_body(key: &str) -> serde_json::Value {
+    let envelope = format!("{{\"{key}\":\"\"}}").len();
+    serde_json::json!({ key: "x".repeat(DEFERRED_TOOL_BODY_MIN_BYTES + 1 - envelope) })
+}
+
+fn deferred_marker(id: i64, field: &str, body: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"$deferred": {
+        "messageId": id,
+        "field": field,
+        "bytes": serde_json::to_vec(body).unwrap().len(),
+    }})
+}
+
+#[test]
+fn test_transcript_reads_defer_large_bodies_of_settled_tool_rows_only() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let big_input = oversized_tool_body("content");
+    let big_output = oversized_tool_body("stdout");
+    let small_content = serde_json::json!([
+        {"type": "content", "content": {"type": "text", "text": "ok"}},
+    ]);
+    let metadata = |status: &str| AcpMessageMetadata {
+        acp_event_kind: Some("tool_call".to_string()),
+        acp_tool_call_id: Some("tc-1".to_string()),
+        acp_tool_status: Some(status.to_string()),
+        acp_raw_input: Some(big_input.clone()),
+        acp_raw_output: Some(big_output.clone()),
+        acp_content: Some(small_content.clone()),
+        ..Default::default()
+    };
+    let id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Write notes.md")
+        .unwrap();
+    store
+        .update_message_acp_metadata(id, &metadata("in_progress"))
+        .unwrap();
+
+    // In flight: the writer still mutates the row and the poll re-reads it,
+    // so every body ships whole.
+    let in_flight = &store.get_session_messages(&session.id).unwrap()[0];
+    assert_eq!(in_flight.acp.acp_raw_input, Some(big_input.clone()));
+    assert_eq!(in_flight.acp.acp_raw_output, Some(big_output.clone()));
+    assert_eq!(in_flight.acp.acp_content, Some(small_content.clone()));
+    // No marker exists yet, and the body lookup refuses the row so the
+    // `immutable` body route cannot cache bodies the writer may still replace.
+    assert_eq!(store.get_tool_call_body(id).unwrap(), None);
+
+    // Settled: the two large bodies become markers, the small one stays.
+    store
+        .update_message_acp_metadata(id, &metadata("completed"))
+        .unwrap();
+    let expected_input = deferred_marker(id, "input", &big_input);
+    let expected_output = deferred_marker(id, "output", &big_output);
+    assert!(
+        expected_input["$deferred"]["bytes"].as_u64().unwrap()
+            == DEFERRED_TOOL_BODY_MIN_BYTES as u64 + 1,
+        "fixture should sit one byte past the threshold"
+    );
+    for message in [
+        &store.get_session_messages(&session.id).unwrap()[0],
+        &store
+            .get_session_messages_since(&session.id, id, &[])
+            .unwrap()[0],
+        // Settled visible rows leave the metadata query, but a refetch by id
+        // still delivers the row (now projected) so the poll sees it settle.
+        &store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
+            .unwrap()[0],
+    ] {
+        assert_eq!(message.acp.acp_raw_input, Some(expected_input.clone()));
+        assert_eq!(message.acp.acp_raw_output, Some(expected_output.clone()));
+        assert_eq!(message.acp.acp_content, Some(small_content.clone()));
+        assert_eq!(message.acp.acp_tool_status.as_deref(), Some("completed"));
+    }
+
+    // Replay and archive readers still see the bodies, and the table does too.
+    let replay = store.get_session_replay_messages(&session.id).unwrap();
+    assert_eq!(replay[0].acp.acp_raw_input, Some(big_input.clone()));
+    assert_eq!(replay[0].acp.acp_raw_output, Some(big_output.clone()));
+    assert_eq!(
+        store.get_session_acp_metadata_archive(&session.id).unwrap()[0]
+            .acp
+            .acp_raw_output,
+        Some(big_output.clone())
+    );
+
+    // The marker resolves to the row's bodies…
+    let body = store.get_tool_call_body(id).unwrap().unwrap();
+    assert_eq!(
+        body,
+        ToolCallBody {
+            message_id: id,
+            acp_raw_input: Some(big_input),
+            acp_raw_output: Some(big_output),
+            acp_content: Some(small_content),
+        }
+    );
+    let wire = serde_json::to_value(&body).unwrap();
+    assert_eq!(wire["messageId"], serde_json::json!(id));
+    for key in ["acpRawInput", "acpRawOutput", "acpContent"] {
+        assert!(
+            wire.get(key).is_some(),
+            "wire field names follow SessionMessage: {key}"
+        );
+    }
+    // …and an unknown row is `None`.
+    assert_eq!(store.get_tool_call_body(id + 1).unwrap(), None);
+}
+
+#[test]
+fn test_tool_body_deferral_judges_the_projected_size_and_keeps_pikchr_hints() {
+    use base64::Engine;
+
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // A screenshot result: far past the threshold as stored, tiny once the
+    // image is a ref — so it ships inline, and the body route projects the
+    // same ref.
+    let png = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 4096]);
+    let image_output = serde_json::json!([
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}},
+    ]);
+    let image_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Read shot.png")
+        .unwrap();
+    store
+        .update_message_acp_metadata(
+            image_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-img".to_string()),
+                acp_tool_status: Some("completed".to_string()),
+                acp_raw_output: Some(image_output),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let projected = serde_json::json!([
+        {"type": "image", "ref": format!("{image_id}/output/0"), "mimeType": "image/png"},
+    ]);
+    assert_eq!(
+        store.get_session_messages(&session.id).unwrap()[0]
+            .acp
+            .acp_raw_output,
+        Some(projected.clone())
+    );
+    assert_eq!(
+        store
+            .get_tool_call_body(image_id)
+            .unwrap()
+            .unwrap()
+            .acp_raw_output,
+        Some(projected)
+    );
+
+    // A `render_pikchr` call keeps its source in the marker (the collapsed
+    // card draws it), and a `generate_pikchr` result keeps the child session
+    // id it names however deeply.
+    let pikchr_source = format!("box \"{}\"", "x".repeat(DEFERRED_TOOL_BODY_MIN_BYTES));
+    let pikchr_input = serde_json::json!({"pikchr": pikchr_source, "description": "big"});
+    let pikchr_output = serde_json::json!({
+        "content": [{"type": "text", "text": "x".repeat(DEFERRED_TOOL_BODY_MIN_BYTES)}],
+        "result": {"structured_content": {"inner_session_id": "child-1"}},
+    });
+    let pikchr_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "render_pikchr")
+        .unwrap();
+    store
+        .update_message_acp_metadata(
+            pikchr_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-pikchr".to_string()),
+                acp_tool_status: Some("completed".to_string()),
+                acp_raw_input: Some(pikchr_input.clone()),
+                acp_raw_output: Some(pikchr_output.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let row = &store.get_session_messages(&session.id).unwrap()[1];
+    let mut expected_input = deferred_marker(pikchr_id, "input", &pikchr_input);
+    expected_input["$deferred"]["pikchr"] = serde_json::Value::String(pikchr_source);
+    assert_eq!(row.acp.acp_raw_input, Some(expected_input));
+    let mut expected_output = deferred_marker(pikchr_id, "output", &pikchr_output);
+    expected_output["$deferred"]["innerSessionId"] = serde_json::Value::String("child-1".into());
+    assert_eq!(row.acp.acp_raw_output, Some(expected_output));
 }
 
 #[test]

@@ -627,7 +627,7 @@ mod tests {
             }
         );
         let metadata = store
-            .get_session_acp_metadata_messages(&session_id)
+            .get_session_acp_metadata_archive(&session_id)
             .expect("metadata");
         assert!(metadata.is_empty());
     }
@@ -924,9 +924,7 @@ mod tests {
             "ACP event metadata should not appear in transcript rows"
         );
 
-        let metadata_rows = store
-            .get_session_acp_metadata_messages(&session_id)
-            .unwrap();
+        let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(
             metadata_rows[0].acp.acp_event_kind.as_deref(),
@@ -965,9 +963,7 @@ mod tests {
         )
         .await;
 
-        let metadata_rows = store
-            .get_session_acp_metadata_messages(&session_id)
-            .unwrap();
+        let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(metadata_rows[0].acp.acp_origin.as_deref(), Some(&*origin));
         assert_eq!(
@@ -987,9 +983,7 @@ mod tests {
         assert_eq!(session.acp_title.as_deref(), Some("Fix the login flow"));
 
         // The metadata-row archive of the raw update is unchanged behavior.
-        let metadata_rows = store
-            .get_session_acp_metadata_messages(&session_id)
-            .unwrap();
+        let metadata_rows = store.get_session_acp_metadata_archive(&session_id).unwrap();
         assert_eq!(metadata_rows.len(), 1);
         assert_eq!(
             metadata_rows[0].acp.acp_event_kind.as_deref(),

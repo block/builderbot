@@ -1,8 +1,10 @@
 //! Session message CRUD operations.
 
-use rusqlite::{params, Row};
+use rusqlite::{params, Connection, Row};
 
 use super::models::{AcpMessageMetadata, MessageRole, SessionMessage};
+use super::tool_bodies::project_tool_bodies;
+use super::tool_images::project_tool_images;
 use super::{now_timestamp, Store, StoreError};
 
 const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at, image_ids,
@@ -11,6 +13,41 @@ const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at
     acp_raw_input, acp_raw_output, acp_content, acp_locations, acp_usage,
     acp_session_info, acp_config_options, acp_session_mode_state, acp_origin";
 const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
+/// ACP rows the transcript needs on top of [`Store::get_session_messages`]:
+/// hidden rows of the kinds the frontend reads (`acpTranscript.ts`,
+/// `acpConfigMetadata.ts`), plus visible tool rows still in flight — the
+/// writer mutates those in place, so the poll re-reads them by id until they
+/// settle. Everything else (`agent_message_chunk`, `usage_update`,
+/// `session_info_update`, settled visible tool rows, …) stays in the table
+/// for replay but is not shipped to the UI; chunk rows alone are ~90% of a
+/// long session's ACP rows, and settled tool rows duplicate the visible
+/// transcript byte for byte.
+const TRANSCRIPT_METADATA_FILTER: &str = "(
+    (content = '' AND acp_event_kind IN (
+        'tool_call', 'tool_call_update', 'plan_update', 'available_commands_update',
+        'config_options_update', 'pikchr_session_started'))
+    OR (content != '' AND acp_event_kind IN ('tool_call', 'tool_call_update')
+        AND COALESCE(acp_tool_status, '') NOT IN (
+            'completed', 'succeeded', 'success', 'failed', 'error', 'cancelled', 'canceled'))
+)";
+
+/// Which slice of the visible transcript [`Store::get_session_messages_window`]
+/// returns. `limit` keeps only the newest rows (still delivered oldest first);
+/// `before_id` restricts the query to rows older than a loaded one, which is
+/// how the UI pages backwards from the window it opened with. Both unset is
+/// the whole transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TranscriptWindow {
+    pub limit: Option<u32>,
+    pub before_id: Option<i64>,
+}
+
+impl TranscriptWindow {
+    pub const ALL: Self = Self {
+        limit: None,
+        before_id: None,
+    };
+}
 
 /// Parse a JSON array string into a Vec<String>, returning an empty vec on
 /// NULL or invalid JSON.
@@ -33,6 +70,41 @@ pub(super) fn image_ids_json(image_ids: &[String]) -> Option<String> {
     } else {
         Some(serde_json::to_string(image_ids).unwrap())
     }
+}
+
+/// The visible-transcript query for a [`TranscriptWindow`]; positional
+/// placeholders in the order [`session_messages_window_params`] binds them.
+pub(super) fn session_messages_window_sql(window: &TranscriptWindow) -> String {
+    let before_filter = if window.before_id.is_some() {
+        " AND id < ?"
+    } else {
+        ""
+    };
+    let (order, limit_clause) = if window.limit.is_some() {
+        ("DESC", " LIMIT ?")
+    } else {
+        ("ASC", "")
+    };
+    format!(
+        "SELECT {SESSION_MESSAGE_COLUMNS}
+         FROM session_messages
+         WHERE session_id = ? AND {VISIBLE_MESSAGE_FILTER}{before_filter}
+         ORDER BY id {order}{limit_clause}"
+    )
+}
+
+pub(super) fn session_messages_window_params<'a>(
+    session_id: &'a &str,
+    window: &'a TranscriptWindow,
+) -> Vec<&'a dyn rusqlite::ToSql> {
+    let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![session_id];
+    if let Some(before_id) = &window.before_id {
+        query_params.push(before_id);
+    }
+    if let Some(limit) = &window.limit {
+        query_params.push(limit);
+    }
+    query_params
 }
 
 fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
@@ -66,6 +138,19 @@ fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
             acp_origin: row.get(23)?,
         },
     })
+}
+
+/// [`session_message_from_row`] for the queries that feed the UI. For settled
+/// tool rows only (in-flight rows ship whole): base64 image blocks in the ACP
+/// output/content become `/api/tool-images` refs (see `tool_images.rs`), then
+/// the large bodies become `/api/tool-bodies` markers (see `tool_bodies.rs`;
+/// images first so the size judged is the size that would ship). Replay,
+/// archive and initialization readers keep the raw row.
+fn transcript_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
+    let mut message = session_message_from_row(row)?;
+    project_tool_images(&mut message);
+    project_tool_bodies(&mut message);
+    Ok(message)
 }
 
 impl Store {
@@ -180,20 +265,39 @@ impl Store {
         Ok(message_id)
     }
 
+    /// The visible transcript, with tool-result images projected to refs.
     pub fn get_session_messages(
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
+        self.get_session_messages_window(session_id, TranscriptWindow::ALL)
+    }
+
+    /// [`Self::get_session_messages`] restricted to a [`TranscriptWindow`].
+    /// Rows come back in ascending id order whatever the window; a `limit`
+    /// is applied from the newest row backwards.
+    ///
+    /// The limited query reads `idx_session_messages_session` in descending
+    /// rowid order and the result is reversed here rather than in SQL: a
+    /// subquery with an outer `ORDER BY id ASC` would sort through a temp
+    /// B-tree, while the index already yields the newest-first order for
+    /// free (pinned by `test_session_messages_window_query_plan`).
+    pub fn get_session_messages_window(
+        &self,
+        session_id: &str,
+        window: TranscriptWindow,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let sql = format!(
-            "SELECT {SESSION_MESSAGE_COLUMNS}
-             FROM session_messages
-             WHERE session_id = ?1 AND {VISIBLE_MESSAGE_FILTER}
-             ORDER BY id ASC"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![session_id], session_message_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut stmt = conn.prepare(&session_messages_window_sql(&window))?;
+        let rows = stmt.query_map(
+            &session_messages_window_params(&session_id, &window)[..],
+            transcript_message_from_row,
+        )?;
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        if window.limit.is_some() {
+            messages.reverse();
+        }
+        Ok(messages)
     }
 
     /// Return visible transcript rows plus hidden ACP rows that can identify
@@ -363,9 +467,29 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Return rows carrying ACP metadata, including rows hidden from the legacy
-    /// transcript projection.
+    /// Return the ACP metadata rows the transcript needs beyond
+    /// [`Self::get_session_messages`]; see [`TRANSCRIPT_METADATA_FILTER`].
     pub fn get_session_acp_metadata_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ?1 AND {TRANSCRIPT_METADATA_FILTER}
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![session_id], transcript_message_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every row carrying ACP metadata, unfiltered — the replay archive the
+    /// writer persists. Tests use it to assert on rows the transcript
+    /// projection deliberately leaves out.
+    #[cfg(test)]
+    pub fn get_session_acp_metadata_archive(
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, StoreError> {
@@ -386,6 +510,8 @@ impl Store {
     /// `refetch_ids`. Rows for tool calls that have not reached a terminal
     /// status are updated in place by the message writer rather than
     /// re-inserted, so callers pass those ids to observe the mutations.
+    /// Re-fetched rows bypass the transcript filter so a caller sees the row
+    /// settle (and stops asking for it) instead of it silently vanishing.
     pub fn get_session_acp_metadata_messages_since(
         &self,
         session_id: &str,
@@ -393,15 +519,31 @@ impl Store {
         refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::get_session_acp_metadata_messages_since_with_conn(
+            &conn,
+            session_id,
+            since_id,
+            refetch_ids,
+        )
+    }
+
+    /// [`Self::get_session_acp_metadata_messages_since`] on a connection the
+    /// caller already holds (see `poll_session`).
+    pub(super) fn get_session_acp_metadata_messages_since_with_conn(
+        conn: &Connection,
+        session_id: &str,
+        since_id: i64,
+        refetch_ids: &[i64],
+    ) -> Result<Vec<SessionMessage>, StoreError> {
         let refetch_placeholders = refetch_ids
             .iter()
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(", ");
         let id_filter = if refetch_ids.is_empty() {
-            "id > ?".to_string()
+            format!("(id > ? AND {TRANSCRIPT_METADATA_FILTER})")
         } else {
-            format!("(id > ? OR id IN ({refetch_placeholders}))")
+            format!("((id > ? AND {TRANSCRIPT_METADATA_FILTER}) OR id IN ({refetch_placeholders}))")
         };
         let sql = format!(
             "SELECT {SESSION_MESSAGE_COLUMNS}
@@ -414,7 +556,7 @@ impl Store {
         for id in refetch_ids {
             query_params.push(id);
         }
-        let rows = stmt.query_map(&query_params[..], session_message_from_row)?;
+        let rows = stmt.query_map(&query_params[..], transcript_message_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -475,6 +617,17 @@ impl Store {
         refetch_ids: &[i64],
     ) -> Result<Vec<SessionMessage>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::get_session_messages_since_with_conn(&conn, session_id, since_id, refetch_ids)
+    }
+
+    /// [`Self::get_session_messages_since`] on a connection the caller already
+    /// holds (see `poll_session`).
+    pub(super) fn get_session_messages_since_with_conn(
+        conn: &Connection,
+        session_id: &str,
+        since_id: i64,
+        refetch_ids: &[i64],
+    ) -> Result<Vec<SessionMessage>, StoreError> {
         let refetch_placeholders = refetch_ids
             .iter()
             .map(|_| "?")
@@ -498,7 +651,7 @@ impl Store {
         for id in refetch_ids {
             query_params.push(id);
         }
-        let rows = stmt.query_map(&query_params[..], session_message_from_row)?;
+        let rows = stmt.query_map(&query_params[..], transcript_message_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

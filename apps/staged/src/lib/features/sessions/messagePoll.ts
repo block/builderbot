@@ -8,7 +8,32 @@
  * behind the cursor. The pane asks for it by id alongside the tail.
  */
 
-import type { SessionMessage } from '../../types';
+import type { SessionMessage, SessionPollRequest } from '../../types';
+import { isToolMetadataSettled } from './acpTranscript';
+import { retainInlineToolBodies } from './toolCallBodies';
+
+/**
+ * The cursors for one `pollSession` tick, from what the pane has loaded.
+ *
+ * An empty transcript polls from `0`, which returns every visible row: the
+ * same result `mergeSinceMessages([], rows, 0)` turns into the whole list.
+ * Metadata rows for unsettled tool calls are mutated in place by the writer
+ * rather than re-inserted, so they are re-requested by id alongside the rows
+ * past the metadata cursor.
+ */
+export function sessionPollRequest(
+  messages: readonly SessionMessage[],
+  acpMetadataMessages: readonly SessionMessage[]
+): SessionPollRequest {
+  return {
+    sinceId: messages.at(-1)?.id ?? 0,
+    refetchIds: openAssistantRefetchIds(messages),
+    metadataSinceId: acpMetadataMessages.at(-1)?.id ?? 0,
+    metadataRefetchIds: acpMetadataMessages
+      .filter((message) => message.acpToolCallId && !isToolMetadataSettled(message))
+      .map((message) => message.id),
+  };
+}
 
 /**
  * Ids of rows before the tail the writer may still be extending: the most
@@ -55,6 +80,10 @@ export interface MergedSinceMessages {
  * hold it cannot tell which copy is newer, so it relies on the pane
  * serialising since-fetches (`pollInFlight` / `finalPollPending`) and is not
  * a full defence against out-of-order fetches.
+ *
+ * A tool row that settled since the last tick comes back with its large
+ * bodies deferred; the inline copies already cached are kept where they match
+ * ({@link retainInlineToolBodies}) so an expanded card does not refetch them.
  */
 export function mergeSinceMessages(
   existing: readonly SessionMessage[],
@@ -63,12 +92,13 @@ export function mergeSinceMessages(
 ): MergedSinceMessages | null {
   let next: SessionMessage[] | null = null;
   const tail: SessionMessage[] = [];
-  for (const message of updated) {
+  for (const update of updated) {
+    const index = findIndexFromEnd(existing, update.id);
+    const message = index < 0 ? update : retainInlineToolBodies(existing[index], update);
     if (message.id >= lastId) {
       tail.push(message);
       continue;
     }
-    const index = findIndexFromEnd(existing, message.id);
     if (index < 0 || isSameMessage(existing[index], message)) continue;
     next ??= [...existing];
     next[index] = message;

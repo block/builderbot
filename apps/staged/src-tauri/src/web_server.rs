@@ -269,6 +269,14 @@ pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
     ))
 }
 
+/// Tool and note media are user/agent-supplied bytes served from the app
+/// origin. Viewed top-level (e.g. "Open image in new tab") an SVG would run
+/// script with the session cookie in scope; `sandbox` puts it in an opaque
+/// origin with script disabled and `default-src 'none'` blocks its subresource
+/// loads, while `style-src 'unsafe-inline'` keeps its own `<style>` working.
+/// `<img>` rendering ignores response CSP, so this costs nothing there.
+const UNTRUSTED_MEDIA_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
+
 fn media_router_for_store(
     store: Arc<Store>,
     token: String,
@@ -317,6 +325,12 @@ async fn serve_media(
                 "X-Content-Type-Options",
                 axum::http::HeaderValue::from_static("nosniff"),
             );
+            // `mime_for_extension` has no SVG entry today; this keeps a future
+            // one from reopening the top-level script hole.
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static(UNTRUSTED_MEDIA_CSP),
+            );
             response
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -335,6 +349,9 @@ async fn serve_media(
 /// resolves refs for settled tool rows, whose block lists never change again,
 /// so the id/index pair is a stable identity for the block. The compression
 /// layer's default predicate skips `image/*` bodies, so these go out as-is.
+/// Every response carries [`UNTRUSTED_MEDIA_CSP`]: `is_image_mime_type`
+/// admits `image/svg+xml`, and an SVG opened as a document must not run on
+/// this origin.
 async fn serve_tool_image(
     State(store): State<Arc<Store>>,
     Path((message_id, field, index)): Path<(String, String, String)>,
@@ -371,6 +388,10 @@ async fn serve_tool_image(
             (
                 axum::http::header::HeaderName::from_static("x-content-type-options"),
                 axum::http::HeaderValue::from_static("nosniff"),
+            ),
+            (
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static(UNTRUSTED_MEDIA_CSP),
             ),
         ],
         image.bytes,
@@ -4498,6 +4519,11 @@ mod media_tests {
             .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
         assert_eq!(
             axum::body::to_bytes(response.into_body(), 100)
                 .await
@@ -4521,6 +4547,10 @@ mod media_tests {
         use base64::Engine;
         let fixture = Fixture::new();
         let store = fixture.store.clone();
+        // An SVG is an image to the store and the client, but opened as a
+        // document it is a script host; the route must serve it sandboxed.
+        const SVG: &[u8] =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>";
         let id = store
             .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Read")
             .unwrap();
@@ -4535,6 +4565,10 @@ mod media_tests {
                         {"type": "image", "source": {
                             "type": "base64", "media_type": "image/png",
                             "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                        }},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/svg+xml",
+                            "data": base64::engine::general_purpose::STANDARD.encode(SVG),
                         }},
                     ])),
                     ..Default::default()
@@ -4590,11 +4624,37 @@ mod media_tests {
         );
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
+        assert_eq!(
             axum::body::to_bytes(response.into_body(), 100)
                 .await
                 .unwrap()
                 .as_ref(),
             PNG
+        );
+
+        // The SVG is still served with its own type (the `<img>` needs it),
+        // only ever under the sandboxing policy.
+        let response = get(
+            format!("/api/tool-images/{id}/output/2"),
+            Some("bearer-token"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "image/svg+xml");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1000)
+                .await
+                .unwrap()
+                .as_ref(),
+            SVG
         );
 
         assert_eq!(
@@ -4606,7 +4666,7 @@ mod media_tests {
         );
         for uri in [
             format!("/api/tool-images/{id}/output/0"),
-            format!("/api/tool-images/{id}/output/2"),
+            format!("/api/tool-images/{id}/output/3"),
             format!("/api/tool-images/{id}/content/0"),
             format!("/api/tool-images/{id}/source/1"),
             format!("/api/tool-images/{in_flight_id}/output/1"),

@@ -574,6 +574,55 @@ fn validates_magic_and_caps_by_kind_without_reading_oversized_files() {
 }
 
 #[test]
+fn attachment_reads_pick_their_cap_from_the_file_signature() {
+    let f = Fixture::new();
+    let sparse = |name: &str, header: &[u8], len: u64| {
+        let path = f.dir.path().join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, header).unwrap();
+        file.set_len(len).unwrap();
+        path
+    };
+    // A PDF between the image and PDF caps is read in full.
+    let path = sparse("a.pdf", b"%PDF-1.4\n", files::MAX_IMAGE_SIZE + 1);
+    let bytes = files::read_local_attachment(&path).unwrap();
+    assert_eq!(bytes.len() as u64, files::MAX_IMAGE_SIZE + 1);
+    assert!(bytes.starts_with(b"%PDF-1.4\n"));
+    assert_eq!(
+        files::read_local_attachment(&sparse("b.pdf", b"%PDF-", files::MAX_PDF_INPUT_SIZE + 1)),
+        Err("PDF exceeds 50 MB limit".into())
+    );
+    // Anything else keeps the image cap, judged from metadata.
+    assert_eq!(
+        files::read_local_attachment(&sparse("c.png", PNG, files::MAX_IMAGE_SIZE + 1)),
+        Err("media exceeds 10 MB limit".into())
+    );
+    // Files shorter than the signature are read, not mistaken for PDFs.
+    assert_eq!(
+        files::read_local_attachment(&sparse("d.png", b"%PD", 3)).unwrap(),
+        b"%PD"
+    );
+    assert_eq!(
+        files::read_local_attachment(f.dir.path()),
+        Err("media must be a regular file".into())
+    );
+    assert_eq!(
+        files::read_local_attachment(&f.dir.path().join("missing.pdf")),
+        Err(files::ReadError::NotFound("media file is unavailable"))
+    );
+
+    // The same decision for bytes already in memory.
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.resize(files::MAX_PDF_INPUT_SIZE as usize + 1, b' ');
+    let err = files::store_sniffed_image(&f.store, None, &f.project.id, None, "a.pdf", &pdf);
+    assert_eq!(err.unwrap_err(), "PDF exceeds 50 MB limit");
+    let mut png = PNG.to_vec();
+    png.resize(files::MAX_IMAGE_SIZE as usize + 1, 0);
+    let err = files::store_sniffed_image(&f.store, None, &f.project.id, None, "a.png", &png);
+    assert_eq!(err.unwrap_err(), "media exceeds 10 MB limit");
+}
+
+#[test]
 fn failed_note_save_rolls_back_new_files_but_keeps_previous_media() {
     let f = Fixture::new();
     std::fs::write(f.dir.path().join("shot.png"), PNG).unwrap();

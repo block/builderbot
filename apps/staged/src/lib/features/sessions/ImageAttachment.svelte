@@ -1,5 +1,5 @@
 <!--
-  ImageAttachment.svelte — Attach images or text snippets to a session prompt
+  ImageAttachment.svelte — Attach images, PDFs, or text snippets to a session prompt
 
   Provides a file picker button, thumbnail previews with remove buttons,
   and clipboard paste support (Ctrl/Cmd+V). Images are uploaded to the
@@ -231,8 +231,8 @@
         variant="outline"
         size="icon"
         class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-        title="Add image"
-        aria-label="Add image"
+        title="Add image or PDF"
+        aria-label="Add image or PDF"
         onclick={openFilePicker}
       >
         <Plus size={16} />
@@ -260,7 +260,7 @@
       onclick={openFilePicker}
     >
       <ImagePlus size={14} />
-      <span>Attach images</span>
+      <span>Attach images or PDFs</span>
     </Button>
     {#if onAttachClipboard}
       <Button

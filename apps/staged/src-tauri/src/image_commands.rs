@@ -42,8 +42,7 @@ fn create_image_impl(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or("Invalid filename")?;
-    let bytes =
-        crate::note_media::files::read_local(src, crate::note_media::files::MAX_IMAGE_SIZE)?;
+    let bytes = crate::note_media::files::read_local_attachment(src)?;
     crate::note_media::files::store_sniffed_image(
         &store,
         branch_id.as_deref(),
@@ -165,10 +164,19 @@ pub(crate) fn create_image_from_data_impl(
     pending: Option<bool>,
 ) -> Result<crate::store::Image, String> {
     use base64::Engine;
-    if data.len() as u64 > crate::note_media::files::MAX_IMAGE_SIZE.div_ceil(3) * 4 {
-        return Err("Image too large (max 10 MB)".into());
+    let engine = base64::engine::general_purpose::STANDARD;
+    // The cap depends on the payload (a PDF may be larger than an image), so
+    // peek at the first six bytes — two base64 quanta — before decoding a
+    // payload that may turn out to be oversized.
+    let header = data
+        .get(..8)
+        .and_then(|quanta| engine.decode(quanta).ok())
+        .unwrap_or_default();
+    let (cap, what) = crate::note_media::files::attachment_limit(&header);
+    if data.len() as u64 > cap.div_ceil(3) * 4 {
+        return Err(crate::note_media::files::size_error(what, cap));
     }
-    let bytes = base64::engine::general_purpose::STANDARD
+    let bytes = engine
         .decode(&data)
         .map_err(|e| format!("Invalid base64 data: {e}"))?;
 
@@ -268,6 +276,86 @@ mod tests {
                 .filename,
             "pasted.png"
         );
+    }
+
+    /// PDFs get the larger input cap on both routes; images keep theirs. The
+    /// padded PDFs here are well-formed, so acceptance means the PNG of page
+    /// one was stored, not that the bytes merely got past the size check.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pdf_input_cap_is_separate_from_the_image_cap() {
+        use crate::note_media::files::{MAX_IMAGE_SIZE, MAX_PDF_INPUT_SIZE};
+        use crate::note_media::pdf::tests::{padded_pdf, PAGE_ONE};
+        use crate::note_media::tests::PNG;
+        let f = Fixture::new();
+        let large_pdf = padded_pdf(&[PAGE_ONE], MAX_IMAGE_SIZE as usize + 1);
+
+        let image = attach(&f, "scan.pdf", "application/pdf", &large_pdf).unwrap();
+        assert_eq!(image.mime_type, "image/png");
+        assert!(image.size_bytes < MAX_IMAGE_SIZE as i64);
+
+        let path = f.dir.path().join("dropped.pdf");
+        std::fs::write(&path, &large_pdf).unwrap();
+        let image = create_image_impl(
+            f.store.clone(),
+            Some(f.branch.id.clone()),
+            f.project.id.clone(),
+            path.to_string_lossy().into_owned(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            (image.mime_type.as_str(), image.filename.as_str()),
+            ("image/png", "dropped.png")
+        );
+
+        // Over the PDF cap: refused before decoding (base64) or reading (path).
+        let mut oversized = "JVBERi0x".to_owned(); // "%PDF-1" — a PDF signature
+        oversized.push_str(&"A".repeat((MAX_PDF_INPUT_SIZE.div_ceil(3) * 4) as usize));
+        let err = create_image_from_data_impl(
+            f.store.clone(),
+            None,
+            f.project.id.clone(),
+            "huge.pdf".into(),
+            "application/pdf".into(),
+            oversized,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, "PDF exceeds 50 MB limit");
+        let sparse = f.dir.path().join("huge.pdf");
+        let mut file = std::fs::File::create(&sparse).unwrap();
+        std::io::Write::write_all(&mut file, b"%PDF-1.4\n").unwrap();
+        file.set_len(MAX_PDF_INPUT_SIZE + 1).unwrap();
+        let err = create_image_impl(
+            f.store.clone(),
+            None,
+            f.project.id.clone(),
+            sparse.to_string_lossy().into_owned(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, "PDF exceeds 50 MB limit");
+
+        // An image over its own cap is still refused with the image message,
+        // on both routes, and from metadata alone on the path route.
+        let mut png = PNG.to_vec();
+        png.resize(MAX_IMAGE_SIZE as usize + 1, 0);
+        let err = attach(&f, "big.png", "image/png", &png).unwrap_err();
+        assert_eq!(err, "media exceeds 10 MB limit");
+        let sparse = f.dir.path().join("big.png");
+        let mut file = std::fs::File::create(&sparse).unwrap();
+        std::io::Write::write_all(&mut file, PNG).unwrap();
+        file.set_len(MAX_IMAGE_SIZE + 1).unwrap();
+        let err = create_image_impl(
+            f.store.clone(),
+            None,
+            f.project.id.clone(),
+            sparse.to_string_lossy().into_owned(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, "media exceeds 10 MB limit");
     }
 
     #[cfg(target_os = "macos")]

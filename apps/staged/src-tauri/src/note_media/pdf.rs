@@ -7,7 +7,7 @@
 //! Linux CI build stays green; they report that PDF attachments need macOS.
 
 #[cfg(target_os = "macos")]
-use super::files::MAX_IMAGE_SIZE;
+use super::files::{size_error, MAX_IMAGE_SIZE};
 
 /// Long edge of the rendered page in pixels. A letter page lands at ~186 DPI,
 /// which keeps body text legible to a vision model without approaching the
@@ -37,11 +37,6 @@ impl std::fmt::Debug for RenderedPage {
             .field("page_count", &self.page_count)
             .finish()
     }
-}
-
-#[cfg(target_os = "macos")]
-fn size_limit_error() -> String {
-    format!("media exceeds {} MB limit", MAX_IMAGE_SIZE / 1024 / 1024)
 }
 
 /// Render page 1 to a white-backed PNG whose long edge is `max_edge_px`
@@ -94,7 +89,7 @@ pub(crate) fn render_first_page(bytes: &[u8], max_edge_px: u32) -> Result<Render
         png
     };
     if png.len() as u64 > MAX_IMAGE_SIZE {
-        return Err(size_limit_error());
+        return Err(size_error("media", MAX_IMAGE_SIZE));
     }
     Ok(RenderedPage { png, page_count })
 }
@@ -206,6 +201,25 @@ pub(crate) mod tests {
         crop_box: Option<&str>,
         rotate: Option<u32>,
     ) -> Vec<u8> {
+        build_pdf(pages, media_box, crop_box, rotate, 0)
+    }
+
+    /// [`tiny_pdf`] grown past `min_len` bytes with comment lines after the
+    /// header, so a large file is still a well-formed, instantly rendered PDF
+    /// (the xref offsets skip the comments) — for exercising the size caps.
+    pub(crate) fn padded_pdf(pages: &[&str], min_len: usize) -> Vec<u8> {
+        let pdf = build_pdf(pages, "[0 0 612 792]", None, None, min_len);
+        assert!(pdf.len() >= min_len);
+        pdf
+    }
+
+    fn build_pdf(
+        pages: &[&str],
+        media_box: &str,
+        crop_box: Option<&str>,
+        rotate: Option<u32>,
+        padding: usize,
+    ) -> Vec<u8> {
         let font_id = 3 + pages.len() * 2;
         let mut objects = vec![
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -236,6 +250,10 @@ pub(crate) mod tests {
         objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned());
 
         let mut out = b"%PDF-1.4\n".to_vec();
+        let comment = format!("%{}\n", "x".repeat(4095));
+        while out.len() < padding {
+            out.extend_from_slice(comment.as_bytes());
+        }
         let mut offsets = Vec::new();
         for (i, body) in objects.iter().enumerate() {
             offsets.push(out.len());
@@ -261,6 +279,10 @@ pub(crate) mod tests {
     pub(crate) const PAGE_ONE: &str =
         "BT /F1 24 Tf 72 700 Td (PAGE ONE Staged PDF probe) Tj ET\n4 w 72 650 m 540 650 l S";
 
+    /// Page one's text plus a second rule, at y=400 pt, that page one lacks.
+    pub(crate) const PAGE_TWO: &str =
+        "BT /F1 24 Tf 72 700 Td (PAGE TWO should not appear) Tj ET\n4 w 72 400 m 540 400 l S";
+
     #[test]
     fn detects_the_pdf_signature_only() {
         assert!(is_pdf(&tiny_pdf(&[PAGE_ONE])));
@@ -274,8 +296,6 @@ pub(crate) mod tests {
     mod macos {
         use super::*;
 
-        const PAGE_TWO: &str = "BT /F1 24 Tf 72 700 Td (PAGE TWO should not appear) Tj ET";
-
         fn decode(png: &[u8]) -> tiny_skia::Pixmap {
             assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
             tiny_skia::Pixmap::decode_png(png).unwrap()
@@ -284,6 +304,12 @@ pub(crate) mod tests {
         fn is_opaque_white(pixmap: &tiny_skia::Pixmap, x: u32, y: u32) -> bool {
             let p = pixmap.pixel(x, y).unwrap();
             (p.red(), p.green(), p.blue(), p.alpha()) == (255, 255, 255, 255)
+        }
+
+        /// Bitmap row through the middle of a 4 pt rule drawn at `y_pt` on a
+        /// letter page rendered 2048 px tall.
+        fn letter_rule_row(y_pt: f64) -> u32 {
+            ((792.0 - y_pt) * 2048.0 / 792.0) as u32
         }
 
         #[test]
@@ -297,12 +323,18 @@ pub(crate) mod tests {
                 assert!(is_opaque_white(&pixmap, x, y), "corner {x},{y}");
             }
             // The rule at y=650pt from the bottom is drawn; everything is opaque.
-            let rule_y = ((792.0 - 650.0) * 2048.0 / 792.0) as u32;
-            let p = pixmap.pixel(800, rule_y).unwrap();
+            let p = pixmap.pixel(800, letter_rule_row(650.0)).unwrap();
             assert!(p.red() < 128 && p.alpha() == 255, "rule pixel {p:?}");
             assert!(pixmap.pixels().iter().all(|p| p.alpha() == 255));
-            // Page two's text sits where page one has nothing but white.
-            assert!(is_opaque_white(&pixmap, 1400, 2048 - rule_y - 300));
+            // Page two's own rule, at y=400pt, is not drawn...
+            assert!(is_opaque_white(&pixmap, 800, letter_rule_row(400.0)));
+            // ...and would have been, had page two been the one rendered.
+            let swapped = decode(&render_first_page(&tiny_pdf(&[PAGE_TWO]), 2048).unwrap().png);
+            let p = swapped.pixel(800, letter_rule_row(400.0)).unwrap();
+            assert!(
+                p.red() < 128 && p.alpha() == 255,
+                "page-two rule pixel {p:?}"
+            );
         }
 
         #[test]

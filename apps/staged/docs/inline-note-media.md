@@ -41,10 +41,13 @@ the current webview. Older QuickTime files without an `ftyp` header are rejected
 Chat attachments (file picker, paste, drop) share the validation code but are
 stored under the format their bytes actually are: browsers label `file.type`
 from the filename, so a WebP saved as `shot.png` is stored as `shot.webp` with
-an `image/webp` MIME rather than rejected. Only unrecognized signatures, videos,
-and oversized files are refused, and the composer shows the reason for pasted,
-picked, and natively dropped files alike, clearing it when the message is sent
-or the attachment removed.
+an `image/webp` MIME rather than rejected. A dropped, pasted, or picked PDF (up
+to 50 MiB) is stored as a PNG of its first page, rendered with CoreGraphics on
+macOS; the PDF bytes themselves are not kept, and a `.pdf` reference in a note
+is still refused. Only unrecognized signatures, videos, and oversized files are
+refused, and the composer shows the reason for pasted, picked, and natively
+dropped files alike, clearing it when the message is sent or the attachment
+removed.
 
 On session completion, files are copied into the existing project `images/`
 store and destinations become `staged-media://<uuid>.<ext>`. Captions and titles

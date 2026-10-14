@@ -62,6 +62,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import { splitNoteMarkdown } from '../notes/noteMarkdown';
+  import { attachBasename } from '../sessions/attachErrors';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -1780,10 +1781,11 @@
             console.error('Failed to create image from drop:', e);
             // Same shape as the text path, so a rejected PDF or oversized
             // image ("could not open PDF", "media exceeds 10 MB limit") is
-            // not a silent no-op.
+            // not a silent no-op. The extension stays in the name, as in the
+            // composer's attach errors: it is what explains a PDF failure.
             const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
             toast.error('Error', {
-              description: `Could not attach "${fileNameFromPath(filePath)}"${reason ? ` \u2014 ${reason}` : ''}`,
+              description: `Could not attach "${attachBasename(filePath)}"${reason ? ` \u2014 ${reason}` : ''}`,
             });
           }
         })

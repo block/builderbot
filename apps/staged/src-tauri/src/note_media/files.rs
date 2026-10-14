@@ -6,7 +6,26 @@ use std::io::Read;
 use std::path::Path;
 
 pub(crate) const MAX_IMAGE_SIZE: u64 = 10 * 1024 * 1024;
+/// A PDF attachment may be far larger than the PNG of its first page that is
+/// actually stored (scans and print-ready files routinely run 10–50 MB), so
+/// `%PDF-` payloads get their own input cap. Only the rendered PNG has to
+/// satisfy [`MAX_IMAGE_SIZE`].
+pub(crate) const MAX_PDF_INPUT_SIZE: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_VIDEO_SIZE: u64 = 100 * 1024 * 1024;
+
+pub(crate) fn size_error(what: &str, cap: u64) -> String {
+    format!("{what} exceeds {} MB limit", cap / 1024 / 1024)
+}
+
+/// Input cap for a chat attachment, decided from its leading bytes, with the
+/// noun its size error names so an oversized PDF is reported as such.
+pub(crate) fn attachment_limit(header: &[u8]) -> (u64, &'static str) {
+    if super::pdf::is_pdf(header) {
+        (MAX_PDF_INPUT_SIZE, "PDF")
+    } else {
+        (MAX_IMAGE_SIZE, "media")
+    }
+}
 pub(crate) const MAX_REMOTE_VIDEO_SIZE: i64 = 20 * 1024 * 1024;
 
 pub(crate) fn extension(filename: &str) -> String {
@@ -79,7 +98,7 @@ pub(crate) fn validate_media(
 ) -> Result<&'static str, String> {
     let cap = size_limit(filename, allow_video)?;
     if bytes.len() as u64 > cap {
-        return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024));
+        return Err(size_error("media", cap));
     }
     let ext = extension(filename);
     let valid = match (ext.as_str(), sniff_format(bytes)) {
@@ -107,11 +126,9 @@ pub(crate) fn store_sniffed_image(
     filename: &str,
     bytes: &[u8],
 ) -> Result<Image, String> {
-    if bytes.len() as u64 > MAX_IMAGE_SIZE {
-        return Err(format!(
-            "media exceeds {} MB limit",
-            MAX_IMAGE_SIZE / 1024 / 1024
-        ));
+    let (cap, what) = attachment_limit(bytes);
+    if bytes.len() as u64 > cap {
+        return Err(size_error(what, cap));
     }
     // A PDF becomes an ordinary PNG attachment of its first page; nothing
     // downstream (store, viewer, agent prompt) ever sees PDF bytes. Only this
@@ -181,6 +198,35 @@ impl From<&str> for ReadError {
 }
 
 pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
+    let (file, len) = open_regular(path)?;
+    if len > cap {
+        return Err(size_error("media", cap).into());
+    }
+    read_capped(file, Vec::new(), cap)
+}
+
+/// [`read_local`] for a chat attachment, whose cap depends on what the file
+/// is (see [`attachment_limit`]). The signature is read before the body so an
+/// oversized image is still refused from its metadata, without buffering
+/// anything like [`MAX_PDF_INPUT_SIZE`] first.
+pub(crate) fn read_local_attachment(path: &Path) -> Result<Vec<u8>, ReadError> {
+    let (mut file, len) = open_regular(path)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(PDF_SIGNATURE_LEN)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "cannot read media file")?;
+    let (cap, what) = attachment_limit(&bytes);
+    if len > cap {
+        return Err(size_error(what, cap).into());
+    }
+    read_capped(file, bytes, cap)
+}
+
+const PDF_SIGNATURE_LEN: u64 = b"%PDF-".len() as u64;
+
+/// Open a regular file for reading and return it with its current length.
+fn open_regular(path: &Path) -> Result<(std::fs::File, u64), ReadError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -197,11 +243,13 @@ pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
     if !metadata.is_file() {
         return Err("media must be a regular file".into());
     }
-    if metadata.len() > cap {
-        return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
-    }
-    let mut bytes = Vec::new();
-    file.take(cap + 1)
+    Ok((file, metadata.len()))
+}
+
+/// Read the rest of `file` after `bytes` (already read from it), refusing a
+/// file that grew past `cap` since its metadata was checked.
+fn read_capped(file: std::fs::File, mut bytes: Vec<u8>, cap: u64) -> Result<Vec<u8>, ReadError> {
+    file.take(cap + 1 - bytes.len() as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| "cannot read media file")?;
     if bytes.len() as u64 > cap {
@@ -312,7 +360,7 @@ pub(crate) fn read_candidate(
         }
         let bytes = output.stdout;
         if bytes.len() as u64 > cap {
-            return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
+            return Err(size_error("media", cap).into());
         }
         Ok(bytes)
     } else {

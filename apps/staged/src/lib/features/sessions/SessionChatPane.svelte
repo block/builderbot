@@ -938,7 +938,7 @@
       // A first page shorter than the viewport leaves nothing to scroll, so
       // the scroll handler alone could never ask for the next one.
       await tick();
-      loadOlderMessagesIfNearTop();
+      loadOlderMessagesIfUnscrollable();
     }
   }
 
@@ -1363,9 +1363,17 @@
     if (scrollTop < LOAD_OLDER_THRESHOLD_PX) void loadOlderMessages();
   }
 
-  /** Ask for the next page while the top of the window is in or near view. */
-  function loadOlderMessagesIfNearTop() {
-    if (messagesEl && messagesEl.scrollTop < LOAD_OLDER_THRESHOLD_PX) void loadOlderMessages();
+  /**
+   * Ask for the next page while the loaded rows do not overflow the viewport.
+   * Only that case needs a programmatic request: once the transcript scrolls
+   * at all, `handleScroll` applies `LOAD_OLDER_THRESHOLD_PX` on real scrolling.
+   * Reusing the threshold here would fetch a second page, unasked, for every
+   * session whose first page overflows by less than it.
+   */
+  function loadOlderMessagesIfUnscrollable() {
+    if (messagesEl && messagesEl.scrollHeight <= messagesEl.clientHeight) {
+      void loadOlderMessages();
+    }
   }
 
   /**
@@ -1417,7 +1425,7 @@
     } finally {
       loadingOlder = false;
     }
-    loadOlderMessagesIfNearTop();
+    loadOlderMessagesIfUnscrollable();
   }
 
   /** Scroll to bottom unconditionally (e.g. initial load, user sends message).

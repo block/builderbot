@@ -57,6 +57,7 @@
   import type { SearchState, FileSearchResult } from '../state/searchState.svelte';
   import type { SearchMatch, MatchLocation } from '../utils/diffSearch';
   import {
+    anchorSideForHunk,
     buildAfterMarkers,
     buildBeforeMarkers,
     buildLineToAlignmentMap,
@@ -473,13 +474,10 @@
     // Wait for next frame to ensure dimensions are set
     requestAnimationFrame(() => {
       const firstHunk = changedAlignments[0].alignment;
-      // Scroll to the first change in the after pane, unless it only exists on
-      // the before side (deleted file or pure deletion) – anchoring on the after
-      // pane there would leave the removed lines just past the before viewport.
-      const side =
-        isDeletedFile || firstHunk.after.end === firstHunk.after.start ? 'before' : 'after';
-      const startRow = side === 'before' ? firstHunk.before.start : firstHunk.after.start;
-      scrollController.scrollToRow(startRow, side);
+      // Scroll to the first change, anchored on the pane that has its rows
+      // (deleted files and pure deletions only exist on the before side).
+      const side = isDeletedFile ? 'before' : anchorSideForHunk(firstHunk);
+      scrollController.scrollToRow(firstHunk[side].start, side);
     });
   });
 
@@ -533,6 +531,12 @@
   // Content dimensions for scrollbars (state-driven so they update on font changes too)
   let beforeContentHeight = $state(0);
   let afterContentHeight = $state(0);
+
+  // Scrollbars run over each pane's effective extent (own range plus the edge
+  // handoff headroom) so rows that exist on one side alone stay reachable by
+  // thumb drag and track click, not just by wheel.
+  let beforeScrollExtent = $derived(scrollController.getEffectiveExtent('before'));
+  let afterScrollExtent = $derived(scrollController.getEffectiveExtent('after'));
 
   // Reactive line/viewport metrics that drive the rendered window (Phase 2
   // virtualization). Kept in sync wherever dimensions are measured below so the
@@ -1222,8 +1226,7 @@
     handleWheel('after', e);
   }
 
-  function handleBeforeScrollbarScroll(deltaY: number) {
-    scrollController.scrollBy('before', deltaY);
+  function syncOverlaysAfterScrollbar() {
     redrawConnectorsImpl();
     updateToolbarPosition();
     updateCommentEditorPosition();
@@ -1231,13 +1234,24 @@
     updateLineCommentEditorPosition();
   }
 
+  function handleBeforeScrollbarScroll(deltaY: number) {
+    scrollController.scrollBy('before', deltaY);
+    syncOverlaysAfterScrollbar();
+  }
+
+  function handleBeforeScrollbarScrollTo(scrollY: number) {
+    scrollController.scrollToEffective('before', scrollY);
+    syncOverlaysAfterScrollbar();
+  }
+
   function handleAfterScrollbarScroll(deltaY: number) {
     scrollController.scrollBy('after', deltaY);
-    redrawConnectorsImpl();
-    updateToolbarPosition();
-    updateCommentEditorPosition();
-    updateLineSelectionToolbar();
-    updateLineCommentEditorPosition();
+    syncOverlaysAfterScrollbar();
+  }
+
+  function handleAfterScrollbarScrollTo(scrollY: number) {
+    scrollController.scrollToEffective('after', scrollY);
+    syncOverlaysAfterScrollbar();
   }
 
   function handleHorizontalScrollbarScroll(deltaX: number) {
@@ -2312,11 +2326,13 @@
               </div>
             {:else}
               <Scrollbar
-                scrollY={scrollController.beforeScrollY}
-                contentHeight={beforeContentHeight}
+                scrollY={beforeScrollExtent.scrollY}
+                contentHeight={beforeScrollExtent.contentHeight}
                 viewportHeight={beforePane?.clientHeight ?? 0}
+                markerRange={{ top: beforeScrollExtent.contentOffset, height: beforeContentHeight }}
                 side="left"
                 onScroll={handleBeforeScrollbarScroll}
+                onScrollTo={handleBeforeScrollbarScrollTo}
                 markers={beforeMarkers}
               />
               <div class="code-container" bind:this={beforePane}>
@@ -2409,11 +2425,13 @@
           </div>
           <div class="code-area" onwheel={handleBeforeWheel}>
             <Scrollbar
-              scrollY={scrollController.beforeScrollY}
-              contentHeight={beforeContentHeight}
+              scrollY={beforeScrollExtent.scrollY}
+              contentHeight={beforeScrollExtent.contentHeight}
               viewportHeight={beforePane?.clientHeight ?? 0}
+              markerRange={{ top: beforeScrollExtent.contentOffset, height: beforeContentHeight }}
               side="left"
               onScroll={handleBeforeScrollbarScroll}
+              onScrollTo={handleBeforeScrollbarScrollTo}
               markers={[]}
             />
             <div class="code-container" bind:this={beforePane}>
@@ -2577,11 +2595,13 @@
                 {/if}
               </div>
               <Scrollbar
-                scrollY={scrollController.afterScrollY}
-                contentHeight={afterContentHeight}
+                scrollY={afterScrollExtent.scrollY}
+                contentHeight={afterScrollExtent.contentHeight}
                 viewportHeight={afterPane?.clientHeight ?? 0}
+                markerRange={{ top: afterScrollExtent.contentOffset, height: afterContentHeight }}
                 side="right"
                 onScroll={handleAfterScrollbarScroll}
+                onScrollTo={handleAfterScrollbarScrollTo}
                 markers={afterMarkers}
               />
               <HorizontalScrollbar
@@ -2658,11 +2678,13 @@
               {/if}
             </div>
             <Scrollbar
-              scrollY={scrollController.afterScrollY}
-              contentHeight={afterContentHeight}
+              scrollY={afterScrollExtent.scrollY}
+              contentHeight={afterScrollExtent.contentHeight}
               viewportHeight={afterPane?.clientHeight ?? 0}
+              markerRange={{ top: afterScrollExtent.contentOffset, height: afterContentHeight }}
               side="right"
               onScroll={handleAfterScrollbarScroll}
+              onScrollTo={handleAfterScrollbarScrollTo}
               markers={[]}
             />
             <HorizontalScrollbar

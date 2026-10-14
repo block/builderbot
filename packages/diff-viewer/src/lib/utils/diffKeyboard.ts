@@ -15,6 +15,7 @@
  */
 
 import type { Alignment } from '../types';
+import { anchorSideForHunk } from './diffViewerHelpers';
 
 export interface DiffNavConfig {
   scrollAmount: number; // pixels per keypress for smooth scroll
@@ -76,6 +77,14 @@ function findCurrentHunkIndex(config: DiffNavConfig): number {
 }
 
 /**
+ * Scroll a hunk into view, anchored on the pane that actually has its rows.
+ */
+function scrollToHunk(config: DiffNavConfig, hunk: Alignment): void {
+  const side = anchorSideForHunk(hunk);
+  config.scrollToRow(hunk[side].start, side);
+}
+
+/**
  * Navigate to the next diff hunk.
  */
 function goToNextHunk(config: DiffNavConfig): boolean {
@@ -86,8 +95,7 @@ function goToNextHunk(config: DiffNavConfig): boolean {
   const nextIndex = currentIndex + 1;
 
   if (nextIndex < alignments.length) {
-    const nextHunk = alignments[nextIndex].alignment;
-    config.scrollToRow(nextHunk.after.start, 'after');
+    scrollToHunk(config, alignments[nextIndex].alignment);
     config.onHunkFocus?.(nextIndex);
     return true;
   }
@@ -128,15 +136,14 @@ function goToPreviousHunk(config: DiffNavConfig): boolean {
 
     // If we're more than 2 lines into the current hunk, go to its start
     if (anchorRow > currentHunk.after.start + 2) {
-      config.scrollToRow(currentHunk.after.start, 'after');
+      scrollToHunk(config, currentHunk);
       config.onHunkFocus?.(currentIndex);
       return true;
     }
 
     // Otherwise go to previous hunk
     if (currentIndex > 0) {
-      const prevHunk = alignments[currentIndex - 1].alignment;
-      config.scrollToRow(prevHunk.after.start, 'after');
+      scrollToHunk(config, alignments[currentIndex - 1].alignment);
       config.onHunkFocus?.(currentIndex - 1);
       return true;
     }
@@ -144,7 +151,7 @@ function goToPreviousHunk(config: DiffNavConfig): boolean {
 
   // If at or before first hunk, go to first hunk
   if (alignments.length > 0) {
-    config.scrollToRow(alignments[0].alignment.after.start, 'after');
+    scrollToHunk(config, alignments[0].alignment);
     config.onHunkFocus?.(0);
     return true;
   }

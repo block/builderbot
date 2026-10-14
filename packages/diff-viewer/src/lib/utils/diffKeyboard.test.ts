@@ -190,14 +190,17 @@ describe('diffKeyboard hunk navigation', () => {
     });
   });
 
-  describe('after content fits the viewport: before has deletions at rows 10 and 100', () => {
+  describe('after content fits the viewport: before has deletions at rows 40 and 100', () => {
     const VIEWPORT_ROWS = 80;
     const BEFORE_LINES = 160;
     const AFTER_LINES = 70;
+    // The first deletion sits below the initial before-pane anchor row
+    // (VIEWPORT_ROWS / 3 = 26) so that it is not already "current" from the
+    // top and the first j is a real jump to it rather than past it.
     const alignments: Alignment[] = [
-      hunk([0, 10], [0, 10], false),
-      hunk([10, 40], [10, 10]),
-      hunk([40, 100], [10, 70], false),
+      hunk([0, 40], [0, 40], false),
+      hunk([40, 70], [40, 40]),
+      hunk([70, 100], [40, 70], false),
       hunk([100, 160], [70, 70]),
     ];
 
@@ -210,8 +213,14 @@ describe('diffKeyboard hunk navigation', () => {
       });
       cleanup = result.cleanup;
       const { controller, host, scrollToRow } = result;
+
       press('j');
+      expect(scrollToRow).toHaveBeenCalledTimes(1);
+      expect(scrollToRow).toHaveBeenLastCalledWith(40, 'before');
+      expect(host.focusedHunkIndex).toBe(0);
+
       press('j');
+      expect(scrollToRow).toHaveBeenCalledTimes(2);
       expect(scrollToRow).toHaveBeenLastCalledWith(100, 'before');
       expect(host.focusedHunkIndex).toBe(1);
       const landedBeforeScrollY = controller.beforeScrollY;
@@ -231,6 +240,84 @@ describe('diffKeyboard hunk navigation', () => {
       expect(scrollToRow).toHaveBeenLastCalledWith(100, 'before');
       expect(host.focusedHunkIndex).toBe(1);
       expect(controller.beforeScrollY).toBe(landedBeforeScrollY);
+    });
+  });
+
+  describe('mid-file pure deletion: 220/200-line file, before rows 100-120 deleted at after row 100', () => {
+    const VIEWPORT_ROWS = 15;
+    const BEFORE_LINES = 220;
+    const AFTER_LINES = 200;
+    const alignments: Alignment[] = [
+      hunk([0, 50], [0, 50], false),
+      hunk([50, 51], [50, 51]),
+      hunk([51, 100], [51, 100], false),
+      hunk([100, 120], [100, 100]),
+      hunk([120, 220], [100, 200], false),
+    ];
+
+    /** Scroll offset that puts `row` at the 1/3 anchor, as scrollToRow does. */
+    function anchoredScrollY(row: number): number {
+      return row * LINE_HEIGHT - (VIEWPORT_ROWS * LINE_HEIGHT) / 3;
+    }
+
+    function setupMidFileDeletion() {
+      const result = setup({
+        beforeLines: BEFORE_LINES,
+        afterLines: AFTER_LINES,
+        viewportRows: VIEWPORT_ROWS,
+        alignments,
+      });
+      cleanup = result.cleanup;
+      return result;
+    }
+
+    // Deliberate semantic choice: the snap-to-start tolerance for k is measured
+    // on the pane that has the hunk's rows. A pure deletion collapses to a
+    // single boundary on the after side, so scrolling the after pane one row
+    // past it carries the before pane past the whole deletion. k then snaps
+    // back to the deletion's start (the before pane visibly jumped 20 rows)
+    // instead of treating a one-row move as "already at the start" and going
+    // to the previous hunk, which is what anchoring on the after pane did.
+    it('k after scrolling the after pane one row past the deletion snaps back to its start on the before pane', () => {
+      const { controller, host, scrollToRow } = setupMidFileDeletion();
+      press('j');
+      press('j');
+      expect(scrollToRow).toHaveBeenLastCalledWith(100, 'before');
+      expect(host.focusedHunkIndex).toBe(1);
+      // Landed with both anchors on row 100: the deletion start on the before
+      // side, its collapsed boundary on the after side.
+      expect(controller.beforeScrollY).toBe(anchoredScrollY(100));
+      expect(controller.afterScrollY).toBe(anchoredScrollY(100));
+
+      controller.scrollBy('after', LINE_HEIGHT);
+
+      // One after row (100 -> 101) maps to before row 121: the alignment
+      // transfer skips the deleted rows 100-120 entirely.
+      expect(controller.afterScrollY).toBe(anchoredScrollY(101));
+      expect(controller.beforeScrollY).toBe(anchoredScrollY(121));
+
+      press('k');
+
+      expect(scrollToRow).toHaveBeenLastCalledWith(100, 'before');
+      expect(host.focusedHunkIndex).toBe(1);
+      expect(controller.beforeScrollY).toBe(anchoredScrollY(100));
+      expect(controller.afterScrollY).toBe(anchoredScrollY(100));
+    });
+
+    it('k again from the start of the deletion goes to the previous hunk', () => {
+      const { controller, host, scrollToRow } = setupMidFileDeletion();
+      press('j');
+      press('j');
+      controller.scrollBy('after', LINE_HEIGHT);
+      press('k');
+      expect(host.focusedHunkIndex).toBe(1);
+
+      press('k');
+
+      expect(scrollToRow).toHaveBeenLastCalledWith(50, 'after');
+      expect(host.focusedHunkIndex).toBe(0);
+      expect(controller.afterScrollY).toBe(anchoredScrollY(50));
+      expect(controller.beforeScrollY).toBe(anchoredScrollY(50));
     });
   });
 

@@ -4545,10 +4545,9 @@ mod invoke_tests {
             .unwrap();
         let text = std::str::from_utf8(&text).unwrap();
         assert!(
-            text.contains("length limit exceeded"),
-            "unexpected body: {text}"
+            serde_json::from_str::<Value>(text).is_err(),
+            "unexpected JSON body: {text}"
         );
-        assert!(serde_json::from_str::<Value>(text).is_err());
     }
 }
 

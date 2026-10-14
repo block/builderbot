@@ -2851,9 +2851,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let mime_type: String = arg(&args, "mimeType")?;
             let data: String = arg(&args, "data")?;
             let pending: Option<bool> = opt_arg(&args, "pending")?;
-            let image = crate::image_commands::create_image_from_data_impl(
-                store, branch_id, project_id, filename, mime_type, data, pending,
-            )?;
+            let image = tauri::async_runtime::spawn_blocking(move || {
+                crate::image_commands::create_image_from_data_impl(
+                    store, branch_id, project_id, filename, mime_type, data, pending,
+                )
+            })
+            .await
+            .map_err(|e| format!("Image task failed: {e}"))??;
             Ok(serde_json::to_value(image).unwrap())
         }
         "get_image_path" => {

@@ -64,11 +64,14 @@ pub(crate) fn render_first_page(bytes: &[u8], max_edge_px: u32) -> Result<Render
     }
     let page = CGPDFDocument::page(Some(&document), 1).ok_or("could not read PDF page 1")?;
 
-    // MediaBox is the page; fall back to CropBox only when it is unusable.
-    let mut page_box = CGPDFBox::MediaBox;
+    // CropBox is what Preview and Quick Look display (CoreGraphics clips it
+    // to the MediaBox, and returns the MediaBox when none is set), so a
+    // print-ready PDF renders without its bleed and crop marks. Fall back to
+    // the MediaBox only when the CropBox is unusable.
+    let mut page_box = CGPDFBox::CropBox;
     let mut rect = CGPDFPage::box_rect(Some(&page), page_box);
     if !is_drawable(rect.size.width, rect.size.height) {
-        page_box = CGPDFBox::CropBox;
+        page_box = CGPDFBox::MediaBox;
         rect = CGPDFPage::box_rect(Some(&page), page_box);
         if !is_drawable(rect.size.width, rect.size.height) {
             return Err("PDF page has no drawable area".into());
@@ -194,10 +197,15 @@ pub(crate) mod tests {
     /// built-in Helvetica. Offsets in the xref table are computed, so the
     /// output is well-formed rather than relying on reader repair.
     pub(crate) fn tiny_pdf(pages: &[&str]) -> Vec<u8> {
-        tiny_pdf_with(pages, "[0 0 612 792]", None)
+        tiny_pdf_with(pages, "[0 0 612 792]", None, None)
     }
 
-    pub(crate) fn tiny_pdf_with(pages: &[&str], media_box: &str, rotate: Option<u32>) -> Vec<u8> {
+    pub(crate) fn tiny_pdf_with(
+        pages: &[&str],
+        media_box: &str,
+        crop_box: Option<&str>,
+        rotate: Option<u32>,
+    ) -> Vec<u8> {
         let font_id = 3 + pages.len() * 2;
         let mut objects = vec![
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -211,9 +219,12 @@ pub(crate) mod tests {
             ),
         ];
         for (i, content) in pages.iter().enumerate() {
+            let crop_box = crop_box
+                .map(|b| format!(" /CropBox {b}"))
+                .unwrap_or_default();
             let rotate = rotate.map(|r| format!(" /Rotate {r}")).unwrap_or_default();
             objects.push(format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox {media_box}{rotate} \
+                "<< /Type /Page /Parent 2 0 R /MediaBox {media_box}{crop_box}{rotate} \
                  /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {} 0 R >>",
                 4 + i * 2
             ));
@@ -249,7 +260,6 @@ pub(crate) mod tests {
 
     pub(crate) const PAGE_ONE: &str =
         "BT /F1 24 Tf 72 700 Td (PAGE ONE Staged PDF probe) Tj ET\n4 w 72 650 m 540 650 l S";
-    const PAGE_TWO: &str = "BT /F1 24 Tf 72 700 Td (PAGE TWO should not appear) Tj ET";
 
     #[test]
     fn detects_the_pdf_signature_only() {
@@ -263,6 +273,8 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     mod macos {
         use super::*;
+
+        const PAGE_TWO: &str = "BT /F1 24 Tf 72 700 Td (PAGE TWO should not appear) Tj ET";
 
         fn decode(png: &[u8]) -> tiny_skia::Pixmap {
             assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
@@ -296,21 +308,48 @@ pub(crate) mod tests {
         #[test]
         fn wide_pages_are_downscaled_and_tiny_pages_capped_at_4x() {
             // Same box as the onboarding flow chart fixture: 3150×1800 pt.
-            let wide = tiny_pdf_with(&[PAGE_ONE], "[0 0 3150 1800]", None);
+            let wide = tiny_pdf_with(&[PAGE_ONE], "[0 0 3150 1800]", None, None);
             let pixmap = decode(&render_first_page(&wide, 2048).unwrap().png);
             assert_eq!((pixmap.width(), pixmap.height()), (2048, 1170));
 
-            let tiny = tiny_pdf_with(&[PAGE_ONE], "[0 0 100 50]", None);
+            let tiny = tiny_pdf_with(&[PAGE_ONE], "[0 0 100 50]", None, None);
             let pixmap = decode(&render_first_page(&tiny, 2048).unwrap().png);
             assert_eq!((pixmap.width(), pixmap.height()), (400, 200));
         }
 
         #[test]
         fn rotated_pages_take_their_displayed_orientation() {
-            let landscape = tiny_pdf_with(&[PAGE_ONE], "[0 0 612 792]", Some(90));
+            let landscape = tiny_pdf_with(&[PAGE_ONE], "[0 0 612 792]", None, Some(90));
             let pixmap = decode(&render_first_page(&landscape, 2048).unwrap().png);
             assert_eq!((pixmap.width(), pixmap.height()), (2048, 1583));
             assert!(pixmap.pixels().iter().any(|p| p.red() < 128));
+        }
+
+        #[test]
+        fn crop_box_wins_over_media_box() {
+            // Letter MediaBox with bleed trimmed to a 300×400 pt CropBox; the
+            // rule is drawn inside the crop, the page-one text outside it.
+            const INSIDE_CROP: &str = "4 w 100 300 m 400 300 l S";
+            let cropped = tiny_pdf_with(
+                &[&format!("{PAGE_ONE}\n{INSIDE_CROP}")],
+                "[0 0 612 792]",
+                Some("[100 100 400 500]"),
+                None,
+            );
+            let pixmap = decode(&render_first_page(&cropped, 2048).unwrap().png);
+            // 2048 / 400 pt would be 5.12x, so the 4x ceiling applies.
+            assert_eq!((pixmap.width(), pixmap.height()), (1200, 1600));
+            let rule_y = ((500.0 - 300.0) * 4.0) as u32;
+            let p = pixmap.pixel(600, rule_y).unwrap();
+            assert!(p.red() < 128 && p.alpha() == 255, "rule pixel {p:?}");
+            for (x, y) in [(0, 0), (1199, 0), (0, 1599), (1199, 1599)] {
+                assert!(is_opaque_white(&pixmap, x, y), "corner {x},{y}");
+            }
+
+            // An empty CropBox is not drawable, so the MediaBox is used.
+            let degenerate = tiny_pdf_with(&[PAGE_ONE], "[0 0 612 792]", Some("[0 0 0 0]"), None);
+            let pixmap = decode(&render_first_page(&degenerate, 2048).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (1583, 2048));
         }
 
         #[test]

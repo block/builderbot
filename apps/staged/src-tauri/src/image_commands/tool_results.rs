@@ -1,4 +1,4 @@
-use crate::note_media::files::{mime_for_extension, MAX_IMAGE_SIZE};
+use crate::note_media::files::{mime_for_extension, size_error, MAX_IMAGE_SIZE};
 const ALLOWED_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 use base64::Engine;
 use std::io::Read;
@@ -27,14 +27,14 @@ pub fn read_image_file(file_path: String) -> Result<String, String> {
         return Err("Image path is not a file".to_string());
     }
     if metadata.len() > MAX_IMAGE_SIZE {
-        return Err("Image too large (max 10 MB)".to_string());
+        return Err(size_error("Image", MAX_IMAGE_SIZE));
     }
     let mut bytes = Vec::new();
     file.take(MAX_IMAGE_SIZE + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Failed to read image: {e}"))?;
     if bytes.len() as u64 > MAX_IMAGE_SIZE {
-        return Err("Image too large (max 10 MB)".to_string());
+        return Err(size_error("Image", MAX_IMAGE_SIZE));
     }
     Ok(format!(
         "data:{};base64,{}",
@@ -87,6 +87,6 @@ mod tests {
             .unwrap();
         assert!(read_image_file(path.to_string_lossy().into_owned())
             .unwrap_err()
-            .contains("too large"));
+            .contains("exceeds 10 MB limit"));
     }
 }

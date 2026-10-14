@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, Query, Request, State, WebSocketUpgrade};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -243,14 +243,37 @@ pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Rout
         }
     };
 
-    Router::new()
-        .route("/api/invoke/{command}", post(invoke_command))
+    invoke_router(invoke_command)
         .route("/api/events", get(ws_events))
         .with_state(state)
         .merge(media_routes)
         .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
+}
+
+/// Request body cap for `/api/invoke/{command}`, the only route that takes a
+/// large body. axum's default is 2 MiB, which would refuse a base64 PDF
+/// attachment before `create_image_from_data`'s own
+/// [`MAX_PDF_INPUT_SIZE`](crate::note_media::files::MAX_PDF_INPUT_SIZE) check
+/// ever sees it, so this is the base64 of a cap-sized payload plus a margin
+/// for the JSON envelope (the other arguments are short strings).
+const INVOKE_BODY_LIMIT: usize =
+    (crate::note_media::files::MAX_PDF_INPUT_SIZE.div_ceil(3) * 4) as usize + 64 * 1024;
+
+/// The invoke route with its body limit applied to that route alone. Generic
+/// over the handler so a test can mount a stand-in without a Tauri
+/// `AppHandle` and exercise the exact layering [`app_router`] uses.
+fn invoke_router<S, H, T>(handler: H) -> Router<S>
+where
+    H: axum::handler::Handler<T, S>,
+    T: 'static,
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new().route(
+        "/api/invoke/{command}",
+        post(handler).layer(DefaultBodyLimit::max(INVOKE_BODY_LIMIT)),
+    )
 }
 
 /// Kept ready for the mobile-web startup restore. The route and auth layer are
@@ -4468,6 +4491,64 @@ mod tests {
         }
 
         delta
+    }
+}
+
+#[cfg(test)]
+mod invoke_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    /// Stands in for `invoke_command` with the same extractors, reporting what
+    /// reached dispatch so the test can tell a parsed body from a refused one.
+    async fn echo_len(Path(command): Path<String>, Json(args): Json<Value>) -> Json<Value> {
+        let data_len = args["data"].as_str().map_or(0, str::len);
+        Json(serde_json::json!({ "command": command, "dataLen": data_len }))
+    }
+
+    fn invoke(body: String) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/invoke/create_image_from_data")
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn invoke_route_admits_a_cap_sized_pdf_body_and_refuses_larger() {
+        let router: Router = invoke_router(echo_len);
+
+        // The base64 of a PDF right at MAX_PDF_INPUT_SIZE: the largest body
+        // `create_image_from_data` admits, and far past axum's 2 MiB default.
+        let data_len = (crate::note_media::files::MAX_PDF_INPUT_SIZE.div_ceil(3) * 4) as usize;
+        let body = format!(r#"{{"data":"{}"}}"#, "A".repeat(data_len));
+        assert!(body.len() > 2 * 1024 * 1024 && body.len() <= INVOKE_BODY_LIMIT);
+        let response = router.clone().oneshot(invoke(body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["command"], "create_image_from_data");
+        assert_eq!(reply["dataLen"], data_len);
+
+        // One byte over the limit never reaches the handler.
+        let body = format!(r#"{{"data":"{}"}}"#, "A".repeat(INVOKE_BODY_LIMIT - 10));
+        assert_eq!(body.len(), INVOKE_BODY_LIMIT + 1);
+        let response = router.oneshot(invoke(body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        // axum answers with a plain-text rejection, not the `{ "error" }` JSON
+        // `invoke_command` emits, so `transport.ts` surfaces this text as-is.
+        let text = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&text).unwrap();
+        assert!(
+            text.contains("length limit exceeded"),
+            "unexpected body: {text}"
+        );
+        assert!(serde_json::from_str::<Value>(text).is_err());
     }
 }
 

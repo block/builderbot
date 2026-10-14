@@ -28,6 +28,12 @@ export interface DiffNavConfig {
   startCommentOnHunk: (hunkIndex: number) => void;
   /** Called when keyboard navigation focuses a hunk */
   onHunkFocus?: (hunkIndex: number | null) => void;
+  /**
+   * Hunk the host currently shows as focused (fed back from onHunkFocus), or
+   * null once the user clicked away or the diff changed. Lets navigation trust
+   * its last jump when the scroll position alone cannot identify the hunk.
+   */
+  getFocusedHunkIndex?: () => number | null;
   /** Search callbacks */
   onOpenSearch?: () => void;
   onNextSearchResult?: () => void;
@@ -46,27 +52,35 @@ const DEFAULT_CONFIG: DiffNavConfig = {
   onHunkFocus: () => {},
 };
 
+interface NavState {
+  /** Last keyboard hunk jump and the after-pane scroll position it landed on. */
+  lastJump: { index: number; scrollY: number } | null;
+}
+
+/**
+ * Row at the scroll anchor (1/3 down the after pane's viewport).
+ */
+function anchorRow(config: DiffNavConfig): number {
+  const anchorY = config.getCurrentScrollY() + config.getViewportHeight() / 3;
+  return Math.floor(anchorY / config.getLineHeight());
+}
+
 /**
  * Find the index of the current hunk based on scroll position.
  * Returns the index of the hunk that's currently visible (or just passed).
  */
-function findCurrentHunkIndex(config: DiffNavConfig): number {
+function findCurrentHunkIndexFromScroll(config: DiffNavConfig): number {
   const alignments = config.getChangedAlignments();
   if (alignments.length === 0) return -1;
 
-  const scrollY = config.getCurrentScrollY();
-  const lineHeight = config.getLineHeight();
-  const viewportHeight = config.getViewportHeight();
-
   // Consider a hunk "current" if its start is within the top third of the viewport
-  const anchorY = scrollY + viewportHeight / 3;
-  const anchorRow = Math.floor(anchorY / lineHeight);
+  const anchor = anchorRow(config);
 
   // Find the last hunk whose start is at or before the anchor
   let currentIndex = -1;
   for (let i = 0; i < alignments.length; i++) {
     const hunkStart = alignments[i].alignment.after.start;
-    if (hunkStart <= anchorRow) {
+    if (hunkStart <= anchor) {
       currentIndex = i;
     } else {
       break;
@@ -77,26 +91,55 @@ function findCurrentHunkIndex(config: DiffNavConfig): number {
 }
 
 /**
- * Scroll a hunk into view, anchored on the pane that actually has its rows.
+ * Resolve the hunk keyboard navigation should treat as current.
+ *
+ * The scroll-derived answer breaks down whenever the after pane cannot move far
+ * enough to bring a hunk up to the anchor: pinned at its max by a trailing
+ * deletion, or a file shorter than the viewport. Any hunk in that last stretch
+ * is never "reached", so n/p would keep re-selecting the hunk above it. The
+ * last keyboard jump is authoritative there, as long as the host still reports
+ * it focused and the after pane has not scrolled since; that jump also means
+ * the viewport sits at the hunk's start.
  */
-function scrollToHunk(config: DiffNavConfig, hunk: Alignment): void {
+function findCurrentHunk(
+  config: DiffNavConfig,
+  state: NavState
+): { index: number; atStart: boolean } {
+  const { lastJump } = state;
+  if (lastJump) {
+    const focused = config.getFocusedHunkIndex ? config.getFocusedHunkIndex() : lastJump.index;
+    const inRange = lastJump.index < config.getChangedAlignments().length;
+    if (focused === lastJump.index && inRange && config.getCurrentScrollY() === lastJump.scrollY) {
+      return { index: lastJump.index, atStart: true };
+    }
+    state.lastJump = null;
+  }
+  return { index: findCurrentHunkIndexFromScroll(config), atStart: false };
+}
+
+/**
+ * Scroll a hunk into view, anchored on the pane that actually has its rows,
+ * and remember where that left the after pane.
+ */
+function scrollToHunk(config: DiffNavConfig, state: NavState, index: number): void {
+  const hunk = config.getChangedAlignments()[index].alignment;
   const side = anchorSideForHunk(hunk);
   config.scrollToRow(hunk[side].start, side);
+  state.lastJump = { index, scrollY: config.getCurrentScrollY() };
+  config.onHunkFocus?.(index);
 }
 
 /**
  * Navigate to the next diff hunk.
  */
-function goToNextHunk(config: DiffNavConfig): boolean {
+function goToNextHunk(config: DiffNavConfig, state: NavState): boolean {
   const alignments = config.getChangedAlignments();
   if (alignments.length === 0) return false;
 
-  const currentIndex = findCurrentHunkIndex(config);
-  const nextIndex = currentIndex + 1;
+  const nextIndex = findCurrentHunk(config, state).index + 1;
 
   if (nextIndex < alignments.length) {
-    scrollToHunk(config, alignments[nextIndex].alignment);
-    config.onHunkFocus?.(nextIndex);
+    scrollToHunk(config, state, nextIndex);
     return true;
   }
 
@@ -106,8 +149,8 @@ function goToNextHunk(config: DiffNavConfig): boolean {
 /**
  * Start a comment on the current hunk.
  */
-function commentOnCurrentHunk(config: DiffNavConfig): boolean {
-  const currentIndex = findCurrentHunkIndex(config);
+function commentOnCurrentHunk(config: DiffNavConfig, state: NavState): boolean {
+  const currentIndex = findCurrentHunk(config, state).index;
   if (currentIndex >= 0) {
     config.startCommentOnHunk(currentIndex);
     return true;
@@ -118,45 +161,33 @@ function commentOnCurrentHunk(config: DiffNavConfig): boolean {
 /**
  * Navigate to the previous diff hunk.
  */
-function goToPreviousHunk(config: DiffNavConfig): boolean {
+function goToPreviousHunk(config: DiffNavConfig, state: NavState): boolean {
   const alignments = config.getChangedAlignments();
   if (alignments.length === 0) return false;
 
-  const currentIndex = findCurrentHunkIndex(config);
+  const { index: currentIndex, atStart } = findCurrentHunk(config, state);
 
   // If we're past the first hunk, go to current or previous
   // We need to check if we're at the very start of the current hunk
   if (currentIndex >= 0) {
     const currentHunk = alignments[currentIndex].alignment;
-    const scrollY = config.getCurrentScrollY();
-    const lineHeight = config.getLineHeight();
-    const viewportHeight = config.getViewportHeight();
-    const anchorY = scrollY + viewportHeight / 3;
-    const anchorRow = Math.floor(anchorY / lineHeight);
 
     // If we're more than 2 lines into the current hunk, go to its start
-    if (anchorRow > currentHunk.after.start + 2) {
-      scrollToHunk(config, currentHunk);
-      config.onHunkFocus?.(currentIndex);
+    if (!atStart && anchorRow(config) > currentHunk.after.start + 2) {
+      scrollToHunk(config, state, currentIndex);
       return true;
     }
 
     // Otherwise go to previous hunk
     if (currentIndex > 0) {
-      scrollToHunk(config, alignments[currentIndex - 1].alignment);
-      config.onHunkFocus?.(currentIndex - 1);
+      scrollToHunk(config, state, currentIndex - 1);
       return true;
     }
   }
 
   // If at or before first hunk, go to first hunk
-  if (alignments.length > 0) {
-    scrollToHunk(config, alignments[0].alignment);
-    config.onHunkFocus?.(0);
-    return true;
-  }
-
-  return false;
+  scrollToHunk(config, state, 0);
+  return true;
 }
 
 /**
@@ -165,6 +196,7 @@ function goToPreviousHunk(config: DiffNavConfig): boolean {
  */
 export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () => void {
   const cfg = { ...DEFAULT_CONFIG, ...config };
+  const state: NavState = { lastJump: null };
 
   function handleKeydown(event: KeyboardEvent): void {
     const target = event.target as HTMLElement;
@@ -206,13 +238,13 @@ export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () =>
 
     // J or ArrowDown — next hunk (no modifiers)
     if ((key === 'j' || key === 'arrowdown') && !ctrl && !meta && !shift && !alt) {
-      if (goToNextHunk(cfg)) event.preventDefault();
+      if (goToNextHunk(cfg, state)) event.preventDefault();
       return;
     }
 
     // K or ArrowUp — previous hunk (no modifiers)
     if ((key === 'k' || key === 'arrowup') && !ctrl && !meta && !shift && !alt) {
-      if (goToPreviousHunk(cfg)) event.preventDefault();
+      if (goToPreviousHunk(cfg, state)) event.preventDefault();
       return;
     }
 
@@ -232,7 +264,7 @@ export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () =>
 
     // I — add comment on current hunk (no modifiers)
     if (key === 'i' && !ctrl && !meta && !shift && !alt) {
-      if (commentOnCurrentHunk(cfg)) event.preventDefault();
+      if (commentOnCurrentHunk(cfg, state)) event.preventDefault();
       return;
     }
   }

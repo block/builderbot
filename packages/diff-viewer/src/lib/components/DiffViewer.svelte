@@ -475,8 +475,8 @@
     requestAnimationFrame(() => {
       const firstHunk = changedAlignments[0].alignment;
       // Scroll to the first change, anchored on the pane that has its rows
-      // (deleted files and pure deletions only exist on the before side).
-      const side = isDeletedFile ? 'before' : anchorSideForHunk(firstHunk);
+      // (pure deletions, including whole deleted files, only exist on the before side).
+      const side = anchorSideForHunk(firstHunk);
       scrollController.scrollToRow(firstHunk[side].start, side);
     });
   });
@@ -2197,6 +2197,7 @@
       onHunkFocus: (hunkIndex) => {
         focusedHunkIndex = hunkIndex;
       },
+      getFocusedHunkIndex: () => focusedHunkIndex,
     });
 
     document.addEventListener('copy', handleCopy);

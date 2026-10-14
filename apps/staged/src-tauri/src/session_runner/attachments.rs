@@ -2,9 +2,9 @@
 //! blocks (claude-agent-acp drops blob resources; codex-acp's input items are
 //! text or image), so a PDF attachment is rendered page by page into image
 //! blocks here, each captioned with its page number and filename, within a
-//! page cap, a per-page size cap, and a byte budget for the whole document;
-//! anything left out or unrenderable is reported in the prompt text rather
-//! than silently dropped.
+//! page cap, a per-page size cap, and a byte budget shared by every image
+//! block in the prompt; anything left out or unrenderable is reported in the
+//! prompt text rather than silently dropped.
 
 use crate::note_media::pdf::{self, Fit};
 use crate::store::Image;
@@ -15,30 +15,37 @@ use base64::Engine;
 /// so a long document would otherwise crowd out the conversation.
 pub(crate) const MAX_PROMPT_PAGES: usize = 20;
 
-/// Encoded bytes of all the pages of one PDF in a prompt. Every page may be
-/// up to [`MAX_PROMPT_IMAGE_SIZE`] and the prompt travels as one JSON-RPC
-/// message (the Claude API also refuses requests over 32 MB), so a scanned
-/// document stops here before it reaches the page cap.
-pub(crate) const MAX_PROMPT_PAGE_BYTES: u64 = 20 * 1024 * 1024;
+/// Encoded bytes of every image block in one prompt — attached images and
+/// rendered PDF pages together, however many attachments the message has.
+/// The prompt travels as one JSON-RPC message and the Claude API refuses
+/// requests over 32 MB; 20 MB of encoded bytes is ~27 MB as base64, which
+/// leaves room for the text and the conversation around it.
+pub(crate) const MAX_PROMPT_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
-/// The Claude API's limit for one image, applied to each rendered page.
+/// Ceiling on one rendered page. The direct Claude API accepts 10 MB of
+/// base64 per image (Bedrock and Vertex less), so 5 MB of encoded bytes
+/// (~6.7 MB as base64) is the conservative ceiling.
 pub(crate) const MAX_PROMPT_IMAGE_SIZE: u64 = 5 * 1024 * 1024;
 
-/// How much of a PDF goes into a prompt. The defaults are the constants
-/// above; tests shrink them, and the render size, to stay fast.
+/// How much of the attachments goes into a prompt. The defaults are the
+/// constants above; tests shrink them, and the render size, to stay fast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PageLimits {
+pub(crate) struct PromptLimits {
+    /// Pages rendered from one PDF.
     pub pages: usize,
+    /// Encoded bytes of every image block in the prompt.
     pub total_bytes: u64,
+    /// Encoded bytes of one rendered page.
     pub page_bytes: u64,
+    /// Long edge of a rendered page.
     pub edge_px: u32,
 }
 
-impl Default for PageLimits {
+impl Default for PromptLimits {
     fn default() -> Self {
-        PageLimits {
+        PromptLimits {
             pages: MAX_PROMPT_PAGES,
-            total_bytes: MAX_PROMPT_PAGE_BYTES,
+            total_bytes: MAX_PROMPT_IMAGE_BYTES,
             page_bytes: MAX_PROMPT_IMAGE_SIZE,
             edge_px: pdf::MAX_EDGE_PX,
         }
@@ -51,15 +58,33 @@ pub(crate) struct PromptAttachments {
     /// Appended to the prompt text: attachments that could not be sent as
     /// images, and why.
     pub notes: Vec<String>,
+    limits: PromptLimits,
+    /// Encoded bytes of the image blocks accepted so far, against
+    /// `limits.total_bytes`.
+    used_bytes: u64,
 }
 
 impl PromptAttachments {
-    pub(crate) fn add(&mut self, image: &Image, bytes: &[u8]) {
-        self.add_with_limits(image, bytes, PageLimits::default());
+    /// Tests shrink the limits so budget cases render in milliseconds.
+    #[cfg(test)]
+    fn with_limits(limits: PromptLimits) -> Self {
+        PromptAttachments {
+            limits,
+            ..Self::default()
+        }
     }
 
-    pub(crate) fn add_with_limits(&mut self, image: &Image, bytes: &[u8], limits: PageLimits) {
+    pub(crate) fn add(&mut self, image: &Image, bytes: &[u8]) {
         if image.mime_type != "application/pdf" {
+            if !self.reserve(bytes.len()) {
+                self.notes.push(format!(
+                    "[Attached image {} ({} bytes) not included in this prompt: {}]",
+                    image.filename,
+                    bytes.len(),
+                    self.over_budget()
+                ));
+                return;
+            }
             self.images
                 .push(PromptImage::new(encode(bytes), image.mime_type.clone()));
             return;
@@ -79,12 +104,12 @@ impl PromptAttachments {
             }
         };
         let total = document.page_count();
+        let limits = self.limits;
         let fit = Fit {
             max_bytes: limits.page_bytes,
             jpeg_fallback: true,
         };
         let first_image = self.images.len();
-        let mut used_bytes = 0u64;
         // Pages are rendered in order and only as far as they are accepted,
         // so memory holds the accepted set plus the page being decided.
         let mut omitted: Option<(usize, String)> = None;
@@ -107,17 +132,10 @@ impl PromptAttachments {
                     continue;
                 }
             };
-            if used_bytes + encoded.bytes.len() as u64 > limits.total_bytes {
-                omitted = Some((
-                    page,
-                    format!(
-                        "over the {} image budget",
-                        describe_size(limits.total_bytes)
-                    ),
-                ));
+            if !self.reserve(encoded.bytes.len()) {
+                omitted = Some((page, self.over_budget()));
                 break;
             }
-            used_bytes += encoded.bytes.len() as u64;
             self.images.push(
                 PromptImage::new(encode(&encoded.bytes), encoded.mime_type)
                     .with_label(format!("page {page} of {total} of {}", image.filename)),
@@ -141,6 +159,24 @@ impl PromptAttachments {
                     .push(format!("[Attached PDF {}: {what}]", image.filename));
             }
         }
+    }
+
+    /// Count `len` encoded bytes against the prompt's image budget; false,
+    /// with nothing counted, when they would cross it.
+    fn reserve(&mut self, len: usize) -> bool {
+        let len = len as u64;
+        if self.used_bytes + len > self.limits.total_bytes {
+            return false;
+        }
+        self.used_bytes += len;
+        true
+    }
+
+    fn over_budget(&self) -> String {
+        format!(
+            "over the {} image budget",
+            describe_size(self.limits.total_bytes)
+        )
     }
 
     /// The prompt text with the notes, if any, after it.
@@ -182,16 +218,57 @@ mod tests {
         Image::new(None, "project", filename, mime_type, size as i64, false)
     }
 
+    fn png_image() -> Image {
+        image("shot.png", "image/png", PNG.len())
+    }
+
+    /// Letter pages at a 256 px long edge: enough to tell the pages apart,
+    /// cheap enough to render dozens.
+    fn small(limits: PromptLimits) -> PromptAttachments {
+        PromptAttachments::with_limits(PromptLimits {
+            edge_px: 256,
+            ..limits
+        })
+    }
+
+    fn budget(total_bytes: u64) -> PromptAttachments {
+        small(PromptLimits {
+            total_bytes,
+            ..PromptLimits::default()
+        })
+    }
+
     #[test]
     fn images_are_sent_as_they_are_stored() {
         let mut attachments = PromptAttachments::default();
-        attachments.add(&image("shot.png", "image/png", PNG.len()), PNG);
+        attachments.add(&png_image(), PNG);
         assert_eq!(
             attachments.images,
             [PromptImage::new(encode(PNG), "image/png")]
         );
         assert!(attachments.notes.is_empty());
         assert_eq!(attachments.prompt("look"), "look");
+    }
+
+    #[test]
+    fn images_over_the_budget_are_noted_not_dropped() {
+        let total_bytes = PNG.len() as u64 * 3 / 2;
+        let mut attachments = budget(total_bytes);
+        attachments.add(&png_image(), PNG);
+        attachments.add(&image("second.png", "image/png", PNG.len()), PNG);
+        assert_eq!(attachments.images.len(), 1);
+        assert_eq!(
+            attachments.notes,
+            [format!(
+                "[Attached image second.png ({} bytes) not included in this prompt: over the {} image budget]",
+                PNG.len(),
+                describe_size(total_bytes)
+            )]
+        );
+        // The refused image was not counted, so a smaller one still fits.
+        attachments.add(&image("tiny.gif", "image/gif", 1), &PNG[..PNG.len() / 2]);
+        assert_eq!(attachments.images.len(), 2);
+        assert_eq!(attachments.notes.len(), 1);
     }
 
     #[cfg(target_os = "macos")]
@@ -212,10 +289,10 @@ mod tests {
                 .decode(&prompt_image.data)
                 .unwrap();
             let pixmap = tiny_skia::Pixmap::decode_png(&png).unwrap();
-            assert_eq!((pixmap.width(), pixmap.height()), (1583, 2048));
+            assert_eq!((pixmap.width(), pixmap.height()), (1545, 2000));
         }
         // The pages differ: page two's rule at y=400pt is only on page two.
-        let row = ((792.0 - 400.0) * 2048.0 / 792.0) as u32;
+        let row = ((792.0 - 400.0) * f64::from(pdf::MAX_EDGE_PX) / 792.0) as u32;
         let pixel = |i: usize| {
             let png = base64::engine::general_purpose::STANDARD
                 .decode(&attachments.images[i].data)
@@ -228,15 +305,6 @@ mod tests {
         };
         assert_eq!(pixel(0), 255);
         assert!(pixel(1) < 128);
-    }
-
-    /// Letter pages at a 256 px long edge: enough to tell the pages apart,
-    /// cheap enough to render dozens.
-    fn small(limits: PageLimits) -> PageLimits {
-        PageLimits {
-            edge_px: 256,
-            ..limits
-        }
     }
 
     /// Encoded size of one small [`PAGE_ONE`] render, for budgets.
@@ -255,12 +323,8 @@ mod tests {
     fn long_pdfs_stop_at_the_page_cap_and_say_so() {
         let pages = vec![PAGE_ONE; MAX_PROMPT_PAGES + 5];
         let pdf = tiny_pdf(&pages);
-        let mut attachments = PromptAttachments::default();
-        attachments.add_with_limits(
-            &image("long.pdf", "application/pdf", pdf.len()),
-            &pdf,
-            small(PageLimits::default()),
-        );
+        let mut attachments = small(PromptLimits::default());
+        attachments.add(&image("long.pdf", "application/pdf", pdf.len()), &pdf);
         assert_eq!(attachments.images.len(), MAX_PROMPT_PAGES);
         assert!(attachments.notes.is_empty());
         assert_eq!(
@@ -283,17 +347,11 @@ mod tests {
         let page_bytes = small_page_bytes();
         let pdf = tiny_pdf(&[PAGE_ONE; 4]);
         let pdf_image = image("scan.pdf", "application/pdf", pdf.len());
-        let budget = |total_bytes: u64| {
-            small(PageLimits {
-                total_bytes,
-                ..PageLimits::default()
-            })
-        };
 
         // Two pages fit; the third would cross the budget, so it and the
         // rest are left out and the last page sent says so.
-        let mut attachments = PromptAttachments::default();
-        attachments.add_with_limits(&pdf_image, &pdf, budget(page_bytes * 5 / 2));
+        let mut attachments = budget(page_bytes * 5 / 2);
+        attachments.add(&pdf_image, &pdf);
         assert_eq!(attachments.images.len(), 2);
         assert!(attachments.notes.is_empty());
         assert_eq!(
@@ -308,8 +366,8 @@ mod tests {
         );
 
         // A single page left out is named as one.
-        let mut attachments = PromptAttachments::default();
-        attachments.add_with_limits(&pdf_image, &pdf, budget(page_bytes * 3));
+        let mut attachments = budget(page_bytes * 3);
+        attachments.add(&pdf_image, &pdf);
         assert_eq!(attachments.images.len(), 3);
         let label = attachments.images[2].label.as_deref().unwrap();
         assert!(
@@ -319,9 +377,9 @@ mod tests {
 
         // When not even the first page fits, the prompt text carries the note
         // and no label from an earlier attachment is touched.
-        let mut attachments = PromptAttachments::default();
-        attachments.add(&image("shot.png", "image/png", PNG.len()), PNG);
-        attachments.add_with_limits(&pdf_image, &pdf, budget(page_bytes - 1));
+        let mut attachments = budget(page_bytes - 1);
+        attachments.add(&image("tiny.png", "image/png", 1), &[0u8; 1]);
+        attachments.add(&pdf_image, &pdf);
         assert_eq!(attachments.images.len(), 1);
         assert_eq!(attachments.images[0].label, None);
         assert_eq!(attachments.notes.len(), 1);
@@ -335,19 +393,80 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_byte_budget_is_shared_by_every_attachment_in_the_prompt() {
+        let page_bytes = small_page_bytes();
+        let pdf = tiny_pdf(&[PAGE_ONE, PAGE_ONE]);
+        let first = image("a.pdf", "application/pdf", pdf.len());
+        let second = image("b.pdf", "application/pdf", pdf.len());
+
+        // Two PDFs: the first takes two of the three pages the budget
+        // holds, so the second gets one page and names the one left out.
+        let mut attachments = budget(page_bytes * 7 / 2);
+        attachments.add(&first, &pdf);
+        attachments.add(&second, &pdf);
+        assert!(attachments.notes.is_empty());
+        let labels: Vec<_> = attachments
+            .images
+            .iter()
+            .map(|image| image.label.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "page 1 of 2 of a.pdf",
+                "page 2 of 2 of a.pdf",
+                &format!(
+                    "page 1 of 2 of b.pdf (page 2 not included: over the {} image budget)",
+                    describe_size(page_bytes * 7 / 2)
+                ),
+            ]
+        );
+
+        // An image before a PDF counts against the same budget: the PDF
+        // gets the one page that is left.
+        let mut attachments = budget(PNG.len() as u64 + page_bytes * 3 / 2);
+        attachments.add(&png_image(), PNG);
+        attachments.add(&first, &pdf);
+        assert!(attachments.notes.is_empty());
+        assert_eq!(attachments.images.len(), 2);
+        assert_eq!(attachments.images[0].label, None);
+        assert!(attachments.images[1]
+            .label
+            .as_deref()
+            .unwrap()
+            .starts_with("page 1 of 2 of a.pdf (page 2 not included: over the "),);
+
+        // A PDF that uses the budget up leaves a later image noted in the
+        // prompt text, with the PDF's own pages and labels untouched.
+        let mut attachments = budget(page_bytes * 2);
+        attachments.add(&first, &pdf);
+        attachments.add(&png_image(), PNG);
+        assert_eq!(attachments.images.len(), 2);
+        assert_eq!(
+            attachments.images[1].label.as_deref(),
+            Some("page 2 of 2 of a.pdf")
+        );
+        assert_eq!(
+            attachments.notes,
+            [format!(
+                "[Attached image shot.png ({} bytes) not included in this prompt: over the {} image budget]",
+                PNG.len(),
+                describe_size(page_bytes * 2)
+            )]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn pages_over_the_per_page_cap_are_noted_and_the_rest_still_sent() {
         let pdf = tiny_pdf(&[PAGE_ONE, PAGE_TWO]);
-        let mut attachments = PromptAttachments::default();
         // Under the smallest text page even as a JPEG: every page is refused
         // on its own, each with a note, and nothing stops the loop.
-        attachments.add_with_limits(
-            &image("scan.pdf", "application/pdf", pdf.len()),
-            &pdf,
-            small(PageLimits {
-                page_bytes: 64,
-                ..PageLimits::default()
-            }),
-        );
+        let mut attachments = small(PromptLimits {
+            page_bytes: 64,
+            ..PromptLimits::default()
+        });
+        attachments.add(&image("scan.pdf", "application/pdf", pdf.len()), &pdf);
         assert!(attachments.images.is_empty());
         assert_eq!(attachments.notes.len(), 2);
         assert!(
@@ -365,7 +484,7 @@ mod tests {
 
     #[test]
     fn sizes_read_in_whole_units() {
-        assert_eq!(describe_size(MAX_PROMPT_PAGE_BYTES), "20 MB");
+        assert_eq!(describe_size(MAX_PROMPT_IMAGE_BYTES), "20 MB");
         assert_eq!(describe_size(3 * 1024), "3 KB");
         assert_eq!(describe_size(1500), "1500 bytes");
     }

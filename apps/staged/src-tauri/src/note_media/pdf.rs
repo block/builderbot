@@ -15,10 +15,14 @@
 use super::files::size_error;
 use super::files::MAX_IMAGE_SIZE;
 
-/// Long edge of a page rendered for the agent prompt, in pixels. A letter
-/// page lands at ~186 DPI, which keeps body text legible to a vision model
-/// without approaching the attachment size cap.
-pub(crate) const MAX_EDGE_PX: u32 = 2048;
+/// Long edge of a page rendered for the agent prompt, in pixels. The Claude
+/// API rejects any image over 2000 px on a side once a request carries more
+/// than 20 image blocks (it counts the images resent from earlier turns and
+/// those in tool results, so a 20-page PDF plus one screenshot gets there),
+/// and the high-resolution tier tops out at 2576 px, so 2000 loses nothing a
+/// 2048 would have kept. A letter page lands at ~182 DPI, which keeps body
+/// text legible to a vision model without approaching the attachment size cap.
+pub(crate) const MAX_EDGE_PX: u32 = 2000;
 
 /// Pages are never blown up beyond 4 px per PDF point, so a tiny page does
 /// not become a huge blurry bitmap just to reach the long-edge target.
@@ -492,19 +496,20 @@ pub(crate) mod tests {
         }
 
         /// Bitmap row through the middle of a 4 pt rule drawn at `y_pt` on a
-        /// letter page rendered 2048 px tall.
+        /// letter page rendered [`MAX_EDGE_PX`] tall.
         fn letter_rule_row(y_pt: f64) -> u32 {
-            ((792.0 - y_pt) * 2048.0 / 792.0) as u32
+            ((792.0 - y_pt) * f64::from(MAX_EDGE_PX) / 792.0) as u32
         }
 
         #[test]
         fn renders_first_page_to_opaque_png_at_the_long_edge() {
-            let rendered = render_first_page(&tiny_pdf(&[PAGE_ONE, PAGE_TWO]), 2048).unwrap();
+            let rendered =
+                render_first_page(&tiny_pdf(&[PAGE_ONE, PAGE_TWO]), MAX_EDGE_PX).unwrap();
             assert_eq!(rendered.page_count, 2);
             let pixmap = decode(&rendered.png);
-            // Letter: 2048 / 792 pt ≈ 2.59x, under the 4x ceiling.
-            assert_eq!((pixmap.width(), pixmap.height()), (1583, 2048));
-            for (x, y) in [(0, 0), (1582, 0), (0, 2047), (1582, 2047)] {
+            // Letter: 2000 / 792 pt ≈ 2.53x, under the 4x ceiling.
+            assert_eq!((pixmap.width(), pixmap.height()), (1545, 2000));
+            for (x, y) in [(0, 0), (1544, 0), (0, 1999), (1544, 1999)] {
                 assert!(is_opaque_white(&pixmap, x, y), "corner {x},{y}");
             }
             // The rule at y=650pt from the bottom is drawn; everything is opaque.
@@ -514,7 +519,11 @@ pub(crate) mod tests {
             // Page two's own rule, at y=400pt, is not drawn...
             assert!(is_opaque_white(&pixmap, 800, letter_rule_row(400.0)));
             // ...and would have been, had page two been the one rendered.
-            let swapped = decode(&render_first_page(&tiny_pdf(&[PAGE_TWO]), 2048).unwrap().png);
+            let swapped = decode(
+                &render_first_page(&tiny_pdf(&[PAGE_TWO]), MAX_EDGE_PX)
+                    .unwrap()
+                    .png,
+            );
             let p = swapped.pixel(800, letter_rule_row(400.0)).unwrap();
             assert!(
                 p.red() < 128 && p.alpha() == 255,
@@ -526,19 +535,19 @@ pub(crate) mod tests {
         fn wide_pages_are_downscaled_and_tiny_pages_capped_at_4x() {
             // Same box as the onboarding flow chart fixture: 3150×1800 pt.
             let wide = tiny_pdf_with(&[PAGE_ONE], "[0 0 3150 1800]", None, None);
-            let pixmap = decode(&render_first_page(&wide, 2048).unwrap().png);
-            assert_eq!((pixmap.width(), pixmap.height()), (2048, 1170));
+            let pixmap = decode(&render_first_page(&wide, MAX_EDGE_PX).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (2000, 1143));
 
             let tiny = tiny_pdf_with(&[PAGE_ONE], "[0 0 100 50]", None, None);
-            let pixmap = decode(&render_first_page(&tiny, 2048).unwrap().png);
+            let pixmap = decode(&render_first_page(&tiny, MAX_EDGE_PX).unwrap().png);
             assert_eq!((pixmap.width(), pixmap.height()), (400, 200));
         }
 
         #[test]
         fn rotated_pages_take_their_displayed_orientation() {
             let landscape = tiny_pdf_with(&[PAGE_ONE], "[0 0 612 792]", None, Some(90));
-            let pixmap = decode(&render_first_page(&landscape, 2048).unwrap().png);
-            assert_eq!((pixmap.width(), pixmap.height()), (2048, 1583));
+            let pixmap = decode(&render_first_page(&landscape, MAX_EDGE_PX).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (2000, 1545));
             assert!(pixmap.pixels().iter().any(|p| p.red() < 128));
         }
 
@@ -553,8 +562,8 @@ pub(crate) mod tests {
                 Some("[100 100 400 500]"),
                 None,
             );
-            let pixmap = decode(&render_first_page(&cropped, 2048).unwrap().png);
-            // 2048 / 400 pt would be 5.12x, so the 4x ceiling applies.
+            let pixmap = decode(&render_first_page(&cropped, MAX_EDGE_PX).unwrap().png);
+            // 2000 / 400 pt would be 5x, so the 4x ceiling applies.
             assert_eq!((pixmap.width(), pixmap.height()), (1200, 1600));
             let rule_y = ((500.0 - 300.0) * 4.0) as u32;
             let p = pixmap.pixel(600, rule_y).unwrap();
@@ -565,8 +574,8 @@ pub(crate) mod tests {
 
             // An empty CropBox is not drawable, so the MediaBox is used.
             let degenerate = tiny_pdf_with(&[PAGE_ONE], "[0 0 612 792]", Some("[0 0 0 0]"), None);
-            let pixmap = decode(&render_first_page(&degenerate, 2048).unwrap().png);
-            assert_eq!((pixmap.width(), pixmap.height()), (1583, 2048));
+            let pixmap = decode(&render_first_page(&degenerate, MAX_EDGE_PX).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (1545, 2000));
         }
 
         #[test]
@@ -576,7 +585,7 @@ pub(crate) mod tests {
                 b"%PDF-",
                 &tiny_pdf(&[])[..],
             ] {
-                let err = render_first_page(bytes, 2048).unwrap_err();
+                let err = render_first_page(bytes, MAX_EDGE_PX).unwrap_err();
                 assert!(err.contains("PDF"), "{err}");
                 assert_eq!(check(bytes).unwrap_err(), err);
             }
@@ -681,7 +690,7 @@ pub(crate) mod tests {
     #[test]
     fn reports_platform_support() {
         let pdf = tiny_pdf(&[PAGE_ONE]);
-        let err = render_first_page(&pdf, 2048).unwrap_err();
+        let err = render_first_page(&pdf, MAX_EDGE_PX).unwrap_err();
         assert!(err.contains("macOS"), "{err}");
         let err = Document::open(&pdf).err().unwrap();
         assert!(err.contains("macOS"), "{err}");

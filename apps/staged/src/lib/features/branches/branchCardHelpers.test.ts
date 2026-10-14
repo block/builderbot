@@ -68,7 +68,7 @@ describe('file type helpers', () => {
     }
   });
 
-  it('attaches PDFs as images rather than reading them as text', () => {
+  it('attaches PDFs through the image store rather than reading them as text', () => {
     for (const filePath of ['/tmp/report.pdf', '/tmp/Scan.PDF']) {
       expect(isImageFile(filePath)).toBe(false);
       expect(isImageAttachmentFile(filePath)).toBe(true);

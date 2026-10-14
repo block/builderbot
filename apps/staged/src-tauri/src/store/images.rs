@@ -167,10 +167,12 @@ impl Store {
     }
 
     /// Return chat attachments linked to a session, excluding note-owned media
-    /// so restarted sessions don't send videos as ACP image input.
+    /// so restarted sessions don't send videos as ACP image input. PDFs are
+    /// chat attachments too; the runner renders their pages for the prompt.
     pub fn get_image_ids_for_session(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1 AND mime_type LIKE 'image/%'
+        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1
+             AND (mime_type LIKE 'image/%' OR mime_type = 'application/pdf')
              AND NOT EXISTS (SELECT 1 FROM notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)
              AND NOT EXISTS (SELECT 1 FROM project_notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)")?;
         let ids = stmt
@@ -215,9 +217,7 @@ impl Store {
 
         let count = rows.len();
         for (id, project_id, filename) in &rows {
-            if let Ok(path) = image_file_path(project_id, id, filename) {
-                let _ = std::fs::remove_file(path);
-            }
+            remove_image_files(project_id, id, filename);
         }
 
         conn.execute(
@@ -297,4 +297,32 @@ pub fn image_file_path(
     Ok(project_root
         .join("images")
         .join(format!("{image_id}.{ext}")))
+}
+
+/// Where the rendered first-page thumbnail of a PDF attachment is cached,
+/// beside the PDF itself: `<project_worktree_root>/images/<image_id>.thumb.png`.
+/// The `.thumb.png` suffix cannot collide with [`image_file_path`], whose
+/// names are a bare UUID plus one extension.
+pub fn thumbnail_file_path(project_id: &str, image_id: &str) -> Result<PathBuf, String> {
+    let project_root = crate::git::project_worktree_root_for(project_id)
+        .map_err(|e| format!("Cannot determine project root: {e}"))?;
+    Ok(project_root
+        .join("images")
+        .join(format!("{image_id}.thumb.png")))
+}
+
+/// Best-effort removal of an image's file and any cached thumbnail, for the
+/// delete paths. A file that is already gone is not worth a warning.
+pub fn remove_image_files(project_id: &str, image_id: &str, filename: &str) {
+    let paths = [
+        image_file_path(project_id, image_id, filename),
+        thumbnail_file_path(project_id, image_id),
+    ];
+    for path in paths.into_iter().flatten() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Failed to remove image file {}: {e}", path.display());
+            }
+        }
+    }
 }

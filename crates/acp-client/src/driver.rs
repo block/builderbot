@@ -1025,13 +1025,13 @@ pub trait Store: Send + Sync {
 pub trait AgentDriver {
     /// Run a single turn: send `prompt`, stream results via `writer`.
     ///
-    /// `images` contains `(base64_data, mime_type)` pairs that are sent as
-    /// `ContentBlock::Image` entries alongside the text prompt.
+    /// `images` are sent as `ContentBlock::Image` entries alongside the text
+    /// prompt, each preceded by its label when it has one.
     async fn run(
         &self,
         session_id: &str,
         prompt: &str,
-        images: &[(String, String)],
+        images: &[PromptImage],
         working_dir: &Path,
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
@@ -1411,7 +1411,7 @@ type SessionTurnResult = Result<AgentRunOutcome, String>;
 /// A prompt turn queued onto a [`SessionConnection`].
 struct QueuedSessionTurn {
     prompt: String,
-    images: Vec<(String, String)>,
+    images: Vec<PromptImage>,
     /// Resolved by the connection task with the turn's outcome.
     reply: oneshot::Sender<SessionTurnResult>,
 }
@@ -1554,7 +1554,7 @@ impl SessionConnection {
     pub async fn prompt(
         &mut self,
         prompt: &str,
-        images: &[(String, String)],
+        images: &[PromptImage],
     ) -> Result<AgentRunOutcome, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let turn = QueuedSessionTurn {
@@ -2038,7 +2038,7 @@ impl AgentDriver for AcpDriver {
         &self,
         session_id: &str,
         prompt: &str,
-        images: &[(String, String)],
+        images: &[PromptImage],
         working_dir: &Path,
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
@@ -5327,7 +5327,7 @@ async fn run_prompt_turn(
     our_session_id: &str,
     cancel_token: &CancellationToken,
     prompt: &str,
-    images: &[(String, String)],
+    images: &[PromptImage],
 ) -> Result<AgentRunOutcome, String> {
     let supports_images = setup.agent_capabilities.prompt_capabilities.image;
     if !images.is_empty() && !supports_images {
@@ -6301,18 +6301,49 @@ async fn authenticate_with_explicit_method(
     Ok(())
 }
 
+/// An image attached to a prompt. Only `image/*` data is accepted by the ACP
+/// agents (neither claude-agent-acp nor codex-acp forwards blob resources to
+/// the model), so other attachments are rendered to images before they get
+/// here; `label` carries the caption that says which page of what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptImage {
+    /// Base64 of the image bytes.
+    pub data: String,
+    pub mime_type: String,
+    /// Sent as a text block immediately before the image.
+    pub label: Option<String>,
+}
+
+impl PromptImage {
+    pub fn new(data: impl Into<String>, mime_type: impl Into<String>) -> Self {
+        Self {
+            data: data.into(),
+            mime_type: mime_type.into(),
+            label: None,
+        }
+    }
+
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
 fn build_prompt_content_blocks(
     prompt: &str,
-    images: &[(String, String)],
+    images: &[PromptImage],
     supports_images: bool,
 ) -> Vec<AcpContentBlock> {
     let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
 
     if supports_images {
-        for (data, mime_type) in images {
+        for image in images {
+            if let Some(label) = &image.label {
+                content_blocks.push(AcpContentBlock::Text(TextContent::new(label.as_str())));
+            }
             content_blocks.push(AcpContentBlock::Image(ImageContent::new(
-                data.as_str(),
-                mime_type.as_str(),
+                image.data.as_str(),
+                image.mime_type.as_str(),
             )));
         }
     } else if !images.is_empty() {
@@ -6476,10 +6507,10 @@ mod tests {
         AsyncTaskStopHandle, AsyncTaskUpdate, BackgroundActivity, BackgroundHoldConfig,
         BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BackgroundTaskSet,
         BasicMessageWriter, HoldOutcome, HoldSettle, HoldingState, IncomingSessionUpdate,
-        MessageWriter, OutOfTurnPermissionPolicy, QueuedSessionTurn, RemoteLineOutcome,
-        ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState, SessionLifetime,
-        SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store, TaskTrackingMode,
-        TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
+        MessageWriter, OutOfTurnPermissionPolicy, PromptImage, QueuedSessionTurn,
+        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent, SdkSessionState,
+        SessionLifetime, SessionSettleReason, SessionSettled, StopAsyncTaskRequest, Store,
+        TaskTrackingMode, TypedAsyncTaskSet, ASYNC_TASK_STOP_METHOD, AVAILABILITY_PROBE_SUBTYPE,
         BACKGROUND_CONTINUATION_ORIGIN, BACKGROUND_TASK_SUBTYPES, CLAUDE_SDK_MESSAGE_METHOD,
         CONTINUATION_MESSAGE_ID_PREFIX, ORIGIN_TASK_NAME_MAX_CHARS, PERMISSION_ANNOUNCEMENT_GRACE,
         SESSION_STATE_SUBTYPE, TASK_NOTIFICATION_ORIGIN,
@@ -8210,7 +8241,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
     #[test]
     fn image_prompt_blocks_are_omitted_when_unsupported() {
-        let images = vec![("abcd".to_string(), "image/png".to_string())];
+        let images = vec![PromptImage::new("abcd", "image/png")];
         let blocks = build_prompt_content_blocks("inspect this", &images, false);
 
         assert_eq!(blocks.len(), 2);
@@ -8225,12 +8256,56 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
     #[test]
     fn image_prompt_blocks_are_sent_when_supported() {
-        let images = vec![("abcd".to_string(), "image/png".to_string())];
+        let images = vec![PromptImage::new("abcd", "image/png")];
         let blocks = build_prompt_content_blocks("inspect this", &images, true);
 
         assert_eq!(blocks.len(), 2);
         assert!(matches!(blocks[0], AcpContentBlock::Text(_)));
         assert!(matches!(blocks[1], AcpContentBlock::Image(_)));
+    }
+
+    #[test]
+    fn labelled_image_prompt_blocks_carry_their_caption_first() {
+        let images = vec![
+            PromptImage::new("abcd", "image/png").with_label("page 1 of 2 of report.pdf"),
+            PromptImage::new("efgh", "image/png").with_label("page 2 of 2 of report.pdf"),
+            PromptImage::new("ijkl", "image/png"),
+        ];
+        let blocks = build_prompt_content_blocks("inspect this", &images, true);
+
+        let shape: Vec<&str> = blocks
+            .iter()
+            .map(|block| match block {
+                AcpContentBlock::Text(text) => text.text.as_str(),
+                AcpContentBlock::Image(_) => "<image>",
+                other => panic!("unexpected block {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "inspect this",
+                "page 1 of 2 of report.pdf",
+                "<image>",
+                "page 2 of 2 of report.pdf",
+                "<image>",
+                "<image>",
+            ]
+        );
+
+        // Without image support the captions go too; only the notice remains.
+        let blocks = build_prompt_content_blocks("inspect this", &images, false);
+        assert_eq!(blocks.len(), 2);
+        match &blocks[1] {
+            AcpContentBlock::Text(text) => {
+                assert!(
+                    text.text.contains("3 image attachment(s) omitted"),
+                    "{}",
+                    text.text
+                );
+            }
+            other => panic!("expected omission notice text block, got {other:?}"),
+        }
     }
 
     #[test]

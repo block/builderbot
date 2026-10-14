@@ -2398,6 +2398,7 @@ pub fn run() {
             image_commands::delete_image,
             image_commands::list_branch_images,
             image_commands::create_image_from_data,
+            image_commands::get_attachment_thumbnail,
             // Timeline delete commands
             timeline::get_worktree_changes_preview,
             timeline::discard_worktree_changes,

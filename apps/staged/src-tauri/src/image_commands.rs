@@ -1,6 +1,8 @@
 //! Image commands — image upload, retrieval, and management.
 
+mod thumbnail;
 mod tool_results;
+pub use thumbnail::*;
 pub use tool_results::*;
 
 use crate::store::Store;
@@ -22,7 +24,7 @@ pub async fn create_image(
     pending: Option<bool>,
 ) -> Result<crate::store::Image, String> {
     let store = crate::get_store(&store)?;
-    // Storing may rasterize a PDF page; keep that off the main thread.
+    // Reading and validating a 50 MB PDF is not main-thread work.
     tauri::async_runtime::spawn_blocking(move || {
         create_image_impl(store, branch_id, project_id, file_path, pending)
     })
@@ -86,16 +88,23 @@ pub fn delete_image(
     // Delete the DB record first (triggers session cleanup).
     store.delete_image(&image_id).map_err(|e| e.to_string())?;
 
-    // Best-effort file removal.
-    if let Ok(path) =
-        crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
-    {
-        if let Err(e) = std::fs::remove_file(&path) {
-            log::warn!("Failed to remove image file {}: {e}", path.display());
-        }
-    }
+    // Best-effort removal of the file and any cached PDF thumbnail.
+    crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
 
     Ok(())
+}
+
+/// A small preview of an attachment: the image itself, or for a PDF a PNG of
+/// its first page, rendered on first use and cached beside the file.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_attachment_thumbnail(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    image_id: String,
+) -> Result<AttachmentThumbnail, String> {
+    let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || attachment_thumbnail_impl(&store, &image_id))
+        .await
+        .map_err(|e| format!("Failed to load thumbnail: {e}"))?
 }
 
 /// List all images for a branch.
@@ -144,7 +153,7 @@ pub async fn create_image_from_data(
     pending: Option<bool>,
 ) -> Result<crate::store::Image, String> {
     let store = crate::get_store(&store)?;
-    // See `create_image`: PDF rendering must not block the main thread.
+    // See `create_image`: decoding a large payload must not block the main thread.
     tauri::async_runtime::spawn_blocking(move || {
         create_image_from_data_impl(
             store, branch_id, project_id, filename, mime_type, data, pending,
@@ -247,41 +256,38 @@ mod tests {
         assert!(err.contains("only images"), "{err}");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn pdf_attachments_are_rasterized_to_png() {
+    fn pdf_attachments_are_stored_as_pdfs() {
         use crate::note_media::pdf::tests::{tiny_pdf, PAGE_ONE};
         let f = Fixture::new();
-        let image = attach(&f, "doc.pdf", "application/pdf", &tiny_pdf(&[PAGE_ONE])).unwrap();
-        assert_eq!(image.mime_type, "image/png");
-        assert_eq!(image.filename, "doc.png");
+        let pdf = tiny_pdf(&[PAGE_ONE]);
+        let image = attach(&f, "doc.pdf", "application/pdf", &pdf).unwrap();
+        assert_eq!(image.mime_type, "application/pdf");
+        assert_eq!(image.filename, "doc.pdf");
+        assert_eq!(image.size_bytes, pdf.len() as i64);
         let path =
             crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
                 .unwrap();
-        let png = std::fs::read(path).unwrap();
-        assert_eq!(image.size_bytes, png.len() as i64);
-        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
-        let pixmap = tiny_skia::Pixmap::decode_png(&png).unwrap();
-        assert!(pixmap.width().max(pixmap.height()) <= 2048);
-        let corner = pixmap.pixel(0, 0).unwrap();
-        assert_eq!(
-            (corner.red(), corner.green(), corner.blue(), corner.alpha()),
-            (255, 255, 255, 255)
-        );
+        assert_eq!(path.extension().unwrap(), "pdf");
+        assert_eq!(std::fs::read(path).unwrap(), pdf);
 
-        // Pasted PDFs arrive without a usable name, like pasted images.
+        // Pasted PDFs arrive without a usable name, like pasted images, and a
+        // mislabelled one takes the extension its bytes call for.
         assert_eq!(
-            attach(&f, "pasted", "application/pdf", &tiny_pdf(&[PAGE_ONE]))
+            attach(&f, "pasted", "application/pdf", &pdf)
                 .unwrap()
                 .filename,
-            "pasted.png"
+            "pasted.pdf"
+        );
+        assert_eq!(
+            attach(&f, "scan.png", "image/png", &pdf).unwrap().filename,
+            "scan.pdf"
         );
     }
 
     /// PDFs get the larger input cap on both routes; images keep theirs. The
-    /// padded PDFs here are well-formed, so acceptance means the PNG of page
-    /// one was stored, not that the bytes merely got past the size check.
-    #[cfg(target_os = "macos")]
+    /// padded PDFs here are well-formed, so acceptance means the PDF passed
+    /// the open check, not that the bytes merely got past the size check.
     #[test]
     fn pdf_input_cap_is_separate_from_the_image_cap() {
         use crate::note_media::files::{MAX_IMAGE_SIZE, MAX_PDF_INPUT_SIZE};
@@ -291,8 +297,8 @@ mod tests {
         let large_pdf = padded_pdf(&[PAGE_ONE], MAX_IMAGE_SIZE as usize + 1);
 
         let image = attach(&f, "scan.pdf", "application/pdf", &large_pdf).unwrap();
-        assert_eq!(image.mime_type, "image/png");
-        assert!(image.size_bytes < MAX_IMAGE_SIZE as i64);
+        assert_eq!(image.mime_type, "application/pdf");
+        assert_eq!(image.size_bytes, large_pdf.len() as i64);
 
         let path = f.dir.path().join("dropped.pdf");
         std::fs::write(&path, &large_pdf).unwrap();
@@ -306,7 +312,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (image.mime_type.as_str(), image.filename.as_str()),
-            ("image/png", "dropped.png")
+            ("application/pdf", "dropped.pdf")
         );
 
         // Over the PDF cap: refused before decoding (base64) or reading (path).
@@ -366,12 +372,13 @@ mod tests {
         assert!(err.contains("PDF"), "{err}");
     }
 
+    /// Without CoreGraphics only the signature is checked, so the file is
+    /// still stored and viewable as a PDF.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn pdf_attachments_report_platform_support() {
-        use crate::note_media::pdf::tests::{tiny_pdf, PAGE_ONE};
+    fn pdf_attachments_are_stored_without_a_renderer() {
         let f = Fixture::new();
-        let err = attach(&f, "doc.pdf", "application/pdf", &tiny_pdf(&[PAGE_ONE])).unwrap_err();
-        assert!(err.contains("macOS"), "{err}");
+        let image = attach(&f, "doc.pdf", "application/pdf", b"%PDF-1.4\ngarbage").unwrap();
+        assert_eq!(image.mime_type, "application/pdf");
     }
 }

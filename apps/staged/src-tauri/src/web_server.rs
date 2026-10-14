@@ -2929,12 +2929,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Image not found: {image_id}"))?;
             store.delete_image(&image_id).map_err(|e| e.to_string())?;
-            if let Ok(path) =
-                crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
-            {
-                let _ = std::fs::remove_file(&path);
-            }
+            crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
             Ok(Value::Null)
+        }
+        "get_attachment_thumbnail" => {
+            let store = get_store(store_mutex)?;
+            let image_id: String = arg(&args, "imageId")?;
+            let thumbnail = tauri::async_runtime::spawn_blocking(move || {
+                crate::image_commands::attachment_thumbnail_impl(&store, &image_id)
+            })
+            .await
+            .map_err(|e| format!("Thumbnail task failed: {e}"))??;
+            Ok(serde_json::to_value(thumbnail).unwrap())
         }
         "list_branch_images" => {
             let store = get_store(store_mutex)?;

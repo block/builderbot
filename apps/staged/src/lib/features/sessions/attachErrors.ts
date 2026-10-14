@@ -6,7 +6,8 @@ export interface AttachRejection {
 
 /**
  * File-picker `accept` list for the image store. A PDF is accepted alongside
- * images because the backend stores page one of it as a rendered PNG.
+ * images: it is stored as a PDF, previewed through a rendering of its first
+ * page, and opened in the native PDF viewer.
  */
 export const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
 

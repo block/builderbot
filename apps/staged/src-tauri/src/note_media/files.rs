@@ -6,10 +6,9 @@ use std::io::Read;
 use std::path::Path;
 
 pub(crate) const MAX_IMAGE_SIZE: u64 = 10 * 1024 * 1024;
-/// A PDF attachment may be far larger than the PNG of its first page that is
-/// actually stored (scans and print-ready files routinely run 10–50 MB), so
-/// `%PDF-` payloads get their own input cap. Only the rendered PNG has to
-/// satisfy [`MAX_IMAGE_SIZE`].
+/// PDF attachments (scans and print-ready files routinely run 10–50 MB) get
+/// their own cap; they are stored as-is, and only the PNGs rendered from them
+/// for thumbnails and the agent prompt have to satisfy [`MAX_IMAGE_SIZE`].
 pub(crate) const MAX_PDF_INPUT_SIZE: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_VIDEO_SIZE: u64 = 100 * 1024 * 1024;
 
@@ -45,13 +44,20 @@ pub(crate) fn mime_for_extension(ext: &str) -> Option<&'static str> {
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
+        "pdf" => "application/pdf",
         _ => return None,
     })
 }
 
+/// Cap for a note media reference. PDFs are chat attachments only: the note
+/// renderer has no PDF figure, so a `.pdf` reference is refused here rather
+/// than stored and shown broken.
 pub(crate) fn size_limit(filename: &str, allow_video: bool) -> Result<u64, String> {
     let ext = extension(filename);
     let mime = mime_for_extension(&ext).ok_or("unsupported media format")?;
+    if mime == "application/pdf" {
+        return Err("PDFs cannot be embedded in notes".into());
+    }
     if mime.starts_with("video/") {
         if !allow_video {
             return Err("only images can be uploaded here".into());
@@ -66,6 +72,8 @@ pub(crate) fn size_limit(filename: &str, allow_video: bool) -> Result<u64, Strin
 pub(crate) fn sniff_format(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("png")
+    } else if super::pdf::is_pdf(bytes) {
+        Some("pdf")
     } else if bytes.starts_with(b"\xff\xd8\xff") {
         Some("jpg")
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
@@ -130,31 +138,20 @@ pub(crate) fn store_sniffed_image(
     if bytes.len() as u64 > cap {
         return Err(size_error(what, cap));
     }
-    // A PDF becomes an ordinary PNG attachment of its first page; nothing
-    // downstream (store, viewer, agent prompt) ever sees PDF bytes. Only this
-    // chat/timeline path converts: note ingest (`validate_media`) still
-    // rejects `.pdf` references.
-    let rendered;
-    let renamed;
-    let (filename, bytes) = if super::pdf::is_pdf(bytes) {
-        rendered = super::pdf::render_first_page(bytes, super::pdf::MAX_EDGE_PX)?;
-        log::debug!(
-            "Rendered page 1 of {} from PDF attachment {filename}",
-            rendered.page_count
-        );
-        renamed = Path::new(filename)
-            .with_extension("png")
-            .to_string_lossy()
-            .into_owned();
-        (renamed.as_str(), rendered.png.as_slice())
-    } else {
-        (filename, bytes)
-    };
+    // A PDF is stored byte-for-byte so the viewer can show the vector
+    // original; thumbnails and the agent prompt render pages from it later.
+    // Only this chat/timeline path accepts one: note ingest (`validate_media`)
+    // still refuses `.pdf` references.
+    if super::pdf::is_pdf(bytes) {
+        super::pdf::check(bytes)?;
+    }
     let sniffed = sniff_format(bytes).ok_or("unsupported image format")?;
-    if mime_for_extension(sniffed).unwrap().starts_with("video/") {
+    // Every sniffed extension has a MIME entry.
+    let mime = mime_for_extension(sniffed).unwrap();
+    if mime.starts_with("video/") {
         return Err("only images can be uploaded here".into());
     }
-    let filename = if mime_for_extension(&extension(filename)) == mime_for_extension(sniffed) {
+    let filename = if mime_for_extension(&extension(filename)) == Some(mime) {
         filename.to_owned()
     } else {
         Path::new(filename)
@@ -162,8 +159,10 @@ pub(crate) fn store_sniffed_image(
             .to_string_lossy()
             .into_owned()
     };
-    store_media_file(
-        store, branch_id, project_id, session_id, &filename, bytes, false,
+    // Already validated above (cap, signature, no video); `validate_media`
+    // would refuse the PDF a note cannot embed.
+    write_media(
+        store, branch_id, project_id, session_id, &filename, mime, bytes,
     )
 }
 
@@ -270,6 +269,22 @@ pub(crate) fn store_media_file(
     allow_video: bool,
 ) -> Result<Image, String> {
     let mime = validate_media(filename, bytes, allow_video)?;
+    write_media(
+        store, branch_id, project_id, session_id, filename, mime, bytes,
+    )
+}
+
+/// Write validated bytes under their MIME: a unique filename on the branch,
+/// the file, then the row (the file is removed if the insert fails).
+fn write_media(
+    store: &Store,
+    branch_id: Option<&str>,
+    project_id: &str,
+    session_id: Option<&str>,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<Image, String> {
     let filename = Path::new(filename)
         .file_name()
         .and_then(|s| s.to_str())
@@ -306,15 +321,7 @@ pub(crate) fn store_media_file(
 
 pub(crate) fn delete_media_file(store: &Store, image: &Image) -> Result<(), String> {
     store.delete_image(&image.id).map_err(|e| e.to_string())?;
-    if let Ok(path) =
-        crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
-    {
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Cannot remove media {}: {e}", image.id);
-            }
-        }
-    }
+    crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
     Ok(())
 }
 

@@ -55,7 +55,7 @@ describe('attachBasename', () => {
 });
 
 describe('isAttachableClipboardType', () => {
-  it('accepts images and PDFs, which the backend renders to PNG', () => {
+  it('accepts images and PDFs through the attachment store', () => {
     expect(isAttachableClipboardType('image/png')).toBe(true);
     expect(isAttachableClipboardType('image/webp')).toBe(true);
     expect(isAttachableClipboardType('application/pdf')).toBe(true);

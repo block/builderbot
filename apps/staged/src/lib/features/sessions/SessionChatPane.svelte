@@ -41,7 +41,6 @@
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import BookOpen from '@lucide/svelte/icons/book-open';
   import FileText from '@lucide/svelte/icons/file-text';
-  import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
   import type {
@@ -62,7 +61,7 @@
     createImageFromData,
     deleteImage,
     discoverAcpConfig,
-    getImageData,
+    getAttachmentThumbnail,
     getSession,
     getSessionAcpMetadataMessages,
     getSessionBackgroundHold,
@@ -129,6 +128,8 @@
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
   import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
+  import AttachmentThumb from './AttachmentThumb.svelte';
+  import { localPreview, type AttachmentPreview } from './attachmentPreview';
   import {
     attachBasename,
     attachErrorReason,
@@ -489,30 +490,31 @@
   // Image attachment state (available when project context is provided; branchId is optional)
   let canAttachImages = $derived(!!projectId);
   let replyImageIds = $state<string[]>([]);
-  let imagePreviews = $state<Map<string, string>>(new Map());
+  // Image ID → preview; null once a load failed, so it is not retried forever.
+  let imagePreviews = $state<Map<string, AttachmentPreview | null>>(new Map());
   let attachError = $state<string | null>(null);
 
   // Drag-and-drop state
   let dragOver = $state(false);
   let modalElement: HTMLElement | null = $state(null);
 
-  // Shared image data cache for both reply previews and message history images.
-  // Maps image ID → data URL. Loaded lazily when needed.
-  let messageImageCache = $state<Map<string, string>>(new Map());
+  // Preview cache for message history and queued-message attachments.
+  // Maps image ID → preview (null: failed). Loaded lazily when needed.
+  let messageImageCache = $state<Map<string, AttachmentPreview | null>>(new Map());
 
-  // Load previews for attached images
+  // Load previews for attached images and PDFs
   $effect(() => {
     for (const id of replyImageIds) {
       if (!imagePreviews.has(id)) {
-        getImageData(id)
-          .then((dataUrl) => {
+        getAttachmentThumbnail(id)
+          .then((preview) => {
             imagePreviews = new Map(imagePreviews);
-            imagePreviews.set(id, dataUrl);
+            imagePreviews.set(id, preview);
           })
           .catch(() => {
-            // Image may have been deleted — insert sentinel to prevent infinite retry
+            // Image may have been deleted
             imagePreviews = new Map(imagePreviews);
-            imagePreviews.set(id, '');
+            imagePreviews.set(id, null);
           });
       }
     }
@@ -535,14 +537,14 @@
     }
     for (const id of allImageIds) {
       if (!messageImageCache.has(id)) {
-        getImageData(id)
-          .then((dataUrl) => {
+        getAttachmentThumbnail(id)
+          .then((preview) => {
             messageImageCache = new Map(messageImageCache);
-            messageImageCache.set(id, dataUrl);
+            messageImageCache.set(id, preview);
           })
           .catch(() => {
             messageImageCache = new Map(messageImageCache);
-            messageImageCache.set(id, '');
+            messageImageCache.set(id, null);
           });
       }
     }
@@ -581,12 +583,13 @@
         true
       );
       replyImageIds = [...replyImageIds, image.id];
-      // Preview from the local bytes only when they are what got stored; a
-      // PDF is stored as a rendered PNG, which the preview effect fetches.
-      if (file.type === image.mimeType) {
-        const dataUrl = `data:${image.mimeType};base64,${base64}`;
+      // Preview from the local bytes when they can stand in for the stored
+      // file; otherwise (relabelled image, PDF) the effect fetches the
+      // backend thumbnail.
+      const preview = localPreview(image, file.type, base64);
+      if (preview) {
         imagePreviews = new Map(imagePreviews);
-        imagePreviews.set(image.id, dataUrl);
+        imagePreviews.set(image.id, preview);
       }
       return null;
     } catch (err) {
@@ -2247,17 +2250,12 @@
                     {#if group.message.imageIds && group.message.imageIds.length > 0}
                       <div class="message-images">
                         {#each group.message.imageIds as imgId}
-                          {#if messageImageCache.get(imgId)}
-                            <img
-                              class="message-image-thumb"
-                              src={messageImageCache.get(imgId)}
+                          <div class="message-image-thumb">
+                            <AttachmentThumb
+                              preview={messageImageCache.get(imgId)}
                               alt="attachment"
                             />
-                          {:else}
-                            <div class="message-image-placeholder">
-                              <ImagePlus size={16} />
-                            </div>
-                          {/if}
+                          </div>
                         {/each}
                       </div>
                     {/if}
@@ -2573,11 +2571,13 @@
                 {#if msg.imageIds.length > 0}
                   <div class="queue-item-images">
                     {#each msg.imageIds as imageId}
-                      {#if messageImageCache.get(imageId)}
-                        <img src={messageImageCache.get(imageId)} alt="queued attachment" />
-                      {:else}
-                        <span class="queue-item-image-placeholder"><ImagePlus size={12} /></span>
-                      {/if}
+                      <span class="queue-item-image">
+                        <AttachmentThumb
+                          preview={messageImageCache.get(imageId)}
+                          alt="queued attachment"
+                          iconSize={12}
+                        />
+                      </span>
                     {/each}
                   </div>
                 {/if}
@@ -2828,24 +2828,13 @@
   }
 
   .message-image-thumb {
+    position: relative;
     width: 120px;
-    max-height: 120px;
-    object-fit: cover;
-    border-radius: 8px;
-    border: 1px solid var(--border-subtle);
-    cursor: pointer;
-  }
-
-  .message-image-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 48px;
-    height: 48px;
+    height: 120px;
+    overflow: hidden;
     border-radius: 8px;
     border: 1px solid var(--border-subtle);
     background: var(--bg-hover);
-    color: var(--text-faint);
   }
 
   /* Context blocks (action/branch-history tags rendered as tool-call-style cards) */
@@ -3238,23 +3227,14 @@
     flex-wrap: wrap;
   }
 
-  .queue-item-images img,
-  .queue-item-image-placeholder {
+  .queue-item-image {
+    position: relative;
+    display: inline-block;
     width: 28px;
     height: 28px;
+    overflow: hidden;
     border-radius: 6px;
     border: 1px solid var(--border-subtle);
-  }
-
-  .queue-item-images img {
-    object-fit: cover;
-  }
-
-  .queue-item-image-placeholder {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-faint);
     background: var(--bg-hover);
   }
 

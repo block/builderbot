@@ -2,8 +2,9 @@
   ImageAttachment.svelte — Attach images, PDFs, or text snippets to a session prompt
 
   Provides a file picker button, thumbnail previews with remove buttons,
-  and clipboard paste support (Ctrl/Cmd+V). Images are uploaded to the
-  backend as base64-encoded data via the `create_image_from_data` command.
+  and clipboard paste support (Ctrl/Cmd+V). Files are uploaded to the
+  backend as base64-encoded data via the `create_image_from_data` command;
+  a PDF is stored as-is and previewed through its rendered first page.
 
   Text snippets are modal-local (folded into the prompt on submit, never
   persisted): they render as chips alongside the image thumbnails, and an
@@ -28,9 +29,11 @@
   import ClipboardPaste from '@lucide/svelte/icons/clipboard-paste';
   import FileText from '@lucide/svelte/icons/file-text';
   import { Button } from '$lib/components/ui/button';
-  import { createImageFromData, getImageData, deleteImage } from '../../commands';
+  import { createImageFromData, getAttachmentThumbnail, deleteImage } from '../../commands';
   import type { Image } from '../../types';
   import type { TextSnippet } from './sessionModalHelpers';
+  import AttachmentThumb from './AttachmentThumb.svelte';
+  import { localPreview, type AttachmentPreview } from './attachmentPreview';
   import {
     ATTACHMENT_ACCEPT,
     attachErrorReason,
@@ -65,24 +68,24 @@
 
   let hasAttachments = $derived(imageIds.length > 0 || textSnippets.length > 0);
 
-  let previews = $state<Map<string, string>>(new Map());
+  // Image ID → preview; null once a load failed, so it is not retried forever.
+  let previews = $state<Map<string, AttachmentPreview | null>>(new Map());
   let attachError = $state<string | null>(null);
   let fileInput: HTMLInputElement;
 
-  // Load previews for existing images
+  // Load previews for existing attachments
   $effect(() => {
     for (const id of imageIds) {
       if (!previews.has(id)) {
-        getImageData(id)
-          .then((dataUrl) => {
+        getAttachmentThumbnail(id)
+          .then((preview) => {
             previews = new Map(previews);
-            previews.set(id, dataUrl);
+            previews.set(id, preview);
           })
           .catch((err) => {
-            console.error('Failed to load image preview:', err);
-            // Insert sentinel to prevent infinite retries
+            console.error('Failed to load attachment preview:', err);
             previews = new Map(previews);
-            previews.set(id, '');
+            previews.set(id, null);
           });
       }
     }
@@ -133,14 +136,13 @@
         true
       );
       onImageIdsChange((current) => [...current, image.id]);
-      // Set preview immediately from the local data when it is what got
-      // stored. The stored MIME follows the file signature, which may differ
-      // from the browser's label; a PDF becomes a rendered PNG, which the
-      // preview effect above fetches instead.
-      if (file.type === image.mimeType) {
-        const dataUrl = `data:${image.mimeType};base64,${base64}`;
+      // Preview from the local bytes when they can stand in for the stored
+      // file; otherwise (relabelled image, PDF) the effect above fetches the
+      // backend thumbnail.
+      const preview = localPreview(image, file.type, base64);
+      if (preview) {
         previews = new Map(previews);
-        previews.set(image.id, dataUrl);
+        previews.set(image.id, preview);
       }
       return null;
     } catch (err) {
@@ -189,18 +191,14 @@
   <div class="attached-images">
     {#each imageIds as imageId}
       <div class="group/thumb image-thumb">
-        {#if previews.get(imageId)}
-          <img src={previews.get(imageId)} alt="attached" />
-        {:else}
-          <div class="image-placeholder"><ImagePlus size={16} /></div>
-        {/if}
+        <AttachmentThumb preview={previews.get(imageId)} alt="attached" />
         {#if !disabled}
           <Button
             variant="ghost"
             size="icon"
             class="image-remove-action absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-            title="Remove image"
-            aria-label="Remove image"
+            title="Remove attachment"
+            aria-label="Remove attachment"
             onclick={() => removeImage(imageId)}
           >
             <X size={10} />
@@ -310,12 +308,6 @@
     flex-shrink: 0;
   }
 
-  .image-thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
   .image-thumb:focus-within :global(.image-remove-action),
   :global(.image-remove-action:focus-visible) {
     opacity: 1;
@@ -325,15 +317,6 @@
     :global(.image-remove-action) {
       opacity: 1;
     }
-  }
-
-  .image-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    color: var(--text-faint);
   }
 
   .attach-controls {

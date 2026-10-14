@@ -48,6 +48,7 @@ import type {
   PrStatus,
   PollWorkspaceResult,
   Image,
+  AttachmentThumbnail,
   SuggestedRepo,
   AcpConfigSelection,
 } from './types';
@@ -1934,9 +1935,17 @@ export function listBranchImages(branchId: string): Promise<Image[]> {
   return invokeCommand('list_branch_images', { branchId });
 }
 
-/** Get the base64-encoded data URL for an image. */
+/** Get the base64-encoded data URL for an image (or the PDF itself, for a PDF attachment). */
 export function getImageData(imageId: string): Promise<string> {
   return invokeCommand('get_image_data', { imageId });
+}
+
+/**
+ * Small preview of an attachment: the image itself, or for a PDF a PNG of its
+ * first page (rendered once and cached by the backend).
+ */
+export function getAttachmentThumbnail(imageId: string): Promise<AttachmentThumbnail> {
+  return invokeCommand('get_attachment_thumbnail', { imageId });
 }
 
 /** Load an image referenced by a tool result without creating an attachment. */

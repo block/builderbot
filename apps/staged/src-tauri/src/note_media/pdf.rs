@@ -1,17 +1,19 @@
-//! PDF attachments: rasterize the first page to an opaque PNG so a dropped
-//! PDF flows through the image store, viewer, and agent prompt as an ordinary
-//! `image/png` row. Rendering uses CoreGraphics in-process (no subprocess, no
-//! temp files, malformed input fails fast instead of hanging).
+//! PDF attachments are stored as the PDF itself; this module rasterizes pages
+//! to opaque PNGs where a bitmap is needed: the thumbnail shown next to image
+//! attachments, and the agent prompt, whose transports accept only image
+//! blocks. Rendering uses CoreGraphics in-process (no subprocess, no temp
+//! files, malformed input fails fast instead of hanging).
 //!
-//! macOS only — the shipped target. Other platforms compile a stub so the
-//! Linux CI build stays green; they report that PDF attachments need macOS.
+//! macOS only — the shipped target. Other platforms compile stubs so the
+//! Linux CI build stays green; they accept any `%PDF-` payload at store time
+//! and report that rendering needs macOS.
 
 #[cfg(target_os = "macos")]
 use super::files::{size_error, MAX_IMAGE_SIZE};
 
-/// Long edge of the rendered page in pixels. A letter page lands at ~186 DPI,
-/// which keeps body text legible to a vision model without approaching the
-/// attachment size cap.
+/// Long edge of a page rendered for the agent prompt, in pixels. A letter
+/// page lands at ~186 DPI, which keeps body text legible to a vision model
+/// without approaching the attachment size cap.
 pub(crate) const MAX_EDGE_PX: u32 = 2048;
 
 /// Pages are never blown up beyond 4 px per PDF point, so a tiny page does
@@ -25,8 +27,7 @@ pub(crate) fn is_pdf(bytes: &[u8]) -> bool {
 
 pub(crate) struct RenderedPage {
     pub png: Vec<u8>,
-    /// Pages in the document. Only the first is rendered today; a follow-up
-    /// can emit one attachment per page.
+    /// Pages in the document, so callers can say "page 1 of N".
     pub page_count: usize,
 }
 
@@ -39,14 +40,60 @@ impl std::fmt::Debug for RenderedPage {
     }
 }
 
+/// The leading pages of a document, each as a white-backed PNG, plus the
+/// total so a caller can say how many were left out.
+pub(crate) struct RenderedDocument {
+    pub pages: Vec<Vec<u8>>,
+    pub page_count: usize,
+}
+
+/// Reject what CoreGraphics cannot open before it is stored, so a `%PDF-`
+/// prefix on garbage never becomes an attachment that fails to render later.
+#[cfg(target_os = "macos")]
+pub(crate) fn check(bytes: &[u8]) -> Result<(), String> {
+    open(bytes).map(drop)
+}
+
 /// Render page 1 to a white-backed PNG whose long edge is `max_edge_px`
-/// (less when that would exceed [`MAX_SCALE`]). If the PNG is still over
-/// [`MAX_IMAGE_SIZE`] — photographic pages — it is re-rendered once at half
-/// scale before failing with the usual size message.
+/// (less when that would exceed [`MAX_SCALE`]).
 #[cfg(target_os = "macos")]
 pub(crate) fn render_first_page(bytes: &[u8], max_edge_px: u32) -> Result<RenderedPage, String> {
+    let document = open(bytes)?;
+    let png = render_page(&document, 1, max_edge_px)?;
+    Ok(RenderedPage {
+        png,
+        page_count: document.page_count,
+    })
+}
+
+/// Render pages 1..=`max_pages` (or every page, if fewer) like
+/// [`render_first_page`].
+#[cfg(target_os = "macos")]
+pub(crate) fn render_pages(
+    bytes: &[u8],
+    max_pages: usize,
+    max_edge_px: u32,
+) -> Result<RenderedDocument, String> {
+    let document = open(bytes)?;
+    let pages = (1..=document.page_count.min(max_pages))
+        .map(|number| render_page(&document, number, max_edge_px))
+        .collect::<Result<_, _>>()?;
+    Ok(RenderedDocument {
+        pages,
+        page_count: document.page_count,
+    })
+}
+
+#[cfg(target_os = "macos")]
+struct Document {
+    document: objc2_core_foundation::CFRetained<objc2_core_graphics::CGPDFDocument>,
+    page_count: usize,
+}
+
+#[cfg(target_os = "macos")]
+fn open(bytes: &[u8]) -> Result<Document, String> {
     use objc2_core_foundation::CFData;
-    use objc2_core_graphics::{CGDataProvider, CGPDFBox, CGPDFDocument, CGPDFPage};
+    use objc2_core_graphics::{CGDataProvider, CGPDFDocument};
 
     let data = CFData::from_bytes(bytes);
     let provider = CGDataProvider::with_cf_data(Some(&data)).ok_or("could not read PDF data")?;
@@ -57,7 +104,22 @@ pub(crate) fn render_first_page(bytes: &[u8], max_edge_px: u32) -> Result<Render
     if page_count == 0 {
         return Err("PDF has no pages".into());
     }
-    let page = CGPDFDocument::page(Some(&document), 1).ok_or("could not read PDF page 1")?;
+    Ok(Document {
+        document,
+        page_count,
+    })
+}
+
+/// Draw one page at `max_edge_px` along its long edge (less when that would
+/// exceed [`MAX_SCALE`]). If the PNG is over [`MAX_IMAGE_SIZE`] —
+/// photographic pages — it is re-rendered once at half scale before failing
+/// with the usual size message.
+#[cfg(target_os = "macos")]
+fn render_page(document: &Document, number: usize, max_edge_px: u32) -> Result<Vec<u8>, String> {
+    use objc2_core_graphics::{CGPDFBox, CGPDFDocument, CGPDFPage};
+
+    let page = CGPDFDocument::page(Some(&document.document), number)
+        .ok_or_else(|| format!("could not read PDF page {number}"))?;
 
     // CropBox is what Preview and Quick Look display (CoreGraphics clips it
     // to the MediaBox, and returns the MediaBox when none is set), so a
@@ -91,7 +153,7 @@ pub(crate) fn render_first_page(bytes: &[u8], max_edge_px: u32) -> Result<Render
     if png.len() as u64 > MAX_IMAGE_SIZE {
         return Err(size_error("media", MAX_IMAGE_SIZE));
     }
-    Ok(RenderedPage { png, page_count })
+    Ok(png)
 }
 
 #[cfg(target_os = "macos")]
@@ -180,8 +242,27 @@ fn render(
 }
 
 #[cfg(not(target_os = "macos"))]
+pub(crate) const UNSUPPORTED: &str = "PDF rendering requires macOS";
+
+/// Without a renderer only the signature is checked; the file is still
+/// stored and viewed as a PDF.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn check(_bytes: &[u8]) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn render_first_page(_bytes: &[u8], _max_edge_px: u32) -> Result<RenderedPage, String> {
-    Err("PDF attachments require macOS".into())
+    Err(UNSUPPORTED.into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn render_pages(
+    _bytes: &[u8],
+    _max_pages: usize,
+    _max_edge_px: u32,
+) -> Result<RenderedDocument, String> {
+    Err(UNSUPPORTED.into())
 }
 
 #[cfg(test)]
@@ -393,14 +474,39 @@ pub(crate) mod tests {
             ] {
                 let err = render_first_page(bytes, 2048).unwrap_err();
                 assert!(err.contains("PDF"), "{err}");
+                assert_eq!(check(bytes).unwrap_err(), err);
             }
+            check(&tiny_pdf(&[PAGE_ONE])).unwrap();
+        }
+
+        #[test]
+        fn render_pages_stops_at_the_cap_and_reports_the_total() {
+            let pdf = tiny_pdf(&[PAGE_ONE, PAGE_TWO, PAGE_ONE]);
+            let rendered = render_pages(&pdf, 2, 512).unwrap();
+            assert_eq!(rendered.page_count, 3);
+            assert_eq!(rendered.pages.len(), 2);
+            let row = ((792.0 - 400.0) * 512.0 / 792.0) as u32;
+            let first = decode(&rendered.pages[0]);
+            let second = decode(&rendered.pages[1]);
+            assert_eq!((first.width(), first.height()), (396, 512));
+            assert!(is_opaque_white(&first, 200, row));
+            assert!(second.pixel(200, row).unwrap().red() < 128);
+
+            let all = render_pages(&pdf, 20, 512).unwrap();
+            assert_eq!((all.pages.len(), all.page_count), (3, 3));
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn reports_platform_support() {
-        let err = render_first_page(&tiny_pdf(&[PAGE_ONE]), 2048).unwrap_err();
+        let pdf = tiny_pdf(&[PAGE_ONE]);
+        let err = render_first_page(&pdf, 2048).unwrap_err();
         assert!(err.contains("macOS"), "{err}");
+        let err = render_pages(&pdf, 1, 2048).unwrap_err();
+        assert!(err.contains("macOS"), "{err}");
+        // Storage only needs the signature here.
+        check(&pdf).unwrap();
+        check(b"%PDF-1.4\ngarbage").unwrap();
     }
 }

@@ -42,12 +42,16 @@ Chat attachments (file picker, paste, drop) share the validation code but are
 stored under the format their bytes actually are: browsers label `file.type`
 from the filename, so a WebP saved as `shot.png` is stored as `shot.webp` with
 an `image/webp` MIME rather than rejected. A dropped, pasted, or picked PDF (up
-to 50 MiB) is stored as a PNG of its first page, rendered with CoreGraphics on
-macOS; the PDF bytes themselves are not kept, and a `.pdf` reference in a note
-is still refused. Only unrecognized signatures, videos, and oversized files are
-refused, and the composer shows the reason for pasted, picked, and natively
-dropped files alike, clearing it when the message is sent or the attachment
-removed.
+to 50 MiB) is stored byte-for-byte as `application/pdf` so the viewer can open
+it in the webview's native PDF viewer (vector zoom, every page) through a Blob
+URL; thumbnails show its first page, rendered once with CoreGraphics on macOS
+and cached as `<uuid>.thumb.png` beside the file, and the agent prompt gets
+each page (up to 20) as a captioned PNG image block, since the ACP agents
+accept only image blocks. A `.pdf` reference in a note is still refused. Only
+unrecognized signatures, videos, oversized files, and PDFs CoreGraphics cannot
+open are refused, and the composer shows the reason for pasted, picked, and
+natively dropped files alike, clearing it when the message is sent or the
+attachment removed.
 
 On session completion, files are copied into the existing project `images/`
 store and destinations become `staged-media://<uuid>.<ext>`. Captions and titles

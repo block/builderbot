@@ -1514,16 +1514,44 @@ mod tests {
         } else {
             "case \" $* \" in *\" --registry \"*) echo 'unexpected --registry' >&2; exit 43;; esac\n"
         };
-        std::fs::write(
-            bin_dir.join("npm"),
-            format!(
+        write_executable(
+            &bin_dir.join("npm"),
+            &format!(
                 "#!/bin/sh\ntest \"$1\" = view || exit 44\ntest \"$3\" = version || exit 45\n{registry_check}echo '{version}'\nexit {exit_code}\n"
             ),
-        )
-        .unwrap();
+        );
+    }
+
+    /// Writes `contents` to `path` as a 0755 script and returns only once it
+    /// can actually be exec'd. On Linux, a test on another thread that forks
+    /// while our write handle is open inherits it until its own exec, and
+    /// exec of a file anyone still holds open for writing fails with
+    /// `ETXTBSY` — which `npm_view_version` would faithfully report as
+    /// "unknown" and fail the test. Probe-spawn (and immediately kill) the
+    /// script until that window has passed.
+    fn write_executable(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin_dir.join("npm"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for _ in 0..1000 {
+            match std::process::Command::new(path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("{} is not executable: {error}", path.display()),
+            }
+        }
+        panic!("{} stayed text-busy", path.display());
     }
 
     fn path_env(bin_dir: &Path) -> Vec<(String, String)> {
@@ -1608,7 +1636,7 @@ mod tests {
         );
 
         // A hung lookup is cut off at the bound.
-        std::fs::write(bin.join("npm"), "#!/bin/sh\nsleep 30\necho 9.9.9\n").unwrap();
+        write_executable(&bin.join("npm"), "#!/bin/sh\nsleep 30\necho 9.9.9\n");
         let started = Instant::now();
         assert_eq!(
             npm_view_version(

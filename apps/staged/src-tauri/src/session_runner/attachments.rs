@@ -118,6 +118,12 @@ impl PromptAttachments {
                 omitted = Some((page, format!("over the {}-page limit", limits.pages)));
                 break;
             }
+            // A spent budget refuses every page, so none is rendered only to
+            // be turned away.
+            if self.used_bytes >= limits.total_bytes {
+                omitted = Some((page, self.over_budget()));
+                break;
+            }
             let encoded = match document.render_page(page, limits.edge_px, fit) {
                 Ok(encoded) => encoded,
                 Err(e) => {
@@ -453,6 +459,18 @@ mod tests {
                 PNG.len(),
                 describe_size(page_bytes * 2)
             )]
+        );
+        // A later PDF finds the budget spent before its first page is
+        // rendered and is noted in the prompt text like one that did not fit.
+        attachments.add(&second, &pdf);
+        assert_eq!(attachments.images.len(), 2);
+        assert_eq!(attachments.notes.len(), 2);
+        assert_eq!(
+            attachments.notes[1],
+            format!(
+                "[Attached PDF b.pdf: pages 1–2 not included: over the {} image budget]",
+                describe_size(page_bytes * 2)
+            )
         );
     }
 

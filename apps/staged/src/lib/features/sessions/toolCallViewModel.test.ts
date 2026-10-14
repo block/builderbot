@@ -596,8 +596,43 @@ describe('buildToolCallViewModel output handling', () => {
 
     const inputOnly = buildToolCallViewModel(richTool({ rawInput: marker('input') }));
     expect(inputOnly.hasDetails).toBe(true);
+    expect(inputOnly.metadata.input).toBeNull();
+    expect(inputOnly.metadata.hasInputText).toBe(false);
     expect(inputOnly.metadata.command).toBeNull();
     expect(inputOnly.metadata.targetPath).toBeNull();
+  });
+
+  it('reads a deferred input from the tool_call content copy so the card does not reclassify on expand', () => {
+    // The visible `tool_call.content` is `{"name","input":<raw_input>}`, the
+    // same input the store deferred, so the collapsed card must classify and
+    // extract metadata from it exactly as it will once the body is fetched.
+    const input = { command: 'curl https://example.com/api', cwd: '/repo/apps' };
+    const call = message({
+      id: 1,
+      role: 'tool_call',
+      content: JSON.stringify({ name: 'shell', input }),
+    });
+    const deferred = buildToolCallViewModel(
+      richTool({
+        call,
+        verb: 'Processed',
+        rawInput: { $deferred: { messageId: 1, field: 'input', bytes: 9000 } },
+      }),
+      '/repo'
+    );
+    const hydrated = buildToolCallViewModel(
+      richTool({ call, verb: 'Processed', rawInput: input }),
+      '/repo'
+    );
+
+    expect(deferred.metadata.input).toEqual(input);
+    expect(deferred.metadata.command).toBe('curl https://example.com/api');
+    expect(deferred.metadata.workingDirectory).toBe('apps');
+    expect(deferred.metadata.parsedCommands).toEqual(hydrated.metadata.parsedCommands);
+    expect(deferred.category).toBe(hydrated.category);
+    expect(deferred.metadata.hasInputText).toBe(true);
+    expect(deferred.metadata.inputText).toBe(hydrated.metadata.inputText);
+    expect(deferred.metadata.inputText).not.toContain('$deferred');
   });
 
   it('defers raw output JSON formatting until the value is read', () => {

@@ -550,6 +550,14 @@ fn validates_magic_and_caps_by_kind_without_reading_oversized_files() {
     }
     assert!(validate_media("fake.mp4", b"\0\0\0\x18ftypavif\0\0\0\0", true).is_err());
     assert!(validate_media("fake.webm", b"\x1a\x45\xdf\xa3matroska", true).is_err());
+    // PDFs are converted only on the chat attachment path; note ingest does
+    // not accept them.
+    assert!(validate_media(
+        "a.pdf",
+        &pdf::tests::tiny_pdf(&[pdf::tests::PAGE_ONE]),
+        true
+    )
+    .is_err());
     assert!(size_limit("a.mp4", false).is_err());
     assert_eq!(size_limit("a.png", true).unwrap(), MAX_IMAGE_SIZE);
     assert_eq!(size_limit("a.mov", true).unwrap(), MAX_VIDEO_SIZE);

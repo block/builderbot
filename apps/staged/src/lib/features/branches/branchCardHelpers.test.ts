@@ -8,6 +8,7 @@ import {
   extractPrNumber,
   extractPrUrl,
   isGitActionInFlight,
+  isImageAttachmentFile,
   isImageFile,
   isMaybeTextFile,
   isPushRejectedNonFastForward,
@@ -62,6 +63,15 @@ describe('file type helpers', () => {
       const filePath = `/tmp/image.${extension}`;
 
       expect(isImageFile(filePath)).toBe(true);
+      expect(isImageAttachmentFile(filePath)).toBe(true);
+      expect(isMaybeTextFile(filePath)).toBe(false);
+    }
+  });
+
+  it('attaches PDFs as images rather than reading them as text', () => {
+    for (const filePath of ['/tmp/report.pdf', '/tmp/Scan.PDF']) {
+      expect(isImageFile(filePath)).toBe(false);
+      expect(isImageAttachmentFile(filePath)).toBe(true);
       expect(isMaybeTextFile(filePath)).toBe(false);
     }
   });
@@ -71,6 +81,7 @@ describe('file type helpers', () => {
       const filePath = `/tmp/image.${extension}`;
 
       expect(isImageFile(filePath)).toBe(false);
+      expect(isImageAttachmentFile(filePath)).toBe(false);
       expect(isMaybeTextFile(filePath)).toBe(true);
     }
   });

@@ -3,6 +3,8 @@ import type { PushState } from '../../stores/pushState.svelte';
 import type { PipelineExecution } from '../../types';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+// Stored as an image attachment too: the backend rasterizes page one to PNG.
+const PDF_EXTENSIONS = ['.pdf'];
 
 /**
  * Whether a push or pull of the branch's own is running or waiting on the branch
@@ -245,8 +247,14 @@ export function isImageFile(filePath: string): boolean {
   return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+/** Files `createImage` accepts: images plus PDFs, which it converts to PNG. */
+export function isImageAttachmentFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return isImageFile(filePath) || PDF_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
 export function isMaybeTextFile(filePath: string): boolean {
-  return !isImageFile(filePath);
+  return !isImageAttachmentFile(filePath);
 }
 
 /**

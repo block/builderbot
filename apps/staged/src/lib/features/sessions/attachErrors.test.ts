@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { attachBasename, attachErrorReason, formatAttachErrors } from './attachErrors';
+import {
+  ATTACHMENT_ACCEPT,
+  attachBasename,
+  attachErrorReason,
+  formatAttachErrors,
+  isAttachableClipboardType,
+} from './attachErrors';
 
 describe('formatAttachErrors', () => {
   it('returns null when nothing was rejected', () => {
@@ -45,5 +51,24 @@ describe('attachBasename', () => {
     expect(attachBasename('/tmp/shots/one.png')).toBe('one.png');
     expect(attachBasename('C:\\shots\\two.png')).toBe('two.png');
     expect(attachBasename('three.png')).toBe('three.png');
+  });
+});
+
+describe('isAttachableClipboardType', () => {
+  it('accepts images and PDFs, which the backend renders to PNG', () => {
+    expect(isAttachableClipboardType('image/png')).toBe(true);
+    expect(isAttachableClipboardType('image/webp')).toBe(true);
+    expect(isAttachableClipboardType('application/pdf')).toBe(true);
+  });
+
+  it('ignores other clipboard payloads', () => {
+    expect(isAttachableClipboardType('text/plain')).toBe(false);
+    expect(isAttachableClipboardType('text/html')).toBe(false);
+    expect(isAttachableClipboardType('application/octet-stream')).toBe(false);
+  });
+
+  it('offers the same types in the file picker', () => {
+    expect(ATTACHMENT_ACCEPT.split(',')).toContain('application/pdf');
+    expect(ATTACHMENT_ACCEPT.split(',')).toContain('image/png');
   });
 });

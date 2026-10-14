@@ -72,7 +72,7 @@
     formatBaseBranch,
     isGitActionInFlight,
     isMaybeTextFile,
-    isImageFile,
+    isImageAttachmentFile,
   } from './branchCardHelpers';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
@@ -1737,7 +1737,7 @@
 
   function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isMaybeTextFile);
-    const imagePaths = paths.filter(isImageFile);
+    const imagePaths = paths.filter(isImageAttachmentFile);
 
     if (textPaths.length > 0) {
       const placeholders = textPaths.map((filePath) => ({
@@ -1778,6 +1778,13 @@
             await commands.createImage(branch.id, branch.projectId, filePath);
           } catch (e) {
             console.error('Failed to create image from drop:', e);
+            // Same shape as the text path, so a rejected PDF or oversized
+            // image ("could not open PDF", "media exceeds 10 MB limit") is
+            // not a silent no-op.
+            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
+            toast.error('Error', {
+              description: `Could not attach "${fileNameFromPath(filePath)}"${reason ? ` \u2014 ${reason}` : ''}`,
+            });
           }
         })
       ).then(() => {

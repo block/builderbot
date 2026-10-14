@@ -28,6 +28,7 @@
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
+  import { ATTACHMENT_ACCEPT } from './attachErrors';
   import HashtagInput from './HashtagInput.svelte';
   import type { HashtagItem } from '../../types';
 
@@ -136,7 +137,7 @@
       <input
         bind:this={fileInputEl}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+        accept="{ATTACHMENT_ACCEPT},image/svg+xml"
         multiple
         class="file-input-hidden"
         onchange={handleImageFileSelect}

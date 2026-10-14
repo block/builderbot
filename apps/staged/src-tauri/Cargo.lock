@@ -23,6 +23,8 @@ dependencies = [
  "include_dir",
  "libc",
  "log",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "pikchr",
  "rand 0.10.3",
  "regex",

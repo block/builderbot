@@ -31,7 +31,13 @@
   import { createImageFromData, getImageData, deleteImage } from '../../commands';
   import type { Image } from '../../types';
   import type { TextSnippet } from './sessionModalHelpers';
-  import { attachErrorReason, formatAttachErrors, type AttachRejection } from './attachErrors';
+  import {
+    ATTACHMENT_ACCEPT,
+    attachErrorReason,
+    formatAttachErrors,
+    isAttachableClipboardType,
+    type AttachRejection,
+  } from './attachErrors';
 
   type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
 
@@ -127,11 +133,15 @@
         true
       );
       onImageIdsChange((current) => [...current, image.id]);
-      // Set preview immediately from the local data. The stored MIME follows
-      // the file signature, which may differ from the browser's label.
-      const dataUrl = `data:${image.mimeType};base64,${base64}`;
-      previews = new Map(previews);
-      previews.set(image.id, dataUrl);
+      // Set preview immediately from the local data when it is what got
+      // stored. The stored MIME follows the file signature, which may differ
+      // from the browser's label; a PDF becomes a rendered PNG, which the
+      // preview effect above fetches instead.
+      if (file.type === image.mimeType) {
+        const dataUrl = `data:${image.mimeType};base64,${base64}`;
+        previews = new Map(previews);
+        previews.set(image.id, dataUrl);
+      }
       return null;
     } catch (err) {
       console.error('Failed to attach image:', err);
@@ -145,7 +155,7 @@
     if (!items || disabled) return;
     const files: File[] = [];
     for (const item of Array.from(items)) {
-      if (item.type.startsWith('image/')) {
+      if (isAttachableClipboardType(item.type)) {
         e.preventDefault();
         const file = item.getAsFile();
         if (file) files.push(file);
@@ -169,7 +179,7 @@
 <input
   bind:this={fileInput}
   type="file"
-  accept="image/png,image/jpeg,image/gif,image/webp"
+  accept={ATTACHMENT_ACCEPT}
   multiple
   class="file-input-hidden"
   onchange={handleFileSelect}

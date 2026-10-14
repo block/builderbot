@@ -113,6 +113,26 @@ pub(crate) fn store_sniffed_image(
             MAX_IMAGE_SIZE / 1024 / 1024
         ));
     }
+    // A PDF becomes an ordinary PNG attachment of its first page; nothing
+    // downstream (store, viewer, agent prompt) ever sees PDF bytes. Only this
+    // chat/timeline path converts: note ingest (`validate_media`) still
+    // rejects `.pdf` references.
+    let rendered;
+    let renamed;
+    let (filename, bytes) = if super::pdf::is_pdf(bytes) {
+        rendered = super::pdf::render_first_page(bytes, super::pdf::MAX_EDGE_PX)?;
+        log::debug!(
+            "Rendered page 1 of {} from PDF attachment {filename}",
+            rendered.page_count
+        );
+        renamed = Path::new(filename)
+            .with_extension("png")
+            .to_string_lossy()
+            .into_owned();
+        (renamed.as_str(), rendered.png.as_slice())
+    } else {
+        (filename, bytes)
+    };
     let sniffed = sniff_format(bytes).ok_or("unsupported image format")?;
     if mime_for_extension(sniffed).unwrap().starts_with("video/") {
         return Err("only images can be uploaded here".into());

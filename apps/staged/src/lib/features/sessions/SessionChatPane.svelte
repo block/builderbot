@@ -124,7 +124,7 @@
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
-    isImageFile,
+    isImageAttachmentFile,
     isMaybeTextFile,
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
@@ -133,6 +133,7 @@
     attachBasename,
     attachErrorReason,
     formatAttachErrors,
+    isAttachableClipboardType,
     type AttachRejection,
   } from './attachErrors';
   import {
@@ -580,9 +581,13 @@
         true
       );
       replyImageIds = [...replyImageIds, image.id];
-      const dataUrl = `data:${image.mimeType};base64,${base64}`;
-      imagePreviews = new Map(imagePreviews);
-      imagePreviews.set(image.id, dataUrl);
+      // Preview from the local bytes only when they are what got stored; a
+      // PDF is stored as a rendered PNG, which the preview effect fetches.
+      if (file.type === image.mimeType) {
+        const dataUrl = `data:${image.mimeType};base64,${base64}`;
+        imagePreviews = new Map(imagePreviews);
+        imagePreviews.set(image.id, dataUrl);
+      }
       return null;
     } catch (err) {
       console.error('Failed to attach image:', err);
@@ -596,7 +601,7 @@
     if (!items) return;
     const files: File[] = [];
     for (const item of Array.from(items)) {
-      if (item.type.startsWith('image/')) {
+      if (isAttachableClipboardType(item.type)) {
         e.preventDefault();
         const file = item.getAsFile();
         if (file) files.push(file);
@@ -618,7 +623,7 @@
   // Drag-and-drop files (via Tauri native drag-drop events)
   async function handleFileDrop(paths: string[]) {
     if (!projectId) return;
-    const imagePaths = paths.filter((p) => isImageFile(p));
+    const imagePaths = paths.filter((p) => isImageAttachmentFile(p));
     const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const bid = branchId ?? null;
     const pid = projectId;

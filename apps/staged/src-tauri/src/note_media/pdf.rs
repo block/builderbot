@@ -1,0 +1,335 @@
+//! PDF attachments: rasterize the first page to an opaque PNG so a dropped
+//! PDF flows through the image store, viewer, and agent prompt as an ordinary
+//! `image/png` row. Rendering uses CoreGraphics in-process (no subprocess, no
+//! temp files, malformed input fails fast instead of hanging).
+//!
+//! macOS only — the shipped target. Other platforms compile a stub so the
+//! Linux CI build stays green; they report that PDF attachments need macOS.
+
+#[cfg(target_os = "macos")]
+use super::files::MAX_IMAGE_SIZE;
+
+/// Long edge of the rendered page in pixels. A letter page lands at ~186 DPI,
+/// which keeps body text legible to a vision model without approaching the
+/// attachment size cap.
+pub(crate) const MAX_EDGE_PX: u32 = 2048;
+
+/// Pages are never blown up beyond 4 px per PDF point, so a tiny page does
+/// not become a huge blurry bitmap just to reach the long-edge target.
+#[cfg(target_os = "macos")]
+const MAX_SCALE: f64 = 4.0;
+
+pub(crate) fn is_pdf(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"%PDF-")
+}
+
+pub(crate) struct RenderedPage {
+    pub png: Vec<u8>,
+    /// Pages in the document. Only the first is rendered today; a follow-up
+    /// can emit one attachment per page.
+    pub page_count: usize,
+}
+
+impl std::fmt::Debug for RenderedPage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderedPage")
+            .field("png_bytes", &self.png.len())
+            .field("page_count", &self.page_count)
+            .finish()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn size_limit_error() -> String {
+    format!("media exceeds {} MB limit", MAX_IMAGE_SIZE / 1024 / 1024)
+}
+
+/// Render page 1 to a white-backed PNG whose long edge is `max_edge_px`
+/// (less when that would exceed [`MAX_SCALE`]). If the PNG is still over
+/// [`MAX_IMAGE_SIZE`] — photographic pages — it is re-rendered once at half
+/// scale before failing with the usual size message.
+#[cfg(target_os = "macos")]
+pub(crate) fn render_first_page(bytes: &[u8], max_edge_px: u32) -> Result<RenderedPage, String> {
+    use objc2_core_foundation::CFData;
+    use objc2_core_graphics::{CGDataProvider, CGPDFBox, CGPDFDocument, CGPDFPage};
+
+    let data = CFData::from_bytes(bytes);
+    let provider = CGDataProvider::with_cf_data(Some(&data)).ok_or("could not read PDF data")?;
+    // CoreGraphics returns no document for anything it cannot parse, so a
+    // `%PDF-` prefix on garbage is rejected here rather than drawn as blank.
+    let document = CGPDFDocument::with_provider(Some(&provider)).ok_or("could not open PDF")?;
+    let page_count = CGPDFDocument::number_of_pages(Some(&document));
+    if page_count == 0 {
+        return Err("PDF has no pages".into());
+    }
+    let page = CGPDFDocument::page(Some(&document), 1).ok_or("could not read PDF page 1")?;
+
+    // MediaBox is the page; fall back to CropBox only when it is unusable.
+    let mut page_box = CGPDFBox::MediaBox;
+    let mut rect = CGPDFPage::box_rect(Some(&page), page_box);
+    if !is_drawable(rect.size.width, rect.size.height) {
+        page_box = CGPDFBox::CropBox;
+        rect = CGPDFPage::box_rect(Some(&page), page_box);
+        if !is_drawable(rect.size.width, rect.size.height) {
+            return Err("PDF page has no drawable area".into());
+        }
+    }
+    // `drawing_transform` honours the page's own /Rotate, so the bitmap must
+    // take the rotated orientation for the page to fill it.
+    let rotated = CGPDFPage::rotation_angle(Some(&page)).rem_euclid(180) == 90;
+    let (w_pt, h_pt) = if rotated {
+        (rect.size.height, rect.size.width)
+    } else {
+        (rect.size.width, rect.size.height)
+    };
+    let scale = (f64::from(max_edge_px) / w_pt.max(h_pt)).min(MAX_SCALE);
+
+    let png = render(&page, page_box, (w_pt, h_pt), scale)?;
+    let png = if png.len() as u64 > MAX_IMAGE_SIZE {
+        render(&page, page_box, (w_pt, h_pt), scale / 2.0)?
+    } else {
+        png
+    };
+    if png.len() as u64 > MAX_IMAGE_SIZE {
+        return Err(size_limit_error());
+    }
+    Ok(RenderedPage { png, page_count })
+}
+
+#[cfg(target_os = "macos")]
+fn is_drawable(width: f64, height: f64) -> bool {
+    width.is_finite() && height.is_finite() && width >= 1.0 && height >= 1.0
+}
+
+#[cfg(target_os = "macos")]
+fn pixel_size(w_pt: f64, h_pt: f64, scale: f64) -> (u32, u32) {
+    let px = |pt: f64| (pt * scale).round().max(1.0) as u32;
+    (px(w_pt), px(h_pt))
+}
+
+/// Draw the page, displayed at `(w_pt, h_pt)` points, into a fresh RGBA
+/// bitmap at `scale` px/pt and PNG-encode it with tiny-skia (its pixmaps are
+/// premultiplied RGBA8, the same layout CoreGraphics writes for
+/// `PremultipliedLast`).
+#[cfg(target_os = "macos")]
+fn render(
+    page: &objc2_core_graphics::CGPDFPage,
+    page_box: objc2_core_graphics::CGPDFBox,
+    (w_pt, h_pt): (f64, f64),
+    scale: f64,
+) -> Result<Vec<u8>, String> {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGPDFPage,
+    };
+
+    let (width, height) = pixel_size(w_pt, h_pt, scale);
+    let (w, h) = (width as usize, height as usize);
+    let mut buf = vec![0u8; w * h * 4];
+    let space = CGColorSpace::new_device_rgb().ok_or("could not create color space")?;
+    let bitmap = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: f64::from(width),
+            height: f64::from(height),
+        },
+    };
+    // In points, after the CTM is scaled. `drawing_transform` only ever
+    // scales a page *down* to fit its rect (otherwise it centres the page at
+    // 1:1), so the magnification has to come from the CTM, and the rect is
+    // the page's own displayed size so the box lands flush at the origin.
+    let page_rect = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize {
+            width: w_pt,
+            height: h_pt,
+        },
+    };
+    {
+        // SAFETY: the context draws into `buf`, which outlives it — the
+        // context is released at the end of this block, before `buf` moves
+        // into the pixmap — and the width, height, and row stride describe
+        // exactly the RGBA8 buffer allocated above.
+        let context = unsafe {
+            CGBitmapContextCreate(
+                buf.as_mut_ptr().cast(),
+                w,
+                h,
+                8,
+                w * 4,
+                Some(&space),
+                CGImageAlphaInfo::PremultipliedLast.0,
+            )
+        }
+        .ok_or("could not create bitmap context")?;
+        let ctx = Some(&*context);
+        // White behind the page: PDFs have no background, and a transparent
+        // PNG would lose black text on the dark theme and for the agent.
+        CGContext::set_rgb_fill_color(ctx, 1.0, 1.0, 1.0, 1.0);
+        CGContext::fill_rect(ctx, bitmap);
+        CGContext::scale_ctm(ctx, scale, scale);
+        CGContext::concat_ctm(
+            ctx,
+            CGPDFPage::drawing_transform(Some(page), page_box, page_rect, 0, true),
+        );
+        CGContext::draw_pdf_page(ctx, Some(page));
+    }
+    let size = tiny_skia::IntSize::from_wh(width, height).ok_or("invalid PDF page size")?;
+    let pixmap = tiny_skia::Pixmap::from_vec(buf, size).ok_or("invalid PDF page bitmap")?;
+    pixmap
+        .encode_png()
+        .map_err(|e| format!("could not encode PDF page: {e}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn render_first_page(_bytes: &[u8], _max_edge_px: u32) -> Result<RenderedPage, String> {
+    Err("PDF attachments require macOS".into())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// A minimal PDF with one letter-size page per content stream, using the
+    /// built-in Helvetica. Offsets in the xref table are computed, so the
+    /// output is well-formed rather than relying on reader repair.
+    pub(crate) fn tiny_pdf(pages: &[&str]) -> Vec<u8> {
+        tiny_pdf_with(pages, "[0 0 612 792]", None)
+    }
+
+    pub(crate) fn tiny_pdf_with(pages: &[&str], media_box: &str, rotate: Option<u32>) -> Vec<u8> {
+        let font_id = 3 + pages.len() * 2;
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {} >>",
+                (0..pages.len())
+                    .map(|i| format!("{} 0 R", 3 + i * 2))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                pages.len()
+            ),
+        ];
+        for (i, content) in pages.iter().enumerate() {
+            let rotate = rotate.map(|r| format!(" /Rotate {r}")).unwrap_or_default();
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox {media_box}{rotate} \
+                 /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {} 0 R >>",
+                4 + i * 2
+            ));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ));
+        }
+        objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned());
+
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    pub(crate) const PAGE_ONE: &str =
+        "BT /F1 24 Tf 72 700 Td (PAGE ONE Staged PDF probe) Tj ET\n4 w 72 650 m 540 650 l S";
+    const PAGE_TWO: &str = "BT /F1 24 Tf 72 700 Td (PAGE TWO should not appear) Tj ET";
+
+    #[test]
+    fn detects_the_pdf_signature_only() {
+        assert!(is_pdf(&tiny_pdf(&[PAGE_ONE])));
+        assert!(is_pdf(b"%PDF-1.7 junk"));
+        assert!(!is_pdf(b"\x89PNG\r\n\x1a\n"));
+        assert!(!is_pdf(b" %PDF-1.4"));
+        assert!(!is_pdf(b""));
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::*;
+
+        fn decode(png: &[u8]) -> tiny_skia::Pixmap {
+            assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+            tiny_skia::Pixmap::decode_png(png).unwrap()
+        }
+
+        fn is_opaque_white(pixmap: &tiny_skia::Pixmap, x: u32, y: u32) -> bool {
+            let p = pixmap.pixel(x, y).unwrap();
+            (p.red(), p.green(), p.blue(), p.alpha()) == (255, 255, 255, 255)
+        }
+
+        #[test]
+        fn renders_first_page_to_opaque_png_at_the_long_edge() {
+            let rendered = render_first_page(&tiny_pdf(&[PAGE_ONE, PAGE_TWO]), 2048).unwrap();
+            assert_eq!(rendered.page_count, 2);
+            let pixmap = decode(&rendered.png);
+            // Letter: 2048 / 792 pt ≈ 2.59x, under the 4x ceiling.
+            assert_eq!((pixmap.width(), pixmap.height()), (1583, 2048));
+            for (x, y) in [(0, 0), (1582, 0), (0, 2047), (1582, 2047)] {
+                assert!(is_opaque_white(&pixmap, x, y), "corner {x},{y}");
+            }
+            // The rule at y=650pt from the bottom is drawn; everything is opaque.
+            let rule_y = ((792.0 - 650.0) * 2048.0 / 792.0) as u32;
+            let p = pixmap.pixel(800, rule_y).unwrap();
+            assert!(p.red() < 128 && p.alpha() == 255, "rule pixel {p:?}");
+            assert!(pixmap.pixels().iter().all(|p| p.alpha() == 255));
+            // Page two's text sits where page one has nothing but white.
+            assert!(is_opaque_white(&pixmap, 1400, 2048 - rule_y - 300));
+        }
+
+        #[test]
+        fn wide_pages_are_downscaled_and_tiny_pages_capped_at_4x() {
+            // Same box as the onboarding flow chart fixture: 3150×1800 pt.
+            let wide = tiny_pdf_with(&[PAGE_ONE], "[0 0 3150 1800]", None);
+            let pixmap = decode(&render_first_page(&wide, 2048).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (2048, 1170));
+
+            let tiny = tiny_pdf_with(&[PAGE_ONE], "[0 0 100 50]", None);
+            let pixmap = decode(&render_first_page(&tiny, 2048).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (400, 200));
+        }
+
+        #[test]
+        fn rotated_pages_take_their_displayed_orientation() {
+            let landscape = tiny_pdf_with(&[PAGE_ONE], "[0 0 612 792]", Some(90));
+            let pixmap = decode(&render_first_page(&landscape, 2048).unwrap().png);
+            assert_eq!((pixmap.width(), pixmap.height()), (2048, 1583));
+            assert!(pixmap.pixels().iter().any(|p| p.red() < 128));
+        }
+
+        #[test]
+        fn malformed_pdfs_are_rejected_without_hanging() {
+            for bytes in [
+                &b"%PDF-1.4\nnot really a pdf"[..],
+                b"%PDF-",
+                &tiny_pdf(&[])[..],
+            ] {
+                let err = render_first_page(bytes, 2048).unwrap_err();
+                assert!(err.contains("PDF"), "{err}");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn reports_platform_support() {
+        let err = render_first_page(&tiny_pdf(&[PAGE_ONE]), 2048).unwrap_err();
+        assert!(err.contains("macOS"), "{err}");
+    }
+}

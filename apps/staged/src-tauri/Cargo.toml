@@ -85,6 +85,26 @@ tiny-skia = "0.12"
 tar = "0.4"
 flate2 = "1"
 
+# PDF attachments: rasterize page 1 with CoreGraphics (note_media::pdf). Both
+# crates are already in the lock via arboard/tray-icon; the feature list is
+# the minimum for CGPDFDocument + a bitmap CGContext + CFData input.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "CGAffineTransform",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDataProvider",
+    "CGGeometry",
+    "CGImage",
+    "CGPDFDocument",
+    "CGPDFPage",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "CFCGTypes",
+    "CFData",
+] }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # test-util: `#[tokio::test(start_paused = true)]` for the store-events

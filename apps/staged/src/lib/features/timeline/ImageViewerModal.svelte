@@ -74,7 +74,7 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
   <Dialog.Content
-    class="max-w-[90vw] max-h-[90vh] bg-background p-0 gap-0 overflow-hidden border border-[var(--border-subtle)] flex flex-col {isPdf
+    class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] bg-background p-0 gap-0 overflow-hidden border border-[var(--border-subtle)] flex flex-col {isPdf
       ? 'w-[90vw] h-[90vh]'
       : 'w-auto'}"
     showCloseButton={false}

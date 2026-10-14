@@ -329,10 +329,11 @@ async fn serve_media(
 /// `store/tool_images.rs`); the `<img>` then requests this route lazily.
 ///
 /// Anything that does not resolve to a base64 image block — unknown row,
-/// bad field, index past the end, a text block — is a 404, including
-/// unparseable ids, so a stale ref never surfaces as a 400 in the console.
-/// `Cache-Control` is long-lived: a settled tool result never changes, and
-/// the id/index pair is a stable identity for the block. The compression
+/// bad field, index past the end, a text block, a row still in flight — is a
+/// 404, including unparseable ids, so a stale ref never surfaces as a 400 in
+/// the console. `Cache-Control` is long-lived: the store only projects and
+/// resolves refs for settled tool rows, whose block lists never change again,
+/// so the id/index pair is a stable identity for the block. The compression
 /// layer's default predicate skips `image/*` bodies, so these go out as-is.
 async fn serve_tool_image(
     State(store): State<Arc<Store>>,
@@ -4540,6 +4541,29 @@ mod media_tests {
                 },
             )
             .unwrap();
+        // The same block on a row that has not settled: never projected to a
+        // ref, and not served either, since the response would be cached as
+        // immutable while a later update could still replace the block.
+        let in_flight_id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Read")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                in_flight_id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("in_progress".into()),
+                    acp_raw_output: Some(serde_json::json!([
+                        {"type": "text", "text": "ok"},
+                        {"type": "image", "source": {
+                            "type": "base64", "media_type": "image/png",
+                            "data": base64::engine::general_purpose::STANDARD.encode(PNG),
+                        }},
+                    ])),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let sessions = Arc::new(Mutex::new(HashSet::new()));
         let router = media_router_for_store(store, "bearer-token".into(), sessions);
         let get = |uri: String, auth: Option<&str>| {
@@ -4585,7 +4609,8 @@ mod media_tests {
             format!("/api/tool-images/{id}/output/2"),
             format!("/api/tool-images/{id}/content/0"),
             format!("/api/tool-images/{id}/source/1"),
-            format!("/api/tool-images/{}/output/1", id + 1),
+            format!("/api/tool-images/{in_flight_id}/output/1"),
+            format!("/api/tool-images/{}/output/1", in_flight_id + 1),
             "/api/tool-images/not-an-id/output/1".to_string(),
         ] {
             assert_eq!(

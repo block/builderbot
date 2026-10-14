@@ -2142,23 +2142,55 @@ fn test_transcript_reads_project_tool_images_to_refs_and_keep_raw_bytes() {
     let content = serde_json::json!([
         {"type": "content", "content": {"type": "image", "mimeType": "image/jpeg", "data": encode(jpeg), "annotations": {"audience": ["user"]}}},
     ]);
+    let metadata = |status: &str| AcpMessageMetadata {
+        acp_event_kind: Some("tool_call".to_string()),
+        acp_tool_call_id: Some("tc-1".to_string()),
+        acp_tool_status: Some(status.to_string()),
+        acp_raw_output: Some(raw_output.clone()),
+        acp_content: Some(content.clone()),
+        ..Default::default()
+    };
     let id = store
         .add_session_message(&session.id, MessageRole::ToolCall, "Read screenshot.png")
         .unwrap();
     store
-        .update_message_acp_metadata(
-            id,
-            &AcpMessageMetadata {
-                acp_event_kind: Some("tool_call".to_string()),
-                acp_tool_call_id: Some("tc-1".to_string()),
-                acp_tool_status: Some("in_progress".to_string()),
-                acp_raw_output: Some(raw_output.clone()),
-                acp_content: Some(content.clone()),
-                ..Default::default()
-            },
-        )
+        .update_message_acp_metadata(id, &metadata("in_progress"))
         .unwrap();
 
+    // In flight: a later update may still replace or reorder the block list,
+    // and a ref is cached as immutable, so the base64 ships inline from every
+    // transcript read and the ref lookup refuses the row.
+    for message in [
+        &store.get_session_messages(&session.id).unwrap()[0],
+        &store
+            .get_session_messages_since(&session.id, id, &[])
+            .unwrap()[0],
+        // In flight, so the metadata query ships it too.
+        &store
+            .get_session_acp_metadata_messages(&session.id)
+            .unwrap()[0],
+        &store
+            .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
+            .unwrap()[0],
+    ] {
+        assert_eq!(message.acp.acp_raw_output, Some(raw_output.clone()));
+        assert_eq!(message.acp.acp_content, Some(content.clone()));
+    }
+    assert_eq!(
+        store.get_tool_image(id, ToolImageField::Output, 1).unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .get_tool_image(id, ToolImageField::Content, 0)
+            .unwrap(),
+        None
+    );
+
+    // Settled: the block list is final, so every transcript read projects it.
+    store
+        .update_message_acp_metadata(id, &metadata("completed"))
+        .unwrap();
     let expected_output = serde_json::json!([
         {"type": "text", "text": "Read 1 image"},
         {"type": "image", "ref": format!("{id}/output/1"), "mimeType": "image/png"},
@@ -2169,17 +2201,13 @@ fn test_transcript_reads_project_tool_images_to_refs_and_keep_raw_bytes() {
             "annotations": {"audience": ["user"]},
         }},
     ]);
-    let visible = store.get_session_messages(&session.id).unwrap();
-    assert_eq!(visible[0].acp.acp_raw_output, Some(expected_output.clone()));
-    assert_eq!(visible[0].acp.acp_content, Some(expected_content.clone()));
     for message in [
+        &store.get_session_messages(&session.id).unwrap()[0],
         &store
             .get_session_messages_since(&session.id, id, &[])
             .unwrap()[0],
-        // In flight, so the metadata query ships it too.
-        &store
-            .get_session_acp_metadata_messages(&session.id)
-            .unwrap()[0],
+        // Settled visible rows leave the metadata query, but a refetch by id
+        // still delivers the row so the poll sees it settle.
         &store
             .get_session_acp_metadata_messages_since(&session.id, 0, &[id])
             .unwrap()[0],
@@ -2250,7 +2278,8 @@ fn test_poll_session_matches_the_four_standalone_reads() {
         .unwrap();
 
     // What the pane has loaded: a prompt, an assistant row a tool call then
-    // interrupted, and that tool call (in flight, with a screenshot result).
+    // interrupted, and that tool call (in flight, with a screenshot result
+    // that ships inline until the row settles).
     store
         .add_session_message(&session.id, MessageRole::User, "look at this")
         .unwrap();
@@ -2261,6 +2290,14 @@ fn test_poll_session_matches_the_four_standalone_reads() {
         .add_session_message(&session.id, MessageRole::ToolCall, "Read screenshot.png")
         .unwrap();
     let png: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+    let inline_output = serde_json::json!([{
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(png),
+        },
+    }]);
     store
         .update_message_acp_metadata(
             tool_id,
@@ -2268,14 +2305,7 @@ fn test_poll_session_matches_the_four_standalone_reads() {
                 acp_event_kind: Some("tool_call".to_string()),
                 acp_tool_call_id: Some("tc-1".to_string()),
                 acp_tool_status: Some("in_progress".to_string()),
-                acp_raw_output: Some(serde_json::json!([{
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": base64::engine::general_purpose::STANDARD.encode(png),
-                    },
-                }])),
+                acp_raw_output: Some(inline_output.clone()),
                 ..Default::default()
             },
         )
@@ -2368,13 +2398,45 @@ fn test_poll_session_matches_the_four_standalone_reads() {
             .collect::<Vec<_>>(),
         [tool_id, plan_id]
     );
+    assert_eq!(
+        poll.messages[1].acp.acp_raw_output,
+        Some(inline_output.clone())
+    );
+    assert_eq!(
+        poll.acp_metadata_messages[0].acp.acp_raw_output,
+        Some(inline_output.clone())
+    );
+
+    // Once the tool settles, the refetch delivers the row with the image
+    // projected to a ref, through the poll exactly as through the standalone
+    // read.
+    store
+        .update_message_acp_metadata(
+            tool_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-1".to_string()),
+                acp_tool_status: Some("completed".to_string()),
+                acp_raw_output: Some(inline_output),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let settled = store.poll_session(&session.id, &request).unwrap();
     let projected = serde_json::json!([
         {"type": "image", "ref": format!("{tool_id}/output/0"), "mimeType": "image/png"},
     ]);
-    assert_eq!(poll.messages[1].acp.acp_raw_output, Some(projected.clone()));
     assert_eq!(
-        poll.acp_metadata_messages[0].acp.acp_raw_output,
-        Some(projected)
+        settled.acp_metadata_messages[0].acp.acp_raw_output,
+        Some(projected.clone())
+    );
+    assert_eq!(
+        json(&settled.acp_metadata_messages),
+        json(
+            &store
+                .get_session_acp_metadata_messages_since(&session.id, tool_id, &[tool_id])
+                .unwrap()
+        )
     );
 }
 

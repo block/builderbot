@@ -16,6 +16,17 @@
 //! (`GET /api/tool-images/{ref}` on the web, the `get_tool_image` command
 //! under Tauri). The table itself is untouched: `session_messages` keeps the
 //! base64, and the replay/archive readers still see it.
+//!
+//! Only rows whose `acp_tool_status` is terminal are projected, the same gate
+//! `tool_bodies.rs` applies. A ref's identity is positional
+//! (`<message_id>/<field>/<index>`) and the route serves it with a year-long
+//! `immutable` cache lifetime, which is only honest once the block list can
+//! no longer change: an in-flight `tool_call_update` that already carries an
+//! image could be replaced or reordered by a later update before the row
+//! settles. In-flight rows therefore ship their base64 inline (the client's
+//! inline branch renders them as before), and [`Store::get_tool_image`]
+//! refuses to resolve a ref into an unsettled row so a stale ref cannot pin
+//! the wrong bytes in a browser cache.
 
 use std::fmt;
 
@@ -23,6 +34,7 @@ use rusqlite::params;
 use serde_json::{Map, Value};
 
 use super::models::SessionMessage;
+use super::tool_bodies::is_settled_tool_status;
 use super::{Store, StoreError};
 
 /// Which column of the row a reference points into.
@@ -71,9 +83,13 @@ pub struct ToolImage {
     pub bytes: Vec<u8>,
 }
 
-/// Rewrite every base64 image block in the message's ACP output and content
-/// into reference form. Used by the transcript queries only.
+/// Rewrite every base64 image block in a settled tool row's ACP output and
+/// content into reference form; in-flight rows are left as they are. Used by
+/// the transcript queries only.
 pub(super) fn project_tool_images(message: &mut SessionMessage) {
+    if !is_settled_tool_status(message.acp.acp_tool_status.as_deref()) {
+        return;
+    }
     let id = message.id;
     if let Some(output) = message.acp.acp_raw_output.as_mut() {
         project_blocks(output, id, ToolImageField::Output);
@@ -194,7 +210,10 @@ pub fn is_image_mime_type(value: &str) -> bool {
 
 impl Store {
     /// Decode the image block a transcript reference points at. `None` when
-    /// the row, field or index does not resolve to a base64 image block.
+    /// the row, field or index does not resolve to a base64 image block, or
+    /// when the row has not settled: the transcript never emits a ref for an
+    /// in-flight row, and serving one would let the route's `immutable`
+    /// response cache bytes the row may still replace.
     pub fn get_tool_image(
         &self,
         message_id: i64,
@@ -204,14 +223,22 @@ impl Store {
         let raw: Option<String> = {
             let conn = self.conn.lock().unwrap();
             let sql = format!(
-                "SELECT {} FROM session_messages WHERE id = ?1",
+                "SELECT {}, acp_tool_status FROM session_messages WHERE id = ?1",
                 field.column()
             );
-            match conn.query_row(&sql, params![message_id], |row| row.get(0)) {
-                Ok(raw) => raw,
-                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-                Err(e) => return Err(e.into()),
+            let row: (Option<String>, Option<String>) =
+                match conn.query_row(&sql, params![message_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                }) {
+                    Ok(row) => row,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+                    Err(e) => return Err(e.into()),
+                };
+            let (raw, status) = row;
+            if !is_settled_tool_status(status.as_deref()) {
+                return Ok(None);
             }
+            raw
         };
         let Some(value) = raw.and_then(|s| serde_json::from_str::<Value>(&s).ok()) else {
             return Ok(None);

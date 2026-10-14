@@ -85,10 +85,13 @@ tiny-skia = "0.12"
 tar = "0.4"
 flate2 = "1"
 
-# PDF attachments: rasterize page 1 with CoreGraphics (note_media::pdf). Both
-# crates are already in the lock via arboard/tray-icon; the feature list is
-# the minimum for CGPDFDocument + a bitmap CGContext + CFData input.
+# PDF attachments: rasterize pages with CoreGraphics (note_media::pdf). All
+# three crates are already in the lock via arboard/tray-icon (and `image`'s
+# jpeg feature only adds zune-jpeg, which resvg pulls in); the feature lists
+# are the minimum for CGPDFDocument + a bitmap CGContext + CFData input, and
+# a JPEG encoder for prompt pages whose PNG is over the per-image cap.
 [target.'cfg(target_os = "macos")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "CGAffineTransform",
     "CGBitmapContext",

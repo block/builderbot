@@ -1,12 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { Image } from '../../types';
-import {
-  dataUrlBytes,
-  isPdfDataUrl,
-  isPdfMimeType,
-  localPreview,
-  pdfBlobUrl,
-} from './attachmentPreview';
+import { isPdfMimeType, localPreview } from './attachmentPreview';
 
 function image(filename: string, mimeType: string): Image {
   return {
@@ -40,25 +34,9 @@ describe('localPreview', () => {
   });
 });
 
-describe('PDF data URLs', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
+describe('isPdfMimeType', () => {
   it('recognises only the PDF MIME', () => {
     expect(isPdfMimeType('application/pdf')).toBe(true);
     expect(isPdfMimeType('image/png')).toBe(false);
-    expect(isPdfDataUrl('data:application/pdf;base64,JVBERi0=')).toBe(true);
-    expect(isPdfDataUrl('data:image/png;base64,iVBOR')).toBe(false);
-  });
-
-  it('decodes the bytes and hands them to the viewer as a PDF blob URL', () => {
-    expect(Array.from(dataUrlBytes('data:application/pdf;base64,JVBERi0='))).toEqual([
-      0x25, 0x50, 0x44, 0x46, 0x2d,
-    ]);
-    const createObjectURL = vi.fn((blob: Blob) => `blob:${blob.type}:${blob.size}`);
-    vi.stubGlobal('URL', { ...URL, createObjectURL });
-    expect(pdfBlobUrl('data:application/pdf;base64,JVBERi0=')).toBe('blob:application/pdf:5');
-    expect(createObjectURL).toHaveBeenCalledTimes(1);
   });
 });

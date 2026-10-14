@@ -17,3 +17,13 @@ export function parseStagedMediaReference(href: string) {
 export function resolveStagedMediaUrl(id: string, ext: string): string {
   return isTauri ? convertFileSrc(`${id}.${ext}`, 'staged-media') : `/api/media/${id}.${ext}`;
 }
+
+/**
+ * Served URL of a PDF chat attachment, for the viewer's `<iframe>`. Looked up
+ * by id like note media (the same protocol and `/api/media` route, Range and
+ * all), but deliberately not via `parseStagedMediaReference`: PDFs stay out
+ * of note embeds.
+ */
+export function resolvePdfAttachmentUrl(id: string): string {
+  return resolveStagedMediaUrl(id, 'pdf');
+}

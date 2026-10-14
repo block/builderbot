@@ -73,10 +73,32 @@ fn pdf_thumbnail_png(
     let rendered = pdf::render_first_page(&bytes, THUMBNAIL_EDGE_PX)
         .map_err(|e| log::warn!("Cannot render thumbnail for PDF attachment {image_id}: {e}"))
         .ok()?;
-    if let Err(e) = std::fs::write(&cache, &rendered.png) {
-        log::warn!("Cannot cache thumbnail {}: {e}", cache.display());
+    match crate::store::images::thumbnail_temp_file_path(project_id, image_id) {
+        Ok(temp) => {
+            if let Err(e) = cache_thumbnail(&cache, &temp, &rendered.png) {
+                log::warn!("Cannot cache thumbnail {}: {e}", cache.display());
+            }
+        }
+        Err(e) => log::warn!("Cannot cache thumbnail {}: {e}", cache.display()),
     }
     Some(rendered.png)
+}
+
+/// Write the PNG beside the cache and rename it into place, so a concurrent
+/// reader (the composer strip and the history effect ask for a new
+/// attachment at the same moment) sees either no cache or a complete file,
+/// never a partial one that passes the signature check. The temp file does
+/// not outlive a failure.
+fn cache_thumbnail(
+    cache: &std::path::Path,
+    temp: &std::path::Path,
+    png: &[u8],
+) -> std::io::Result<()> {
+    let result = std::fs::write(temp, png).and_then(|()| std::fs::rename(temp, cache));
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -158,9 +180,40 @@ mod tests {
             Some(data_url)
         );
 
-        // Deleting the attachment removes the thumbnail with it.
+        // Rendering left no temp file behind.
+        assert_eq!(thumbnail_temp_files(&cache), Vec::<String>::new());
+
+        // Deleting the attachment removes the thumbnail with it, and any
+        // temp file a crash mid-write left behind.
+        let stray = cache.with_file_name(format!("{}.thumb.1-0.tmp", image.id));
+        std::fs::write(&stray, b"partial").unwrap();
         crate::note_media::files::delete_media_file(&f.store, &image).unwrap();
         assert!(!cache.exists());
+        assert!(!stray.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_failed_cache_write_serves_the_render_and_leaves_no_temp_file() {
+        let f = Fixture::new();
+        let image = stored_pdf(&f);
+        let cache = crate::store::images::thumbnail_file_path(&f.project.id, &image.id).unwrap();
+        // A directory where the cache file goes: the rename cannot land.
+        std::fs::create_dir(&cache).unwrap();
+        let thumbnail = attachment_thumbnail_impl(&f.store, &image.id).unwrap();
+        assert!(thumbnail.data_url.is_some());
+        assert!(cache.is_dir());
+        assert_eq!(thumbnail_temp_files(&cache), Vec::<String>::new());
+    }
+
+    /// Names of thumbnail temp files beside `cache`.
+    fn thumbnail_temp_files(cache: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(cache.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".thumb.") && n.ends_with(".tmp"))
+            .collect()
     }
 
     #[cfg(not(target_os = "macos"))]

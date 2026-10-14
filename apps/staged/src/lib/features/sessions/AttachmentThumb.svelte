@@ -11,6 +11,9 @@
                attachment could not be loaded at all
     alt      — alt text for the image
     iconSize — size of the stand-in icon
+    fit      — 'cover' (default) fills the parent's box, cropping the image;
+               'natural' takes the parent's width at the image's own aspect,
+               cropped only past the parent's --attachment-thumb-max-height
 -->
 <script lang="ts">
   import ImagePlus from '@lucide/svelte/icons/image-plus';
@@ -21,18 +24,19 @@
     preview: AttachmentPreview | null | undefined;
     alt: string;
     iconSize?: number;
+    fit?: 'cover' | 'natural';
   }
 
-  let { preview, alt, iconSize = 16 }: Props = $props();
+  let { preview, alt, iconSize = 16, fit = 'cover' }: Props = $props();
 
   let isPdf = $derived(!!preview && isPdfMimeType(preview.mimeType));
   let title = $derived(preview?.filename || undefined);
 </script>
 
 {#if preview?.dataUrl}
-  <img src={preview.dataUrl} {alt} {title} />
+  <img src={preview.dataUrl} {alt} {title} class:natural={fit === 'natural'} />
 {:else}
-  <div class="attachment-thumb-placeholder" {title}>
+  <div class="attachment-thumb-placeholder" class:natural={fit === 'natural'} {title}>
     {#if isPdf}
       <FileText size={iconSize} />
     {:else}
@@ -52,6 +56,11 @@
     object-fit: cover;
   }
 
+  img.natural {
+    height: auto;
+    max-height: var(--attachment-thumb-max-height, none);
+  }
+
   .attachment-thumb-placeholder {
     display: flex;
     align-items: center;
@@ -59,6 +68,11 @@
     width: 100%;
     height: 100%;
     color: var(--text-faint);
+  }
+
+  .attachment-thumb-placeholder.natural {
+    height: auto;
+    aspect-ratio: 1;
   }
 
   .attachment-thumb-badge {

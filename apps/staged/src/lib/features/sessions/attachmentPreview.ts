@@ -32,27 +32,3 @@ export function localPreview(
     filename: image.filename,
   };
 }
-
-const PDF_DATA_URL_PREFIX = `data:${PDF_MIME_TYPE};base64,`;
-
-/** Whether a `get_image_data` reply carries a PDF rather than an image. */
-export function isPdfDataUrl(dataUrl: string): boolean {
-  return dataUrl.startsWith(PDF_DATA_URL_PREFIX);
-}
-
-/** The bytes of a base64 data URL. */
-export function dataUrlBytes(dataUrl: string): Uint8Array<ArrayBuffer> {
-  const binary = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
-  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-/**
- * Object URL for showing a PDF in the webview's native viewer. An `<iframe>`
- * will not load a `data:` URL, so the bytes go through a Blob; the caller
- * revokes the URL when the viewer closes.
- */
-export function pdfBlobUrl(dataUrl: string): string {
-  return URL.createObjectURL(new Blob([dataUrlBytes(dataUrl)], { type: PDF_MIME_TYPE }));
-}

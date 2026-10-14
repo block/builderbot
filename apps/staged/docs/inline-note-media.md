@@ -43,11 +43,16 @@ stored under the format their bytes actually are: browsers label `file.type`
 from the filename, so a WebP saved as `shot.png` is stored as `shot.webp` with
 an `image/webp` MIME rather than rejected. A dropped, pasted, or picked PDF (up
 to 50 MiB) is stored byte-for-byte as `application/pdf` so the viewer can open
-it in the webview's native PDF viewer (vector zoom, every page) through a Blob
-URL; thumbnails show its first page, rendered once with CoreGraphics on macOS
-and cached as `<uuid>.thumb.png` beside the file, and the agent prompt gets
-each page (up to 20) as a captioned PNG image block, since the ACP agents
-accept only image blocks. A `.pdf` reference in a note is still refused. Only
+it in the webview's native PDF viewer (vector zoom, every page) from its served
+media URL (`staged-media://<uuid>.pdf`, `/api/media/<uuid>.pdf` in web mode,
+where the response omits the `sandbox` CSP directive that would blank WebKit's
+viewer); thumbnails show its first page, rendered once with CoreGraphics on
+macOS and written atomically as `<uuid>.thumb.png` beside the file, and the
+agent prompt gets its pages as captioned image blocks, since the ACP agents
+accept only image blocks: up to 20 pages and 20 MB of encoded images, each page
+at most 5 MB (PNG, re-rendered at half scale and then re-encoded as JPEG if it
+has to be), with the pages left out named on the last one sent. A `.pdf`
+reference in a note is still refused. Only
 unrecognized signatures, videos, oversized files, and PDFs CoreGraphics cannot
 open are refused, and the composer shows the reason for pasted, picked, and
 natively dropped files alike, clearing it when the message is sent or the

@@ -2,8 +2,10 @@
   ImageViewerModal.svelte — Full-size attachment viewer modal
 
   Loads and displays an image by its ID, or a PDF attachment in the webview's
-  native PDF viewer (vector zoom, every page) through a Blob URL in a
-  full-height frame. Supports Escape to close and backdrop click dismissal.
+  native PDF viewer (vector zoom, every page) by pointing a full-height frame
+  at the attachment's served media URL, so the viewer streams the file with
+  Range requests instead of the bytes crossing IPC as base64. Supports Escape
+  to close and backdrop click dismissal.
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -14,7 +16,7 @@
   import { viewport } from '../../shared/viewport.svelte';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import type { ReferenceNavState } from '../references/referenceHistory.svelte';
-  import { isPdfDataUrl, pdfBlobUrl } from '../sessions/attachmentPreview';
+  import { resolvePdfAttachmentUrl } from '../../shared/markdown/mediaUrl';
 
   interface Props {
     open: boolean;
@@ -27,30 +29,22 @@
 
   let { open, imageId, filename, onClose, onDelete, referenceNav }: Props = $props();
   let dataUrl = $state<string | null>(null);
-  /** Blob URL of a PDF attachment, revoked when the viewer closes or moves on. */
-  let pdfUrl = $state<string | null>(null);
   let loading = $state(true);
 
-  // Sized for a document from the start when the name says PDF, so the
-  // modal does not jump once the bytes arrive.
-  let isPdf = $derived(pdfUrl !== null || /\.pdf$/i.test(filename));
+  // Stored filenames take the extension of the sniffed format, so `.pdf`
+  // means a PDF attachment: shown from its media URL, sized for a document.
+  let isPdf = $derived(/\.pdf$/i.test(filename));
+  let pdfUrl = $derived(isPdf ? resolvePdfAttachmentUrl(imageId) : null);
 
   $effect(() => {
-    if (!open) return;
+    if (!open || isPdf) return;
     loading = true;
     dataUrl = null;
-    pdfUrl = null;
     let cancelled = false;
-    let blobUrl: string | null = null;
     getImageData(imageId)
       .then((url) => {
         if (cancelled) return;
-        if (isPdfDataUrl(url)) {
-          blobUrl = pdfBlobUrl(url);
-          pdfUrl = blobUrl;
-        } else {
-          dataUrl = url;
-        }
+        dataUrl = url;
         loading = false;
       })
       .catch(() => {
@@ -58,12 +52,14 @@
       });
     return () => {
       cancelled = true;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
   });
 
-  // Keys pressed inside the PDF frame do not reach the dialog, so forward
-  // Escape from the frame's own window where the webview lets us listen.
+  // Keys pressed inside the PDF frame do not reach the dialog. In Tauri the
+  // frame is another origin (the staged-media scheme), so this listener
+  // cannot attach and the close button and backdrop remain; in web mode the
+  // frame is same-origin and Escape is forwarded where the viewer lets the
+  // frame window see it.
   function forwardFrameEscape(e: Event) {
     const frame = e.currentTarget as HTMLIFrameElement;
     try {
@@ -71,7 +67,7 @@
         if (e.key === 'Escape') onClose();
       });
     } catch {
-      // Cross-origin or plugin-rendered document: the close button remains.
+      // Cross-origin frame: the close button remains.
     }
   }
 </script>
@@ -119,15 +115,15 @@
       </div>
     </Dialog.Header>
     <div class="modal-body" class:pdf={isPdf}>
-      {#if loading}
-        <div class="placeholder">Loading...</div>
-      {:else if pdfUrl}
+      {#if pdfUrl}
         <iframe class="pdf-frame" src={pdfUrl} title={filename} onload={forwardFrameEscape}
         ></iframe>
+      {:else if loading}
+        <div class="placeholder">Loading...</div>
       {:else if dataUrl}
         <img src={dataUrl} alt={filename} />
       {:else}
-        <div class="placeholder error">Failed to load {isPdf ? 'PDF' : 'image'}</div>
+        <div class="placeholder error">Failed to load image</div>
       {/if}
     </div>
   </Dialog.Content>

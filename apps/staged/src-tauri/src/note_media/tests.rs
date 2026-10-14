@@ -693,6 +693,42 @@ fn materialization_missing_files_and_remote_video_caps_are_readable() {
     assert!(materialized.contains(&video.size_bytes.to_string()));
 }
 
+/// A PDF attachment is viewed through the same protocol as note media, in an
+/// `<iframe>`: the stored MIME comes back and the viewer can seek with
+/// Range. Only the stored extension resolves; the id cannot be read as an
+/// image.
+#[test]
+fn desktop_protocol_serves_pdf_attachments_with_ranges() {
+    use tauri::http::{Request, StatusCode};
+    let f = Fixture::new();
+    let pdf = super::pdf::tests::tiny_pdf(&[super::pdf::tests::PAGE_ONE]);
+    let image =
+        files::store_sniffed_image(&f.store, None, &f.project.id, None, "doc.pdf", &pdf).unwrap();
+    assert_eq!(
+        serving::lookup(&f.store, &format!("{}.pdf", image.id))
+            .unwrap()
+            .1,
+        "application/pdf"
+    );
+    assert!(serving::lookup(&f.store, &format!("{}.png", image.id)).is_err());
+    let response = serving::response(
+        &f.store,
+        Request::builder()
+            .uri(format!("staged-media://localhost/{}.pdf", image.id))
+            .header("Range", "bytes=0-4")
+            .body(vec![])
+            .unwrap(),
+    );
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-type"], "application/pdf");
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert_eq!(
+        response.headers()["content-range"],
+        format!("bytes 0-4/{}", pdf.len())
+    );
+    assert_eq!(response.body(), b"%PDF-");
+}
+
 #[test]
 fn desktop_protocol_seeks_and_handles_head_and_unsatisfiable_ranges() {
     use tauri::http::{Request, StatusCode};

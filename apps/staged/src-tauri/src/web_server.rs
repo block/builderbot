@@ -300,6 +300,12 @@ pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
 /// `<img>` rendering ignores response CSP, so this costs nothing there.
 const UNTRUSTED_MEDIA_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; sandbox";
 
+/// A PDF attachment is shown in an `<iframe>` by the browser's own viewer,
+/// which WebKit treats as a plugin and refuses in a sandboxed document (the
+/// frame stays blank). The viewer runs no page-origin script, so only
+/// `sandbox` is dropped for it.
+const UNTRUSTED_PDF_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'";
+
 fn media_router_for_store(
     store: Arc<Store>,
     token: String,
@@ -350,9 +356,14 @@ async fn serve_media(
             );
             // `mime_for_extension` has no SVG entry today; this keeps a future
             // one from reopening the top-level script hole.
+            let csp = if mime == "application/pdf" {
+                UNTRUSTED_PDF_CSP
+            } else {
+                UNTRUSTED_MEDIA_CSP
+            };
             response.headers_mut().insert(
                 axum::http::header::CONTENT_SECURITY_POLICY,
-                axum::http::HeaderValue::from_static(UNTRUSTED_MEDIA_CSP),
+                axum::http::HeaderValue::from_static(csp),
             );
             response
         }
@@ -4562,6 +4573,87 @@ mod media_tests {
     use super::*;
     use crate::note_media::tests::{Fixture, PNG};
     use tower::ServiceExt;
+
+    /// The browser's PDF viewer loads a PDF attachment in an `<iframe>`, so
+    /// the response keeps the stored MIME and Range support but must not
+    /// carry the `sandbox` directive, which blanks the viewer in WebKit.
+    #[tokio::test]
+    async fn pdf_media_is_served_without_the_sandbox_directive() {
+        let fixture = Fixture::new();
+        let pdf =
+            crate::note_media::pdf::tests::tiny_pdf(&[crate::note_media::pdf::tests::PAGE_ONE]);
+        let image = crate::note_media::files::store_sniffed_image(
+            &fixture.store,
+            None,
+            &fixture.project.id,
+            None,
+            "doc.pdf",
+            &pdf,
+        )
+        .unwrap();
+        let sessions = Arc::new(Mutex::new(HashSet::new()));
+        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions);
+        let request = |uri: String, range: Option<&str>| {
+            let mut request = axum::http::Request::builder()
+                .uri(uri)
+                .header("Authorization", "Bearer bearer-token");
+            if let Some(range) = range {
+                request = request.header("Range", range);
+            }
+            request.body(axum::body::Body::empty()).unwrap()
+        };
+        let response = router
+            .clone()
+            .oneshot(request(format!("/api/media/{}.pdf", image.id), None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/pdf");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_PDF_CSP
+        );
+        assert!(!UNTRUSTED_PDF_CSP.contains("sandbox"));
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            &pdf[..]
+        );
+
+        let response = router
+            .clone()
+            .oneshot(request(
+                format!("/api/media/{}.pdf", image.id),
+                Some("bytes=0-4"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"%PDF-"
+        );
+
+        // Images keep the sandboxed policy.
+        std::fs::write(fixture.dir.path().join("shot.png"), PNG).unwrap();
+        let outcome = fixture.ingest("", "![a](shot.png)");
+        let id = outcome.kept_ids.iter().next().unwrap();
+        let response = router
+            .oneshot(request(format!("/api/media/{id}.png"), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.headers()["content-security-policy"],
+            UNTRUSTED_MEDIA_CSP
+        );
+    }
 
     #[tokio::test]
     async fn media_route_requires_auth_and_streams_ranges() {

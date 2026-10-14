@@ -6347,8 +6347,9 @@ fn build_prompt_content_blocks(
             )));
         }
     } else if !images.is_empty() {
+        // Blocks, not attachments: one PDF arrives as one image per page.
         content_blocks.push(AcpContentBlock::Text(TextContent::new(format!(
-            "[{} image attachment(s) omitted because this ACP provider does not advertise promptCapabilities.image]",
+            "[{} image block(s) omitted because this ACP provider does not advertise promptCapabilities.image]",
             images.len()
         ))));
     }
@@ -8248,7 +8249,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert!(matches!(blocks[0], AcpContentBlock::Text(_)));
         match &blocks[1] {
             AcpContentBlock::Text(text) => {
-                assert!(text.text.contains("image attachment(s) omitted"));
+                assert!(text.text.contains("image block(s) omitted"));
             }
             other => panic!("expected omission notice text block, got {other:?}"),
         }
@@ -8299,7 +8300,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         match &blocks[1] {
             AcpContentBlock::Text(text) => {
                 assert!(
-                    text.text.contains("3 image attachment(s) omitted"),
+                    text.text.contains("3 image block(s) omitted"),
                     "{}",
                     text.text
                 );

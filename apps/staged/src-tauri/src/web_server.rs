@@ -4655,6 +4655,23 @@ mod media_tests {
             shipped.acp.acp_raw_output.as_ref().unwrap()["$deferred"]["messageId"],
             serde_json::json!(id)
         );
+        // An in-flight row never gets a marker, and the route must not serve
+        // it under the `immutable` cache header either.
+        let in_flight_id = store
+            .add_session_message(&fixture.session.id, store::MessageRole::ToolCall, "Bash")
+            .unwrap();
+        store
+            .update_message_acp_metadata(
+                in_flight_id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("tool_call".into()),
+                    acp_tool_status: Some("in_progress".into()),
+                    acp_raw_input: Some(serde_json::json!({"command": "make"})),
+                    acp_raw_output: Some(serde_json::json!({"stdout": stdout.clone()})),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         let sessions = Arc::new(Mutex::new(HashSet::new()));
         let router = media_router_for_store(store, "bearer-token".into(), sessions);
@@ -4705,7 +4722,8 @@ mod media_tests {
             StatusCode::UNAUTHORIZED
         );
         for uri in [
-            format!("/api/tool-bodies/{}", id + 1),
+            format!("/api/tool-bodies/{in_flight_id}"),
+            format!("/api/tool-bodies/{}", in_flight_id + 1),
             "/api/tool-bodies/not-an-id".to_string(),
         ] {
             assert_eq!(

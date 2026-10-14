@@ -211,22 +211,34 @@ fn inner_session_id(value: &Value) -> Option<String> {
 
 impl Store {
     /// The bodies a transcript marker stands in for, with tool images
-    /// projected to refs. `None` when no such row exists. Serves the current
-    /// row whatever its status; callers only ask for rows the transcript
-    /// deferred, which are settled.
+    /// projected to refs. `None` when no such row exists or when the row has
+    /// not settled: the transcript only emits markers for settled rows, and
+    /// serving an in-flight one would let the route's `immutable` response
+    /// cache bodies the writer may still replace. Same rule as
+    /// [`Store::get_tool_image`].
     pub fn get_tool_call_body(&self, message_id: i64) -> Result<Option<ToolCallBody>, StoreError> {
+        // input, output, content, status
+        type BodyRow = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
         let conn = self.conn.lock().unwrap();
-        let row: Option<(Option<String>, Option<String>, Option<String>)> = conn
+        let row: Option<BodyRow> = conn
             .query_row(
-                "SELECT acp_raw_input, acp_raw_output, acp_content
+                "SELECT acp_raw_input, acp_raw_output, acp_content, acp_tool_status
                  FROM session_messages WHERE id = ?1",
                 params![message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((input, output, content)) = row else {
+        let Some((input, output, content, status)) = row else {
             return Ok(None);
         };
+        if !is_settled_tool_status(status.as_deref()) {
+            return Ok(None);
+        }
         let parse = |raw: Option<String>| raw.and_then(|s| serde_json::from_str::<Value>(&s).ok());
         let mut body = ToolCallBody {
             message_id,

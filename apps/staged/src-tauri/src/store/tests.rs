@@ -2538,6 +2538,9 @@ fn test_transcript_reads_defer_large_bodies_of_settled_tool_rows_only() {
     assert_eq!(in_flight.acp.acp_raw_input, Some(big_input.clone()));
     assert_eq!(in_flight.acp.acp_raw_output, Some(big_output.clone()));
     assert_eq!(in_flight.acp.acp_content, Some(small_content.clone()));
+    // No marker exists yet, and the body lookup refuses the row so the
+    // `immutable` body route cannot cache bodies the writer may still replace.
+    assert_eq!(store.get_tool_call_body(id).unwrap(), None);
 
     // Settled: the two large bodies become markers, the small one stays.
     store

@@ -205,6 +205,33 @@ describe('mergeSinceMessages', () => {
     expect(merged!.messages[0].acpMessageId).toBe('msg-1');
     expect(merged!.messages[1]).toBe(existing[1]);
   });
+
+  it('keeps the inline body of a tail tool row that comes back settled and deferred', () => {
+    const input = { file_path: '/tmp/a.txt', content: 'x'.repeat(3000) };
+    const inFlight: SessionMessage = {
+      ...message(3, 'tool_call', 'Write'),
+      acpEventKind: 'tool_call',
+      acpToolCallId: 'tc-3',
+      acpToolStatus: 'in_progress',
+      acpRawInput: input,
+    };
+    const settled: SessionMessage = {
+      ...inFlight,
+      acpToolStatus: 'completed',
+      acpRawInput: {
+        $deferred: { messageId: 3, field: 'input', bytes: JSON.stringify(input).length },
+      },
+      acpContent: [{ type: 'content', content: { type: 'text', text: 'ok' } }],
+    };
+    const existing = [message(2, 'assistant', 'The'), inFlight];
+    const merged = mergeSinceMessages(existing, [settled, message(4, 'assistant', 'Done')], 3);
+
+    expect(merged!.appended).toBe(true);
+    expect(merged!.messages.map((m) => m.id)).toEqual([2, 3, 4]);
+    expect(merged!.messages[1].acpToolStatus).toBe('completed');
+    expect(merged!.messages[1].acpRawInput).toBe(input);
+    expect(merged!.messages[1].acpContent).toBe(settled.acpContent);
+  });
 });
 
 describe('sessionPollRequest', () => {

@@ -105,6 +105,7 @@
     type SessionBackgroundHold,
   } from './backgroundHold';
   import { mergeSinceMessages, sessionPollRequest } from './messagePoll';
+  import { retainInlineToolBodies } from './toolCallBodies';
   import {
     applyLatestWindow,
     LOAD_OLDER_THRESHOLD_PX,
@@ -998,14 +999,18 @@
    * Merge incremental metadata rows into the cached array. Row identity is
    * preserved when a re-fetched unsettled row comes back unchanged, and array
    * identity is preserved when no row changed at all, so unchanged transcript
-   * groups keep their identity downstream.
+   * groups keep their identity downstream. A row that settled since the last
+   * tick arrives with its large bodies deferred; the inline bodies already held
+   * are kept where they match (`retainInlineToolBodies`), so an expanded card
+   * does not flip to loading and refetch the bytes it was showing.
    */
   function applyAcpMetadataUpdates(updates: SessionMessage[]) {
     if (updates.length === 0) return;
     const byId = new Map(acpMetadataMessages.map((message) => [message.id, message]));
     let changed = false;
-    for (const update of updates) {
-      const current = byId.get(update.id);
+    for (const fetched of updates) {
+      const current = byId.get(fetched.id);
+      const update = current ? retainInlineToolBodies(current, fetched) : fetched;
       if (current && JSON.stringify(current) === JSON.stringify(update)) continue;
       byId.set(update.id, update);
       changed = true;

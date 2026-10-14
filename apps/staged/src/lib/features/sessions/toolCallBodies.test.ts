@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import type { ToolCallBody } from '../../types';
-import { deferredToolBody, deferredToolBodyIds, hydrateToolItem } from './toolCallBodies';
+import type { SessionMessage, ToolCallBody } from '../../types';
+import {
+  deferredToolBody,
+  deferredToolBodyIds,
+  hydrateToolItem,
+  retainInlineToolBodies,
+} from './toolCallBodies';
 
 const marker = (messageId: number, field: 'input' | 'output' | 'content', extra = {}) => ({
   $deferred: { messageId, field, bytes: 4096, ...extra },
@@ -93,5 +98,95 @@ describe('hydrateToolItem', () => {
     expect(hydrated.rawInput).toEqual({ command: 'ls' });
     expect(hydrated.rawOutput).toBe(item.rawOutput);
     expect(hydrated.content).toBeNull();
+  });
+});
+
+describe('retainInlineToolBodies', () => {
+  /** The store measures `bytes` as the UTF-8 length of the serialized body. */
+  const serializedBytes = (value: unknown) =>
+    new TextEncoder().encode(JSON.stringify(value)).length;
+
+  const toolRow = (
+    id: number,
+    status: string,
+    bodies: Partial<SessionMessage>
+  ): SessionMessage => ({
+    id,
+    sessionId: 's1',
+    role: 'tool_call',
+    content: '',
+    createdAt: id,
+    acpEventKind: 'tool_call',
+    acpToolCallId: `tc-${id}`,
+    acpToolStatus: status,
+    ...bodies,
+  });
+
+  const input = { file_path: '/tmp/a.txt', content: 'x'.repeat(3000) };
+  const output = { stdout: 'é'.repeat(2000) };
+
+  it('keeps the held inline bodies when the settled markers report their size', () => {
+    const current = toolRow(5, 'in_progress', { acpRawInput: input, acpRawOutput: output });
+    const update = toolRow(5, 'completed', {
+      acpRawInput: { $deferred: { messageId: 5, field: 'input', bytes: serializedBytes(input) } },
+      acpRawOutput: {
+        $deferred: { messageId: 5, field: 'output', bytes: serializedBytes(output) },
+      },
+      acpContent: [{ type: 'content', content: { type: 'text', text: 'done' } }],
+    });
+
+    const retained = retainInlineToolBodies(current, update);
+
+    expect(retained).not.toBe(update);
+    expect(retained.acpToolStatus).toBe('completed');
+    expect(retained.acpRawInput).toBe(input);
+    expect(retained.acpRawOutput).toBe(output);
+    expect(retained.acpContent).toBe(update.acpContent);
+    expect(update.acpRawInput).toEqual({ $deferred: expect.anything() });
+  });
+
+  it('leaves a marker in place when the held body is not the size the store measured', () => {
+    const partial = { stdout: output.stdout.slice(0, 1000) };
+    const current = toolRow(5, 'in_progress', { acpRawInput: input, acpRawOutput: partial });
+    const update = toolRow(5, 'completed', {
+      acpRawInput: { $deferred: { messageId: 5, field: 'input', bytes: serializedBytes(input) } },
+      acpRawOutput: {
+        $deferred: { messageId: 5, field: 'output', bytes: serializedBytes(output) },
+      },
+    });
+
+    const retained = retainInlineToolBodies(current, update);
+
+    expect(retained.acpRawInput).toBe(input);
+    expect(retained.acpRawOutput).toBe(update.acpRawOutput);
+  });
+
+  it('returns the update itself when nothing can be kept', () => {
+    const marker = { $deferred: { messageId: 5, field: 'input', bytes: serializedBytes(input) } };
+    const settled = toolRow(5, 'completed', { acpRawInput: marker });
+
+    // Nothing held for the field, a held marker, a marker for another row or
+    // field, a different row, and an update with no markers at all.
+    expect(retainInlineToolBodies(toolRow(5, 'in_progress', {}), settled)).toBe(settled);
+    expect(retainInlineToolBodies(toolRow(5, 'completed', { acpRawInput: marker }), settled)).toBe(
+      settled
+    );
+    const foreign = toolRow(5, 'completed', {
+      acpRawInput: { $deferred: { ...marker.$deferred, messageId: 6 } },
+      acpRawOutput: { $deferred: { ...marker.$deferred, field: 'content' } },
+    });
+    expect(
+      retainInlineToolBodies(
+        toolRow(5, 'in_progress', { acpRawInput: input, acpRawOutput: input }),
+        foreign
+      )
+    ).toBe(foreign);
+    expect(retainInlineToolBodies(toolRow(4, 'in_progress', { acpRawInput: input }), settled)).toBe(
+      settled
+    );
+    const inline = toolRow(5, 'in_progress', { acpRawInput: input });
+    expect(retainInlineToolBodies(toolRow(5, 'pending', { acpRawInput: input }), inline)).toBe(
+      inline
+    );
   });
 });

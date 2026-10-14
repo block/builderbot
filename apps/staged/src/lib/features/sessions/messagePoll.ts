@@ -10,6 +10,7 @@
 
 import type { SessionMessage, SessionPollRequest } from '../../types';
 import { isToolMetadataSettled } from './acpTranscript';
+import { retainInlineToolBodies } from './toolCallBodies';
 
 /**
  * The cursors for one `pollSession` tick, from what the pane has loaded.
@@ -79,6 +80,10 @@ export interface MergedSinceMessages {
  * hold it cannot tell which copy is newer, so it relies on the pane
  * serialising since-fetches (`pollInFlight` / `finalPollPending`) and is not
  * a full defence against out-of-order fetches.
+ *
+ * A tool row that settled since the last tick comes back with its large
+ * bodies deferred; the inline copies already cached are kept where they match
+ * ({@link retainInlineToolBodies}) so an expanded card does not refetch them.
  */
 export function mergeSinceMessages(
   existing: readonly SessionMessage[],
@@ -87,12 +92,13 @@ export function mergeSinceMessages(
 ): MergedSinceMessages | null {
   let next: SessionMessage[] | null = null;
   const tail: SessionMessage[] = [];
-  for (const message of updated) {
+  for (const update of updated) {
+    const index = findIndexFromEnd(existing, update.id);
+    const message = index < 0 ? update : retainInlineToolBodies(existing[index], update);
     if (message.id >= lastId) {
       tail.push(message);
       continue;
     }
-    const index = findIndexFromEnd(existing, message.id);
     if (index < 0 || isSameMessage(existing[index], message)) continue;
     next ??= [...existing];
     next[index] = message;

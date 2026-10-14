@@ -1,4 +1,4 @@
-import type { ToolCallBody } from '../../types';
+import type { SessionMessage, ToolCallBody } from '../../types';
 import type { RichToolItem } from './acpTranscript';
 
 /**
@@ -93,6 +93,57 @@ function resolveBody(value: unknown, bodies: ReadonlyMap<number, ToolCallBody>):
   const body = bodies.get(deferred.messageId);
   if (!body) return value;
   return body[BODY_KEY_BY_FIELD[deferred.field]] ?? null;
+}
+
+const MESSAGE_BODY_KEYS: readonly (keyof Pick<
+  SessionMessage,
+  'acpRawInput' | 'acpRawOutput' | 'acpContent'
+>)[] = ['acpRawInput', 'acpRawOutput', 'acpContent'];
+
+/**
+ * A re-fetched tool row with each `$deferred` marker swapped back for the body
+ * the pane already holds, where that body is evidently the one the marker
+ * stands in for.
+ *
+ * An in-flight row ships its bodies inline on every poll; the tick that sees
+ * it settle gets it back with the large ones deferred. Taking that update as
+ * is would turn an expanded card to "Loading details…" and fetch the bytes it
+ * just dropped. But the held copy is not necessarily current — streamed tool
+ * output accumulates in `acp_content` while the row is in flight, and an
+ * update may replace `rawInput` — so a body is only kept when its serialized
+ * UTF-8 size equals the marker's `bytes`, the size the store measured on the
+ * settled body (`serialized_len` in `store/tool_bodies.rs`). A mismatch,
+ * including an in-flight copy whose images are still inline base64 where the
+ * settled one carries refs, leaves the marker in place and the card fetches as
+ * before. Returns `update` itself when nothing was kept.
+ */
+export function retainInlineToolBodies(
+  current: SessionMessage,
+  update: SessionMessage
+): SessionMessage {
+  if (current.id !== update.id) return update;
+  let retained: SessionMessage | null = null;
+  for (const key of MESSAGE_BODY_KEYS) {
+    const marker = deferredToolBody(update[key]);
+    if (!marker || marker.messageId !== update.id || BODY_KEY_BY_FIELD[marker.field] !== key) {
+      continue;
+    }
+    const held = current[key];
+    if (
+      held == null ||
+      deferredToolBody(held) ||
+      utf8Length(JSON.stringify(held)) !== marker.bytes
+    ) {
+      continue;
+    }
+    retained ??= { ...update };
+    retained[key] = held;
+  }
+  return retained ?? update;
+}
+
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
 }
 
 function nonEmptyString(value: unknown): string | null {

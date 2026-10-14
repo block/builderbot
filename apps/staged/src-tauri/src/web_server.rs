@@ -722,7 +722,6 @@ fn web_client_id(args: &Value) -> Result<String, String> {
     Ok(client_id)
 }
 
-/// Helper to get the Store Arc from the shared mutex slot.
 /// Run a store read and its JSON serialization on the blocking pool. The
 /// session-transcript reads produce tens of MB of JSON; doing that inline
 /// would stall the tokio worker that is also servicing `/api/events`.
@@ -740,6 +739,7 @@ where
     .map_err(|e| format!("task failed: {e}"))?
 }
 
+/// Helper to get the Store Arc from the shared mutex slot.
 fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
     store
         .lock()

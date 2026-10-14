@@ -62,6 +62,7 @@ function setup(opts: {
     scrollToRow,
     scrollBy: (deltaY) => controller.scrollBy('after', deltaY),
     getCurrentScrollY: () => controller.afterScrollY,
+    getBeforeScrollY: () => controller.beforeScrollY,
     getLineHeight: () => controller.getDimensions('after').lineHeight,
     getViewportHeight: () => controller.getDimensions('after').viewportHeight,
     startCommentOnHunk,
@@ -186,6 +187,50 @@ describe('diffKeyboard hunk navigation', () => {
       press('i');
 
       expect(startCommentOnHunk).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('after content fits the viewport: before has deletions at rows 10 and 100', () => {
+    const VIEWPORT_ROWS = 80;
+    const BEFORE_LINES = 160;
+    const AFTER_LINES = 70;
+    const alignments: Alignment[] = [
+      hunk([0, 10], [0, 10], false),
+      hunk([10, 40], [10, 10]),
+      hunk([40, 100], [10, 70], false),
+      hunk([100, 160], [70, 70]),
+    ];
+
+    it('k after a handoff scroll that moved only the before pane snaps back to the second deletion', () => {
+      const result = setup({
+        beforeLines: BEFORE_LINES,
+        afterLines: AFTER_LINES,
+        viewportRows: VIEWPORT_ROWS,
+        alignments,
+      });
+      cleanup = result.cleanup;
+      const { controller, host, scrollToRow } = result;
+      press('j');
+      press('j');
+      expect(scrollToRow).toHaveBeenLastCalledWith(100, 'before');
+      expect(host.focusedHunkIndex).toBe(1);
+      const landedBeforeScrollY = controller.beforeScrollY;
+      expect(landedBeforeScrollY).toBeGreaterThan(0);
+      expect(controller.afterScrollY).toBe(0);
+
+      // Wheel the after pane down: it is pinned at 0 (the file fits), so the
+      // edge handoff moves only the before pane and afterScrollY stays put.
+      controller.scrollBy('after', 5 * LINE_HEIGHT);
+      expect(controller.afterScrollY).toBe(0);
+      expect(controller.beforeScrollY).toBe(landedBeforeScrollY + 5 * LINE_HEIGHT);
+
+      press('k');
+
+      // The viewport moved, so the jump is stale: k snaps back to the start of
+      // the deletion we are inside of instead of jumping to the first one.
+      expect(scrollToRow).toHaveBeenLastCalledWith(100, 'before');
+      expect(host.focusedHunkIndex).toBe(1);
+      expect(controller.beforeScrollY).toBe(landedBeforeScrollY);
     });
   });
 

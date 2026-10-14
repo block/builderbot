@@ -23,6 +23,12 @@ export interface DiffNavConfig {
   scrollToRow: (row: number, side: 'before' | 'after') => void;
   scrollBy: (deltaY: number) => void;
   getCurrentScrollY: () => number;
+  /**
+   * Before-pane scroll position. With the after pane pinned at an edge, a
+   * scroll can move only the before pane (the edge handoff), so this is needed
+   * to tell that the viewport has moved and to locate pure deletions.
+   */
+  getBeforeScrollY?: () => number;
   getLineHeight: () => number;
   getViewportHeight: () => number;
   startCommentOnHunk: (hunkIndex: number) => void;
@@ -53,15 +59,21 @@ const DEFAULT_CONFIG: DiffNavConfig = {
 };
 
 interface NavState {
-  /** Last keyboard hunk jump and the after-pane scroll position it landed on. */
-  lastJump: { index: number; scrollY: number } | null;
+  /** Last keyboard hunk jump and the scroll position of each pane it landed on. */
+  lastJump: { index: number; scrollY: number; beforeScrollY: number } | null;
+}
+
+/** Scroll position of a pane; the before pane falls back to the after pane's. */
+function scrollYFor(config: DiffNavConfig, side: 'before' | 'after'): number {
+  if (side === 'before' && config.getBeforeScrollY) return config.getBeforeScrollY();
+  return config.getCurrentScrollY();
 }
 
 /**
- * Row at the scroll anchor (1/3 down the after pane's viewport).
+ * Row at the scroll anchor (1/3 down the pane's viewport).
  */
-function anchorRow(config: DiffNavConfig): number {
-  const anchorY = config.getCurrentScrollY() + config.getViewportHeight() / 3;
+function anchorRow(config: DiffNavConfig, side: 'before' | 'after' = 'after'): number {
+  const anchorY = scrollYFor(config, side) + config.getViewportHeight() / 3;
   return Math.floor(anchorY / config.getLineHeight());
 }
 
@@ -73,17 +85,17 @@ function findCurrentHunkIndexFromScroll(config: DiffNavConfig): number {
   const alignments = config.getChangedAlignments();
   if (alignments.length === 0) return -1;
 
-  // Consider a hunk "current" if its start is within the top third of the viewport
-  const anchor = anchorRow(config);
-
-  // Find the last hunk whose start is at or before the anchor
+  // Consider a hunk "current" if its start is within the top third of the
+  // viewport. Each hunk is located on the pane that has its rows, so a pure
+  // deletion is found by the before pane even when the after pane is pinned at
+  // an edge and the edge handoff has moved only the before pane. Mid-file both
+  // panes are level and the two anchors agree; take the last hunk reached.
   let currentIndex = -1;
   for (let i = 0; i < alignments.length; i++) {
-    const hunkStart = alignments[i].alignment.after.start;
-    if (hunkStart <= anchor) {
+    const hunk = alignments[i].alignment;
+    const side = anchorSideForHunk(hunk);
+    if (hunk[side].start <= anchorRow(config, side)) {
       currentIndex = i;
-    } else {
-      break;
     }
   }
 
@@ -98,8 +110,8 @@ function findCurrentHunkIndexFromScroll(config: DiffNavConfig): number {
  * deletion, or a file shorter than the viewport. Any hunk in that last stretch
  * is never "reached", so n/p would keep re-selecting the hunk above it. The
  * last keyboard jump is authoritative there, as long as the host still reports
- * it focused and the after pane has not scrolled since; that jump also means
- * the viewport sits at the hunk's start.
+ * it focused and neither pane has scrolled since; that jump also means the
+ * viewport sits at the hunk's start.
  */
 function findCurrentHunk(
   config: DiffNavConfig,
@@ -109,7 +121,10 @@ function findCurrentHunk(
   if (lastJump) {
     const focused = config.getFocusedHunkIndex ? config.getFocusedHunkIndex() : lastJump.index;
     const inRange = lastJump.index < config.getChangedAlignments().length;
-    if (focused === lastJump.index && inRange && config.getCurrentScrollY() === lastJump.scrollY) {
+    const unscrolled =
+      config.getCurrentScrollY() === lastJump.scrollY &&
+      scrollYFor(config, 'before') === lastJump.beforeScrollY;
+    if (focused === lastJump.index && inRange && unscrolled) {
       return { index: lastJump.index, atStart: true };
     }
     state.lastJump = null;
@@ -119,13 +134,17 @@ function findCurrentHunk(
 
 /**
  * Scroll a hunk into view, anchored on the pane that actually has its rows,
- * and remember where that left the after pane.
+ * and remember where that left both panes.
  */
 function scrollToHunk(config: DiffNavConfig, state: NavState, index: number): void {
   const hunk = config.getChangedAlignments()[index].alignment;
   const side = anchorSideForHunk(hunk);
   config.scrollToRow(hunk[side].start, side);
-  state.lastJump = { index, scrollY: config.getCurrentScrollY() };
+  state.lastJump = {
+    index,
+    scrollY: config.getCurrentScrollY(),
+    beforeScrollY: scrollYFor(config, 'before'),
+  };
   config.onHunkFocus?.(index);
 }
 
@@ -173,7 +192,8 @@ function goToPreviousHunk(config: DiffNavConfig, state: NavState): boolean {
     const currentHunk = alignments[currentIndex].alignment;
 
     // If we're more than 2 lines into the current hunk, go to its start
-    if (!atStart && anchorRow(config) > currentHunk.after.start + 2) {
+    const side = anchorSideForHunk(currentHunk);
+    if (!atStart && anchorRow(config, side) > currentHunk[side].start + 2) {
       scrollToHunk(config, state, currentIndex);
       return true;
     }

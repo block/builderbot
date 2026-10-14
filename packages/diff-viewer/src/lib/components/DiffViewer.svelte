@@ -2186,6 +2186,7 @@
       scrollToRow: (row, side) => scrollController.scrollToRow(row, side),
       scrollBy: (deltaY) => scrollController.scrollBy('after', deltaY),
       getCurrentScrollY: () => scrollController.afterScrollY,
+      getBeforeScrollY: () => scrollController.beforeScrollY,
       getLineHeight: () => scrollController.getDimensions('after').lineHeight,
       getViewportHeight: () => scrollController.getDimensions('after').viewportHeight,
       startCommentOnHunk: (hunkIndex) => {

@@ -2273,6 +2273,9 @@ fn test_poll_session_matches_the_four_standalone_reads() {
     store
         .add_queued_session_message(&session.id, "first follow-up", &[], None)
         .unwrap();
+    // Queued ids are UUIDs, so rows sharing a millisecond `created_at` sort
+    // randomly; keep the two apart so the order assertion below is stable.
+    std::thread::sleep(std::time::Duration::from_millis(2));
     store
         .add_queued_session_message(&session.id, "second follow-up", &[], None)
         .unwrap();

@@ -3,7 +3,7 @@
  * each. NoteTransferDialog's list, its "create project" row and its buttons all
  * read from here, so the rules have exactly one frontend statement.
  */
-import { projectDisplayName } from '../../shared/utils';
+import { projectSearchName } from '../branches/moveBranchTarget';
 import type { Project } from '../../types';
 
 export type NoteTransferMode = 'move' | 'copy';
@@ -38,12 +38,13 @@ export function noteTransferCandidates(
  * The name a "Create project" row would use for `query`, or `null` when the
  * row should not be shown: nothing typed, or a project already goes by that
  * name (case-insensitively) — picking the existing one beats creating a twin.
+ * "Goes by" is `projectSearchName`, the same name the list is filtered on.
  */
 export function createProjectOption(query: string, projects: Project[]): string | null {
   const name = query.trim();
   if (!name) return null;
   const lower = name.toLowerCase();
-  if (projects.some((p) => projectDisplayName(p).toLowerCase() === lower)) return null;
+  if (projects.some((p) => projectSearchName(p) === lower)) return null;
   return name;
 }
 

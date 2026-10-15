@@ -27,6 +27,12 @@
     projectId?: string | null;
     /** The repo a branch note is bound to; shown in the picker's hint. */
     repoLabel?: { githubRepo: string; subpath: string | null } | null;
+    /**
+     * Runs after the picker confirms and before the command. The transfer acts
+     * on the stored note, so a host that is editing it saves here first; a
+     * rejection is shown in the picker and the transfer does not happen.
+     */
+    beforeTransfer?: () => Promise<void>;
     /** The note left this project; the host should close. */
     onMoved?: () => void;
   }
@@ -37,6 +43,7 @@
     noteTitle,
     projectId = null,
     repoLabel = null,
+    beforeTransfer,
     onMoved,
   }: Props = $props();
 
@@ -53,6 +60,7 @@
   }
 
   async function transfer(targetProjectId: string) {
+    await beforeTransfer?.();
     if (mode === 'move') {
       if (noteKind === 'project') {
         await commands.moveProjectNoteToProject(noteId, targetProjectId);

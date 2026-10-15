@@ -1,5 +1,6 @@
 //! Image CRUD operations and filesystem helpers.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -124,8 +125,22 @@ impl Store {
         project_id: &str,
         filename: &str,
     ) -> Result<String, StoreError> {
+        self.unique_image_filename_excluding(branch_id, project_id, filename, &HashSet::new())
+    }
+
+    /// [`Self::unique_image_filename`] that also steers clear of `reserved`:
+    /// names a caller has already handed out but not inserted yet, so a batch
+    /// of rows staged together stays unique among itself as well as against
+    /// the table.
+    pub fn unique_image_filename_excluding(
+        &self,
+        branch_id: Option<&str>,
+        project_id: &str,
+        filename: &str,
+        reserved: &HashSet<String>,
+    ) -> Result<String, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let existing: std::collections::HashSet<String> = match branch_id {
+        let mut existing: HashSet<String> = match branch_id {
             Some(bid) => {
                 let mut stmt = conn.prepare("SELECT filename FROM images WHERE branch_id = ?1")?;
                 let rows = stmt.query_map(params![bid], |row| row.get::<_, String>(0))?;
@@ -139,6 +154,7 @@ impl Store {
                 rows.filter_map(|r| r.ok()).collect()
             }
         };
+        existing.extend(reserved.iter().cloned());
 
         if !existing.contains(filename) {
             return Ok(filename.to_string());

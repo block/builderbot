@@ -6,7 +6,8 @@
 //!    project that tracks the same repo + subpath; when the target lacks that
 //!    repo it is added first, through the regular add-repo path. Nothing about
 //!    the note has been touched yet, so an add-repo failure is simply reported
-//!    and the note stays where it was.
+//!    and the note stays where it was. Adding takes long enough for a save to
+//!    land, so the note is read again afterwards and that row is what moves.
 //! 2. Copy the note's media files into the target project's media directory.
 //!    Files are cheap to remove and rows are not, so the filesystem goes first.
 //! 3. One transaction rewrites (move) or inserts (copy) the note row together
@@ -30,7 +31,7 @@
 //! and — having no session to overwrite it — editable like a note the user
 //! wrote.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -148,16 +149,27 @@ where
             .await
             .map_err(|e| format!("Could not add {} to {}: {e}", key.describe(), target.name))?;
     }
-    let target_branch = store
-        .find_branch_for_repo(&target.id, &key.github_repo, key.subpath.as_deref())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "{} tracks {} but has no branch for it.",
-                target.name,
-                key.describe()
-            )
-        })?;
+    // Adding a repo can take seconds, and a save that landed meanwhile must
+    // not be overwritten by the body read before it: from here on the note is
+    // the row as it reads now.
+    let note = refetch_branch_note(store, &note, mode)?;
+    // A copy into the note's own project lands beside the original. The
+    // lookup would send it to the project's oldest branch on the repo, which
+    // is only the same branch when there is one.
+    let target_branch = if source_branch.project_id == target.id {
+        source_branch
+    } else {
+        store
+            .find_branch_for_repo(&target.id, &key.github_repo, key.subpath.as_deref())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "{} tracks {} but has no branch for it.",
+                    target.name,
+                    key.describe()
+                )
+            })?
+    };
 
     // Step 2: media files, then step 3: the transaction.
     let media = stage_media_copies(store, &note.content, Some(&target_branch.id), &target.id)?;
@@ -263,6 +275,38 @@ fn ensure_settled(
     Ok(())
 }
 
+/// The note as it reads after an await: a save that landed in the meantime
+/// is carried rather than overwritten, a session that has since started
+/// writing to it stops the transfer, and a note that was deleted or moved
+/// meanwhile is left alone — the branch and repo resolved for it no longer
+/// describe where it is.
+fn refetch_branch_note(store: &Store, before: &Note, mode: TransferMode) -> Result<Note, String> {
+    let fresh = store
+        .get_note(&before.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "{} was deleted while {} it.",
+                quoted(&before.title),
+                mode.gerund()
+            )
+        })?;
+    ensure_settled(
+        &fresh.title,
+        fresh.session_id.as_deref(),
+        fresh.completed_at,
+        mode,
+    )?;
+    if fresh.branch_id != before.branch_id {
+        return Err(format!(
+            "{} was moved while {} it.",
+            quoted(&fresh.title),
+            mode.gerund()
+        ));
+    }
+    Ok(fresh)
+}
+
 fn quoted(title: &str) -> String {
     if title.trim().is_empty() {
         "This note".to_string()
@@ -327,6 +371,9 @@ fn stage_media_copies(
         files: Vec::new(),
     };
     let mut copies = HashMap::<String, Image>::new();
+    // Names handed out in this batch: the rows are not inserted until the
+    // transaction, so the store alone cannot keep two copies apart.
+    let mut reserved = HashSet::<String>::new();
     let mut edits = Vec::new();
     let result = (|| -> Result<(), String> {
         for reference in refs::extract_media_refs(content) {
@@ -347,8 +394,14 @@ fn stage_media_copies(
                         Err(e) => return Err(e.into()),
                     };
                     let filename = store
-                        .unique_image_filename(branch_id, project_id, &source.filename)
+                        .unique_image_filename_excluding(
+                            branch_id,
+                            project_id,
+                            &source.filename,
+                            &reserved,
+                        )
                         .map_err(|e| e.to_string())?;
+                    reserved.insert(filename.clone());
                     let mut copy = Image::new(
                         branch_id,
                         project_id,
@@ -533,10 +586,24 @@ mod tests {
 
     impl Fixture {
         fn note(&self, title: &str, content: &str) -> Note {
-            let note = Note::new_standalone(&self.source_branch.id, title, content)
-                .with_subtype(Note::SUBTYPE_WRITTEN);
+            self.note_on(&self.source_branch.id, title, content)
+        }
+
+        fn note_on(&self, branch_id: &str, title: &str, content: &str) -> Note {
+            let note =
+                Note::new_standalone(branch_id, title, content).with_subtype(Note::SUBTYPE_WRITTEN);
             self.store.create_note(&note).unwrap();
             note
+        }
+
+        /// A second branch in `source` on the same repo, created after
+        /// `source_branch` so the oldest-branch lookup never picks it.
+        fn later_source_branch(&self) -> Branch {
+            let mut branch = Branch::new(&self.source.id, "feature-2", "origin/main")
+                .with_project_repo(self.source_branch.project_repo_id.as_deref().unwrap());
+            branch.created_at = self.source_branch.created_at + 1_000;
+            self.store.create_branch(&branch).unwrap();
+            branch
         }
 
         /// What `add_project_repo_impl` leaves behind, minus git: the repo row
@@ -562,15 +629,14 @@ mod tests {
                 .unwrap()
         }
 
-        /// A stored attachment on the source branch, written to disk, and the
-        /// markdown that references it.
-        fn media_note(&self) -> (Note, Image) {
+        /// A stored attachment on the source branch, written to disk.
+        fn attachment(&self, filename: &str) -> Image {
             let session = Session::new_running("note", Path::new("/tmp/wt"));
             self.store.create_session(&session).unwrap();
             let mut image = Image::new(
                 Some(&self.source_branch.id),
                 &self.source.id,
-                "shot.png",
+                filename,
                 "image/png",
                 PNG.len() as i64,
                 false,
@@ -580,6 +646,12 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, PNG).unwrap();
             self.store.create_image(&image).unwrap();
+            image
+        }
+
+        /// An attachment and the note whose markdown references it.
+        fn media_note(&self) -> (Note, Image) {
+            let image = self.attachment("shot.png");
             let note = self.note(
                 "Shots",
                 &format!("before ![a](staged-media://{}.png) after", image.id),
@@ -748,6 +820,91 @@ mod tests {
         );
     }
 
+    /// With two branches on the repo in one project, the oldest-branch lookup
+    /// would send a same-project copy to the other branch.
+    #[tokio::test]
+    async fn copy_into_the_same_project_lands_beside_the_original() {
+        let f = fixture();
+        let later = f.later_source_branch();
+        let note = f.note_on(&later.id, "Findings", "body");
+
+        let copy = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.source.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(copy.branch_id, later.id);
+        assert!(f
+            .store
+            .list_notes_for_branch(&f.source_branch.id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(f.store.list_notes_for_branch(&later.id).unwrap().len(), 2);
+    }
+
+    /// The add-repo step is the one await in a transfer; a save that lands
+    /// during it is what the moved note carries, not the body read before.
+    #[tokio::test]
+    async fn a_save_landing_while_the_repo_is_added_is_carried_by_the_move() {
+        let f = fixture();
+        let note = f.note("Findings", "first draft");
+
+        let moved = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| {
+                f.store
+                    .update_note_content(&note.id, "revised while adding the repo")
+                    .unwrap();
+                std::future::ready(f.attach_repo(key))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(moved.content, "revised while adding the repo");
+        assert_eq!(
+            f.store.get_note(&note.id).unwrap().unwrap().content,
+            "revised while adding the repo"
+        );
+    }
+
+    /// Likewise a note deleted during the add-repo step is not brought back
+    /// by the UPDATE or INSERT that follows; the repo stays added.
+    #[tokio::test]
+    async fn a_note_deleted_while_the_repo_is_added_is_not_recreated() {
+        let f = fixture();
+        let note = f.note("Findings", "body");
+
+        let err = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            |key| {
+                f.store.delete_note(&note.id).unwrap();
+                std::future::ready(f.attach_repo(key))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err, "\"Findings\" was deleted while copying it.");
+        let target_branch = f.target_branch().expect("the repo was still added");
+        assert!(f
+            .store
+            .list_notes_for_branch(&target_branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn a_note_still_being_generated_stays_put() {
         let f = fixture();
@@ -831,6 +988,40 @@ mod tests {
         assert!(f.store.get_image(&image.id).unwrap().is_none());
         let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
         assert!(!original_path.exists());
+    }
+
+    /// Two attachments can share a filename in one scope. Their copies are
+    /// staged before any row is inserted, so the names have to be kept apart
+    /// within the batch and not only against the destination's rows.
+    #[tokio::test]
+    async fn identically_named_attachments_get_distinct_copies() {
+        let f = fixture();
+        let first = f.attachment("image.png");
+        let second = f.attachment("image.png");
+        let note = f.note(
+            "Shots",
+            &format!(
+                "![a](staged-media://{}.png)\n![b](staged-media://{}.png)",
+                first.id, second.id
+            ),
+        );
+
+        let copy = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        let mut filenames: Vec<String> = refs::media_ids(&copy.content)
+            .into_iter()
+            .map(|id| f.store.get_image(&id).unwrap().unwrap().filename)
+            .collect();
+        filenames.sort();
+        assert_eq!(filenames, ["image 2.png", "image.png"]);
     }
 
     /// A reference whose file was lost before the transfer is carried over

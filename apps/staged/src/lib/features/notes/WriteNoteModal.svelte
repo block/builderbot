@@ -23,7 +23,7 @@
   import { viewport } from '../../shared/viewport.svelte';
   import MarkdownWysiwygEditor from './MarkdownWysiwygEditor.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
-  import { noteMarkdownWithTitle, splitNoteMarkdown } from './noteMarkdown';
+  import { noteMarkdownWithTitle, splitNoteMarkdown, unsavedNoteEdit } from './noteMarkdown';
 
   interface Props {
     open: boolean;
@@ -58,6 +58,10 @@
   // opens on a different note rather than reusing the previous one's content.
   let editorKey = $derived(open ? (note?.id ?? 'new') : null);
   let initialMarkdown = $derived(note ? noteMarkdownWithTitle(note.title, note.content) : '');
+  // What the store holds for this note, as the editor would show it: seeded
+  // from `initialMarkdown` and advanced by a save that keeps the dialog open,
+  // so "unsaved" is measured against the last save and not the open.
+  let savedMarkdown = $state('');
   // Button state only — `handleSave` re-checks against the editor rather than
   // this debounced copy of the document.
   let canSave = $derived(!saving && markdown.trim().length > 0);
@@ -69,6 +73,7 @@
   $effect(() => {
     if (editorKey === null) return;
     markdown = initialMarkdown;
+    savedMarkdown = initialMarkdown;
     saving = false;
     error = null;
   });
@@ -92,6 +97,20 @@
       error = e instanceof Error ? e.message : 'Could not save the note.';
       saving = false;
     }
+  }
+
+  /**
+   * The transfer menu acts on the stored note, and a move closes this dialog,
+   * so edits still in the editor go to the store first: what moves or is
+   * copied is what the user is looking at. A failed save surfaces in the
+   * picker and stops the transfer.
+   */
+  async function saveBeforeTransfer() {
+    const current = editor?.getMarkdown() ?? markdown;
+    const draft = unsavedNoteEdit(current, savedMarkdown);
+    if (!draft) return;
+    await onSave(draft);
+    savedMarkdown = current;
   }
 
   function requestClose() {
@@ -136,6 +155,7 @@
               noteTitle={note.title}
               {projectId}
               {repoLabel}
+              beforeTransfer={saveBeforeTransfer}
               onMoved={onClose}
             />
           {/if}

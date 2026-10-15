@@ -1,11 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createProjectOption,
   noteTransferCandidates,
   noteTransferLabels,
   repoAddedHint,
 } from './noteTransferTarget';
+import { filterMoveTargets } from '../branches/moveBranchTarget';
 import type { Project } from '../../types';
+
+// One project is shown under a name other than its `name` column, to check
+// the picker's list and its "create project" row agree on what a project is
+// called rather than each reading a different field.
+vi.mock('../../shared/utils', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../shared/utils')>();
+  return {
+    ...actual,
+    projectDisplayName: (p: Project) =>
+      p.id === 'aliased' ? 'Shown Name' : actual.projectDisplayName(p),
+  };
+});
 
 function project(overrides: Partial<Project> & Pick<Project, 'id' | 'name'>): Project {
   return {
@@ -63,6 +76,18 @@ describe('createProjectOption', () => {
   it('does not offer a twin of an existing project, whatever the case', () => {
     expect(createProjectOption('here', [here])).toBeNull();
     expect(createProjectOption('HERE ', [here])).toBeNull();
+  });
+
+  it('judges a twin by the name the list shows, not the stored one', () => {
+    const aliased = project({ id: 'aliased', name: 'stored-name' });
+    const noRepos = new Map();
+
+    // The query lands on the listed project, so no "create" row beside it.
+    expect(filterMoveTargets([aliased], noRepos, 'shown name')).toEqual([aliased]);
+    expect(createProjectOption('shown name', [aliased])).toBeNull();
+    // The stored name is not what the user sees, so it is not a twin.
+    expect(filterMoveTargets([aliased], noRepos, 'stored-name')).toEqual([]);
+    expect(createProjectOption('stored-name', [aliased])).toBe('stored-name');
   });
 });
 

@@ -329,6 +329,7 @@
   let mobileDiffGestureMode: MobileDiffGestureMode = 'pending';
   let mobileDiffCanDragPane = false;
   let mobileDiffCanScrollCode = false;
+  let mobileDiffScrollSide: 'before' | 'after' = 'after';
   let mobileDiffMarkdownScrollEl: HTMLElement | null = null;
   let mobileDiffLastY = 0;
   let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
@@ -1288,6 +1289,7 @@
     mobileDiffGestureMode = 'pending';
     mobileDiffCanDragPane = false;
     mobileDiffCanScrollCode = false;
+    mobileDiffScrollSide = 'after';
     mobileDiffMarkdownScrollEl = null;
     mobileDiffDragX = 0;
   }
@@ -1298,10 +1300,14 @@
     );
   }
 
-  function isMobileDiffCodeTarget(target: HTMLElement): boolean {
-    return !!target.closest(
-      '.after-pane .code-container, .after-pane .lines-wrapper, .after-pane .line'
-    );
+  // The visible code pane: the after pane in two-pane mode (the before pane sits
+  // behind it), or the only pane for created/deleted files. Returns which side
+  // the scroll controller should move, or null when the target isn't code.
+  function getMobileDiffCodeSide(target: HTMLElement): 'before' | 'after' | null {
+    if (!target.closest('.code-container, .lines-wrapper, .line')) return null;
+    const pane = target.closest('.after-pane, .single-pane-content') as HTMLElement | null;
+    if (!pane) return null;
+    return pane.dataset.paneSide === 'before' ? 'before' : 'after';
   }
 
   function getMobileDiffMarkdownScrollTarget(target: HTMLElement): HTMLElement | null {
@@ -1318,7 +1324,7 @@
       return;
     }
 
-    diffViewerScrollApi?.scrollBy('after', deltaY);
+    diffViewerScrollApi?.scrollBy(mobileDiffScrollSide, deltaY);
   }
 
   function isMobileDiffRevealTarget(
@@ -1341,8 +1347,9 @@
     const target = event.target as HTMLElement;
     const canDragPane = isMobileDiffRevealTarget(target, event);
     const markdownScrollEl = !canDragPane ? getMobileDiffMarkdownScrollTarget(target) : null;
-    const canScrollCode =
-      !canDragPane && markdownScrollEl === null && isMobileDiffCodeTarget(target);
+    const codeSide =
+      !canDragPane && markdownScrollEl === null ? getMobileDiffCodeSide(target) : null;
+    const canScrollCode = codeSide !== null;
     if (!canDragPane && !canScrollCode && markdownScrollEl === null) return;
     const isMarkdownLink = markdownScrollEl !== null && target.closest('a') !== null;
     if (isMobileDiffInteractiveTarget(target) && !isMarkdownLink) return;
@@ -1357,6 +1364,7 @@
     mobileDiffGestureMode = 'pending';
     mobileDiffCanDragPane = canDragPane;
     mobileDiffCanScrollCode = canScrollCode;
+    mobileDiffScrollSide = codeSide ?? 'after';
     mobileDiffMarkdownScrollEl = markdownScrollEl;
   }
 
@@ -1396,7 +1404,7 @@
         mobileDiffGestureMode = 'pane-drag';
         mobileDiffIsDragging = true;
         diffViewerContainerEl?.setPointerCapture(event.pointerId);
-      } else if (mobileDiffCanScrollCode && diffViewerScrollApi?.canScrollX('after')) {
+      } else if (mobileDiffCanScrollCode && diffViewerScrollApi?.canScrollX(mobileDiffScrollSide)) {
         mobileDiffGestureMode = 'horizontal-scroll';
         mobileDiffLastX = event.clientX;
         diffViewerContainerEl?.setPointerCapture(event.pointerId);
@@ -2065,6 +2073,12 @@
       box-shadow:
         -18px 0 28px color-mix(in srgb, var(--bg-deepest) 52%, transparent),
         var(--shadow-elevated);
+    }
+
+    /* Created/deleted files render one pane; its scrolling is driven by the
+       pointer handlers above, so stop the browser from claiming the pan. */
+    :global(.diff-viewer-container .diff-content.single-pane .single-pane-content .code-area) {
+      touch-action: none;
     }
 
     :global(.diff-viewer-container .diff-content:not(.single-pane) .after-pane .pane-header) {

@@ -1523,16 +1523,22 @@ mod tests {
     }
 
     /// Writes `contents` to `path` as a 0755 script and returns only once it
-    /// can actually be exec'd. On Linux, a test on another thread that forks
-    /// while our write handle is open inherits it until its own exec, and
-    /// exec of a file anyone still holds open for writing fails with
-    /// `ETXTBSY` — which `npm_view_version` would faithfully report as
-    /// "unknown" and fail the test. Probe-spawn (and immediately kill) the
-    /// script until that window has passed.
+    /// can actually be exec'd (see [`wait_until_executable`]).
     fn write_executable(path: &Path, contents: &str) {
         std::fs::write(path, contents).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_executable(path);
+    }
+
+    /// Returns only once the freshly written script at `path` can actually be
+    /// exec'd. On Linux, a test on another thread that forks while our write
+    /// handle is open inherits it until its own exec, and exec of a file
+    /// anyone still holds open for writing fails with `ETXTBSY` — which the
+    /// code under test would faithfully report and fail the test. Probe-spawn
+    /// (and immediately kill) the script until that window has passed, so the
+    /// script must be harmless to run with no arguments.
+    fn wait_until_executable(path: &Path) {
         for _ in 0..1000 {
             match std::process::Command::new(path)
                 .stdin(std::process::Stdio::null())

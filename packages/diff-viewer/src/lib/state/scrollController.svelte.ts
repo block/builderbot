@@ -107,6 +107,11 @@ function transferRow(row: number, alignment: Alignment, side: 'before' | 'after'
   return Math.min(target.start + targetOffset, target.end - 1);
 }
 
+/** Dimensions of a pane that is not rendered: nothing to scroll, no headroom to hand off. */
+function emptyDimensions(): PaneDimensions {
+  return { viewportHeight: 0, contentHeight: 0, lineHeight: 20 };
+}
+
 /**
  * Create a scroll controller for synchronized diff panes.
  */
@@ -114,16 +119,8 @@ export function createScrollController() {
   // Internal state. Reactive (raw, replaced wholesale) so derived extents
   // recompute when the diff or pane geometry changes, not just on scroll.
   let alignments: Alignment[] = $state.raw([]);
-  let beforeDims: PaneDimensions = $state.raw({
-    viewportHeight: 0,
-    contentHeight: 0,
-    lineHeight: 20,
-  });
-  let afterDims: PaneDimensions = $state.raw({
-    viewportHeight: 0,
-    contentHeight: 0,
-    lineHeight: 20,
-  });
+  let beforeDims: PaneDimensions = $state.raw(emptyDimensions());
+  let afterDims: PaneDimensions = $state.raw(emptyDimensions());
 
   // Track current file to detect file changes vs content refreshes
   let currentFilePath: string | null = null;
@@ -295,6 +292,16 @@ export function createScrollController() {
       } else {
         afterDims = dims;
       }
+    },
+
+    /**
+     * Forget a pane's dimensions when it is not rendered (created and deleted
+     * files show a single pane). Stale dimensions from a previous file would
+     * otherwise give the visible pane phantom edge headroom and let scrollBy
+     * hand input off to a pane that does not exist.
+     */
+    clearDimensions(side: 'before' | 'after') {
+      this.setDimensions(side, emptyDimensions());
     },
 
     /**

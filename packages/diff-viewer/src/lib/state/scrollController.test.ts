@@ -269,4 +269,61 @@ describe('scrollController edge handoff', () => {
       expect(controller.beforeScrollY).toBe(30 * LINE_HEIGHT);
     });
   });
+
+  describe('switching from a two-pane diff to a single-pane file', () => {
+    // git-diff emits a deleted file as one hunk with an empty after span.
+    const deletedFile: Alignment[] = [
+      { before: { start: 0, end: 50 }, after: { start: 0, end: 0 }, changed: true },
+    ];
+    const createdFile: Alignment[] = [
+      { before: { start: 0, end: 0 }, after: { start: 0, end: 50 }, changed: true },
+    ];
+
+    function twoPaneThenCleared(absent: 'before' | 'after') {
+      const controller = setup(100, 80, [
+        { before: { start: 0, end: 80 }, after: { start: 0, end: 80 }, changed: false },
+        { before: { start: 80, end: 100 }, after: { start: 80, end: 80 }, changed: true },
+      ]);
+      // Leave an outstanding handoff behind so the previous file's state is as messy as it gets.
+      controller.scrollBy('after', maxScroll(80) + 20 * LINE_HEIGHT);
+
+      const present = absent === 'before' ? 'after' : 'before';
+      controller.setDimensions(present, dims(50));
+      controller.clearDimensions(absent);
+      controller.setAlignments(absent === 'after' ? deletedFile : createdFile, 'other.ts');
+      return controller;
+    }
+
+    it('gives a deleted file no phantom headroom from the previous after pane', () => {
+      const controller = twoPaneThenCleared('after');
+
+      const extent = controller.getEffectiveExtent('before');
+      expect(extent.contentOffset).toBe(0);
+      expect(extent.maxScrollY).toBe(maxScroll(50));
+      expect(extent.contentHeight).toBe(50 * LINE_HEIGHT);
+
+      // Past the end nothing is handed to the pane that is not rendered.
+      controller.scrollBy('before', maxScroll(50) + 20 * LINE_HEIGHT);
+      expect(controller.beforeScrollY).toBe(maxScroll(50));
+      expect(controller.afterScrollY).toBe(0);
+      expect(controller.getEffectiveExtent('before').scrollY).toBe(maxScroll(50));
+
+      controller.scrollToEffective('before', maxScroll(50) + 20 * LINE_HEIGHT);
+      expect(controller.beforeScrollY).toBe(maxScroll(50));
+      expect(controller.afterScrollY).toBe(0);
+    });
+
+    it('gives a created file no phantom headroom from the previous before pane', () => {
+      const controller = twoPaneThenCleared('before');
+
+      const extent = controller.getEffectiveExtent('after');
+      expect(extent.contentOffset).toBe(0);
+      expect(extent.maxScrollY).toBe(maxScroll(50));
+      expect(extent.contentHeight).toBe(50 * LINE_HEIGHT);
+
+      controller.scrollBy('after', maxScroll(50) + 20 * LINE_HEIGHT);
+      expect(controller.afterScrollY).toBe(maxScroll(50));
+      expect(controller.beforeScrollY).toBe(0);
+    });
+  });
 });

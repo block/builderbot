@@ -303,6 +303,8 @@
   let isNewFile = $derived(diff !== null && !isEmptyDiff && diff.before === null);
   let isDeletedFile = $derived(diff !== null && !isEmptyDiff && diff.after === null);
   let isTwoPaneMode = $derived(!isNewFile && !isDeletedFile);
+  /** The pane that exists for every file: only a deleted file has no after pane. */
+  const renderedPaneSide = (): 'before' | 'after' => (isDeletedFile ? 'before' : 'after');
   let isBinary = $derived(diff !== null && isBinaryDiff(diff));
   let isImage = $derived(diff !== null && isImageDiff(diff));
 
@@ -481,7 +483,9 @@
     });
   });
 
-  // Update dimensions when panes are available or content changes
+  // Update dimensions when panes are available or content changes. A pane that
+  // is not rendered (created/deleted files) or has no lines is cleared so the
+  // other pane's effective extent does not inherit a previous file's geometry.
   $effect(() => {
     if (beforePane && beforeLines.length > 0) {
       const lineHeight = measureLineHeight(beforePane);
@@ -495,6 +499,8 @@
         viewportWidth: beforePane.clientWidth,
         contentWidth,
       });
+    } else {
+      scrollController.clearDimensions('before');
     }
   });
 
@@ -511,6 +517,8 @@
         viewportWidth: afterPane.clientWidth,
         contentWidth,
       });
+    } else {
+      scrollController.clearDimensions('after');
     }
   });
 
@@ -2187,8 +2195,9 @@
       scrollBy: (deltaY) => scrollController.scrollBy('after', deltaY),
       getCurrentScrollY: () => scrollController.afterScrollY,
       getBeforeScrollY: () => scrollController.beforeScrollY,
-      getLineHeight: () => scrollController.getDimensions('after').lineHeight,
-      getViewportHeight: () => scrollController.getDimensions('after').viewportHeight,
+      // Both panes share a viewport height; read the one that is rendered.
+      getLineHeight: () => scrollController.getDimensions(renderedPaneSide()).lineHeight,
+      getViewportHeight: () => scrollController.getDimensions(renderedPaneSide()).viewportHeight,
       startCommentOnHunk: (hunkIndex) => {
         if (!commentingEnabled) return;
         commentingOnRange = hunkIndex;

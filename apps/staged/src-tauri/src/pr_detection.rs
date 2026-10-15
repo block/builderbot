@@ -1,19 +1,25 @@
-//! Manual "Detect existing PR" lookup.
+//! Which GitHub PR belongs to a branch Staged has no PR number for.
 //!
 //! Staged only learns a branch's PR number when it drove the PR creation or
 //! the branch was created from a PR. A PR opened any other way (a session
 //! running `gh pr create`, "Compare & pull request" in the browser, a
-//! terminal) leaves `branches.pr_number` null. This module backs the
-//! user-triggered lookup that closes that gap: it lists PRs on GitHub whose
-//! head is the branch name, adopts the first one that belongs to this branch,
-//! and otherwise explains why each candidate was passed over so the user can
-//! tell "no PR" apart from "a PR exists but targets the wrong base".
+//! terminal) leaves `branches.pr_number` null. Both ways of closing that gap
+//! live here and share one rule, `classify_candidates`: list the PRs on GitHub
+//! whose head is the branch name and adopt the first that is open, targets
+//! the branch's base and has its head in the repo the branch pushes to.
 //!
-//! A base mismatch is the one check the user may legitimately want to
-//! override (the PR was retargeted on GitHub, or the stored base is stale
-//! after a stack restructure), so candidates rejected on that alone are
-//! flagged `linkable` and `link_branch_pr` adopts one on request. It re-runs
-//! the same checks so a closed PR or a fork's PR can't be linked by hand.
+//! - Manual detection (`detect_branch_pr`) is the user-triggered lookup. When
+//!   nothing passes it explains why each candidate was passed over, so the
+//!   user can tell "no PR" apart from "a PR exists but targets the wrong
+//!   base". A base mismatch is the one check the user may legitimately want
+//!   to override (the PR was retargeted on GitHub, or the stored base is
+//!   stale after a stack restructure), so candidates rejected on that alone
+//!   are flagged `linkable` and `link_branch_pr` adopts one on request. It
+//!   re-runs the same checks so a closed PR or a fork's PR can't be linked by
+//!   hand.
+//! - Mount-time recovery (`recover_branch_pr`) runs unprompted for pushed
+//!   remote branches. It applies the same checks but adopts only a full
+//!   match and never overrides, since nobody is there to decide.
 
 use std::sync::{Arc, Mutex};
 
@@ -458,6 +464,83 @@ pub async fn link_branch_pr(
     link_branch_pr_impl(store, branch_id, pr_number).await
 }
 
+/// The open PR recovery may adopt without asking: only a full match, never
+/// one that "Link anyway" would have to override.
+fn recoverable_pr(open: &[git::HeadBranchPr], expected: &PrExpectations) -> Option<u64> {
+    match classify_candidates(open, expected) {
+        PrDetectionResult::Found { pr_number, .. } => Some(pr_number),
+        _ => None,
+    }
+}
+
+/// Silently adopt the branch's open PR if one passes every check.
+///
+/// Mount-time counterpart to `detect_branch_pr`: same rule, but no near-miss
+/// reporting and no override. Only open PRs are listed, since closed and
+/// merged ones could never be adopted. Shared by the `recover_branch_pr`
+/// command and the web-mode `dispatch()` arm.
+pub(crate) async fn recover_branch_pr_impl(
+    store: Arc<Store>,
+    branch_id: String,
+) -> Result<Option<u64>, String> {
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    // Recovery is fire-and-forget on mount, so losing a race with another
+    // linker is a no-op rather than an error.
+    if branch.pr_number.is_some() {
+        return Ok(branch.pr_number);
+    }
+
+    let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
+
+    let open = list_head_branch_prs(
+        repo_slug.clone(),
+        branch.branch_name.clone(),
+        git::PrListState::Open,
+        "recover_branch_pr",
+    )
+    .await?;
+
+    let Some(pr_number) = recoverable_pr(&open, &expected) else {
+        log::info!(
+            "recover_branch_pr: nothing adoptable for branch_id={} in {} ({} open candidate(s))",
+            branch_id,
+            repo_slug,
+            open.len()
+        );
+        return Ok(None);
+    };
+
+    store
+        .update_branch_pr_number(&branch_id, Some(pr_number))
+        .map_err(|e| e.to_string())?;
+    log::info!(
+        "recover_branch_pr: recovered PR #{} in {} for branch_id={}",
+        pr_number,
+        repo_slug,
+        branch_id
+    );
+
+    Ok(Some(pr_number))
+}
+
+/// Look up the branch's PR on GitHub and persist it if one fully matches.
+///
+/// Called on component mount when `branch.prNumber` is null but the branch
+/// has been pushed. Returns the recovered PR number, or None if no PR passes
+/// the checks.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn recover_branch_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Option<u64>, String> {
+    let store = crate::get_store(&store)?;
+    recover_branch_pr_impl(store, branch_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +773,49 @@ mod tests {
             classify_candidates(&candidates, &expected),
             PrDetectionResult::Found { pr_number: 2, .. }
         ));
+    }
+
+    #[test]
+    fn recovery_adopts_an_open_pr_matching_base_and_head_repo() {
+        let open = [pr(9, "OPEN", "main", Some("acme/widgets"))];
+
+        assert_eq!(recoverable_pr(&open, &expectations()), Some(9));
+    }
+
+    #[test]
+    fn recovery_skips_an_open_pr_that_only_differs_on_base() {
+        // "Link anyway" may override a base mismatch; recovery never does.
+        let open = [pr(4, "OPEN", "develop", Some("acme/widgets"))];
+
+        assert_eq!(recoverable_pr(&open, &expectations()), None);
+    }
+
+    #[test]
+    fn recovery_skips_a_fork_pr_but_adopts_from_the_configured_head_repo() {
+        let open = [
+            pr(1, "OPEN", "main", Some("fork-owner/widgets")),
+            pr(2, "OPEN", "main", Some("acme/widgets")),
+        ];
+
+        assert_eq!(recoverable_pr(&open, &expectations()), Some(2));
+
+        let fork_setup = PrExpectations {
+            base_ref: "main".to_string(),
+            head_repo: "fork-owner/widgets".to_string(),
+        };
+        assert_eq!(recoverable_pr(&open[1..], &fork_setup), None);
+        assert_eq!(recoverable_pr(&open, &fork_setup), Some(1));
+    }
+
+    #[test]
+    fn recovery_never_adopts_closed_or_merged() {
+        // Recovery only fetches open PRs, but must stay safe if that changes.
+        let candidates = [
+            pr(7, "MERGED", "main", Some("acme/widgets")),
+            pr(8, "CLOSED", "main", Some("acme/widgets")),
+        ];
+
+        assert_eq!(recoverable_pr(&candidates, &expectations()), None);
     }
 
     /// The frontend switches on `kind` and reads camelCase fields; lock the

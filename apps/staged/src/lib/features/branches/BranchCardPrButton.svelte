@@ -366,8 +366,8 @@
     window.addEventListener('keyup', handleOptionUp);
 
     // PR recovery: if the branch has been pushed but has no PR number,
-    // check GitHub for an existing open PR on this branch name.
-    // The shouldAttemptRecovery guard prevents N concurrent `gh pr view`
+    // check GitHub for an open PR that passes the same checks as detection.
+    // The shouldAttemptRecovery guard prevents N concurrent `gh pr list`
     // CLI calls when many components mount simultaneously.
     if (!branch.prNumber && isRemote && prPollingService.shouldAttemptRecovery(branch.id)) {
       commands

@@ -2428,7 +2428,7 @@ pub fn run() {
             prs::rebase_branch,
             prs::squash_commits,
             prs::clear_branch_pr_status,
-            prs::recover_branch_pr,
+            pr_detection::recover_branch_pr,
             pr_detection::detect_branch_pr,
             pr_detection::link_branch_pr,
             // PR poll scheduler (frontend interest/hint layer)

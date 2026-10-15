@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  UNTITLED_NOTE_TITLE,
   canBeNoteTitleLine,
   canBeNoteTitleText,
   noteMarkdownWithTitle,
   renderNoteMarkdown,
   splitNoteMarkdown,
   unescapeMarkdown,
+  unsavedNoteEdit,
+  UNTITLED_NOTE_TITLE,
 } from './noteMarkdown';
 
 describe('noteMarkdownWithTitle', () => {
@@ -261,6 +262,30 @@ describe('splitNoteMarkdown with a fallback title', () => {
 
   it('names an empty file after itself rather than Untitled', () => {
     expect(splitNoteMarkdown('  \n\n', 'empty')).toEqual({ title: 'empty', body: '' });
+  });
+});
+
+describe('unsavedNoteEdit', () => {
+  const saved = '# Findings\n\nFirst draft.';
+
+  it('returns what a save of the edited document would store', () => {
+    expect(unsavedNoteEdit('# Findings\n\nSecond draft.', saved)).toEqual({
+      title: 'Findings',
+      content: 'Second draft.',
+    });
+    expect(unsavedNoteEdit('# Renamed\n\nFirst draft.', saved)).toEqual({
+      title: 'Renamed',
+      content: 'First draft.',
+    });
+  });
+
+  it('has nothing to save for an unchanged or empty document', () => {
+    expect(unsavedNoteEdit(saved, saved)).toBeNull();
+    expect(unsavedNoteEdit('  \n', saved)).toBeNull();
+  });
+
+  it('does not count the editor re-serializing the same document as an edit', () => {
+    expect(unsavedNoteEdit('# Findings\n\n\nFirst draft.\n', saved)).toBeNull();
   });
 });
 

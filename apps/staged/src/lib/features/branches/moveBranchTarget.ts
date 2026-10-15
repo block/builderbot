@@ -45,6 +45,16 @@ export function describeBranchRepo(repo: BranchRepo): string {
   return repo.subpath ? `${repo.githubRepo} (${repo.subpath})` : repo.githubRepo;
 }
 
+/**
+ * The name a project is searched by, lower-cased for comparison. Every picker
+ * that lists projects by name goes through here — the branch and note pickers'
+ * filtering as well as the note picker's "create project" row — so one query
+ * can't match a listed project and still be offered as a new one.
+ */
+export function projectSearchName(project: Project): string {
+  return projectDisplayName(project).trim().toLowerCase();
+}
+
 /** Match projects on their name or on any attached repo path. */
 export function filterMoveTargets(
   candidates: Project[],
@@ -55,7 +65,7 @@ export function filterMoveTargets(
   if (!trimmed) return candidates;
   const lower = trimmed.toLowerCase();
   return candidates.filter((project) => {
-    if (projectDisplayName(project).toLowerCase().includes(lower)) return true;
+    if (projectSearchName(project).includes(lower)) return true;
     return (reposByProject.get(project.id) ?? []).some((repo) =>
       matchesRepoSearch(repo.githubRepo, repo.subpath, trimmed)
     );

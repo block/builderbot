@@ -1,5 +1,6 @@
 //! Image CRUD operations and filesystem helpers.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,6 +39,25 @@ impl Store {
 
     pub fn create_image(&self, image: &Image) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::insert_image(&conn, image)?;
+        // Only branch-attached images without a session appear on the
+        // timeline; session-scoped attachments live in the chat history,
+        // which polls.
+        if image.session_id.is_none() {
+            if let Some(branch_id) = &image.branch_id {
+                self.publish_with(|| StoreChange::Branch {
+                    branch_id: branch_id.clone(),
+                    project_id: Some(image.project_id.clone()),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn insert_image(
+        conn: &rusqlite::Connection,
+        image: &Image,
+    ) -> Result<(), StoreError> {
         conn.execute(
             "INSERT INTO images (id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -52,17 +72,6 @@ impl Store {
                 image.created_at,
             ],
         )?;
-        // Only branch-attached images without a session appear on the
-        // timeline; session-scoped attachments live in the chat history,
-        // which polls.
-        if image.session_id.is_none() {
-            if let Some(branch_id) = &image.branch_id {
-                self.publish_with(|| StoreChange::Branch {
-                    branch_id: branch_id.clone(),
-                    project_id: Some(image.project_id.clone()),
-                });
-            }
-        }
         Ok(())
     }
 
@@ -116,8 +125,22 @@ impl Store {
         project_id: &str,
         filename: &str,
     ) -> Result<String, StoreError> {
+        self.unique_image_filename_excluding(branch_id, project_id, filename, &HashSet::new())
+    }
+
+    /// [`Self::unique_image_filename`] that also steers clear of `reserved`:
+    /// names a caller has already handed out but not inserted yet, so a batch
+    /// of rows staged together stays unique among itself as well as against
+    /// the table.
+    pub fn unique_image_filename_excluding(
+        &self,
+        branch_id: Option<&str>,
+        project_id: &str,
+        filename: &str,
+        reserved: &HashSet<String>,
+    ) -> Result<String, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let existing: std::collections::HashSet<String> = match branch_id {
+        let mut existing: HashSet<String> = match branch_id {
             Some(bid) => {
                 let mut stmt = conn.prepare("SELECT filename FROM images WHERE branch_id = ?1")?;
                 let rows = stmt.query_map(params![bid], |row| row.get::<_, String>(0))?;
@@ -131,6 +154,7 @@ impl Store {
                 rows.filter_map(|r| r.ok()).collect()
             }
         };
+        existing.extend(reserved.iter().cloned());
 
         if !existing.contains(filename) {
             return Ok(filename.to_string());

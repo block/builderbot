@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use tauri::Manager;
+
 use crate::store::repo_affinities::repo_affinity_key;
 use crate::store::{self, Store};
 use crate::{blox, branches, git};
@@ -168,4 +170,112 @@ pub(crate) async fn add_project_repo_impl(
     };
     store.create_branch(&branch).map_err(|e| e.to_string())?;
     Ok(repo)
+}
+
+/// Background worktree + prerun-actions setup for a repo that was just added
+/// to a project — fire and forget. Shared by the `add_project_repo` command and
+/// the note move that adds a repo on the way.
+pub(crate) fn spawn_project_repo_setup(
+    app_handle: tauri::AppHandle,
+    store: Arc<Store>,
+    project_id: String,
+    repo_id: String,
+) {
+    log::info!(
+        "[add_project_repo] spawning background setup for repo {repo_id} in project {project_id}"
+    );
+    tauri::async_runtime::spawn(async move {
+        crate::web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
+
+        let branch = match store.list_branches_for_project(&project_id) {
+            Ok(branches) => branches
+                .into_iter()
+                .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str())),
+            Err(e) => {
+                log::warn!("[add_project_repo] failed to list branches: {e}");
+                return;
+            }
+        };
+        let branch = match branch {
+            Some(b) => b,
+            None => {
+                log::warn!("[add_project_repo] no branch found for repo {repo_id}");
+                return;
+            }
+        };
+
+        if branch.workspace_name.is_none() {
+            // Local branch: set up git worktree and run prerun actions.
+            let branch_id = branch.id.clone();
+            let store_clone = Arc::clone(&store);
+            let app_handle_clone = app_handle.clone();
+            let worktree_result = tauri::async_runtime::spawn_blocking(move || {
+                branches::setup_worktree_sync(&store_clone, &branch_id, Some(&app_handle_clone))
+            })
+            .await;
+
+            match worktree_result {
+                Ok(Ok(path)) => {
+                    log::info!("[add_project_repo] worktree ready at {path}");
+                    crate::web_server::emit_to_all(
+                        &app_handle,
+                        "project-setup-progress",
+                        project_id.clone(),
+                    );
+                }
+                Ok(Err(e)) => {
+                    log::warn!("[add_project_repo] worktree setup failed: {e}");
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("[add_project_repo] worktree task panicked: {e}");
+                    return;
+                }
+            }
+
+            let executor = app_handle.state::<Arc<crate::actions::ActionExecutor>>();
+            let act_registry = app_handle.state::<Arc<crate::actions::ActionRegistry>>();
+            if let branches::PrerunOutcome::Ran(_) = branches::claim_and_run_prerun_actions(
+                &store,
+                &app_handle,
+                &branch.id,
+                &executor,
+                &act_registry,
+                None,
+                "add_project_repo",
+            )
+            .await
+            {
+                crate::web_server::emit_to_all(
+                    &app_handle,
+                    "project-setup-progress",
+                    project_id.clone(),
+                );
+            }
+        } else {
+            // Remote branch: clone the repo into the running workspace,
+            // fetch the base branch, and create the feature branch.
+            match branches::setup_remote_repo_clone(&store, &branch.id).await {
+                Ok(()) => {
+                    log::info!(
+                        "[add_project_repo] remote repo cloned for branch '{}'",
+                        branch.branch_name
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[add_project_repo] remote repo clone failed for branch '{}': {e}",
+                        branch.branch_name
+                    );
+                    crate::web_server::emit_to_all(
+                        &app_handle,
+                        "project-setup-progress",
+                        project_id,
+                    );
+                    return;
+                }
+            }
+            crate::web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
+        }
+    });
 }

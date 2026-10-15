@@ -60,6 +60,7 @@
   import type { HashtagItem, NotesChangedEvent, ProjectRepo, Session } from '../../types';
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
+  import NoteTransferMenu from './NoteTransferMenu.svelte';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
   /**
@@ -640,6 +641,16 @@
             />
           {/if}
           <div class="note-header-actions">
+            {#if displayNoteId}
+              <NoteTransferMenu
+                noteId={displayNoteId}
+                {noteKind}
+                noteTitle={displayTitle}
+                {projectId}
+                {repoLabel}
+                onMoved={onClose}
+              />
+            {/if}
             {#if hasNoteContent}
               {@render copyButton()}
             {/if}

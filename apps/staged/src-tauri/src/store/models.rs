@@ -1092,6 +1092,14 @@ pub struct Image {
 /// On app startup any images still marked pending are cleaned up.
 pub const PENDING_SESSION_ID: &str = "pending";
 
+/// Sentinel stored in `images.session_id` for media that belongs to a note
+/// with no session of its own (a note copied into another project). Like a
+/// real session id it keeps the row out of the branch-timeline query and lets
+/// `note_media::cleanup_unreferenced` remove the file once the note no longer
+/// references it; unlike one it pins no `sessions` row, so the GC triggers
+/// stay free to collect the session the media was copied from.
+pub const NOTE_MEDIA_SESSION_ID: &str = "note";
+
 impl Image {
     /// Create a new image record.
     ///

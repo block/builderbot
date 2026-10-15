@@ -161,6 +161,29 @@ export function splitNoteMarkdown(
   return { title: title || untitled, body: bodyFrom(titleIndex + 1) };
 }
 
+/**
+ * The `(title, content)` a save of `current` would store, or `null` when there
+ * is nothing to save: the editor is empty, or it still holds what `saved`
+ * holds. The two are compared as the pair the store keeps rather than as
+ * text, trailing whitespace aside, so a document the editor re-serialized but
+ * did not change — a final newline added, `_a_` read back as `*a*` — is not
+ * an edit either.
+ *
+ * The write modal saves this before a move or copy: both act on the stored
+ * note, and a move closes the editor, so unsaved edits would otherwise be
+ * dropped as the note appears to leave with them.
+ */
+export function unsavedNoteEdit(
+  current: string,
+  saved: string
+): { title: string; content: string } | null {
+  if (!current.trim()) return null;
+  const next = splitNoteMarkdown(current);
+  const was = splitNoteMarkdown(saved);
+  if (next.title === was.title && next.body.trimEnd() === was.body.trimEnd()) return null;
+  return { title: next.title, content: next.body };
+}
+
 export function renderNoteMarkdown(text: string, options: MarkdownRenderingOptions = {}): string {
   return renderMarkdown(text, options);
 }

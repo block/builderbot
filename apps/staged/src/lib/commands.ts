@@ -1272,6 +1272,51 @@ export function deleteNote(noteId: string, deleteSession = true): Promise<void> 
   return invokeCommand('delete_note', { noteId, deleteSession });
 }
 
+/**
+ * Move a branch note into another project. The note lands on that project's
+ * branch for the same repo + subpath; when the project doesn't track the repo
+ * yet it is added first, through the regular add-repo path. Rejects a move
+ * into the note's current project.
+ *
+ * The backend publishes `notes-changed` for both branches (and a project
+ * change when a repo was added), so timelines and the sidebar refresh on
+ * their own.
+ */
+export function moveNoteToProject(
+  noteId: string,
+  targetProjectId: string
+): Promise<import('./types').NoteTimelineItem> {
+  return invokeCommand('move_note_to_project', { noteId, targetProjectId });
+}
+
+/**
+ * Copy a branch note (body and inline media) into another project, or
+ * duplicate it in the same one. The copy is a standalone, editable note; the
+ * original is untouched. Same repo handling as {@link moveNoteToProject}.
+ */
+export function copyNoteToProject(
+  noteId: string,
+  targetProjectId: string
+): Promise<import('./types').NoteTimelineItem> {
+  return invokeCommand('copy_note_to_project', { noteId, targetProjectId });
+}
+
+/** Move a project note into another project. Child notes are detached, not moved. */
+export function moveProjectNoteToProject(
+  projectNoteId: string,
+  targetProjectId: string
+): Promise<import('./types').ProjectNote> {
+  return invokeCommand('move_project_note_to_project', { projectNoteId, targetProjectId });
+}
+
+/** Copy a project note (body and inline media) into another project. */
+export function copyProjectNoteToProject(
+  projectNoteId: string,
+  targetProjectId: string
+): Promise<import('./types').ProjectNote> {
+  return invokeCommand('copy_project_note_to_project', { projectNoteId, targetProjectId });
+}
+
 /** Delete a commit (git reset --hard to parent) and optionally its session.
  *  Only works for the tip commit (HEAD) of the branch. */
 export function deleteCommit(

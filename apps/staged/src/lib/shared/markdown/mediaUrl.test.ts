@@ -4,8 +4,20 @@ vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: vi.fn(() => 'staged-media://localhost/file'),
 }));
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { resolveStagedMediaUrl } from './mediaUrl';
+import {
+  parseStagedMediaReference,
+  resolvePdfAttachmentUrl,
+  resolveStagedMediaUrl,
+} from './mediaUrl';
 it('delegates platform-specific protocol URLs to Tauri', () => {
   expect(resolveStagedMediaUrl('id', 'png')).toBe('staged-media://localhost/file');
   expect(convertFileSrc).toHaveBeenCalledWith('id.png', 'staged-media');
+});
+
+it('resolves PDF attachments by id without admitting them as note embeds', () => {
+  expect(resolvePdfAttachmentUrl('id')).toBe('staged-media://localhost/file');
+  expect(convertFileSrc).toHaveBeenCalledWith('id.pdf', 'staged-media');
+  expect(
+    parseStagedMediaReference('staged-media://0f3b9d2a-1c4e-4a5b-8d6e-7f8091a2b3c4.pdf')
+  ).toBeNull();
 });

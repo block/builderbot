@@ -25,9 +25,11 @@
   import type { Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
-  import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
+  import { ATTACHMENT_ACCEPT } from './attachErrors';
+  import AttachmentThumb from './AttachmentThumb.svelte';
+  import type { AttachmentPreview } from './attachmentPreview';
   import HashtagInput from './HashtagInput.svelte';
   import type { HashtagItem } from '../../types';
 
@@ -44,8 +46,8 @@
     canAttachImages?: boolean;
     /** IDs of images currently attached to the pending message. */
     attachedImageIds?: string[];
-    /** Image ID → data URL previews for the attached images. */
-    imagePreviews?: Map<string, string>;
+    /** Image ID → preview for the attached images and PDFs (null: failed to load). */
+    imagePreviews?: Map<string, AttachmentPreview | null>;
     onAttachFiles?: (files: File[]) => void;
     onRemoveImage?: (imageId: string) => void;
     /** Why the last attachment was rejected, shown until the next attempt. */
@@ -96,18 +98,14 @@
     <div class="reply-images">
       {#each attachedImageIds as imageId (imageId)}
         <div class="group/thumb reply-image-thumb">
-          {#if imagePreviews.get(imageId)}
-            <img src={imagePreviews.get(imageId)} alt="attached" />
-          {:else}
-            <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
-          {/if}
+          <AttachmentThumb preview={imagePreviews.get(imageId)} alt="attached" />
           {#if !isLive}
             <Button
               variant="ghost"
               size="icon"
               class="reply-image-remove-action absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-              title="Remove image"
-              aria-label="Remove image"
+              title="Remove attachment"
+              aria-label="Remove attachment"
               onclick={() => onRemoveImage?.(imageId)}
             >
               <X size={10} />
@@ -136,16 +134,16 @@
       <input
         bind:this={fileInputEl}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+        accept="{ATTACHMENT_ACCEPT},image/svg+xml"
         multiple
         class="file-input-hidden"
         onchange={handleImageFileSelect}
       />
-      <span class="inline-flex" title="Attach image">
+      <span class="inline-flex" title="Attach image or PDF">
         <Button
           variant="outline"
           class={attachButtonClass}
-          aria-label="Attach image"
+          aria-label="Attach image or PDF"
           onclick={openImagePicker}
           disabled={isLive}
         >
@@ -213,21 +211,6 @@
     border: 1px solid var(--border-muted);
     background: var(--bg-hover);
     flex-shrink: 0;
-  }
-
-  .reply-image-thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .reply-image-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    color: var(--text-faint);
   }
 
   .reply-image-thumb:focus-within :global(.reply-image-remove-action),

@@ -6,7 +6,25 @@ use std::io::Read;
 use std::path::Path;
 
 pub(crate) const MAX_IMAGE_SIZE: u64 = 10 * 1024 * 1024;
+/// PDF attachments (scans and print-ready files routinely run 10–50 MB) get
+/// their own cap; they are stored as-is, and only the PNGs rendered from them
+/// for thumbnails and the agent prompt have to satisfy [`MAX_IMAGE_SIZE`].
+pub(crate) const MAX_PDF_INPUT_SIZE: u64 = 50 * 1024 * 1024;
 pub(crate) const MAX_VIDEO_SIZE: u64 = 100 * 1024 * 1024;
+
+pub(crate) fn size_error(what: &str, cap: u64) -> String {
+    format!("{what} exceeds {} MB limit", cap / 1024 / 1024)
+}
+
+/// Input cap for a chat attachment, decided from its leading bytes, with the
+/// noun its size error names so an oversized PDF is reported as such.
+pub(crate) fn attachment_limit(header: &[u8]) -> (u64, &'static str) {
+    if super::pdf::is_pdf(header) {
+        (MAX_PDF_INPUT_SIZE, "PDF")
+    } else {
+        (MAX_IMAGE_SIZE, "media")
+    }
+}
 pub(crate) const MAX_REMOTE_VIDEO_SIZE: i64 = 20 * 1024 * 1024;
 
 pub(crate) fn extension(filename: &str) -> String {
@@ -26,13 +44,20 @@ pub(crate) fn mime_for_extension(ext: &str) -> Option<&'static str> {
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "mov" => "video/quicktime",
+        "pdf" => "application/pdf",
         _ => return None,
     })
 }
 
+/// Cap for a note media reference. PDFs are chat attachments only: the note
+/// renderer has no PDF figure, so a `.pdf` reference is refused here rather
+/// than stored and shown broken.
 pub(crate) fn size_limit(filename: &str, allow_video: bool) -> Result<u64, String> {
     let ext = extension(filename);
     let mime = mime_for_extension(&ext).ok_or("unsupported media format")?;
+    if mime == "application/pdf" {
+        return Err("PDFs cannot be embedded in notes".into());
+    }
     if mime.starts_with("video/") {
         if !allow_video {
             return Err("only images can be uploaded here".into());
@@ -47,6 +72,8 @@ pub(crate) fn size_limit(filename: &str, allow_video: bool) -> Result<u64, Strin
 pub(crate) fn sniff_format(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("png")
+    } else if super::pdf::is_pdf(bytes) {
+        Some("pdf")
     } else if bytes.starts_with(b"\xff\xd8\xff") {
         Some("jpg")
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
@@ -79,7 +106,7 @@ pub(crate) fn validate_media(
 ) -> Result<&'static str, String> {
     let cap = size_limit(filename, allow_video)?;
     if bytes.len() as u64 > cap {
-        return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024));
+        return Err(size_error("media", cap));
     }
     let ext = extension(filename);
     let valid = match (ext.as_str(), sniff_format(bytes)) {
@@ -107,17 +134,24 @@ pub(crate) fn store_sniffed_image(
     filename: &str,
     bytes: &[u8],
 ) -> Result<Image, String> {
-    if bytes.len() as u64 > MAX_IMAGE_SIZE {
-        return Err(format!(
-            "media exceeds {} MB limit",
-            MAX_IMAGE_SIZE / 1024 / 1024
-        ));
+    let (cap, what) = attachment_limit(bytes);
+    if bytes.len() as u64 > cap {
+        return Err(size_error(what, cap));
+    }
+    // A PDF is stored byte-for-byte so the viewer can show the vector
+    // original; thumbnails and the agent prompt render pages from it later.
+    // Only this chat/timeline path accepts one: note ingest (`validate_media`)
+    // still refuses `.pdf` references.
+    if super::pdf::is_pdf(bytes) {
+        super::pdf::check(bytes)?;
     }
     let sniffed = sniff_format(bytes).ok_or("unsupported image format")?;
-    if mime_for_extension(sniffed).unwrap().starts_with("video/") {
+    // Every sniffed extension has a MIME entry.
+    let mime = mime_for_extension(sniffed).unwrap();
+    if mime.starts_with("video/") {
         return Err("only images can be uploaded here".into());
     }
-    let filename = if mime_for_extension(&extension(filename)) == mime_for_extension(sniffed) {
+    let filename = if mime_for_extension(&extension(filename)) == Some(mime) {
         filename.to_owned()
     } else {
         Path::new(filename)
@@ -125,8 +159,10 @@ pub(crate) fn store_sniffed_image(
             .to_string_lossy()
             .into_owned()
     };
-    store_media_file(
-        store, branch_id, project_id, session_id, &filename, bytes, false,
+    // Already validated above (cap, signature, no video); `validate_media`
+    // would refuse the PDF a note cannot embed.
+    write_media(
+        store, branch_id, project_id, session_id, &filename, mime, bytes,
     )
 }
 
@@ -161,6 +197,35 @@ impl From<&str> for ReadError {
 }
 
 pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
+    let (file, len) = open_regular(path)?;
+    if len > cap {
+        return Err(size_error("media", cap).into());
+    }
+    read_capped(file, Vec::new(), cap)
+}
+
+/// [`read_local`] for a chat attachment, whose cap depends on what the file
+/// is (see [`attachment_limit`]). The signature is read before the body so an
+/// oversized image is still refused from its metadata, without buffering
+/// anything like [`MAX_PDF_INPUT_SIZE`] first.
+pub(crate) fn read_local_attachment(path: &Path) -> Result<Vec<u8>, ReadError> {
+    let (mut file, len) = open_regular(path)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(PDF_SIGNATURE_LEN)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "cannot read media file")?;
+    let (cap, what) = attachment_limit(&bytes);
+    if len > cap {
+        return Err(size_error(what, cap).into());
+    }
+    read_capped(file, bytes, cap)
+}
+
+const PDF_SIGNATURE_LEN: u64 = b"%PDF-".len() as u64;
+
+/// Open a regular file for reading and return it with its current length.
+fn open_regular(path: &Path) -> Result<(std::fs::File, u64), ReadError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -177,11 +242,13 @@ pub(crate) fn read_local(path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
     if !metadata.is_file() {
         return Err("media must be a regular file".into());
     }
-    if metadata.len() > cap {
-        return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
-    }
-    let mut bytes = Vec::new();
-    file.take(cap + 1)
+    Ok((file, metadata.len()))
+}
+
+/// Read the rest of `file` after `bytes` (already read from it), refusing a
+/// file that grew past `cap` since its metadata was checked.
+fn read_capped(file: std::fs::File, mut bytes: Vec<u8>, cap: u64) -> Result<Vec<u8>, ReadError> {
+    file.take(cap + 1 - bytes.len() as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| "cannot read media file")?;
     if bytes.len() as u64 > cap {
@@ -202,6 +269,22 @@ pub(crate) fn store_media_file(
     allow_video: bool,
 ) -> Result<Image, String> {
     let mime = validate_media(filename, bytes, allow_video)?;
+    write_media(
+        store, branch_id, project_id, session_id, filename, mime, bytes,
+    )
+}
+
+/// Write validated bytes under their MIME: a unique filename on the branch,
+/// the file, then the row (the file is removed if the insert fails).
+fn write_media(
+    store: &Store,
+    branch_id: Option<&str>,
+    project_id: &str,
+    session_id: Option<&str>,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<Image, String> {
     let filename = Path::new(filename)
         .file_name()
         .and_then(|s| s.to_str())
@@ -238,15 +321,7 @@ pub(crate) fn store_media_file(
 
 pub(crate) fn delete_media_file(store: &Store, image: &Image) -> Result<(), String> {
     store.delete_image(&image.id).map_err(|e| e.to_string())?;
-    if let Ok(path) =
-        crate::store::images::image_file_path(&image.project_id, &image.id, &image.filename)
-    {
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("Cannot remove media {}: {e}", image.id);
-            }
-        }
-    }
+    crate::store::images::remove_image_files(&image.project_id, &image.id, &image.filename);
     Ok(())
 }
 
@@ -292,7 +367,7 @@ pub(crate) fn read_candidate(
         }
         let bytes = output.stdout;
         if bytes.len() as u64 > cap {
-            return Err(format!("media exceeds {} MB limit", cap / 1024 / 1024).into());
+            return Err(size_error("media", cap).into());
         }
         Ok(bytes)
     } else {

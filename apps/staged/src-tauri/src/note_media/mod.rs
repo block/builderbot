@@ -5,6 +5,7 @@ mod blocks;
 pub(crate) mod files;
 mod materialize;
 pub(crate) use materialize::materialize_note_media;
+pub(crate) mod pdf;
 #[cfg(test)]
 pub(crate) use materialize::{materialize_note_media_with, RemoteMedia};
 pub(crate) mod refs;

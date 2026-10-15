@@ -299,6 +299,14 @@ export interface BranchGitState {
   };
 }
 
+/** Reply of `get_attachment_thumbnail`; see `attachmentPreview.ts`. */
+export interface AttachmentThumbnail {
+  /** The image's own data URL, or a PNG of a PDF's first page; null when a PDF could not be rendered. */
+  dataUrl: string | null;
+  mimeType: string;
+  filename: string;
+}
+
 export interface Image {
   id: string;
   branchId: string | null;

@@ -2679,6 +2679,21 @@ fn move_branch_image_files(
         let (Ok(from), Ok(to)) = (from, to) else {
             continue;
         };
+        // A PDF's cached thumbnail travels with it; losing one only costs a
+        // re-render, so its failure is not worth more than a log line.
+        if let (Ok(thumb_from), Ok(thumb_to)) = (
+            store::images::thumbnail_file_path(source_project_id, &image.id),
+            store::images::thumbnail_file_path(target_project_id, &image.id),
+        ) {
+            if thumb_from.exists() {
+                if let Some(parent) = thumb_to.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::rename(&thumb_from, &thumb_to) {
+                    log::warn!("Failed to move thumbnail {}: {e}", thumb_from.display());
+                }
+            }
+        }
         if !from.exists() {
             continue;
         }

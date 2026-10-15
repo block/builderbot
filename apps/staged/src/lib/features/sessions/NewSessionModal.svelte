@@ -48,7 +48,7 @@
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
-    isImageFile,
+    isImageAttachmentFile,
     isMaybeTextFile,
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
@@ -480,7 +480,7 @@
 
   async function handleFileDrop(paths: string[]) {
     if (!activeProjectId) return;
-    const imagePaths = paths.filter((p) => isImageFile(p));
+    const imagePaths = paths.filter((p) => isImageAttachmentFile(p));
     const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const newIds: string[] = [];
     for (const path of imagePaths) {

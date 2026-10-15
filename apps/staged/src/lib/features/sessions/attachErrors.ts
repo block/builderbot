@@ -4,6 +4,18 @@ export interface AttachRejection {
   reason: string;
 }
 
+/**
+ * File-picker `accept` list for the image store. A PDF is accepted alongside
+ * images: it is stored as a PDF, previewed through a rendering of its first
+ * page, and opened in the native PDF viewer.
+ */
+export const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
+
+/** Whether a pasted clipboard item can be attached through the image store. */
+export function isAttachableClipboardType(type: string): boolean {
+  return type.startsWith('image/') || type === 'application/pdf';
+}
+
 export function attachErrorReason(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

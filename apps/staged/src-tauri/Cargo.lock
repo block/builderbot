@@ -20,9 +20,12 @@ dependencies = [
  "flate2",
  "git-diff",
  "hex",
+ "image",
  "include_dir",
  "libc",
  "log",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "pikchr",
  "rand 0.10.3",
  "regex",
@@ -2537,6 +2540,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

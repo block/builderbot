@@ -550,6 +550,19 @@ fn validates_magic_and_caps_by_kind_without_reading_oversized_files() {
     }
     assert!(validate_media("fake.mp4", b"\0\0\0\x18ftypavif\0\0\0\0", true).is_err());
     assert!(validate_media("fake.webm", b"\x1a\x45\xdf\xa3matroska", true).is_err());
+    // PDFs are chat attachments only; note ingest refuses them even though
+    // the sniffer and MIME map know the format (for the attachment store).
+    assert_eq!(sniff_format(b"%PDF-1.7 ..."), Some("pdf"));
+    assert_eq!(mime_for_extension("pdf"), Some("application/pdf"));
+    assert_eq!(
+        validate_media(
+            "a.pdf",
+            &pdf::tests::tiny_pdf(&[pdf::tests::PAGE_ONE]),
+            true
+        ),
+        Err("PDFs cannot be embedded in notes".into())
+    );
+    assert!(size_limit("a.pdf", true).is_err());
     assert!(size_limit("a.mp4", false).is_err());
     assert_eq!(size_limit("a.png", true).unwrap(), MAX_IMAGE_SIZE);
     assert_eq!(size_limit("a.mov", true).unwrap(), MAX_VIDEO_SIZE);
@@ -563,6 +576,55 @@ fn validates_magic_and_caps_by_kind_without_reading_oversized_files() {
         assert!(result.markdown.contains("exceeds"));
         assert!(result.kept_ids.is_empty());
     }
+}
+
+#[test]
+fn attachment_reads_pick_their_cap_from_the_file_signature() {
+    let f = Fixture::new();
+    let sparse = |name: &str, header: &[u8], len: u64| {
+        let path = f.dir.path().join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::Write::write_all(&mut file, header).unwrap();
+        file.set_len(len).unwrap();
+        path
+    };
+    // A PDF between the image and PDF caps is read in full.
+    let path = sparse("a.pdf", b"%PDF-1.4\n", files::MAX_IMAGE_SIZE + 1);
+    let bytes = files::read_local_attachment(&path).unwrap();
+    assert_eq!(bytes.len() as u64, files::MAX_IMAGE_SIZE + 1);
+    assert!(bytes.starts_with(b"%PDF-1.4\n"));
+    assert_eq!(
+        files::read_local_attachment(&sparse("b.pdf", b"%PDF-", files::MAX_PDF_INPUT_SIZE + 1)),
+        Err("PDF exceeds 50 MB limit".into())
+    );
+    // Anything else keeps the image cap, judged from metadata.
+    assert_eq!(
+        files::read_local_attachment(&sparse("c.png", PNG, files::MAX_IMAGE_SIZE + 1)),
+        Err("media exceeds 10 MB limit".into())
+    );
+    // Files shorter than the signature are read, not mistaken for PDFs.
+    assert_eq!(
+        files::read_local_attachment(&sparse("d.png", b"%PD", 3)).unwrap(),
+        b"%PD"
+    );
+    assert_eq!(
+        files::read_local_attachment(f.dir.path()),
+        Err("media must be a regular file".into())
+    );
+    assert_eq!(
+        files::read_local_attachment(&f.dir.path().join("missing.pdf")),
+        Err(files::ReadError::NotFound("media file is unavailable"))
+    );
+
+    // The same decision for bytes already in memory.
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.resize(files::MAX_PDF_INPUT_SIZE as usize + 1, b' ');
+    let err = files::store_sniffed_image(&f.store, None, &f.project.id, None, "a.pdf", &pdf);
+    assert_eq!(err.unwrap_err(), "PDF exceeds 50 MB limit");
+    let mut png = PNG.to_vec();
+    png.resize(files::MAX_IMAGE_SIZE as usize + 1, 0);
+    let err = files::store_sniffed_image(&f.store, None, &f.project.id, None, "a.png", &png);
+    assert_eq!(err.unwrap_err(), "media exceeds 10 MB limit");
 }
 
 #[test]
@@ -629,6 +691,42 @@ fn materialization_missing_files_and_remote_video_caps_are_readable() {
     assert!(materialized.contains("large\\.mp4"));
     assert!(materialized.starts_with("Clip — "));
     assert!(materialized.contains(&video.size_bytes.to_string()));
+}
+
+/// A PDF attachment is viewed through the same protocol as note media, in an
+/// `<iframe>`: the stored MIME comes back and the viewer can seek with
+/// Range. Only the stored extension resolves; the id cannot be read as an
+/// image.
+#[test]
+fn desktop_protocol_serves_pdf_attachments_with_ranges() {
+    use tauri::http::{Request, StatusCode};
+    let f = Fixture::new();
+    let pdf = super::pdf::tests::tiny_pdf(&[super::pdf::tests::PAGE_ONE]);
+    let image =
+        files::store_sniffed_image(&f.store, None, &f.project.id, None, "doc.pdf", &pdf).unwrap();
+    assert_eq!(
+        serving::lookup(&f.store, &format!("{}.pdf", image.id))
+            .unwrap()
+            .1,
+        "application/pdf"
+    );
+    assert!(serving::lookup(&f.store, &format!("{}.png", image.id)).is_err());
+    let response = serving::response(
+        &f.store,
+        Request::builder()
+            .uri(format!("staged-media://localhost/{}.pdf", image.id))
+            .header("Range", "bytes=0-4")
+            .body(vec![])
+            .unwrap(),
+    );
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()["content-type"], "application/pdf");
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert_eq!(
+        response.headers()["content-range"],
+        format!("bytes 0-4/{}", pdf.len())
+    );
+    assert_eq!(response.body(), b"%PDF-");
 }
 
 #[test]

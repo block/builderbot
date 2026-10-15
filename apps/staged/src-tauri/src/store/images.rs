@@ -1,6 +1,7 @@
 //! Image CRUD operations and filesystem helpers.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{params, OptionalExtension};
 
@@ -167,10 +168,12 @@ impl Store {
     }
 
     /// Return chat attachments linked to a session, excluding note-owned media
-    /// so restarted sessions don't send videos as ACP image input.
+    /// so restarted sessions don't send videos as ACP image input. PDFs are
+    /// chat attachments too; the runner renders their pages for the prompt.
     pub fn get_image_ids_for_session(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1 AND mime_type LIKE 'image/%'
+        let mut stmt = conn.prepare("SELECT id FROM images WHERE session_id = ?1
+             AND (mime_type LIKE 'image/%' OR mime_type = 'application/pdf')
              AND NOT EXISTS (SELECT 1 FROM notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)
              AND NOT EXISTS (SELECT 1 FROM project_notes WHERE instr(content, 'staged-media://' || images.id || '.') > 0)")?;
         let ids = stmt
@@ -215,9 +218,7 @@ impl Store {
 
         let count = rows.len();
         for (id, project_id, filename) in &rows {
-            if let Ok(path) = image_file_path(project_id, id, filename) {
-                let _ = std::fs::remove_file(path);
-            }
+            remove_image_files(project_id, id, filename);
         }
 
         conn.execute(
@@ -297,4 +298,63 @@ pub fn image_file_path(
     Ok(project_root
         .join("images")
         .join(format!("{image_id}.{ext}")))
+}
+
+/// Where the rendered first-page thumbnail of a PDF attachment is cached,
+/// beside the PDF itself: `<project_worktree_root>/images/<image_id>.thumb.png`.
+/// The `.thumb.png` suffix cannot collide with [`image_file_path`], whose
+/// names are a bare UUID plus one extension.
+pub fn thumbnail_file_path(project_id: &str, image_id: &str) -> Result<PathBuf, String> {
+    let project_root = crate::git::project_worktree_root_for(project_id)
+        .map_err(|e| format!("Cannot determine project root: {e}"))?;
+    Ok(project_root
+        .join("images")
+        .join(format!("{image_id}.thumb.png")))
+}
+
+/// Where a thumbnail is written before it is renamed over
+/// [`thumbnail_file_path`], so a reader sees either no cache or a complete
+/// one: `<project_worktree_root>/images/<image_id>.thumb.<pid>-<n>.tmp`.
+/// Unique per writer, so two slots rendering the same new attachment at
+/// once never interleave into one file; whichever rename lands last wins,
+/// and both are complete PNGs of the same page.
+pub fn thumbnail_temp_file_path(project_id: &str, image_id: &str) -> Result<PathBuf, String> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let project_root = crate::git::project_worktree_root_for(project_id)
+        .map_err(|e| format!("Cannot determine project root: {e}"))?;
+    Ok(project_root.join("images").join(format!(
+        "{image_id}.thumb.{}-{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )))
+}
+
+/// Best-effort removal of an image's file, any cached thumbnail, and any
+/// thumbnail temp file a crash left behind, for the delete paths. A file
+/// that is already gone is not worth a warning.
+pub fn remove_image_files(project_id: &str, image_id: &str, filename: &str) {
+    let mut paths: Vec<PathBuf> = [
+        image_file_path(project_id, image_id, filename),
+        thumbnail_file_path(project_id, image_id),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Some(dir) = paths.first().and_then(|p| p.parent()) {
+        let prefix = format!("{image_id}.thumb.");
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            paths.extend(entries.flatten().map(|e| e.path()).filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".tmp"))
+            }));
+        }
+    }
+    for path in paths {
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Failed to remove image file {}: {e}", path.display());
+            }
+        }
+    }
 }

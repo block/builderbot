@@ -36,6 +36,8 @@
 //! - All write paths in the background thread use `let _ =` or
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
+mod attachments;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io;
@@ -1359,8 +1361,9 @@ pub fn start_session(
                 driver.with_mcp_servers(required_mcp_servers)
             };
 
-            // Read and base64-encode images for the prompt content blocks.
-            let mut image_data: Vec<(String, String)> = Vec::new();
+            // Read the attachments for the prompt content blocks: images as
+            // they are, PDFs rendered page by page (see `attachments`).
+            let mut attachments = attachments::PromptAttachments::default();
             for image_id in &config.image_ids {
                 match store.get_image(image_id) {
                     Ok(Some(image)) => {
@@ -1371,10 +1374,7 @@ pub fn start_session(
                         ) {
                             Ok(path) => {
                                 if let Ok(bytes) = std::fs::read(&path) {
-                                    use base64::Engine;
-                                    let encoded =
-                                        base64::engine::general_purpose::STANDARD.encode(&bytes);
-                                    image_data.push((encoded, image.mime_type.clone()));
+                                    attachments.add(&image, &bytes);
                                 } else {
                                     log::warn!(
                                         "Failed to read image file for image {image_id}: {}",
@@ -1396,7 +1396,7 @@ pub fn start_session(
                 }
             }
 
-            let mut prompt = config.prompt.clone();
+            let mut prompt = attachments.prompt(&config.prompt);
             let mut agent_session_id = config.agent_session_id.clone();
             let mut repair_attempts = 0;
             let mut include_images = true;
@@ -1409,7 +1409,7 @@ pub fn start_session(
                 let store_trait: Arc<dyn acp_client::Store> = store.clone();
                 let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
                 let images = if include_images {
-                    image_data.as_slice()
+                    attachments.images.as_slice()
                 } else {
                     &[]
                 };

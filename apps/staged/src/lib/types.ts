@@ -724,7 +724,12 @@ export interface PrCreatedPayload {
 export type PrRejectionReason =
   | { kind: 'notOpen'; state: string }
   | { kind: 'wrongBase'; expected: string; actual: string }
-  | { kind: 'wrongHeadRepo'; expected: string; actual: string | null };
+  | {
+      kind: 'wrongHeadRepo';
+      /** Every repository the branch's PR head may live in (parent, plus the fork for a fork setup). */
+      expected: string[];
+      actual: string | null;
+    };
 
 export interface RejectedPrCandidate {
   prNumber: number;

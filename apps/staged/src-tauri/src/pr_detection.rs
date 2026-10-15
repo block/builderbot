@@ -6,7 +6,8 @@
 //! terminal) leaves `branches.pr_number` null. Both ways of closing that gap
 //! live here and share one rule, `classify_candidates`: list the PRs on GitHub
 //! whose head is the branch name and adopt the first that is open, targets
-//! the branch's base and has its head in the repo the branch pushes to.
+//! the branch's base and has its head in a repo this branch could have been
+//! pushed to (the project repo, plus the fork for a fork setup).
 //!
 //! - Manual detection (`detect_branch_pr`) is the user-triggered lookup. When
 //!   nothing passes it explains why each candidate was passed over, so the
@@ -37,11 +38,12 @@ pub enum PrRejectionReason {
     NotOpen { state: String },
     /// The PR targets a different base than the branch is based on.
     WrongBase { expected: String, actual: String },
-    /// The PR's head lives in a different repository than this branch pushes
-    /// to — typically a fork with the same branch name. `actual` is `None`
-    /// when the head repository has been deleted.
+    /// The PR's head lives in a repository this branch cannot have been
+    /// pushed to — typically a fork with the same branch name. `expected`
+    /// lists every acceptable repository (see [`PrExpectations::head_repos`]);
+    /// `actual` is `None` when the head repository has been deleted.
     WrongHeadRepo {
-        expected: String,
+        expected: Vec<String>,
         actual: Option<String>,
     },
 }
@@ -65,11 +67,17 @@ impl PrRejectionReason {
             PrRejectionReason::WrongHeadRepo {
                 expected,
                 actual: Some(actual),
-            } => format!("its head branch lives in {actual}, not {expected}"),
+            } => format!(
+                "its head branch lives in {actual}, not {}",
+                expected.join(" or ")
+            ),
             PrRejectionReason::WrongHeadRepo {
                 expected,
                 actual: None,
-            } => format!("its head repository no longer exists (this branch pushes to {expected})"),
+            } => format!(
+                "its head repository no longer exists (this branch pushes to {})",
+                expected.join(" or ")
+            ),
         }
     }
 }
@@ -132,9 +140,11 @@ pub enum PrDetectionResult {
 pub(crate) struct PrExpectations {
     /// Bare base branch name (no `origin/` prefix).
     pub base_ref: String,
-    /// `owner/repo` the branch is pushed to: the fork's `head_repo` when the
-    /// project repo is a fork setup, otherwise the repo itself.
-    pub head_repo: String,
+    /// `owner/repo` slugs the PR's head may live in. Always the repo itself,
+    /// since that is where Staged clones and pushes every branch it creates;
+    /// for a fork setup also the fork's `head_repo`, because the branch
+    /// imported from the fork PR has its head there.
+    pub head_repos: Vec<String>,
 }
 
 fn rejection_reasons(pr: &git::HeadBranchPr, expected: &PrExpectations) -> Vec<PrRejectionReason> {
@@ -155,13 +165,15 @@ fn rejection_reasons(pr: &git::HeadBranchPr, expected: &PrExpectations) -> Vec<P
 
     // GitHub treats owner/repo names case-insensitively, so a slug typed
     // with different casing is still the same repository.
-    let same_head_repo = pr
-        .head_repo
-        .as_deref()
-        .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.head_repo));
-    if !same_head_repo {
+    let acceptable_head_repo = pr.head_repo.as_deref().is_some_and(|actual| {
+        expected
+            .head_repos
+            .iter()
+            .any(|repo| actual.eq_ignore_ascii_case(repo))
+    });
+    if !acceptable_head_repo {
         reasons.push(PrRejectionReason::WrongHeadRepo {
-            expected: expected.head_repo.clone(),
+            expected: expected.head_repos.clone(),
             actual: pr.head_repo.clone(),
         });
     }
@@ -243,20 +255,27 @@ fn branch_pr_expectations(
 
     let (repo_slug, _) = crate::prs::resolve_branch_repo_and_subpath(store, &project, branch)?;
 
-    // For fork setups the branch is pushed to `head_repo`, and that is where
-    // GitHub reports the PR's head as living.
-    let head_repo = match &branch.project_repo_id {
+    // Staged clones and pushes to `repo_slug` even for a fork setup, so a PR
+    // the user opened from a branch created here has its head there. The
+    // branch imported from the fork PR is the exception: its head lives in
+    // the fork's `head_repo`, so accept that as well when configured.
+    let fork_head_repo = match &branch.project_repo_id {
         Some(repo_id) => store
             .get_project_repo(repo_id)
             .map_err(|e| e.to_string())?
             .and_then(|repo| repo.head_repo),
         None => None,
+    };
+    let mut head_repos = vec![repo_slug.clone()];
+    if let Some(fork) = fork_head_repo {
+        if !fork.eq_ignore_ascii_case(&repo_slug) {
+            head_repos.push(fork);
+        }
     }
-    .unwrap_or_else(|| repo_slug.clone());
 
     let expected = PrExpectations {
         base_ref: git::branch_name_without_origin(&branch.base_branch).to_string(),
-        head_repo,
+        head_repos,
     };
 
     Ok((repo_slug, expected))
@@ -560,7 +579,16 @@ mod tests {
     fn expectations() -> PrExpectations {
         PrExpectations {
             base_ref: "main".to_string(),
-            head_repo: "acme/widgets".to_string(),
+            head_repos: vec!["acme/widgets".to_string()],
+        }
+    }
+
+    /// A project repo imported from a fork PR: branches push to the parent,
+    /// but the imported branch's head lives in the fork.
+    fn fork_setup_expectations() -> PrExpectations {
+        PrExpectations {
+            base_ref: "main".to_string(),
+            head_repos: vec!["acme/widgets".to_string(), "fork-owner/widgets".to_string()],
         }
     }
 
@@ -664,7 +692,7 @@ mod tests {
                         author: "fork-owner".to_string(),
                         draft: true,
                         reasons: vec![PrRejectionReason::WrongHeadRepo {
-                            expected: "acme/widgets".to_string(),
+                            expected: vec!["acme/widgets".to_string()],
                             actual: Some("fork-owner/widgets".to_string()),
                         }],
                         linkable: false,
@@ -675,7 +703,7 @@ mod tests {
                         author: "octocat".to_string(),
                         draft: false,
                         reasons: vec![PrRejectionReason::WrongHeadRepo {
-                            expected: "acme/widgets".to_string(),
+                            expected: vec!["acme/widgets".to_string()],
                             actual: None,
                         }],
                         linkable: false,
@@ -759,20 +787,54 @@ mod tests {
     }
 
     #[test]
-    fn fork_setup_expects_the_fork_as_head_repo() {
-        let expected = PrExpectations {
-            base_ref: "main".to_string(),
-            head_repo: "fork-owner/widgets".to_string(),
-        };
-        let candidates = [
-            pr(1, "OPEN", "main", Some("acme/widgets")),
-            pr(2, "OPEN", "main", Some("fork-owner/widgets")),
-        ];
+    fn fork_setup_accepts_heads_in_the_parent_and_the_fork() {
+        // A sibling branch created in the project is pushed to the parent;
+        // the branch imported from the fork PR has its head in the fork.
+        // Both are this project's PRs, so either head repo is accepted.
+        let parent_head = [pr(1, "OPEN", "main", Some("acme/widgets"))];
+        let fork_head = [pr(2, "OPEN", "main", Some("fork-owner/widgets"))];
+        let other_fork = [pr(3, "OPEN", "main", Some("someone-else/widgets"))];
 
         assert!(matches!(
-            classify_candidates(&candidates, &expected),
+            classify_candidates(&parent_head, &fork_setup_expectations()),
+            PrDetectionResult::Found { pr_number: 1, .. }
+        ));
+        assert!(matches!(
+            classify_candidates(&fork_head, &fork_setup_expectations()),
             PrDetectionResult::Found { pr_number: 2, .. }
         ));
+        assert_eq!(
+            classify_candidates(&other_fork, &fork_setup_expectations()),
+            PrDetectionResult::Rejected {
+                candidates: vec![RejectedPrCandidate {
+                    pr_number: 3,
+                    pr_url: "https://github.com/acme/widgets/pull/3".to_string(),
+                    author: "octocat".to_string(),
+                    draft: false,
+                    reasons: vec![PrRejectionReason::WrongHeadRepo {
+                        expected: vec![
+                            "acme/widgets".to_string(),
+                            "fork-owner/widgets".to_string()
+                        ],
+                        actual: Some("someone-else/widgets".to_string()),
+                    }],
+                    linkable: false,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn wrong_head_repo_message_lists_every_acceptable_repo() {
+        let candidates = [pr(3, "OPEN", "main", Some("someone-else/widgets"))];
+
+        let err = pick_candidate_to_link(&candidates, 3, &fork_setup_expectations(), "feature")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "PR #3 cannot be linked to this branch: its head branch lives in \
+             someone-else/widgets, not acme/widgets or fork-owner/widgets"
+        );
     }
 
     #[test]
@@ -791,20 +853,22 @@ mod tests {
     }
 
     #[test]
-    fn recovery_skips_a_fork_pr_but_adopts_from_the_configured_head_repo() {
+    fn recovery_skips_a_fork_pr_unless_the_fork_is_configured() {
         let open = [
             pr(1, "OPEN", "main", Some("fork-owner/widgets")),
             pr(2, "OPEN", "main", Some("acme/widgets")),
         ];
 
+        // Without a fork setup, a same-named fork PR is someone else's.
         assert_eq!(recoverable_pr(&open, &expectations()), Some(2));
 
-        let fork_setup = PrExpectations {
-            base_ref: "main".to_string(),
-            head_repo: "fork-owner/widgets".to_string(),
-        };
-        assert_eq!(recoverable_pr(&open[1..], &fork_setup), None);
-        assert_eq!(recoverable_pr(&open, &fork_setup), Some(1));
+        // With one, the fork's PR comes first in GitHub's order and is
+        // adopted; a parent-repo PR on its own is still adopted too.
+        assert_eq!(recoverable_pr(&open, &fork_setup_expectations()), Some(1));
+        assert_eq!(
+            recoverable_pr(&open[1..], &fork_setup_expectations()),
+            Some(2)
+        );
     }
 
     #[test]
@@ -855,7 +919,7 @@ mod tests {
                         actual: "develop".to_string(),
                     },
                     PrRejectionReason::WrongHeadRepo {
-                        expected: "acme/widgets".to_string(),
+                        expected: vec!["acme/widgets".to_string()],
                         actual: None,
                     },
                 ],
@@ -874,7 +938,7 @@ mod tests {
                     "reasons": [
                         { "kind": "notOpen", "state": "merged" },
                         { "kind": "wrongBase", "expected": "main", "actual": "develop" },
-                        { "kind": "wrongHeadRepo", "expected": "acme/widgets", "actual": null },
+                        { "kind": "wrongHeadRepo", "expected": ["acme/widgets"], "actual": null },
                     ],
                     "linkable": false,
                 }],

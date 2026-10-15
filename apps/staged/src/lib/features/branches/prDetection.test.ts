@@ -18,15 +18,27 @@ describe('describePrRejectionReason', () => {
     expect(
       describePrRejectionReason({
         kind: 'wrongHeadRepo',
-        expected: 'acme/widgets',
+        expected: ['acme/widgets'],
         actual: 'fork-owner/widgets',
       })
     ).toBe('Its head branch lives in fork-owner/widgets, not acme/widgets.');
   });
 
+  it('lists every acceptable head repository for a fork setup', () => {
+    expect(
+      describePrRejectionReason({
+        kind: 'wrongHeadRepo',
+        expected: ['acme/widgets', 'fork-owner/widgets'],
+        actual: 'someone-else/widgets',
+      })
+    ).toBe(
+      'Its head branch lives in someone-else/widgets, not acme/widgets or fork-owner/widgets.'
+    );
+  });
+
   it('handles a deleted head repository', () => {
     expect(
-      describePrRejectionReason({ kind: 'wrongHeadRepo', expected: 'acme/widgets', actual: null })
+      describePrRejectionReason({ kind: 'wrongHeadRepo', expected: ['acme/widgets'], actual: null })
     ).toBe('Its head repository no longer exists (this branch pushes to acme/widgets).');
   });
 });

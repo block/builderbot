@@ -13,9 +13,11 @@ export function describePrRejectionReason(reason: PrRejectionReason): string {
       return `It is ${reason.state}; only an open pull request is linked.`;
     case 'wrongBase':
       return `It targets ${reason.actual}, but this branch is based on ${reason.expected}.`;
-    case 'wrongHeadRepo':
+    case 'wrongHeadRepo': {
+      const expected = reason.expected.join(' or ');
       return reason.actual
-        ? `Its head branch lives in ${reason.actual}, not ${reason.expected}.`
-        : `Its head repository no longer exists (this branch pushes to ${reason.expected}).`;
+        ? `Its head branch lives in ${reason.actual}, not ${expected}.`
+        : `Its head repository no longer exists (this branch pushes to ${expected}).`;
+    }
   }
 }

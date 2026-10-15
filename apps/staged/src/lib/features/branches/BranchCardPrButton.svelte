@@ -1097,7 +1097,8 @@
         {#if anyLinkable}
           <p class="text-xs text-[var(--text-muted)]">
             A base mismatch can be overridden if the PR was retargeted on GitHub or this branch's
-            base is out of date. Closed, merged and fork pull requests cannot be linked.
+            base is out of date. Closed or merged pull requests and pull requests from another
+            repository cannot be linked.
           </p>
         {/if}
         {#if prLinkError}

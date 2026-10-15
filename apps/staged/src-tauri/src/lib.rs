@@ -31,6 +31,7 @@ pub mod pikchr_mcp;
 pub(crate) mod pikchr_subsession;
 pub(crate) mod pikchr_validation;
 pub(crate) mod pipeline_dependency;
+pub mod pr_detection;
 pub mod pr_poll_scheduler;
 mod preference_events;
 pub mod project_commands;
@@ -2335,7 +2336,9 @@ pub fn run() {
             prs::rebase_branch,
             prs::squash_commits,
             prs::clear_branch_pr_status,
-            prs::recover_branch_pr,
+            pr_detection::recover_branch_pr,
+            pr_detection::detect_branch_pr,
+            pr_detection::link_branch_pr,
             // PR poll scheduler (frontend interest/hint layer)
             pr_poll_scheduler::set_foreground_project,
             pr_poll_scheduler::set_focus,

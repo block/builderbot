@@ -46,6 +46,8 @@ import type {
   PullRequest,
   Issue,
   PrStatus,
+  PrDetectionResult,
+  LinkedBranchPr,
   PollWorkspaceResult,
   Image,
   AttachmentThumbnail,
@@ -1579,6 +1581,20 @@ export function updateBranchPr(branchId: string, prNumber: number | null): Promi
  *  Returns the recovered PR number, or null if no PR exists. */
 export function recoverBranchPr(branchId: string): Promise<number | null> {
   return invokeCommand('recover_branch_pr', { branchId });
+}
+
+/** Look up PRs on GitHub whose head is this branch and link the first one
+ *  that belongs to it (open, same base, same head repo). Candidates that
+ *  matched only on branch name come back as `rejected` with reasons. */
+export function detectBranchPr(branchId: string): Promise<PrDetectionResult> {
+  return invokeCommand('detect_branch_pr', { branchId });
+}
+
+/** Link a PR that `detectBranchPr` reported as `linkable` (rejected on its
+ *  base branch alone). The backend re-checks the PR and refuses one that is
+ *  closed, merged or whose head lives in another repository. */
+export function linkBranchPr(branchId: string, prNumber: number): Promise<LinkedBranchPr> {
+  return invokeCommand('link_branch_pr', { branchId, prNumber });
 }
 
 /** Check whether a branch has local commits not yet pushed to the remote. */

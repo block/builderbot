@@ -25,15 +25,15 @@ pub use files::{get_file_at_ref, search_files};
 pub use github::{
     check_github_auth, check_monorepo_modules, create_pull_request, detect_default_branch_for_repo,
     ensure_local_clone, ensure_local_clone_with_progress, fetch_for_worktree, fetch_github_repo,
-    fetch_pr, fetch_pr_status, fetch_pr_status_for_repo, fetch_pr_url, get_pr_for_branch,
+    fetch_pr, fetch_pr_status, fetch_pr_status_for_repo, fetch_pr_url,
     invalidate_cache as invalidate_pr_cache, list_branches_for_repo, list_github_orgs,
-    list_github_repos, list_issues, list_issues_for_repo, list_pull_requests,
-    list_pull_requests_for_repo, list_repo_directories, list_user_repos,
+    list_github_repos, list_issues, list_issues_for_repo, list_prs_for_head_branch,
+    list_pull_requests, list_pull_requests_for_repo, list_repo_directories, list_user_repos,
     post_single_comment_to_github, prune_remote_for_repo, push_branch, resolve_default_branch,
     search_github_repos, search_issues, search_pull_requests, update_clone_to_remote_head,
     update_comment_on_github, update_pull_request, validate_subpath_in_repo, ChecksSummary,
-    CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, Issue,
-    PrStatus, PullRequest, PullRequestInfo,
+    CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, HeadBranchPr,
+    Issue, PrListState, PrStatus, PullRequest,
 };
 pub use rebase::{rebase_preserving_merge_edits_command, HAND_EDIT_COMMIT_SUBJECT_PREFIX};
 pub use refs::{

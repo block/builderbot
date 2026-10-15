@@ -12,15 +12,21 @@
   import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Clock from '@lucide/svelte/icons/clock';
+  import Search from '@lucide/svelte/icons/search';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
-  import { Button } from '$lib/components/ui/button';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { Badge } from '$lib/components/ui/badge';
+  import { Button, buttonVariants } from '$lib/components/ui/button';
+  import { cn } from '$lib/components/utils';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
     PrFailedCheck,
+    RejectedPrCandidate,
     Session,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -36,6 +42,7 @@
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
   import { derivePrPushAction } from './prButtonGitState';
+  import { describePrRejectionReason } from './prDetection';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
@@ -359,8 +366,8 @@
     window.addEventListener('keyup', handleOptionUp);
 
     // PR recovery: if the branch has been pushed but has no PR number,
-    // check GitHub for an existing open PR on this branch name.
-    // The shouldAttemptRecovery guard prevents N concurrent `gh pr view`
+    // check GitHub for an open PR that passes the same checks as detection.
+    // The shouldAttemptRecovery guard prevents N concurrent `gh pr list`
     // CLI calls when many components mount simultaneously.
     if (!branch.prNumber && isRemote && prPollingService.shouldAttemptRecovery(branch.id)) {
       commands
@@ -507,6 +514,90 @@
       .catch((e) => {
         prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
       });
+  }
+
+  // =========================================================================
+  // Detect existing PR
+  // =========================================================================
+  //
+  // Staged only learns a PR number when it drove the creation, so a PR opened
+  // from a session's `gh pr create`, the browser or a terminal leaves the
+  // button on "Create PR". This asks the backend to look the branch up on
+  // GitHub; the backend persists a match and reports near-misses with reasons.
+  //
+  // A match only updates the button (the PR badge is the confirmation); every
+  // other outcome opens an alert dialog so the user can tell "no PR" apart from
+  // "a PR exists but targets develop" or "gh failed".
+  //
+  // A candidate rejected on its base branch alone (the backend marks it
+  // `linkable`) gets a "Link anyway" action: the stored base can be stale after
+  // a stack restructure, or the PR may have been retargeted on GitHub.
+  type PrDetectionFailure =
+    | { kind: 'notFound' }
+    | { kind: 'rejected'; candidates: RejectedPrCandidate[] }
+    | { kind: 'error'; message: string };
+
+  let detectingPr = $state(false);
+  let prDetectionFailure = $state<PrDetectionFailure | null>(null);
+  let showPrDetectionDialog = $derived(prDetectionFailure !== null);
+  let linkingPrNumber = $state<number | null>(null);
+  let prLinkError = $state<string | null>(null);
+
+  // The secondary menu only joins the button while it still reads "Create PR".
+  let showCreatePrMenu = $derived(prState === 'idle' && pushState === 'idle');
+
+  // Mirror what the backend persisted, as handlePrSessionComplete does.
+  function adoptLinkedPr(prNumber: number, prUrl: string) {
+    branch.prNumber = prNumber;
+    prStateStore.setPrCreated(branch.id, prUrl);
+    prPollingService.refreshNow(branch.projectId);
+  }
+
+  async function handleDetectExistingPr() {
+    if (detectingPr || prState !== 'idle') return;
+
+    detectingPr = true;
+    try {
+      const result = await commands.detectBranchPr(branch.id);
+      switch (result.kind) {
+        case 'found':
+          adoptLinkedPr(result.prNumber, result.prUrl);
+          break;
+        case 'notFound':
+          prDetectionFailure = { kind: 'notFound' };
+          break;
+        case 'rejected':
+          prDetectionFailure = { kind: 'rejected', candidates: result.candidates };
+          break;
+      }
+    } catch (e) {
+      prDetectionFailure = { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+    } finally {
+      detectingPr = false;
+    }
+  }
+
+  // The failure is shown inside the open dialog rather than replacing it, so
+  // the candidate list stays visible next to the explanation.
+  async function handleLinkPrAnyway(candidate: RejectedPrCandidate) {
+    if (linkingPrNumber !== null) return;
+
+    linkingPrNumber = candidate.prNumber;
+    prLinkError = null;
+    try {
+      const linked = await commands.linkBranchPr(branch.id, candidate.prNumber);
+      adoptLinkedPr(linked.prNumber, linked.prUrl);
+      prDetectionFailure = null;
+    } catch (e) {
+      prLinkError = e instanceof Error ? e.message : String(e);
+    } finally {
+      linkingPrNumber = null;
+    }
+  }
+
+  function handlePrDetectionDialogClose() {
+    prDetectionFailure = null;
+    prLinkError = null;
   }
 
   let prCompletionInFlight = false;
@@ -793,9 +884,15 @@
         pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
         pushState === 'queued' && 'border-[var(--border-muted)]',
         prState === 'created' && prStatusState === 'MERGED' && '[&_svg]:text-[var(--status-added)]',
+        showCreatePrMenu && 'rounded-r-none',
+        detectingPr && 'cursor-default border-[var(--border-muted)]',
       ]}
       onclick={handlePrButtonClick}
-      disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+      disabled={showPushErrorDialog ||
+        showForcePushDialog ||
+        showPrErrorDialog ||
+        showPrDetectionDialog ||
+        detectingPr}
     >
       {#if pushState === 'queued'}
         <Clock size={13} />
@@ -813,6 +910,8 @@
         <GitPullRequestDraft size={13} />
       {:else if prState === 'created'}
         <GitPullRequestArrow size={13} />
+      {:else if detectingPr}
+        <Spinner size={13} />
       {:else}
         <GitPullRequestCreateArrow size={13} />
       {/if}
@@ -835,6 +934,8 @@
           Creating PR…
         {:else if prState === 'error'}
           PR failed
+        {:else if detectingPr}
+          Detecting PR…
         {:else}
           {optionHeld ? 'Create draft PR' : 'Create PR'}
         {/if}
@@ -845,6 +946,39 @@
         <span class="pr-status-indicator {prStatusIndicator}"></span>
       {/if}
     </Button>
+    {#if showCreatePrMenu}
+      <!-- Joined to the Create PR button, as the rebase chevron is in
+           BranchCardHeaderInfo: same outline and height, touching corners
+           squared, border overlapped so the pair reads as one control.
+           The tooltip lives on a wrapping span, as it does there, because
+           browsers don't reliably show tooltips on a disabled element. -->
+      <DropdownMenu.Root>
+        <span class="inline-flex -ml-px shrink-0" title="More PR options">
+          <DropdownMenu.Trigger
+            class={cn(
+              buttonVariants({ variant: 'outline', size: 'sm' }),
+              'w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
+              detectingPr && 'border-[var(--border-muted)]'
+            )}
+            disabled={showPrDetectionDialog || detectingPr}
+            aria-label="More PR options"
+          >
+            <ChevronDown size={13} />
+          </DropdownMenu.Trigger>
+        </span>
+        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
+          <DropdownMenu.Item onSelect={() => handleCreatePr(true)}>
+            <GitPullRequestDraft size={14} /> Create draft PR
+          </DropdownMenu.Item>
+          <DropdownMenu.Item
+            title="Look up GitHub for a pull request already opened from this branch and link it here."
+            onSelect={handleDetectExistingPr}
+          >
+            <Search size={14} /> Detect existing PR
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/if}
   </span>
 {/snippet}
 
@@ -876,6 +1010,108 @@
         <AlertDialog.Action variant="outline" onclick={handlePrErrorRetry}>
           Retry
         </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
+
+{#if prDetectionFailure}
+  <AlertDialog.Root
+    open={showPrDetectionDialog}
+    onOpenChange={(open) => !open && linkingPrNumber === null && handlePrDetectionDialogClose()}
+  >
+    <AlertDialog.Content>
+      {#if prDetectionFailure.kind === 'notFound'}
+        <AlertDialog.Header>
+          <AlertDialog.Title>No pull request found</AlertDialog.Title>
+          <AlertDialog.Description>
+            GitHub has no pull request with {branch.branchName} as its head branch.
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+      {:else if prDetectionFailure.kind === 'error'}
+        <AlertDialog.Header>
+          <AlertDialog.Title>Could not check GitHub for an existing PR</AlertDialog.Title>
+          <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+            {prDetectionFailure.message}
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+      {:else}
+        {@const candidates = prDetectionFailure.candidates}
+        {@const anyLinkable = candidates.some((c) => c.linkable)}
+        <AlertDialog.Header>
+          <AlertDialog.Title>Existing PR not linked</AlertDialog.Title>
+          <AlertDialog.Description>
+            GitHub has {candidates.length === 1
+              ? 'a pull request'
+              : `${candidates.length} pull requests`} with {branch.branchName} as the head branch, but
+            none can be linked to this branch:
+          </AlertDialog.Description>
+        </AlertDialog.Header>
+        <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">
+          {#each candidates as candidate (candidate.prNumber)}
+            <li>
+              <div class="flex items-center justify-between gap-3">
+                <div class="flex min-w-0 items-center gap-2">
+                  <button
+                    type="button"
+                    class="font-medium underline-offset-2 hover:underline"
+                    onclick={() =>
+                      commands.openUrl(candidate.prUrl).catch((e) => {
+                        console.error('Failed to open PR URL:', e);
+                      })}
+                  >
+                    #{candidate.prNumber}
+                  </button>
+                  <span class="truncate text-[var(--text-muted)]">by {candidate.author}</span>
+                  {#if candidate.draft}
+                    <Badge variant="outline" title="Draft pull request">
+                      <GitPullRequestDraft /> Draft
+                    </Badge>
+                  {/if}
+                </div>
+                {#if candidate.linkable}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-7 gap-1.5 text-xs"
+                    title="Link PR #{candidate.prNumber} to this branch even though it targets a different base."
+                    disabled={linkingPrNumber !== null}
+                    onclick={() => handleLinkPrAnyway(candidate)}
+                  >
+                    {#if linkingPrNumber === candidate.prNumber}
+                      <Spinner size={12} /> Linking…
+                    {:else}
+                      Link anyway
+                    {/if}
+                  </Button>
+                {/if}
+              </div>
+              <ul class="mt-1 list-disc space-y-0.5 pl-5 text-[var(--text-muted)]">
+                {#each candidate.reasons as reason, i (i)}
+                  <li>{describePrRejectionReason(reason)}</li>
+                {/each}
+              </ul>
+            </li>
+          {/each}
+        </ul>
+        {#if anyLinkable}
+          <p class="text-xs text-[var(--text-muted)]">
+            A base mismatch can be overridden if the PR was retargeted on GitHub or this branch's
+            base is out of date. Closed or merged pull requests and pull requests from another
+            repository cannot be linked.
+          </p>
+        {/if}
+        {#if prLinkError}
+          <p class="whitespace-pre-line text-sm text-destructive">{prLinkError}</p>
+        {/if}
+      {/if}
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel
+          disabled={linkingPrNumber !== null}
+          onclick={handlePrDetectionDialogClose}
+        >
+          Close
+        </AlertDialog.Cancel>
       </AlertDialog.Footer>
     </AlertDialog.Content>
   </AlertDialog.Root>

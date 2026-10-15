@@ -617,6 +617,102 @@ pub fn get_pr_for_branch_for_repo(
     Ok(items.into_iter().next().map(Into::into))
 }
 
+/// A pull request whose head branch has a given name, in whatever state it
+/// is in. Narrower than [`PullRequest`]: only the fields needed to decide
+/// whether the PR belongs to a local branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadBranchPr {
+    pub number: u64,
+    pub url: String,
+    /// Upper-case GitHub state: `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+    pub base_ref: String,
+    /// `owner/repo` the head branch lives in; `None` once a fork is deleted.
+    pub head_repo: Option<String>,
+    pub draft: bool,
+    pub author: String,
+}
+
+/// Response from `gh pr list --head … --state all --json`
+#[derive(Debug, Deserialize)]
+struct GhHeadBranchPrItem {
+    number: u64,
+    url: String,
+    state: String,
+    author: GhAuthor,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(rename = "headRepository")]
+    head_repository: Option<GhRepository>,
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
+}
+
+impl From<GhHeadBranchPrItem> for HeadBranchPr {
+    fn from(item: GhHeadBranchPrItem) -> Self {
+        HeadBranchPr {
+            number: item.number,
+            url: item.url,
+            state: item.state,
+            base_ref: item.base_ref_name,
+            head_repo: item.head_repository.map(|r| r.name_with_owner),
+            draft: item.is_draft,
+            author: item.author.login,
+        }
+    }
+}
+
+/// Which PR states [`list_prs_for_head_branch`] asks `gh` for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrListState {
+    /// Open PRs only. The limit is generous so a branch's own open PR is
+    /// returned no matter how many forks reuse the branch name.
+    Open,
+    /// Open, closed and merged PRs, newest first. Capped low: a popular
+    /// branch name (`main`, `patch-1`) can have a long history across forks
+    /// and this list only exists to explain near-misses.
+    All,
+}
+
+impl PrListState {
+    fn gh_args(self) -> [&'static str; 2] {
+        match self {
+            PrListState::Open => ["--state=open", "--limit=50"],
+            PrListState::All => ["--state=all", "--limit=10"],
+        }
+    }
+}
+
+/// List pull requests whose head branch is `branch_name`, using
+/// `-R owner/repo` (no local dir needed).
+///
+/// `--head` filters on the head ref name alone, so PRs opened from forks of
+/// `github_repo` under the same branch name are included; callers that care
+/// which repository the head lives in compare [`HeadBranchPr::head_repo`].
+pub fn list_prs_for_head_branch(
+    github_repo: &str,
+    branch_name: &str,
+    state: PrListState,
+) -> Result<Vec<HeadBranchPr>, GitError> {
+    let [state_arg, limit_arg] = state.gh_args();
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        "-R",
+        github_repo,
+        "--head",
+        branch_name,
+        state_arg,
+        limit_arg,
+        "--json=number,url,state,author,baseRefName,headRepository,isDraft",
+    ])?;
+
+    let items: Vec<GhHeadBranchPrItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().map(Into::into).collect())
+}
+
 /// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
     let output = run_gh_global(&[
@@ -2323,84 +2419,6 @@ pub struct CreatePrResult {
     pub number: u64,
     /// URL to the PR on GitHub
     pub url: String,
-}
-
-/// Extended PR info including body and state (for checking existing PRs)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PullRequestInfo {
-    pub number: u64,
-    pub title: String,
-    pub body: String,
-    pub author: String,
-    pub base_ref: String,
-    pub head_ref: String,
-    pub draft: bool,
-    pub state: String,
-    pub url: String,
-}
-
-/// Response from `gh pr view --json`
-#[derive(Debug, Deserialize)]
-struct GhPrViewItem {
-    number: u64,
-    title: String,
-    body: String,
-    author: GhAuthor,
-    #[serde(rename = "baseRefName")]
-    base_ref_name: String,
-    #[serde(rename = "headRefName")]
-    head_ref_name: String,
-    #[serde(rename = "isDraft")]
-    is_draft: bool,
-    state: String,
-    url: String,
-}
-
-impl From<GhPrViewItem> for PullRequestInfo {
-    fn from(item: GhPrViewItem) -> Self {
-        PullRequestInfo {
-            number: item.number,
-            title: item.title,
-            body: item.body,
-            author: item.author.login,
-            base_ref: item.base_ref_name,
-            head_ref: item.head_ref_name,
-            draft: item.is_draft,
-            state: item.state.to_lowercase(),
-            url: item.url,
-        }
-    }
-}
-
-/// Get the PR associated with a branch (if one exists).
-/// Returns None if no PR exists for this branch.
-pub fn get_pr_for_branch(repo: &Path, branch: &str) -> Result<Option<PullRequestInfo>, GitError> {
-    let output = run_gh(
-        repo,
-        &[
-            "pr",
-            "view",
-            branch,
-            "--json=number,title,body,author,baseRefName,headRefName,isDraft,state,url",
-        ],
-    );
-
-    match output {
-        Ok(json) => {
-            let item: GhPrViewItem =
-                serde_json::from_str(&json).map_err(|e| GitError::CommandFailed(e.to_string()))?;
-            Ok(Some(item.into()))
-        }
-        Err(e) => {
-            // "no pull requests found" is not an error, just means no PR exists
-            let msg = e.to_string();
-            if msg.contains("no pull requests found") || msg.contains("Could not resolve") {
-                Ok(None)
-            } else {
-                Err(e)
-            }
-        }
-    }
 }
 
 /// Response from `gh pr view --json` for status fields

@@ -766,6 +766,12 @@
       });
       previousCanvas = connectorCanvas;
       scheduleConnectorRedraw();
+    } else if (!connectorCanvas && connectorRenderer) {
+      // The spine unmounts in single-pane mode; drop the renderer so scroll
+      // handlers stop painting into a detached canvas.
+      connectorRenderer.destroy();
+      connectorRenderer = null;
+      previousCanvas = null;
     }
   });
 
@@ -2484,21 +2490,23 @@
         </div>
       {/if}
 
-      <!-- Spine / Divider -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="spine"
-        class:dragging={isDraggingDivider}
-        onmousedown={handleDividerMouseDown}
-        ondblclick={handleDividerDoubleClick}
-      >
-        <div class="divider-handle"></div>
-        <canvas
-          class="spine-connector"
-          class:hidden={isMarkdownFile && markdownPreview}
-          bind:this={connectorCanvas}
-        ></canvas>
-      </div>
+      <!-- Spine / Divider (two-pane mode only: a single pane has nothing to divide or connect) -->
+      {#if isTwoPaneMode}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="spine"
+          class:dragging={isDraggingDivider}
+          onmousedown={handleDividerMouseDown}
+          ondblclick={handleDividerDoubleClick}
+        >
+          <div class="divider-handle"></div>
+          <canvas
+            class="spine-connector"
+            class:hidden={isMarkdownFile && markdownPreview}
+            bind:this={connectorCanvas}
+          ></canvas>
+        </div>
+      {/if}
 
       <!-- After pane (two-pane mode or created file) -->
       {#if isTwoPaneMode}

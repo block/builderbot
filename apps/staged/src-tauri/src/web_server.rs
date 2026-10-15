@@ -2897,7 +2897,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 },
             )
             .await?;
-            let item = crate::note_commands::note_to_timeline_item(&store, note);
+            let item = match mode {
+                crate::note_transfer::TransferMode::Move => {
+                    crate::note_commands::note_to_timeline_item(&store, note)
+                }
+                crate::note_transfer::TransferMode::Copy => {
+                    crate::note_commands::standalone_note_to_timeline_item(note)
+                }
+            };
             Ok(serde_json::to_value(item).unwrap())
         }
         "move_project_note_to_project" | "copy_project_note_to_project" => {

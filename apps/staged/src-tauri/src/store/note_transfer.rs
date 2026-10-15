@@ -9,6 +9,12 @@
 //! A move is an `UPDATE`, never a delete-and-reinsert: the note keeps its id
 //! (so `#note:<id>` references elsewhere stay valid) and its `session_id`, and
 //! the `AFTER DELETE` triggers that garbage-collect sessions are never fired.
+//!
+//! The `UPDATE` is keyed on where the caller last saw the note as well as its
+//! id. The command layer resolves the destination from the source location,
+//! and a note relocated (or deleted) between that read and this transaction
+//! would otherwise be silently overwritten; matching zero rows fails the
+//! transaction instead, so the media rows roll back with it.
 
 use rusqlite::{params, OptionalExtension};
 
@@ -76,6 +82,10 @@ impl Store {
     /// (the body with its media references rewritten to `media`, the copied
     /// rows). Returns the note as it now reads.
     ///
+    /// The note must still be on `expected_branch_id`, the branch the caller
+    /// resolved the destination from; otherwise nothing is written and the
+    /// move is refused.
+    ///
     /// The title is made unique among the destination branch's notes, the
     /// same way a fresh save would be. `parent_project_note_id` is cleared:
     /// a child note's parent project note stays in the source project, and a
@@ -84,6 +94,7 @@ impl Store {
     pub fn move_note_to_branch(
         &self,
         note_id: &str,
+        expected_branch_id: &str,
         target_branch_id: &str,
         content: &str,
         media: &[Image],
@@ -108,12 +119,22 @@ impl Store {
             Self::insert_image(&tx, image)?;
         }
         let now = now_timestamp();
-        tx.execute(
+        let changed = tx.execute(
             "UPDATE notes
              SET branch_id = ?1, title = ?2, content = ?3, parent_project_note_id = NULL, updated_at = ?4
-             WHERE id = ?5",
-            params![target_branch_id, title, content, now, note_id],
+             WHERE id = ?5 AND branch_id = ?6",
+            params![
+                target_branch_id,
+                title,
+                content,
+                now,
+                note_id,
+                expected_branch_id
+            ],
         )?;
+        if changed != 1 {
+            return Err(relocated_during_transfer(&existing.title));
+        }
         tx.commit()?;
 
         // Both timelines changed: the note left one and arrived on the other.
@@ -157,7 +178,8 @@ impl Store {
     }
 
     /// Re-home a project note into `target_project_id`; see
-    /// [`Store::move_note_to_branch`] for the content/media contract.
+    /// [`Store::move_note_to_branch`] for the content/media contract and the
+    /// role of `expected_project_id`.
     ///
     /// Child notes aggregated under it are detached rather than moved: they are
     /// branch notes bound to the source project's repos, which the destination
@@ -167,6 +189,7 @@ impl Store {
     pub fn move_project_note_to_project(
         &self,
         note_id: &str,
+        expected_project_id: &str,
         target_project_id: &str,
         content: &str,
         media: &[Image],
@@ -197,10 +220,20 @@ impl Store {
             params![note_id],
         )?;
         let now = now_timestamp();
-        tx.execute(
-            "UPDATE project_notes SET project_id = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
-            params![target_project_id, content, now, note_id],
+        let changed = tx.execute(
+            "UPDATE project_notes SET project_id = ?1, content = ?2, updated_at = ?3
+             WHERE id = ?4 AND project_id = ?5",
+            params![
+                target_project_id,
+                content,
+                now,
+                note_id,
+                expected_project_id
+            ],
         )?;
+        if changed != 1 {
+            return Err(relocated_during_transfer(&existing.title));
+        }
         tx.commit()?;
 
         self.publish(StoreChange::Notes {
@@ -246,6 +279,14 @@ impl Store {
         });
         Ok(())
     }
+}
+
+/// The note was not where the caller last saw it, so the destination it
+/// resolved no longer applies.
+fn relocated_during_transfer(title: &str) -> StoreError {
+    StoreError(format!(
+        "Note '{title}' was moved or deleted during the transfer."
+    ))
 }
 
 #[cfg(test)]
@@ -374,6 +415,7 @@ mod tests {
             .store
             .move_note_to_branch(
                 &note.id,
+                &f.source_branch.id,
                 &f.target_branch.id,
                 "new body",
                 std::slice::from_ref(&image),
@@ -405,7 +447,13 @@ mod tests {
 
         let moved = f
             .store
-            .move_note_to_branch(&note.id, &f.target_branch.id, "mine", &[])
+            .move_note_to_branch(
+                &note.id,
+                &f.source_branch.id,
+                &f.target_branch.id,
+                "mine",
+                &[],
+            )
             .unwrap();
 
         assert_eq!(moved.title, "Findings (2)");
@@ -424,6 +472,7 @@ mod tests {
             .store
             .move_note_to_branch(
                 &note.id,
+                &f.source_branch.id,
                 "no-such-branch",
                 "body",
                 std::slice::from_ref(&image),
@@ -436,6 +485,79 @@ mod tests {
             f.store.get_note(&note.id).unwrap().unwrap().branch_id,
             f.source_branch.id
         );
+    }
+
+    /// The destination was resolved from where the note was; if it has since
+    /// been relocated, the `UPDATE` matches nothing and the transaction — media
+    /// rows included — is rolled back rather than overwriting the newer home.
+    #[test]
+    fn move_is_refused_when_the_note_is_no_longer_on_the_expected_branch() {
+        let f = fixture();
+        let note = Note::new_standalone(&f.source_branch.id, "Findings", "body");
+        f.store.create_note(&note).unwrap();
+        let image = Image::new(
+            Some(&f.target_branch.id),
+            &f.target.id,
+            "shot.png",
+            "image/png",
+            3,
+            false,
+        );
+
+        let err = f
+            .store
+            .move_note_to_branch(
+                &note.id,
+                "stale-branch",
+                &f.target_branch.id,
+                "new body",
+                std::slice::from_ref(&image),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("moved or deleted"), "{err}");
+        let stored = f.store.get_note(&note.id).unwrap().unwrap();
+        assert_eq!(stored.branch_id, f.source_branch.id);
+        assert_eq!(stored.content, "body");
+        assert!(f.store.get_image(&image.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn project_note_move_is_refused_when_the_note_left_the_expected_project() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id);
+        f.store.create_note(&child).unwrap();
+        let image = Image::new(None, &f.target.id, "shot.png", "image/png", 3, false);
+
+        let err = f
+            .store
+            .move_project_note_to_project(
+                &note.id,
+                "stale-project",
+                &f.target.id,
+                "new body",
+                std::slice::from_ref(&image),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("moved or deleted"), "{err}");
+        let stored = f.store.get_project_note(&note.id).unwrap().unwrap();
+        assert_eq!(stored.project_id, f.source.id);
+        assert_eq!(stored.content, "body");
+        // The child detach ran inside the same transaction and was undone.
+        assert_eq!(
+            f.store
+                .get_note(&child.id)
+                .unwrap()
+                .unwrap()
+                .parent_project_note_id
+                .as_deref(),
+            Some(note.id.as_str())
+        );
+        assert!(f.store.get_image(&image.id).unwrap().is_none());
     }
 
     #[test]
@@ -478,7 +600,7 @@ mod tests {
 
         let moved = f
             .store
-            .move_project_note_to_project(&parent.id, &f.target.id, "body", &[])
+            .move_project_note_to_project(&parent.id, &f.source.id, &f.target.id, "body", &[])
             .unwrap();
 
         assert_eq!(moved.project_id, f.target.id);

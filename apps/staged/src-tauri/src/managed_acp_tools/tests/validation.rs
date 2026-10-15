@@ -3,6 +3,15 @@ use super::*;
 const TIMEOUT: Duration = super::super::validation::VALIDATION_TIMEOUT;
 const MISSING_NATIVE: &str = "echo 'native binary not found for this platform' >&2\nexit 1\n";
 
+/// Installs `contents` as the fake `node` under `bin_dir`, through the
+/// production shim writer, and waits out the `ETXTBSY` window before the
+/// validation probe execs it. A busy exec would otherwise fail validation
+/// with `could not start: Text file busy`.
+fn write_node_shim(bin_dir: &Path, contents: &str) {
+    write_shim(bin_dir, "node", contents).unwrap();
+    wait_until_executable(&bin_dir.join("node"));
+}
+
 fn write_probe(node: &Path, template: &Path, tool: &ManagedTool, script: &str) {
     write_fixture_install(template, tool, "1.2.4");
     std::fs::write(npm_entrypoint(template, tool.package), script).unwrap();
@@ -14,15 +23,14 @@ fn write_probe(node: &Path, template: &Path, tool: &ManagedTool, script: &str) {
         "codex-acp" => "[ \"$2\" = cli ] && [ \"$3\" = -V ]",
         _ => panic!("missing probe fixture for {}", tool.id),
     };
-    write_shim(
+    // With no arguments this exits 91 at once, so it is safe to probe-spawn.
+    write_node_shim(
         &node.join("bin"),
-        "node",
         &format!(
             "#!/bin/sh\ncase \"$1\" in /*) ;; *) exit 91 ;; esac\n[ \"$1\" -ef \"$PWD/node_modules/{}/dist/index.js\" ] || exit 91\n{args_check} && [ $# = 3 ] || exit 92\nexec /bin/sh \"$@\"\n",
             tool.package
         ),
-    )
-    .unwrap();
+    );
 }
 
 #[tokio::test]
@@ -113,12 +121,7 @@ async fn rejected_upgrade(
     let live = tool_install_dir(&root, tool.id);
     let entrypoint = npm_entrypoint(&live, tool.package);
     std::fs::write(&entrypoint, "echo '1.2.3'\n").unwrap();
-    write_shim(
-        &old_node.join("bin"),
-        "node",
-        "#!/bin/sh\nexec /bin/sh \"$@\"\n",
-    )
-    .unwrap();
+    write_node_shim(&old_node.join("bin"), "#!/bin/sh\nexec /bin/sh \"$@\"\n");
     let shim = shim_bin_dir(&root).join(tool.binary);
     let shim_before = std::fs::read(&shim).unwrap();
     let state_before = std::fs::read(state_path(&root)).unwrap();
@@ -245,7 +248,10 @@ async fn personal_overrides_cannot_mask_missing_native_binary() {
 const HANGING_NATIVE: &str =
     "/bin/sleep 60 &\necho \"$$ $!\" > ../../validation-pids\necho 'waiting for native CLI' >&2\n";
 
-async fn probe_pids(root: &Path) -> Vec<i32> {
+/// The bridge and native-child PIDs the hanging probe records, or `None` if
+/// it has not recorded them within 5 seconds. Callers attach whatever they
+/// know about why validation never got that far.
+async fn probe_pids(root: &Path) -> Option<Vec<i32>> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(contents) = tokio::fs::read_to_string(root.join("validation-pids")).await {
@@ -261,7 +267,7 @@ async fn probe_pids(root: &Path) -> Vec<i32> {
         }
     })
     .await
-    .expect("probe did not spawn its native child")
+    .ok()
 }
 
 async fn assert_probe_tree_stopped(pids: &[i32]) {
@@ -300,7 +306,9 @@ async fn timeout_preserves_install_and_kills_tree(bridge_exit: &str) {
             Duration::from_secs(1),
         )
         .await;
-        let pids = probe_pids(&dir.path().join("packages")).await;
+        let pids = probe_pids(&dir.path().join("packages"))
+            .await
+            .unwrap_or_else(|| panic!("probe did not spawn its native child: {error}"));
         assert_probe_tree_stopped(&pids).await;
         assert!(error.contains("timed out after 1 seconds"), "{error}");
         assert!(error.contains("waiting for native CLI"), "{error}");
@@ -326,10 +334,17 @@ async fn cancellation_kills_bridge_and_native_child() {
         let node = root.join("node");
         let staging = staging_install_dir(&root, tool.id);
         write_probe(&node, &staging, &tool, &format!("{HANGING_NATIVE}wait\n"));
-        let probe = tokio::spawn(async move {
+        let mut probe = tokio::spawn(async move {
             super::super::validation::validate_staged_tool(&node, &staging, &tool, TIMEOUT).await
         });
-        let pids = probe_pids(&root).await;
+        // Validation should hang until aborted. If it returns first (say, the
+        // node shim failed to start), report why instead of a bare timeout.
+        let pids = tokio::select! {
+            pids = probe_pids(&root) => pids.expect("probe did not spawn its native child"),
+            result = &mut probe => {
+                panic!("validation finished before spawning its native child: {result:?}")
+            }
+        };
         probe.abort();
         assert!(probe.await.unwrap_err().is_cancelled());
         assert_probe_tree_stopped(&pids).await;

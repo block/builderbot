@@ -23,6 +23,7 @@ export {
 } from './diffModalHelpers';
 
 export {
+  anchorSideForHunk,
   buildLineToAlignmentMap,
   buildBeforeMarkers,
   buildAfterMarkers,

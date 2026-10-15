@@ -21,19 +21,36 @@
   interface Props {
     /** Current scroll position in pixels */
     scrollY: number;
-    /** Total content height in pixels */
+    /** Total scrollable height in pixels */
     contentHeight: number;
     /** Visible viewport height in pixels */
     viewportHeight: number;
+    /**
+     * Pixel range within contentHeight that marker percentages refer to.
+     * Defaults to the whole height; the diff panes pass their own content range
+     * when the scrollable extent also carries the other pane's edge handoff.
+     */
+    markerRange?: { top: number; height: number };
     /** Which side to render on */
     side: 'left' | 'right';
-    /** Callback when user scrolls via this scrollbar */
+    /** Callback when the user wheels over the scrollbar */
     onScroll: (deltaY: number) => void;
+    /** Callback when the user drags the thumb or clicks the track (absolute target) */
+    onScrollTo: (scrollY: number) => void;
     /** Markers to show (changes, comments) */
     markers?: Marker[];
   }
 
-  let { scrollY, contentHeight, viewportHeight, side, onScroll, markers = [] }: Props = $props();
+  let {
+    scrollY,
+    contentHeight,
+    viewportHeight,
+    markerRange,
+    side,
+    onScroll,
+    onScrollTo,
+    markers = [],
+  }: Props = $props();
 
   // ==========================================================================
   // State
@@ -61,6 +78,18 @@
   let thumbTopPercent = $derived(
     maxScroll > 0 ? (scrollY / maxScroll) * (100 - thumbHeightPercent) : 0
   );
+
+  /** Markers mapped from their own range onto the full track */
+  let trackMarkers = $derived.by(() => {
+    if (!markerRange || contentHeight <= 0) return markers;
+    const scale = markerRange.height / contentHeight;
+    const offset = (markerRange.top / contentHeight) * 100;
+    return markers.map((marker) => ({
+      ...marker,
+      top: offset + marker.top * scale,
+      height: marker.height * scale,
+    }));
+  });
 
   /** Whether scrollbar should be visible (content overflows) */
   let canScroll = $derived(contentHeight > viewportHeight);
@@ -119,9 +148,7 @@
 
     const deltaY = e.clientY - dragStartY;
     const scrollDelta = (deltaY / availableTrack) * maxScroll;
-    const newScrollY = Math.max(0, Math.min(maxScroll, dragStartScrollY + scrollDelta));
-
-    onScroll(newScrollY - scrollY);
+    onScrollTo(Math.max(0, Math.min(maxScroll, dragStartScrollY + scrollDelta)));
   }
 
   function handleDragEnd() {
@@ -152,9 +179,7 @@
     if (availableTrack <= 0) return;
 
     const targetScrollY = (targetThumbTop / availableTrack) * maxScroll;
-    const clampedScrollY = Math.max(0, Math.min(maxScroll, targetScrollY));
-
-    onScroll(clampedScrollY - scrollY);
+    onScrollTo(Math.max(0, Math.min(maxScroll, targetScrollY)));
   }
 
   // ==========================================================================
@@ -194,7 +219,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="track" bind:this={trackEl} onclick={handleTrackClick}>
     <!-- Markers layer (behind thumb) -->
-    {#each markers as marker}
+    {#each trackMarkers as marker}
       <div
         class="marker"
         class:change={marker.type === 'change'}

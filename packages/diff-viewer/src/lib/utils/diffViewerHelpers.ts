@@ -70,6 +70,15 @@ export function normalizeLineSelection(
   return { pane: lineSelection.pane, start, end };
 }
 
+/**
+ * Which pane to anchor on when scrolling a hunk into view. A hunk with no
+ * after-side rows (a pure deletion) only exists in the before pane; anchoring
+ * on the after pane there would leave the removed lines just past its viewport.
+ */
+export function anchorSideForHunk(alignment: Alignment): PaneSide {
+  return alignment.after.end === alignment.after.start ? 'before' : 'after';
+}
+
 export function isLineInChangedAlignment(
   side: PaneSide,
   lineIndex: number,

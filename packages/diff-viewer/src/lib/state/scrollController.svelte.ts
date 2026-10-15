@@ -40,6 +40,23 @@ export interface ScrollState {
 }
 
 /**
+ * The scrollable extent a pane's scrollbar should present: the pane's own
+ * range extended by the edge handoff headroom (see scrollBy), so dragging the
+ * thumb to an end carries the other pane through rows that exist on its side
+ * alone. Invariant: contentHeight - viewportHeight === maxScrollY.
+ */
+export interface ScrollExtent {
+  /** Current position within the extent */
+  scrollY: number;
+  /** Maximum position within the extent */
+  maxScrollY: number;
+  /** Height of the extent: the pane's own content plus headroom at both edges */
+  contentHeight: number;
+  /** Where the pane's own content starts within the extent (its top headroom) */
+  contentOffset: number;
+}
+
+/**
  * Find the alignment containing a given row index.
  */
 function findAlignment(
@@ -90,14 +107,20 @@ function transferRow(row: number, alignment: Alignment, side: 'before' | 'after'
   return Math.min(target.start + targetOffset, target.end - 1);
 }
 
+/** Dimensions of a pane that is not rendered: nothing to scroll, no headroom to hand off. */
+function emptyDimensions(): PaneDimensions {
+  return { viewportHeight: 0, contentHeight: 0, lineHeight: 20 };
+}
+
 /**
  * Create a scroll controller for synchronized diff panes.
  */
 export function createScrollController() {
-  // Internal state
-  let alignments: Alignment[] = [];
-  let beforeDims: PaneDimensions = { viewportHeight: 0, contentHeight: 0, lineHeight: 20 };
-  let afterDims: PaneDimensions = { viewportHeight: 0, contentHeight: 0, lineHeight: 20 };
+  // Internal state. Reactive (raw, replaced wholesale) so derived extents
+  // recompute when the diff or pane geometry changes, not just on scroll.
+  let alignments: Alignment[] = $state.raw([]);
+  let beforeDims: PaneDimensions = $state.raw(emptyDimensions());
+  let afterDims: PaneDimensions = $state.raw(emptyDimensions());
 
   // Track current file to detect file changes vs content refreshes
   let currentFilePath: string | null = null;
@@ -109,11 +132,17 @@ export function createScrollController() {
   let afterScrollX = $state(0);
 
   /**
+   * Maximum vertical scroll position for a pane.
+   */
+  function maxScrollY(dims: PaneDimensions): number {
+    return Math.max(0, dims.contentHeight - dims.viewportHeight);
+  }
+
+  /**
    * Clamp a vertical scroll position to valid bounds.
    */
   function clampScroll(scrollY: number, dims: PaneDimensions): number {
-    const maxScroll = Math.max(0, dims.contentHeight - dims.viewportHeight);
-    return Math.max(0, Math.min(maxScroll, scrollY));
+    return Math.max(0, Math.min(maxScrollY(dims), scrollY));
   }
 
   /**
@@ -181,6 +210,39 @@ export function createScrollController() {
     return clampScroll(targetY, targetDims);
   }
 
+  /**
+   * How far the target pane sits past its alignment-derived position because
+   * scrolling was handed off to it while the source pane was pinned at an edge
+   * (see scrollBy). Only counts while the source is still at that edge; any
+   * other discrepancy is alignment rounding and keeps snapping as before.
+   */
+  function edgeOverscroll(
+    sourceScrollY: number,
+    sourceSide: 'before' | 'after',
+    sourceDims: PaneDimensions,
+    targetScrollY: number,
+    targetDims: PaneDimensions
+  ): number {
+    const aligned = transferScroll(sourceScrollY, sourceSide, sourceDims, targetDims);
+    const overscroll = targetScrollY - aligned;
+    if (overscroll > 0 && sourceScrollY >= maxScrollY(sourceDims)) return overscroll;
+    if (overscroll < 0 && sourceScrollY <= 0) return overscroll;
+    return 0;
+  }
+
+  /**
+   * How far the other pane can travel past its aligned position once this
+   * pane is pinned at the top or bottom: the rows that exist on the other
+   * side alone before the first (or after the last) shared row.
+   */
+  function edgeHeadroom(side: 'before' | 'after'): { top: number; bottom: number } {
+    const sourceDims = side === 'before' ? beforeDims : afterDims;
+    const targetDims = side === 'before' ? afterDims : beforeDims;
+    const top = transferScroll(0, side, sourceDims, targetDims);
+    const alignedAtMax = transferScroll(maxScrollY(sourceDims), side, sourceDims, targetDims);
+    return { top, bottom: maxScrollY(targetDims) - alignedAtMax };
+  }
+
   return {
     // Expose reactive state
     get beforeScrollY() {
@@ -233,19 +295,50 @@ export function createScrollController() {
     },
 
     /**
+     * Forget a pane's dimensions when it is not rendered (created and deleted
+     * files show a single pane). Stale dimensions from a previous file would
+     * otherwise give the visible pane phantom edge headroom and let scrollBy
+     * hand input off to a pane that does not exist.
+     */
+    clearDimensions(side: 'before' | 'after') {
+      this.setDimensions(side, emptyDimensions());
+    },
+
+    /**
      * Scroll by a delta amount. Updates both panes in sync.
+     *
+     * The alignment transfer keeps shared rows level, so content that exists on
+     * only one side past the last shared row (e.g. lines deleted from the end
+     * of a file) sits beyond the other pane's scroll range. Once the source
+     * pane is pinned at an edge, the delta it cannot consume is handed off to
+     * the other pane so that content stays reachable; reversing direction
+     * unwinds the handoff first so neither pane jumps.
      */
     scrollBy(side: 'before' | 'after', deltaY: number) {
+      const sourceDims = side === 'before' ? beforeDims : afterDims;
+      const targetDims = side === 'before' ? afterDims : beforeDims;
+      const sourceScrollY = side === 'before' ? beforeScrollY : afterScrollY;
+      const targetScrollY = side === 'before' ? afterScrollY : beforeScrollY;
+
+      let overscroll = edgeOverscroll(sourceScrollY, side, sourceDims, targetScrollY, targetDims);
+      let remaining = deltaY;
+      if (overscroll !== 0 && Math.sign(remaining) === -Math.sign(overscroll)) {
+        const unwind = Math.sign(remaining) * Math.min(Math.abs(remaining), Math.abs(overscroll));
+        overscroll += unwind;
+        remaining -= unwind;
+      }
+
+      const newSource = clampScroll(sourceScrollY + remaining, sourceDims);
+      const residual = sourceScrollY + remaining - newSource;
+      const aligned = transferScroll(newSource, side, sourceDims, targetDims);
+      const newTarget = clampScroll(aligned + overscroll + residual, targetDims);
+
       if (side === 'before') {
-        // Update before, compute after
-        const newBefore = clampScroll(beforeScrollY + deltaY, beforeDims);
-        beforeScrollY = newBefore;
-        afterScrollY = transferScroll(newBefore, 'before', beforeDims, afterDims);
+        beforeScrollY = newSource;
+        afterScrollY = newTarget;
       } else {
-        // Update after, compute before
-        const newAfter = clampScroll(afterScrollY + deltaY, afterDims);
-        afterScrollY = newAfter;
-        beforeScrollY = transferScroll(newAfter, 'after', afterDims, beforeDims);
+        afterScrollY = newSource;
+        beforeScrollY = newTarget;
       }
     },
 
@@ -267,6 +360,54 @@ export function createScrollController() {
     scrollByXBoth(deltaX: number) {
       beforeScrollX = clampScrollX(beforeScrollX + deltaX, beforeDims);
       afterScrollX = clampScrollX(afterScrollX + deltaX, afterDims);
+    },
+
+    /**
+     * The extent a pane's scrollbar should run over (see ScrollExtent). The
+     * position includes any outstanding edge handoff, so a scrollbar bound to
+     * it tracks scrollBy and scrollToEffective without jumping.
+     */
+    getEffectiveExtent(side: 'before' | 'after'): ScrollExtent {
+      const sourceDims = side === 'before' ? beforeDims : afterDims;
+      const targetDims = side === 'before' ? afterDims : beforeDims;
+      const sourceScrollY = side === 'before' ? beforeScrollY : afterScrollY;
+      const targetScrollY = side === 'before' ? afterScrollY : beforeScrollY;
+
+      const { top, bottom } = edgeHeadroom(side);
+      const overscroll = edgeOverscroll(sourceScrollY, side, sourceDims, targetScrollY, targetDims);
+      const maxScroll = top + maxScrollY(sourceDims) + bottom;
+      return {
+        scrollY: Math.max(0, Math.min(maxScroll, top + sourceScrollY + overscroll)),
+        maxScrollY: maxScroll,
+        contentHeight: Math.max(sourceDims.contentHeight, sourceDims.viewportHeight) + top + bottom,
+        contentOffset: top,
+      };
+    },
+
+    /**
+     * Set the position within a pane's effective extent (see getEffectiveExtent).
+     * Inside the pane's own range this is scrollTo; in the headroom beyond
+     * either edge the pane stays pinned and the remainder moves the other pane,
+     * the same handoff scrollBy performs incrementally.
+     */
+    scrollToEffective(side: 'before' | 'after', effectiveY: number) {
+      const sourceDims = side === 'before' ? beforeDims : afterDims;
+      const targetDims = side === 'before' ? afterDims : beforeDims;
+
+      const { top, bottom } = edgeHeadroom(side);
+      const clamped = Math.max(0, Math.min(top + maxScrollY(sourceDims) + bottom, effectiveY));
+      const newSource = clampScroll(clamped - top, sourceDims);
+      const residual = clamped - top - newSource;
+      const aligned = transferScroll(newSource, side, sourceDims, targetDims);
+      const newTarget = clampScroll(aligned + residual, targetDims);
+
+      if (side === 'before') {
+        beforeScrollY = newSource;
+        afterScrollY = newTarget;
+      } else {
+        afterScrollY = newSource;
+        beforeScrollY = newTarget;
+      }
     },
 
     /**

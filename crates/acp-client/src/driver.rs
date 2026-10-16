@@ -29,7 +29,7 @@ use agent_client_protocol::{
             SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
             SessionConfigOptionCategory, SessionConfigSelectOptions, SessionInfoUpdate,
             SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-            StopReason, TextContent, ToolCallContent,
+            SetSessionConfigOptionResponse, StopReason, TextContent, ToolCallContent,
         },
         ProtocolVersion,
     },
@@ -5483,6 +5483,129 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
                 || error.contains(CONFIG_SELECTION_STALE_NOT_SELECT)))
 }
 
+// Claude's SDK confirms every `setModel` with a short API probe on a fixed
+// five-second deadline, and a probe that misses it surfaces as this sentence
+// in the `details` of an internal error. That is confirmation uncertainty,
+// not an unavailable model: the same selection is routinely accepted seconds
+// later. [`send_config_selection`] bounds its recovery to exactly this error.
+const MODEL_CONFIRMATION_FAILED_PREFIX: &str = "Couldn't confirm model \"";
+const MODEL_CONFIRMATION_ATTEMPTS: u32 = 2;
+const MODEL_CONFIRMATION_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// What the user reads once every confirmation attempt has failed. Kept clear
+/// of the [`is_config_selection_unavailable_error`] fragments on purpose: the
+/// selection itself is sound, so consumers must keep it for the retry the
+/// sentence asks for.
+pub const MODEL_CONFIRMATION_EXHAUSTED_MESSAGE: &str = "Claude couldn't confirm the selected model after two attempts. Your selection is unchanged; try again.";
+
+/// Whether `adapter` — the agent's `initialize` name, or the driver label when
+/// it sends none — is a Claude bridge. Only Claude's SDK produces the
+/// confirmation failure, so only Claude gets the retry; another agent that
+/// happened to word an error the same way keeps the single attempt.
+fn supports_model_confirmation_recovery(adapter: &str) -> bool {
+    adapter.to_ascii_lowercase().contains("claude")
+}
+
+/// Whether a `session/set_config_option` error is Claude failing to confirm
+/// `requested_model`: an internal error whose `data` quotes that model after
+/// [`MODEL_CONFIRMATION_FAILED_PREFIX`], either as the bridge's
+/// `{"details": …}` object or as a bare string. Authentication errors, invalid
+/// values, transport failures, and a different model are all not this error.
+fn is_model_confirmation_error(
+    error: &agent_client_protocol::Error,
+    requested_model: &str,
+) -> bool {
+    if error.code != ErrorCode::InternalError {
+        return false;
+    }
+    let details = match &error.data {
+        Some(serde_json::Value::Object(data)) => data.get("details").and_then(|d| d.as_str()),
+        Some(serde_json::Value::String(details)) => Some(details.as_str()),
+        _ => None,
+    };
+    details.is_some_and(|details| {
+        details.contains(&format!(
+            "{MODEL_CONFIRMATION_FAILED_PREFIX}{requested_model}\""
+        ))
+    })
+}
+
+/// One `session/set_config_option` round trip for `selection`.
+///
+/// When a Claude bridge can't confirm the selected model, the identical
+/// request goes out exactly once more after [`MODEL_CONFIRMATION_RETRY_DELAY`]
+/// on the same connection — never while an attempt is still unanswered, and
+/// never for any other option, error, or adapter. The caller's setup timeout
+/// and cancellation bound the whole exchange by dropping this future, so a
+/// Stop during the delay or the second attempt sends nothing further.
+/// Exhausted recovery reads as [`MODEL_CONFIRMATION_EXHAUSTED_MESSAGE`]
+/// rather than the nested Debug dump.
+///
+/// Each attempt logs a sanitized record — phase, adapter, requested and
+/// resolved value, attempt, duration, classified outcome; never prompts,
+/// credentials, or the raw response — so a failed start can be correlated
+/// with the confirmation that produced it.
+async fn send_config_selection(
+    connection: &ConnectionTo<Agent>,
+    agent_session_id: &str,
+    adapter: &str,
+    selection: &AcpSessionConfigOptionSelection,
+    resolved: &ResolvedConfigSelection,
+) -> Result<SetSessionConfigOptionResponse, String> {
+    let label = config_selection_label(&selection.category);
+    let requested = selection.value_id.as_str();
+    let value = resolved.value.value_id.as_str();
+    let recoverable = selection.category == SessionConfigOptionCategory::Model
+        && supports_model_confirmation_recovery(adapter);
+    let attempts = if recoverable {
+        MODEL_CONFIRMATION_ATTEMPTS
+    } else {
+        1
+    };
+    let mut attempt = 1;
+    loop {
+        let started = Instant::now();
+        let result = connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                agent_session_id.to_string(),
+                resolved.config_id.clone(),
+                value,
+            ))
+            .block_task()
+            .await;
+        let diagnostic = format!(
+            "ACP config phase=setup adapter={adapter} option={label} requested={requested} \
+             resolved={value} attempt={attempt}/{attempts} duration_ms={}",
+            started.elapsed().as_millis()
+        );
+        match result {
+            Ok(response) => {
+                log::info!("{diagnostic} outcome=accepted");
+                return Ok(response);
+            }
+            Err(error) if recoverable && is_model_confirmation_error(&error, value) => {
+                if attempt < attempts {
+                    log::warn!(
+                        "{diagnostic} outcome=unconfirmed; retrying in {}ms",
+                        MODEL_CONFIRMATION_RETRY_DELAY.as_millis()
+                    );
+                    tokio::time::sleep(MODEL_CONFIRMATION_RETRY_DELAY).await;
+                    attempt += 1;
+                    continue;
+                }
+                log::warn!("{diagnostic} outcome=unconfirmed; recovery exhausted");
+                return Err(MODEL_CONFIRMATION_EXHAUSTED_MESSAGE.to_string());
+            }
+            Err(error) => {
+                log::warn!("{diagnostic} outcome=failed code={}", i32::from(error.code));
+                return Err(format!(
+                    "Failed to set selected ACP {label} config option: {error:?}"
+                ));
+            }
+        }
+    }
+}
+
 // Fragment shared by `setup_acp_session`'s required-transport check and
 // [`is_missing_mcp_transport_error`] — the same producer/matcher contract as
 // the config-selection constants above.
@@ -5499,6 +5622,7 @@ pub fn is_missing_mcp_transport_error(error: &str) -> bool {
 async fn apply_or_record_session_config_options(
     connection: &ConnectionTo<Agent>,
     agent_session_id: &str,
+    adapter: &str,
     initial_options: Option<&[SessionConfigOption]>,
     selections: &[AcpSessionConfigOptionSelection],
     writer: &Arc<dyn MessageWriter>,
@@ -5548,20 +5672,9 @@ async fn apply_or_record_session_config_options(
             }
             Err(e) => return Err(e),
         };
-        let response = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                agent_session_id.to_string(),
-                resolved.config_id,
-                resolved.value.value_id.as_str(),
-            ))
-            .block_task()
-            .await
-            .map_err(|e| {
-                format!(
-                    "Failed to set selected ACP {} config option: {e:?}",
-                    config_selection_label(&selection.category)
-                )
-            })?;
+        let response =
+            send_config_selection(connection, agent_session_id, adapter, selection, &resolved)
+                .await?;
         // Announced only once the agent has accepted the substitute, so the
         // transcript never claims a fallback that did not take effect.
         if let Some(notice) = resolved.value.fallback_notice {
@@ -6019,6 +6132,8 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
     writer
         .on_initialize(&initialize_metadata(&init_response))
         .await;
+    // Keys the config-selection recovery and its diagnostics below.
+    let adapter = adapter_name(agent_label, &init_response);
 
     if init_response.protocol_version != ProtocolVersion::V1 {
         return Err(format!(
@@ -6104,6 +6219,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             apply_or_record_session_config_options(
                 connection,
                 existing_id,
+                adapter,
                 load_response.config_options.as_deref(),
                 config_options,
                 writer,
@@ -6144,6 +6260,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             apply_or_record_session_config_options(
                 connection,
                 &new_id,
+                adapter,
                 session_response.config_options.as_deref(),
                 config_options,
                 writer,
@@ -6173,12 +6290,20 @@ fn initialize_metadata(init_response: &InitializeResponse) -> AcpInitializeMetad
     }
 }
 
-fn log_initialize_response(agent_label: &str, init_response: &InitializeResponse) {
-    let agent_name = init_response
+/// The name the agent gave itself on `initialize` (e.g.
+/// `@agentclientprotocol/claude-agent-acp`), or the driver label when it sent
+/// none — so a remote bridge is still recognized by what it is, not where it
+/// runs.
+fn adapter_name<'a>(agent_label: &'a str, init_response: &'a InitializeResponse) -> &'a str {
+    init_response
         .agent_info
         .as_ref()
         .map(|info| info.name.as_str())
-        .unwrap_or(agent_label);
+        .unwrap_or(agent_label)
+}
+
+fn log_initialize_response(agent_label: &str, init_response: &InitializeResponse) {
+    let agent_name = adapter_name(agent_label, init_response);
     let agent_version = init_response
         .agent_info
         .as_ref()
@@ -6480,6 +6605,7 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod model_confirmation;
     mod response_completion;
     mod settlement;
 
@@ -7585,6 +7711,7 @@ mod tests {
                 apply_or_record_session_config_options(
                     &connection,
                     "session-1",
+                    "Claude Code",
                     Some(&initial_options),
                     &selections,
                     &message_writer,
@@ -7665,6 +7792,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 apply_or_record_session_config_options(
                     &connection,
                     "session-1",
+                    "Claude Code",
                     None,
                     &selections,
                     &message_writer,
@@ -7676,6 +7804,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 let error = apply_or_record_session_config_options(
                     &connection,
                     "session-1",
+                    "Claude Code",
                     None,
                     &selections,
                     &message_writer,
@@ -7751,6 +7880,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 apply_or_record_session_config_options(
                     &connection,
                     "session-1",
+                    "Claude Code",
                     Some(&loaded_options),
                     &selections,
                     &message_writer,
@@ -7820,6 +7950,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 apply_or_record_session_config_options(
                     &connection,
                     "session-1",
+                    "Claude Code",
                     Some(&renamed_options()),
                     &selections,
                     &message_writer,
@@ -7892,6 +8023,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 apply_or_record_session_config_options(
                     &connection,
                     "session-1",
+                    "Claude Code",
                     Some(&renamed_options()),
                     &selections,
                     &message_writer,

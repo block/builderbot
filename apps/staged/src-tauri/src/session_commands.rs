@@ -4838,8 +4838,7 @@ fn context_preamble() -> String {
     "This branch represents an ongoing conversation across multiple sessions. \
      Be judicious with your context window, but you are responsible for understanding \
      previous changes or note content from the branch history when they relate to the \
-     next step. Every item below carries a `Date:` line in UTC; use them to understand \
-     the order and timing of what happened."
+     next step."
         .to_string()
 }
 
@@ -4968,12 +4967,7 @@ pub(crate) fn build_project_session_context(
         project_name
     };
 
-    let mut lines = vec![
-        format!("You are working in project \"{project_name}\"."),
-        "Every timeline item and note below carries a `Date:` line in UTC; use them to \
-         understand the order and timing of what happened."
-            .to_string(),
-    ];
+    let mut lines = vec![format!("You are working in project \"{project_name}\".")];
 
     // List all repos
     let repos = store.list_project_repos(&project.id).unwrap_or_default();

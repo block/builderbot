@@ -458,12 +458,13 @@ fn parse_commit_info_lines(output: &str) -> Vec<CommitInfo> {
 /// separated from the display text by `\x01`:
 ///
 /// ```text
-/// \0<unix_ts>\x01commit <sha>\nAuthor: …\nDate: …\n\n<message>\0…
+/// \0<unix_ts>\x01commit <sha>\nAuthor: …\n\n<message>\0…
 /// ```
 ///
 /// Use [`super::parse_timestamped_log`] (in `session_commands`) to
 /// split this into `(timestamp, display_text)` pairs for timeline
-/// interleaving.
+/// interleaving. There is no `Date:` line in the display text: the
+/// caller renders one from the prefix, in UTC like every other item.
 ///
 /// Uses `merge-base` to find the actual fork point, consistent with
 /// [`get_commits_since_base`].
@@ -481,16 +482,17 @@ pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitErr
 
     // --reverse gives oldest-first ordering
     // %x00 = record separator, %x01 = field separator
-    // %at = author time — the prefix is purely an ordering key, and author
-    // time is the one a rebase preserves, so rewritten commits keep their
-    // place among the session messages they're interleaved with
+    // %at = author time — the prefix orders the interleave and is also the
+    // date the caller displays (the branch card shows author time too), and
+    // author time is the one a rebase preserves, so rewritten commits keep
+    // their place among the session messages they're interleaved with
     // %B is the full commit message (subject + body)
     let output = cli::run_smart(
         worktree,
         &[
             "log",
             "--reverse",
-            "--format=%x00%at%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            "--format=%x00%at%x01commit %H%nAuthor: %an%n%n%B",
             &range,
         ],
     )?;

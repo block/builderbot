@@ -3,11 +3,12 @@
   
   Handles three display modes:
   1. Two-pane diff: Side-by-side before/after with synchronized scrolling and spine connectors
-  2. Created file: Status label + spine + single after pane (commentable)
-  3. Deleted file: Single before pane + spine + status label
+  2. Created file: Single after pane (commentable), "+" badge in the pane header
+  3. Deleted file: Single before pane, "−" badge in the pane header
   
-  The spine is always present - it shows bezier connectors for two-pane diffs,
-  and comment highlights for all modes.
+  The spine (divider, connector canvas, and comment highlights) only exists in
+  two-pane mode. Single-pane modes render no spine, and the connector effect
+  tears down the renderer when its canvas unmounts.
   
   Uses custom scroll implementation for frame-perfect sync between panes.
   
@@ -131,8 +132,6 @@
     loading?: boolean;
     /** Message shown when no diff content is currently available. */
     emptyMessage?: string;
-    /** Whether this is a reference file (not part of the diff). */
-    isReferenceFile?: boolean;
     /** Label for the before pane header (e.g. base branch name). */
     beforeLabel?: string;
     /** Label for the after pane header (e.g. head branch name). */
@@ -166,7 +165,6 @@
     syntaxThemeVersion = 0,
     loading = false,
     emptyMessage = 'Select a file to view changes',
-    isReferenceFile = false,
     beforeLabel = 'before',
     afterLabel = 'after',
     annotations = [],
@@ -766,6 +764,12 @@
       });
       previousCanvas = connectorCanvas;
       scheduleConnectorRedraw();
+    } else if (!connectorCanvas && connectorRenderer) {
+      // The spine unmounts in single-pane mode; drop the renderer so scroll
+      // handlers stop painting into a detached canvas.
+      connectorRenderer.destroy();
+      connectorRenderer = null;
+      previousCanvas = null;
     }
   });
 
@@ -2295,21 +2299,10 @@
     </div>
   {:else}
     <div class="diff-content" class:single-pane={!isTwoPaneMode}>
-      <!-- Created/Reference file: label on left -->
-      {#if isReferenceFile}
-        <div class="status-label reference">
-          <span class="status-text">Reference</span>
-        </div>
-      {:else if isNewFile}
-        <div class="status-label created">
-          <span class="status-text">Created</span>
-        </div>
-      {/if}
-
       <!-- Before pane (only in two-pane mode) -->
       {#if isTwoPaneMode}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="diff-pane before-pane" style="flex: {paneRatio}">
+        <div class="diff-pane before-pane" data-pane-side="before" style="flex: {paneRatio}">
           <div class="pane-header">
             <span class="pane-label">{beforeLabel}</span>
             <span class="pane-path" title={beforePath}>{beforePath ?? 'No file'}</span>
@@ -2429,9 +2422,15 @@
 
       <!-- Deleted file: before pane shows content -->
       {#if isDeletedFile}
-        <div class="diff-pane single-pane-content">
+        <div class="diff-pane single-pane-content" data-pane-side="before">
           <div class="pane-header">
             <span class="pane-label">{beforeLabel}</span>
+            <span
+              class="status-badge deleted"
+              role="img"
+              aria-label="Deleted file"
+              title="Deleted file">−</span
+            >
             <span class="pane-path" title={beforePath}>{beforePath ?? 'No file'}</span>
           </div>
           <div class="code-area" onwheel={handleBeforeWheel}>
@@ -2482,26 +2481,28 @@
         </div>
       {/if}
 
-      <!-- Spine / Divider -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="spine"
-        class:dragging={isDraggingDivider}
-        onmousedown={handleDividerMouseDown}
-        ondblclick={handleDividerDoubleClick}
-      >
-        <div class="divider-handle"></div>
-        <canvas
-          class="spine-connector"
-          class:hidden={isMarkdownFile && markdownPreview}
-          bind:this={connectorCanvas}
-        ></canvas>
-      </div>
+      <!-- Spine / Divider (two-pane mode only: a single pane has nothing to divide or connect) -->
+      {#if isTwoPaneMode}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="spine"
+          class:dragging={isDraggingDivider}
+          onmousedown={handleDividerMouseDown}
+          ondblclick={handleDividerDoubleClick}
+        >
+          <div class="divider-handle"></div>
+          <canvas
+            class="spine-connector"
+            class:hidden={isMarkdownFile && markdownPreview}
+            bind:this={connectorCanvas}
+          ></canvas>
+        </div>
+      {/if}
 
       <!-- After pane (two-pane mode or created file) -->
       {#if isTwoPaneMode}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="diff-pane after-pane" style="flex: {1 - paneRatio}">
+        <div class="diff-pane after-pane" data-pane-side="after" style="flex: {1 - paneRatio}">
           <div class="pane-header">
             <span class="pane-label">{afterLabel}</span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
@@ -2627,9 +2628,15 @@
       {:else if isNewFile}
         <!-- Created file: single after pane -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="diff-pane single-pane-content">
+        <div class="diff-pane single-pane-content" data-pane-side="after">
           <div class="pane-header">
             <span class="pane-label">{afterLabel}</span>
+            <span
+              class="status-badge created"
+              role="img"
+              aria-label="Created file"
+              title="Created file">+</span
+            >
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
           <div class="code-area" onwheel={handleAfterWheel}>
@@ -2705,13 +2712,6 @@
               onScroll={handleHorizontalScrollbarScroll}
             />
           </div>
-        </div>
-      {/if}
-
-      <!-- Deleted file: label on right -->
-      {#if isDeletedFile}
-        <div class="status-label deleted">
-          <span class="status-text">Deleted</span>
         </div>
       {/if}
     </div>
@@ -2865,51 +2865,29 @@
     flex: 1;
   }
 
-  /* Status labels for created/deleted files */
-  .status-label {
-    display: flex;
+  /* Compact created/deleted badge in the single pane header */
+  .status-badge {
+    display: inline-flex;
     align-items: center;
-    width: 80px;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
     flex-shrink: 0;
-  }
-
-  .status-label.created {
-    justify-content: flex-end;
-    padding-right: 12px;
-  }
-
-  .status-label.deleted {
-    justify-content: flex-start;
-    padding-left: 12px;
-  }
-
-  .status-text {
+    border-radius: 4px;
     font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
-    font-size: var(--size-lg);
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
+    font-size: var(--size-sm);
+    font-weight: 700;
+    line-height: 1;
   }
 
-  .status-label.created .status-text {
-    transform: rotate(180deg);
+  .status-badge.created {
     color: var(--status-added);
+    background-color: color-mix(in srgb, var(--status-added) 18%, transparent);
   }
 
-  .status-label.deleted .status-text {
+  .status-badge.deleted {
     color: var(--status-deleted);
-  }
-
-  .status-label.reference {
-    justify-content: flex-end;
-    padding-right: 12px;
-  }
-
-  .status-label.reference .status-text {
-    transform: rotate(180deg);
-    color: var(--text-muted);
+    background-color: color-mix(in srgb, var(--status-deleted) 18%, transparent);
   }
 
   /* Pane header */

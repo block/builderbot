@@ -132,8 +132,6 @@
     loading?: boolean;
     /** Message shown when no diff content is currently available. */
     emptyMessage?: string;
-    /** Whether this is a reference file (not part of the diff). */
-    isReferenceFile?: boolean;
     /** Label for the before pane header (e.g. base branch name). */
     beforeLabel?: string;
     /** Label for the after pane header (e.g. head branch name). */
@@ -167,7 +165,6 @@
     syntaxThemeVersion = 0,
     loading = false,
     emptyMessage = 'Select a file to view changes',
-    isReferenceFile = false,
     beforeLabel = 'before',
     afterLabel = 'after',
     annotations = [],
@@ -2302,13 +2299,6 @@
     </div>
   {:else}
     <div class="diff-content" class:single-pane={!isTwoPaneMode}>
-      <!-- Reference file: label on left -->
-      {#if isReferenceFile}
-        <div class="status-label reference">
-          <span class="status-text">Reference</span>
-        </div>
-      {/if}
-
       <!-- Before pane (only in two-pane mode) -->
       {#if isTwoPaneMode}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -2898,34 +2888,6 @@
   .status-badge.deleted {
     color: var(--status-deleted);
     background-color: color-mix(in srgb, var(--status-deleted) 18%, transparent);
-  }
-
-  /* Status label for reference files */
-  .status-label {
-    display: flex;
-    align-items: center;
-    width: 80px;
-    flex-shrink: 0;
-  }
-
-  .status-text {
-    font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
-    font-size: var(--size-lg);
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    writing-mode: vertical-rl;
-    text-orientation: mixed;
-  }
-
-  .status-label.reference {
-    justify-content: flex-end;
-    padding-right: 12px;
-  }
-
-  .status-label.reference .status-text {
-    transform: rotate(180deg);
-    color: var(--text-muted);
   }
 
   /* Pane header */

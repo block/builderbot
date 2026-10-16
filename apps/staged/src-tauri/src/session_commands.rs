@@ -4755,8 +4755,9 @@ fn build_remote_branch_context(
             "--reverse",
             // %at (author time) rather than %ct: the prefix only orders the
             // interleave, and author time survives a rebase — see
-            // `git::get_full_commit_log`, the local counterpart.
-            "--format=%x00%at%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            // `git::get_full_commit_log`, the local counterpart. The `Date:`
+            // line is rendered from that prefix by `parse_timestamped_log`.
+            "--format=%x00%at%x01commit %H%nAuthor: %an%n%n%B",
             &range,
         ],
     ) {
@@ -4837,7 +4838,8 @@ fn context_preamble() -> String {
     "This branch represents an ongoing conversation across multiple sessions. \
      Be judicious with your context window, but you are responsible for understanding \
      previous changes or note content from the branch history when they relate to the \
-     next step."
+     next step. Every item below carries a `Date:` line in UTC; use them to understand \
+     the order and timing of what happened."
         .to_string()
 }
 
@@ -4966,7 +4968,12 @@ pub(crate) fn build_project_session_context(
         project_name
     };
 
-    let mut lines = vec![format!("You are working in project \"{project_name}\".")];
+    let mut lines = vec![
+        format!("You are working in project \"{project_name}\"."),
+        "Every timeline item and note below carries a `Date:` line in UTC; use them to \
+         understand the order and timing of what happened."
+            .to_string(),
+    ];
 
     // List all repos
     let repos = store.list_project_repos(&project.id).unwrap_or_default();
@@ -5059,13 +5066,7 @@ pub(crate) fn build_project_session_context(
             // Blank line before each note: separates the first one from the
             // section heading and the rest from each other.
             lines.push(String::new());
-            lines.push(format_project_note_for_context(
-                store,
-                &note.id,
-                &note.title,
-                &note.content,
-                workspace_name,
-            ));
+            lines.push(format_project_note_for_context(store, note, workspace_name));
         }
     }
 
@@ -5143,6 +5144,31 @@ fn build_branch_timeline_summary(
 // Chronological timeline helpers
 // =============================================================================
 
+/// Render a Unix-seconds timestamp the way every context item's `Date:` line
+/// shows it: full date and time in UTC, with the zone spelled out.
+///
+/// Absolute rather than relative so a session can work out the order and
+/// spacing of events from the text alone, and one zone for every item type —
+/// commits, notes, reviews, images — so they compare directly. Each item uses
+/// the same field the branch card displays for it, so the UI and the agent
+/// never disagree on when something happened.
+pub(crate) fn format_context_timestamp(unix_secs: i64) -> String {
+    match time::OffsetDateTime::from_unix_timestamp(unix_secs) {
+        Ok(dt) => format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+            dt.year(),
+            dt.month() as u8,
+            dt.day(),
+            dt.hour(),
+            dt.minute(),
+            dt.second()
+        ),
+        // Out of `time`'s range (±9999 years): nothing in the store or git
+        // produces this, but a garbage value shouldn't take the prompt down.
+        Err(_) => format!("unix {unix_secs}"),
+    }
+}
+
 /// A single entry in the branch timeline, sorted by timestamp (Unix seconds).
 struct TimelineEntry {
     timestamp: i64,
@@ -5197,6 +5223,11 @@ fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> S
 /// aren't monotonic along a branch (a cherry-pick keeps its old one), so the
 /// entries are clamped the same way the branch card's are, keeping
 /// "Branch History (oldest first)" in `git log` order.
+///
+/// The prefix is also what the branch card displays for a commit, so it's
+/// rendered as the commit's `Date:` line — before clamping, so a cherry-pick
+/// still shows its real author date — and in UTC like every other item,
+/// rather than taking `git log`'s own `%ci`-style line in the author's zone.
 fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     let mut entries = Vec::new();
     // The log is produced with --reverse (oldest-first), so index 0 = oldest.
@@ -5211,7 +5242,7 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
                 entries.push(TimelineEntry {
                     timestamp: ts,
                     order,
-                    content: display.trim().to_string(),
+                    content: commit_display_with_date(display.trim(), ts),
                 });
                 order += 1;
             }
@@ -5219,6 +5250,17 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     }
     crate::timeline::clamp_timestamps_monotonic(entries.iter_mut().map(|e| &mut e.timestamp));
     entries
+}
+
+/// Insert a `Date:` line after a commit's header lines (`commit <sha>` and
+/// `Author:`), which the blank line before the message body terminates. A
+/// commit with no body is all header.
+fn commit_display_with_date(display: &str, author_ts: i64) -> String {
+    let date = format_context_timestamp(author_ts);
+    match display.split_once("\n\n") {
+        Some((header, body)) => format!("{header}\nDate: {date}\n\n{body}"),
+        None => format!("{display}\nDate: {date}"),
+    }
 }
 
 /// Extract the set of commit SHAs from a timestamped git log.
@@ -5338,9 +5380,10 @@ fn write_note_to_remote(
 /// the note is written to a local temp file. Both produce the same
 /// `See: <path>` output format, keeping large notes out of the prompt.
 ///
-/// The pointer hugs its heading (single newline) so the blank line between
-/// items is the only blank line, making the grouping unambiguous. The inline
-/// fallback keeps its blank line — that body *is* the item, not a pointer.
+/// The `Date:` line (see [`format_context_timestamp`]) and the pointer hug the
+/// heading (single newlines) so the blank line between items is the only blank
+/// line, making the grouping unambiguous. The inline fallback keeps its blank
+/// line — that body *is* the item, not a pointer.
 ///
 /// Falls back to inlining if the write fails (remote or local).
 fn format_note_with_heading(
@@ -5348,14 +5391,16 @@ fn format_note_with_heading(
     id: &str,
     title: &str,
     content: &str,
+    timestamp_secs: i64,
     workspace_name: Option<&str>,
     heading: &str,
 ) -> String {
+    let date = format_context_timestamp(timestamp_secs);
     let content = materialize_note_media(store, content, workspace_name);
     write_content_to_temp_file(id, &content, workspace_name, "staged-note", |path| {
-        format!("### {heading}: {title}\nSee: `{path}`")
+        format!("### {heading}: {title}\nDate: {date}\nSee: `{path}`")
     })
-    .unwrap_or_else(|| format!("### {heading}: {title}\n\n{content}"))
+    .unwrap_or_else(|| format!("### {heading}: {title}\nDate: {date}\n\n{content}"))
 }
 
 /// Write content to a temp file (local or remote) and return formatted output via `fmt_ok`.
@@ -5488,7 +5533,11 @@ pub(crate) fn format_note_for_context(
     note: &store::Note,
     workspace_name: Option<&str>,
 ) -> String {
-    let heading = format!("### Note: {}", note.title);
+    let heading = format!(
+        "### Note: {}\nDate: {}",
+        note.title,
+        format_context_timestamp(note_timestamp_secs(note))
+    );
     // The annotation lines sit directly under the heading, with the pointer
     // directly under those, so the whole item is one unbroken block.
     let mut annotations = match &note.parent_project_note_id {
@@ -5515,6 +5564,12 @@ pub(crate) fn format_note_for_context(
         format!("{heading}{annotations}\nSee: `{path}`")
     })
     .unwrap_or_else(|| format!("{heading}{annotations}\n\n{content}"))
+}
+
+/// The timestamp a note is shown under, in Unix seconds: the same
+/// `completed_at ?? created_at` the branch card renders for it.
+fn note_timestamp_secs(note: &store::Note) -> i64 {
+    note.completed_at.unwrap_or(note.created_at) / 1000
 }
 
 /// Convert notes from the DB into timeline entries.
@@ -5547,7 +5602,7 @@ fn note_timeline_entries(
             continue; // skip session notes still generating (or that failed)
         }
         entries.push(TimelineEntry {
-            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
+            timestamp: note_timestamp_secs(note),
             order: 0,
             content: format_note_for_context(store, note, workspace_name),
         });
@@ -5555,17 +5610,29 @@ fn note_timeline_entries(
     entries
 }
 
+/// The timestamp a project note is shown under, in Unix seconds: the same
+/// `completed_at ?? created_at` the project section renders.
+fn project_note_timestamp_secs(note: &store::ProjectNote) -> i64 {
+    note.completed_at.unwrap_or(note.created_at) / 1000
+}
+
 /// Format a single project note for inclusion in context.
 ///
 /// Wrapper around `format_note_with_heading` that uses "Project Note" as the heading.
 fn format_project_note_for_context(
     store: &Store,
-    id: &str,
-    title: &str,
-    content: &str,
+    note: &store::ProjectNote,
     workspace_name: Option<&str>,
 ) -> String {
-    format_note_with_heading(store, id, title, content, workspace_name, "Project Note")
+    format_note_with_heading(
+        store,
+        &note.id,
+        &note.title,
+        &note.content,
+        project_note_timestamp_secs(note),
+        workspace_name,
+        "Project Note",
+    )
 }
 
 /// Convert project notes from the DB into timeline entries.
@@ -5587,15 +5654,9 @@ fn project_note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        let content = format_project_note_for_context(
-            store,
-            &note.id,
-            &note.title,
-            &note.content,
-            workspace_name,
-        );
+        let content = format_project_note_for_context(store, note, workspace_name);
         entries.push(TimelineEntry {
-            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
+            timestamp: project_note_timestamp_secs(note),
             order: 0,
             content,
         });
@@ -5695,7 +5756,10 @@ fn review_timeline_entries(
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
+        // The same `completed_at ?? created_at` the branch card shows the
+        // review under, so the UI and the agent agree on when it happened.
         let review_ts_secs = review.completed_at.unwrap_or(review.created_at) / 1000;
+        let date = format_context_timestamp(review_ts_secs);
         let is_old = max_commit_ts.is_some_and(|ts| review.created_at / 1000 < ts);
 
         let heading_title = match review.title.as_deref() {
@@ -5706,7 +5770,7 @@ fn review_timeline_entries(
         let content = if is_old {
             let (total, issues) = review_summary_counts(review);
             let comment_detail = format_review_comments(review);
-            let full_content = format!("### {heading_title}\n{comment_detail}");
+            let full_content = format!("### {heading_title}\nDate: {date}\n{comment_detail}");
 
             let summary_suffix = format!("{total} comments, {issues} issues");
 
@@ -5715,15 +5779,17 @@ fn review_timeline_entries(
                 &full_content,
                 workspace_name,
                 "staged-review",
-                |path| format!("### {heading_title} — {summary_suffix}\nSee: `{path}`"),
+                |path| {
+                    format!("### {heading_title} — {summary_suffix}\nDate: {date}\nSee: `{path}`")
+                },
             )
             .unwrap_or_else(|| {
                 // Fallback: inline if file write fails
-                format!("### {heading_title}\n{comment_detail}")
+                format!("### {heading_title}\nDate: {date}\n{comment_detail}")
             })
         } else {
             let comment_detail = format_review_comments(review);
-            format!("### {heading_title}\n{comment_detail}")
+            format!("### {heading_title}\nDate: {date}\n{comment_detail}")
         };
 
         entries.push(TimelineEntry {
@@ -5757,6 +5823,8 @@ fn image_timeline_entries(
     images
         .iter()
         .map(|img| {
+            // `created_at` is what the branch card shows the image under.
+            let date = format_context_timestamp(img.created_at / 1000);
             let size_label = if img.size_bytes > 1_000_000 {
                 format!("{:.1} MB", img.size_bytes as f64 / 1_000_000.0)
             } else if img.size_bytes > 1_000 {
@@ -5777,16 +5845,19 @@ fn image_timeline_entries(
                         .unwrap_or("bin");
                     match write_image_to_temp_file(&source_path, &img.id, ext, workspace_name) {
                         Some(temp_path) => {
-                            format!("### Image: {}\nSee: `{}`", img.filename, temp_path)
+                            format!(
+                                "### Image: {}\nDate: {date}\nSee: `{}`",
+                                img.filename, temp_path
+                            )
                         }
                         None => format!(
-                            "### Image: {}\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                            "### Image: {}\nDate: {date}\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                             img.filename, img.mime_type, size_label
                         ),
                     }
                 }
                 _ => format!(
-                    "### Image: {}\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                    "### Image: {}\nDate: {date}\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label
                 ),
             };
@@ -9675,13 +9746,143 @@ mod tests {
 
     #[test]
     fn parse_commit_shas_extracts_full_shas() {
-        let log = "\u{0}1700000000\u{1}commit abc123def456\nAuthor: A\nDate: d\n\nfirst\
-            \u{0}1700000100\u{1}commit 0011223344ff\nAuthor: B\nDate: d\n\nsecond";
+        let log = "\u{0}1700000000\u{1}commit abc123def456\nAuthor: A\n\nfirst\
+            \u{0}1700000100\u{1}commit 0011223344ff\nAuthor: B\n\nsecond";
         let shas = parse_commit_shas(log);
 
         assert_eq!(shas.len(), 2);
         assert!(shas.contains("abc123def456"));
         assert!(shas.contains("0011223344ff"));
+    }
+
+    #[test]
+    fn format_context_timestamp_renders_full_date_time_in_utc() {
+        assert_eq!(format_context_timestamp(0), "1970-01-01 00:00:00 UTC");
+        assert_eq!(
+            format_context_timestamp(1_700_000_000),
+            "2023-11-14 22:13:20 UTC"
+        );
+    }
+
+    /// The branch card shows a commit under its author time, so the context
+    /// renders that same field — not git's committer date — as the commit's
+    /// `Date:` line, in UTC like every other item. A cherry-pick is clamped
+    /// into branch order for sorting but still displays its real author date,
+    /// and a bodyless commit gets the line too.
+    #[test]
+    fn parse_timestamped_log_renders_author_date_in_utc_after_the_header() {
+        let log = "\u{0}1700000000\u{1}commit aaa\nAuthor: A\n\nfirst\n\nbody\
+            \u{0}1600000000\u{1}commit bbb\nAuthor: B\n\ncherry-picked\
+            \u{0}1700000200\u{1}commit ccc\nAuthor: C\n";
+
+        let entries = parse_timestamped_log(log);
+
+        assert_eq!(
+            entries[0].content,
+            "commit aaa\nAuthor: A\nDate: 2023-11-14 22:13:20 UTC\n\nfirst\n\nbody"
+        );
+        assert_eq!(entries[1].timestamp, 1_700_000_000);
+        assert_eq!(
+            entries[1].content,
+            "commit bbb\nAuthor: B\nDate: 2020-09-13 12:26:40 UTC\n\ncherry-picked"
+        );
+        assert_eq!(
+            entries[2].content,
+            "commit ccc\nAuthor: C\nDate: 2023-11-14 22:16:40 UTC"
+        );
+    }
+
+    /// Each store-backed item carries the date the branch card shows it under
+    /// — `completed_at ?? created_at` for notes and reviews, `created_at` for
+    /// images — directly under its heading, in the same UTC format as commits.
+    #[test]
+    fn timeline_entries_carry_the_branch_cards_date_for_each_item_type() {
+        let (store, branch) = setup_branch_store();
+        const CREATED_AT_MS: i64 = 1_600_000_000_000;
+        const COMPLETED_AT_MS: i64 = 1_700_000_000_000;
+        const COMPLETED_AT: &str = "2023-11-14 22:13:20 UTC";
+
+        let mut note = store::Note::new(&branch.id, "Note", "body");
+        note.created_at = CREATED_AT_MS;
+        note.completed_at = Some(COMPLETED_AT_MS);
+        store.create_note(&note).unwrap();
+        let note_entries = note_timeline_entries(&store, &branch.id, None);
+        assert_eq!(note_entries.len(), 1);
+        assert_eq!(note_entries[0].timestamp, COMPLETED_AT_MS / 1000);
+        assert!(
+            note_entries[0]
+                .content
+                .starts_with(&format!("### Note: Note\nDate: {COMPLETED_AT}\nSee: `")),
+            "{}",
+            note_entries[0].content
+        );
+
+        let mut review = store::Review::new(&branch.id, "abc1234", store::ReviewScope::Branch);
+        review.created_at = CREATED_AT_MS;
+        review.completed_at = Some(COMPLETED_AT_MS);
+        store.create_review(&review).unwrap();
+        add_agent_comment(&store, &review.id, "an issue", store::CommentType::Issue);
+        let visible = HashSet::from(["abc1234".to_string()]);
+        let review_entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
+        assert_eq!(review_entries.len(), 1);
+        assert_eq!(review_entries[0].timestamp, COMPLETED_AT_MS / 1000);
+        assert!(
+            review_entries[0]
+                .content
+                .starts_with(&format!("### Code review: abc1234\nDate: {COMPLETED_AT}\n")),
+            "{}",
+            review_entries[0].content
+        );
+
+        let mut image = store::Image::new(
+            Some(&branch.id),
+            &branch.project_id,
+            "shot.png",
+            "image/png",
+            10,
+            false,
+        );
+        image.created_at = COMPLETED_AT_MS;
+        store.create_image(&image).unwrap();
+        let image_entries = image_timeline_entries(&store, &branch.id, None, &branch.project_id);
+        assert_eq!(image_entries.len(), 1);
+        assert_eq!(image_entries[0].timestamp, COMPLETED_AT_MS / 1000);
+        assert!(
+            image_entries[0]
+                .content
+                .starts_with(&format!("### Image: shot.png\nDate: {COMPLETED_AT}\n")),
+            "{}",
+            image_entries[0].content
+        );
+    }
+
+    /// Project notes show the same `completed_at ?? created_at` the project
+    /// section renders, in both places they appear: the project readout and a
+    /// branch's history.
+    #[test]
+    fn project_notes_carry_their_completed_date_in_both_readouts() {
+        let (store, branch) = setup_branch_store();
+        let project = store
+            .get_project(&branch.project_id)
+            .unwrap()
+            .expect("project missing");
+        let mut note = store::ProjectNote::new(&project.id, "Plan", "project body");
+        note.created_at = 1_600_000_000_000;
+        note.completed_at = Some(1_700_000_000_000);
+        store.create_project_note(&note).unwrap();
+        let expected = "### Project Note: Plan\nDate: 2023-11-14 22:13:20 UTC\nSee: `";
+
+        let context = build_project_session_context(&store, &project, None);
+        assert!(context.contains(expected), "{context}");
+
+        let entries = project_note_timeline_entries(&store, &project.id, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp, 1_700_000_000);
+        assert!(
+            entries[0].content.starts_with(expected),
+            "{}",
+            entries[0].content
+        );
     }
 
     #[test]
@@ -9723,6 +9924,7 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].content.contains("3 comments, 1 issues"));
         assert!(!entries[0].content.contains("4 comments"));
+        assert!(entries[0].content.contains("\nDate: "));
         assert!(entries[0].content.contains("See:"));
 
         let temp_content = std::fs::read_to_string(&temp_path).unwrap();
@@ -9836,9 +10038,15 @@ mod tests {
         assert_eq!(entries.len(), 2);
         for entry in &entries {
             let lines: Vec<&str> = entry.content.lines().collect();
-            assert_eq!(lines.len(), 2, "expected heading + pointer: {:?}", lines);
+            assert_eq!(
+                lines.len(),
+                3,
+                "expected heading + date + pointer: {:?}",
+                lines
+            );
             assert!(lines[0].starts_with("### Note: "));
-            assert!(lines[1].starts_with("See: `"));
+            assert!(lines[1].starts_with("Date: "));
+            assert!(lines[2].starts_with("See: `"));
         }
 
         // Both timeline builders separate items with exactly one blank line.
@@ -9873,11 +10081,11 @@ mod tests {
         let context = build_project_session_context(&store, &project, None);
 
         assert!(context.contains(&format!(
-            "### Branch: {}\n\n### Note: Branch note\nSee: `",
+            "### Branch: {}\n\n### Note: Branch note\nDate: ",
             branch.branch_name
         )));
         assert!(context.contains("## Existing Project Notes\n\n### Project Note: "));
-        assert!(context.contains("\n\n### Project Note: Second project note\nSee: `"));
+        assert!(context.contains("\n\n### Project Note: Second project note\nDate: "));
         assert!(!context.contains("\n\n\n"));
     }
 
@@ -9933,7 +10141,10 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].content,
-            "### Note: Bump the lockfile before release\nWritten by the user."
+            format!(
+                "### Note: Bump the lockfile before release\nDate: {}\nWritten by the user.",
+                format_context_timestamp(note_timestamp_secs(&written))
+            )
         );
     }
 

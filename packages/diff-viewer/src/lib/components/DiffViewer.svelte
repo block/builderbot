@@ -3,11 +3,12 @@
   
   Handles three display modes:
   1. Two-pane diff: Side-by-side before/after with synchronized scrolling and spine connectors
-  2. Created file: Spine + single after pane (commentable), "+" badge in the pane header
-  3. Deleted file: Spine + single before pane, "−" badge in the pane header
+  2. Created file: Single after pane (commentable), "+" badge in the pane header
+  3. Deleted file: Single before pane, "−" badge in the pane header
   
-  The spine is always present - it shows bezier connectors for two-pane diffs,
-  and comment highlights for all modes.
+  The spine (divider, connector canvas, and comment highlights) only exists in
+  two-pane mode. Single-pane modes render no spine, and the connector effect
+  tears down the renderer when its canvas unmounts.
   
   Uses custom scroll implementation for frame-perfect sync between panes.
   

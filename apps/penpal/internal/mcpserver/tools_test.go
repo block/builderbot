@@ -40,7 +40,7 @@ func setup(t *testing.T) (*testEnv, func()) {
 		Origin: "standalone",
 	}})
 
-	handler := NewHandler(cs, c)
+	handler := NewHandler(cs, c, func(project string) string { return "claude" })
 	ts := httptest.NewServer(handler)
 
 	ctx := context.Background()

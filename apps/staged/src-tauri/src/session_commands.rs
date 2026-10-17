@@ -5658,14 +5658,6 @@ fn project_note_timeline_entries(
     entries
 }
 
-fn should_include_in_history(comment: &store::Comment) -> bool {
-    comment.deleted_at.is_none()
-        && !matches!(
-            comment.comment_type.as_ref(),
-            Some(store::CommentType::Information)
-        )
-}
-
 /// Build the inline comment content for a review (used both for inlining and temp files).
 fn format_review_comments(review: &store::Review) -> String {
     let mut content = String::new();
@@ -5676,7 +5668,7 @@ fn format_review_comments(review: &store::Review) -> String {
     for comment in review
         .comments
         .iter()
-        .filter(|comment| should_include_in_history(comment))
+        .filter(|comment| comment.is_visible())
     {
         by_path.entry(&comment.path).or_default().push(comment);
     }
@@ -5705,12 +5697,12 @@ fn review_summary_counts(review: &store::Review) -> (usize, usize) {
     let total = review
         .comments
         .iter()
-        .filter(|comment| should_include_in_history(comment))
+        .filter(|comment| comment.is_visible())
         .count();
     let issues = review
         .comments
         .iter()
-        .filter(|c| should_include_in_history(c))
+        .filter(|c| c.is_visible())
         .filter(|c| matches!(c.comment_type.as_ref(), Some(store::CommentType::Issue)))
         .count();
     (total, issues)
@@ -5745,7 +5737,7 @@ fn review_timeline_entries(
         {
             continue;
         }
-        let has_branch_history_comments = review.comments.iter().any(should_include_in_history);
+        let has_branch_history_comments = review.comments.iter().any(store::Comment::is_visible);
         if !has_branch_history_comments {
             continue;
         }

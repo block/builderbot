@@ -228,13 +228,18 @@ export interface BranchNote {
 export interface ReviewTimelineItem {
   id: string;
   commitSha: string;
-  scope: string;
+  scope: 'branch' | 'commit';
   sessionId: string | null;
   sessionStatus: string | null;
   sessionProvider: string | null;
   completionReason: string | null;
   title: string | null;
+  /** Active non-`information` comments (what the detail view lists as comments). */
   commentCount: number;
+  /** Active `information` comments (rendered as hold-to-reveal annotations). */
+  annotationCount: number;
+  /** Subset of `commentCount` typed `warning`. */
+  warningCount: number;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;

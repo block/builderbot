@@ -203,7 +203,12 @@ pub struct ReviewTimelineItem {
     pub session_provider: Option<String>,
     pub completion_reason: Option<String>,
     pub title: Option<String>,
+    /// Active non-`information` comments (what the detail view lists as comments).
     pub comment_count: usize,
+    /// Active `information` comments (rendered as hold-to-reveal annotations).
+    pub annotation_count: usize,
+    /// Subset of `comment_count` typed `warning`.
+    pub warning_count: usize,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,

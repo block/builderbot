@@ -14,7 +14,7 @@ import { invokeCommand, isTauri } from './transport';
  * The timeline boot snapshot in `commands.ts` is versioned by this same
  * constant, so one bump covers both layers that survive a deploy.
  */
-export const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
 const CACHE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**

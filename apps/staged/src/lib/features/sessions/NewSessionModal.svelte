@@ -38,7 +38,12 @@
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
   import { buildBranchHashtagItems } from './hashtagItems';
-  import { foldSnippetsIntoPrompt, snippetLabel, type TextSnippet } from './sessionModalHelpers';
+  import {
+    foldSnippetsIntoPrompt,
+    insertedText,
+    snippetLabel,
+    type TextSnippet,
+  } from './sessionModalHelpers';
   import * as Dialog from '$lib/components/ui/dialog';
   import {
     createDialogWidth,
@@ -317,6 +322,12 @@
 
     switchingMode = true;
     currentMode = newMode;
+    // From here until the load lands the save gate is closed and the mode on
+    // screen is already `newMode`, so keystrokes belong to the incoming mode.
+    // Snapshot now rather than before the outgoing save: anything typed during
+    // that await was still shown under the outgoing mode and reached its key
+    // through the save effect.
+    const promptWhenLoadStarted = prompt;
 
     if (loadDraftForMode) {
       let cachedDraft: string | null = null;
@@ -329,7 +340,14 @@
 
       const modePrefill =
         newMode === 'commit' ? commitPrefill : newMode === 'note' ? notePrefill : '';
-      if (cachedDraft) {
+      // Text typed while the load was in flight was typed over the outgoing
+      // mode's text, so only the inserted part carries over — after the
+      // stored draft, or on its own (a prefill would bury it).
+      const typedDuringLoad = insertedText(promptWhenLoadStarted, prompt).trimStart();
+      if (typedDuringLoad) {
+        prompt = cachedDraft ? `${cachedDraft.trimEnd()}\n${typedDuringLoad}` : typedDuringLoad;
+        focusPrompt(null);
+      } else if (cachedDraft) {
         prompt = cachedDraft;
         focusPrompt(null);
       } else if (modePrefill) {

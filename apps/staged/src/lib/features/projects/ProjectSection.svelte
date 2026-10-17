@@ -115,6 +115,8 @@
   let draftProjectImageIds = $state<string[]>([]);
   const projectDraftWriter = createDraftWriteScheduler();
   let projectDraftLoadGeneration = 0;
+  /** Bumped by every open so a referring open can tell when a plain open overtook it. */
+  let projectSessionOpenRequest = 0;
   let preferredProvider = $derived(getPreferredAgent(agentState.providers) ?? undefined);
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
@@ -269,6 +271,8 @@
   }
 
   function openProjectSessionModal() {
+    // Supersede any in-flight referring open so it can't clobber this one.
+    ++projectSessionOpenRequest;
     // Open synchronously seeded with the held draft — the modal fetches the
     // authoritative stored draft itself (via loadDraftForMode) so the click
     // isn't gated on store IPC (a flush plus a read; HTTP hops in web mode).
@@ -457,7 +461,13 @@
   }
 
   async function handleProjectNoteNewSessionReferring(ref: string) {
+    const request = ++projectSessionOpenRequest;
     await loadProjectSessionDraft();
+    // A plain open landed during the read: the modal is already up without
+    // the ref and only reads initialPrompt once, so saving the ref-appended
+    // prompt would just be overwritten by its next keystroke. Drop the ref,
+    // as BranchCardSessionManager.openNewSessionReferring does.
+    if (request !== projectSessionOpenRequest) return;
     draftProjectPrompt = buildReferringPrompt(draftProjectPrompt, ref);
     showProjectSessionModal = true;
     void ensureHashtagItems();

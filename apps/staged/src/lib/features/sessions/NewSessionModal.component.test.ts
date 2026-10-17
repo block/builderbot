@@ -6,7 +6,8 @@ import type { Branch, BranchSessionType } from '../../types';
 // effect wiring, not the editor/dialog/picker internals.
 vi.mock('$lib/components/ui/dialog', async () => {
   const { default: Passthrough } = await import('./testStubs/PassthroughStub.svelte');
-  return { Root: Passthrough, Content: Passthrough, Title: Passthrough };
+  const { default: Empty } = await import('./testStubs/EmptyStub.svelte');
+  return { Root: Passthrough, Content: Passthrough, Title: Passthrough, ResizeHandle: Empty };
 });
 vi.mock('./HashtagInput.svelte', () => import('./testStubs/PromptInputStub.svelte'));
 vi.mock('./ImageAttachment.svelte', () => import('./testStubs/EmptyStub.svelte'));
@@ -144,6 +145,83 @@ describe('NewSessionModal draft autosave', () => {
     const prompts = onDraftChange.mock.calls.map(([draft]) => (draft as { prompt: string }).prompt);
     expect(prompts).toContain('typed during load');
     expect(prompts).not.toContain('stored draft');
+
+    unmount(modal);
+  });
+
+  it('keeps text typed during a mode-switch load and appends it to the stored draft', async () => {
+    // Regression: the mode-switch load overwrote `prompt` wholesale when it
+    // landed, so keystrokes typed between ⌘1/⌘2/⌘3 and the load resolving
+    // were dropped from both modes — the save effect is gated during the
+    // switch, and the outgoing save had already been snapshotted.
+    let resolveNoteLoad!: (value: string | null) => void;
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      onDraftChange,
+      loadDraftForMode: vi.fn((mode: BranchSessionType) => {
+        if (mode === 'note') return new Promise<string | null>((r) => (resolveNoteLoad = r));
+        return Promise.resolve(null);
+      }),
+    });
+    flushSync();
+    await settle();
+
+    typeInPrompt('commit text');
+    await settle();
+
+    pressModeShortcut('1'); // commit → note; note's draft load stays pending
+    await settle();
+    onDraftChange.mockClear();
+
+    // The outgoing commit text is still on screen; the user types after it.
+    typeInPrompt('commit text typed mid-switch');
+    await settle();
+
+    resolveNoteLoad('note stored draft');
+    await settle();
+
+    // The typed delta belongs to note mode: it lands after the stored note
+    // draft, the commit text does not come along, and the result is saved
+    // under note's key.
+    const noteSaves = onDraftChange.mock.calls
+      .filter(([draft]) => (draft as { mode: string }).mode === 'note')
+      .map(([draft]) => (draft as { prompt: string }).prompt);
+    expect(noteSaves.length).toBeGreaterThan(0);
+    const final = noteSaves[noteSaves.length - 1];
+    expect(final).toContain('note stored draft');
+    expect(final).toContain('typed mid-switch');
+    expect(final).not.toContain('commit text');
+    expect(final.indexOf('note stored draft')).toBeLessThan(final.indexOf('typed mid-switch'));
+
+    unmount(modal);
+  });
+
+  it('keeps text typed during a mode-switch load when the new mode has no stored draft', async () => {
+    let resolveNoteLoad!: (value: string | null) => void;
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      onDraftChange,
+      loadDraftForMode: vi.fn((mode: BranchSessionType) => {
+        if (mode === 'note') return new Promise<string | null>((r) => (resolveNoteLoad = r));
+        return Promise.resolve(null);
+      }),
+    });
+    flushSync();
+    await settle();
+
+    pressModeShortcut('1'); // commit → note; note's draft load stays pending
+    await settle();
+    onDraftChange.mockClear();
+
+    typeInPrompt('typed mid-switch');
+    await settle();
+
+    resolveNoteLoad(null);
+    await settle();
+
+    expect(onDraftChange).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'typed mid-switch', mode: 'note' })
+    );
 
     unmount(modal);
   });

@@ -172,10 +172,11 @@ export default class BranchCardSessionManager {
       this.newSessionMode = 'commit';
       this.showNewSession = true;
     }
-    // This save must stay synchronous with opening the modal: its
-    // loadInitialDraft only keeps the seeded prompt when the stored draft
-    // equals it, so an await between opening and saving would let the load
-    // read the pre-ref draft and replace the prompt with it, minus the ref.
+    // Keep this save in the same tick as opening the modal so its
+    // loadInitialDraft hits the equality fast path (stored draft === seed)
+    // and the ref is preserved exactly. An await here wouldn't lose the ref,
+    // but the open would then depend on the insertedText prefix/suffix
+    // heuristic instead.
     this.handleNewSessionDraftChange(
       { prompt: this.draftPrompt, mode: this.newSessionMode, imageIds: this.draftImageIds },
       { immediate: true }

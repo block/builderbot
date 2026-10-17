@@ -450,9 +450,15 @@
     }
     // A mode switch superseded this load; it owns `prompt` and the save gate now.
     if (generation !== modeSwitchGeneration) return;
-    // Apply the stored draft only if the user hasn't typed in the meantime.
-    if (cachedDraft !== null && cachedDraft !== prompt && prompt === promptWhenLoadStarted) {
-      prompt = cachedDraft;
+    // When the seed already was the stored draft, any edits made during the
+    // load sit on top of it and the prompt is left alone. Otherwise (an empty
+    // or other-mode seed, or a prefill) the stored draft is authoritative, and
+    // text typed during the load belongs to this mode too: it goes after the
+    // stored draft, as in switchMode — the save effect then files the
+    // combined value under this mode's key once the gate reopens.
+    if (cachedDraft !== null && cachedDraft !== promptWhenLoadStarted) {
+      const typedDuringLoad = insertedText(promptWhenLoadStarted, prompt).trimStart();
+      prompt = typedDuringLoad ? `${cachedDraft.trimEnd()}\n${typedDuringLoad}` : cachedDraft;
       focusPrompt(null);
     }
     switchingMode = false;

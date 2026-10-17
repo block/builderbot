@@ -52,6 +52,13 @@ describe('insertedText', () => {
     expect(insertedText('commit text', 'commit')).toBe('');
     expect(insertedText('commit', '')).toBe('');
   });
+
+  it('drops boundary characters a replacement shares with the replaced text (known limitation)', () => {
+    // A prefix/suffix diff can't tell a shared boundary character apart from
+    // untouched text; accepted for the one-round-trip window it covers.
+    expect(insertedText('note text', 'new')).toBe('ew');
+    expect(insertedText('fix bug', 'fix bag')).toBe('a');
+  });
 });
 
 describe('snippetLabel', () => {

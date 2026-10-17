@@ -25,11 +25,9 @@ vi.mock(
 vi.mock('../notes/NoteModal.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('./SuggestedRepos.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
 vi.mock('./ProjectStatusPicker.svelte', () => import('../sessions/testStubs/EmptyStub.svelte'));
-vi.mock('$lib/components/ui/dialog', async () => {
-  const { default: Passthrough } = await import('../sessions/testStubs/PassthroughStub.svelte');
-  const { default: Empty } = await import('../sessions/testStubs/EmptyStub.svelte');
-  return { Root: Passthrough, Content: Passthrough, Title: Passthrough, ResizeHandle: Empty };
-});
+vi.mock('$lib/components/ui/dialog', () =>
+  import('../sessions/testStubs/dialogMock').then((m) => m.dialogModuleMock())
+);
 vi.mock(
   '../sessions/HashtagInput.svelte',
   () => import('../sessions/testStubs/PromptInputStub.svelte')

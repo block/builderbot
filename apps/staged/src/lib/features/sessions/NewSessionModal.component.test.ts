@@ -4,11 +4,9 @@ import type { Branch, BranchSessionType } from '../../types';
 
 // Heavy leaf components are stubbed out: the tests exercise the modal's draft
 // effect wiring, not the editor/dialog/picker internals.
-vi.mock('$lib/components/ui/dialog', async () => {
-  const { default: Passthrough } = await import('./testStubs/PassthroughStub.svelte');
-  const { default: Empty } = await import('./testStubs/EmptyStub.svelte');
-  return { Root: Passthrough, Content: Passthrough, Title: Passthrough, ResizeHandle: Empty };
-});
+vi.mock('$lib/components/ui/dialog', () =>
+  import('./testStubs/dialogMock').then((m) => m.dialogModuleMock())
+);
 vi.mock('./HashtagInput.svelte', () => import('./testStubs/PromptInputStub.svelte'));
 vi.mock('./ImageAttachment.svelte', () => import('./testStubs/EmptyStub.svelte'));
 vi.mock('../agents/AcpConfigPicker.svelte', () => import('./testStubs/EmptyStub.svelte'));
@@ -121,10 +119,15 @@ describe('NewSessionModal draft autosave', () => {
     unmount(modal);
   });
 
-  it('lets text typed during the initial draft load win, and still saves it', async () => {
+  it('appends text typed during the initial load to the stored draft and saves both', async () => {
+    // Regression: the initial load skipped the stored draft entirely once the
+    // user had typed, then the reopened save effect overwrote the stored
+    // draft with just the typed text — the one load path that still lost a
+    // stored draft to a keystroke landing in the load window.
     let resolveLoad!: (value: string | null) => void;
     const onDraftChange = vi.fn();
     const modal = mountModal({
+      initialPrompt: '',
       onDraftChange,
       loadDraftForMode: vi.fn(() => new Promise<string | null>((r) => (resolveLoad = r))),
     });
@@ -140,11 +143,62 @@ describe('NewSessionModal draft autosave', () => {
 
     resolveLoad('stored draft');
     await settle();
-    // …and once the load lands, the typed text is preserved over the stored
-    // draft and reaches onDraftChange so it still gets persisted.
+    // …and once the load lands, the stored draft comes first with the typed
+    // text after it, and that combined value is what gets persisted.
     const prompts = onDraftChange.mock.calls.map(([draft]) => (draft as { prompt: string }).prompt);
-    expect(prompts).toContain('typed during load');
-    expect(prompts).not.toContain('stored draft');
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[prompts.length - 1]).toBe('stored draft\ntyped during load');
+    expect(prompts).not.toContain('typed during load');
+
+    unmount(modal);
+  });
+
+  it('lets text typed during the initial load win when there is no stored draft', async () => {
+    let resolveLoad!: (value: string | null) => void;
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      initialPrompt: 'prefill',
+      prefilled: true,
+      onDraftChange,
+      loadDraftForMode: vi.fn(() => new Promise<string | null>((r) => (resolveLoad = r))),
+    });
+    flushSync();
+    await settle();
+
+    typeInPrompt('typed over prefill');
+    await settle();
+
+    resolveLoad(null);
+    await settle();
+    expect(onDraftChange).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: 'typed over prefill', mode: 'commit' })
+    );
+
+    unmount(modal);
+  });
+
+  it('keeps edits made during the initial load when the seed already is the stored draft', async () => {
+    // The caller seeds the modal with the draft it holds in memory, which is
+    // normally what the store holds too; edits typed during the load then
+    // sit on top of the stored draft and must not be re-appended to it.
+    let resolveLoad!: (value: string | null) => void;
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      initialPrompt: 'stored draft',
+      onDraftChange,
+      loadDraftForMode: vi.fn(() => new Promise<string | null>((r) => (resolveLoad = r))),
+    });
+    flushSync();
+    await settle();
+
+    typeInPrompt('stored draft plus');
+    await settle();
+
+    resolveLoad('stored draft');
+    await settle();
+    const prompts = onDraftChange.mock.calls.map(([draft]) => (draft as { prompt: string }).prompt);
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts.every((p) => p === 'stored draft plus')).toBe(true);
 
     unmount(modal);
   });

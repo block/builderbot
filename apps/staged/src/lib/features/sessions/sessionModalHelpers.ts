@@ -35,6 +35,12 @@ export function foldSnippetsIntoPrompt(prompt: string, snippets: { text: string 
  * Used to recover keystrokes typed while a mode-switch draft load was in
  * flight: they were typed over the outgoing mode's text, so the prompt as a
  * whole can't be kept, but the inserted part belongs to the incoming mode.
+ *
+ * This is a prefix/suffix diff, not a general-purpose one: a replacement
+ * whose typed text shares boundary characters with the text it replaced
+ * loses those characters (select-all over 'note text' then typing 'new'
+ * yields 'ew'; 'fix bug' → 'fix bag' yields 'a'). The window is a single
+ * store round-trip, so dropping a character or two there is accepted.
  */
 export function insertedText(before: string, after: string): string {
   const max = Math.min(before.length, after.length);

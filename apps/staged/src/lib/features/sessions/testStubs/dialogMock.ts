@@ -2,7 +2,8 @@
  * Factory for `vi.mock('$lib/components/ui/dialog', dialogModuleMock)` in
  * component tests.
  *
- * Root/Content/Title pass their children through so the dialog body renders;
+ * Root/Content/Title (and their Dialog* aliases) pass their children through
+ * so the dialog body renders;
  * every other PascalCase export (ResizeHandle, Overlay, whatever lands on main
  * next) resolves to the empty stub. A closed mock object would instead fail
  * every suite that renders a dialog with an opaque "not a component" error
@@ -15,6 +16,10 @@ export async function dialogModuleMock(): Promise<Record<string, unknown>> {
     Root: Passthrough,
     Content: Passthrough,
     Title: Passthrough,
+    // dialog/index.ts also exports these under their aliased names.
+    Dialog: Passthrough,
+    DialogContent: Passthrough,
+    DialogTitle: Passthrough,
   };
   // Only component-shaped names fall back to the stub: `then`, `default` and
   // `__esModule` must stay absent or module interop misreads the mock.

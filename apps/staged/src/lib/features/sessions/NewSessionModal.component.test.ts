@@ -177,6 +177,35 @@ describe('NewSessionModal draft autosave', () => {
     unmount(modal);
   });
 
+  it('keeps a replacement typed over the prefill during the initial load whole', async () => {
+    // A prefilled open selects all, so the natural gesture in the load window
+    // is typing a replacement over the prefill. Diffing that against the seed
+    // drops boundary characters the replacement shares with the prefill
+    // (here the trailing 's'); a prompt that no longer contains the seed is
+    // wholly typed and must carry over intact.
+    let resolveLoad!: (value: string | null) => void;
+    const onDraftChange = vi.fn();
+    const modal = mountModal({
+      initialPrompt: 'Commit the changes',
+      prefilled: true,
+      onDraftChange,
+      loadDraftForMode: vi.fn(() => new Promise<string | null>((r) => (resolveLoad = r))),
+    });
+    flushSync();
+    await settle();
+
+    typeInPrompt('add tests');
+    await settle();
+
+    resolveLoad('stored draft');
+    await settle();
+    const prompts = onDraftChange.mock.calls.map(([draft]) => (draft as { prompt: string }).prompt);
+    expect(prompts.length).toBeGreaterThan(0);
+    expect(prompts[prompts.length - 1]).toBe('stored draft\nadd tests');
+
+    unmount(modal);
+  });
+
   it('keeps edits made during the initial load when the seed already is the stored draft', async () => {
     // The caller seeds the modal with the draft it holds in memory, which is
     // normally what the store holds too; edits typed during the load then

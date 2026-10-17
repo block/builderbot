@@ -457,7 +457,15 @@
     // stored draft, as in switchMode — the save effect then files the
     // combined value under this mode's key once the gate reopens.
     if (cachedDraft !== null && cachedDraft !== promptWhenLoadStarted) {
-      const typedDuringLoad = insertedText(promptWhenLoadStarted, prompt).trimStart();
+      // A prefilled open selects all, so the usual gesture here is typing a
+      // replacement over the seed; once the seed is gone the whole prompt was
+      // typed, and diffing it would drop boundary characters it shares with
+      // the seed (see insertedText). Only diff while the seed is still there.
+      const typedDuringLoad = (
+        prompt.includes(promptWhenLoadStarted)
+          ? insertedText(promptWhenLoadStarted, prompt)
+          : prompt
+      ).trimStart();
       prompt = typedDuringLoad ? `${cachedDraft.trimEnd()}\n${typedDuringLoad}` : cachedDraft;
       focusPrompt(null);
     }

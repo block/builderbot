@@ -471,6 +471,10 @@
     draftProjectPrompt = buildReferringPrompt(draftProjectPrompt, ref);
     showProjectSessionModal = true;
     void ensureHashtagItems();
+    // This save must stay synchronous with opening the modal: its
+    // loadInitialDraft only keeps the seeded prompt when the stored draft
+    // equals it, so an await between opening and saving would let the load
+    // read the pre-ref draft and replace the prompt with it, minus the ref.
     void projectDraftWriter.saveNow(projectDraftKey(project.id), draftProjectPrompt);
   }
 

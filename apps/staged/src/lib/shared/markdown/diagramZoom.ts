@@ -12,6 +12,17 @@ interface DiagramZoomOptions {
   maxScale: number;
   fitPadding: number;
   doubleClickScale: number;
+  /**
+   * Double-click returns to the fit transform once the view has been zoomed
+   * or panned away from it, instead of zooming in again (photo-viewer style).
+   */
+  doubleClickTogglesFit?: boolean;
+  /**
+   * Keep the content within the viewport: a zoomed-in image must cover the
+   * viewport, a smaller one stays centred, so it can never be panned out of
+   * view.
+   */
+  constrainToContent?: boolean;
   isEnabled: () => boolean;
   onTransform: (transform: DiagramZoomTransform) => void;
   onDraggingChange: (dragging: boolean) => void;
@@ -19,6 +30,8 @@ interface DiagramZoomOptions {
 
 export interface DiagramZoomController {
   reset: () => void;
+  /** Re-fit after the viewport resized, unless the user has zoomed or panned since the last fit. */
+  refit: () => void;
   zoomBy: (multiplier: number) => void;
   getResetTransform: () => DiagramZoomTransform;
   destroy: () => void;
@@ -34,13 +47,19 @@ export function createDiagramZoomController(
 ): DiagramZoomController {
   const selection = select<HTMLDivElement, unknown>(viewportEl);
   let lastClick: { time: number; x: number; y: number } | null = null;
+  let lastFit: ZoomTransform | null = null;
   const behavior = zoom<HTMLDivElement, unknown>()
     .scaleExtent([options.minScale, options.maxScale])
+    .constrain((transform, extent) =>
+      options.constrainToContent ? constrainToContent(transform, extent, contentEl) : transform
+    )
+    // Layout size rather than getBoundingClientRect: the dialog's open
+    // animation scales its content, and a fit computed from the transformed
+    // rect would be a few percent off.
     .extent(() => {
-      const rect = viewportEl.getBoundingClientRect();
       return [
         [0, 0],
-        [rect.width, rect.height],
+        [viewportEl.clientWidth, viewportEl.clientHeight],
       ] satisfies [[number, number], [number, number]];
     })
     .filter((event) => {
@@ -83,6 +102,12 @@ export function createDiagramZoomController(
     }
 
     lastClick = null;
+    if (options.doubleClickTogglesFit && !isAtLastFit()) {
+      event.preventDefault();
+      event.stopPropagation();
+      reset();
+      return;
+    }
     zoomByAtPointer(event, event.altKey ? 1 / options.doubleClickScale : options.doubleClickScale);
   });
 
@@ -98,21 +123,27 @@ export function createDiagramZoomController(
 
     event.preventDefault();
     const [deltaX, deltaY] = normalizeWheelDelta(event, viewportEl);
-    const currentTransform = zoomTransform(viewportEl);
-    behavior.transform(
-      selection,
-      currentTransform.translate(-deltaX / currentTransform.k, -deltaY / currentTransform.k)
-    );
+    // translateBy rather than transform(): only the former runs the
+    // constrain function, so a constrained image cannot be scrolled off the
+    // viewport.
+    const { k } = zoomTransform(viewportEl);
+    behavior.translateBy(selection, -deltaX / k, -deltaY / k);
   });
 
   return {
-    reset: () => {
-      behavior.transform(selection, getFitTransform(viewportEl, contentEl, options));
-      options.onDraggingChange(false);
+    reset,
+    refit: () => {
+      if (isAtLastFit()) {
+        reset();
+      } else {
+        syncScaleFloor();
+      }
     },
     zoomBy: (multiplier: number) => {
-      const rect = viewportEl.getBoundingClientRect();
-      behavior.scaleBy(selection, multiplier, [rect.width / 2, rect.height / 2]);
+      behavior.scaleBy(selection, multiplier, [
+        viewportEl.clientWidth / 2,
+        viewportEl.clientHeight / 2,
+      ]);
     },
     getResetTransform: () => toDiagramTransform(getFitTransform(viewportEl, contentEl, options)),
     destroy: () => {
@@ -128,6 +159,50 @@ export function createDiagramZoomController(
     event.stopPropagation();
     behavior.scaleBy(selection, multiplier, pointer(event, viewportEl));
   }
+
+  function reset() {
+    lastFit = getFitTransform(viewportEl, contentEl, options);
+    syncScaleFloor(lastFit);
+    behavior.transform(selection, lastFit);
+    options.onDraggingChange(false);
+  }
+
+  // The fit scale of a very tall or wide image can fall below minScale; the
+  // floor follows it so a pinch can always get back out to the whole image.
+  function syncScaleFloor(fit = getFitTransform(viewportEl, contentEl, options)) {
+    behavior.scaleExtent([Math.min(options.minScale, fit.k), options.maxScale]);
+  }
+
+  function isAtLastFit(): boolean {
+    if (!lastFit) return false;
+    const current = zoomTransform(viewportEl);
+    return (
+      isClose(current.k, lastFit.k) &&
+      isClose(current.x, lastFit.x) &&
+      isClose(current.y, lastFit.y)
+    );
+  }
+}
+
+function isClose(a: number, b: number): boolean {
+  return Math.abs(a - b) < 0.001;
+}
+
+// d3-zoom's default constrain with the content box as the translate extent,
+// read at gesture time so it follows the content's current layout size.
+function constrainToContent(
+  transform: ZoomTransform,
+  extent: [[number, number], [number, number]],
+  contentEl: HTMLElement
+): ZoomTransform {
+  const dx0 = transform.invertX(extent[0][0]);
+  const dx1 = transform.invertX(extent[1][0]) - contentEl.offsetWidth;
+  const dy0 = transform.invertY(extent[0][1]);
+  const dy1 = transform.invertY(extent[1][1]) - contentEl.offsetHeight;
+  return transform.translate(
+    dx1 > dx0 ? (dx0 + dx1) / 2 : Math.min(0, dx0) || Math.max(0, dx1),
+    dy1 > dy0 ? (dy0 + dy1) / 2 : Math.min(0, dy0) || Math.max(0, dy1)
+  );
 }
 
 function distanceSquared(
@@ -144,25 +219,21 @@ function getFitTransform(
   contentEl: HTMLElement,
   options: DiagramZoomOptions
 ): ZoomTransform {
-  const viewportRect = viewportEl.getBoundingClientRect();
+  const viewportWidth = viewportEl.clientWidth;
+  const viewportHeight = viewportEl.clientHeight;
   const contentWidth = contentEl.offsetWidth;
   const contentHeight = contentEl.offsetHeight;
 
-  if (
-    viewportRect.width <= 0 ||
-    viewportRect.height <= 0 ||
-    contentWidth <= 0 ||
-    contentHeight <= 0
-  ) {
+  if (viewportWidth <= 0 || viewportHeight <= 0 || contentWidth <= 0 || contentHeight <= 0) {
     return zoomIdentity;
   }
 
-  const availableWidth = Math.max(1, viewportRect.width - options.fitPadding * 2);
-  const availableHeight = Math.max(1, viewportRect.height - options.fitPadding * 2);
+  const availableWidth = Math.max(1, viewportWidth - options.fitPadding * 2);
+  const availableHeight = Math.max(1, viewportHeight - options.fitPadding * 2);
   const fitScale = Math.min(1, availableWidth / contentWidth, availableHeight / contentHeight);
   const scale = Math.min(fitScale, options.maxScale);
-  const offsetX = (viewportRect.width - contentWidth * scale) / 2;
-  const offsetY = (viewportRect.height - contentHeight * scale) / 2;
+  const offsetX = (viewportWidth - contentWidth * scale) / 2;
+  const offsetY = (viewportHeight - contentHeight * scale) / 2;
 
   return zoomIdentity.translate(offsetX, offsetY).scale(scale);
 }

@@ -23,6 +23,9 @@
   const MAX_SCALE = 8;
   const FIT_PADDING = 16;
   const DOUBLE_TAP_SCALE = 2;
+  // An <img> without intrinsic dimensions (an SVG with no width/height or
+  // viewBox) reports 0×0; lay it out at the replaced-element default instead.
+  const DEFAULT_IMAGE_SIZE = { width: 300, height: 150 };
 
   let stageEl = $state<HTMLDivElement | null>(null);
   let surfaceEl = $state<HTMLDivElement | null>(null);
@@ -54,6 +57,8 @@
       maxScale: MAX_SCALE,
       fitPadding: FIT_PADDING,
       doubleClickScale: DOUBLE_TAP_SCALE,
+      doubleClickTogglesFit: true,
+      constrainToContent: true,
       isEnabled: () => imageSize !== null,
       onTransform: (transform) => {
         scale = transform.scale;
@@ -64,9 +69,10 @@
         dragging = isDragging;
       },
     });
-    // Fit on open and again whenever the stage changes size: the dialog
-    // settling into its full-screen layout, rotation, window resizes.
-    const observer = new ResizeObserver(() => controller.reset());
+    // Fit on open and again whenever the stage changes size (the dialog
+    // settling into its full-screen layout, rotation, window resizes) for as
+    // long as the view is still at the fit; a zoomed or panned view is kept.
+    const observer = new ResizeObserver(() => controller.refit());
     observer.observe(stageEl);
     controller.reset();
 
@@ -78,7 +84,10 @@
 
   function handleImageLoad(event: Event) {
     const img = event.currentTarget as HTMLImageElement;
-    imageSize = { width: img.naturalWidth, height: img.naturalHeight };
+    imageSize =
+      img.naturalWidth > 0 && img.naturalHeight > 0
+        ? { width: img.naturalWidth, height: img.naturalHeight }
+        : DEFAULT_IMAGE_SIZE;
   }
 </script>
 
@@ -111,7 +120,7 @@
               aria-label={title || 'Video'}
               onerror={() => (failed = true)}
             ></video>
-          {:else}
+          {:else if !failed}
             <div class="viewer-stage" class:dragging bind:this={stageEl}>
               <div
                 class="image-surface"
@@ -119,7 +128,13 @@
                 style={surfaceStyle}
                 bind:this={surfaceEl}
               >
-                <img {src} alt={title} onload={handleImageLoad} onerror={() => (failed = true)} />
+                <img
+                  {src}
+                  alt={title}
+                  draggable="false"
+                  onload={handleImageLoad}
+                  onerror={() => (failed = true)}
+                />
               </div>
             </div>
           {/if}
@@ -185,11 +200,14 @@
     max-height: none;
     border-radius: 4px;
     -webkit-touch-callout: none;
-    pointer-events: none;
+    -webkit-user-drag: none;
   }
   .media-viewer-body p {
     color: var(--text-muted);
     font-size: var(--size-sm);
     padding: 16px;
+  }
+  .media-viewer-body.image p {
+    margin: auto;
   }
 </style>

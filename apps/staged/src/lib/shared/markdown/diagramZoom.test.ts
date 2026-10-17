@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDiagramZoomController, type DiagramZoomController } from './diagramZoom';
 
+type ControllerOptions = Parameters<typeof createDiagramZoomController>[2];
+
 describe('createDiagramZoomController', () => {
   let viewportEl: HTMLDivElement;
   let contentEl: HTMLDivElement;
@@ -37,16 +39,7 @@ describe('createDiagramZoomController', () => {
     Object.defineProperty(contentEl, 'offsetHeight', { configurable: true, value: 100 });
 
     transforms = [];
-    controller = createDiagramZoomController(viewportEl, contentEl, {
-      minScale: 0.05,
-      maxScale: 8,
-      fitPadding: 0,
-      doubleClickScale: 1.25,
-      isEnabled: () => true,
-      onTransform: (transform) => transforms.push(transform),
-      onDraggingChange: () => {},
-    });
-    controller.reset();
+    createController();
   });
 
   afterEach(() => {
@@ -99,8 +92,11 @@ describe('createDiagramZoomController', () => {
       [190, 200],
       [310, 200],
     ]);
+    // Zoom about the pinch centre (250, 200), which is (50, 50) in content space.
     expect(currentScale()).toBeCloseTo(3);
     const zoomed = transforms.at(-1)!;
+    expect(zoomed.offsetX).toBeCloseTo(250 - 50 * 3);
+    expect(zoomed.offsetY).toBeCloseTo(200 - 50 * 3);
 
     // Both fingers sliding together pans without changing the scale.
     dispatchTouch('touchmove', [
@@ -126,6 +122,82 @@ describe('createDiagramZoomController', () => {
     expect(transforms.at(-1)!.offsetX).toBeCloseTo(before.offsetX + 60);
     expect(transforms.at(-1)!.offsetY).toBeCloseTo(before.offsetY - 50);
   });
+
+  it('double-clicks back to the fit once zoomed when toggling is enabled', () => {
+    createController({ doubleClickTogglesFit: true });
+
+    dispatchClick(120, 140);
+    vi.advanceTimersByTime(80);
+    dispatchClick(121, 141);
+    expect(currentScale()).toBeCloseTo(1.25);
+
+    vi.advanceTimersByTime(80);
+    dispatchClick(121, 141);
+    vi.advanceTimersByTime(80);
+    dispatchClick(122, 142);
+    expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
+  });
+
+  it('lets the scale floor follow a fit below the minimum scale', () => {
+    // 100×16000 content fits the 400px-tall viewport at 0.025, under the 0.05 floor.
+    Object.defineProperty(contentEl, 'offsetHeight', { configurable: true, value: 16000 });
+    createController();
+    expect(currentScale()).toBeCloseTo(0.025);
+
+    controller.zoomBy(4);
+    expect(currentScale()).toBeCloseTo(0.1);
+    controller.zoomBy(0.1);
+    expect(currentScale()).toBeCloseTo(0.025);
+  });
+
+  it('keeps the content within the viewport when constrained', () => {
+    createController({ constrainToContent: true });
+
+    // Smaller than the viewport: a drag leaves it centred.
+    dispatchTouch('touchstart', [[200, 200]]);
+    dispatchTouch('touchmove', [[260, 150]]);
+    dispatchTouch('touchend', [[260, 150]]);
+    expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 200, offsetY: 150 });
+
+    // Larger than the viewport: it must keep covering the viewport.
+    controller.zoomBy(8);
+    dispatchTouch('touchstart', [[200, 200]]);
+    dispatchTouch('touchmove', [[1200, 1200]]);
+    dispatchTouch('touchend', [[1200, 1200]]);
+    expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: 0, offsetY: 0 });
+
+    dispatchTouch('touchstart', [[200, 200]]);
+    dispatchTouch('touchmove', [[-5000, -5000]]);
+    dispatchTouch('touchend', [[-5000, -5000]]);
+    expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: 500 - 800, offsetY: 400 - 800 });
+  });
+
+  it('re-fits on resize only while the view is still at the fit', () => {
+    Object.defineProperty(viewportEl, 'clientWidth', { configurable: true, value: 400 });
+    controller.refit();
+    expect(transforms.at(-1)).toEqual({ scale: 1, offsetX: 150, offsetY: 150 });
+
+    controller.zoomBy(2);
+    const zoomed = transforms.at(-1)!;
+    Object.defineProperty(viewportEl, 'clientWidth', { configurable: true, value: 500 });
+    controller.refit();
+    expect(transforms.at(-1)).toEqual(zoomed);
+  });
+
+  function createController(overrides: Partial<ControllerOptions> = {}) {
+    controller?.destroy();
+    controller = createDiagramZoomController(viewportEl, contentEl, {
+      minScale: 0.05,
+      maxScale: 8,
+      fitPadding: 0,
+      doubleClickScale: 1.25,
+      isEnabled: () => true,
+      onTransform: (transform) => transforms.push(transform),
+      onDraggingChange: () => {},
+      ...overrides,
+    });
+    controller.reset();
+  }
 
   // jsdom has no `Touch` constructor; d3-zoom only reads identifier/clientX/clientY.
   function dispatchTouch(

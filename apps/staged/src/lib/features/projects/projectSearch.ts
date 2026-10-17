@@ -4,6 +4,10 @@
  * Plain module (no runes, no store imports) so the matching rule stays
  * trivially unit-testable. Projects carry no description, so only the display
  * name is searched. Applied after the chip filters in ProjectsList.
+ *
+ * `visibleProjects` is the whole composition the grid renders — chip filters,
+ * sticky return-target card, then the query — lifted out of the component so
+ * the wiring between the three is testable without a Svelte runtime.
  */
 
 import type { Project } from '../../types';
@@ -18,4 +22,33 @@ export function searchProjects(projects: Project[], query: string): Project[] {
   const q = query.trim().toLowerCase();
   if (!q) return projects;
   return projects.filter((p) => projectDisplayName(p).toLowerCase().includes(q));
+}
+
+/**
+ * The projects the landing-page grid shows, in grid order.
+ *
+ * `chipFiltered` is the chip-filter result. When `stickyId` names a project the
+ * chips excluded, it is re-inserted — rebuilt from the full `projects` list
+ * rather than appended so the card keeps its place in the grid, the position
+ * the scroll restore captured. The query is then applied to whatever the chips
+ * (and the sticky exception) left. The sticky card is not exempt from the
+ * search: the exception exists so a card the user just visited doesn't vanish
+ * because visiting it changed its read state, whereas a typed query is a
+ * deliberate narrowing, so a sticky card that doesn't match it is hidden.
+ *
+ * With no sticky re-insertion and an empty query, `chipFiltered` is returned
+ * unchanged.
+ */
+export function visibleProjects(
+  projects: Project[],
+  chipFiltered: Project[],
+  stickyId: string | null,
+  query: string
+): Project[] {
+  let base = chipFiltered;
+  if (stickyId && !chipFiltered.some((p) => p.id === stickyId)) {
+    const matched = new Set(chipFiltered.map((p) => p.id));
+    base = projects.filter((p) => matched.has(p.id) || p.id === stickyId);
+  }
+  return searchProjects(base, query);
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Project } from '../../types';
-import { searchProjects } from './projectSearch';
+import { searchProjects, visibleProjects } from './projectSearch';
 
 // ── Fixtures ──
 
@@ -57,5 +57,62 @@ describe('searchProjects', () => {
 
   it('preserves input order', () => {
     expect(searchProjects([gamma, alpha, beta], 'a')).toEqual([gamma, alpha, beta]);
+  });
+});
+
+// The grid composition: chip filters → sticky return-target card → query.
+describe('visibleProjects', () => {
+  // Chips excluded beta: the typical "Unread" case after visiting it.
+  const chipsWithoutBeta = [alpha, gamma];
+
+  describe('without a sticky card', () => {
+    it('returns the chip-filtered list unchanged for an empty query', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, null, '')).toBe(chipsWithoutBeta);
+    });
+
+    it('applies the query to the chip-filtered list', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, null, 'gamma')).toEqual([gamma]);
+      // beta matches the query but the chips excluded it.
+      expect(visibleProjects(all, chipsWithoutBeta, null, 'beta')).toEqual([]);
+    });
+  });
+
+  describe('with a sticky card the chips already include', () => {
+    it('returns the chip-filtered list unchanged for an empty query', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, '')).toBe(chipsWithoutBeta);
+    });
+
+    it('applies the query to the chip-filtered list', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, 'alpha')).toEqual([alpha]);
+    });
+
+    it('hides the sticky card when it does not match the query', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, 'gamma')).toEqual([gamma]);
+    });
+  });
+
+  describe('with a sticky card the chips excluded', () => {
+    it('re-inserts it at its position in the full list', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, '')).toEqual([alpha, beta, gamma]);
+    });
+
+    it('re-inserts it and then applies the query', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'beta')).toEqual([beta]);
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'a')).toEqual([alpha, beta, gamma]);
+    });
+
+    it('hides the sticky card when it does not match the query', () => {
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'gamma')).toEqual([gamma]);
+    });
+
+    it('re-inserts it even when the chips matched nothing', () => {
+      expect(visibleProjects(all, [], beta.id, '')).toEqual([beta]);
+      expect(visibleProjects(all, [], beta.id, 'alpha')).toEqual([]);
+    });
+
+    it('leaves the list alone when the sticky id is no longer a project', () => {
+      // A deleted return target: nothing to re-insert.
+      expect(visibleProjects(all, chipsWithoutBeta, 'gone', '')).toEqual(chipsWithoutBeta);
+    });
   });
 });

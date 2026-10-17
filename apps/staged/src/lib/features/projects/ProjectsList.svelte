@@ -42,7 +42,7 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { searchProjects } from './projectSearch';
+  import { visibleProjects } from './projectSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -51,7 +51,9 @@
   // Data comes from the shared projectsData store — returning to the landing
   // page paints instantly from memory while the store revalidates in the
   // background. Filters live in the shared projectFiltersStore so the sidebar
-  // sees the same selection; scroll restore and modal state stay view-local.
+  // sees the same selection; scroll restore and the search query are
+  // view-local but persist across visits via projectsListViewState; modal
+  // state stays in the component.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
@@ -64,9 +66,6 @@
 
   let showNewProjectModal = $state(false);
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
-  // View-local, unlike the chip filters: a typed query is a transient
-  // narrowing of this grid, not a selection the sidebar should mirror.
-  let searchQuery = $state('');
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let isCommandKeyHeld = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
@@ -94,23 +93,25 @@
   // would paint the stale card once under the new filters before removing it.
   const filtersAtMount = projectFiltersStore.activeFilters;
 
-  let filteredProjects = $derived.by(() => {
-    const filtered = projectFiltersStore.filteredProjects;
-    const sticky = projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null;
-    if (!sticky || filtered.some((p) => p.id === sticky)) return filtered;
-    // Rebuilt from the full list rather than appended so the sticky card keeps
-    // its place in the grid — the position the scroll restore captured.
-    const matched = new Set(filtered.map((p) => p.id));
-    const chipFiltered = projects.filter((p) => matched.has(p.id) || p.id === sticky);
-    // The search narrows what the chips left, sticky card included: a query
-    // is always a deliberate narrowing, so no card is exempt from it.
-    return searchProjects(chipFiltered, searchQuery);
-  });
+  // Chips → sticky card → search; see visibleProjects for the composition.
+  let filteredProjects = $derived(
+    visibleProjects(
+      projects,
+      projectFiltersStore.filteredProjects,
+      projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null,
+      projectsListViewState.searchQuery
+    )
+  );
 
-  let searchActive = $derived(searchQuery.trim().length > 0);
+  let searchActive = $derived(projectsListViewState.searchQuery.trim().length > 0);
+  // Decides the empty-state copy: blame the query only when the chips alone
+  // would have shown something, otherwise the chips are what excluded it all.
+  let searchExcludedEverything = $derived(
+    searchActive && projectFiltersStore.filteredProjects.length > 0
+  );
 
   function clearSearch() {
-    searchQuery = '';
+    projectsListViewState.searchQuery = '';
     searchInputEl?.focus();
   }
 
@@ -194,6 +195,18 @@
       finishProjectsListRestore();
       return;
     }
+    // The sticky exception keeps the target through chip changes, but not
+    // through the (persisted) search: if the target is still a project yet
+    // the query hides it — renamed while away, say — the list no longer
+    // resembles the one scrollTop was captured against, so don't restore.
+    if (
+      targetProjectId &&
+      projects.some((p) => p.id === targetProjectId) &&
+      !filteredProjects.some((p) => p.id === targetProjectId)
+    ) {
+      finishProjectsListRestore();
+      return;
+    }
 
     void restoreProjectsListPosition();
   });
@@ -261,7 +274,12 @@
   function handleKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
-    if (isInput) return;
+    // Typing in an input must not trigger shortcuts, but the natural flow for
+    // the search box is type a query → ⌘1 to open the first hit, so modified
+    // keys from it fall through: the ⌘ press itself shows the overlay and the
+    // digit opens the card. Unmodified digits still reach the input.
+    const fromSearchWithModifier = target === searchInputEl && (e.metaKey || e.ctrlKey);
+    if (isInput && !fromSearchWithModifier) return;
 
     // Track command key state
     if (e.metaKey || e.ctrlKey) {
@@ -382,7 +400,7 @@
               autocomplete="off"
               autocorrect="off"
               spellcheck="false"
-              bind:value={searchQuery}
+              bind:value={projectsListViewState.searchQuery}
               class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
             />
             {#if searchActive}
@@ -401,13 +419,20 @@
         </div>
 
         <ProjectFilterChips />
-        {#if filteredProjects.length === 0}
-          {#if searchActive}
-            <div class="state">No projects match "{searchQuery.trim()}"</div>
-          {:else}
-            <div class="state">No projects match filters</div>
+        <!-- Always in the DOM so the live region exists before its text
+             changes; screen readers only announce updates to a region they
+             have already seen. -->
+        <div aria-live="polite">
+          {#if filteredProjects.length === 0}
+            {#if searchExcludedEverything}
+              <div class="state">
+                No projects match "{projectsListViewState.searchQuery.trim()}"
+              </div>
+            {:else}
+              <div class="state">No projects match filters</div>
+            {/if}
           {/if}
-        {/if}
+        </div>
         <div class="projects-grid">
           {#each filteredProjects as project, index (project.id)}
             {@const status = getProjectStatus(

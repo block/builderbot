@@ -1,7 +1,14 @@
+// View-local but persistent: ProjectsList is created fresh on every return to
+// the landing page, so anything that should survive opening a project and
+// coming back lives here rather than in the component.
 export const projectsListViewState = $state({
   scrollTop: 0,
   returnTargetProjectId: null as string | null,
   restorePending: false,
+  // Unlike the chip filters this is not mirrored by the sidebar, but it does
+  // outlive the component: narrowing to a few candidates and opening them one
+  // by one would otherwise reset the query on every round trip.
+  searchQuery: '',
 });
 
 export function setProjectsListScrollTop(scrollTop: number): void {

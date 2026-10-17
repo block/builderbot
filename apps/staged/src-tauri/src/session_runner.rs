@@ -1572,17 +1572,12 @@ pub fn start_session(
             .unwrap_or(CompletionReason::Interrupted);
 
         if let Err(ref e) = result {
-            if config.acp_config_selection.is_some()
-                && acp_client::is_config_selection_unavailable_error(e)
-            {
-                if let Err(clear_err) =
-                    store_for_status.set_session_acp_config_selection(&session_id_for_status, None)
-                {
-                    log::warn!(
-                        "Failed to clear stale ACP config selection for session {session_id_for_status}: {clear_err}"
-                    );
-                }
-            }
+            clear_unavailable_acp_config_selection(
+                &store_for_status,
+                &session_id_for_status,
+                config.acp_config_selection.as_ref(),
+                e,
+            );
         }
 
         // Transition the session to its terminal state, but only if it is
@@ -1845,6 +1840,32 @@ fn stored_agent_session_id(store: &Store, session_id: &str) -> Result<Option<Str
                 crate::session_commands::resumable_agent_session_id(s.agent_id.as_deref())
             })
         })
+}
+
+/// Forget a saved model/effort selection the agent said it cannot serve, so
+/// the next run falls back to provider defaults. Returns whether it cleared.
+///
+/// Only the acp-client matcher decides: the selection goes when the error
+/// means the pinned value is stale or unavailable on the agent. A model Claude
+/// merely couldn't *confirm* — retried once by acp-client, then reported as
+/// [`acp_client::MODEL_CONFIRMATION_EXHAUSTED_MESSAGE`] — is not stale, so
+/// that selection stays for the retry the message asks for.
+fn clear_unavailable_acp_config_selection(
+    store: &Store,
+    session_id: &str,
+    selection: Option<&AcpConfigSelection>,
+    error: &str,
+) -> bool {
+    if selection.is_none() || !acp_client::is_config_selection_unavailable_error(error) {
+        return false;
+    }
+    if let Err(clear_err) = store.set_session_acp_config_selection(session_id, None) {
+        log::warn!(
+            "Failed to clear stale ACP config selection for session {session_id}: {clear_err}"
+        );
+        return false;
+    }
+    true
 }
 
 pub(crate) fn session_has_note_artifact(store: &Store, session_id: &str) -> bool {
@@ -4962,6 +4983,92 @@ mod tests {
             "a Stop is not the handoff step failing"
         );
         assert_eq!(step.error, None);
+    }
+
+    fn fable_selection() -> AcpConfigSelection {
+        AcpConfigSelection {
+            model: Some(crate::store::AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "claude-fable-5-1[1m]".to_string(),
+                label: Some("Fable".to_string()),
+            }),
+            effort: None,
+        }
+    }
+
+    /// acp-client retries Claude's model confirmation once and then fails
+    /// with a plain sentence. The post-run clearing must read that as
+    /// "selection fine, try again" and leave the saved pin alone, while a
+    /// genuinely stale pin keeps being cleared exactly as before.
+    #[test]
+    fn a_failed_model_confirmation_keeps_the_saved_selection_but_a_stale_pin_is_cleared() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("prompt", &PathBuf::from("/tmp"));
+        store.create_session(&session).unwrap();
+        let selection = fable_selection();
+        store
+            .set_session_acp_config_selection(&session.id, Some(&selection))
+            .unwrap();
+
+        // Exactly as the driver's `run` wraps the setup failure.
+        let exhausted = format!(
+            "ACP protocol failed: {:?}",
+            agent_client_protocol::util::internal_error(
+                acp_client::MODEL_CONFIRMATION_EXHAUSTED_MESSAGE
+            )
+        );
+        assert!(!clear_unavailable_acp_config_selection(
+            &store,
+            &session.id,
+            Some(&selection),
+            &exhausted,
+        ));
+        assert_eq!(
+            store
+                .get_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .acp_config_selection,
+            Some(selection.clone()),
+            "a confirmation failure leaves the pin for the retry it asks for"
+        );
+
+        let stale = format!(
+            "ACP protocol failed: {:?}",
+            agent_client_protocol::util::internal_error(
+                "Selected ACP model value 'claude-fable-5-1[1m]' is no longer available for config option 'model'"
+            )
+        );
+        assert!(clear_unavailable_acp_config_selection(
+            &store,
+            &session.id,
+            Some(&selection),
+            &stale,
+        ));
+        assert_eq!(
+            store
+                .get_session(&session.id)
+                .unwrap()
+                .unwrap()
+                .acp_config_selection,
+            None
+        );
+    }
+
+    /// A run that never had a selection has nothing to clear, whatever it
+    /// failed with.
+    #[test]
+    fn a_run_without_a_selection_clears_nothing() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("prompt", &PathBuf::from("/tmp"));
+        store.create_session(&session).unwrap();
+
+        assert!(!clear_unavailable_acp_config_selection(
+            &store,
+            &session.id,
+            None,
+            "Selected ACP model value 'x' is no longer available for config option 'model'",
+        ));
     }
 
     /// The immediate branch start has answered its client by the time the

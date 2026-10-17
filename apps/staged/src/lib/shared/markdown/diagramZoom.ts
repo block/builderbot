@@ -36,11 +36,13 @@ export function createDiagramZoomController(
   let lastClick: { time: number; x: number; y: number } | null = null;
   const behavior = zoom<HTMLDivElement, unknown>()
     .scaleExtent([options.minScale, options.maxScale])
+    // Layout size rather than getBoundingClientRect: the dialog's open
+    // animation scales its content, and a fit computed from the transformed
+    // rect would be a few percent off.
     .extent(() => {
-      const rect = viewportEl.getBoundingClientRect();
       return [
         [0, 0],
-        [rect.width, rect.height],
+        [viewportEl.clientWidth, viewportEl.clientHeight],
       ] satisfies [[number, number], [number, number]];
     })
     .filter((event) => {
@@ -111,8 +113,10 @@ export function createDiagramZoomController(
       options.onDraggingChange(false);
     },
     zoomBy: (multiplier: number) => {
-      const rect = viewportEl.getBoundingClientRect();
-      behavior.scaleBy(selection, multiplier, [rect.width / 2, rect.height / 2]);
+      behavior.scaleBy(selection, multiplier, [
+        viewportEl.clientWidth / 2,
+        viewportEl.clientHeight / 2,
+      ]);
     },
     getResetTransform: () => toDiagramTransform(getFitTransform(viewportEl, contentEl, options)),
     destroy: () => {
@@ -144,25 +148,21 @@ function getFitTransform(
   contentEl: HTMLElement,
   options: DiagramZoomOptions
 ): ZoomTransform {
-  const viewportRect = viewportEl.getBoundingClientRect();
+  const viewportWidth = viewportEl.clientWidth;
+  const viewportHeight = viewportEl.clientHeight;
   const contentWidth = contentEl.offsetWidth;
   const contentHeight = contentEl.offsetHeight;
 
-  if (
-    viewportRect.width <= 0 ||
-    viewportRect.height <= 0 ||
-    contentWidth <= 0 ||
-    contentHeight <= 0
-  ) {
+  if (viewportWidth <= 0 || viewportHeight <= 0 || contentWidth <= 0 || contentHeight <= 0) {
     return zoomIdentity;
   }
 
-  const availableWidth = Math.max(1, viewportRect.width - options.fitPadding * 2);
-  const availableHeight = Math.max(1, viewportRect.height - options.fitPadding * 2);
+  const availableWidth = Math.max(1, viewportWidth - options.fitPadding * 2);
+  const availableHeight = Math.max(1, viewportHeight - options.fitPadding * 2);
   const fitScale = Math.min(1, availableWidth / contentWidth, availableHeight / contentHeight);
   const scale = Math.min(fitScale, options.maxScale);
-  const offsetX = (viewportRect.width - contentWidth * scale) / 2;
-  const offsetY = (viewportRect.height - contentHeight * scale) / 2;
+  const offsetX = (viewportWidth - contentWidth * scale) / 2;
+  const offsetY = (viewportHeight - contentHeight * scale) / 2;
 
   return zoomIdentity.translate(offsetX, offsetY).scale(scale);
 }

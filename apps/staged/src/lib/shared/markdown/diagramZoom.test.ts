@@ -31,6 +31,8 @@ describe('createDiagramZoomController', () => {
         toJSON: () => ({}),
       }),
     });
+    Object.defineProperty(viewportEl, 'clientWidth', { configurable: true, value: 500 });
+    Object.defineProperty(viewportEl, 'clientHeight', { configurable: true, value: 400 });
     Object.defineProperty(contentEl, 'offsetWidth', { configurable: true, value: 100 });
     Object.defineProperty(contentEl, 'offsetHeight', { configurable: true, value: 100 });
 
@@ -86,6 +88,61 @@ describe('createDiagramZoomController', () => {
 
     expect(currentScale()).toBeCloseTo(1.25);
   });
+
+  it('zooms and pans from a two-finger pinch', () => {
+    // Fingers 40px apart, spreading to 120px apart around the same centre.
+    dispatchTouch('touchstart', [
+      [230, 200],
+      [270, 200],
+    ]);
+    dispatchTouch('touchmove', [
+      [190, 200],
+      [310, 200],
+    ]);
+    expect(currentScale()).toBeCloseTo(3);
+    const zoomed = transforms.at(-1)!;
+
+    // Both fingers sliding together pans without changing the scale.
+    dispatchTouch('touchmove', [
+      [150, 170],
+      [270, 170],
+    ]);
+    dispatchTouch('touchend', [
+      [150, 170],
+      [270, 170],
+    ]);
+    expect(currentScale()).toBeCloseTo(3);
+    expect(transforms.at(-1)!.offsetX).toBeCloseTo(zoomed.offsetX - 40);
+    expect(transforms.at(-1)!.offsetY).toBeCloseTo(zoomed.offsetY - 30);
+  });
+
+  it('pans with a single finger drag', () => {
+    const before = transforms.at(-1)!;
+    dispatchTouch('touchstart', [[200, 200]]);
+    dispatchTouch('touchmove', [[260, 150]]);
+    dispatchTouch('touchend', [[260, 150]]);
+
+    expect(currentScale()).toBeCloseTo(before.scale);
+    expect(transforms.at(-1)!.offsetX).toBeCloseTo(before.offsetX + 60);
+    expect(transforms.at(-1)!.offsetY).toBeCloseTo(before.offsetY - 50);
+  });
+
+  // jsdom has no `Touch` constructor; d3-zoom only reads identifier/clientX/clientY.
+  function dispatchTouch(
+    type: 'touchstart' | 'touchmove' | 'touchend',
+    points: [number, number][]
+  ) {
+    const touches = points.map(([clientX, clientY], identifier) => ({
+      identifier,
+      clientX,
+      clientY,
+      target: viewportEl,
+    }));
+    const event = new TouchEvent(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'touches', { value: type === 'touchend' ? [] : touches });
+    Object.defineProperty(event, 'changedTouches', { value: touches });
+    viewportEl.dispatchEvent(event);
+  }
 
   function dispatchClick(clientX: number, clientY: number) {
     viewportEl.dispatchEvent(

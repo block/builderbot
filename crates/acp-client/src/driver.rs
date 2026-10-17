@@ -5496,10 +5496,20 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
 // claude-agent-sdk` 0.3.296 relays that from the Claude Code CLI it vendors
 // (`@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`, Claude Code 2.1.296).
 // The CLI's model-validation module builds the message when its
-// deadline-wrapped API probe returns without an answer, flagged
-// `retryable: true` (identifiers minified in the shipped binary):
+// deadline-wrapped API probe returns without an answer. Identifiers are
+// minified in the shipped binary, but the template literal and its
+// `retryable:!0` (`true`) flag survive verbatim and can be read straight out
+// of it:
 //
 //     `Couldn't confirm model "${model}" with the API. Try again[…].`
+//
+// The same binary carries a *single-quoted* sibling that must not be matched:
+//
+//     `Couldn't confirm model '${model}' is available (the check timed out) · try again`
+//
+// That one is the inline `/model` command's `{type: "text"}` reply, not an
+// error, and never reaches `setModel`; the matcher keys on the double-quoted
+// form for that reason.
 //
 // `${model}` is the value id the bridge passed to `setModel`, echoed verbatim
 // including suffixes such as `[1m]` (session records show
@@ -6661,7 +6671,7 @@ mod tests {
         autoapprove_permission_decision, background_continuation_origin,
         background_task_tracking_meta, build_prompt_content_blocks, carry_config_value_hint,
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
-        describe_prompt_error, hold_for_background_quiescence,
+        describe_prompt_error, describe_protocol_failure, hold_for_background_quiescence,
         is_config_selection_unavailable_error, is_missing_mcp_transport_error,
         labeled_background_continuation_origin, mcp_server_transport_supported,
         origin_task_name_label, permission_response_for_decision, permission_response_for_options,
@@ -6791,10 +6801,12 @@ mod tests {
             .expect_err("auth_required should be surfaced without authenticate");
 
         assert!(format!("{error:?}").contains("ACP authentication is required"));
-        // The exact string the session alert shows once `run` has wrapped it;
-        // `authRecovery.test.ts` pins the same bytes on the frontend side.
+        // The exact string the session alert shows once `run` has passed it
+        // through `describe_protocol_failure`; `authRecovery.test.ts` pins the
+        // same bytes on the frontend side, so the unwrap there must leave
+        // auth-required errors in their Debug shape.
         assert_eq!(
-            format!("ACP protocol failed: {error:?}"),
+            describe_protocol_failure(error),
             r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to create ACP session. Sign this agent in, then retry.")) }"#
         );
         assert_eq!(calls.lock().unwrap().as_slice(), &["session/new"]);
@@ -6852,13 +6864,11 @@ mod tests {
         );
         assert!(error.contains("authentication"));
 
-        // `run` wraps every protocol failure the same way before it reaches
-        // the session alert; `authRecovery.test.ts` pins this exact string on
-        // the frontend side, so the two must agree byte for byte.
-        let wrapped = format!(
-            "ACP protocol failed: {:?}",
-            agent_client_protocol::util::internal_error(error)
-        );
+        // `run` passes every protocol failure through
+        // `describe_protocol_failure` before it reaches the session alert;
+        // `authRecovery.test.ts` pins this exact string on the frontend side,
+        // so the two must agree byte for byte.
+        let wrapped = describe_protocol_failure(agent_client_protocol::util::internal_error(error));
         assert_eq!(
             wrapped,
             r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to run the prompt. Sign this agent in, then retry.")) }"#
@@ -7321,8 +7331,10 @@ mod tests {
             .await
             .expect_err("auth_required at session/load should fail the setup");
 
+        // Same contract as the `session/new` variant: `describe_protocol_failure`
+        // must keep auth-required errors in the Debug shape the frontend pins.
         assert_eq!(
-            format!("ACP protocol failed: {error:?}"),
+            describe_protocol_failure(error),
             r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("ACP authentication is required to load ACP session. Sign this agent in, then retry.")) }"#
         );
         assert_eq!(

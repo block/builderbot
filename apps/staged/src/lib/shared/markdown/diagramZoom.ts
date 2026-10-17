@@ -123,11 +123,11 @@ export function createDiagramZoomController(
 
     event.preventDefault();
     const [deltaX, deltaY] = normalizeWheelDelta(event, viewportEl);
-    const currentTransform = zoomTransform(viewportEl);
-    behavior.transform(
-      selection,
-      currentTransform.translate(-deltaX / currentTransform.k, -deltaY / currentTransform.k)
-    );
+    // translateBy rather than transform(): only the former runs the
+    // constrain function, so a constrained image cannot be scrolled off the
+    // viewport.
+    const { k } = zoomTransform(viewportEl);
+    behavior.translateBy(selection, -deltaX / k, -deltaY / k);
   });
 
   return {

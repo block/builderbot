@@ -123,6 +123,15 @@ describe('createDiagramZoomController', () => {
     expect(transforms.at(-1)!.offsetY).toBeCloseTo(before.offsetY - 50);
   });
 
+  it('pans by the wheel delta without a modifier key', () => {
+    const before = transforms.at(-1)!;
+    dispatchWheel(60, 40);
+
+    expect(currentScale()).toBeCloseTo(before.scale);
+    expect(transforms.at(-1)!.offsetX).toBeCloseTo(before.offsetX - 60);
+    expect(transforms.at(-1)!.offsetY).toBeCloseTo(before.offsetY - 40);
+  });
+
   it('double-clicks back to the fit once zoomed when toggling is enabled', () => {
     createController({ doubleClickTogglesFit: true });
 
@@ -170,6 +179,14 @@ describe('createDiagramZoomController', () => {
     dispatchTouch('touchmove', [[-5000, -5000]]);
     dispatchTouch('touchend', [[-5000, -5000]]);
     expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: 500 - 800, offsetY: 400 - 800 });
+
+    // A wheel pan is clamped the same way, and still pans within the extent.
+    dispatchWheel(-5000, -5000);
+    expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: 0, offsetY: 0 });
+    dispatchWheel(60, 40);
+    expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: -60, offsetY: -40 });
+    dispatchWheel(5000, 5000);
+    expect(transforms.at(-1)).toEqual({ scale: 8, offsetX: 500 - 800, offsetY: 400 - 800 });
   });
 
   it('re-fits on resize only while the view is still at the fit', () => {
@@ -214,6 +231,18 @@ describe('createDiagramZoomController', () => {
     Object.defineProperty(event, 'touches', { value: type === 'touchend' ? [] : touches });
     Object.defineProperty(event, 'changedTouches', { value: touches });
     viewportEl.dispatchEvent(event);
+  }
+
+  function dispatchWheel(deltaX: number, deltaY: number) {
+    viewportEl.dispatchEvent(
+      new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        deltaX,
+        deltaY,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+      })
+    );
   }
 
   function dispatchClick(clientX: number, clientY: number) {

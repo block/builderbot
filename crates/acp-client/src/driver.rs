@@ -1985,7 +1985,7 @@ impl AcpDriver {
                     .map_err(agent_client_protocol::util::internal_error)
                 })
                 .await
-                .map_err(|e| format!("ACP protocol failed: {e:?}"));
+                .map_err(describe_protocol_failure);
 
             writer.finalize().await;
             graceful_stop(&mut child, is_remote).await;
@@ -5488,15 +5488,56 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
 // in the `details` of an internal error. That is confirmation uncertainty,
 // not an unavailable model: the same selection is routinely accepted seconds
 // later. [`send_config_selection`] bounds its recovery to exactly this error.
+//
+// Provenance of the wording — re-verify whenever the adapter is upgraded.
+// `@agentclientprotocol/claude-agent-acp` 0.90.0 does not word this itself:
+// its `setSessionConfigOption` (`dist/acp-agent.js`) rethrows whatever
+// `query.setModel(resolvedValue)` rejects with, and `@anthropic-ai/
+// claude-agent-sdk` 0.3.296 relays that from the Claude Code CLI it vendors
+// (`@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`, Claude Code 2.1.296).
+// The CLI's model-validation module builds the message when its
+// deadline-wrapped API probe returns without an answer, flagged
+// `retryable: true` (identifiers minified in the shipped binary):
+//
+//     `Couldn't confirm model "${model}" with the API. Try again[…].`
+//
+// `${model}` is the value id the bridge passed to `setModel`, echoed verbatim
+// including suffixes such as `[1m]` (session records show
+// `claude-fable-5-1[1m]`), which is why the matcher is keyed to the *resolved*
+// value. A rewording upstream silently disables the retry — nothing fails, the
+// run just falls back to today's single attempt and the raw error — and only
+// this repo's own fixtures in `driver/tests/model_confirmation.rs` pin the
+// contract.
 const MODEL_CONFIRMATION_FAILED_PREFIX: &str = "Couldn't confirm model \"";
 const MODEL_CONFIRMATION_ATTEMPTS: u32 = 2;
 const MODEL_CONFIRMATION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// What the user reads once every confirmation attempt has failed. Kept clear
-/// of the [`is_config_selection_unavailable_error`] fragments on purpose: the
-/// selection itself is sound, so consumers must keep it for the retry the
-/// sentence asks for.
+/// What the user reads once every confirmation attempt has failed;
+/// [`describe_protocol_failure`] delivers it to the session alert as this
+/// sentence. Kept clear of the [`is_config_selection_unavailable_error`]
+/// fragments on purpose: the selection itself is sound, so consumers must keep
+/// it for the retry the sentence asks for.
 pub const MODEL_CONFIRMATION_EXHAUSTED_MESSAGE: &str = "Claude couldn't confirm the selected model after two attempts. Your selection is unchanged; try again.";
+
+/// The text `run` records for a connection that ended in an error.
+///
+/// Setup failures arrive here as the `internal_error` the `connect_with`
+/// closure had to wrap their `String` in to satisfy the ACP error type, and
+/// the default is to keep that Debug shape: the auth-recovery matchers here
+/// and in the frontend (`authRecovery.ts`) are keyed to it, and the detail it
+/// carries is what diagnostics want. Exhausted model confirmation is the one
+/// setup failure whose wording is written for the user, so it alone is
+/// unwrapped back to [`MODEL_CONFIRMATION_EXHAUSTED_MESSAGE`]; the per-attempt
+/// records logged by [`send_config_selection`] keep the technical detail.
+fn describe_protocol_failure(error: agent_client_protocol::Error) -> String {
+    if error.code == ErrorCode::InternalError
+        && error.data.as_ref().and_then(|data| data.as_str())
+            == Some(MODEL_CONFIRMATION_EXHAUSTED_MESSAGE)
+    {
+        return MODEL_CONFIRMATION_EXHAUSTED_MESSAGE.to_string();
+    }
+    format!("ACP protocol failed: {error:?}")
+}
 
 /// Whether `adapter` — the agent's `initialize` name, or the driver label when
 /// it sends none — is a Claude bridge. Only Claude's SDK produces the
@@ -5511,6 +5552,8 @@ fn supports_model_confirmation_recovery(adapter: &str) -> bool {
 /// [`MODEL_CONFIRMATION_FAILED_PREFIX`], either as the bridge's
 /// `{"details": …}` object or as a bare string. Authentication errors, invalid
 /// values, transport failures, and a different model are all not this error.
+/// The wording's origin and upgrade caveats are on
+/// [`MODEL_CONFIRMATION_FAILED_PREFIX`].
 fn is_model_confirmation_error(
     error: &agent_client_protocol::Error,
     requested_model: &str,
@@ -5538,8 +5581,9 @@ fn is_model_confirmation_error(
 /// never for any other option, error, or adapter. The caller's setup timeout
 /// and cancellation bound the whole exchange by dropping this future, so a
 /// Stop during the delay or the second attempt sends nothing further.
-/// Exhausted recovery reads as [`MODEL_CONFIRMATION_EXHAUSTED_MESSAGE`]
-/// rather than the nested Debug dump.
+/// Exhausted recovery fails with [`MODEL_CONFIRMATION_EXHAUSTED_MESSAGE`],
+/// which [`describe_protocol_failure`] hands to the session alert as that
+/// plain sentence while every other setup failure keeps its Debug shape.
 ///
 /// Each attempt logs a sanitized record — phase, adapter, requested and
 /// resolved value, attempt, duration, classified outcome; never prompts,

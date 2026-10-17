@@ -4997,9 +4997,11 @@ mod tests {
     }
 
     /// acp-client retries Claude's model confirmation once and then fails
-    /// with a plain sentence. The post-run clearing must read that as
-    /// "selection fine, try again" and leave the saved pin alone, while a
-    /// genuinely stale pin keeps being cleared exactly as before.
+    /// with a plain sentence, which its `run` hands through unwrapped. The
+    /// post-run clearing must read that as "selection fine, try again" and
+    /// leave the saved pin alone, while a genuinely stale pin — still
+    /// Debug-wrapped like every other setup failure — keeps being cleared
+    /// exactly as before.
     #[test]
     fn a_failed_model_confirmation_keeps_the_saved_selection_but_a_stale_pin_is_cleared() {
         let store = Store::in_memory().unwrap();
@@ -5010,18 +5012,12 @@ mod tests {
             .set_session_acp_config_selection(&session.id, Some(&selection))
             .unwrap();
 
-        // Exactly as the driver's `run` wraps the setup failure.
-        let exhausted = format!(
-            "ACP protocol failed: {:?}",
-            agent_client_protocol::util::internal_error(
-                acp_client::MODEL_CONFIRMATION_EXHAUSTED_MESSAGE
-            )
-        );
+        // Exactly what the driver's `run` records: the sentence, unwrapped.
         assert!(!clear_unavailable_acp_config_selection(
             &store,
             &session.id,
             Some(&selection),
-            &exhausted,
+            acp_client::MODEL_CONFIRMATION_EXHAUSTED_MESSAGE,
         ));
         assert_eq!(
             store

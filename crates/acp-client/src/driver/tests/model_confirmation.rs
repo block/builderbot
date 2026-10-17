@@ -9,8 +9,8 @@
 
 use super::*;
 use crate::driver::{
-    is_model_confirmation_error, run_acp_session, supports_model_confirmation_recovery,
-    ACP_SETUP_TIMEOUT, MODEL_CONFIRMATION_EXHAUSTED_MESSAGE,
+    describe_protocol_failure, is_model_confirmation_error, run_acp_session,
+    supports_model_confirmation_recovery, ACP_SETUP_TIMEOUT, MODEL_CONFIRMATION_EXHAUSTED_MESSAGE,
 };
 use agent_client_protocol::schema::v1::{
     Implementation, InitializeRequest, InitializeResponse, PromptResponse,
@@ -309,22 +309,37 @@ fn recovery_is_keyed_to_claude_bridges_only() {
     assert!(!supports_model_confirmation_recovery("Blox"));
 }
 
-/// The terminal sentence must keep the saved selection: the runner clears a
-/// selection only when `is_config_selection_unavailable_error` fires.
+/// The terminal sentence must keep the saved selection — the runner clears a
+/// selection only when `is_config_selection_unavailable_error` fires — and it
+/// must reach the session alert as the sentence itself: `run` unwraps the
+/// `internal_error` the connection closure wrapped it in, while every other
+/// setup failure keeps the Debug shape the auth-recovery fixtures pin.
 #[test]
 fn exhausted_message_is_not_an_unavailable_selection() {
     assert!(!is_config_selection_unavailable_error(
         MODEL_CONFIRMATION_EXHAUSTED_MESSAGE
     ));
-    // Exactly as `run` wraps it on the way to the session alert.
-    let wrapped = format!(
-        "ACP protocol failed: {:?}",
-        agent_client_protocol::util::internal_error(MODEL_CONFIRMATION_EXHAUSTED_MESSAGE)
+    // Exactly as the `connect_with` closure wraps a setup failure before
+    // `run` describes it for the session alert.
+    let shown = describe_protocol_failure(agent_client_protocol::util::internal_error(
+        MODEL_CONFIRMATION_EXHAUSTED_MESSAGE,
+    ));
+    assert_eq!(shown, MODEL_CONFIRMATION_EXHAUSTED_MESSAGE);
+    assert!(!is_config_selection_unavailable_error(&shown));
+
+    // Any other setup failure, and a bare transport error, keep the shape
+    // `isAuthenticationError` and the driver's auth tests are keyed to.
+    let auth = agent_client_protocol::util::internal_error(
+        "ACP authentication is required to create ACP session. Sign this agent in, then retry.",
     );
-    assert!(!is_config_selection_unavailable_error(&wrapped));
     assert_eq!(
-        wrapped,
-        r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("Claude couldn't confirm the selected model after two attempts. Your selection is unchanged; try again.")) }"#
+        describe_protocol_failure(auth.clone()),
+        format!("ACP protocol failed: {auth:?}")
+    );
+    let transport = agent_client_protocol::Error::internal_error();
+    assert_eq!(
+        describe_protocol_failure(transport.clone()),
+        format!("ACP protocol failed: {transport:?}")
     );
 }
 

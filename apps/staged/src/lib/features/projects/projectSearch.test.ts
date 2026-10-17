@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Project } from '../../types';
-import { searchProjects, visibleProjects } from './projectSearch';
+import { searchProjects, visibleProjects, withStickyProject } from './projectSearch';
 
 // ── Fixtures ──
 
@@ -60,11 +60,38 @@ describe('searchProjects', () => {
   });
 });
 
+// Chips excluded beta: the typical "Unread" case after visiting it.
+const chipsWithoutBeta = [alpha, gamma];
+
+// The pre-search base: chip filters → sticky return-target card.
+describe('withStickyProject', () => {
+  it('returns the chip-filtered list unchanged without a sticky card', () => {
+    expect(withStickyProject(all, chipsWithoutBeta, null)).toBe(chipsWithoutBeta);
+  });
+
+  it('returns the chip-filtered list unchanged when the chips include the sticky card', () => {
+    expect(withStickyProject(all, chipsWithoutBeta, alpha.id)).toBe(chipsWithoutBeta);
+  });
+
+  it('re-inserts an excluded sticky card at its position in the full list', () => {
+    expect(withStickyProject(all, chipsWithoutBeta, beta.id)).toEqual([alpha, beta, gamma]);
+  });
+
+  it('leaves the list alone when the sticky id is no longer a project', () => {
+    expect(withStickyProject(all, chipsWithoutBeta, 'gone')).toEqual(chipsWithoutBeta);
+  });
+
+  // Drives the empty-state copy: the chips matched nothing, but the sticky
+  // card was re-inserted, so when the query then hides it the query — not the
+  // chips — is what emptied the grid.
+  it('is non-empty when the chips matched nothing but the sticky card was re-inserted', () => {
+    expect(withStickyProject(all, [], beta.id)).toEqual([beta]);
+    expect(visibleProjects(all, [], beta.id, 'alpha')).toEqual([]);
+  });
+});
+
 // The grid composition: chip filters → sticky return-target card → query.
 describe('visibleProjects', () => {
-  // Chips excluded beta: the typical "Unread" case after visiting it.
-  const chipsWithoutBeta = [alpha, gamma];
-
   describe('without a sticky card', () => {
     it('returns the chip-filtered list unchanged for an empty query', () => {
       expect(visibleProjects(all, chipsWithoutBeta, null, '')).toBe(chipsWithoutBeta);

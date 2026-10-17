@@ -42,7 +42,7 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { visibleProjects } from './projectSearch';
+  import { visibleProjects, withStickyProject } from './projectSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -93,21 +93,29 @@
   // would paint the stale card once under the new filters before removing it.
   const filtersAtMount = projectFiltersStore.activeFilters;
 
+  let effectiveStickyId = $derived(
+    projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null
+  );
+
   // Chips → sticky card → search; see visibleProjects for the composition.
   let filteredProjects = $derived(
     visibleProjects(
       projects,
       projectFiltersStore.filteredProjects,
-      projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null,
+      effectiveStickyId,
       projectsListViewState.searchQuery
     )
   );
 
   let searchActive = $derived(projectsListViewState.searchQuery.trim().length > 0);
-  // Decides the empty-state copy: blame the query only when the chips alone
-  // would have shown something, otherwise the chips are what excluded it all.
+  // Decides the empty-state copy: blame the query only when the grid would
+  // have shown something without it. Judged against the sticky-adjusted base,
+  // not the raw chip result, so a sticky card the chips excluded but the query
+  // hid is attributed to the query.
   let searchExcludedEverything = $derived(
-    searchActive && projectFiltersStore.filteredProjects.length > 0
+    searchActive &&
+      withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId).length >
+        0
   );
 
   function clearSearch() {
@@ -195,10 +203,11 @@
       finishProjectsListRestore();
       return;
     }
-    // The sticky exception keeps the target through chip changes, but not
-    // through the (persisted) search: if the target is still a project yet
-    // the query hides it — renamed while away, say — the list no longer
-    // resembles the one scrollTop was captured against, so don't restore.
+    // The target is still a project but has been filtered out of the visible
+    // list — by the persisted query (renamed while away, say), or by a chip
+    // change between mount and ready, which lifts the sticky exception. Either
+    // way the list no longer resembles the one scrollTop was captured
+    // against, so don't restore.
     if (
       targetProjectId &&
       projects.some((p) => p.id === targetProjectId) &&
@@ -431,6 +440,13 @@
             {:else}
               <div class="state">No projects match filters</div>
             {/if}
+          {:else if searchActive}
+            <!-- Announce the grid narrowing as the user types, not just when
+                 it empties. Search-only so ordinary loads stay quiet. -->
+            <span class="sr-only">
+              {filteredProjects.length}
+              {filteredProjects.length === 1 ? 'project' : 'projects'}
+            </span>
           {/if}
         </div>
         <div class="projects-grid">

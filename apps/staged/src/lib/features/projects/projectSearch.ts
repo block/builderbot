@@ -25,16 +25,33 @@ export function searchProjects(projects: Project[], query: string): Project[] {
 }
 
 /**
- * The projects the landing-page grid shows, in grid order.
+ * The chip-filter result with the sticky return-target card re-inserted: what
+ * the grid shows before the search narrows it.
  *
  * `chipFiltered` is the chip-filter result. When `stickyId` names a project the
  * chips excluded, it is re-inserted — rebuilt from the full `projects` list
  * rather than appended so the card keeps its place in the grid, the position
- * the scroll restore captured. The query is then applied to whatever the chips
- * (and the sticky exception) left. The sticky card is not exempt from the
- * search: the exception exists so a card the user just visited doesn't vanish
- * because visiting it changed its read state, whereas a typed query is a
- * deliberate narrowing, so a sticky card that doesn't match it is hidden.
+ * the scroll restore captured. With no re-insertion, `chipFiltered` is
+ * returned unchanged.
+ */
+export function withStickyProject(
+  projects: Project[],
+  chipFiltered: Project[],
+  stickyId: string | null
+): Project[] {
+  if (!stickyId || chipFiltered.some((p) => p.id === stickyId)) return chipFiltered;
+  const matched = new Set(chipFiltered.map((p) => p.id));
+  return projects.filter((p) => matched.has(p.id) || p.id === stickyId);
+}
+
+/**
+ * The projects the landing-page grid shows, in grid order.
+ *
+ * The query is applied to whatever the chips (and the sticky exception) left.
+ * The sticky card is not exempt from the search: the exception exists so a
+ * card the user just visited doesn't vanish because visiting it changed its
+ * read state, whereas a typed query is a deliberate narrowing, so a sticky
+ * card that doesn't match it is hidden.
  *
  * With no sticky re-insertion and an empty query, `chipFiltered` is returned
  * unchanged.
@@ -45,10 +62,5 @@ export function visibleProjects(
   stickyId: string | null,
   query: string
 ): Project[] {
-  let base = chipFiltered;
-  if (stickyId && !chipFiltered.some((p) => p.id === stickyId)) {
-    const matched = new Set(chipFiltered.map((p) => p.id));
-    base = projects.filter((p) => matched.has(p.id) || p.id === stickyId);
-  }
-  return searchProjects(base, query);
+  return searchProjects(withStickyProject(projects, chipFiltered, stickyId), query);
 }

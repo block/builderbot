@@ -8,8 +8,10 @@
   import { fade } from 'svelte/transition';
   import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
+  import Search from '@lucide/svelte/icons/search';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import X from '@lucide/svelte/icons/x';
   import type { Project } from '../../types';
   import RepoCard from './RepoCard.svelte';
   import { projectDisplayName, projectActivity } from '../../shared/utils';
@@ -28,6 +30,7 @@
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { Button } from '$lib/components/ui/button';
+  import { Input } from '$lib/components/ui/input';
 
   import {
     finishProjectsListRestore,
@@ -39,6 +42,7 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
+  import { searchProjects } from './projectSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -60,6 +64,10 @@
 
   let showNewProjectModal = $state(false);
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
+  // View-local, unlike the chip filters: a typed query is a transient
+  // narrowing of this grid, not a selection the sidebar should mirror.
+  let searchQuery = $state('');
+  let searchInputEl = $state<HTMLInputElement | null>(null);
   let isCommandKeyHeld = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
   let restoreInProgress = false;
@@ -93,8 +101,18 @@
     // Rebuilt from the full list rather than appended so the sticky card keeps
     // its place in the grid — the position the scroll restore captured.
     const matched = new Set(filtered.map((p) => p.id));
-    return projects.filter((p) => matched.has(p.id) || p.id === sticky);
+    const chipFiltered = projects.filter((p) => matched.has(p.id) || p.id === sticky);
+    // The search narrows what the chips left, sticky card included: a query
+    // is always a deliberate narrowing, so no card is exempt from it.
+    return searchProjects(chipFiltered, searchQuery);
   });
+
+  let searchActive = $derived(searchQuery.trim().length > 0);
+
+  function clearSearch() {
+    searchQuery = '';
+    searchInputEl?.focus();
+  }
 
   function trackProjectCard(node: HTMLElement, projectId: string) {
     let currentProjectId = projectId;
@@ -353,9 +371,42 @@
           </div>
         {/if}
 
+        <div class="search-row">
+          <div class="search-input-wrapper">
+            <Search size={14} />
+            <Input
+              bind:ref={searchInputEl}
+              type="search"
+              placeholder="Search projects"
+              aria-label="Search projects"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+              bind:value={searchQuery}
+              class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
+            />
+            {#if searchActive}
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                class="-my-1 -mr-1 size-6 [&_svg]:size-3.5"
+                aria-label="Clear search"
+                title="Clear search"
+                onclick={clearSearch}
+              >
+                <X size={14} />
+              </Button>
+            {/if}
+          </div>
+        </div>
+
         <ProjectFilterChips />
         {#if filteredProjects.length === 0}
-          <div class="state">No projects match filters</div>
+          {#if searchActive}
+            <div class="state">No projects match "{searchQuery.trim()}"</div>
+          {:else}
+            <div class="state">No projects match filters</div>
+          {/if}
         {/if}
         <div class="projects-grid">
           {#each filteredProjects as project, index (project.id)}
@@ -607,6 +658,32 @@
   .repos-scroll-row::-webkit-scrollbar-thumb {
     background: var(--border-muted);
     border-radius: 2px;
+  }
+
+  .search-row {
+    margin-bottom: 14px;
+  }
+
+  .search-input-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    transition: border-color 0.15s ease;
+  }
+
+  .search-input-wrapper:focus-within {
+    border-color: var(--border-emphasis);
+  }
+
+  /* The explicit clear button replaces WebKit's native search cancel glyph. */
+  .search-input-wrapper :global(input[type='search'])::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
   }
 
   .projects-grid {

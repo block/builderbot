@@ -28,6 +28,28 @@ export function foldSnippetsIntoPrompt(prompt: string, snippets: { text: string 
   );
 }
 
+/**
+ * The text inserted into `before` to produce `after`: whatever lies between
+ * their longest common prefix and suffix. Pure deletions yield ''.
+ *
+ * Used to recover keystrokes typed while a mode-switch draft load was in
+ * flight: they were typed over the outgoing mode's text, so the prompt as a
+ * whole can't be kept, but the inserted part belongs to the incoming mode.
+ */
+export function insertedText(before: string, after: string): string {
+  const max = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < max && before[prefix] === after[prefix]) prefix++;
+  let suffix = 0;
+  while (
+    suffix < max - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix++;
+  }
+  return after.slice(prefix, after.length - suffix);
+}
+
 export interface ParsedToolCall {
   name: string;
   args: Record<string, unknown>;

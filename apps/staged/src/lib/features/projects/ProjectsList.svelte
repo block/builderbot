@@ -8,10 +8,8 @@
   import { fade } from 'svelte/transition';
   import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
-  import Search from '@lucide/svelte/icons/search';
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import X from '@lucide/svelte/icons/x';
   import type { Project } from '../../types';
   import RepoCard from './RepoCard.svelte';
   import { projectDisplayName, projectActivity } from '../../shared/utils';
@@ -28,9 +26,9 @@
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
+  import SearchField from '../../shared/SearchField.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { Button } from '$lib/components/ui/button';
-  import { Input } from '$lib/components/ui/input';
 
   import {
     finishProjectsListRestore,
@@ -117,11 +115,6 @@
       withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId).length >
         0
   );
-
-  function clearSearch() {
-    projectsListViewState.searchQuery = '';
-    searchInputEl?.focus();
-  }
 
   function trackProjectCard(node: HTMLElement, projectId: string) {
     let currentProjectId = projectId;
@@ -399,32 +392,12 @@
         {/if}
 
         <div class="search-row">
-          <div class="search-input-wrapper">
-            <Search size={14} />
-            <Input
-              bind:ref={searchInputEl}
-              type="search"
-              placeholder="Search projects"
-              aria-label="Search projects"
-              autocomplete="off"
-              autocorrect="off"
-              spellcheck="false"
-              bind:value={projectsListViewState.searchQuery}
-              class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
-            />
-            {#if searchActive}
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                class="-my-1 -mr-1 size-6 [&_svg]:size-3.5"
-                aria-label="Clear search"
-                title="Clear search"
-                onclick={clearSearch}
-              >
-                <X size={14} />
-              </Button>
-            {/if}
-          </div>
+          <SearchField
+            bind:ref={searchInputEl}
+            bind:value={projectsListViewState.searchQuery}
+            placeholder="Search projects"
+            clearable
+          />
         </div>
 
         <ProjectFilterChips />
@@ -703,28 +676,6 @@
 
   .search-row {
     margin-bottom: 14px;
-  }
-
-  .search-input-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: var(--bg-elevated);
-    color: var(--text-muted);
-    transition: border-color 0.15s ease;
-  }
-
-  .search-input-wrapper:focus-within {
-    border-color: var(--border-emphasis);
-  }
-
-  /* The explicit clear button replaces WebKit's native search cancel glyph. */
-  .search-input-wrapper :global(input[type='search'])::-webkit-search-cancel-button {
-    -webkit-appearance: none;
-    appearance: none;
   }
 
   .projects-grid {

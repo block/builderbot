@@ -180,15 +180,6 @@
   let discardingWorktreeChanges = $state(false);
   let showResetToOriginDialog = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
-  type TimelineFullReview = NonNullable<Awaited<ReturnType<typeof commands.getReview>>>;
-  type TimelineReviewDetails = {
-    commitSha: string;
-    scope: 'branch' | 'commit';
-    comments: number;
-    annotations: number;
-    warnings: number;
-    userComments: number;
-  };
   type OpenNoteState = {
     noteId?: string;
     title: string;
@@ -198,8 +189,6 @@
     chatOpen?: boolean;
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
   };
-  let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
-
   // Hashtag items for rendering #type:id badges in timeline titles.
   // Timeline-derived items are computed reactively so badges update when timeline refreshes.
   // Project notes are loaded async separately (they don't change during note generation).
@@ -241,8 +230,6 @@
     githubRepo: repoLabel?.headRepo ?? repoLabel?.githubRepo,
     subpath: repoLabel?.subpath,
   });
-  let reviewDetailsLoadVersion = 0;
-
   /** True when the branch is still provisioning (local worktree or remote workspace). */
   let isProvisioning = $derived(
     (isLocal && !branch.worktreePath && !worktreeError) ||
@@ -640,7 +627,6 @@
           timeline = next;
           loadedTimelineKey = timelineKey;
           prunedSessionIds = prunePendingSessionItems(branch.id, next);
-          void loadTimelineReviewDetails(next.reviews);
         })
         .catch((e) => {
           if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
@@ -648,8 +634,6 @@
           }
           error = e instanceof Error ? e.message : String(e);
         });
-    } else {
-      void loadTimelineReviewDetails(cached.reviews);
     }
 
     startGitStateRefresh();
@@ -864,7 +848,6 @@
       timeline = nextTimeline;
       loadedTimelineKey = timelineKey;
       prunedSessionIds = prunePendingSessionItems(branch.id, nextTimeline);
-      void loadTimelineReviewDetails(nextTimeline.reviews);
     } catch (e) {
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       error = e instanceof Error ? e.message : String(e);
@@ -878,62 +861,6 @@
     }
 
     startGitStateRefresh();
-  }
-
-  function getTimelineReviewDetails(fullReview: TimelineFullReview): TimelineReviewDetails {
-    let comments = 0;
-    let annotations = 0;
-    let warnings = 0;
-    for (const comment of fullReview.comments) {
-      if (comment.commentType === 'information') {
-        annotations += 1;
-      } else {
-        comments += 1;
-        if (comment.commentType === 'warning') {
-          warnings += 1;
-        }
-      }
-    }
-
-    return {
-      commitSha: fullReview.commitSha,
-      scope: fullReview.scope,
-      comments,
-      annotations,
-      warnings,
-      userComments: countUserComments(fullReview.comments),
-    };
-  }
-
-  async function loadTimelineReviewDetails(reviews: BranchTimelineData['reviews']) {
-    const loadVersion = ++reviewDetailsLoadVersion;
-    if (reviews.length === 0) {
-      timelineReviewDetailsById = {};
-      return;
-    }
-
-    const reviewDetails = await Promise.all(
-      reviews.map(async (review) => {
-        try {
-          const fullReview = await commands.getReview(review.id);
-          if (!fullReview) return null;
-
-          return { id: review.id, details: getTimelineReviewDetails(fullReview) };
-        } catch (e) {
-          console.error(`Failed to load review details for ${review.id}:`, e);
-          return null;
-        }
-      })
-    );
-
-    if (loadVersion !== reviewDetailsLoadVersion) return;
-
-    const nextDetails: Record<string, TimelineReviewDetails> = {};
-    for (const item of reviewDetails) {
-      if (!item) continue;
-      nextDetails[item.id] = item.details;
-    }
-    timelineReviewDetailsById = nextDetails;
   }
 
   // =========================================================================
@@ -1054,14 +981,14 @@
   }
 
   async function handleReviewClick(reviewId: string) {
-    const cached = timelineReviewDetailsById[reviewId];
-    if (cached) {
+    const item = timeline?.reviews.find((review) => review.id === reviewId);
+    if (item) {
       openDiffDetail({
-        commitSha: cached.commitSha,
-        scope: cached.scope,
+        commitSha: item.commitSha,
+        scope: item.scope,
         reviewId,
-        beforeLabel: cached.scope === 'commit' ? 'parent' : formatBaseBranch(branch.baseBranch),
-        afterLabel: cached.commitSha.slice(0, 7),
+        beforeLabel: item.scope === 'commit' ? 'parent' : formatBaseBranch(branch.baseBranch),
+        afterLabel: item.commitSha.slice(0, 7),
       });
       return;
     }
@@ -1513,31 +1440,25 @@
       };
     };
     const decideDelete = async () => {
-      let details = timelineReviewDetailsById[reviewId] ?? null;
+      let review: Awaited<ReturnType<typeof commands.getReview>>;
       try {
-        if (!details) {
-          const review = await commands.getReview(reviewId);
-          if (review) {
-            details = getTimelineReviewDetails(review);
-            timelineReviewDetailsById = { ...timelineReviewDetailsById, [reviewId]: details };
-          }
-        }
+        review = await commands.getReview(reviewId);
       } catch (e) {
         console.error('Failed to check review before delete:', e);
         showConfirmDelete();
         return;
       }
 
-      // Conservative fallback: if we couldn't load review details, always warn
-      if (!details) {
+      // Conservative fallback: if we couldn't load the review, always warn
+      if (!review) {
         showConfirmDelete();
         return;
       }
 
       const shouldWarn = shouldWarnBeforeDeletingReview({
-        review: details,
+        review,
         commits: timeline?.commits ?? [],
-        userCommentCount: details.userComments,
+        userCommentCount: countUserComments(review.comments),
       });
       if (shouldWarn) {
         showConfirmDelete();
@@ -2013,7 +1934,6 @@
               gitActionDisabledReason={branchIdentityWarning}
               onRetry={() => loadTimeline()}
               deletingItems={timelineDeletingItems}
-              reviewCommentBreakdown={timelineReviewDetailsById}
               onSessionClick={(sid) => {
                 if (!openNoteChatForSession(sid)) {
                   sessionMgr.handleTimelineSessionClick(sid);

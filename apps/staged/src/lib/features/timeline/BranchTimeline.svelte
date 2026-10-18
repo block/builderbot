@@ -46,6 +46,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { reviewBadges } from './reviewBadges';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
@@ -84,15 +85,6 @@
     onDeleteImage?: (imageId: string, opts?: { altKey: boolean }) => void;
     /** Start a specific queued session ahead of the branch queue. */
     onStartQueuedNow?: (sessionId: string) => void;
-    /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
-    reviewCommentBreakdown?: Record<
-      string,
-      {
-        comments: number;
-        annotations: number;
-        warnings?: number;
-      }
-    >;
     onNewNote?: () => void;
     onNewCommit?: () => void;
     /** Alt-click skips the prompt dialog; the overflow menu item passes no event. */
@@ -180,7 +172,6 @@
     onDeleteReview,
     onDeleteImage,
     onStartQueuedNow,
-    reviewCommentBreakdown = {},
     onNewNote,
     onNewCommit,
     onNewReview,
@@ -761,10 +752,7 @@
     }
 
     for (const review of timeline.reviews) {
-      const breakdown = reviewCommentBreakdown[review.id];
-      const commentCount = breakdown?.comments ?? review.commentCount;
-      const annotationCount = breakdown?.annotations ?? 0;
-      const totalCount = commentCount + annotationCount;
+      const totalCount = review.commentCount + review.annotationCount;
       const isRunning = review.sessionStatus === 'running';
       const isQueued = review.sessionStatus === 'queued';
       const isFailed = isEmptyFailedReview({
@@ -776,17 +764,7 @@
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
-      // Build badges: warnings get their own badge, everything else is a comment
-      const warningCount = breakdown?.warnings ?? 0;
-      const nonWarningCount = commentCount - warningCount;
-
-      const badges: TimelineBadge[] = [];
-      if (warningCount > 0) {
-        badges.push({ icon: 'warning', count: warningCount });
-      }
-      if (nonWarningCount > 0) {
-        badges.push({ icon: 'comment', count: nonWarningCount });
-      }
+      const badges = reviewBadges(review);
 
       let type: TimelineItemType;
       let meta: string | undefined;

@@ -1470,6 +1470,14 @@ impl Comment {
         self.comment_type = Some(comment_type);
         self
     }
+
+    /// Whether this comment counts as a visible review comment: active and
+    /// not `information`. Information comments are hold-to-reveal annotations,
+    /// so the detail view, the branch timeline, and the agent-facing branch
+    /// history all leave them out of the comment list and count them separately.
+    pub(crate) fn is_visible(&self) -> bool {
+        self.deleted_at.is_none() && !matches!(self.comment_type, Some(CommentType::Information))
+    }
 }
 
 // =============================================================================

@@ -10,7 +10,7 @@
 
 use crate::git;
 use crate::session_runner;
-use crate::store::{CommentAuthor, ResolvedSession, Review, Store};
+use crate::store::{CommentAuthor, CommentType, ResolvedSession, Review, Store};
 use crate::{
     blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
@@ -545,7 +545,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .filter(|r| review_is_visible_in_timeline(r, |sha| visible_shas.contains(sha)))
         .map(|r| {
             let resolved = store.resolve_session_status(r.session_id.as_deref());
-            let comment_count = r.comments.len();
+            let counts = review_comment_counts(&r);
             // Untitled running reviews would otherwise render a static
             // placeholder; surface the agent-pushed ACP title instead. A
             // stored title always wins.
@@ -564,7 +564,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_provider: resolved.provider,
                 completion_reason: resolved.completion_reason,
                 title,
-                comment_count,
+                comment_count: counts.comments,
+                annotation_count: counts.annotations,
+                warning_count: counts.warnings,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
                 completed_at: r.completed_at,
@@ -621,6 +623,32 @@ fn remote_git_state_cache_key(
         "remote:{workspace_name}:{}:{branch_name}:{base_branch}",
         repo_subpath.unwrap_or("")
     )
+}
+
+/// Per-type counts of a review's active comments, as shown on the branch card.
+struct ReviewCommentCounts {
+    /// Non-`information` comments (`Comment::is_visible`).
+    comments: usize,
+    /// `information` comments, rendered as hold-to-reveal annotations.
+    annotations: usize,
+    /// Subset of `comments` typed `warning`.
+    warnings: usize,
+}
+
+fn review_comment_counts(review: &Review) -> ReviewCommentCounts {
+    let visible = || review.comments.iter().filter(|c| c.is_visible());
+    ReviewCommentCounts {
+        comments: visible().count(),
+        annotations: review
+            .comments
+            .iter()
+            .filter(|c| c.deleted_at.is_none())
+            .filter(|c| matches!(c.comment_type, Some(CommentType::Information)))
+            .count(),
+        warnings: visible()
+            .filter(|c| matches!(c.comment_type, Some(CommentType::Warning)))
+            .count(),
+    }
 }
 
 /// Whether a review should be shown in a branch's timeline.
@@ -1746,6 +1774,45 @@ mod tests {
         assert_eq!(timeline.reviews.len(), 1);
         assert_eq!(timeline.reviews[0].id, stale_review.id);
         assert_eq!(timeline.reviews[0].comment_count, 1);
+        assert_eq!(timeline.reviews[0].annotation_count, 0);
+        assert_eq!(timeline.reviews[0].warning_count, 0);
+    }
+
+    #[test]
+    fn build_branch_timeline_counts_review_comments_by_type() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let review = Review::new(&branch.id, &visible_sha, ReviewScope::Commit);
+        store.create_review(&review).unwrap();
+        let agent_comment = |content: &str, comment_type: CommentType| {
+            Comment::new("file.txt", Span::new(2, 3), content)
+                .with_author(CommentAuthor::Agent)
+                .with_comment_type(comment_type)
+        };
+        for comment in [
+            agent_comment("Bug", CommentType::Issue),
+            agent_comment("Another bug", CommentType::Issue),
+            agent_comment("Careful", CommentType::Warning),
+            agent_comment("FYI", CommentType::Information),
+            agent_comment("Also FYI", CommentType::Information),
+            // Untyped user comments count as plain comments.
+            Comment::new("file.txt", Span::new(4, 4), "Please follow up"),
+        ] {
+            store.add_comment(&review.id, &comment).unwrap();
+        }
+        // Soft-deleted comments are excluded from every count.
+        let deleted = agent_comment("Gone", CommentType::Warning);
+        store.add_comment(&review.id, &deleted).unwrap();
+        store.delete_comment(&deleted.id).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.reviews.len(), 1);
+        let item = &timeline.reviews[0];
+        assert_eq!(item.comment_count, 4);
+        assert_eq!(item.annotation_count, 2);
+        assert_eq!(item.warning_count, 1);
     }
 
     #[test]

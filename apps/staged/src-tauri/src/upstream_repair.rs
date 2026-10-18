@@ -162,7 +162,8 @@ impl WorktreeUpstream for GitWorktreeUpstream {
     fn repoint(&mut self, worktree: &Path, local: &str, remote: &str) -> Result<bool, String> {
         // `origin/<remote>` has to exist locally before it can be tracked;
         // a clone that only ever fetched `refs/pull/N/head` may not have it.
-        // A failed fetch surfaces as `Ok(false)` below.
+        // The fetch is by explicit refspec and leaves `remote.origin.fetch`
+        // alone. A failed fetch surfaces as `Ok(false)` below.
         let _ = git::fetch_origin_branch(worktree, remote);
         git::set_upstream_to_origin(worktree, local, remote).map_err(|e| e.to_string())
     }

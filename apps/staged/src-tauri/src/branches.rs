@@ -298,7 +298,7 @@ where
 
 /// The branch on origin a Blox workspace checkout of `local` pushes to — the
 /// workspace-side counterpart of [`git::upstream_branch_name`]. Blocking: one
-/// workspace exec.
+/// workspace exec, two when the branch tracks something on origin.
 pub(crate) fn workspace_upstream_branch_name(
     ws_name: &str,
     repo_subpath: Option<&str>,
@@ -1365,10 +1365,13 @@ pub(crate) fn create_and_link_worktree(
         );
     }
 
-    let adopted_existing = matches!(existing_worktree, ExistingWorktree::Found(_));
+    // Whether the worktree belongs to someone else — one the user already had,
+    // or one another process made while this call was running. Its upstream
+    // is left alone and it is never removed on failure.
+    let mut adopted_existing = matches!(existing_worktree, ExistingWorktree::Found(_));
     // Whether the local branch itself was created here, so a failure further
     // down can delete it along with the worktree instead of leaving the name
-    // taken for the next attempt.
+    // taken for the next attempt, and so its upstream may be cleared.
     let mut created_branch = false;
     let worktree_path = if let ExistingWorktree::Found(path) = existing_worktree {
         path
@@ -1421,6 +1424,9 @@ pub(crate) fn create_and_link_worktree(
                         path.display(),
                         local_branch_name
                     );
+                    // Another process created it between the lookup above
+                    // and the attempt: theirs to keep.
+                    adopted_existing = true;
                     path
                 } else if git::branch_exists(repo_path, &local_branch_name)
                     .map_err(|e| e.to_string())?
@@ -1451,40 +1457,66 @@ pub(crate) fn create_and_link_worktree(
     // checkout track origin/<requested> when that branch exists and nothing
     // otherwise. This is deliberate for de-duplicated non-PR branches too:
     // the user asked for `feature-x`, and the `-2` suffix exists only
-    // because another project's worktree holds the local name. A worktree
-    // the user already had is left as they configured it, and a fork PR's
-    // (see `head_in_fork`) is not pointed at origin at all.
+    // because another project's worktree holds the local name.
+    //
+    // A worktree the user already had is left as they configured it, and so
+    // is the upstream of a local branch that existed before this call (it
+    // only gets a worktree here): one tracking another remote, or a fork,
+    // is the user's own setup, and the resolver ignores it rather than
+    // Staged clearing it. Such a branch is only pointed at origin when it
+    // tracks nothing at all. A fork PR's checkout (see `head_in_fork`) is
+    // not pointed at origin either.
     if !adopted_existing && head_in_fork {
         log::info!("Branch '{local_branch_name}' is a fork PR head; it tracks nothing on origin");
     } else if !adopted_existing {
-        // A PR import has only fetched `refs/pull/N/head` so far, and a
-        // de-duplicated name may never have had its remote fetched. The
-        // branch not existing on origin is fine; it is the `Ok(false)` below.
-        if branch.pr_number.is_some() || local_branch_name != requested_branch {
-            if let Err(e) = git::fetch_origin_branch(repo_path, requested_branch) {
-                log::debug!(
-                    "Could not fetch origin/{requested_branch} before setting upstream: {e}"
-                );
+        let keep_own_upstream = !created_branch
+            && git::has_upstream(repo_path, &local_branch_name).map_err(|e| e.to_string())?;
+        if keep_own_upstream {
+            log::info!(
+                "Branch '{local_branch_name}' existed before its worktree; keeping the upstream it has"
+            );
+        } else {
+            // A PR import has only fetched `refs/pull/N/head` so far, and a
+            // de-duplicated name may never have had its remote fetched. The
+            // branch not existing on origin is fine; it is the `Ok(false)`
+            // below.
+            if branch.pr_number.is_some() || local_branch_name != requested_branch {
+                if let Err(e) = git::fetch_origin_branch(repo_path, requested_branch) {
+                    log::debug!(
+                        "Could not fetch origin/{requested_branch} before setting upstream: {e}"
+                    );
+                }
             }
-        }
-        match git::set_upstream_to_origin_or_unset(repo_path, &local_branch_name, requested_branch) {
-            Ok(true) => log::info!("Branch '{local_branch_name}' tracks origin/{requested_branch}"),
-            Ok(false) => log::debug!(
-                "origin/{requested_branch} does not exist; '{local_branch_name}' tracks nothing until pushed"
-            ),
-            Err(e) => {
-                // Silently continuing would recreate the stray-remote-branch
-                // bug on the first push; leaving the worktree behind would
-                // make the retry find `feature-x-2` taken and move on to `-3`.
-                discard_incomplete_worktree(
+            let set = if created_branch {
+                git::set_upstream_to_origin_or_unset(
                     repo_path,
-                    &worktree_path,
-                    created_branch.then_some(local_branch_name.as_str()),
-                );
-                return Err(format!(
-                    "Could not set the upstream of '{local_branch_name}' to origin/{requested_branch}: {e}. \
-                     The worktree was removed; retry to create it again."
-                ));
+                    &local_branch_name,
+                    requested_branch,
+                )
+            } else {
+                git::set_upstream_to_origin(repo_path, &local_branch_name, requested_branch)
+            };
+            match set {
+                Ok(true) => {
+                    log::info!("Branch '{local_branch_name}' tracks origin/{requested_branch}")
+                }
+                Ok(false) => log::debug!(
+                    "origin/{requested_branch} does not exist; '{local_branch_name}' tracks nothing until pushed"
+                ),
+                Err(e) => {
+                    // Silently continuing would recreate the stray-remote-branch
+                    // bug on the first push; leaving the worktree behind would
+                    // make the retry find `feature-x-2` taken and move on to `-3`.
+                    discard_incomplete_worktree(
+                        repo_path,
+                        &worktree_path,
+                        created_branch.then_some(local_branch_name.as_str()),
+                    );
+                    return Err(format!(
+                        "Could not set the upstream of '{local_branch_name}' to origin/{requested_branch}: {e}. \
+                         The worktree was removed; retry to create it again."
+                    ));
+                }
             }
         }
     }
@@ -4210,6 +4242,95 @@ mod upstream_tracking_tests {
         assert_eq!(
             git::upstream_branch_name(path, "feature-x-2", "main"),
             "feature-x"
+        );
+        // The clone's fetch refspecs are as the user left them: nothing was
+        // added for `feature-x`, so a bare `git fetch origin` keeps working
+        // after the PR head is deleted.
+        assert_eq!(
+            git(
+                clone.path(),
+                &["config", "--get-all", "remote.origin.fetch"]
+            ),
+            "+refs/heads/main:refs/remotes/origin/main"
+        );
+        assert!(git::cli_run(clone.path(), &["fetch", "origin"]).is_ok());
+    }
+
+    /// A local branch the user already had, with no worktree, is only given a
+    /// worktree here: an upstream they configured — on another remote, say —
+    /// is theirs, even when origin has a branch of the same name. A branch
+    /// of theirs that tracks nothing is pointed at origin like any other.
+    #[test]
+    fn a_pre_existing_branch_keeps_the_upstream_the_user_gave_it() {
+        let (origin, clone, _) = clone_of_origin(false);
+        let origin_str = origin.path().to_str().unwrap();
+        git(clone.path(), &["remote", "add", "fork", origin_str]);
+        git(clone.path(), &["fetch", "fork"]);
+        git(
+            clone.path(),
+            &["branch", "--track", "feature-x", "fork/feature-x"],
+        );
+        git(
+            clone.path(),
+            &["push", "origin", "main:refs/heads/feature-y"],
+        );
+        git(clone.path(), &["fetch", "origin"]);
+        git(
+            clone.path(),
+            &["branch", "--no-track", "feature-y", "origin/feature-y"],
+        );
+        assert!(git::remote_branch_exists(clone.path(), "feature-x").unwrap());
+
+        let (store, project) = store_with_project();
+        let tracked = store::Branch::new(&project.id, "feature-x", "main");
+        store.create_branch(&tracked).unwrap();
+        let loose = store::Branch::new(&project.id, "feature-y", "main");
+        store.create_branch(&loose).unwrap();
+        let worktrees = TempDir::new("worktrees");
+
+        let path = create_and_link_worktree(
+            &store,
+            &tracked,
+            clone.path(),
+            &worktrees.path().join("feature-x"),
+        )
+        .unwrap();
+        assert_eq!(
+            git(Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feature-x"
+        );
+        assert_eq!(
+            git(clone.path(), &["config", "branch.feature-x.remote"]),
+            "fork"
+        );
+        assert_eq!(
+            merge_config(clone.path(), "feature-x"),
+            "refs/heads/feature-x"
+        );
+        // Staged itself ignores the fork upstream and pushes to origin by name.
+        assert_eq!(
+            git::upstream_branch_name(Path::new(&path), "feature-x", "main"),
+            "feature-x"
+        );
+
+        let path = create_and_link_worktree(
+            &store,
+            &loose,
+            clone.path(),
+            &worktrees.path().join("feature-y"),
+        )
+        .unwrap();
+        assert_eq!(
+            git(clone.path(), &["config", "branch.feature-y.remote"]),
+            "origin"
+        );
+        assert_eq!(
+            merge_config(clone.path(), "feature-y"),
+            "refs/heads/feature-y"
+        );
+        assert_eq!(
+            git::upstream_branch_name(Path::new(&path), "feature-y", "main"),
+            "feature-y"
         );
     }
 

@@ -1,7 +1,7 @@
 use super::cli::{self, EnvSource, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
 use super::status_parse::is_conflicted_status;
-use super::upstream::upstream_branch_name_from_symbolic_ref;
+use super::upstream::upstream_branch_name_from_config;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -706,25 +706,33 @@ pub fn compute_local_branch_git_state(
 ///
 /// Arguments:
 ///   $1 = repo_path
-///   $2 = base_refspec
-///   $3 = branch_refspec (empty if same as base)
-///   $4 = upstream_ref (empty to skip upstream resolution)
-///   $5 = base_ref
+///   $2 = base_refspec (`+refs/heads/<base>:refs/remotes/origin/<base>`)
+///   $3 = local branch name, whose upstream the script resolves itself
+///   $4 = short base branch name (never a push target)
+///   $5 = base_ref (`origin/<base>`)
 ///   $6 = "skip_fetch" to skip the fetch phase (cache fresh)
 ///   $7 = "uno" (no untracked enumeration) or "uall" (full enumeration)
+///   $8 = "upstream_missing" when the fetch cache already knows the branch
+///        is not on origin, so upstream state is skipped
 const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
     // --- Which branch on origin $3 pushes to ---
-    // The same decision as `upstream_branch_name_from_symbolic_ref`, which
-    // re-derives it from UP_SYMREF on the Rust side: an upstream on origin is
-    // the remote branch, unless it is the base ($4); anything else (none, or
-    // on another remote) means the branch's own name.
-    "up_symref=$(git rev-parse --symbolic-full-name \"$3@{upstream}\" 2>/dev/null || true)\n",
-    "printf 'UP_SYMREF=%s\\n' \"$up_symref\"\n",
-    "case \"$up_symref\" in\n",
-    "  refs/remotes/origin/?*) remote_branch=${up_symref#refs/remotes/origin/} ;;\n",
-    "  *) remote_branch=\"$3\" ;;\n",
-    "esac\n",
+    // The same decision as `upstream_branch_name_from_config`, which
+    // re-derives it from UP_REMOTE/UP_MERGE on the Rust side: an upstream on
+    // origin is the remote branch, unless it is the base ($4); anything else
+    // (none, or on another remote) means the branch's own name. The config
+    // is read directly rather than via `@{upstream}`, which git only
+    // resolves when a fetch refspec maps the branch.
+    "up_remote=$(git config --get \"branch.$3.remote\" 2>/dev/null || true)\n",
+    "up_merge=$(git config --get \"branch.$3.merge\" 2>/dev/null || true)\n",
+    "printf 'UP_REMOTE=%s\\n' \"$up_remote\"\n",
+    "printf 'UP_MERGE=%s\\n' \"$up_merge\"\n",
+    "remote_branch=\"$3\"\n",
+    "if [ \"$up_remote\" = origin ]; then\n",
+    "  case \"$up_merge\" in\n",
+    "    refs/heads/?*) remote_branch=${up_merge#refs/heads/} ;;\n",
+    "  esac\n",
+    "fi\n",
     "if [ \"$remote_branch\" = \"$4\" ]; then remote_branch=\"$3\"; fi\n",
     "up_ref=\"origin/$remote_branch\"\n",
     // The fetch cache already knows the upstream is missing: skip resolving it.
@@ -799,9 +807,9 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
 
 /// Parsed output from the combined git state script.
 struct BatchGitStateOutput {
-    /// `rev-parse --symbolic-full-name <branch>@{upstream}`, `None` when the
-    /// branch has no upstream configured.
-    upstream_symref: Option<String>,
+    /// `branch.<name>.remote` and `branch.<name>.merge`, `None` when unset.
+    upstream_remote: Option<String>,
+    upstream_merge: Option<String>,
     head_sha: Option<String>,
     branch: Option<String>,
     status_lines: String,
@@ -817,7 +825,8 @@ struct BatchGitStateOutput {
 }
 
 fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
-    let mut upstream_symref = None;
+    let mut upstream_remote = None;
+    let mut upstream_merge = None;
     let mut head_sha = None;
     let mut branch = None;
     let mut upstream_missing = false;
@@ -848,10 +857,15 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
             status_lines.push_str(line);
             continue;
         }
-        if let Some(val) = line.strip_prefix("UP_SYMREF=") {
+        if let Some(val) = line.strip_prefix("UP_REMOTE=") {
             let v = val.trim();
             if !v.is_empty() {
-                upstream_symref = Some(v.to_string());
+                upstream_remote = Some(v.to_string());
+            }
+        } else if let Some(val) = line.strip_prefix("UP_MERGE=") {
+            let v = val.trim();
+            if !v.is_empty() {
+                upstream_merge = Some(v.to_string());
             }
         } else if let Some(val) = line.strip_prefix("HEAD=") {
             let v = val.trim();
@@ -899,7 +913,8 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
     }
 
     BatchGitStateOutput {
-        upstream_symref,
+        upstream_remote,
+        upstream_merge,
         head_sha,
         branch,
         status_lines,
@@ -979,7 +994,7 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
 ///
 /// Unlike [`compute_branch_git_state`] there is no `remote_branch` argument:
 /// the script reads the upstream itself, and the Rust side re-derives the same
-/// answer from the `UP_SYMREF` line for the returned `upstream.ref`.
+/// answer from the `UP_REMOTE`/`UP_MERGE` lines for the returned `upstream.ref`.
 pub fn compute_branch_git_state_batched<F>(
     cache_key: &str,
     run_script: F,
@@ -1041,8 +1056,9 @@ where
     match raw {
         Ok(output) => {
             let parsed = parse_batch_git_state_output(&output);
-            let upstream_ref = origin_ref_for_branch(&upstream_branch_name_from_symbolic_ref(
-                parsed.upstream_symref.as_deref(),
+            let upstream_ref = origin_ref_for_branch(&upstream_branch_name_from_config(
+                parsed.upstream_remote.as_deref(),
+                parsed.upstream_merge.as_deref(),
                 expected_branch,
                 base_branch,
             ));
@@ -1271,7 +1287,7 @@ mod tests {
     /// round-trip: a de-duplicated `feature-x-2` tracking `origin/feature-x`
     /// is fetched and compared as `feature-x`; a branch tracking its base, or
     /// nothing, as its own name — the same answers as
-    /// `upstream_branch_name_from_symbolic_ref`.
+    /// `upstream_branch_name_from_config`.
     #[test]
     fn batched_state_reads_the_upstream_inside_the_script() {
         let seed = TempGitRepo::new();

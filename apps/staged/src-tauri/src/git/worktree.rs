@@ -518,6 +518,15 @@ pub fn branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
 /// Runs `git branch --set-upstream-to=origin/<remote_branch> <local_branch>`.
 /// Returns `Ok(true)` if the upstream was set, `Ok(false)` if the remote branch
 /// doesn't exist (so there's nothing to track).
+///
+/// Git refuses `--set-upstream-to` when no `remote.origin.fetch` refspec maps
+/// the branch — a `--single-branch` clone, for everything but its one branch
+/// — even though `origin/<remote_branch>` exists. The tracking entry is then
+/// written directly: `branch.<local>.remote` and `branch.<local>.merge`,
+/// exactly what `git push -u` writes in that clone, and what
+/// `upstream_branch_name` reads back. Nothing is added to the fetch refspecs:
+/// a configured non-glob refspec outlives the PR and makes a bare `git fetch
+/// origin` fail once the head is deleted.
 pub fn set_upstream_to_origin(
     repo: &Path,
     local_branch: &str,
@@ -527,11 +536,44 @@ pub fn set_upstream_to_origin(
         return Ok(false);
     }
     let upstream = format!("origin/{remote_branch}");
-    cli::run(
+    match cli::run(
         repo,
         &["branch", "--set-upstream-to", &upstream, local_branch],
-    )?;
-    Ok(true)
+    ) {
+        Ok(_) => Ok(true),
+        Err(GitError::CommandFailed(msg)) if msg.contains("is not a branch") => {
+            log::debug!(
+                "No fetch refspec maps origin/{remote_branch}; writing the tracking entry of \
+                 '{local_branch}' directly"
+            );
+            cli::run(
+                repo,
+                &["config", &format!("branch.{local_branch}.remote"), "origin"],
+            )?;
+            cli::run(
+                repo,
+                &[
+                    "config",
+                    &format!("branch.{local_branch}.merge"),
+                    &format!("refs/heads/{remote_branch}"),
+                ],
+            )?;
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `local_branch` has any upstream configured (`branch.<name>.merge`
+/// is set), on origin or elsewhere.
+pub fn has_upstream(repo: &Path, local_branch: &str) -> Result<bool, GitError> {
+    let key = format!("branch.{local_branch}.merge");
+    match cli::run_lite(repo, &["config", "--get", &key]) {
+        Ok(value) => Ok(!value.trim().is_empty()),
+        // `--get` exits 1 for an unset key.
+        Err(GitError::CommandFailed(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Make `local_branch` track `origin/<remote_branch>` when that remote branch
@@ -556,54 +598,16 @@ pub fn set_upstream_to_origin_or_unset(
     Ok(false)
 }
 
-/// Fetch `origin/<branch_name>` so that it can be tracked.
+/// Fetch `origin/<branch_name>` so that it can be tracked and compared.
 ///
-/// A clone whose `remote.origin.fetch` does not cover the branch (a
-/// `--single-branch` clone, say) gets the branch added to what origin
-/// fetches first, as `git remote set-branches --add` would: a bare `git fetch
-/// origin <branch>` there only updates `FETCH_HEAD`, and even with the
-/// remote-tracking ref in place git refuses `--set-upstream-to` and
-/// `<local>@{upstream}` for a branch no fetch refspec maps. A clone with the
-/// usual `refs/heads/*` refspec is left as it is.
+/// Fetches by explicit refspec, which updates the remote-tracking ref whether
+/// or not `remote.origin.fetch` covers the branch (a `--single-branch` clone's
+/// does not; a bare `git fetch origin <branch>` there only updates
+/// `FETCH_HEAD`). The configured refspecs are left alone.
 pub fn fetch_origin_branch(repo: &Path, branch_name: &str) -> Result<(), GitError> {
     let refspec = format!("+refs/heads/{branch_name}:refs/remotes/origin/{branch_name}");
-    if !origin_fetch_covers(repo, branch_name)? {
-        cli::run(repo, &["config", "--add", "remote.origin.fetch", &refspec])?;
-    }
     cli::run(repo, &["fetch", "origin", &refspec])?;
     Ok(())
-}
-
-/// Whether any `remote.origin.fetch` refspec fetches `refs/heads/<branch>`.
-fn origin_fetch_covers(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
-    let specs = cli::run(repo, &["config", "--get-all", "remote.origin.fetch"])?;
-    let full_ref = format!("refs/heads/{branch_name}");
-    Ok(specs
-        .lines()
-        .any(|spec| fetch_refspec_src_matches(spec, &full_ref)))
-}
-
-/// Whether the source side of fetch refspec `spec` matches `full_ref`: an
-/// exact name, or a single-`*` pattern such as `refs/heads/*`. Negative
-/// refspecs (`^…`) exclude rather than fetch and never match.
-fn fetch_refspec_src_matches(spec: &str, full_ref: &str) -> bool {
-    let spec = spec.trim();
-    if spec.starts_with('^') {
-        return false;
-    }
-    let src = spec
-        .strip_prefix('+')
-        .unwrap_or(spec)
-        .split_once(':')
-        .map_or(spec, |(src, _)| src);
-    match src.split_once('*') {
-        Some((prefix, suffix)) => {
-            full_ref.len() >= prefix.len() + suffix.len()
-                && full_ref.starts_with(prefix)
-                && full_ref.ends_with(suffix)
-        }
-        None => src == full_ref,
-    }
 }
 
 /// Check whether a remote tracking branch (`origin/<branch_name>`) exists.
@@ -952,37 +956,6 @@ pub fn has_unpushed_commits(worktree: &Path, remote_branch: &str) -> Result<bool
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn fetch_refspec_src_matching() {
-        use super::fetch_refspec_src_matches as matches;
-        let feature = "refs/heads/feature-x";
-        assert!(matches("+refs/heads/*:refs/remotes/origin/*", feature));
-        assert!(matches("refs/heads/*:refs/remotes/origin/*", feature));
-        assert!(matches(
-            "+refs/heads/feature-x:refs/remotes/origin/feature-x",
-            feature
-        ));
-        assert!(matches(
-            "+refs/heads/feature-*:refs/remotes/origin/feature-*",
-            feature
-        ));
-        // What `--single-branch -b main` leaves behind.
-        assert!(!matches(
-            "+refs/heads/main:refs/remotes/origin/main",
-            feature
-        ));
-        assert!(!matches(
-            "+refs/heads/feature-x-2:refs/remotes/origin/feature-x-2",
-            feature
-        ));
-        assert!(!matches(
-            "+refs/pull/*/head:refs/remotes/origin/pr/*",
-            feature
-        ));
-        assert!(!matches("^refs/heads/feature-x", feature));
-        assert!(!matches("", feature));
-    }
-
     use super::*;
 
     #[test]

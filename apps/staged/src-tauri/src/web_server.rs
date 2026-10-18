@@ -41,6 +41,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
+use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -248,8 +249,25 @@ pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Rout
         .with_state(state)
         .merge(media_routes)
         .fallback_service(ServeDir::new(dist_dir).append_index_html_on_directories(true))
-        .layer(CompressionLayer::new())
+        .layer(compression_layer())
         .layer(CorsLayer::permissive())
+}
+
+/// Response compression for every route. tower-http's default predicate
+/// already skips small bodies, `image/*`, gRPC, and event streams; video and
+/// PDF are added to that list because their bytes are already codec-compressed
+/// (a 100 MiB MP4 gains nothing from brotli) and because compressing a
+/// response drops its `Content-Length` and `Accept-Ranges`. `<video>`
+/// playback already sends `Accept-Encoding: identity` and range responses
+/// are exempt, so this matters for the paths that negotiate br/gzip: a HEAD,
+/// a `fetch()`, "open in new tab", and the download/share sheet, which
+/// otherwise lose progress and resumability.
+fn compression_layer() -> CompressionLayer<impl Predicate> {
+    CompressionLayer::new().compress_when(
+        DefaultPredicate::new()
+            .and(NotForContentType::new("video/"))
+            .and(NotForContentType::new("application/pdf")),
+    )
 }
 
 /// Request body cap for `/api/invoke/{command}`, the only route that takes a
@@ -343,16 +361,30 @@ async fn serve_media(
         Ok(value) => value,
         Err(status) => return status.into_response(),
     };
+    // A multi-range request gets the whole file as a 200 instead of a 416:
+    // Chrome's PDF viewer sends them, and browsers accept the full body.
     let mut service = tower_http::services::ServeFile::new_with_mime(
         path,
         &mime.parse().expect("validated MIME"),
-    );
+    )
+    .ignore_multi_range_requests(true);
     match service.try_call(request).await {
         Ok(response) => {
             let mut response = response.into_response();
             response.headers_mut().insert(
                 "X-Content-Type-Options",
                 axum::http::HeaderValue::from_static("nosniff"),
+            );
+            // Long-lived for the same reason as the tool-image route: an id
+            // is a fresh UUID per write and nothing rewrites bytes under an
+            // existing one (a cross-project move renames the file, keeping
+            // its contents), so the URL is a stable identity for the bytes.
+            // Applies to 200, 206, HEAD, and 304 alike, so a reopened note
+            // costs no conditional round trips and the browser stops
+            // revalidating a partially cached video before seeking.
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
             );
             // `mime_for_extension` has no SVG entry today; this keeps a future
             // one from reopening the top-level script hole.
@@ -4752,6 +4784,10 @@ mod media_tests {
                 assert_eq!(response.headers()["content-type"], "image/png");
                 assert_eq!(response.headers()["accept-ranges"], "bytes");
                 assert_eq!(
+                    response.headers()["cache-control"],
+                    "private, max-age=31536000, immutable"
+                );
+                assert_eq!(
                     axum::body::to_bytes(response.into_body(), 100)
                         .await
                         .unwrap()
@@ -4773,6 +4809,10 @@ mod media_tests {
             UNTRUSTED_MEDIA_CSP
         );
         assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(
             axum::body::to_bytes(response.into_body(), 100)
                 .await
                 .unwrap()
@@ -4788,6 +4828,84 @@ mod media_tests {
             router.oneshot(request).await.unwrap().status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// Downloads, "open in new tab", and `fetch()` negotiate br/gzip, unlike
+    /// `<video>` playback, and a compressed body loses `Content-Length` and
+    /// `Accept-Ranges`. Videos must therefore bypass the compression layer
+    /// that the rest of the app goes through, and a multi-range request
+    /// gets the whole file rather than a 416.
+    #[tokio::test]
+    async fn video_media_is_served_uncompressed_and_whole_for_multi_range() {
+        // Large enough that the size predicate alone would not exempt it.
+        let mp4: Vec<u8> = [&b"\0\0\0\x18ftypisom\0\0\0\0"[..], &[0u8; 100]].concat();
+        let fixture = Fixture::new();
+        std::fs::write(fixture.dir.path().join("clip.mp4"), &mp4).unwrap();
+        let outcome = fixture.ingest("", "![a](clip.mp4)");
+        let id = outcome.kept_ids.iter().next().unwrap();
+        let sessions = Arc::new(Mutex::new(HashSet::new()));
+        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions)
+            .route("/text", get(|| async { "x".repeat(100) }))
+            .layer(compression_layer());
+        let request = |uri: &str, headers: &[(&str, &str)]| {
+            let mut request = axum::http::Request::builder()
+                .uri(uri)
+                .header("Authorization", "Bearer bearer-token")
+                .header("Accept-Encoding", "br, gzip");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request.body(axum::body::Body::empty()).unwrap()
+        };
+        // Control: the layer is active for everything else.
+        let response = router.clone().oneshot(request("/text", &[])).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-encoding"], "br");
+
+        let uri = format!("/api/media/{id}.mp4");
+        let response = router.clone().oneshot(request(&uri, &[])).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "video/mp4");
+        assert!(response.headers().get("content-encoding").is_none());
+        assert_eq!(
+            response.headers()["content-length"],
+            mp4.len().to_string().as_str()
+        );
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            &mp4[..]
+        );
+
+        let response = router
+            .clone()
+            .oneshot(request(&uri, &[("Range", "bytes=0-1,8-11")]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("content-range").is_none());
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .as_ref(),
+            &mp4[..]
+        );
+
+        let response = router
+            .oneshot(request(&uri, &[("Range", "bytes=0-1")]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-range"], "bytes 0-1/116");
+        assert_eq!(response.headers()["content-length"], "2");
     }
 
     #[tokio::test]

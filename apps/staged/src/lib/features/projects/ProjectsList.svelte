@@ -26,6 +26,7 @@
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
+  import SearchField from '../../shared/SearchField.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { Button } from '$lib/components/ui/button';
 
@@ -39,6 +40,7 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
+  import { visibleProjects, withStickyProject } from './projectSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -47,7 +49,9 @@
   // Data comes from the shared projectsData store — returning to the landing
   // page paints instantly from memory while the store revalidates in the
   // background. Filters live in the shared projectFiltersStore so the sidebar
-  // sees the same selection; scroll restore and modal state stay view-local.
+  // sees the same selection; scroll restore and the search query are
+  // view-local but persist across visits via projectsListViewState; modal
+  // state stays in the component.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
@@ -60,6 +64,7 @@
 
   let showNewProjectModal = $state(false);
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
+  let searchInputEl = $state<HTMLInputElement | null>(null);
   let isCommandKeyHeld = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
   let restoreInProgress = false;
@@ -86,15 +91,30 @@
   // would paint the stale card once under the new filters before removing it.
   const filtersAtMount = projectFiltersStore.activeFilters;
 
-  let filteredProjects = $derived.by(() => {
-    const filtered = projectFiltersStore.filteredProjects;
-    const sticky = projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null;
-    if (!sticky || filtered.some((p) => p.id === sticky)) return filtered;
-    // Rebuilt from the full list rather than appended so the sticky card keeps
-    // its place in the grid — the position the scroll restore captured.
-    const matched = new Set(filtered.map((p) => p.id));
-    return projects.filter((p) => matched.has(p.id) || p.id === sticky);
-  });
+  let effectiveStickyId = $derived(
+    projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null
+  );
+
+  // Chips → sticky card → search; see visibleProjects for the composition.
+  let filteredProjects = $derived(
+    visibleProjects(
+      projects,
+      projectFiltersStore.filteredProjects,
+      effectiveStickyId,
+      projectsListViewState.searchQuery
+    )
+  );
+
+  let searchActive = $derived(projectsListViewState.searchQuery.trim().length > 0);
+  // Decides the empty-state copy: blame the query only when the grid would
+  // have shown something without it. Judged against the sticky-adjusted base,
+  // not the raw chip result, so a sticky card the chips excluded but the query
+  // hid is attributed to the query.
+  let searchExcludedEverything = $derived(
+    searchActive &&
+      withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId).length >
+        0
+  );
 
   function trackProjectCard(node: HTMLElement, projectId: string) {
     let currentProjectId = projectId;
@@ -176,6 +196,19 @@
       finishProjectsListRestore();
       return;
     }
+    // The target is still a project but has been filtered out of the visible
+    // list — by the persisted query (renamed while away, say), or by a chip
+    // change between mount and ready, which lifts the sticky exception. Either
+    // way the list no longer resembles the one scrollTop was captured
+    // against, so don't restore.
+    if (
+      targetProjectId &&
+      projects.some((p) => p.id === targetProjectId) &&
+      !filteredProjects.some((p) => p.id === targetProjectId)
+    ) {
+      finishProjectsListRestore();
+      return;
+    }
 
     void restoreProjectsListPosition();
   });
@@ -243,7 +276,12 @@
   function handleKeydown(e: KeyboardEvent) {
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
-    if (isInput) return;
+    // Typing in an input must not trigger shortcuts, but the natural flow for
+    // the search box is type a query → ⌘1 to open the first hit, so modified
+    // keys from it fall through: the ⌘ press itself shows the overlay and the
+    // digit opens the card. Unmodified digits still reach the input.
+    const fromSearchWithModifier = target === searchInputEl && (e.metaKey || e.ctrlKey);
+    if (isInput && !fromSearchWithModifier) return;
 
     // Track command key state
     if (e.metaKey || e.ctrlKey) {
@@ -353,10 +391,37 @@
           </div>
         {/if}
 
+        <div class="search-row">
+          <SearchField
+            bind:ref={searchInputEl}
+            bind:value={projectsListViewState.searchQuery}
+            placeholder="Search projects"
+            clearable
+          />
+        </div>
+
         <ProjectFilterChips />
-        {#if filteredProjects.length === 0}
-          <div class="state">No projects match filters</div>
-        {/if}
+        <!-- Always in the DOM so the live region exists before its text
+             changes; screen readers only announce updates to a region they
+             have already seen. -->
+        <div aria-live="polite">
+          {#if filteredProjects.length === 0}
+            {#if searchExcludedEverything}
+              <div class="state">
+                No projects match "{projectsListViewState.searchQuery.trim()}"
+              </div>
+            {:else}
+              <div class="state">No projects match filters</div>
+            {/if}
+          {:else if searchActive}
+            <!-- Announce the grid narrowing as the user types, not just when
+                 it empties. Search-only so ordinary loads stay quiet. -->
+            <span class="sr-only">
+              {filteredProjects.length}
+              {filteredProjects.length === 1 ? 'project' : 'projects'}
+            </span>
+          {/if}
+        </div>
         <div class="projects-grid">
           {#each filteredProjects as project, index (project.id)}
             {@const status = getProjectStatus(
@@ -607,6 +672,10 @@
   .repos-scroll-row::-webkit-scrollbar-thumb {
     background: var(--border-muted);
     border-radius: 2px;
+  }
+
+  .search-row {
+    margin-bottom: 14px;
   }
 
   .projects-grid {

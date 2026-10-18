@@ -8,12 +8,11 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import Search from '@lucide/svelte/icons/search';
   import type { Project, RepoHomeItem } from '../../types';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import RepoCard from './RepoCard.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
-  import { Input } from '$lib/components/ui/input';
+  import SearchField from '../../shared/SearchField.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import { selectProject } from '../layout/navigation.svelte';
@@ -79,16 +78,12 @@
   <div class="main-panel">
     <div class="content">
       <div class="search-row">
-        <div class="search-input-wrapper">
-          <Search size={14} />
-          <Input
-            bind:ref={searchInputEl}
-            type="text"
-            placeholder="Filter repos..."
-            bind:value={searchQuery}
-            class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
-          />
-        </div>
+        <SearchField
+          bind:ref={searchInputEl}
+          bind:value={searchQuery}
+          placeholder="Filter repos..."
+          label="Filter repos"
+        />
       </div>
 
       {#if loading}
@@ -157,22 +152,6 @@
 
   .search-row {
     margin-bottom: 16px;
-  }
-
-  .search-input-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: var(--bg-elevated);
-    color: var(--text-muted);
-    transition: border-color 0.15s ease;
-  }
-
-  .search-input-wrapper:focus-within {
-    border-color: var(--border-emphasis);
   }
 
   .state {

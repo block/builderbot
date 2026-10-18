@@ -1435,6 +1435,14 @@ pub(crate) fn create_and_link_worktree(
                         "Branch '{}' already exists after create attempt; retrying with existing branch",
                         local_branch_name
                     );
+                    // This arm is only reached for a name that did not exist
+                    // when this call started (the `branch_exists` check above
+                    // was false, or `unique_branch_name` had just found it
+                    // free), so the branch is the one `worktree add -b` left
+                    // behind when it failed after creating it. It is Staged's
+                    // to point at origin/<requested> and to delete on a later
+                    // failure, the same as when the first attempt succeeds.
+                    created_branch = true;
                     create_worktree_for_existing_branch_with_fallback(
                         repo_path,
                         &local_branch_name,
@@ -3012,15 +3020,8 @@ pub(crate) fn rename_local_branch(
         .get_workdir_for_branch(&branch.id)
         .map_err(|e| e.to_string())?
     {
-        let mut command = std::process::Command::new("git");
-        command.args(["-C", &wd.path, "branch", "-m", new_name]);
-        git::strip_git_env(&mut command);
-        let status = command
-            .status()
-            .map_err(|e| format!("Failed to run git rename: {e}"))?;
-        if !status.success() {
-            return Err("Failed to rename local git branch".to_string());
-        }
+        git::cli_run(Path::new(&wd.path), &["branch", "-m", new_name])
+            .map_err(|e| format!("Failed to rename local git branch: {e}"))?;
     }
 
     record_branch_rename(store, branch, new_name)

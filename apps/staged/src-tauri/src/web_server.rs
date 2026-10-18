@@ -1688,9 +1688,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let branch_name: String = arg(&args, "branchName")?;
-            store
-                .update_branch_name(&branch_id, &branch_name)
-                .map_err(|e| e.to_string())?;
+            let branch = store
+                .get_branch(&branch_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+            // The web server never touches git, so the checkout's upstream —
+            // where the branch pushes — is untouched by construction; only the
+            // stored name (and the project-repo row) moves.
+            crate::branches::record_branch_rename(&store, &branch, &branch_name)?;
             Ok(Value::Null)
         }
         "move_branch" => {
@@ -4450,6 +4455,51 @@ mod tests {
                 "the web `poll_session` arm must contain `{needle}`: {arm}"
             );
         }
+    }
+
+    /// The web rename arm has no git to run, so the checkout's upstream —
+    /// and with it where the branch pushes — is untouched by construction.
+    /// What it must still do is record the name through the shared helper,
+    /// which also renames the project-repo row the old bare
+    /// `update_branch_name` write skipped. Source-level like the other arm
+    /// checks (see `dispatch_arm_body`).
+    #[test]
+    fn web_rename_branch_records_the_name_through_the_shared_helper() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "rename_branch");
+        assert!(
+            arm.contains("record_branch_rename("),
+            "the web `rename_branch` arm must go through `record_branch_rename`: {arm}"
+        );
+        assert!(
+            !arm.contains("update_branch_name("),
+            "the web `rename_branch` arm must not bypass `record_branch_rename`: {arm}"
+        );
+    }
+
+    /// The store sequence the web arm runs: the branch and the project-repo
+    /// row the old arm never updated are renamed together.
+    #[test]
+    fn web_rename_sequence_renames_the_branch_and_its_repo_row() {
+        use crate::branches::record_branch_rename;
+        use crate::store::{self, Store};
+        use std::sync::Arc;
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("acme/widgets");
+        store.create_project(&project).unwrap();
+        let repo = store::ProjectRepo::new(&project.id, "acme/widgets", "feature-x", None);
+        store.create_project_repo(&repo).unwrap();
+        let branch = store::Branch::new(&project.id, "feature-x", "main")
+            .with_pr(7)
+            .with_project_repo(&repo.id);
+        store.create_branch(&branch).unwrap();
+
+        record_branch_rename(&store, &branch, "feature-y").unwrap();
+
+        let stored = store.get_branch(&branch.id).unwrap().unwrap();
+        assert_eq!(stored.branch_name, "feature-y");
+        let repo = store.get_project_repo(&repo.id).unwrap().unwrap();
+        assert_eq!(repo.branch_name, "feature-y");
     }
 
     /// The source of one `dispatch` arm, from its `"command" =>` pattern to the

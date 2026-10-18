@@ -12,6 +12,7 @@ mod state;
 mod state_tests;
 mod status_parse;
 mod types;
+mod upstream;
 mod worktree;
 
 pub(crate) use cli::prewarm_shell_env;
@@ -29,7 +30,7 @@ pub use github::{
     invalidate_cache as invalidate_pr_cache, list_branches_for_repo, list_github_orgs,
     list_github_repos, list_issues, list_issues_for_repo, list_prs_for_head_branch,
     list_pull_requests, list_pull_requests_for_repo, list_repo_directories, list_user_repos,
-    post_single_comment_to_github, prune_remote_for_repo, push_branch, resolve_default_branch,
+    post_single_comment_to_github, prune_remote_for_repo, resolve_default_branch,
     search_github_repos, search_issues, search_pull_requests, update_clone_to_remote_head,
     update_comment_on_github, update_pull_request, validate_subpath_in_repo, ChecksSummary,
     CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, HeadBranchPr,
@@ -48,6 +49,7 @@ pub use state::{
     WorktreeGitState, WorktreeStatusScope,
 };
 pub use types::*;
+pub use upstream::{upstream_branch_name, upstream_branch_name_with};
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,
@@ -56,7 +58,7 @@ pub use worktree::{
     has_unpushed_commits, list_worktree_change_paths, list_worktrees, move_worktree,
     parse_branch_commit_line, parse_worktree_status_paths, project_worktree_path_for,
     project_worktree_root_for, remote_branch_exists, remove_worktree, reset_to_commit,
-    set_upstream_to_origin, switch_branch, update_branch_from_pr, worktree_path_for,
-    BranchCommitFields, CommitInfo, UpdateFromPrResult, WorktreeChangePaths,
+    set_upstream_to_origin, set_upstream_to_origin_or_unset, switch_branch, update_branch_from_pr,
+    worktree_path_for, BranchCommitFields, CommitInfo, UpdateFromPrResult, WorktreeChangePaths,
     BRANCH_COMMIT_LOG_FORMAT,
 };

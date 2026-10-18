@@ -13,10 +13,14 @@
   interface Props {
     open: boolean;
     branchName: string;
+    /** The `origin/…` ref this branch keeps pushing to after the rename —
+     *  set for PR branches and de-duplicated checkouts, where renaming the
+     *  local branch must not move the push target. The dialog spells it out. */
+    remoteRef?: string | null;
     onRename?: (branchName: string) => void | Promise<void>;
   }
 
-  let { open = $bindable(false), branchName, onRename }: Props = $props();
+  let { open = $bindable(false), branchName, remoteRef = null, onRename }: Props = $props();
 
   const inputId = `rename-branch-${++inputCounter}`;
   let draft = $state('');
@@ -95,6 +99,12 @@
         />
       </div>
 
+      {#if remoteRef}
+        <p class="rename-hint">
+          Only the local branch is renamed; it keeps pushing to {remoteRef}.
+        </p>
+      {/if}
+
       {#if error}
         <p class="rename-error" role="alert">{error}</p>
       {/if}
@@ -127,6 +137,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .rename-hint {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-faint);
   }
 
   .rename-error {

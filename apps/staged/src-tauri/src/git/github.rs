@@ -212,6 +212,30 @@ fn find_gh() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Normalised messages for the ways `gh` fails before it can answer anything
+/// at all. Every `gh` runner below maps the raw failure onto one of these so
+/// callers can tell "gh is unusable right now" from "gh answered no".
+pub const GH_NOT_FOUND: &str = "GitHub CLI not found. Install with: brew install gh";
+pub const GH_NOT_AUTHENTICATED: &str = "Not authenticated with GitHub CLI. Run: gh auth login";
+pub const GH_TIMED_OUT: &str = "gh command timed out after 60s";
+
+/// Whether `err` means `gh` itself is unusable (missing, logged out, failed
+/// to spawn, or timed out) rather than a verdict about the thing asked for.
+/// A run that fans out many `gh` calls can stop after one of these; any other
+/// error (a deleted PR, a repo the user can't see) is specific to that call.
+pub fn is_gh_unavailable_error(err: &GitError) -> bool {
+    match err {
+        GitError::CommandFailed(msg) => {
+            msg == GH_NOT_FOUND
+                || msg == GH_NOT_AUTHENTICATED
+                || msg == GH_TIMED_OUT
+                || msg.starts_with("Failed to run gh:")
+                || msg.starts_with("Failed to wait for gh:")
+        }
+        _ => false,
+    }
+}
+
 /// Spawn a gh command, drain its pipes concurrently, and enforce a 60s timeout.
 fn spawn_gh_with_timeout(cmd: &mut Command) -> Result<std::process::Output, GitError> {
     let mut child = cmd
@@ -254,9 +278,7 @@ fn spawn_gh_with_timeout(cmd: &mut Command) -> Result<std::process::Output, GitE
                     if let Some(t) = stderr_thread {
                         let _ = t.join();
                     }
-                    return Err(GitError::CommandFailed(
-                        "gh command timed out after 60s".to_string(),
-                    ));
+                    return Err(GitError::CommandFailed(GH_TIMED_OUT.to_string()));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -283,9 +305,7 @@ fn check_gh_output(output: std::process::Output) -> Result<String, GitError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-            return Err(GitError::CommandFailed(
-                "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-            ));
+            return Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()));
         }
         return Err(GitError::CommandFailed(stderr.into_owned()));
     }
@@ -295,9 +315,7 @@ fn check_gh_output(output: std::process::Output) -> Result<String, GitError> {
 
 /// Run a gh command in the context of a local repo directory
 fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
+    let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
     let output = spawn_gh_with_timeout(Command::new(&gh_path).current_dir(repo).args(args))?;
     check_gh_output(output)
@@ -305,9 +323,7 @@ fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 
 /// Run a gh command without needing a local directory (uses `-R owner/repo` or global commands).
 fn run_gh_global(args: &[&str]) -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
+    let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
     let output = spawn_gh_with_timeout(Command::new(&gh_path).args(args))?;
     check_gh_output(output)
@@ -324,7 +340,7 @@ pub fn check_github_auth() -> GitHubAuthStatus {
         None => {
             return GitHubAuthStatus {
                 authenticated: false,
-                setup_hint: Some("GitHub CLI not found. Install with: brew install gh".to_string()),
+                setup_hint: Some(GH_NOT_FOUND.to_string()),
             }
         }
     };
@@ -956,11 +972,7 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     // fall back to plain HTTPS git clone.
     let clone_str = clone_path.to_string_lossy().to_string();
     let gh_clone_result = (|| -> Result<(), GitError> {
-        let gh_path = find_gh().ok_or_else(|| {
-            GitError::CommandFailed(
-                "GitHub CLI not found. Install with: brew install gh".to_string(),
-            )
-        })?;
+        let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
         let output = Command::new(&gh_path)
             .env("GH_GIT_PROTOCOL", "https")
@@ -971,9 +983,7 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-                return Err(GitError::CommandFailed(
-                    "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-                ));
+                return Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()));
             }
             return Err(GitError::CommandFailed(stderr.into_owned()));
         }
@@ -1114,11 +1124,7 @@ where
     // If this fails (e.g. gh is set to SSH protocol and org requires SSH certs),
     // fall back to plain HTTPS git clone.
     let gh_clone_result = (|| -> Result<(), GitError> {
-        let gh_path = find_gh().ok_or_else(|| {
-            GitError::CommandFailed(
-                "GitHub CLI not found. Install with: brew install gh".to_string(),
-            )
-        })?;
+        let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
         let gh_str = gh_path.to_string_lossy().to_string();
         let result = spawn_streaming(
@@ -1132,9 +1138,7 @@ where
         // falling through to the generic HTTPS fallback.
         if let Err(GitError::CommandFailed(ref stderr)) = result {
             if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-                return Err(GitError::CommandFailed(
-                    "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-                ));
+                return Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()));
             }
         }
 
@@ -1449,9 +1453,7 @@ use crate::store::Comment;
 
 /// Get the GitHub token from `gh auth token`.
 fn get_github_token() -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
+    let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
     let output = Command::new(&gh_path)
         .args(["auth", "token"])
@@ -1470,9 +1472,7 @@ fn get_github_token() -> Result<String, GitError> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-            Err(GitError::CommandFailed(
-                "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-            ))
+            Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()))
         } else {
             Err(GitError::CommandFailed(format!(
                 "GitHub CLI error: {}",
@@ -2699,20 +2699,6 @@ fn fetch_pr_url_from_repo(github_repo: &str, pr_num_str: &str) -> Result<String,
     let parsed: PrUrl = serde_json::from_str(&output)
         .map_err(|e| GitError::CommandFailed(format!("Failed to parse PR URL: {e}")))?;
     Ok(parsed.url)
-}
-
-/// Push a branch to the remote.
-/// If force is true, uses --force-with-lease for safer force pushing.
-pub fn push_branch(repo: &Path, branch: &str, force: bool) -> Result<(), GitError> {
-    use super::cli;
-
-    let mut args = vec!["push", "-u", "origin", branch];
-    if force {
-        args.push("--force-with-lease");
-    }
-
-    cli::run(repo, &args)?;
-    Ok(())
 }
 
 /// Create a new pull request.

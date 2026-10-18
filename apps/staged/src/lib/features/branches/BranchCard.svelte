@@ -69,11 +69,14 @@
     classifyPolledSession,
     createPollFailureTracker,
     createQueuedSessionCanceller,
+    divergedPushTargetRef,
     fileNameFromPath,
     formatBaseBranch,
     isGitActionInFlight,
-    isMaybeTextFile,
     isImageAttachmentFile,
+    isMaybeTextFile,
+    pushTargetRef,
+    renamePushTargetRef,
   } from './branchCardHelpers';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
@@ -1206,7 +1209,11 @@
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
 
-  let resetToOriginTarget = $derived(`origin/${branch.branchName}`);
+  // The branch on origin this checkout pushes to, as the backend resolved it
+  // from git's upstream tracking (`gitState.upstream.ref`).
+  let resetToOriginTarget = $derived(pushTargetRef(branch, timeline?.gitState));
+  let remoteRef = $derived(divergedPushTargetRef(branch, timeline?.gitState));
+  let renameRemoteRef = $derived(renamePushTargetRef(branch, timeline?.gitState));
   let resetToOriginDescription = $derived.by(() => {
     const state = timeline?.gitState;
     if (state?.upstream.relation === 'diverged') {
@@ -1885,6 +1892,7 @@
       <BranchCardHeaderInfo
         branchId={branch.id}
         branchName={branch.branchName}
+        {remoteRef}
         {repoLabel}
         baseBranch={formatBaseBranch(branch.baseBranch)}
       />
@@ -1932,6 +1940,7 @@
       <BranchCardHeaderInfo
         branchId={branch.id}
         branchName={branch.branchName}
+        {remoteRef}
         {repoLabel}
         baseBranch={isRemote
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
@@ -1958,6 +1967,7 @@
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}
+          {renameRemoteRef}
           {onMove}
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
@@ -2276,8 +2286,8 @@
       <AlertDialog.Header>
         <AlertDialog.Title>Force Push</AlertDialog.Title>
         <AlertDialog.Description>
-          The remote branch has commits that would be lost. Do you want to force push? This will
-          overwrite the remote branch with your local version.
+          {resetToOriginTarget} has commits that would be lost. Do you want to force push? This will overwrite
+          {resetToOriginTarget} with your local version.
         </AlertDialog.Description>
       </AlertDialog.Header>
       <AlertDialog.Footer>

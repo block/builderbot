@@ -1,6 +1,6 @@
 import type { PullState } from '../../stores/pullState.svelte';
 import type { PushState } from '../../stores/pushState.svelte';
-import type { PipelineExecution } from '../../types';
+import type { Branch, BranchGitState, PipelineExecution } from '../../types';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 // Stored through the image attachment store too, as a PDF.
@@ -140,6 +140,61 @@ export function getActionTypeLabel(actionType: string): string {
     default:
       return 'Action';
   }
+}
+
+/** The slice of a branch's git state the push-target helpers read; absent
+ *  until the timeline has loaded. */
+type UpstreamGitState = Pick<BranchGitState, 'upstream'> | null | undefined;
+
+/**
+ * The branch on origin this branch pushes to, pulls from and is compared
+ * against, as an `origin/…` ref. The backend resolves it from the checkout's
+ * upstream tracking and reports it as `gitState.upstream.ref`; until the git
+ * state has loaded, `origin/<local name>` is the best guess.
+ */
+export function pushTargetRef(
+  branch: Pick<Branch, 'branchName'>,
+  gitState: UpstreamGitState
+): string {
+  return gitState?.upstream.ref ?? `origin/${branch.branchName}`;
+}
+
+/** `pushTargetRef` without the `origin/` prefix: the head branch GitHub
+ *  knows this branch by. */
+export function pushTargetBranchName(
+  branch: Pick<Branch, 'branchName'>,
+  gitState: UpstreamGitState
+): string {
+  return formatBaseBranch(pushTargetRef(branch, gitState));
+}
+
+/**
+ * The push target, only when it is not simply `origin/<local name>` — a PR
+ * import whose local name had to be de-duplicated (`feature-x-2` tracking
+ * `origin/feature-x`), or a renamed branch that kept its upstream. `null`
+ * otherwise, so callers can show the target only when it would surprise.
+ */
+export function divergedPushTargetRef(
+  branch: Pick<Branch, 'branchName'>,
+  gitState: UpstreamGitState
+): string | null {
+  const ref = pushTargetRef(branch, gitState);
+  return ref === `origin/${branch.branchName}` ? null : ref;
+}
+
+/**
+ * The push target to spell out in the rename dialog, or `null` when a
+ * rename simply moves it. `git branch -m` carries the checkout's upstream
+ * along, so a PR branch keeps pushing to the branch the PR was opened from
+ * and an already-diverged branch keeps its target; either way the user
+ * should see that only the local name changes.
+ */
+export function renamePushTargetRef(
+  branch: Pick<Branch, 'branchName' | 'prNumber'>,
+  gitState: UpstreamGitState
+): string | null {
+  if (branch.prNumber != null) return pushTargetRef(branch, gitState);
+  return divergedPushTargetRef(branch, gitState);
 }
 
 export function formatBaseBranch(baseBranch: string): string {

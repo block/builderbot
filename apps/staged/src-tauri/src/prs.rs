@@ -237,10 +237,15 @@ fn base_branch_name(branch: &store::Branch) -> &str {
 /// Determine the remote ref to rebase onto based on the `target` parameter.
 ///
 /// - `None` or `Some("base")` → base branch name (e.g. `main`)
-/// - `Some("origin")` → the branch's own name (e.g. `feature-xyz`)
-fn rebase_ref_for_target(branch: &store::Branch, target: Option<&str>) -> String {
+/// - `Some("origin")` → `remote_branch`, the branch on origin the checkout
+///   pushes to (the PR head rather than the local name when the two differ)
+fn rebase_ref_for_target(
+    branch: &store::Branch,
+    remote_branch: &str,
+    target: Option<&str>,
+) -> String {
     match target {
-        Some("origin") => branch.branch_name.clone(),
+        Some("origin") => remote_branch.to_string(),
         _ => base_branch_name(branch).to_string(),
     }
 }
@@ -320,6 +325,12 @@ fn git_fetch_with_fallback(refspec: &str) -> String {
     )
 }
 
+/// `local:remote` refspec for `git push`. Spelled out even when the names
+/// match so every push site reads the same way.
+fn push_refspec(local_branch: &str, remote_branch: &str) -> String {
+    format!("{local_branch}:{remote_branch}")
+}
+
 fn git_push_with_fallback(args: &str) -> String {
     format!("if ! git push {args}; then git -c '{HTTPS_FALLBACK_CONFIG}' push {args}; fi")
 }
@@ -333,8 +344,8 @@ fn git_push_with_fallback(args: &str) -> String {
 ///
 /// `rebase_target` is the remote ref the rebase will actually run against. It
 /// equals `base_branch` for the default "rebase onto base" action and equals
-/// the branch's own name for "rebase onto origin" (used when local has
-/// diverged from `origin/{branch}`). Only the rebase variant consults this
+/// the branch's own remote branch for "rebase onto origin" (used when local
+/// has diverged from `origin/{branch}`). Only the rebase variant consults this
 /// value; squash always operates against the base branch.
 ///
 /// Every rebase variant runs [`git::rebase_preserving_merge_edits_command`]
@@ -453,18 +464,31 @@ Here is the context from the prior steps:
 /// Rebuilt from the persisted `push_force` flag on dequeue rather than replayed
 /// from the queued pipeline, so a queued push always pushes the branch's current
 /// name with the command the user asked for.
-fn build_push_pipeline_steps(branch_name: &str, force: bool) -> Vec<PipelineStep> {
+///
+/// The refspec is always explicit (`local:remote`) so a de-duplicated local
+/// name (`feature-x-2`) still lands on the PR's branch (`feature-x`) instead of
+/// creating a new remote branch; `-u` then tracks `origin/{remote}`.
+pub(crate) fn build_push_pipeline_steps(
+    local_branch: &str,
+    remote_branch: &str,
+    force: bool,
+) -> Vec<PipelineStep> {
+    let refspec = push_refspec(local_branch, remote_branch);
     let push_command = if force {
-        git_push_with_fallback(&format!("-u origin {branch_name} --force-with-lease"))
+        git_push_with_fallback(&format!("-u origin {refspec} --force-with-lease"))
     } else {
-        git_push_with_fallback(&format!("-u origin {branch_name}"))
+        git_push_with_fallback(&format!("-u origin {refspec}"))
     };
 
     let on_failure = if force {
+        // Spell the refspec out: with the upstream on `origin/{remote}` a
+        // bare `git push` is refused under `push.default=simple` when the
+        // names differ, and the obvious fallback `git push origin {local}`
+        // would recreate the stray remote branch the refspec avoids.
         FailureStrategy::HandoffToAi {
-            prompt_template:
-                "The force push failed. Diagnose and fix the issue, then retry the force push.\n\n{step_outputs}"
-                    .to_string(),
+            prompt_template: format!(
+                "The force push failed. Diagnose and fix the issue, then retry the force push with exactly `git push -u origin {refspec} --force-with-lease`. Do not push `{local_branch}` under any other remote name.\n\n{{step_outputs}}"
+            ),
         }
     } else {
         // For normal push, abort on non-fast-forward so the frontend can show
@@ -494,17 +518,18 @@ fn build_push_pipeline_steps(branch_name: &str, force: bool) -> Vec<PipelineStep
 /// agent should pick. `session_runner` turns that abort into a session error the
 /// frontend toasts, since a drained pull has no one watching it.
 ///
-/// Rebuilt from the branch's current name on dequeue, like the push steps.
-fn build_pull_pipeline_steps(branch_name: &str) -> Vec<PipelineStep> {
+/// Rebuilt from the branch's current remote branch on dequeue, like the push
+/// steps.
+fn build_pull_pipeline_steps(remote_branch: &str) -> Vec<PipelineStep> {
     vec![
         PipelineStep::Command {
-            label: format!("Fetch origin/{branch_name}"),
-            command: git_fetch_with_fallback(branch_name),
+            label: format!("Fetch origin/{remote_branch}"),
+            command: git_fetch_with_fallback(remote_branch),
             on_failure: FailureStrategy::Abort { marker: None },
         },
         PipelineStep::Command {
-            label: format!("Fast-forward to origin/{branch_name}"),
-            command: format!("git merge --ff-only origin/{branch_name}"),
+            label: format!("Fast-forward to origin/{remote_branch}"),
+            command: format!("git merge --ff-only origin/{remote_branch}"),
             on_failure: FailureStrategy::Abort { marker: None },
         },
     ]
@@ -739,7 +764,8 @@ fn queue_commit_pipeline_locked(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
     let base_branch = base_branch_name(&branch);
-    let rebase_ref = rebase_ref_for_target(&branch, target);
+    let remote_branch = crate::branches::resolve_remote_branch_sync(store, &branch);
+    let rebase_ref = rebase_ref_for_target(&branch, &remote_branch, target);
     let rebase_target = persisted_rebase_target(target, &rebase_ref);
 
     if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
@@ -798,7 +824,8 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch).to_string();
-    let rebase_ref = rebase_ref_for_target(&ctx.branch, target.as_deref());
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
+    let rebase_ref = rebase_ref_for_target(&ctx.branch, &remote_branch, target.as_deref());
     let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref)?;
     let rebase_target = persisted_rebase_target(target.as_deref(), &rebase_ref);
 
@@ -1071,7 +1098,10 @@ fn insert_queued_push_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    let steps = build_push_pipeline_steps(&branch.branch_name, force);
+    // Rebuilt with a full resolution on dequeue; the local-only lookup keeps
+    // this queue path from depending on a running workspace.
+    let remote_branch = crate::branches::resolve_remote_branch_sync(store, &branch);
+    let steps = build_push_pipeline_steps(&branch.branch_name, &remote_branch, force);
     let pipeline = PipelineExecution::from_steps(&steps)
         .with_kind(PipelineKind::Push)
         .with_push_force(force)
@@ -1133,12 +1163,13 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
     let depends_on = queued_pipeline.depends_on_session_id.clone();
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
     let (steps, session_type) = match kind {
         PipelineKind::Push => (
-            build_push_pipeline_steps(&ctx.branch.branch_name, force),
+            build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, force),
             "push",
         ),
-        PipelineKind::Pull => (build_pull_pipeline_steps(&ctx.branch.branch_name), "pull"),
+        PipelineKind::Pull => (build_pull_pipeline_steps(&remote_branch), "pull"),
         PipelineKind::Rebase | PipelineKind::Squash => {
             return Err(format!(
                 "Queued git pipeline session {} has non-git kind {kind:?}",
@@ -1251,7 +1282,11 @@ fn claim_or_queue_pull_for_branch(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    let steps = build_pull_pipeline_steps(&branch.branch_name);
+    // A queued pull is rebuilt with a full resolution on dequeue, and a pull
+    // that runs now goes through `pull_branch_ff_only_impl`, which resolves
+    // the remote branch itself; these steps are the queue marker.
+    let remote_branch = crate::branches::resolve_remote_branch_sync(store, &branch);
+    let steps = build_pull_pipeline_steps(&remote_branch);
     let pipeline = PipelineExecution::from_steps(&steps).with_kind(PipelineKind::Pull);
     // Like a push session, this one carries no artifact — `branch_id` is what
     // keeps it on the branch queue.
@@ -1383,6 +1418,7 @@ fn create_pr_handoff_prompt(
     pr_type: &str,
     base_branch: &str,
     base_ref: &str,
+    head_branch: &str,
     draft_flag: &str,
     opening: &str,
 ) -> String {
@@ -1399,7 +1435,7 @@ Requirements:
 - If you inspect branch changes, compare `$(git merge-base {base_ref} HEAD)..HEAD`.
 - Choose a conventional-commit-style PR title, using the most appropriate type (feat, fix, refactor, docs, style, test, chore, perf, ci, or build) based on the actual changes.
 - Write a concise PR body that summarizes the changes.
-- Run `gh pr create --base {base_branch} --title <title> --body <body>{draft_flag}` to create the {pr_type}.
+- Run `gh pr create --base {base_branch} --head {head_branch} --title <title> --body <body>{draft_flag}` to create the {pr_type}. `{head_branch}` is the branch on origin the previous step pushed to; it may differ from the local branch name.
 - Do not use `--fill-first`.
 - If `gh pr create` reports that a PR already exists, run `gh pr view --json url --jq .url`, update the title/body with `gh pr edit` if needed, and continue.
 - When done, output exactly `PR_URL: <url>`.
@@ -1415,9 +1451,11 @@ fn build_create_pr_pipeline_steps(
     pr_type: &str,
     base_branch: &str,
     draft_flag: &str,
-    branch_name: &str,
+    local_branch: &str,
+    remote_branch: &str,
 ) -> Vec<PipelineStep> {
     let base_ref = git::origin_ref_for_branch(base_branch);
+    let refspec = push_refspec(local_branch, remote_branch);
 
     vec![
         PipelineStep::Command {
@@ -1428,6 +1466,7 @@ fn build_create_pr_pipeline_steps(
                     pr_type,
                     base_branch,
                     &base_ref,
+                    remote_branch,
                     draft_flag,
                     &format!(
                         "The fetch failed while creating a {pr_type}. Diagnose and fix the issue if needed, then inspect this branch against `{base_ref}`, push the branch, and create or recover the {pr_type}."
@@ -1451,15 +1490,16 @@ fn build_create_pr_pipeline_steps(
         },
         PipelineStep::Command {
             label: "Push to remote".to_string(),
-            command: git_push_with_fallback(&format!("-u origin {branch_name}")),
+            command: git_push_with_fallback(&format!("-u origin {refspec}")),
             on_failure: FailureStrategy::HandoffToAi {
                 prompt_template: create_pr_handoff_prompt(
                     pr_type,
                     base_branch,
                     &base_ref,
+                    remote_branch,
                     draft_flag,
                     &format!(
-                        "The push failed while creating a {pr_type}. Diagnose and fix the issue, then retry the push. After the push succeeds, create or recover the {pr_type}."
+                        "The push failed while creating a {pr_type}. Diagnose and fix the issue, then retry the push with exactly `git push -u origin {refspec}`; do not push `{local_branch}` under any other remote name. After the push succeeds, create or recover the {pr_type}."
                     ),
                 ),
             },
@@ -1470,6 +1510,7 @@ fn build_create_pr_pipeline_steps(
                 pr_type,
                 base_branch,
                 &base_ref,
+                remote_branch,
                 draft_flag,
                 &format!("Create a {pr_type} for the current branch."),
             ),
@@ -1502,8 +1543,14 @@ pub(crate) async fn start_create_pr_pipeline_for_branch(
     };
 
     // Build the pipeline steps for PR creation.
-    let steps =
-        build_create_pr_pipeline_steps(pr_type, base_branch, draft_flag, &ctx.branch.branch_name);
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
+    let steps = build_create_pr_pipeline_steps(
+        pr_type,
+        base_branch,
+        draft_flag,
+        &ctx.branch.branch_name,
+        &remote_branch,
+    );
 
     let prompt = format!("Create a {pr_type} for the current branch");
 
@@ -1928,12 +1975,19 @@ pub(crate) async fn has_unpushed_commits_impl(
             .ok_or_else(|| format!("Branch has no workspace name: {branch_id}"))?
             .to_string();
         let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
-        let branch_name = branch.branch_name.clone();
+        let local_branch = branch.branch_name.clone();
+        let base_branch = branch.base_branch.clone();
 
         // Run the blocking SSH calls on a background thread so we don't
         // block the Tauri IPC thread and freeze the UI.
         let result = tauri::async_runtime::spawn_blocking(move || {
-            let remote_ref = format!("origin/{}", branch_name);
+            let remote_branch = crate::branches::workspace_upstream_branch_name(
+                &workspace_name,
+                repo_subpath.as_deref(),
+                &local_branch,
+                &base_branch,
+            );
+            let remote_ref = format!("origin/{remote_branch}");
             // Remote tracking branch doesn't exist — all commits are unpushed
             if crate::branches::run_workspace_git(
                 &workspace_name,
@@ -1967,9 +2021,12 @@ pub(crate) async fn has_unpushed_commits_impl(
     // `git` invocation can't block the Tauri IPC thread and freeze the UI,
     // matching the remote path above.
     let path = workdir.path.clone();
-    let branch_name = branch.branch_name.clone();
+    let local_branch = branch.branch_name.clone();
+    let base_branch = branch.base_branch.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        git::has_unpushed_commits(Path::new(&path), &branch_name).map_err(|e| e.to_string())
+        let worktree = Path::new(&path);
+        let remote_branch = git::upstream_branch_name(worktree, &local_branch, &base_branch);
+        git::has_unpushed_commits(worktree, &remote_branch).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?
@@ -1996,7 +2053,8 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
-    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, force);
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
+    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, force);
 
     let running = {
         let launch_lock = crate::session_commands::branch_session_launch_lock_for(&branch_id);
@@ -2054,7 +2112,7 @@ pub async fn push_branch(
 ///
 /// When `target` is `None` or `"base"`, rebases onto `origin/{base_branch}`
 /// (the default behaviour used by the base-moved row and the `…` menu).
-/// When `target` is `"origin"`, rebases onto `origin/{branch_name}` so that
+/// When `target` is `"origin"`, rebases onto `origin/{remote_branch}` so that
 /// the local branch incorporates remote-only commits (used by the diverged row).
 ///
 /// Queues behind in-flight branch work instead of failing, so the response
@@ -2704,7 +2762,7 @@ mod tests {
     #[test]
     fn inserting_a_running_push_is_what_makes_the_branch_busy() {
         let (store, branch) = setup_branch_store();
-        let steps = build_push_pipeline_steps(&branch.branch_name, false);
+        let steps = build_push_pipeline_steps(&branch.branch_name, &branch.branch_name, false);
 
         insert_running_push_pipeline_session(
             &store,
@@ -2732,25 +2790,79 @@ mod tests {
 
     #[test]
     fn push_steps_are_rebuilt_from_the_current_branch_name_and_force_flag() {
-        let normal = build_push_pipeline_steps("feature", false);
+        // Same local and remote name: the refspec is still explicit.
+        let normal = build_push_pipeline_steps("feature", "feature", false);
         let (label, command, on_failure) = command_at(&normal, 0);
         assert_eq!(label, "Push to remote");
-        assert!(command.contains("-u origin feature"));
+        assert!(command.contains("-u origin feature:feature"));
         assert!(!command.contains("--force-with-lease"));
         assert!(matches!(
             on_failure,
             FailureStrategy::Abort { marker } if marker.as_deref() == Some("non-fast-forward")
         ));
 
-        // The drain path re-derives the ref, so a branch renamed while the push
-        // waited pushes the new name rather than the queued one.
-        let forced = build_push_pipeline_steps("feature-renamed", true);
+        // The drain path re-derives the refspec, so a branch renamed while the
+        // push waited pushes the new local name rather than the queued one.
+        let forced = build_push_pipeline_steps("feature-renamed", "feature", true);
         let (_, forced_command, forced_on_failure) = command_at(&forced, 0);
-        assert!(forced_command.contains("-u origin feature-renamed --force-with-lease"));
-        assert!(matches!(
-            forced_on_failure,
-            FailureStrategy::HandoffToAi { .. }
-        ));
+        assert!(forced_command.contains("-u origin feature-renamed:feature --force-with-lease"));
+        // The handoff spells the refspec out so an agent doesn't retry with
+        // `git push origin feature-renamed` and create a stray remote branch.
+        let FailureStrategy::HandoffToAi { prompt_template } = forced_on_failure else {
+            panic!("expected force push to hand off to an agent");
+        };
+        assert!(
+            prompt_template
+                .contains("`git push -u origin feature-renamed:feature --force-with-lease`"),
+            "{prompt_template}"
+        );
+        assert!(
+            prompt_template.contains("{step_outputs}"),
+            "{prompt_template}"
+        );
+    }
+
+    /// The bug this guards against: a PR import whose head branch was already
+    /// checked out elsewhere gets a de-duplicated local name (`feature-x-2`).
+    /// Pushing must still land on the PR's branch, not create
+    /// `origin/feature-x-2`.
+    #[test]
+    fn deduplicated_pr_branch_pushes_to_the_pr_head_not_its_local_name() {
+        let steps = build_push_pipeline_steps("feature-x-2", "feature-x", false);
+        let (_, command, _) = command_at(&steps, 0);
+        assert!(command.contains("git push -u origin feature-x-2:feature-x"));
+        assert!(!command.contains("origin feature-x-2 "));
+        assert!(!command.contains("feature-x-2:feature-x-2"));
+    }
+
+    #[test]
+    fn rebase_onto_origin_targets_the_branch_the_checkout_pushes_to() {
+        let (store, branch) = setup_branch_store();
+        // No worktree yet: the branch resolves to its own name.
+        let remote_branch = crate::branches::resolve_remote_branch_sync(&store, &branch);
+        assert_eq!(remote_branch, branch.branch_name);
+        assert_eq!(
+            rebase_ref_for_target(&branch, &remote_branch, Some("origin")),
+            branch.branch_name
+        );
+
+        // A de-duplicated PR import whose checkout tracks the PR head:
+        // "rebase onto origin" targets the PR head, not origin/feature-x-2.
+        let deduplicated = store::Branch::new(&branch.project_id, "feature-x-2", "main").with_pr(7);
+        assert_eq!(
+            rebase_ref_for_target(&deduplicated, "feature-x", Some("origin")),
+            "feature-x"
+        );
+        assert_eq!(
+            rebase_ref_for_target(&deduplicated, "feature-x", None),
+            "main"
+        );
+
+        let steps =
+            build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-x").unwrap();
+        let (_, rebase_command, _) = command_at(&steps, 1);
+        assert!(rebase_command.contains("origin/feature-x"));
+        assert!(!rebase_command.contains("feature-x-2"));
     }
 
     #[test]
@@ -2930,6 +3042,17 @@ mod tests {
     }
 
     #[test]
+    fn pull_steps_fast_forward_to_the_pinned_remote_branch() {
+        // A de-duplicated PR import pulls from the PR head, never from the
+        // (non-existent) origin/<local name>.
+        let steps = build_pull_pipeline_steps("feature-x");
+        let (_, fetch_command, _) = command_at(&steps, 0);
+        assert!(fetch_command.contains("git fetch origin feature-x"));
+        let (_, merge_command, _) = command_at(&steps, 1);
+        assert_eq!(merge_command, "git merge --ff-only origin/feature-x");
+    }
+
+    #[test]
     fn pull_steps_fetch_then_fast_forward_and_never_hand_off() {
         // The drain path re-derives the ref, so a branch renamed while the pull
         // waited fast-forwards the new name rather than the queued one.
@@ -3003,7 +3126,13 @@ mod tests {
 
     #[test]
     fn create_pr_pipeline_fetches_base_and_uses_origin_merge_base_for_context() {
-        let steps = build_create_pr_pipeline_steps("pull request", "main", "", "feature-branch");
+        let steps = build_create_pr_pipeline_steps(
+            "pull request",
+            "main",
+            "",
+            "feature-branch-2",
+            "feature-branch",
+        );
 
         assert_eq!(steps.len(), 5);
 
@@ -3033,14 +3162,14 @@ mod tests {
         assert_eq!(label, "Push to remote");
         assert_eq!(
             command,
-            "if ! git push -u origin feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' push -u origin feature-branch; fi"
+            "if ! git push -u origin feature-branch-2:feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' push -u origin feature-branch-2:feature-branch; fi"
         );
 
         let (label, prompt) = ai_prompt_at(&steps, 4);
         assert_eq!(label, "Create PR");
         assert!(prompt.contains("local `main` branch may be stale"));
         assert!(prompt.contains("$(git merge-base origin/main HEAD)..HEAD"));
-        assert!(prompt.contains("gh pr create --base main"));
+        assert!(prompt.contains("gh pr create --base main --head feature-branch "));
     }
 
     #[test]

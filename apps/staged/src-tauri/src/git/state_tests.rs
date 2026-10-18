@@ -86,6 +86,7 @@ fn state(repo: &Path, fetch_mode: FetchMode) -> BranchGitState {
     compute_local_branch_git_state(
         repo,
         "feature",
+        "feature",
         "main",
         fetch_mode,
         WorktreeStatusScope::Full,
@@ -213,6 +214,7 @@ fn detects_conflicted_worktree() {
     let state = compute_local_branch_git_state(
         repo.path(),
         "feature",
+        "feature",
         "main",
         FetchMode::Never,
         WorktreeStatusScope::Full,
@@ -284,4 +286,40 @@ fn upstream_behind_base_counts_origin_base_commits_missing_from_origin_branch() 
     let state = state(&clone.path, FetchMode::Force);
 
     assert_eq!(state.upstream.behind_base, 2);
+}
+
+/// A de-duplicated PR import: HEAD is on local `feature-x-2` while the branch
+/// pushes to and is compared against `origin/feature-x`. The identity check
+/// must use the local name and the upstream the remote one — comparing
+/// against the non-existent `origin/feature-x-2` is the bug this guards.
+#[test]
+fn upstream_uses_the_remote_branch_while_identity_uses_the_local_name() {
+    let (_origin, clone) = remote_backed_feature();
+    run_git(&clone.path, &["push", "origin", "feature:feature-x"]);
+    run_git(&clone.path, &["fetch", "origin", "feature-x"]);
+    run_git(
+        &clone.path,
+        &["checkout", "-b", "feature-x-2", "origin/feature-x"],
+    );
+    fs::write(clone.path.join("file.txt"), "base\nfeature\nmore\n").unwrap();
+    run_git(&clone.path, &["add", "."]);
+    run_git(&clone.path, &["commit", "-m", "more"]);
+
+    let state = compute_local_branch_git_state(
+        &clone.path,
+        "feature-x-2",
+        "feature-x",
+        "main",
+        FetchMode::Force,
+        WorktreeStatusScope::Full,
+        EnvSource::Captured,
+    );
+
+    assert!(state.expected_branch_matches);
+    assert_eq!(state.current_branch.as_deref(), Some("feature-x-2"));
+    assert_eq!(state.upstream.r#ref, "origin/feature-x");
+    assert!(state.upstream.exists);
+    assert_eq!(state.upstream.relation, UpstreamRelation::LocalAhead);
+    assert_eq!(state.upstream.ahead, 1);
+    assert_eq!(state.upstream.behind, 0);
 }

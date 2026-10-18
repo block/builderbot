@@ -46,6 +46,7 @@ pub mod store;
 pub mod store_events;
 pub(crate) mod terminal_output;
 pub mod timeline;
+mod upstream_repair;
 pub mod util_commands;
 pub mod web_server;
 pub mod window_commands;
@@ -2064,6 +2065,15 @@ pub fn run() {
                             id: "fsmonitor-v1",
                             run: crate::git::config_apply::migrate_existing_clones,
                         }]);
+                    });
+                    // Re-point de-duplicated PR branches whose upstream a
+                    // bare `push -u` once clobbered, so they stop pushing to
+                    // a stray remote branch. Needs git (and possibly `gh`),
+                    // so it runs off the critical path; a repaired branch no
+                    // longer qualifies, so there is no registry entry to keep.
+                    std::thread::spawn({
+                        let store = Arc::clone(&store_arc);
+                        move || upstream_repair::run(&store)
                     });
                     (Mutex::new(Some(store_arc)), None)
                 }

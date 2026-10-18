@@ -534,6 +534,28 @@ pub fn set_upstream_to_origin(
     Ok(true)
 }
 
+/// Make `local_branch` track `origin/<remote_branch>` when that remote branch
+/// exists, and otherwise clear whatever upstream it has.
+///
+/// Run right after Staged creates a worktree. Git makes a branch created from
+/// `origin/<base>` track `<base>`, and a branch that has never been pushed
+/// should track nothing until `git push -u origin <local>:<remote>` records
+/// the real target — `upstream_branch_name` reads this config as the push
+/// target, so it must never be left saying "the base". Returns whether an
+/// upstream was set.
+pub fn set_upstream_to_origin_or_unset(
+    repo: &Path,
+    local_branch: &str,
+    remote_branch: &str,
+) -> Result<bool, GitError> {
+    if set_upstream_to_origin(repo, local_branch, remote_branch)? {
+        return Ok(true);
+    }
+    // Fails when there is no upstream to unset, which is the state we want.
+    let _ = cli::run(repo, &["branch", "--unset-upstream", local_branch]);
+    Ok(false)
+}
+
 /// Check whether a remote tracking branch (`origin/<branch_name>`) exists.
 pub fn remote_branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
     let ref_name = format!("refs/remotes/origin/{branch_name}");
@@ -862,11 +884,13 @@ pub fn switch_branch(worktree: &Path, branch_name: &str) -> Result<(), GitError>
 
 /// Check if the local branch has commits not yet pushed to the remote.
 ///
-/// Compares the local HEAD with `origin/<branch>`. Returns `true` if there
-/// are commits in the local branch that are not in the remote tracking branch.
-/// Returns `true` if the remote tracking branch doesn't exist (e.g., never pushed).
-pub fn has_unpushed_commits(worktree: &Path, branch: &str) -> Result<bool, GitError> {
-    let remote_ref = format!("origin/{branch}");
+/// Compares the local HEAD with `origin/<remote_branch>` — the branch this
+/// checkout pushes to, which is the PR head rather than the local name for a
+/// de-duplicated PR import. Returns `true` if there are commits in the local
+/// branch that are not in the remote tracking branch, and `true` if the
+/// remote tracking branch doesn't exist (e.g., never pushed).
+pub fn has_unpushed_commits(worktree: &Path, remote_branch: &str) -> Result<bool, GitError> {
+    let remote_ref = format!("origin/{remote_branch}");
     // Check that the remote ref exists first
     if cli::run(worktree, &["rev-parse", "--verify", &remote_ref]).is_err() {
         // Remote tracking branch doesn't exist — all local commits are unpushed

@@ -244,7 +244,7 @@ fn refspecs_to_fetch(
 fn refresh_refs_if_needed<F>(
     cache_key: &str,
     run_git: &F,
-    branch_name: &str,
+    remote_branch: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
 ) -> RefreshOutcome
@@ -258,7 +258,7 @@ where
         .and_then(|cache| cache.get(cache_key).cloned());
 
     let base_refspec = refspec_for(base_branch);
-    let branch_refspec = refspec_for(branch_name);
+    let branch_refspec = refspec_for(remote_branch);
 
     // Build the list of needed refspecs (deduplicated).
     let needed: Vec<&str> = if branch_refspec != base_refspec {
@@ -579,10 +579,18 @@ where
     parse_worktree_from_status(&output)
 }
 
+/// Compute the git state of a checkout.
+///
+/// `branch_name` is the local branch HEAD is expected to be on (drives
+/// `expected_branch_matches`); `remote_branch` is the branch on `origin` the
+/// checkout pushes to and is compared against (drives the fetch refspec and
+/// `upstream`). They differ for a PR import whose local name was
+/// de-duplicated (`feature-x-2` tracking `origin/feature-x`).
 pub fn compute_branch_git_state<F>(
     cache_key: &str,
     run_git: F,
     branch_name: &str,
+    remote_branch: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
@@ -594,7 +602,7 @@ where
     // name, worktree status) since those read local state unaffected by fetch.
     let (refresh, head_sha, branch, worktree) = std::thread::scope(|s| {
         let fetch_handle = s.spawn(|| {
-            refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode)
+            refresh_refs_if_needed(cache_key, &run_git, remote_branch, base_branch, fetch_mode)
         });
         let head_handle = s.spawn(|| {
             run_git(&["rev-parse", "HEAD"])
@@ -618,7 +626,7 @@ where
         .as_deref()
         .map(|current| current == expected_branch)
         .unwrap_or(false);
-    let upstream_ref = origin_ref_for_branch(branch_name);
+    let upstream_ref = origin_ref_for_branch(remote_branch);
     let base_ref = origin_ref_for_branch(base_branch);
     let base_ref_for_upstream = base_ref.clone();
 
@@ -655,9 +663,12 @@ where
     }
 }
 
+/// See [`compute_branch_git_state`] for the `branch_name` / `remote_branch`
+/// split.
 pub fn compute_local_branch_git_state(
     repo: &Path,
     branch_name: &str,
+    remote_branch: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
@@ -671,6 +682,7 @@ pub fn compute_local_branch_git_state(
             EnvSource::Captured => cli::run(repo, args).map_err(|e| e.to_string()),
         },
         branch_name,
+        remote_branch,
         base_branch,
         fetch_mode,
         worktree_scope,
@@ -931,11 +943,16 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
 /// round-trip), it bundles all commands into one shell script that performs
 /// fetch (when needed), local state collection, and ref comparisons — giving
 /// **1 round-trip total** regardless of whether fetch is cached or not.
+///
+/// See [`compute_branch_git_state`] for the `branch_name` / `remote_branch`
+/// split.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_branch_git_state_batched<F>(
     cache_key: &str,
     run_script: F,
     repo_path: &str,
     branch_name: &str,
+    remote_branch: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
@@ -944,8 +961,8 @@ where
     F: Fn(&str, &[&str]) -> Result<String, String>,
 {
     let base_refspec = refspec_for(base_branch);
-    let branch_refspec = refspec_for(branch_name);
-    let upstream_ref = origin_ref_for_branch(branch_name);
+    let branch_refspec = refspec_for(remote_branch);
+    let upstream_ref = origin_ref_for_branch(remote_branch);
     let base_ref = origin_ref_for_branch(base_branch);
     let expected_branch = branch_name_without_origin(branch_name);
 

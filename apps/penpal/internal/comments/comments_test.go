@@ -707,6 +707,181 @@ func TestClearWorkingRemovesAfterCommentID(t *testing.T) {
 	}
 }
 
+// E-PENPAL-WORKING: verifies AddCommentForWorktree auto-sets InReplyTo and WorkingStartedAt
+// from stored working entry for agent-role comments, then clears working.
+func TestAddCommentForWorktreeAutoHandlesWorkingForAgent(t *testing.T) {
+	store := newTestStore(t)
+
+	anchor := Anchor{SelectedText: "text"}
+	thread, err := store.CreateThread(testProject, "doc.md", anchor, Comment{
+		Author: "alice", Role: "human", Body: "Please review",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	// Simulate agent reading the thread (sets working indicator)
+	firstCommentID := thread.Comments[0].ID
+	store.SetWorking(testProject, "doc.md", thread.ID, firstCommentID)
+
+	// Agent replies — should auto-populate InReplyTo and WorkingStartedAt
+	agentComment := Comment{Author: "claude", Role: "agent", Body: "I can help."}
+	updated, err := store.AddComment(testProject, "doc.md", thread.ID, agentComment)
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+
+	reply := updated.Comments[1]
+	if reply.InReplyTo != firstCommentID {
+		t.Errorf("InReplyTo = %q, want %q (from working entry)", reply.InReplyTo, firstCommentID)
+	}
+	if reply.WorkingStartedAt == nil {
+		t.Error("expected WorkingStartedAt to be set from working entry")
+	}
+
+	// Working indicator should be cleared
+	if store.IsWorking(testProject, "doc.md", thread.ID) {
+		t.Error("expected working indicator to be cleared after agent reply")
+	}
+	if got := store.WorkingAfterCommentID(testProject, "doc.md", thread.ID); got != "" {
+		t.Errorf("WorkingAfterCommentID = %q, want empty after clear", got)
+	}
+}
+
+// E-PENPAL-WORKING: verifies AddCommentForWorktree does NOT touch working for human-role comments.
+func TestAddCommentForWorktreeSkipsWorkingForHuman(t *testing.T) {
+	store := newTestStore(t)
+
+	anchor := Anchor{SelectedText: "text"}
+	thread, err := store.CreateThread(testProject, "doc.md", anchor, Comment{
+		Author: "claude", Role: "agent", Body: "Here's my review",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+
+	// Human replies — should not set WorkingStartedAt or clear working
+	humanComment := Comment{Author: "alice", Role: "human", Body: "Thanks"}
+	updated, err := store.AddComment(testProject, "doc.md", thread.ID, humanComment)
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+
+	reply := updated.Comments[1]
+	if reply.WorkingStartedAt != nil {
+		t.Error("expected WorkingStartedAt to be nil for human comment")
+	}
+}
+
+// E-PENPAL-WORKING: verifies MarkFileThreadsRead sets working for threads awaiting agent response.
+func TestMarkFileThreadsRead(t *testing.T) {
+	store := newTestStore(t)
+
+	// Thread with last comment from human — should trigger SetWorking
+	threads := []Thread{
+		{
+			ID:     "t1",
+			Status: "open",
+			Comments: []Comment{
+				{ID: "c1", Author: "alice", Role: "human", Body: "Hello"},
+			},
+		},
+		{
+			ID:     "t2",
+			Status: "open",
+			Comments: []Comment{
+				{ID: "c2", Author: "alice", Role: "human", Body: "Question"},
+				{ID: "c3", Author: "claude", Role: "agent", Body: "Answer"},
+			},
+		},
+	}
+
+	store.MarkFileThreadsRead("proj", "file.md", threads)
+
+	// t1: last comment is human → working should be set
+	if !store.IsWorking("proj", "file.md", "t1") {
+		t.Error("expected t1 to be working (last comment is human)")
+	}
+	if got := store.WorkingAfterCommentID("proj", "file.md", "t1"); got != "c1" {
+		t.Errorf("t1 WorkingAfterCommentID = %q, want %q", got, "c1")
+	}
+
+	// t2: last comment is agent → working should NOT be set
+	if store.IsWorking("proj", "file.md", "t2") {
+		t.Error("expected t2 to not be working (last comment is agent)")
+	}
+}
+
+// E-PENPAL-WORKING: verifies MarkThreadsRead sets working for ThreadWithFile entries.
+func TestMarkThreadsRead(t *testing.T) {
+	store := newTestStore(t)
+
+	threads := []ThreadWithFile{
+		{
+			Thread: Thread{
+				ID:     "t1",
+				Status: "open",
+				Comments: []Comment{
+					{ID: "c1", Author: "alice", Role: "human", Body: "Review this"},
+				},
+			},
+			FilePath: "file1.md",
+		},
+		{
+			Thread: Thread{
+				ID:     "t2",
+				Status: "resolved",
+				Comments: []Comment{
+					{ID: "c2", Author: "alice", Role: "human", Body: "Done"},
+				},
+			},
+			FilePath: "file2.md",
+		},
+	}
+
+	store.MarkThreadsRead("proj", threads)
+
+	// t1 is open with human last → working set
+	if !store.IsWorking("proj", "file1.md", "t1") {
+		t.Error("expected t1 to be working")
+	}
+
+	// t2 is resolved → working NOT set
+	if store.IsWorking("proj", "file2.md", "t2") {
+		t.Error("expected t2 to not be working (resolved)")
+	}
+}
+
+// E-PENPAL-WORKING: verifies MarkFileThreadsRead refreshes existing entries instead of overwriting.
+func TestMarkFileThreadsReadRefreshesExisting(t *testing.T) {
+	store := newTestStore(t)
+
+	// Pre-set working with a specific afterCommentID
+	store.SetWorking("proj", "file.md", "t1", "c1")
+	originalStartedAt := store.WorkingStartedAt("proj", "file.md", "t1")
+
+	threads := []Thread{
+		{
+			ID:     "t1",
+			Status: "open",
+			Comments: []Comment{
+				{ID: "c1", Author: "alice", Role: "human", Body: "Hello"},
+			},
+		},
+	}
+
+	// MarkFileThreadsRead should refresh (same afterCommentID) not re-set
+	store.MarkFileThreadsRead("proj", "file.md", threads)
+
+	// startedAt should be preserved (refresh, not re-set)
+	if got := store.WorkingStartedAt("proj", "file.md", "t1"); got != originalStartedAt {
+		t.Errorf("WorkingStartedAt changed after refresh: got %v, want %v", got, originalStartedAt)
+	}
+	if got := store.WorkingAfterCommentID("proj", "file.md", "t1"); got != "c1" {
+		t.Errorf("WorkingAfterCommentID = %q, want %q", got, "c1")
+	}
+}
+
 func TestLegacyJSONWithoutInReplyToLoads(t *testing.T) {
 	store := newTestStore(t)
 

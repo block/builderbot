@@ -12,6 +12,10 @@ import (
 // handleAPIThreads dispatches GET (list threads) and POST (create thread).
 // E-PENPAL-API-ROUTES: GET/POST /api/threads endpoint.
 func (s *Server) handleAPIThreads(w http.ResponseWriter, r *http.Request) {
+	// E-PENPAL-SESSION-MGMT: validate session token if present.
+	if !s.validateSessionParam(w, r) {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.handleListThreads(w, r)
@@ -24,6 +28,10 @@ func (s *Server) handleAPIThreads(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIThreadAction handles /api/threads/{id} and /api/threads/{id}/comments.
 func (s *Server) handleAPIThreadAction(w http.ResponseWriter, r *http.Request) {
+	// E-PENPAL-SESSION-MGMT: validate session token if present.
+	if !s.validateSessionParam(w, r) {
+		return
+	}
 	// Parse the path: /api/threads/{id} or /api/threads/{id}/comments
 	rest := strings.TrimPrefix(r.URL.Path, "/api/threads/")
 	parts := strings.Split(rest, "/")
@@ -69,6 +77,10 @@ type APIFileInReview struct {
 // handleAPIListReviews handles GET /api/reviews?project=X[&agent=true][&worktree=Z].
 // E-PENPAL-REVIEW-COUNT: returns files with open threads for review count.
 func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
+	// E-PENPAL-SESSION-MGMT: validate session token if present.
+	if !s.validateSessionParam(w, r) {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -81,7 +93,6 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 	}
 
 	worktree := r.URL.Query().Get("worktree")
-	isAgent := r.URL.Query().Get("agent") == "true"
 
 	files, err := s.comments.ListFilesInReviewForWorktree(projectName, worktree)
 	if err != nil {
@@ -89,14 +100,8 @@ func (s *Server) handleAPIListReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record heartbeat when an agent polls reviews
-	if isAgent {
-		for _, f := range files {
-			s.comments.RecordHeartbeat(projectName, f.FilePath)
-		}
-	}
-
-	agentActive := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
+	// E-PENPAL-AGENT-ACTIVE-UNIFIED: checks both spawned agents and CLI sessions.
+	agentActive := s.isAgentActive(projectName)
 	result := make([]APIFileInReview, len(files))
 	for i, f := range files {
 		workingThreads := s.comments.WorkingCount(projectName, f.FilePath)
@@ -136,12 +141,6 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 	filePath := r.URL.Query().Get("path")
 	status := r.URL.Query().Get("status")
 	worktree := r.URL.Query().Get("worktree")
-	isAgent := r.URL.Query().Get("agent") == "true"
-
-	// Record heartbeat when an agent polls for threads
-	if isAgent && filePath != "" {
-		s.comments.RecordHeartbeat(projectName, filePath)
-	}
 
 	// When path is omitted, return all open threads across the project
 	if filePath == "" {
@@ -188,7 +187,8 @@ func (s *Server) handleListThreads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	agentRunning := s.agents != nil && s.agents.Status(projectName) != nil && s.agents.Status(projectName).Running
+	// E-PENPAL-AGENT-ACTIVE-UNIFIED: checks both spawned agents and CLI sessions.
+	agentRunning := s.isAgentActive(projectName)
 	var result []threadResponse
 	for _, t := range threads {
 		tr := threadResponse{Thread: t}
@@ -234,8 +234,21 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// E-PENPAL-CLI-CONTENTION: agent-role writes require a valid session.
+	if req.Role == "agent" && !s.requireSessionForAgent(w, r, req.Project) {
+		return
+	}
+
+	// E-PENPAL-AGENT-SELF-ID: override author from session when agent role.
+	author := req.Author
+	if req.Role == "agent" {
+		if name := s.agentNameFromSession(r); name != "" {
+			author = name
+		}
+	}
+
 	comment := comments.Comment{
-		Author:           req.Author,
+		Author:           author,
 		Role:             req.Role,
 		Body:             req.Body,
 		SuggestedReplies: req.SuggestedReplies,
@@ -276,8 +289,23 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request, thread
 		return
 	}
 
+	// E-PENPAL-CLI-CONTENTION: agent-role writes require a valid session.
+	if req.Role == "agent" && !s.requireSessionForAgent(w, r, req.Project) {
+		return
+	}
+
+	// E-PENPAL-AGENT-SELF-ID: override author from session when agent role.
+	author := req.Author
+	if req.Role == "agent" {
+		if name := s.agentNameFromSession(r); name != "" {
+			author = name
+		}
+	}
+
+	// Working indicator handling (InReplyTo, WorkingStartedAt, ClearWorking)
+	// is done automatically by AddCommentForWorktree for agent-role comments.
 	comment := comments.Comment{
-		Author:           req.Author,
+		Author:           author,
 		Role:             req.Role,
 		Body:             req.Body,
 		SuggestedReplies: req.SuggestedReplies,

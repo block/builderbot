@@ -10,11 +10,19 @@
 //!
 //! This walks the local branches that can still be in that state — linked to
 //! a PR, named `<stem>-<digits>`, and resolving their push target to their
-//! own name — asks `gh pr view <pr> --json headRefName,state` what the PR's
-//! head really is, and when the PR is open and the head is exactly `<stem>`
-//! runs `git branch --set-upstream-to=origin/<stem> <local>`. Nothing is
+//! own name — asks `gh pr view <pr> --json headRefName,headRepository,state`
+//! what the PR's head really is, and when the PR is open, its head lives in
+//! the cloned repository and is exactly `<stem>`, runs
+//! `git branch --set-upstream-to=origin/<stem> <local>`. Nothing is
 //! recorded: a repaired branch resolves to `<stem>` on the next launch and
 //! drops out of the walk.
+//!
+//! A PR whose head lives in a fork is never re-pointed: `origin/<stem>` would
+//! be an unrelated branch of the same name in the cloned repository, exactly
+//! as `create_and_link_worktree` leaves such checkouts tracking nothing. The
+//! `head_repo` the create-project flow stored on the project repo settles
+//! that before anything is spawned; rows that predate it (`head_repo` NULL)
+//! are caught by the `headRepository` the `gh` answer carries.
 //!
 //! `<stem>-<digits>` also matches ticket-suffixed names (`fix-login-1234`),
 //! whose PR head is their own name. Those, and candidates whose PR is merged
@@ -33,7 +41,7 @@ use std::sync::Arc;
 
 use crate::git::{github, GitError};
 use crate::store::{self, Store};
-use crate::{git, prs};
+use crate::{branches, git, prs};
 use github::PrHead;
 
 /// The stem of a name shaped like `<stem>-<digits>` — the shape
@@ -105,15 +113,27 @@ where
 
     /// The head branch of `pr_number` in `repo_slug`, or `None` when `gh`
     /// could not say — including when an earlier call this run found `gh`
-    /// unusable, in which case `gh` is not invoked at all — or when the PR is
-    /// no longer open: a merged or closed PR's head is usually gone from
-    /// origin, and nothing pushes to it anyway.
+    /// unusable, in which case `gh` is not invoked at all — when the PR is
+    /// no longer open (a merged or closed PR's head is usually gone from
+    /// origin, and nothing pushes to it anyway), or when GitHub does not
+    /// confirm the head lives in `repo_slug` itself: a fork's branch is not
+    /// reachable through `origin`, and an unknown head repository (a deleted
+    /// fork) is not trusted either.
     pub(crate) fn head(&mut self, repo_slug: &str, pr_number: u64) -> Option<String> {
         if self.unavailable {
             return None;
         }
         match (self.lookup)(repo_slug, pr_number) {
-            Ok(pr) if pr.is_open() => Some(pr.head_ref),
+            Ok(pr) if pr.is_open() && pr.head_is_in(repo_slug) => Some(pr.head_ref),
+            Ok(pr) if pr.is_open() => {
+                log::info!(
+                    "[upstream_repair] PR #{pr_number} in {repo_slug} has its head '{}' in {}; \
+                     leaving its branch's upstream alone",
+                    pr.head_ref,
+                    pr.head_repo.as_deref().unwrap_or("an unknown repository"),
+                );
+                None
+            }
             Ok(pr) => {
                 log::info!(
                     "[upstream_repair] PR #{pr_number} in {repo_slug} is {}; leaving its \
@@ -225,8 +245,8 @@ pub(crate) fn run_with<F>(
 }
 
 /// Re-point one candidate. Returns the branch it now tracks, or `None` when
-/// it was already tracking something, has no worktree, or no trusted source
-/// could say what the PR head is.
+/// it was already tracking something, has no worktree, its PR head is known
+/// to live in a fork, or no trusted source could say what the PR head is.
 fn repair_branch<F>(
     store: &Arc<Store>,
     branch: &store::Branch,
@@ -244,6 +264,16 @@ where
     };
     let worktree = Path::new(&workdir.path);
     if !worktree.exists() {
+        return Ok(None);
+    }
+    // Same source `create_and_link_worktree` consults: a fork PR's checkout
+    // tracks nothing on purpose, so neither git nor `gh` is worth asking.
+    if branches::pr_head_is_in_fork(store, branch)? {
+        log::info!(
+            "[upstream_repair] PR #{} head for '{}' lives in a fork; leaving its upstream alone",
+            branch.pr_number.unwrap_or_default(),
+            branch.branch_name
+        );
         return Ok(None);
     }
 
@@ -275,11 +305,18 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
 
-    fn pr(head: &str, state: &str) -> PrHead {
+    /// A PR whose head lives in `repo` — for most tests the repository the
+    /// store's project points at, `acme/widgets`.
+    fn pr_in(repo: &str, head: &str, state: &str) -> PrHead {
         PrHead {
             head_ref: head.to_string(),
+            head_repo: Some(repo.to_string()),
             state: state.to_string(),
         }
+    }
+
+    fn pr(head: &str, state: &str) -> PrHead {
+        pr_in("acme/widgets", head, state)
     }
 
     fn open_pr(head: &str) -> PrHead {
@@ -386,7 +423,7 @@ mod tests {
     #[test]
     fn a_per_branch_gh_failure_skips_only_that_branch() {
         let calls = Cell::new(0);
-        let mut lookup = PrHeadLookup::new(|_: &str, pr_number| {
+        let mut lookup = PrHeadLookup::new(|repo: &str, pr_number| {
             calls.set(calls.get() + 1);
             if pr_number == 7 {
                 Err(GitError::CommandFailed(
@@ -395,7 +432,7 @@ mod tests {
                         .to_string(),
                 ))
             } else {
-                Ok(open_pr(&format!("head-{pr_number}")))
+                Ok(pr_in(repo, &format!("head-{pr_number}"), "OPEN"))
             }
         });
 
@@ -407,17 +444,45 @@ mod tests {
         assert_eq!(calls.get(), 4);
     }
 
+    /// `gh` reporting the head in another repository — or in none GitHub
+    /// still knows — is about that PR: the branch is skipped, the breaker
+    /// stays closed, and only an exact (case-insensitive) match of the
+    /// cloned repository is trusted.
+    #[test]
+    fn a_pr_whose_head_lives_in_a_fork_is_skipped_by_the_gh_answer() {
+        let mut lookup = PrHeadLookup::new(|_: &str, pr_number| {
+            Ok(match pr_number {
+                7 => pr_in("fork-owner/widgets", "feature-x", "OPEN"),
+                8 => PrHead {
+                    head_ref: "feature-y".to_string(),
+                    head_repo: None,
+                    state: "OPEN".to_string(),
+                },
+                9 => pr_in("ACME/Widgets", "feature-z", "OPEN"),
+                _ => unreachable!(),
+            })
+        });
+
+        assert_eq!(lookup.head("acme/widgets", 7), None);
+        assert_eq!(lookup.head("acme/widgets", 8), None);
+        assert!(!lookup.unavailable);
+        assert_eq!(lookup.head("acme/widgets", 9).as_deref(), Some("feature-z"));
+    }
+
     /// In-memory stand-in for the worktrees: `upstreams` maps a local name
-    /// to what it tracks (absent = tracks itself), `repoints` records the
-    /// `--set-upstream-to` calls.
+    /// to what it tracks (absent = tracks itself), `queried` records the
+    /// branches whose upstream was read, `repoints` the `--set-upstream-to`
+    /// calls.
     #[derive(Default)]
     struct FakeWorktrees {
         upstreams: HashMap<String, String>,
+        queried: Vec<String>,
         repoints: Vec<(String, String)>,
     }
 
     impl WorktreeUpstream for FakeWorktrees {
         fn current(&mut self, _: &Path, local: &str, _: &str) -> String {
+            self.queried.push(local.to_string());
             self.upstreams
                 .get(local)
                 .cloned()
@@ -566,6 +631,63 @@ mod tests {
         assert!(!lookup.unavailable);
         assert_eq!(lookup.head("acme/widgets", 7), None);
         assert_eq!(lookup.head("acme/widgets", 9).as_deref(), Some("feature-z"));
+    }
+
+    /// The create-project flow recorded the PR head's fork on the project
+    /// repo: the walk steps over that branch without a git or `gh` call, as
+    /// `create_and_link_worktree` left its checkout tracking nothing on
+    /// purpose. A `head_repo` naming the cloned repository itself (any
+    /// case) is not a fork, and a row without one is decided by `gh`.
+    #[test]
+    fn run_skips_a_branch_whose_stored_head_repo_is_a_fork() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("acme/widgets");
+        store.create_project(&project).unwrap();
+        // One repo slug per case: a repo can be attached to a project once.
+        let mut dirs = Vec::new();
+        let mut branch_in = |github_repo: &str, head_repo: Option<&str>, name: &str, pr: u64| {
+            let mut repo = store::ProjectRepo::new(&project.id, github_repo, "main", None);
+            repo.head_repo = head_repo.map(str::to_string);
+            store.create_project_repo(&repo).unwrap();
+            let branch = store::Branch::new(&project.id, name, "main")
+                .with_pr(pr)
+                .with_project_repo(&repo.id);
+            store.create_branch(&branch).unwrap();
+            let dir = TempDir::new("worktree");
+            let workdir = store::Workdir::new(&project.id, dir.path().to_str().unwrap())
+                .with_branch(&branch.id);
+            store.create_workdir(&workdir).unwrap();
+            dirs.push(dir);
+        };
+        branch_in("acme/widgets", Some("fork-owner/widgets"), "feature-x-2", 7);
+        branch_in("acme/gadgets", Some("ACME/Gadgets"), "feature-y-2", 8);
+        branch_in("acme/gizmos", None, "feature-z-2", 9);
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let mut lookup = PrHeadLookup::new(|repo: &str, pr_number| {
+            asked.borrow_mut().push(pr_number);
+            Ok(match pr_number {
+                8 => pr_in(repo, "feature-y", "OPEN"),
+                // A legacy row with no `head_repo`: only `gh` knows the
+                // head is in a fork.
+                9 => pr_in("fork-owner/gizmos", "feature-z", "OPEN"),
+                _ => unreachable!("PR #{pr_number} is a fork and must not reach gh"),
+            })
+        });
+        let mut worktrees = FakeWorktrees::default();
+
+        run_with(&store, &mut lookup, &mut worktrees);
+
+        let mut asked = asked.into_inner();
+        asked.sort_unstable();
+        assert_eq!(asked, vec![8, 9]);
+        let mut queried = worktrees.queried.clone();
+        queried.sort_unstable();
+        assert_eq!(queried, vec!["feature-y-2", "feature-z-2"]);
+        assert_eq!(
+            worktrees.repoints,
+            vec![("feature-y-2".to_string(), "feature-y".to_string())]
+        );
     }
 
     #[test]

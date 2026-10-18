@@ -382,12 +382,13 @@ describe('createQueuedSessionCanceller', () => {
   });
 });
 
-/** A git-state payload whose upstream the backend resolved to `ref`. */
-function gitState(ref: string): Pick<BranchGitState, 'upstream'> {
+/** A git-state payload whose upstream the backend resolved to `ref`;
+ *  `exists` is whether that branch is actually on origin. */
+function gitState(ref: string, exists = true): Pick<BranchGitState, 'upstream'> {
   return {
     upstream: {
       ref,
-      exists: true,
+      exists,
       sha: null,
       relation: 'inSync',
       ahead: 0,
@@ -427,10 +428,24 @@ describe('pushTargetRef / divergedPushTargetRef', () => {
 
 describe('renamePushTargetRef', () => {
   it('is silent for a plain branch whose push target follows the rename', () => {
+    // Nothing on origin yet (or nothing loaded): the first push after the
+    // rename creates `origin/<new name>`, so there is no target to keep.
     expect(renamePushTargetRef({ branchName: 'feature', prNumber: null }, null)).toBeNull();
     expect(
-      renamePushTargetRef({ branchName: 'feature', prNumber: null }, gitState('origin/feature'))
+      renamePushTargetRef(
+        { branchName: 'feature', prNumber: null },
+        gitState('origin/feature', false)
+      )
     ).toBeNull();
+  });
+
+  it('names the tracked branch for a plain branch that has been pushed', () => {
+    // `feature` tracks `origin/feature` from its first `push -u`; renamed to
+    // `feature-y` it still pushes to `origin/feature`, so the dialog must
+    // say so even though the names match today.
+    expect(
+      renamePushTargetRef({ branchName: 'feature', prNumber: null }, gitState('origin/feature'))
+    ).toBe('origin/feature');
   });
 
   it('names the current target for a PR branch', () => {
@@ -452,5 +467,13 @@ describe('renamePushTargetRef', () => {
     expect(renamePushTargetRef({ branchName: 'feature-x-2', prNumber: 7 }, state)).toBe(
       'origin/feature-x'
     );
+    // Tracking is configured even if origin has since lost the branch: the
+    // next push recreates `origin/feature-x`, not `origin/<new name>`.
+    expect(
+      renamePushTargetRef(
+        { branchName: 'feature-x-2', prNumber: null },
+        gitState('origin/feature-x', false)
+      )
+    ).toBe('origin/feature-x');
   });
 });

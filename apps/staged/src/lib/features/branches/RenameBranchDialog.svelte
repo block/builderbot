@@ -14,8 +14,10 @@
     open: boolean;
     branchName: string;
     /** The `origin/…` ref this branch keeps pushing to after the rename —
-     *  set for PR branches and de-duplicated checkouts, where renaming the
-     *  local branch must not move the push target. The dialog spells it out. */
+     *  set whenever the checkout tracks a branch on origin (a PR branch, a
+     *  de-duplicated checkout, or any branch pushed at least once), since
+     *  `git branch -m` keeps the upstream and only the local name changes.
+     *  The dialog spells it out. */
     remoteRef?: string | null;
     onRename?: (branchName: string) => void | Promise<void>;
   }

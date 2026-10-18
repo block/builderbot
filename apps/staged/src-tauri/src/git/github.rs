@@ -631,12 +631,14 @@ pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest,
     Ok(item.into())
 }
 
-/// Where a PR's head branch is and whether the PR is still open — the two
-/// facts needed to decide whether a local branch should track that head.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// Where a PR's head branch is and whether the PR is still open — the facts
+/// needed to decide whether a local branch should track that head.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrHead {
-    #[serde(rename = "headRefName")]
     pub head_ref: String,
+    /// `owner/name` of the repository the head branch lives in; `None` when
+    /// GitHub no longer knows it (a deleted fork) or `gh` did not say.
+    pub head_repo: Option<String>,
     /// Upper-case GitHub state: `OPEN`, `CLOSED` or `MERGED`.
     pub state: String,
 }
@@ -645,10 +647,50 @@ impl PrHead {
     pub fn is_open(&self) -> bool {
         self.state.eq_ignore_ascii_case("OPEN")
     }
+
+    /// Whether GitHub confirms the head branch lives in `github_repo` (the
+    /// repository the local clone's `origin` points at). `false` when the
+    /// head is in a fork or its repository is unknown: an `origin/<head>`
+    /// that happens to exist is then an unrelated branch of the same name.
+    pub fn head_is_in(&self, github_repo: &str) -> bool {
+        self.head_repo
+            .as_deref()
+            .is_some_and(|head_repo| head_repo.eq_ignore_ascii_case(github_repo))
+    }
 }
 
-/// `gh pr view <n> -R <repo> --json headRefName,state`: a narrower, cheaper
-/// [`get_pr_for_repo`] for callers that only need the head and the state.
+/// Response from `gh pr view --json headRefName,headRepository,state`.
+#[derive(Debug, Deserialize)]
+struct GhPrHeadItem {
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "headRepository")]
+    head_repository: Option<GhPrHeadRepository>,
+    state: String,
+}
+
+/// `headRepository` as `gh pr view` reports it. Older `gh` releases emit
+/// only `id` and `name`, so `nameWithOwner` is optional and its absence is
+/// treated as "unknown" rather than failing the whole lookup.
+#[derive(Debug, Deserialize)]
+struct GhPrHeadRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: Option<String>,
+}
+
+impl From<GhPrHeadItem> for PrHead {
+    fn from(item: GhPrHeadItem) -> Self {
+        PrHead {
+            head_ref: item.head_ref_name,
+            head_repo: item.head_repository.and_then(|r| r.name_with_owner),
+            state: item.state,
+        }
+    }
+}
+
+/// `gh pr view <n> -R <repo> --json headRefName,headRepository,state`: a
+/// narrower, cheaper [`get_pr_for_repo`] for callers that only need the
+/// head, where it lives and the state.
 pub fn get_pr_head(github_repo: &str, pr_number: u64) -> Result<PrHead, GitError> {
     let output = run_gh_global(&[
         "pr",
@@ -656,9 +698,11 @@ pub fn get_pr_head(github_repo: &str, pr_number: u64) -> Result<PrHead, GitError
         &pr_number.to_string(),
         "-R",
         github_repo,
-        "--json=headRefName,state",
+        "--json=headRefName,headRepository,state",
     ])?;
-    serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))
+    let item: GhPrHeadItem =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+    Ok(item.into())
 }
 
 /// Find the open PR (if any) whose head branch matches `branch_name`.

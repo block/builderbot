@@ -185,16 +185,21 @@ export function divergedPushTargetRef(
 /**
  * The push target to spell out in the rename dialog, or `null` when a
  * rename simply moves it. `git branch -m` carries the checkout's upstream
- * along, so a PR branch keeps pushing to the branch the PR was opened from
- * and an already-diverged branch keeps its target; either way the user
- * should see that only the local name changes.
+ * along, so any branch that tracks a branch on origin keeps pushing there
+ * under its new name: a PR branch to the branch the PR was opened from, a
+ * de-duplicated checkout to its diverged target, and a plain `feature`
+ * that has been pushed once to `origin/feature` even after becoming
+ * `feature-y`. Only a branch with nothing on origin yet (or none loaded,
+ * for a non-PR branch) has a target that simply follows the rename.
  */
 export function renamePushTargetRef(
   branch: Pick<Branch, 'branchName' | 'prNumber'>,
   gitState: UpstreamGitState
 ): string | null {
   if (branch.prNumber != null) return pushTargetRef(branch, gitState);
-  return divergedPushTargetRef(branch, gitState);
+  const diverged = divergedPushTargetRef(branch, gitState);
+  if (diverged) return diverged;
+  return gitState?.upstream.exists ? gitState.upstream.ref : null;
 }
 
 export function formatBaseBranch(baseBranch: string): string {

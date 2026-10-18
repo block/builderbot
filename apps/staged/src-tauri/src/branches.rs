@@ -812,7 +812,10 @@ fn fallback_worktree_path_for(desired_path: &Path) -> Option<PathBuf> {
 /// Whether a PR branch's head lives in a fork rather than on origin: the
 /// `head_repo` the create-project flow records on the project repo when the
 /// PR's head repository is not the one being cloned.
-fn pr_head_is_in_fork(store: &Arc<Store>, branch: &store::Branch) -> Result<bool, String> {
+pub(crate) fn pr_head_is_in_fork(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+) -> Result<bool, String> {
     let Some(repo_id) = &branch.project_repo_id else {
         return Ok(false);
     };

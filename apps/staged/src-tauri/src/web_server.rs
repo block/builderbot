@@ -379,13 +379,18 @@ async fn serve_media(
             // is a fresh UUID per write and nothing rewrites bytes under an
             // existing one (a cross-project move renames the file, keeping
             // its contents), so the URL is a stable identity for the bytes.
-            // Applies to 200, 206, HEAD, and 304 alike, so a reopened note
-            // costs no conditional round trips and the browser stops
-            // revalidating a partially cached video before seeking.
-            response.headers_mut().insert(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
-            );
+            // Applies to every 2xx (200, 206, HEAD) and to 304, so a reopened
+            // note costs no conditional round trips and the browser stops
+            // revalidating a partially cached video before seeking. `Ok`
+            // also carries `ServeFile`'s 412 and 416, which describe the
+            // request rather than the bytes and must not be stored.
+            let status = response.status();
+            if status.is_success() || status == StatusCode::NOT_MODIFIED {
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("private, max-age=31536000, immutable"),
+                );
+            }
             // `mime_for_extension` has no SVG entry today; this keeps a future
             // one from reopening the top-level script hole.
             let csp = if mime == "application/pdf" {
@@ -4675,6 +4680,10 @@ mod media_tests {
     /// The browser's PDF viewer loads a PDF attachment in an `<iframe>`, so
     /// the response keeps the stored MIME and Range support but must not
     /// carry the `sandbox` directive, which blanks the viewer in WebKit.
+    /// The viewer also negotiates br/gzip, so the PDF has to bypass the
+    /// compression layer (the video test holds the control proving the
+    /// same layer is active) or it loses `Content-Length` and
+    /// `Accept-Ranges`.
     #[tokio::test]
     async fn pdf_media_is_served_without_the_sandbox_directive() {
         let fixture = Fixture::new();
@@ -4690,11 +4699,13 @@ mod media_tests {
         )
         .unwrap();
         let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions);
+        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions)
+            .layer(compression_layer());
         let request = |uri: String, range: Option<&str>| {
             let mut request = axum::http::Request::builder()
                 .uri(uri)
-                .header("Authorization", "Bearer bearer-token");
+                .header("Authorization", "Bearer bearer-token")
+                .header("Accept-Encoding", "br, gzip");
             if let Some(range) = range {
                 request = request.header("Range", range);
             }
@@ -4707,6 +4718,12 @@ mod media_tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/pdf");
+        assert!(response.headers().get("content-encoding").is_none());
+        assert_eq!(
+            response.headers()["content-length"],
+            pdf.len().to_string().as_str()
+        );
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert_eq!(
             response.headers()["content-security-policy"],
@@ -4812,6 +4829,7 @@ mod media_tests {
             response.headers()["cache-control"],
             "private, max-age=31536000, immutable"
         );
+        let etag = response.headers()["etag"].clone();
         assert_eq!(
             axum::body::to_bytes(response.into_body(), 100)
                 .await
@@ -4819,6 +4837,45 @@ mod media_tests {
                 .as_ref(),
             PNG
         );
+
+        // The cache policy covers every 2xx and the 304 a conditional
+        // request gets back, but not a 416 (or 412), which describes the
+        // request rather than the bytes and must not be stored for a year.
+        let bearer = |method: &str, headers: &[(&str, &str)]| {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(&uri)
+                .header("Authorization", "Bearer bearer-token");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request.body(axum::body::Body::empty()).unwrap()
+        };
+        let response = router.clone().oneshot(bearer("HEAD", &[])).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        let response = router
+            .clone()
+            .oneshot(bearer("GET", &[("If-None-Match", etag.to_str().unwrap())]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        let beyond_eof = format!("bytes={}-", PNG.len());
+        let response = router
+            .clone()
+            .oneshot(bearer("GET", &[("Range", beyond_eof.as_str())]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert!(response.headers().get("cache-control").is_none());
+
         let request = axum::http::Request::builder()
             .uri("/api/media/not-a-media-id.png")
             .header("Authorization", "Bearer bearer-token")

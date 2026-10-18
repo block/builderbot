@@ -141,11 +141,13 @@ GET/HEAD plus single byte ranges, including open-ended and suffix ranges.
 It returns 416 for invalid or unsatisfiable ranges and reads only the requested
 slice on a blocking worker. The browser route `/api/media/{file}` uses
 `ServeFile` and the same authentication predicate as `require_auth`. Its
-responses carry `Cache-Control: private, max-age=31536000, immutable` on 200,
-206, HEAD, and 304 alike: an ID is a fresh UUID per write and nothing rewrites
-bytes under an existing one (a cross-project move renames the file), so a
-reopened note costs no conditional round trips and browsers stop revalidating a
-partially cached video before seeking. The web server's compression layer
+responses carry `Cache-Control: private, max-age=31536000, immutable` on every
+2xx (200, 206, HEAD) and on 304, but not on 412 or 416: an ID is a fresh UUID
+per write and nothing rewrites bytes under an existing one (a cross-project move
+renames the file), so a reopened note costs no conditional round trips and
+browsers stop revalidating a partially cached video before seeking, while a
+response that describes the request rather than the bytes is never stored. The
+web server's compression layer
 never compresses media: images are excluded by tower-http's default
 predicate, and `video/*` and `application/pdf` are excluded explicitly, so a
 download, HEAD, `fetch()`, or "open in new tab" of a video keeps its

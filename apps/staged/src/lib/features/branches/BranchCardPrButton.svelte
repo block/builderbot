@@ -38,6 +38,8 @@
     createQueuedSessionCanceller,
     extractPrNumber,
     extractPrUrl,
+    pushTargetBranchName,
+    pushTargetRef,
     type CompletedPushOutcome,
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
@@ -1025,7 +1027,8 @@
         <AlertDialog.Header>
           <AlertDialog.Title>No pull request found</AlertDialog.Title>
           <AlertDialog.Description>
-            GitHub has no pull request with {branch.branchName} as its head branch.
+            GitHub has no pull request with {pushTargetBranchName(branch, timeline?.gitState)} as its
+            head branch.
           </AlertDialog.Description>
         </AlertDialog.Header>
       {:else if prDetectionFailure.kind === 'error'}
@@ -1043,8 +1046,10 @@
           <AlertDialog.Description>
             GitHub has {candidates.length === 1
               ? 'a pull request'
-              : `${candidates.length} pull requests`} with {branch.branchName} as the head branch, but
-            none can be linked to this branch:
+              : `${candidates.length} pull requests`} with {pushTargetBranchName(
+              branch,
+              timeline?.gitState
+            )} as the head branch, but none can be linked to this branch:
           </AlertDialog.Description>
         </AlertDialog.Header>
         <ul class="max-h-[42vh] space-y-3 overflow-auto text-sm">
@@ -1142,8 +1147,8 @@
       <AlertDialog.Header>
         <AlertDialog.Title>Push Rejected</AlertDialog.Title>
         <AlertDialog.Description>
-          The remote branch has commits that would be lost. Do you want to force push? This will
-          overwrite the remote branch with your local version.
+          {pushTargetRef(branch, timeline?.gitState)} has commits that would be lost. Do you want to force
+          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version.
         </AlertDialog.Description>
       </AlertDialog.Header>
       <AlertDialog.Footer>

@@ -212,6 +212,51 @@ fn find_gh() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Normalised messages for the ways `gh` fails before it can answer anything
+/// at all. Every `gh` runner below maps the raw failure onto one of these so
+/// callers can tell "gh is unusable right now" from "gh answered no".
+pub const GH_NOT_FOUND: &str = "GitHub CLI not found. Install with: brew install gh";
+pub const GH_NOT_AUTHENTICATED: &str = "Not authenticated with GitHub CLI. Run: gh auth login";
+pub const GH_TIMED_OUT: &str = "gh command timed out after 60s";
+
+/// Fragments of the stderr `gh` (and the Go net stack under it) prints when
+/// it cannot reach GitHub at all — offline, DNS down, proxy or TLS failing.
+/// Compared case-insensitively.
+const GH_CONNECTIVITY_ERRORS: &[&str] = &[
+    "error connecting to",
+    "dial tcp",
+    "tls handshake",
+    "no such host",
+    "connection refused",
+    "network is unreachable",
+];
+
+/// Whether `err` means `gh` itself is unusable (missing, logged out, failed
+/// to spawn, timed out, or unable to reach GitHub) rather than a verdict about
+/// the thing asked for. A run that fans out many `gh` calls can stop after one
+/// of these; any other error (a deleted PR, a repo the user can't see) is
+/// specific to that call.
+pub fn is_gh_unavailable_error(err: &GitError) -> bool {
+    match err {
+        GitError::CommandFailed(msg) => {
+            msg == GH_NOT_FOUND
+                || msg == GH_NOT_AUTHENTICATED
+                || msg == GH_TIMED_OUT
+                || msg.starts_with("Failed to run gh:")
+                || msg.starts_with("Failed to wait for gh:")
+                || is_gh_connectivity_error(msg)
+        }
+        _ => false,
+    }
+}
+
+fn is_gh_connectivity_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    GH_CONNECTIVITY_ERRORS
+        .iter()
+        .any(|fragment| lower.contains(fragment))
+}
+
 /// Spawn a gh command, drain its pipes concurrently, and enforce a 60s timeout.
 fn spawn_gh_with_timeout(cmd: &mut Command) -> Result<std::process::Output, GitError> {
     let mut child = cmd
@@ -254,9 +299,7 @@ fn spawn_gh_with_timeout(cmd: &mut Command) -> Result<std::process::Output, GitE
                     if let Some(t) = stderr_thread {
                         let _ = t.join();
                     }
-                    return Err(GitError::CommandFailed(
-                        "gh command timed out after 60s".to_string(),
-                    ));
+                    return Err(GitError::CommandFailed(GH_TIMED_OUT.to_string()));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -283,9 +326,7 @@ fn check_gh_output(output: std::process::Output) -> Result<String, GitError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-            return Err(GitError::CommandFailed(
-                "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-            ));
+            return Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()));
         }
         return Err(GitError::CommandFailed(stderr.into_owned()));
     }
@@ -295,9 +336,7 @@ fn check_gh_output(output: std::process::Output) -> Result<String, GitError> {
 
 /// Run a gh command in the context of a local repo directory
 fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
+    let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
     let output = spawn_gh_with_timeout(Command::new(&gh_path).current_dir(repo).args(args))?;
     check_gh_output(output)
@@ -305,9 +344,7 @@ fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 
 /// Run a gh command without needing a local directory (uses `-R owner/repo` or global commands).
 fn run_gh_global(args: &[&str]) -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
+    let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
     let output = spawn_gh_with_timeout(Command::new(&gh_path).args(args))?;
     check_gh_output(output)
@@ -324,7 +361,7 @@ pub fn check_github_auth() -> GitHubAuthStatus {
         None => {
             return GitHubAuthStatus {
                 authenticated: false,
-                setup_hint: Some("GitHub CLI not found. Install with: brew install gh".to_string()),
+                setup_hint: Some(GH_NOT_FOUND.to_string()),
             }
         }
     };
@@ -591,6 +628,80 @@ pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest,
     let item: GhPrListItem =
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
+    Ok(item.into())
+}
+
+/// Where a PR's head branch is and whether the PR is still open — the facts
+/// needed to decide whether a local branch should track that head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrHead {
+    pub head_ref: String,
+    /// `owner/name` of the repository the head branch lives in; `None` when
+    /// GitHub no longer knows it (a deleted fork) or `gh` did not say.
+    pub head_repo: Option<String>,
+    /// Upper-case GitHub state: `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+}
+
+impl PrHead {
+    pub fn is_open(&self) -> bool {
+        self.state.eq_ignore_ascii_case("OPEN")
+    }
+
+    /// Whether GitHub confirms the head branch lives in `github_repo` (the
+    /// repository the local clone's `origin` points at). `false` when the
+    /// head is in a fork or its repository is unknown: an `origin/<head>`
+    /// that happens to exist is then an unrelated branch of the same name.
+    pub fn head_is_in(&self, github_repo: &str) -> bool {
+        self.head_repo
+            .as_deref()
+            .is_some_and(|head_repo| head_repo.eq_ignore_ascii_case(github_repo))
+    }
+}
+
+/// Response from `gh pr view --json headRefName,headRepository,state`.
+#[derive(Debug, Deserialize)]
+struct GhPrHeadItem {
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "headRepository")]
+    head_repository: Option<GhPrHeadRepository>,
+    state: String,
+}
+
+/// `headRepository` as `gh pr view` reports it. Older `gh` releases emit
+/// only `id` and `name`, so `nameWithOwner` is optional and its absence is
+/// treated as "unknown" rather than failing the whole lookup.
+#[derive(Debug, Deserialize)]
+struct GhPrHeadRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: Option<String>,
+}
+
+impl From<GhPrHeadItem> for PrHead {
+    fn from(item: GhPrHeadItem) -> Self {
+        PrHead {
+            head_ref: item.head_ref_name,
+            head_repo: item.head_repository.and_then(|r| r.name_with_owner),
+            state: item.state,
+        }
+    }
+}
+
+/// `gh pr view <n> -R <repo> --json headRefName,headRepository,state`: a
+/// narrower, cheaper [`get_pr_for_repo`] for callers that only need the
+/// head, where it lives and the state.
+pub fn get_pr_head(github_repo: &str, pr_number: u64) -> Result<PrHead, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "-R",
+        github_repo,
+        "--json=headRefName,headRepository,state",
+    ])?;
+    let item: GhPrHeadItem =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
     Ok(item.into())
 }
 
@@ -956,11 +1067,7 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     // fall back to plain HTTPS git clone.
     let clone_str = clone_path.to_string_lossy().to_string();
     let gh_clone_result = (|| -> Result<(), GitError> {
-        let gh_path = find_gh().ok_or_else(|| {
-            GitError::CommandFailed(
-                "GitHub CLI not found. Install with: brew install gh".to_string(),
-            )
-        })?;
+        let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
         let output = Command::new(&gh_path)
             .env("GH_GIT_PROTOCOL", "https")
@@ -971,9 +1078,7 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-                return Err(GitError::CommandFailed(
-                    "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-                ));
+                return Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()));
             }
             return Err(GitError::CommandFailed(stderr.into_owned()));
         }
@@ -1114,11 +1219,7 @@ where
     // If this fails (e.g. gh is set to SSH protocol and org requires SSH certs),
     // fall back to plain HTTPS git clone.
     let gh_clone_result = (|| -> Result<(), GitError> {
-        let gh_path = find_gh().ok_or_else(|| {
-            GitError::CommandFailed(
-                "GitHub CLI not found. Install with: brew install gh".to_string(),
-            )
-        })?;
+        let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
         let gh_str = gh_path.to_string_lossy().to_string();
         let result = spawn_streaming(
@@ -1132,9 +1233,7 @@ where
         // falling through to the generic HTTPS fallback.
         if let Err(GitError::CommandFailed(ref stderr)) = result {
             if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-                return Err(GitError::CommandFailed(
-                    "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-                ));
+                return Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()));
             }
         }
 
@@ -1449,9 +1548,7 @@ use crate::store::Comment;
 
 /// Get the GitHub token from `gh auth token`.
 fn get_github_token() -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
+    let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
     let output = Command::new(&gh_path)
         .args(["auth", "token"])
@@ -1470,9 +1567,7 @@ fn get_github_token() -> Result<String, GitError> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-            Err(GitError::CommandFailed(
-                "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-            ))
+            Err(GitError::CommandFailed(GH_NOT_AUTHENTICATED.to_string()))
         } else {
             Err(GitError::CommandFailed(format!(
                 "GitHub CLI error: {}",
@@ -2701,20 +2796,6 @@ fn fetch_pr_url_from_repo(github_repo: &str, pr_num_str: &str) -> Result<String,
     Ok(parsed.url)
 }
 
-/// Push a branch to the remote.
-/// If force is true, uses --force-with-lease for safer force pushing.
-pub fn push_branch(repo: &Path, branch: &str, force: bool) -> Result<(), GitError> {
-    use super::cli;
-
-    let mut args = vec!["push", "-u", "origin", branch];
-    if force {
-        args.push("--force-with-lease");
-    }
-
-    cli::run(repo, &args)?;
-    Ok(())
-}
-
 /// Create a new pull request.
 /// The branch must be pushed to the remote first.
 pub fn create_pull_request(
@@ -3128,6 +3209,38 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clear();
         }
+    }
+
+    /// What `gh` prints when GitHub cannot be reached at all is a property
+    /// of the machine, not of the PR asked about.
+    #[test]
+    fn connectivity_failures_mean_gh_is_unavailable() {
+        let offline = [
+            "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+            "Post \"https://api.github.com/graphql\": dial tcp: lookup api.github.com: no such host",
+            "Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout",
+            "proxyconnect tcp: dial tcp 127.0.0.1:8080: connect: connection refused",
+            "dial tcp 140.82.112.5:443: connect: network is unreachable",
+        ];
+        for msg in offline {
+            assert!(
+                is_gh_unavailable_error(&GitError::CommandFailed(msg.to_string())),
+                "{msg:?} should trip the gh breaker"
+            );
+        }
+        let per_call = [
+            "GraphQL: Could not resolve to a PullRequest with the number of 7. (repository.pullRequest)",
+            "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets)",
+        ];
+        for msg in per_call {
+            assert!(
+                !is_gh_unavailable_error(&GitError::CommandFailed(msg.to_string())),
+                "{msg:?} is about one call"
+            );
+        }
+        assert!(!is_gh_unavailable_error(&GitError::InvalidPath(
+            "dial tcp".to_string()
+        )));
     }
 
     fn check_run(

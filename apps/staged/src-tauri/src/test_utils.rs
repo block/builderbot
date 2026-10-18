@@ -71,3 +71,45 @@ impl Drop for TempGitRepo {
         let _ = fs::remove_dir_all(&self.path);
     }
 }
+
+/// A temporary directory removed on drop, for tests that need more than one
+/// repository (a bare origin plus clones) or a worktree root.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("staged-{label}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Run git in `repo` the way [`TempGitRepo::run_git`] does, for repositories
+/// the test created itself (clones, bare origins, worktrees).
+pub fn run_git_in(repo: &Path, args: &[&str]) -> String {
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg("core.hooksPath=/dev/null")
+        .arg("-C")
+        .arg(repo)
+        .args(args);
+    strip_git_env(&mut command);
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}

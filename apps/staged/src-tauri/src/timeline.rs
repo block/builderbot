@@ -416,6 +416,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             git_state = Some(git::compute_local_branch_git_state(
                 worktree_path,
                 &branch.branch_name,
+                &git::upstream_branch_name(worktree_path, &branch.branch_name, &branch.base_branch),
                 &branch.base_branch,
                 git::FetchMode::Never,
                 git::WorktreeStatusScope::Indexed,
@@ -752,6 +753,7 @@ pub(crate) fn refresh_branch_git_state_impl(
             Some(git::compute_local_branch_git_state(
                 worktree_path,
                 &branch.branch_name,
+                &git::upstream_branch_name(worktree_path, &branch.branch_name, &branch.base_branch),
                 &branch.base_branch,
                 fetch_mode,
                 git::WorktreeStatusScope::Full,
@@ -915,6 +917,7 @@ pub(crate) fn pull_branch_ff_only_impl(store: &Arc<Store>, branch_id: &str) -> R
     let state = git::compute_local_branch_git_state(
         worktree,
         &branch.branch_name,
+        &git::upstream_branch_name(worktree, &branch.branch_name, &branch.base_branch),
         &branch.base_branch,
         git::FetchMode::Force,
         git::WorktreeStatusScope::Full,
@@ -1068,6 +1071,7 @@ pub(crate) fn reset_branch_to_remote_impl(
     let state = git::compute_local_branch_git_state(
         worktree,
         &branch.branch_name,
+        &git::upstream_branch_name(worktree, &branch.branch_name, &branch.base_branch),
         &branch.base_branch,
         git::FetchMode::Force,
         git::WorktreeStatusScope::Full,
@@ -1242,6 +1246,7 @@ pub(crate) fn discard_worktree_changes_impl(
     let state = git::compute_local_branch_git_state(
         worktree,
         &branch.branch_name,
+        &git::upstream_branch_name(worktree, &branch.branch_name, &branch.base_branch),
         &branch.base_branch,
         git::FetchMode::Never,
         git::WorktreeStatusScope::Full,

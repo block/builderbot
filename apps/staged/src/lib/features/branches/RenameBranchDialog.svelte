@@ -13,10 +13,16 @@
   interface Props {
     open: boolean;
     branchName: string;
+    /** The `origin/…` ref this branch keeps pushing to after the rename —
+     *  set whenever the checkout tracks a branch on origin (a PR branch, a
+     *  de-duplicated checkout, or any branch pushed at least once), since
+     *  `git branch -m` keeps the upstream and only the local name changes.
+     *  The dialog spells it out. */
+    remoteRef?: string | null;
     onRename?: (branchName: string) => void | Promise<void>;
   }
 
-  let { open = $bindable(false), branchName, onRename }: Props = $props();
+  let { open = $bindable(false), branchName, remoteRef = null, onRename }: Props = $props();
 
   const inputId = `rename-branch-${++inputCounter}`;
   let draft = $state('');
@@ -95,6 +101,12 @@
         />
       </div>
 
+      {#if remoteRef}
+        <p class="rename-hint">
+          Only the local branch is renamed; it keeps pushing to {remoteRef}.
+        </p>
+      {/if}
+
       {#if error}
         <p class="rename-error" role="alert">{error}</p>
       {/if}
@@ -127,6 +139,12 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .rename-hint {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-faint);
   }
 
   .rename-error {

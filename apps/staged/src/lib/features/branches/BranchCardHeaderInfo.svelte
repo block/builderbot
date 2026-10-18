@@ -14,6 +14,10 @@
   interface Props {
     branchId?: string;
     branchName: string;
+    /** The `origin/…` ref this branch pushes to, when it is not simply
+     *  `origin/<branchName>` (a de-duplicated PR import). Rendered after the
+     *  local name as `branchName → remoteRef` so the divergence is visible. */
+    remoteRef?: string | null;
     repoLabel?: ProjectRepo | null;
     baseBranch?: string | null;
     parentAheadCount?: number;
@@ -33,6 +37,7 @@
   let {
     branchId,
     branchName,
+    remoteRef = null,
     repoLabel = null,
     baseBranch = null,
     parentAheadCount = 0,
@@ -43,6 +48,10 @@
     refreshingGitState = false,
     fetchError = null,
   }: Props = $props();
+
+  const branchTitle = $derived(
+    remoteRef ? `${branchName} → ${remoteRef} (pushes to ${remoteRef})` : branchName
+  );
 
   const capsuleTitle = $derived.by(() => {
     if (!baseBranch || parentAheadCount <= 0) return baseBranch ?? undefined;
@@ -142,7 +151,9 @@
       /></span
     >
     <div class="header-meta">
-      <span class="branch-capsule" title={branchName}>{branchName}</span>
+      <span class="branch-capsule" title={branchTitle}
+        >{branchName}{#if remoteRef}<span class="remote-ref"> → {remoteRef}</span>{/if}</span
+      >
       {#if baseBranch}
         <ChevronRight size={12} />
       {/if}
@@ -156,7 +167,9 @@
       {@render refreshStatus()}
     </div>
   {:else}
-    <span class="repo-name">{branchName}</span>
+    <span class="repo-name" title={branchTitle}
+      >{branchName}{#if remoteRef}<span class="remote-ref"> → {remoteRef}</span>{/if}</span
+    >
     {#if baseBranch || warning || refreshingGitState || fetchError}
       <div class="header-meta">
         {@render parentPill()}
@@ -218,6 +231,10 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .remote-ref {
+    color: var(--text-faint);
   }
 
   .ahead-count {

@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { BranchGitState } from '../../types';
 import {
   classifyCompletedPushSession,
   classifyPipelinePushCompletion,
   classifyPolledSession,
   createPollFailureTracker,
   createQueuedSessionCanceller,
+  divergedPushTargetRef,
+  pushTargetBranchName,
+  pushTargetRef,
+  renamePushTargetRef,
   extractPrNumber,
   extractPrUrl,
   isGitActionInFlight,
@@ -374,5 +379,101 @@ describe('createQueuedSessionCanceller', () => {
     expect(await run('session-1')).toBe(true);
     expect(cancel).toHaveBeenCalledTimes(2);
     expect(clearState).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** A git-state payload whose upstream the backend resolved to `ref`;
+ *  `exists` is whether that branch is actually on origin. */
+function gitState(ref: string, exists = true): Pick<BranchGitState, 'upstream'> {
+  return {
+    upstream: {
+      ref,
+      exists,
+      sha: null,
+      relation: 'inSync',
+      ahead: 0,
+      behind: 0,
+      mergeBaseSha: null,
+      behindBase: 0,
+    },
+  };
+}
+
+describe('pushTargetRef / divergedPushTargetRef', () => {
+  it('guesses origin/<local name> before the git state has loaded', () => {
+    const branch = { branchName: 'feature' };
+    expect(pushTargetRef(branch, null)).toBe('origin/feature');
+    expect(pushTargetRef(branch, undefined)).toBe('origin/feature');
+    expect(pushTargetBranchName(branch, null)).toBe('feature');
+    expect(divergedPushTargetRef(branch, null)).toBeNull();
+  });
+
+  it('reads the upstream the backend resolved from the checkout', () => {
+    // Local `feature-x-2` was picked because `feature-x` was checked out in
+    // another project's worktree; the checkout tracks origin/feature-x and
+    // the git state says so.
+    const branch = { branchName: 'feature-x-2' };
+    const state = gitState('origin/feature-x');
+    expect(pushTargetRef(branch, state)).toBe('origin/feature-x');
+    expect(pushTargetBranchName(branch, state)).toBe('feature-x');
+    expect(divergedPushTargetRef(branch, state)).toBe('origin/feature-x');
+  });
+
+  it('treats an upstream equal to the local name as not diverged', () => {
+    const branch = { branchName: 'feature' };
+    expect(pushTargetRef(branch, gitState('origin/feature'))).toBe('origin/feature');
+    expect(divergedPushTargetRef(branch, gitState('origin/feature'))).toBeNull();
+  });
+});
+
+describe('renamePushTargetRef', () => {
+  it('is silent for a plain branch whose push target follows the rename', () => {
+    // Nothing on origin yet (or nothing loaded): the first push after the
+    // rename creates `origin/<new name>`, so there is no target to keep.
+    expect(renamePushTargetRef({ branchName: 'feature', prNumber: null }, null)).toBeNull();
+    expect(
+      renamePushTargetRef(
+        { branchName: 'feature', prNumber: null },
+        gitState('origin/feature', false)
+      )
+    ).toBeNull();
+  });
+
+  it('names the tracked branch for a plain branch that has been pushed', () => {
+    // `feature` tracks `origin/feature` from its first `push -u`; renamed to
+    // `feature-y` it still pushes to `origin/feature`, so the dialog must
+    // say so even though the names match today.
+    expect(
+      renamePushTargetRef({ branchName: 'feature', prNumber: null }, gitState('origin/feature'))
+    ).toBe('origin/feature');
+  });
+
+  it('names the current target for a PR branch', () => {
+    // `git branch -m` keeps the upstream, so the PR keeps its head; the
+    // dialog has to say so even though nothing has diverged yet.
+    expect(
+      renamePushTargetRef({ branchName: 'feature', prNumber: 42 }, gitState('origin/feature'))
+    ).toBe('origin/feature');
+    expect(renamePushTargetRef({ branchName: 'feature', prNumber: 42 }, null)).toBe(
+      'origin/feature'
+    );
+  });
+
+  it('names a diverged upstream for a de-duplicated checkout, PR or not', () => {
+    const state = gitState('origin/feature-x');
+    expect(renamePushTargetRef({ branchName: 'feature-x-2', prNumber: null }, state)).toBe(
+      'origin/feature-x'
+    );
+    expect(renamePushTargetRef({ branchName: 'feature-x-2', prNumber: 7 }, state)).toBe(
+      'origin/feature-x'
+    );
+    // Tracking is configured even if origin has since lost the branch: the
+    // next push recreates `origin/feature-x`, not `origin/<new name>`.
+    expect(
+      renamePushTargetRef(
+        { branchName: 'feature-x-2', prNumber: null },
+        gitState('origin/feature-x', false)
+      )
+    ).toBe('origin/feature-x');
   });
 });

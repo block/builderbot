@@ -376,21 +376,20 @@ pub(crate) async fn detect_branch_pr_impl(
 ) -> Result<PrDetectionResult, String> {
     let branch = load_unlinked_branch(&store, &branch_id, "detect")?;
     let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
+    // PRs are keyed by the branch on origin the checkout pushes to, which is
+    // the PR head rather than the local name for a de-duplicated import.
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &branch).await;
 
     // Closed and merged PRs are never adopted, so they are only fetched when
     // no open PR satisfies the checks and the user needs to be told why.
-    let candidates = list_head_branch_prs_with_history(
-        &repo_slug,
-        &branch.branch_name,
-        "detect_branch_pr",
-        |open| {
+    let candidates =
+        list_head_branch_prs_with_history(&repo_slug, &remote_branch, "detect_branch_pr", |open| {
             !matches!(
                 classify_candidates(open, &expected),
                 PrDetectionResult::Found { .. }
             )
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     let result = classify_candidates(&candidates, &expected);
 
@@ -439,19 +438,20 @@ pub(crate) async fn link_branch_pr_impl(
 ) -> Result<LinkedBranchPr, String> {
     let branch = load_unlinked_branch(&store, &branch_id, "link")?;
     let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
+    // PRs are keyed by the branch on origin the checkout pushes to, which is
+    // the PR head rather than the local name for a de-duplicated import.
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &branch).await;
 
     // Only an open PR can be linked, but a PR closed since detection should
     // be refused as "closed" rather than "no longer has this head", so the
     // history is consulted when the number isn't among the open PRs.
-    let candidates = list_head_branch_prs_with_history(
-        &repo_slug,
-        &branch.branch_name,
-        "link_branch_pr",
-        |open| !open.iter().any(|pr| pr.number == pr_number),
-    )
-    .await?;
+    let candidates =
+        list_head_branch_prs_with_history(&repo_slug, &remote_branch, "link_branch_pr", |open| {
+            !open.iter().any(|pr| pr.number == pr_number)
+        })
+        .await?;
 
-    let pr = pick_candidate_to_link(&candidates, pr_number, &expected, &branch.branch_name)?;
+    let pr = pick_candidate_to_link(&candidates, pr_number, &expected, &remote_branch)?;
 
     store
         .update_branch_pr_number(&branch_id, Some(pr.number))
@@ -514,10 +514,13 @@ pub(crate) async fn recover_branch_pr_impl(
     }
 
     let (repo_slug, expected) = branch_pr_expectations(&store, &branch)?;
+    // PRs are keyed by the branch on origin the checkout pushes to, which is
+    // the PR head rather than the local name for a de-duplicated import.
+    let remote_branch = crate::branches::resolve_remote_branch(&store, &branch).await;
 
     let open = list_head_branch_prs(
         repo_slug.clone(),
-        branch.branch_name.clone(),
+        remote_branch.clone(),
         git::PrListState::Open,
         "recover_branch_pr",
     )

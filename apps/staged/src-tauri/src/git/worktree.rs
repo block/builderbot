@@ -518,6 +518,15 @@ pub fn branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
 /// Runs `git branch --set-upstream-to=origin/<remote_branch> <local_branch>`.
 /// Returns `Ok(true)` if the upstream was set, `Ok(false)` if the remote branch
 /// doesn't exist (so there's nothing to track).
+///
+/// Git refuses `--set-upstream-to` when no `remote.origin.fetch` refspec maps
+/// the branch — a `--single-branch` clone, for everything but its one branch
+/// — even though `origin/<remote_branch>` exists. The tracking entry is then
+/// written directly: `branch.<local>.remote` and `branch.<local>.merge`,
+/// exactly what `git push -u` writes in that clone, and what
+/// `upstream_branch_name` reads back. Nothing is added to the fetch refspecs:
+/// a configured non-glob refspec outlives the PR and makes a bare `git fetch
+/// origin` fail once the head is deleted.
 pub fn set_upstream_to_origin(
     repo: &Path,
     local_branch: &str,
@@ -527,11 +536,78 @@ pub fn set_upstream_to_origin(
         return Ok(false);
     }
     let upstream = format!("origin/{remote_branch}");
-    cli::run(
+    match cli::run(
         repo,
         &["branch", "--set-upstream-to", &upstream, local_branch],
-    )?;
-    Ok(true)
+    ) {
+        Ok(_) => Ok(true),
+        Err(GitError::CommandFailed(msg)) if msg.contains("is not a branch") => {
+            log::debug!(
+                "No fetch refspec maps origin/{remote_branch}; writing the tracking entry of \
+                 '{local_branch}' directly"
+            );
+            cli::run(
+                repo,
+                &["config", &format!("branch.{local_branch}.remote"), "origin"],
+            )?;
+            cli::run(
+                repo,
+                &[
+                    "config",
+                    &format!("branch.{local_branch}.merge"),
+                    &format!("refs/heads/{remote_branch}"),
+                ],
+            )?;
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `local_branch` has any upstream configured (`branch.<name>.merge`
+/// is set), on origin or elsewhere.
+pub fn has_upstream(repo: &Path, local_branch: &str) -> Result<bool, GitError> {
+    let key = format!("branch.{local_branch}.merge");
+    match cli::run_lite(repo, &["config", "--get", &key]) {
+        Ok(value) => Ok(!value.trim().is_empty()),
+        // `--get` exits 1 for an unset key.
+        Err(GitError::CommandFailed(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Make `local_branch` track `origin/<remote_branch>` when that remote branch
+/// exists, and otherwise clear whatever upstream it has.
+///
+/// Run right after Staged creates a worktree. Git makes a branch created from
+/// `origin/<base>` track `<base>`, and a branch that has never been pushed
+/// should track nothing until `git push -u origin <local>:<remote>` records
+/// the real target — `upstream_branch_name` reads this config as the push
+/// target, so it must never be left saying "the base". Returns whether an
+/// upstream was set.
+pub fn set_upstream_to_origin_or_unset(
+    repo: &Path,
+    local_branch: &str,
+    remote_branch: &str,
+) -> Result<bool, GitError> {
+    if set_upstream_to_origin(repo, local_branch, remote_branch)? {
+        return Ok(true);
+    }
+    // Fails when there is no upstream to unset, which is the state we want.
+    let _ = cli::run(repo, &["branch", "--unset-upstream", local_branch]);
+    Ok(false)
+}
+
+/// Fetch `origin/<branch_name>` so that it can be tracked and compared.
+///
+/// Fetches by explicit refspec, which updates the remote-tracking ref whether
+/// or not `remote.origin.fetch` covers the branch (a `--single-branch` clone's
+/// does not; a bare `git fetch origin <branch>` there only updates
+/// `FETCH_HEAD`). The configured refspecs are left alone.
+pub fn fetch_origin_branch(repo: &Path, branch_name: &str) -> Result<(), GitError> {
+    let refspec = format!("+refs/heads/{branch_name}:refs/remotes/origin/{branch_name}");
+    cli::run(repo, &["fetch", "origin", &refspec])?;
+    Ok(())
 }
 
 /// Check whether a remote tracking branch (`origin/<branch_name>`) exists.
@@ -862,11 +938,13 @@ pub fn switch_branch(worktree: &Path, branch_name: &str) -> Result<(), GitError>
 
 /// Check if the local branch has commits not yet pushed to the remote.
 ///
-/// Compares the local HEAD with `origin/<branch>`. Returns `true` if there
-/// are commits in the local branch that are not in the remote tracking branch.
-/// Returns `true` if the remote tracking branch doesn't exist (e.g., never pushed).
-pub fn has_unpushed_commits(worktree: &Path, branch: &str) -> Result<bool, GitError> {
-    let remote_ref = format!("origin/{branch}");
+/// Compares the local HEAD with `origin/<remote_branch>` — the branch this
+/// checkout pushes to, which is the PR head rather than the local name for a
+/// de-duplicated PR import. Returns `true` if there are commits in the local
+/// branch that are not in the remote tracking branch, and `true` if the
+/// remote tracking branch doesn't exist (e.g., never pushed).
+pub fn has_unpushed_commits(worktree: &Path, remote_branch: &str) -> Result<bool, GitError> {
+    let remote_ref = format!("origin/{remote_branch}");
     // Check that the remote ref exists first
     if cli::run(worktree, &["rev-parse", "--verify", &remote_ref]).is_err() {
         // Remote tracking branch doesn't exist — all local commits are unpushed

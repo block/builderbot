@@ -43,6 +43,9 @@
     remoteWorkspaceStatus: string | null;
     onDelete?: () => void;
     onRename?: (branchName: string) => void | Promise<void>;
+    /** The `origin/…` ref the branch keeps pushing to after a rename, for the
+     *  rename dialog's hint; `null` when a rename simply moves the target. */
+    renameRemoteRef?: string | null;
     onMove?: (targetProjectId: string) => void | Promise<void>;
     onNoteCreated?: () => void;
     onRebaseBranch?: () => void;
@@ -66,6 +69,7 @@
     remoteWorkspaceStatus,
     onDelete,
     onRename,
+    renameRemoteRef = null,
     onMove,
     onNoteCreated,
     onRebaseBranch,
@@ -319,7 +323,12 @@
   </DropdownMenu.Content>
 </DropdownMenu.Root>
 
-<RenameBranchDialog bind:open={renameDialogOpen} branchName={branch.branchName} {onRename} />
+<RenameBranchDialog
+  bind:open={renameDialogOpen}
+  branchName={branch.branchName}
+  remoteRef={renameRemoteRef}
+  {onRename}
+/>
 
 <MoveBranchDialog bind:open={moveDialogOpen} {branch} {repoLabel} {onMove} />
 

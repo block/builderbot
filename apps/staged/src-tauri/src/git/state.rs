@@ -1244,13 +1244,10 @@ mod tests {
     /// `branches::run_workspace_shell` runs it on Blox (`sh -c <script> _
     /// <args…>`).
     fn run_batch_script_locally(script: &str, args: &[&str]) -> Result<String, String> {
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(script)
-            .arg("_")
-            .args(args)
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg(script).arg("_").args(args);
+        crate::git::strip_git_env(&mut command);
+        let output = command.output().map_err(|e| e.to_string())?;
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).into_owned());
         }

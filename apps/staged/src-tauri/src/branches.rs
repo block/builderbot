@@ -2980,8 +2980,10 @@ pub(crate) fn rename_local_branch(
         .get_workdir_for_branch(&branch.id)
         .map_err(|e| e.to_string())?
     {
-        let status = std::process::Command::new("git")
-            .args(["-C", &wd.path, "branch", "-m", new_name])
+        let mut command = std::process::Command::new("git");
+        command.args(["-C", &wd.path, "branch", "-m", new_name]);
+        git::strip_git_env(&mut command);
+        let status = command
             .status()
             .map_err(|e| format!("Failed to run git rename: {e}"))?;
         if !status.success() {
@@ -4186,12 +4188,10 @@ mod upstream_tracking_tests {
             command.contains("git push -u origin feature-x-2:feature-x"),
             "{command}"
         );
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(path)
-            .output()
-            .unwrap();
+        let mut push = std::process::Command::new("sh");
+        push.arg("-c").arg(command).current_dir(path);
+        git::strip_git_env(&mut push);
+        let output = push.output().unwrap();
         assert!(
             output.status.success(),
             "{command}\n{}",

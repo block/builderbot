@@ -2325,6 +2325,68 @@ fn test_transition_running_to_rate_limited_pauses_with_recovery_metadata() {
 }
 
 #[test]
+fn test_transition_running_to_rate_limited_merges_provider_metadata_in_the_same_write() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("rate limited", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .merge_session_provider_metadata(
+            &session.id,
+            &serde_json::json!({ "acp": { "promptError": { "data": { "errorKind": "rate_limit" } } } }),
+        )
+        .unwrap();
+
+    assert!(store
+        .transition_running_to_rate_limited_with_provider_metadata(
+            &session.id,
+            Some("rate limit"),
+            Some("2026-06-24T15:45:00Z"),
+            Some("claude_pro"),
+            Some(&serde_json::json!({ "staged": { "rateLimitAutoRecovery": { "attempt": 1 } } })),
+        )
+        .unwrap());
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.status, SessionStatus::Paused);
+    assert_eq!(
+        fetched.completion_reason,
+        Some(CompletionReason::RateLimited)
+    );
+    let metadata = fetched.provider_metadata.expect("metadata persisted");
+    assert_eq!(
+        metadata.pointer("/staged/rateLimitAutoRecovery/attempt"),
+        Some(&serde_json::json!(1))
+    );
+    // The merge keeps unrelated provider metadata.
+    assert_eq!(
+        metadata.pointer("/acp/promptError/data/errorKind"),
+        Some(&serde_json::json!("rate_limit"))
+    );
+
+    // The guard still applies: a row that is no longer running takes neither
+    // the status nor the metadata.
+    assert!(!store
+        .transition_running_to_rate_limited_with_provider_metadata(
+            &session.id,
+            Some("again"),
+            None,
+            None,
+            Some(&serde_json::json!({ "staged": { "rateLimitAutoRecovery": { "attempt": 2 } } })),
+        )
+        .unwrap());
+    let unchanged = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(unchanged.error_message.as_deref(), Some("rate limit"));
+    assert_eq!(
+        unchanged
+            .provider_metadata
+            .unwrap()
+            .pointer("/staged/rateLimitAutoRecovery/attempt"),
+        Some(&serde_json::json!(1))
+    );
+}
+
+#[test]
 fn test_transition_to_running_clears_stale_recovery_metadata() {
     let store = Store::in_memory().unwrap();
 

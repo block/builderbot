@@ -3149,9 +3149,16 @@ pub(crate) fn build_note_followup_message_impl(
 /// The registry is the fast path: a session whose cancellation token is
 /// registered gets it fired, and the session runner records the terminal state
 /// itself. The `!was_running` fallback covers the rest — a session that is
-/// `running` or `queued` in the store but has no live token to fire, either
-/// because it never started one or because it was deregistered before its
-/// terminal write. Without it the row would sit at `running` forever.
+/// `running`, `queued`, or `paused` in the store but has no live token to
+/// fire, either because it never started one or because it was deregistered
+/// before its terminal write. Without it the row would sit at `running`
+/// forever.
+///
+/// A rate-limited `paused` session is never in the registry, so this fallback
+/// is the only Stop it can take. Writing `cancelled` here clears
+/// `completion_reason = rate_limited`, which is what makes the rate-limit
+/// scheduler's claim lose: without it a Stop was a silent no-op and the only
+/// ways out of the auto-retries were deleting the artifact or resuming first.
 ///
 /// Both the `cancel_session` Tauri command and the web dispatcher's arm of the
 /// same name call this. They must not diverge: `session_runner` relies on this
@@ -3195,6 +3202,7 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                 store::SessionStatus::Running
                     | store::SessionStatus::Queued
                     | store::SessionStatus::Disconnected
+                    | store::SessionStatus::Paused
             ) {
                 let _ = store.update_session_status(
                     session_id,
@@ -9301,6 +9309,50 @@ mod tests {
 
         assert_eq!(
             store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Cancelled
+        );
+    }
+
+    /// A rate-limited `paused` session is never in the registry, so this
+    /// fallback is the only Stop it can take. It used to touch only
+    /// `running`/`queued`, so Stop on a paused session was a silent no-op and
+    /// the auto-retries kept coming. Cancelling clears
+    /// `completion_reason = rate_limited`, which makes the scheduler's claim
+    /// lose, and settles work gated on the session as a running cancel would.
+    #[test]
+    fn cancelling_a_paused_rate_limited_session_records_the_stop_and_releases_its_dependents() {
+        let (store, branch) = setup_branch_store();
+        let paused = create_session_with_status(&store, "rebase", store::SessionStatus::Running);
+        store
+            .create_commit(
+                &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),
+            )
+            .unwrap();
+        assert!(store
+            .transition_running_to_rate_limited(&paused.id, Some("rate limit"), None, None)
+            .unwrap());
+        let mut push = store::Session::new_queued("push").with_branch(&branch.id);
+        push.pipeline = Some(
+            store::PipelineExecution::from_steps(&[])
+                .with_kind(store::PipelineKind::Push)
+                .with_depends_on_session_id(Some(paused.id.clone())),
+        );
+        store.create_session(&push).unwrap();
+
+        cancel_through_shared_body(&session_runner::SessionRegistry::new(), &store, &paused.id);
+
+        let row = store.get_session(&paused.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+        // The scheduler's claim only matches paused/rate-limited rows.
+        assert!(!store
+            .transition_to_running_with_provider_metadata(&paused.id, None)
+            .unwrap());
+        assert_eq!(
+            store.get_session(&push.id).unwrap().unwrap().status,
             store::SessionStatus::Cancelled
         );
     }

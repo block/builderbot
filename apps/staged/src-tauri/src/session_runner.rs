@@ -2678,14 +2678,21 @@ fn finish_session_run(
     registry.mark_finished(&session_id_for_status, registration);
     let status_enum = SessionStatus::parse(new_status).unwrap();
     let transitioned = if let Some(recovery) = rate_limit_recovery.as_ref() {
-        store_for_status
-            .transition_running_to_rate_limited(
-                &session_id_for_status,
-                error_msg.as_deref(),
-                recovery.resets_at.as_deref(),
-                recovery.kind.as_deref(),
-            )
-            .unwrap_or(false)
+        // Status flip and retry bookkeeping land in one write, so a
+        // scheduler tick can never see a paused row without bookkeeping
+        // and double-count the attempt.
+        crate::rate_limit_scheduler::pause_for_rate_limit(
+            &store_for_status,
+            &session_id_for_status,
+            error_msg.as_deref(),
+            recovery.resets_at.as_deref(),
+            recovery.kind.as_deref(),
+            crate::store::now_timestamp(),
+        )
+        .unwrap_or_else(|e| {
+            log::warn!("Failed to pause rate-limited session {session_id_for_status}: {e}");
+            false
+        })
     } else {
         store_for_status
             .transition_from_running(
@@ -2734,25 +2741,14 @@ fn finish_session_run(
     );
 
     if transitioned {
-        if status_enum == SessionStatus::Paused {
-            if let Err(e) = crate::rate_limit_scheduler::record_rate_limit_pause(
-                &store_for_status,
-                &session_id_for_status,
-                crate::store::now_timestamp(),
-            ) {
-                log::warn!(
-                    "Failed to schedule rate-limit recovery for session {session_id_for_status}: {e}"
-                );
-            }
-            // Fall through to the branch queue drain below. A paused
-            // session is not running, so work the user queued behind it has
-            // to be released or the branch deadlocks: the queue waits for a
-            // terminal hook that never fires, while auto-resume waits for
-            // the queue to empty. Only the branch queue drains —
-            // `completed_successfully` is false for a pause, so this
-            // session's own queued follow-up messages keep waiting for the
-            // resume that can actually deliver them.
-        }
+        // A pause falls through to the branch queue drain below. A paused
+        // session is not running, so work the user queued behind it has
+        // to be released or the branch deadlocks: the queue waits for a
+        // terminal hook that never fires, while auto-resume waits for
+        // the queue to empty. Only the branch queue drains —
+        // `completed_successfully` is false for a pause, so this
+        // session's own queued follow-up messages keep waiting for the
+        // resume that can actually deliver them.
 
         let branch_id = config.branch_id.clone();
         // Read the token again rather than reusing what the terminal-state
@@ -4303,8 +4299,19 @@ fn is_rate_limit_error(error: &str, provider_metadata: Option<&serde_json::Value
         return false;
     }
 
+    // A structured error kind from the bridge is authoritative. Driver error
+    // text can carry agent or tool stderr and model output, so a session that
+    // is itself working on rate-limit code, or a reply quoting "overloaded",
+    // must not turn a crash the bridge already classified as something else
+    // (`invalid_request`, `max_output_tokens`, `server_error`, ...) into a
+    // paused session that replays the retry prompt. The text fallback is only
+    // for errors that arrive with no kind at all.
+    if let Some(kind) = provider_metadata.and_then(prompt_error_kind) {
+        return kind == "rate_limit" || kind == "overloaded";
+    }
+
     if provider_metadata
-        .map(metadata_has_rate_limit)
+        .map(usage_update_reports_limit)
         .unwrap_or(false)
     {
         return true;
@@ -4313,30 +4320,24 @@ fn is_rate_limit_error(error: &str, provider_metadata: Option<&serde_json::Value
     has_rate_limit_marker(&normalized)
 }
 
-fn metadata_has_non_retryable_limit(metadata: &serde_json::Value) -> bool {
+/// The bridge's `errorKind` for the failed prompt, lowercased, when it sent one.
+fn prompt_error_kind(metadata: &serde_json::Value) -> Option<String> {
     metadata
         .pointer("/acp/promptError/data/errorKind")
         .and_then(|kind| kind.as_str())
+        .map(|kind| kind.trim().to_ascii_lowercase())
+        .filter(|kind| !kind.is_empty())
+}
+
+fn metadata_has_non_retryable_limit(metadata: &serde_json::Value) -> bool {
+    prompt_error_kind(metadata)
         .map(|kind| {
-            let kind = kind.to_ascii_lowercase();
-            kind == "billing_error" || kind == "credits_exhausted"
+            kind == "billing_error" || kind == "credits_exhausted" || kind == "account_on_hold"
         })
         .unwrap_or(false)
 }
 
-fn metadata_has_rate_limit(metadata: &serde_json::Value) -> bool {
-    if metadata
-        .pointer("/acp/promptError/data/errorKind")
-        .and_then(|kind| kind.as_str())
-        .map(|kind| {
-            let kind = kind.to_ascii_lowercase();
-            kind == "rate_limit" || kind == "overloaded"
-        })
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
+fn usage_update_reports_limit(metadata: &serde_json::Value) -> bool {
     let Some(rate_limit) = metadata
         .pointer("/acp/usageUpdate/_meta")
         .and_then(|meta| meta.get("_claude/rateLimit"))
@@ -4363,6 +4364,8 @@ fn has_non_retryable_limit_marker(normalized: &str) -> bool {
         "auth login",
         "billing_error",
         "billing error",
+        "account_on_hold",
+        "account on hold",
         "credits exhausted",
         "credit exhausted",
         "insufficient_quota",
@@ -7629,6 +7632,83 @@ mod tests {
                 })),
             ),
             CompletionReason::RateLimited
+        );
+    }
+
+    /// A structured `errorKind` that is not a limit is authoritative: driver
+    /// error text can carry stderr or model output that mentions rate limits,
+    /// and that must not turn a classified crash into a paused session.
+    #[test]
+    fn structured_non_limit_error_kinds_skip_the_text_fallback() {
+        fn metadata(kind: &str) -> serde_json::Value {
+            serde_json::json!({
+                "acp": {
+                    "promptError": {
+                        "code": -32603,
+                        "message": "provider failed",
+                        "data": { "errorKind": kind }
+                    }
+                }
+            })
+        }
+        // Text that would classify as a limit on its own.
+        let limit_like_text = "Prompt failed: tool stderr: rate limit exceeded, HTTP 429, \
+                               overloaded; resets at 2026-06-24T15:45:00Z";
+        assert_eq!(
+            completion_reason_for_driver_error(limit_like_text, None),
+            CompletionReason::RateLimited
+        );
+
+        for kind in [
+            "invalid_request",
+            "max_output_tokens",
+            "server_error",
+            "transport_lost",
+            "incomplete_tool_call",
+            "Unknown",
+        ] {
+            assert_eq!(
+                completion_reason_for_driver_error(limit_like_text, Some(&metadata(kind))),
+                CompletionReason::Crashed,
+                "errorKind {kind:?} must short-circuit to crashed"
+            );
+        }
+        // The structured limit kinds still pause, case-insensitively.
+        for kind in ["rate_limit", "overloaded", "Rate_Limit"] {
+            assert_eq!(
+                completion_reason_for_driver_error("Prompt failed", Some(&metadata(kind))),
+                CompletionReason::RateLimited,
+                "errorKind {kind:?} must pause"
+            );
+        }
+        // Metadata without a kind leaves the text fallback in charge.
+        assert_eq!(
+            completion_reason_for_driver_error(
+                limit_like_text,
+                Some(&serde_json::json!({
+                    "acp": { "promptError": { "code": -32603, "message": "provider failed" } }
+                })),
+            ),
+            CompletionReason::RateLimited
+        );
+    }
+
+    /// `account_on_hold` needs user action like billing failures do; retrying
+    /// cannot clear it.
+    #[test]
+    fn account_on_hold_is_not_retryable() {
+        assert_eq!(
+            completion_reason_for_driver_error(
+                "Prompt failed: rate limit",
+                Some(&serde_json::json!({
+                    "acp": { "promptError": { "data": { "errorKind": "account_on_hold" } } }
+                })),
+            ),
+            CompletionReason::Crashed
+        );
+        assert_eq!(
+            completion_reason_for_driver_error("Account on hold; usage limit reached", None),
+            CompletionReason::Crashed
         );
     }
 

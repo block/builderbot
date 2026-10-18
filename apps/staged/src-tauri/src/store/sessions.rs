@@ -224,11 +224,60 @@ impl Store {
         rate_limit_resets_at: Option<&str>,
         rate_limit_kind: Option<&str>,
     ) -> Result<bool, StoreError> {
+        self.transition_running_to_rate_limited_with_provider_metadata(
+            id,
+            error_message,
+            rate_limit_resets_at,
+            rate_limit_kind,
+            None,
+        )
+    }
+
+    /// [`transition_running_to_rate_limited`](Self::transition_running_to_rate_limited)
+    /// that also merges `provider_metadata` into the row in the same guarded
+    /// write.
+    ///
+    /// The rate-limit scheduler lists `paused` rows and builds retry
+    /// bookkeeping for any that carry none, so the pause path has to land the
+    /// bookkeeping no later than the status flip: written afterwards, a tick in
+    /// between sees a bare paused row, writes attempt 1 itself, and the pause
+    /// path then bumps that to attempt 2. Merging here means the row is never
+    /// observable as paused without its bookkeeping, and a lost race (a Stop
+    /// that cancelled the row first) writes nothing at all.
+    pub fn transition_running_to_rate_limited_with_provider_metadata(
+        &self,
+        id: &str,
+        error_message: Option<&str>,
+        rate_limit_resets_at: Option<&str>,
+        rate_limit_kind: Option<&str>,
+        provider_metadata: Option<&serde_json::Value>,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
+        let merged_json = match provider_metadata {
+            Some(patch) => {
+                let existing_json: Option<String> = conn
+                    .query_row(
+                        "SELECT provider_metadata FROM sessions WHERE id = ?1",
+                        params![id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .flatten();
+                let mut merged = existing_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                merge_json(&mut merged, patch.clone());
+                Some(serde_json::to_string(&merged).map_err(|e| {
+                    StoreError(format!("Failed to serialize provider metadata: {e}"))
+                })?)
+            }
+            None => None,
+        };
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'paused', error_message = ?1, completion_reason = 'rate_limited', rate_limit_resets_at = ?2, rate_limit_kind = ?3, updated_at = ?4
-             WHERE id = ?5 AND status = 'running'",
-            params![error_message, rate_limit_resets_at, rate_limit_kind, now_timestamp(), id],
+            "UPDATE sessions SET status = 'paused', error_message = ?1, completion_reason = 'rate_limited', rate_limit_resets_at = ?2, rate_limit_kind = ?3, provider_metadata = COALESCE(?4, provider_metadata), updated_at = ?5
+             WHERE id = ?6 AND status = 'running'",
+            params![error_message, rate_limit_resets_at, rate_limit_kind, merged_json, now_timestamp(), id],
         )?;
         Ok(rows > 0)
     }

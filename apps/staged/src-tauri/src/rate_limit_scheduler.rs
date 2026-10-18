@@ -303,39 +303,97 @@ fn ensure_auto_recovery_state(
         .and_then(|session| auto_recovery_from_metadata(session.provider_metadata.as_ref())))
 }
 
-pub(crate) fn record_rate_limit_pause(
+/// Park a running session as rate-limited, with its retry bookkeeping.
+///
+/// This is the session runner's pause path. The status flip and the
+/// `staged.rateLimitAutoRecovery` fragment land in one guarded store write, so
+/// a scheduler tick can never observe a paused row without bookkeeping: with
+/// the fragment written *after* the flip, a tick in that window built attempt
+/// 1 itself via [`ensure_auto_recovery_state`], and the pause path then read
+/// that back as `existing` and bumped it to attempt 2 with a fresh
+/// `next_retry_at` — burning retry budget on a race, not a limit.
+///
+/// The bookkeeping is planned from the detected `resets_at` rather than the
+/// row's column (not yet written) and from the row as it stands, which is all
+/// the blocker scan needs: `agent_id` and the message history, not status.
+///
+/// Returns whether this call won the `running → paused` transition. A lost
+/// race (a Stop cancelled the row first) writes nothing, including the
+/// fragment.
+pub(crate) fn pause_for_rate_limit(
     store: &Store,
     session_id: &str,
+    error_message: Option<&str>,
+    resets_at: Option<&str>,
+    kind: Option<&str>,
     now: i64,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    let state = plan_recovery_state(store, &session, resets_at, now)?;
+    let transitioned = store
+        .transition_running_to_rate_limited_with_provider_metadata(
+            session_id,
+            error_message,
+            resets_at,
+            kind,
+            Some(&metadata_for_state(&state)),
+        )
+        .map_err(|e| e.to_string())?;
+    if transitioned {
+        log_recovery_state(&session, kind, &state);
+    }
+    Ok(transitioned)
+}
+
+#[cfg(test)]
+fn record_rate_limit_pause(store: &Store, session_id: &str, now: i64) -> Result<(), String> {
     let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
         return Ok(());
     };
     record_rate_limit_pause_for_session(store, &session, now)
 }
 
+/// Write retry bookkeeping onto a row that is already paused.
+///
+/// Only [`ensure_auto_recovery_state`] needs this: rows paused by a build
+/// that wrote the fragment after the status flip, or by a pause path that
+/// could not plan one. New pauses go through [`pause_for_rate_limit`].
 fn record_rate_limit_pause_for_session(
     store: &Store,
     session: &Session,
     now: i64,
 ) -> Result<(), String> {
-    let blocker = auto_resume_blocker(store, session)?;
-    let existing = auto_recovery_from_metadata(session.provider_metadata.as_ref());
-    let jitter_ms = jitter_ms(jitter_bound_for(
-        session.rate_limit_resets_at.as_deref(),
-        now,
-    ));
-    let state = build_recovery_state(
-        existing.as_ref(),
-        session.rate_limit_resets_at.as_deref(),
-        now,
-        blocker.as_deref(),
-        jitter_ms,
-    );
+    let state = plan_recovery_state(store, session, session.rate_limit_resets_at.as_deref(), now)?;
     store
         .merge_session_provider_metadata(&session.id, &metadata_for_state(&state))
         .map_err(|e| e.to_string())?;
+    log_recovery_state(session, session.rate_limit_kind.as_deref(), &state);
+    Ok(())
+}
 
+/// The next retry state for `session`, advancing any bookkeeping it already
+/// carries.
+fn plan_recovery_state(
+    store: &Store,
+    session: &Session,
+    resets_at: Option<&str>,
+    now: i64,
+) -> Result<RateLimitAutoRecovery, String> {
+    let blocker = auto_resume_blocker(store, session)?;
+    let existing = auto_recovery_from_metadata(session.provider_metadata.as_ref());
+    let jitter_ms = jitter_ms(jitter_bound_for(resets_at, now));
+    Ok(build_recovery_state(
+        existing.as_ref(),
+        resets_at,
+        now,
+        blocker.as_deref(),
+        jitter_ms,
+    ))
+}
+
+fn log_recovery_state(session: &Session, kind: Option<&str>, state: &RateLimitAutoRecovery) {
     if state.unsafe_to_auto_resume {
         log::info!(
             "[rate_limit_recovery] session {} requires manual resume ({})",
@@ -345,7 +403,7 @@ fn record_rate_limit_pause_for_session(
         crate::rate_limit_metrics::record_recovery_manual_required(
             &session.id,
             session.provider.as_deref(),
-            session.rate_limit_kind.as_deref(),
+            kind,
             state.reason.as_deref(),
         );
     } else if state.gave_up_at.is_some() {
@@ -358,7 +416,7 @@ fn record_rate_limit_pause_for_session(
         crate::rate_limit_metrics::record_recovery_give_up(
             &session.id,
             session.provider.as_deref(),
-            session.rate_limit_kind.as_deref(),
+            kind,
             state.attempt,
             state.reason.as_deref(),
         );
@@ -373,15 +431,13 @@ fn record_rate_limit_pause_for_session(
         crate::rate_limit_metrics::record_recovery_scheduled(
             &session.id,
             session.provider.as_deref(),
-            session.rate_limit_kind.as_deref(),
+            kind,
             state.attempt,
             state.max_attempts,
             next_retry_at,
             state.reason.as_deref(),
         );
     }
-
-    Ok(())
 }
 
 /// Park a failed auto-resume attempt back into the normal retry schedule.
@@ -560,10 +616,24 @@ fn claim_for_auto_resume(store: &Arc<Store>, session_id: &str) -> Result<AutoRes
                 });
             }
             crate::prs::BranchWorkInFlight::Queued => {
-                return Ok(AutoResumeClaim::Deferred {
-                    reason: format!("branch {branch_id} has queued work"),
-                    drainable_branch_id: Some(branch_id.to_string()),
-                });
+                // Queued rows gated on this very session (a force-push behind
+                // the rebase that hit the limit, say) cannot start before it:
+                // `pipeline_dependency::status_gate` holds them while it is
+                // paused, so the drain this deferral would spawn starts
+                // nothing, and deferring on them waits forever for a queue
+                // that only this resume can unblock. They are no two-agents
+                // risk either — they run after this session finishes, through
+                // its own terminal drain — so the branch counts as free when
+                // they are all it has queued.
+                let queued = store
+                    .get_queued_sessions_for_branch(branch_id)
+                    .map_err(|e| e.to_string())?;
+                if !queued_rows_all_depend_on(&queued, session_id) {
+                    return Ok(AutoResumeClaim::Deferred {
+                        reason: format!("branch {branch_id} has queued work"),
+                        drainable_branch_id: Some(branch_id.to_string()),
+                    });
+                }
             }
             crate::prs::BranchWorkInFlight::None => {}
         }
@@ -605,6 +675,35 @@ fn claim_for_auto_resume(store: &Arc<Store>, session_id: &str) -> Result<AutoRes
             rate_limit_kind: session.rate_limit_kind.clone(),
         },
     )))
+}
+
+/// Whether every queued row depends on `session_id`, directly or through a
+/// chain of other queued rows (A depends on the session, B depends on A).
+///
+/// A dependency edge pointing outside the queue — at a session that is not
+/// `session_id` and not itself a queued row here — is independent work, as is
+/// a row with no dependency at all. An empty queue is vacuously dependent;
+/// callers only ask once they know the queue is non-empty.
+fn queued_rows_all_depend_on(queued: &[Session], session_id: &str) -> bool {
+    let mut dependents: HashSet<&str> = HashSet::from([session_id]);
+    loop {
+        let before = dependents.len();
+        for row in queued {
+            let depends_on = row
+                .pipeline
+                .as_ref()
+                .and_then(|pipeline| pipeline.depends_on_session_id.as_deref());
+            if depends_on.is_some_and(|dependency| dependents.contains(dependency)) {
+                dependents.insert(row.id.as_str());
+            }
+        }
+        if dependents.len() == before {
+            break;
+        }
+    }
+    queued
+        .iter()
+        .all(|row| dependents.contains(row.id.as_str()))
 }
 
 fn auto_resume_blocker(store: &Store, session: &Session) -> Result<Option<String>, String> {
@@ -1012,6 +1111,189 @@ mod tests {
             } => assert_eq!(drainable_branch_id.as_deref(), Some(branch.id.as_str())),
             _ => panic!("expected a deferral while the branch has queued work"),
         }
+    }
+
+    /// A queued push pipeline on `branch` gated on `depends_on`.
+    fn queued_push_depending_on(
+        store: &Arc<Store>,
+        branch: &crate::store::Branch,
+        depends_on: &str,
+    ) -> Session {
+        use crate::store::{PipelineExecution, PipelineKind};
+
+        let mut queued = Session::new_queued("Push the current branch").with_branch(&branch.id);
+        queued.pipeline = Some(
+            PipelineExecution::from_steps(&[])
+                .with_kind(PipelineKind::Push)
+                .with_push_force(true)
+                .with_depends_on_session_id(Some(depends_on.to_string())),
+        );
+        store.create_session(&queued).unwrap();
+        queued
+    }
+
+    /// The overnight rebase-with-conflicts case: the rebase hit the limit with
+    /// its force-push queued behind it. The push is gated on the rebase
+    /// (`status_gate` waits on a paused dependency), so the drain a deferral
+    /// spawns starts nothing and the two wait on each other forever. Rows
+    /// gated on this session cannot run before it, so they are not a
+    /// two-agents risk and the branch counts as free.
+    #[test]
+    fn claims_when_the_only_queued_work_depends_on_the_paused_session() {
+        use crate::store::SessionStatus;
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (branch, paused) = branch_with_paused_session(&store);
+        let push = queued_push_depending_on(&store, &branch, &paused.id);
+        // Pipelines chain: a row gated on the dependent is itself dependent.
+        let chained = queued_push_depending_on(&store, &branch, &push.id);
+
+        assert!(matches!(
+            claim_for_auto_resume(&store, &paused.id).unwrap(),
+            AutoResumeClaim::Claimed(_)
+        ));
+        assert_eq!(
+            store.get_session(&paused.id).unwrap().unwrap().status,
+            SessionStatus::Running
+        );
+        // The dependents stay queued for the resumed session's own terminal
+        // drain; the claim neither starts nor skips them.
+        for dependent in [&push.id, &chained.id] {
+            assert_eq!(
+                store.get_session(dependent).unwrap().unwrap().status,
+                SessionStatus::Queued
+            );
+        }
+    }
+
+    /// Independent queued work still defers: the user may have queued a new
+    /// prompt during the backoff, and resuming would put two agents in the
+    /// worktree once the drain starts it.
+    #[test]
+    fn defers_when_queued_work_is_not_all_dependent_on_the_paused_session() {
+        use crate::store::{Commit, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (branch, paused) = branch_with_paused_session(&store);
+        queued_push_depending_on(&store, &branch, &paused.id);
+        let independent = Session::new_queued("queued branch work");
+        store.create_session(&independent).unwrap();
+        store
+            .create_commit(
+                &Commit::new_with_sha(&branch.id, "0789abc").with_session(&independent.id),
+            )
+            .unwrap();
+
+        match claim_for_auto_resume(&store, &paused.id).unwrap() {
+            AutoResumeClaim::Deferred {
+                drainable_branch_id,
+                ..
+            } => assert_eq!(drainable_branch_id.as_deref(), Some(branch.id.as_str())),
+            _ => panic!("expected a deferral while the branch has independent queued work"),
+        }
+        assert_eq!(
+            store.get_session(&paused.id).unwrap().unwrap().status,
+            SessionStatus::Paused
+        );
+    }
+
+    /// A dependency edge pointing at some other session — one that is not the
+    /// paused session and not a queued row here — is independent work too.
+    #[test]
+    fn queued_rows_gated_on_another_session_are_not_dependents() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (branch, paused) = branch_with_paused_session(&store);
+        let other = Session::new_running("other", Path::new("/tmp"));
+        store.create_session(&other).unwrap();
+        let gated_elsewhere = queued_push_depending_on(&store, &branch, &other.id);
+        let dependent = queued_push_depending_on(&store, &branch, &paused.id);
+
+        assert!(queued_rows_all_depend_on(&[dependent.clone()], &paused.id));
+        assert!(!queued_rows_all_depend_on(
+            &[dependent, gated_elsewhere],
+            &paused.id
+        ));
+    }
+
+    /// The runner's pause path lands status and bookkeeping in one write, so
+    /// the tick's `ensure_auto_recovery_state` finds attempt 1 already there
+    /// and leaves it alone. With the fragment written after the flip, a tick
+    /// between the two built attempt 1 itself and the pause path bumped it to
+    /// 2 with a fresh `next_retry_at`.
+    #[test]
+    fn pause_lands_bookkeeping_with_the_status_flip() {
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_running_session(&store);
+
+        assert!(pause_for_rate_limit(
+            &store,
+            &session.id,
+            Some("rate limit"),
+            Some("2026-06-24T15:45:00Z"),
+            Some("claude_pro"),
+            10_000,
+        )
+        .unwrap());
+
+        let paused = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(paused.status, SessionStatus::Paused);
+        assert_eq!(
+            paused.completion_reason,
+            Some(CompletionReason::RateLimited)
+        );
+        assert_eq!(
+            paused.rate_limit_resets_at.as_deref(),
+            Some("2026-06-24T15:45:00Z")
+        );
+        assert_eq!(paused.rate_limit_kind.as_deref(), Some("claude_pro"));
+        let written = auto_recovery_from_metadata(paused.provider_metadata.as_ref())
+            .expect("pause writes bookkeeping with the status flip");
+        assert_eq!(written.attempt, 1);
+        assert!(!written.unsafe_to_auto_resume);
+
+        // What a tick does first: it must see the pause's own state, not build
+        // a second one.
+        let seen = ensure_auto_recovery_state(&store, &paused, 20_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(seen, written);
+        let after_tick = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            auto_recovery_from_metadata(after_tick.provider_metadata.as_ref()),
+            Some(written)
+        );
+    }
+
+    /// A pause that loses the `running → paused` race to a Stop writes
+    /// nothing, so a cancelled row carries no stale bookkeeping.
+    #[test]
+    fn lost_pause_race_writes_no_bookkeeping() {
+        use crate::store::{CompletionReason, SessionStatus};
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (_branch, session) = branch_with_running_session(&store);
+        store
+            .update_session_status(
+                &session.id,
+                SessionStatus::Cancelled,
+                None,
+                Some(&CompletionReason::Interrupted),
+            )
+            .unwrap();
+
+        assert!(
+            !pause_for_rate_limit(&store, &session.id, Some("rate limit"), None, None, 10_000)
+                .unwrap()
+        );
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Cancelled);
+        assert_eq!(
+            auto_recovery_from_metadata(row.provider_metadata.as_ref()),
+            None
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use super::cli::{self, EnvSource, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
 use super::status_parse::is_conflicted_status;
+use super::upstream::upstream_branch_name_from_symbolic_ref;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -713,14 +714,34 @@ pub fn compute_local_branch_git_state(
 ///   $7 = "uno" (no untracked enumeration) or "uall" (full enumeration)
 const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
+    // --- Which branch on origin $3 pushes to ---
+    // The same decision as `upstream_branch_name_from_symbolic_ref`, which
+    // re-derives it from UP_SYMREF on the Rust side: an upstream on origin is
+    // the remote branch, unless it is the base ($4); anything else (none, or
+    // on another remote) means the branch's own name.
+    "up_symref=$(git rev-parse --symbolic-full-name \"$3@{upstream}\" 2>/dev/null || true)\n",
+    "printf 'UP_SYMREF=%s\\n' \"$up_symref\"\n",
+    "case \"$up_symref\" in\n",
+    "  refs/remotes/origin/?*) remote_branch=${up_symref#refs/remotes/origin/} ;;\n",
+    "  *) remote_branch=\"$3\" ;;\n",
+    "esac\n",
+    "if [ \"$remote_branch\" = \"$4\" ]; then remote_branch=\"$3\"; fi\n",
+    "up_ref=\"origin/$remote_branch\"\n",
+    // The fetch cache already knows the upstream is missing: skip resolving it.
+    "if [ \"$8\" = 'upstream_missing' ]; then up_ref=''; fi\n",
+    "if [ \"$remote_branch\" != \"$4\" ]; then\n",
+    "  branch_refspec=\"+refs/heads/$remote_branch:refs/remotes/origin/$remote_branch\"\n",
+    "else\n",
+    "  branch_refspec=''\n",
+    "fi\n",
     // --- Fetch phase (conditional) ---
     "fetch_err=''\n",
     "upstream_missing=''\n",
     "if [ \"$6\" != 'skip_fetch' ]; then\n",
     "  _ferr=$(mktemp) || exit 1\n",
     "  trap 'rm -f \"$_ferr\"' EXIT\n",
-    "  if [ -n \"$3\" ]; then\n",
-    "    if ! git fetch --prune origin \"$2\" \"$3\" 2>\"$_ferr\"; then\n",
+    "  if [ -n \"$branch_refspec\" ]; then\n",
+    "    if ! git fetch --prune origin \"$2\" \"$branch_refspec\" 2>\"$_ferr\"; then\n",
     "      if grep -qi 'could.not.find.remote.ref\\|couldn.t.find.remote.ref' \"$_ferr\"; then\n",
     "        if ! git fetch --prune origin \"$2\" 2>\"$_ferr\"; then\n",
     "          fetch_err=$(cat \"$_ferr\")\n",
@@ -747,18 +768,18 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "echo STATUS_END\n",
     "[ -n \"$upstream_missing\" ] && echo 'UPSTREAM_MISSING=true'\n",
     "[ -n \"$fetch_err\" ] && printf 'FETCH_ERR=%s\\n' \"$fetch_err\"\n",
-    // --- Upstream state (skip if $4 is empty) ---
-    "if [ -n \"$4\" ] && [ -z \"$upstream_missing\" ]; then\n",
-    "  up_sha=$(git rev-parse --verify \"$4\" 2>/dev/null || true)\n",
+    // --- Upstream state (skip if up_ref is empty) ---
+    "if [ -n \"$up_ref\" ] && [ -z \"$upstream_missing\" ]; then\n",
+    "  up_sha=$(git rev-parse --verify \"$up_ref\" 2>/dev/null || true)\n",
     "else\n",
     "  up_sha=''\n",
     "fi\n",
     "printf 'UP_SHA=%s\\n' \"$up_sha\"\n",
     "if [ -n \"$up_sha\" ] && [ -n \"$head_sha\" ]; then\n",
-    "  printf 'UP_COUNTS=%s\\n' \"$(git rev-list --left-right --count \"$head_sha\"...\"$4\" 2>/dev/null || echo '0 0')\"\n",
-    "  printf 'UP_MB=%s\\n' \"$(git merge-base \"$head_sha\" \"$4\" 2>/dev/null || true)\"\n",
-    "  if [ \"$4\" != \"$5\" ]; then\n",
-    "    printf 'UP_BEHIND_BASE=%s\\n' \"$(git rev-list --count \"$4\"..\"$5\" 2>/dev/null || echo 0)\"\n",
+    "  printf 'UP_COUNTS=%s\\n' \"$(git rev-list --left-right --count \"$head_sha\"...\"$up_ref\" 2>/dev/null || echo '0 0')\"\n",
+    "  printf 'UP_MB=%s\\n' \"$(git merge-base \"$head_sha\" \"$up_ref\" 2>/dev/null || true)\"\n",
+    "  if [ \"$up_ref\" != \"$5\" ]; then\n",
+    "    printf 'UP_BEHIND_BASE=%s\\n' \"$(git rev-list --count \"$up_ref\"..\"$5\" 2>/dev/null || echo 0)\"\n",
     "  else\n",
     "    printf 'UP_BEHIND_BASE=0\\n'\n",
     "  fi\n",
@@ -778,6 +799,9 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
 
 /// Parsed output from the combined git state script.
 struct BatchGitStateOutput {
+    /// `rev-parse --symbolic-full-name <branch>@{upstream}`, `None` when the
+    /// branch has no upstream configured.
+    upstream_symref: Option<String>,
     head_sha: Option<String>,
     branch: Option<String>,
     status_lines: String,
@@ -793,6 +817,7 @@ struct BatchGitStateOutput {
 }
 
 fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
+    let mut upstream_symref = None;
     let mut head_sha = None;
     let mut branch = None;
     let mut upstream_missing = false;
@@ -823,7 +848,12 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
             status_lines.push_str(line);
             continue;
         }
-        if let Some(val) = line.strip_prefix("HEAD=") {
+        if let Some(val) = line.strip_prefix("UP_SYMREF=") {
+            let v = val.trim();
+            if !v.is_empty() {
+                upstream_symref = Some(v.to_string());
+            }
+        } else if let Some(val) = line.strip_prefix("HEAD=") {
             let v = val.trim();
             if !v.is_empty() {
                 head_sha = Some(v.to_string());
@@ -869,6 +899,7 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
     }
 
     BatchGitStateOutput {
+        upstream_symref,
         head_sha,
         branch,
         status_lines,
@@ -940,19 +971,20 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
 ///
 /// This is the remote-optimised counterpart of `compute_branch_git_state`.
 /// Instead of many individual `run_git` calls (each a separate `ws_exec`
-/// round-trip), it bundles all commands into one shell script that performs
-/// fetch (when needed), local state collection, and ref comparisons — giving
-/// **1 round-trip total** regardless of whether fetch is cached or not.
+/// round-trip), it bundles all commands into one shell script that resolves
+/// which branch on origin `branch_name` pushes to (its upstream, see
+/// [`super::upstream_branch_name`]), performs fetch (when needed), local state
+/// collection, and ref comparisons — giving **1 round-trip total** regardless
+/// of whether fetch is cached or not.
 ///
-/// See [`compute_branch_git_state`] for the `branch_name` / `remote_branch`
-/// split.
-#[allow(clippy::too_many_arguments)]
+/// Unlike [`compute_branch_git_state`] there is no `remote_branch` argument:
+/// the script reads the upstream itself, and the Rust side re-derives the same
+/// answer from the `UP_SYMREF` line for the returned `upstream.ref`.
 pub fn compute_branch_git_state_batched<F>(
     cache_key: &str,
     run_script: F,
     repo_path: &str,
     branch_name: &str,
-    remote_branch: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
@@ -961,9 +993,8 @@ where
     F: Fn(&str, &[&str]) -> Result<String, String>,
 {
     let base_refspec = refspec_for(base_branch);
-    let branch_refspec = refspec_for(remote_branch);
-    let upstream_ref = origin_ref_for_branch(remote_branch);
     let base_ref = origin_ref_for_branch(base_branch);
+    let base_short = branch_name_without_origin(base_branch);
     let expected_branch = branch_name_without_origin(branch_name);
 
     // Check fetch cache to decide whether we need the fetch phase.
@@ -980,22 +1011,16 @@ where
         (FetchMode::Ttl, None) => true,
     };
 
-    let branch_arg = if branch_refspec != base_refspec {
-        branch_refspec.as_str()
-    } else {
-        ""
-    };
-
-    // When cache says upstream is missing, pass empty upstream_ref so the
-    // script skips upstream resolution.
+    // When cache says upstream is missing, tell the script to skip upstream
+    // resolution.
     let cached_upstream_missing = previous
         .as_ref()
         .map(|e| e.upstream_known_missing)
         .unwrap_or(false);
-    let up_ref_arg = if !should_fetch && cached_upstream_missing {
-        ""
+    let upstream_missing_arg = if !should_fetch && cached_upstream_missing {
+        "upstream_missing"
     } else {
-        upstream_ref.as_str()
+        ""
     };
     let skip_fetch_arg = if should_fetch { "" } else { "skip_fetch" };
 
@@ -1004,17 +1029,23 @@ where
         &[
             repo_path,
             &base_refspec,
-            branch_arg,
-            up_ref_arg,
+            expected_branch,
+            base_short,
             &base_ref,
             skip_fetch_arg,
             worktree_scope.script_arg(),
+            upstream_missing_arg,
         ],
     );
 
     match raw {
         Ok(output) => {
             let parsed = parse_batch_git_state_output(&output);
+            let upstream_ref = origin_ref_for_branch(&upstream_branch_name_from_symbolic_ref(
+                parsed.upstream_symref.as_deref(),
+                expected_branch,
+                base_branch,
+            ));
 
             let upstream_known_missing = if should_fetch {
                 parsed.upstream_missing
@@ -1109,11 +1140,12 @@ where
             }
         }
         Err(err) => {
-            // Script execution itself failed
+            // Script execution itself failed; the upstream could not be read
+            // either, so name the branch's own remote-tracking ref.
             let fetched_at = previous.as_ref().map(|e| e.fetched_at);
             BranchGitState {
                 upstream: UpstreamGitState {
-                    r#ref: upstream_ref,
+                    r#ref: origin_ref_for_branch(expected_branch),
                     exists: false,
                     sha: None,
                     relation: UpstreamRelation::Missing,
@@ -1206,6 +1238,118 @@ pub fn update_repo_fetch_cache(repo_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{run_git_in, TempDir, TempGitRepo};
+
+    /// Drives [`BATCH_GIT_STATE_SCRIPT`] through a local `sh`, shaped the way
+    /// `branches::run_workspace_shell` runs it on Blox (`sh -c <script> _
+    /// <args…>`).
+    fn run_batch_script_locally(script: &str, args: &[&str]) -> Result<String, String> {
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .arg("_")
+            .args(args)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn batched_state(repo: &Path, branch: &str, fetch_mode: FetchMode) -> BranchGitState {
+        let repo_str = repo.to_str().unwrap();
+        compute_branch_git_state_batched(
+            &format!("{repo_str}#{branch}#{fetch_mode:?}"),
+            run_batch_script_locally,
+            repo_str,
+            branch,
+            "main",
+            fetch_mode,
+            WorktreeStatusScope::Full,
+        )
+    }
+
+    /// The batched script resolves the upstream itself, in the one
+    /// round-trip: a de-duplicated `feature-x-2` tracking `origin/feature-x`
+    /// is fetched and compared as `feature-x`; a branch tracking its base, or
+    /// nothing, as its own name — the same answers as
+    /// `upstream_branch_name_from_symbolic_ref`.
+    #[test]
+    fn batched_state_reads_the_upstream_inside_the_script() {
+        let seed = TempGitRepo::new();
+        seed.write_file("file.txt", "base\n");
+        seed.commit("base");
+        seed.run_git(&["checkout", "-b", "feature-x"]);
+        seed.write_file("file.txt", "base\nfeature\n");
+        seed.commit("feature");
+        let origin = TempDir::new("origin");
+        let origin_str = origin.path().to_str().unwrap();
+        run_git_in(seed.path(), &["clone", "--bare", ".", origin_str]);
+        let clone = TempDir::new("clone");
+        run_git_in(
+            origin.path(),
+            &["clone", origin_str, clone.path().to_str().unwrap()],
+        );
+        let repo = clone.path();
+        run_git_in(
+            repo,
+            &[
+                "checkout",
+                "--no-track",
+                "-b",
+                "feature-x-2",
+                "origin/feature-x",
+            ],
+        );
+        run_git_in(repo, &["branch", "-u", "origin/feature-x", "feature-x-2"]);
+
+        let state = batched_state(repo, "feature-x-2", FetchMode::Never);
+        assert_eq!(state.upstream.r#ref, "origin/feature-x");
+        assert!(state.upstream.exists);
+        assert!(matches!(state.upstream.relation, UpstreamRelation::InSync));
+        assert_eq!(state.current_branch.as_deref(), Some("feature-x-2"));
+        assert!(state.expected_branch_matches);
+
+        // origin/feature-x moves on: the fetch has to bring in `feature-x`,
+        // not look for a `feature-x-2` that origin does not have.
+        seed.write_file("file.txt", "base\nfeature\nmore\n");
+        let new_tip = seed.commit("more");
+        seed.run_git(&["push", origin_str, "feature-x"]);
+        let state = batched_state(repo, "feature-x-2", FetchMode::Force);
+        assert!(
+            matches!(state.fetch.status, FetchStatus::Fresh),
+            "{:?}",
+            state.fetch.error
+        );
+        assert_eq!(state.upstream.r#ref, "origin/feature-x");
+        assert_eq!(state.upstream.sha.as_deref(), Some(new_tip.trim()));
+        assert!(matches!(
+            state.upstream.relation,
+            UpstreamRelation::OriginAhead
+        ));
+        assert_eq!((state.upstream.ahead, state.upstream.behind), (0, 1));
+        assert_eq!(
+            run_git_in(repo, &["rev-parse", "origin/feature-x"]),
+            new_tip.trim()
+        );
+
+        // Tracking the base is not a push target: compared as its own name.
+        run_git_in(repo, &["branch", "--track", "feature-new", "origin/main"]);
+        let state = batched_state(repo, "feature-new", FetchMode::Never);
+        assert_eq!(state.upstream.r#ref, "origin/feature-new");
+        assert!(!state.upstream.exists);
+        assert!(matches!(state.upstream.relation, UpstreamRelation::Missing));
+
+        // No upstream at all: the same.
+        run_git_in(
+            repo,
+            &["branch", "--no-track", "feature-loose", "origin/main"],
+        );
+        let state = batched_state(repo, "feature-loose", FetchMode::Never);
+        assert_eq!(state.upstream.r#ref, "origin/feature-loose");
+        assert!(!state.upstream.exists);
+    }
 
     fn assert_worktree(
         input: &str,

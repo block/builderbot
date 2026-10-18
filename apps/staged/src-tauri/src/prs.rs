@@ -764,8 +764,11 @@ fn queue_commit_pipeline_locked(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
     let base_branch = base_branch_name(&branch);
-    let remote_branch = crate::branches::resolve_remote_branch_sync(store, &branch);
-    let rebase_ref = rebase_ref_for_target(&branch, &remote_branch, target);
+    // A queued "rebase onto origin" marks its target with the branch's own
+    // local name. The branch on origin is resolved — workspace-aware, and
+    // without a git subprocess under this lock — when the row is dequeued,
+    // the same way a queued push or pull is rebuilt.
+    let rebase_ref = rebase_ref_for_target(&branch, &branch.branch_name, target);
     let rebase_target = persisted_rebase_target(target, &rebase_ref);
 
     if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
@@ -893,6 +896,11 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
 /// Start a queued rebase or squash that the branch queue (or a forced start)
 /// has decided may run.
 ///
+/// A persisted `rebase_target` only says the rebase is "onto origin"; the
+/// branch on origin is resolved here, not replayed from the queued row, so a
+/// Blox branch (whose queue path never asks its workspace) and a branch
+/// renamed while it waited both rebase onto the branch they actually push to.
+///
 /// `claim` is what actually takes the row: it re-checks the branch under the
 /// launch lock and flips the row to `running` in one step, so the decision the
 /// caller made before its awaits cannot be overtaken by another start.
@@ -910,20 +918,25 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         .as_ref()
         .and_then(|pipeline| pipeline.kind.clone())
         .ok_or_else(|| format!("Queued session {} has no pipeline kind", session.id))?;
-    let queued_rebase_target = session
+    let target = session
         .pipeline
         .as_ref()
-        .and_then(|pipeline| pipeline.rebase_target.clone());
+        .and_then(|pipeline| pipeline.rebase_target.as_deref())
+        .map(|_| "origin");
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch).to_string();
-    let rebase_ref = queued_rebase_target
-        .clone()
-        .unwrap_or_else(|| base_branch.clone());
+    let remote_branch = if target.is_some() {
+        crate::branches::resolve_remote_branch(&store, &ctx.branch).await
+    } else {
+        ctx.branch.branch_name.clone()
+    };
+    let rebase_ref = rebase_ref_for_target(&ctx.branch, &remote_branch, target);
+    let rebase_target = persisted_rebase_target(target, &rebase_ref);
     let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref)?;
     let prompt = pipeline_prompt(&kind, false);
     let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
-    if let Some(target) = queued_rebase_target {
+    if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
     }
     let effective_provider = session.provider.clone().or(provider);
@@ -1098,10 +1111,10 @@ fn insert_queued_push_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-    // Rebuilt with a full resolution on dequeue; the local-only lookup keeps
-    // this queue path from depending on a running workspace.
-    let remote_branch = crate::branches::resolve_remote_branch_sync(store, &branch);
-    let steps = build_push_pipeline_steps(&branch.branch_name, &remote_branch, force);
+    // A queue marker only: the steps are rebuilt with a full resolution on
+    // dequeue, so the branch on origin is not looked up here — that would be
+    // a git subprocess under the branch launch lock.
+    let steps = build_push_pipeline_steps(&branch.branch_name, &branch.branch_name, force);
     let pipeline = PipelineExecution::from_steps(&steps)
         .with_kind(PipelineKind::Push)
         .with_push_force(force)
@@ -1284,9 +1297,9 @@ fn claim_or_queue_pull_for_branch(
 
     // A queued pull is rebuilt with a full resolution on dequeue, and a pull
     // that runs now goes through `pull_branch_ff_only_impl`, which resolves
-    // the remote branch itself; these steps are the queue marker.
-    let remote_branch = crate::branches::resolve_remote_branch_sync(store, &branch);
-    let steps = build_pull_pipeline_steps(&remote_branch);
+    // the remote branch itself; these steps are the queue marker, so the
+    // branch on origin is not looked up under the launch lock here.
+    let steps = build_pull_pipeline_steps(&branch.branch_name);
     let pipeline = PipelineExecution::from_steps(&steps).with_kind(PipelineKind::Pull);
     // Like a push session, this one carries no artifact — `branch_id` is what
     // keeps it on the branch queue.
@@ -2863,6 +2876,76 @@ mod tests {
         let (_, rebase_command, _) = command_at(&steps, 1);
         assert!(rebase_command.contains("origin/feature-x"));
         assert!(!rebase_command.contains("feature-x-2"));
+    }
+
+    /// A queued "rebase onto origin" marks its row with the branch's local
+    /// name even when the checkout tracks a differently named PR head: the
+    /// branch on origin is resolved when the row is dequeued, never replayed
+    /// from the marker.
+    #[test]
+    fn queued_rebase_onto_origin_marks_the_local_name_not_the_resolved_remote() {
+        use crate::test_utils::{run_git_in, TempDir, TempGitRepo};
+
+        let seed = TempGitRepo::new();
+        seed.write_file("file.txt", "base\n");
+        seed.commit("base");
+        seed.run_git(&["branch", "feature-x"]);
+        let origin = TempDir::new("origin");
+        let origin_str = origin.path().to_str().unwrap();
+        run_git_in(seed.path(), &["clone", "--bare", ".", origin_str]);
+        let clone = TempDir::new("clone");
+        run_git_in(
+            origin.path(),
+            &["clone", origin_str, clone.path().to_str().unwrap()],
+        );
+        run_git_in(
+            clone.path(),
+            &[
+                "checkout",
+                "--no-track",
+                "-b",
+                "feature-x-2",
+                "origin/feature-x",
+            ],
+        );
+        run_git_in(
+            clone.path(),
+            &["branch", "-u", "origin/feature-x", "feature-x-2"],
+        );
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("acme/widgets");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature-x-2", "main").with_pr(7);
+        store.create_branch(&branch).unwrap();
+        store
+            .create_workdir(
+                &store::Workdir::new(&project.id, clone.path().to_str().unwrap())
+                    .with_branch(&branch.id),
+            )
+            .unwrap();
+        assert_eq!(
+            crate::branches::resolve_remote_branch_sync(&store, &branch),
+            "feature-x"
+        );
+
+        start_running_note_session(&store, &branch.id);
+        let queued =
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, Some("origin")).unwrap();
+        let session = store.get_session(&queued).unwrap().unwrap();
+        assert_eq!(
+            session.pipeline.unwrap().rebase_target.as_deref(),
+            Some("feature-x-2")
+        );
+        // The marker still tells "onto origin" apart from "onto base".
+        assert_eq!(
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, Some("origin")),
+            Some(queued.clone())
+        );
+        assert_ne!(
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None),
+            Some(queued)
+        );
     }
 
     #[test]

@@ -10,20 +10,23 @@
 //!
 //! This walks the local branches that can still be in that state — linked to
 //! a PR, named `<stem>-<digits>`, and resolving their push target to their
-//! own name — asks `gh pr view <pr> --json headRefName` what the PR's head
-//! really is, and when it is exactly `<stem>` runs `git branch
-//! --set-upstream-to=origin/<stem> <local>`. Nothing is recorded: a repaired
-//! branch resolves to `<stem>` on the next launch and drops out of the walk.
+//! own name — asks `gh pr view <pr> --json headRefName,state` what the PR's
+//! head really is, and when the PR is open and the head is exactly `<stem>`
+//! runs `git branch --set-upstream-to=origin/<stem> <local>`. Nothing is
+//! recorded: a repaired branch resolves to `<stem>` on the next launch and
+//! drops out of the walk.
 //!
 //! `<stem>-<digits>` also matches ticket-suffixed names (`fix-login-1234`),
-//! whose PR head is their own name. Those cost one `gh` round-trip per launch
-//! and are left alone. When `gh` is missing, logged out or hanging that
-//! round-trip fails identically for every candidate, so the first such
-//! failure disables `gh` for the rest of the run; a failure specific to one
-//! PR (deleted, or in a repo the user can no longer see) skips only that
-//! branch. Stray `origin/feature-x-2` branches already pushed are not
-//! deleted. Blox workspaces are not walked: each candidate would cost a
-//! workspace exec, and workspace branches are never de-duplicated.
+//! whose PR head is their own name. Those, and candidates whose PR is merged
+//! or closed (whose head is usually deleted on origin, so a fetch would only
+//! fail), cost one `gh` round-trip per launch and are left alone. When `gh`
+//! is missing, logged out, offline or hanging that round-trip fails
+//! identically for every candidate, so the first such failure disables `gh`
+//! for the rest of the run; a failure specific to one PR (deleted, or in a
+//! repo the user can no longer see) skips only that branch. Stray
+//! `origin/feature-x-2` branches already pushed are not deleted. Blox
+//! workspaces are not walked: each candidate would cost a workspace exec, and
+//! workspace branches are never de-duplicated.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -31,6 +34,7 @@ use std::sync::Arc;
 use crate::git::{github, GitError};
 use crate::store::{self, Store};
 use crate::{git, prs};
+use github::PrHead;
 
 /// The stem of a name shaped like `<stem>-<digits>` — the shape
 /// `unique_branch_name` produces. `None` for anything else, including a
@@ -78,7 +82,7 @@ pub(crate) fn decide_repair(
 /// once `gh` itself proves unusable.
 ///
 /// Only the global failures trip that breaker — `gh` not installed, not
-/// authenticated, failing to spawn or timing out (see
+/// authenticated, offline, failing to spawn or timing out (see
 /// [`github::is_gh_unavailable_error`]) — because those fail identically for
 /// every candidate. Anything else is `gh` answering about one PR (deleted,
 /// inaccessible): that branch is skipped and the walk carries on, so one
@@ -90,7 +94,7 @@ pub(crate) struct PrHeadLookup<F> {
 
 impl<F> PrHeadLookup<F>
 where
-    F: FnMut(&str, u64) -> Result<String, GitError>,
+    F: FnMut(&str, u64) -> Result<PrHead, GitError>,
 {
     pub(crate) fn new(lookup: F) -> Self {
         Self {
@@ -101,13 +105,23 @@ where
 
     /// The head branch of `pr_number` in `repo_slug`, or `None` when `gh`
     /// could not say — including when an earlier call this run found `gh`
-    /// unusable, in which case `gh` is not invoked at all.
+    /// unusable, in which case `gh` is not invoked at all — or when the PR is
+    /// no longer open: a merged or closed PR's head is usually gone from
+    /// origin, and nothing pushes to it anyway.
     pub(crate) fn head(&mut self, repo_slug: &str, pr_number: u64) -> Option<String> {
         if self.unavailable {
             return None;
         }
         match (self.lookup)(repo_slug, pr_number) {
-            Ok(head) => Some(head),
+            Ok(pr) if pr.is_open() => Some(pr.head_ref),
+            Ok(pr) => {
+                log::info!(
+                    "[upstream_repair] PR #{pr_number} in {repo_slug} is {}; leaving its \
+                     branch's upstream alone",
+                    pr.state
+                );
+                None
+            }
             Err(e) if github::is_gh_unavailable_error(&e) => {
                 log::warn!(
                     "[upstream_repair] gh pr view #{pr_number} in {repo_slug} failed: {e}; \
@@ -149,7 +163,7 @@ impl WorktreeUpstream for GitWorktreeUpstream {
         // `origin/<remote>` has to exist locally before it can be tracked;
         // a clone that only ever fetched `refs/pull/N/head` may not have it.
         // A failed fetch surfaces as `Ok(false)` below.
-        let _ = git::cli_run(worktree, &["fetch", "origin", remote]);
+        let _ = git::fetch_origin_branch(worktree, remote);
         git::set_upstream_to_origin(worktree, local, remote).map_err(|e| e.to_string())
     }
 }
@@ -157,9 +171,7 @@ impl WorktreeUpstream for GitWorktreeUpstream {
 /// Run the repair over every candidate branch. Blocking — callers run it
 /// off the startup critical path.
 pub(crate) fn run(store: &Arc<Store>) {
-    let mut lookup = PrHeadLookup::new(|repo_slug: &str, pr_number| {
-        github::get_pr_for_repo(repo_slug, pr_number).map(|pr| pr.head_ref)
-    });
+    let mut lookup = PrHeadLookup::new(github::get_pr_head);
     run_with(store, &mut lookup, &mut GitWorktreeUpstream);
 }
 
@@ -169,7 +181,7 @@ pub(crate) fn run_with<F>(
     lookup: &mut PrHeadLookup<F>,
     worktrees: &mut impl WorktreeUpstream,
 ) where
-    F: FnMut(&str, u64) -> Result<String, GitError>,
+    F: FnMut(&str, u64) -> Result<PrHead, GitError>,
 {
     let ids = match store.list_branch_ids() {
         Ok(ids) => ids,
@@ -221,7 +233,7 @@ fn repair_branch<F>(
     worktrees: &mut impl WorktreeUpstream,
 ) -> Result<Option<String>, String>
 where
-    F: FnMut(&str, u64) -> Result<String, GitError>,
+    F: FnMut(&str, u64) -> Result<PrHead, GitError>,
 {
     let Some(workdir) = store
         .get_workdir_for_branch(&branch.id)
@@ -261,6 +273,17 @@ mod tests {
     use crate::test_utils::TempDir;
     use std::cell::Cell;
     use std::collections::HashMap;
+
+    fn pr(head: &str, state: &str) -> PrHead {
+        PrHead {
+            head_ref: head.to_string(),
+            state: state.to_string(),
+        }
+    }
+
+    fn open_pr(head: &str) -> PrHead {
+        pr(head, "OPEN")
+    }
 
     #[test]
     fn dedup_stem_only_matches_the_unique_branch_name_shape() {
@@ -330,6 +353,13 @@ mod tests {
             github::GH_NOT_FOUND.to_string(),
             github::GH_TIMED_OUT.to_string(),
             "Failed to run gh: permission denied".to_string(),
+            // Offline: `gh` prints these before it can answer about any PR.
+            "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com"
+                .to_string(),
+            "Post \"https://api.github.com/graphql\": dial tcp: lookup api.github.com: no such host"
+                .to_string(),
+            "Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout".to_string(),
+            "proxyconnect tcp: dial tcp 127.0.0.1:8080: connect: connection refused".to_string(),
         ];
         for message in global_failures {
             let calls = Cell::new(0);
@@ -364,7 +394,7 @@ mod tests {
                         .to_string(),
                 ))
             } else {
-                Ok(format!("head-{pr_number}"))
+                Ok(open_pr(&format!("head-{pr_number}")))
             }
         });
 
@@ -435,13 +465,12 @@ mod tests {
         let asked = std::cell::RefCell::new(Vec::new());
         let mut lookup = PrHeadLookup::new(|_: &str, pr_number| {
             asked.borrow_mut().push(pr_number);
-            Ok(match pr_number {
+            Ok(open_pr(match pr_number {
                 7 => "feature-x",
                 8 => "fix-login-1234",
                 9 => "unrelated",
                 _ => unreachable!("PR #{pr_number} already tracks its head"),
-            }
-            .to_string())
+            }))
         });
         let mut worktrees = FakeWorktrees::default();
         worktrees
@@ -461,12 +490,11 @@ mod tests {
         // Self-limiting: a second walk has nothing left to re-point and only
         // the branches that can never be settled are asked about again.
         let mut lookup = PrHeadLookup::new(|_: &str, pr_number| {
-            Ok(match pr_number {
+            Ok(open_pr(match pr_number {
                 8 => "fix-login-1234",
                 9 => "unrelated",
                 _ => unreachable!("PR #{pr_number} should not be asked about again"),
-            }
-            .to_string())
+            }))
         });
         run_with(&store, &mut lookup, &mut worktrees);
         assert_eq!(worktrees.repoints.len(), 1);
@@ -485,8 +513,8 @@ mod tests {
                 7 => Err(GitError::CommandFailed(
                     "GraphQL: Could not resolve to a PullRequest with the number of 7.".to_string(),
                 )),
-                8 => Ok("feature-y".to_string()),
-                9 => Ok("feature-w".to_string()),
+                8 => Ok(open_pr("feature-y")),
+                9 => Ok(open_pr("feature-w")),
                 _ => unreachable!(),
             }
         });
@@ -508,6 +536,35 @@ mod tests {
                 ("feature-y-2".to_string(), "feature-y".to_string()),
             ]
         );
+    }
+
+    /// A merged or closed PR's head is usually deleted on origin, so
+    /// re-pointing at it would only make every launch fetch a branch that is
+    /// not there; such candidates are answered by `gh` and never reach git.
+    #[test]
+    fn a_merged_or_closed_pr_is_left_alone_without_touching_git() {
+        let (store, _dirs) =
+            store_with_pr_branches(&[("feature-x-2", 7), ("feature-y-2", 8), ("feature-z-2", 9)]);
+        let mut lookup = PrHeadLookup::new(|_: &str, pr_number| {
+            Ok(match pr_number {
+                7 => pr("feature-x", "MERGED"),
+                8 => pr("feature-y", "CLOSED"),
+                9 => pr("feature-z", "OPEN"),
+                _ => unreachable!(),
+            })
+        });
+        let mut worktrees = FakeWorktrees::default();
+
+        run_with(&store, &mut lookup, &mut worktrees);
+
+        assert_eq!(
+            worktrees.repoints,
+            vec![("feature-z-2".to_string(), "feature-z".to_string())]
+        );
+        // Not a `gh` failure: the breaker stays closed.
+        assert!(!lookup.unavailable);
+        assert_eq!(lookup.head("acme/widgets", 7), None);
+        assert_eq!(lookup.head("acme/widgets", 9).as_deref(), Some("feature-z"));
     }
 
     #[test]
@@ -558,7 +615,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut lookup = PrHeadLookup::new(|_: &str, pr_number| -> Result<String, GitError> {
+        let mut lookup = PrHeadLookup::new(|_: &str, pr_number| -> Result<PrHead, GitError> {
             panic!("PR #{pr_number} is not a candidate")
         });
         let mut worktrees = FakeWorktrees::default();

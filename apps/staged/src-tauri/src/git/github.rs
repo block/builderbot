@@ -219,10 +219,23 @@ pub const GH_NOT_FOUND: &str = "GitHub CLI not found. Install with: brew install
 pub const GH_NOT_AUTHENTICATED: &str = "Not authenticated with GitHub CLI. Run: gh auth login";
 pub const GH_TIMED_OUT: &str = "gh command timed out after 60s";
 
+/// Fragments of the stderr `gh` (and the Go net stack under it) prints when
+/// it cannot reach GitHub at all — offline, DNS down, proxy or TLS failing.
+/// Compared case-insensitively.
+const GH_CONNECTIVITY_ERRORS: &[&str] = &[
+    "error connecting to",
+    "dial tcp",
+    "tls handshake",
+    "no such host",
+    "connection refused",
+    "network is unreachable",
+];
+
 /// Whether `err` means `gh` itself is unusable (missing, logged out, failed
-/// to spawn, or timed out) rather than a verdict about the thing asked for.
-/// A run that fans out many `gh` calls can stop after one of these; any other
-/// error (a deleted PR, a repo the user can't see) is specific to that call.
+/// to spawn, timed out, or unable to reach GitHub) rather than a verdict about
+/// the thing asked for. A run that fans out many `gh` calls can stop after one
+/// of these; any other error (a deleted PR, a repo the user can't see) is
+/// specific to that call.
 pub fn is_gh_unavailable_error(err: &GitError) -> bool {
     match err {
         GitError::CommandFailed(msg) => {
@@ -231,9 +244,17 @@ pub fn is_gh_unavailable_error(err: &GitError) -> bool {
                 || msg == GH_TIMED_OUT
                 || msg.starts_with("Failed to run gh:")
                 || msg.starts_with("Failed to wait for gh:")
+                || is_gh_connectivity_error(msg)
         }
         _ => false,
     }
+}
+
+fn is_gh_connectivity_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    GH_CONNECTIVITY_ERRORS
+        .iter()
+        .any(|fragment| lower.contains(fragment))
 }
 
 /// Spawn a gh command, drain its pipes concurrently, and enforce a 60s timeout.
@@ -608,6 +629,36 @@ pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest,
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
     Ok(item.into())
+}
+
+/// Where a PR's head branch is and whether the PR is still open — the two
+/// facts needed to decide whether a local branch should track that head.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PrHead {
+    #[serde(rename = "headRefName")]
+    pub head_ref: String,
+    /// Upper-case GitHub state: `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
+}
+
+impl PrHead {
+    pub fn is_open(&self) -> bool {
+        self.state.eq_ignore_ascii_case("OPEN")
+    }
+}
+
+/// `gh pr view <n> -R <repo> --json headRefName,state`: a narrower, cheaper
+/// [`get_pr_for_repo`] for callers that only need the head and the state.
+pub fn get_pr_head(github_repo: &str, pr_number: u64) -> Result<PrHead, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "-R",
+        github_repo,
+        "--json=headRefName,state",
+    ])?;
+    serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))
 }
 
 /// Find the open PR (if any) whose head branch matches `branch_name`.
@@ -3114,6 +3165,38 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clear();
         }
+    }
+
+    /// What `gh` prints when GitHub cannot be reached at all is a property
+    /// of the machine, not of the PR asked about.
+    #[test]
+    fn connectivity_failures_mean_gh_is_unavailable() {
+        let offline = [
+            "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com",
+            "Post \"https://api.github.com/graphql\": dial tcp: lookup api.github.com: no such host",
+            "Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout",
+            "proxyconnect tcp: dial tcp 127.0.0.1:8080: connect: connection refused",
+            "dial tcp 140.82.112.5:443: connect: network is unreachable",
+        ];
+        for msg in offline {
+            assert!(
+                is_gh_unavailable_error(&GitError::CommandFailed(msg.to_string())),
+                "{msg:?} should trip the gh breaker"
+            );
+        }
+        let per_call = [
+            "GraphQL: Could not resolve to a PullRequest with the number of 7. (repository.pullRequest)",
+            "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets)",
+        ];
+        for msg in per_call {
+            assert!(
+                !is_gh_unavailable_error(&GitError::CommandFailed(msg.to_string())),
+                "{msg:?} is about one call"
+            );
+        }
+        assert!(!is_gh_unavailable_error(&GitError::InvalidPath(
+            "dial tcp".to_string()
+        )));
     }
 
     fn check_run(

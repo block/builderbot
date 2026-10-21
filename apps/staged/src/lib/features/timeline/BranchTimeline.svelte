@@ -65,8 +65,11 @@
     timeline: BranchTimelineData;
     /** Repo base directory — tool call paths within it are shown as relative in hints. */
     repoDir?: string | null;
-    /** Placeholder items for notes being created from drag-and-drop. */
-    pendingDropNotes?: { key: string; title: string }[];
+    /**
+     * Placeholder rows for items the user is adding directly: notes from
+     * dropped text files, and dropped or picked images.
+     */
+    pendingAdds?: { key: string; title: string; type: 'generating-note' | 'pending-image' }[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
     pendingItems?: PendingItem[];
     /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
@@ -159,7 +162,7 @@
   let {
     timeline,
     repoDir,
-    pendingDropNotes = [],
+    pendingAdds = [],
     pendingItems = [],
     prunedSessionIds = new Set(),
     deletingItems = [],
@@ -922,7 +925,7 @@
 
   /** True when the timeline has no content and action buttons should be enlarged. */
   let actionButtonsEnlarged = $derived(
-    items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
+    items.length === 0 && pendingAdds.length === 0 && pendingItems.length === 0
   );
 
   // ── Footer overflow ───────────────────────────────────────────────────
@@ -1099,7 +1102,7 @@
   }
 </script>
 
-{#if items.length === 0 && !actionFooterVisible && pendingDropNotes.length === 0 && pendingItems.length === 0}
+{#if items.length === 0 && !actionFooterVisible && pendingAdds.length === 0 && pendingItems.length === 0}
   <p class="no-items">No commits or notes yet</p>
 {:else}
   <!-- Unified timeline (vertical) -->
@@ -1138,7 +1141,7 @@
             discardChangesDisabledReason={item.discardChangesDisabledReason}
             deleting={item.deleting}
             isLast={index === normalItems.length - 1 &&
-              pendingDropNotes.length === 0 &&
+              pendingAdds.length === 0 &&
               pendingItems.length === 0 &&
               gitFooterItems.length === 0 &&
               !error &&
@@ -1158,13 +1161,13 @@
           />
         </div>
       {/each}
-      {#each pendingDropNotes as drop, index (drop.key)}
+      {#each pendingAdds as add, index (add.key)}
         <div transition:slide={{ duration: 200 }}>
           <TimelineRow
-            type="generating-note"
-            title={drop.title}
+            type={add.type}
+            title={add.title}
             secondaryMeta="adding..."
-            isLast={index === pendingDropNotes.length - 1 &&
+            isLast={index === pendingAdds.length - 1 &&
               pendingItems.length === 0 &&
               gitFooterItems.length === 0 &&
               !error &&

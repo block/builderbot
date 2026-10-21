@@ -567,8 +567,8 @@
   /** Stores one file, returning the rejection reason or null on success. */
   async function addImageFile(file: File): Promise<string | null> {
     if (!projectId) return null;
-    const base64 = await fileToBase64(file);
     try {
+      const base64 = await fileToBase64(file);
       const image = await createImageFromData(
         branchId ?? null,
         projectId,

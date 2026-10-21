@@ -62,7 +62,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import { splitNoteMarkdown } from '../notes/noteMarkdown';
-  import { attachBasename } from '../sessions/attachErrors';
+  import { attachBasename, formatAttachErrors } from '../sessions/attachErrors';
   import { fileToBase64 } from '../sessions/attachmentData';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
@@ -83,6 +83,7 @@
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
   import BranchImagePicker from './BranchImagePicker.svelte';
+  import { storeImagesInOrder, type TimelineImageUpload } from './timelineImages';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
   import {
     addPendingSession,
@@ -1664,7 +1665,10 @@
   let shouldMountInterior = $state(false);
   let interiorEl: HTMLDivElement | undefined = $state();
 
-  let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
+  /** "adding..." rows for dropped text files and dropped or picked images. */
+  let pendingAdds = $state<
+    { key: string; title: string; type: 'generating-note' | 'pending-image' }[]
+  >([]);
 
   function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isMaybeTextFile);
@@ -1674,8 +1678,9 @@
       const placeholders = textPaths.map((filePath) => ({
         key: `drop-${Date.now()}-${filePath}`,
         title: fileNameFromPath(filePath),
+        type: 'generating-note' as const,
       }));
-      pendingDropNotes = [...pendingDropNotes, ...placeholders];
+      pendingAdds = [...pendingAdds, ...placeholders];
 
       Promise.all(
         textPaths.map(async (filePath, i) => {
@@ -1694,7 +1699,7 @@
               description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
             });
           } finally {
-            pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
+            pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
           }
         })
       ).then(() => {
@@ -1712,37 +1717,47 @@
   // =========================================================================
 
   let imagePicker: BranchImagePicker | undefined = $state();
+  let nextPendingImageId = 0;
 
   /**
-   * Stores images straight onto the timeline — not pending, so they show at
-   * once — then refreshes it. A drop and "Add image" both land here, so a
-   * picked image ends up exactly where a dropped one does.
+   * Stores images straight onto the timeline — not pending on a session, so
+   * they show as soon as it refreshes. A drop and "Add image" both land here,
+   * so a picked image ends up exactly where a dropped one does.
+   *
+   * Every image gets an "adding..." row up front: images publish no change
+   * event, so the one refresh after the batch is what shows them, and a
+   * multi-photo upload from iOS can take seconds.
    */
-  function addTimelineImages(images: { name: string; store: () => Promise<unknown> }[]) {
-    Promise.all(
-      images.map(async ({ name, store }) => {
-        try {
-          await store();
-        } catch (e) {
-          console.error('Failed to add image:', e);
-          // Same shape as the text drop path, so a rejected PDF or oversized
-          // image ("could not open PDF", "media exceeds 10 MB limit") is
-          // not a silent no-op. The extension stays in the name, as in the
-          // composer's attach errors: it is what explains a PDF failure.
-          const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
-          toast.error('Error', {
-            description: `Could not attach "${name}"${reason ? ` \u2014 ${reason}` : ''}`,
-          });
-        }
-      })
-    ).then(() => {
-      loadTimeline();
-    });
+  async function addTimelineImages(images: TimelineImageUpload[]) {
+    // Keyed by counter, not name: iOS can hand back several "image.jpg"s.
+    const placeholders = images.map(({ name }) => ({
+      key: `image-${nextPendingImageId++}`,
+      title: name,
+      type: 'pending-image' as const,
+    }));
+    const removePlaceholders = (keys: string[]) => {
+      pendingAdds = pendingAdds.filter((p) => !keys.includes(p.key));
+    };
+    pendingAdds = [...pendingAdds, ...placeholders];
+
+    // A rejected image's row goes at once; a stored one's stays until the
+    // refresh replaces it, so it never blinks out in between.
+    const rejections = await storeImagesInOrder(images, (i) =>
+      removePlaceholders([placeholders[i].key])
+    );
+    // One toast for the batch, like the composer's attach errors, so a
+    // rejected PDF or oversized image is not a silent no-op. The extension
+    // stays in each name: it is what explains a PDF failure.
+    const message = formatAttachErrors(rejections);
+    if (message) toast.error('Error', { description: message });
+
+    await loadTimeline();
+    removePlaceholders(placeholders.map((p) => p.key));
   }
 
   /** Desktop: files dropped on the card or picked in the open panel. */
   function addImagePaths(paths: string[]) {
-    addTimelineImages(
+    void addTimelineImages(
       paths.map((filePath) => ({
         name: attachBasename(filePath),
         store: () => commands.createImage(branch.id, branch.projectId, filePath),
@@ -1752,7 +1767,7 @@
 
   /** Web: files picked through the file input (on iOS, Photo Library or Files). */
   function addImageFiles(files: File[]) {
-    addTimelineImages(
+    void addTimelineImages(
       files.map((file) => ({
         name: file.name,
         store: async () =>
@@ -1981,7 +1996,7 @@
               timeline={timeline ?? emptyTimeline}
               repoDir={branch.worktreePath}
               {hashtagItems}
-              pendingDropNotes={isLocal ? pendingDropNotes : undefined}
+              {pendingAdds}
               pendingItems={getPendingSessionItems(branch.id)}
               {prunedSessionIds}
               {error}

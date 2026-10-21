@@ -34,6 +34,7 @@
     | 'queued-review'
     | 'failed-review'
     | 'image'
+    | 'pending-image'
     | 'git-info'
     | 'git-warning'
     | 'git-merge'
@@ -152,7 +153,7 @@
       type === 'queued-review' ||
       type === 'failed-review'
   );
-  let isImage = $derived(type === 'image');
+  let isImage = $derived(type === 'image' || type === 'pending-image');
   let isGitState = $derived(
     type === 'git-info' ||
       type === 'git-warning' ||
@@ -171,6 +172,7 @@
       type === 'pending-commit' ||
       type === 'generating-note' ||
       type === 'generating-review' ||
+      type === 'pending-image' ||
       type === 'provisioning'
   );
   let isFailed = $derived(

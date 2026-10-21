@@ -34,6 +34,7 @@
   import type { TextSnippet } from './sessionModalHelpers';
   import AttachmentThumb from './AttachmentThumb.svelte';
   import { localPreview, type AttachmentPreview } from './attachmentPreview';
+  import { fileToBase64 } from './attachmentData';
   import {
     ATTACHMENT_ACCEPT,
     attachErrorReason,
@@ -117,16 +118,8 @@
 
   /** Stores one file, returning the rejection reason or null on success. */
   async function addImageFile(file: File): Promise<string | null> {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    // Convert to base64 using chunked approach to avoid O(n²) string concatenation
-    const chunks = [];
-    for (let i = 0; i < bytes.length; i += 8192) {
-      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-    }
-    const base64 = btoa(chunks.join(''));
-
     try {
+      const base64 = await fileToBase64(file);
       const image = await createImageFromData(
         branchId,
         projectId,

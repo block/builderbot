@@ -5,11 +5,18 @@ export interface AttachRejection {
 }
 
 /**
+ * File-picker `accept` list for the image formats the image store keeps.
+ * Spelled out rather than `image/*` so pickers (the iOS Files browser too)
+ * only offer formats the store accepts — no HEIC, SVG, or TIFF.
+ */
+export const IMAGE_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp';
+
+/**
  * File-picker `accept` list for the image store. A PDF is accepted alongside
  * images: it is stored as a PDF, previewed through a rendering of its first
  * page, and opened in the native PDF viewer.
  */
-export const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
+export const ATTACHMENT_ACCEPT = `${IMAGE_ACCEPT},application/pdf`;
 
 /** Whether a pasted clipboard item can be attached through the image store. */
 export function isAttachableClipboardType(type: string): boolean {

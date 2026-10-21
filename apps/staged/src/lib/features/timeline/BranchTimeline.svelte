@@ -16,6 +16,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import MoreHorizontal from '@lucide/svelte/icons/more-horizontal';
   import PencilLine from '@lucide/svelte/icons/pencil-line';
+  import ImagePlus from '@lucide/svelte/icons/image-plus';
   import { isResumableReason } from '../../types';
   import type {
     BranchGitState,
@@ -25,6 +26,7 @@
     UpstreamRelation,
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
+  import type { PendingAdd } from '../branches/timelineImages';
   import TimelineRow from './TimelineRow.svelte';
   import TimelineContextMenu, {
     type TimelineContextMenuAction,
@@ -64,8 +66,12 @@
     timeline: BranchTimelineData;
     /** Repo base directory — tool call paths within it are shown as relative in hints. */
     repoDir?: string | null;
-    /** Placeholder items for notes being created from drag-and-drop. */
-    pendingDropNotes?: { key: string; title: string }[];
+    /**
+     * Placeholder rows for items the user is adding directly: notes from
+     * dropped text files, and dropped or picked images (with `imageId` once
+     * stored).
+     */
+    pendingAdds?: PendingAdd[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
     pendingItems?: PendingItem[];
     /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
@@ -91,6 +97,8 @@
     onNewReview?: (e?: MouseEvent) => void;
     /** Open the editor for a note the user writes themselves (no agent session). */
     onWriteNote?: () => void;
+    /** Pick image files to add straight to the timeline. */
+    onAddImage?: () => void;
     onPullOrigin?: () => void;
     onPushOrigin?: () => void;
     onRebaseBranch?: () => void;
@@ -156,7 +164,7 @@
   let {
     timeline,
     repoDir,
-    pendingDropNotes = [],
+    pendingAdds = [],
     pendingItems = [],
     prunedSessionIds = new Set(),
     deletingItems = [],
@@ -176,6 +184,7 @@
     onNewCommit,
     onNewReview,
     onWriteNote,
+    onAddImage,
     onPullOrigin,
     onPushOrigin,
     onRebaseBranch,
@@ -228,6 +237,18 @@
    */
   function maybeSlide(node: Element, params: { sessionId?: string }) {
     if (params.sessionId && prunedSessionIds.has(params.sessionId)) {
+      return { duration: 0 };
+    }
+    return slide(node, { duration: 200 });
+  }
+
+  /**
+   * The same for an "adding..." image row: when it leaves because its image
+   * is now on the timeline, the image row replaces it in place. Rows that go
+   * for any other reason (a rejected image, a finished text drop) slide out.
+   */
+  function maybeSlideAdd(node: Element, params: { imageId?: string }) {
+    if (params.imageId && timeline.images.some((image) => image.id === params.imageId)) {
       return { duration: 0 };
     }
     return slide(node, { duration: 200 });
@@ -908,12 +929,17 @@
     return actions;
   });
   let actionFooterVisible = $derived(
-    !!onNewNote || !!onNewCommit || !!onNewReview || !!onWriteNote || !!footerActions
+    !!onNewNote ||
+      !!onNewCommit ||
+      !!onNewReview ||
+      !!onWriteNote ||
+      !!onAddImage ||
+      !!footerActions
   );
 
   /** True when the timeline has no content and action buttons should be enlarged. */
   let actionButtonsEnlarged = $derived(
-    items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
+    items.length === 0 && pendingAdds.length === 0 && pendingItems.length === 0
   );
 
   // ── Footer overflow ───────────────────────────────────────────────────
@@ -1090,7 +1116,7 @@
   }
 </script>
 
-{#if items.length === 0 && !actionFooterVisible && pendingDropNotes.length === 0 && pendingItems.length === 0}
+{#if items.length === 0 && !actionFooterVisible && pendingAdds.length === 0 && pendingItems.length === 0}
   <p class="no-items">No commits or notes yet</p>
 {:else}
   <!-- Unified timeline (vertical) -->
@@ -1129,7 +1155,7 @@
             discardChangesDisabledReason={item.discardChangesDisabledReason}
             deleting={item.deleting}
             isLast={index === normalItems.length - 1 &&
-              pendingDropNotes.length === 0 &&
+              pendingAdds.length === 0 &&
               pendingItems.length === 0 &&
               gitFooterItems.length === 0 &&
               !error &&
@@ -1149,13 +1175,13 @@
           />
         </div>
       {/each}
-      {#each pendingDropNotes as drop, index (drop.key)}
-        <div transition:slide={{ duration: 200 }}>
+      {#each pendingAdds as add, index (add.key)}
+        <div in:slide={{ duration: 200 }} out:maybeSlideAdd={{ imageId: add.imageId }}>
           <TimelineRow
-            type="generating-note"
-            title={drop.title}
+            type={add.type}
+            title={add.title}
             secondaryMeta="adding..."
-            isLast={index === pendingDropNotes.length - 1 &&
+            isLast={index === pendingAdds.length - 1 &&
               pendingItems.length === 0 &&
               gitFooterItems.length === 0 &&
               !error &&
@@ -1370,8 +1396,8 @@
             {/if}
             <!-- The menu is the only way to reach an overflowed button, so it
                  renders whenever something overflowed — not just when there is
-                 a "Write note" action to hang off it. -->
-            {#if onWriteNote || overflowMenuActions.length > 0}
+                 a manual action to hang off it. -->
+            {#if onWriteNote || onAddImage || overflowMenuActions.length > 0}
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger
                   class={buttonVariants({ variant: 'outline', size: 'icon-sm' })}
@@ -1383,7 +1409,7 @@
                 <DropdownMenu.Content align="start" sideOffset={4} class="min-w-[180px]">
                   <!-- Overflowed buttons lead, in their footer order, so the menu
                        reads as a continuation of the button row; the manual
-                       "Write note" action sits below them. -->
+                       "Write note" and "Add image" actions sit below them. -->
                   {#each overflowMenuActions as action (action)}
                     {#if action === 'note'}
                       <DropdownMenu.Item
@@ -1410,12 +1436,19 @@
                       </DropdownMenu.Item>
                     {/if}
                   {/each}
+                  {#if (onWriteNote || onAddImage) && overflowMenuActions.length > 0}
+                    <DropdownMenu.Separator />
+                  {/if}
                   {#if onWriteNote}
-                    {#if overflowMenuActions.length > 0}
-                      <DropdownMenu.Separator />
-                    {/if}
                     <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
                       <PencilLine size={14} /> Write note
+                    </DropdownMenu.Item>
+                  {/if}
+                  {#if onAddImage}
+                    <!-- Called straight from the select so the picker opens
+                         inside the tap, as iOS requires. -->
+                    <DropdownMenu.Item onSelect={() => onAddImage?.()}>
+                      <ImagePlus size={14} /> Add image
                     </DropdownMenu.Item>
                   {/if}
                 </DropdownMenu.Content>

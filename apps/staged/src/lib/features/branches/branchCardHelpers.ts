@@ -2,7 +2,7 @@ import type { PullState } from '../../stores/pullState.svelte';
 import type { PushState } from '../../stores/pushState.svelte';
 import type { Branch, BranchGitState, PipelineExecution } from '../../types';
 
-const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+export const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 // Stored through the image attachment store too, as a PDF.
 const PDF_EXTENSIONS = ['.pdf'];
 

@@ -62,7 +62,8 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import { splitNoteMarkdown } from '../notes/noteMarkdown';
-  import { attachBasename } from '../sessions/attachErrors';
+  import { attachBasename, formatAttachErrors } from '../sessions/attachErrors';
+  import { fileToBase64 } from '../sessions/attachmentData';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -81,6 +82,13 @@
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
+  import BranchImagePicker from './BranchImagePicker.svelte';
+  import {
+    pruneLandedImages,
+    storeTimelineImages,
+    type PendingAdd,
+    type TimelineImageUpload,
+  } from './timelineImages';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
   import {
     addPendingSession,
@@ -551,6 +559,18 @@
   /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
   let prunedSessionIds = $state<Set<string>>(new Set());
 
+  /**
+   * "adding..." rows for dropped text files and dropped or picked images.
+   * Declared before the cache hydration below, which prunes it.
+   */
+  let pendingAdds = $state<PendingAdd[]>([]);
+
+  /** Drops the placeholders whose real rows are in `next`, in the same update. */
+  function prunePlaceholders(next: BranchTimelineData) {
+    prunedSessionIds = prunePendingSessionItems(branch.id, next);
+    pendingAdds = pruneLandedImages(pendingAdds, next);
+  }
+
   // Confirm delete dialog
   let confirmDelete = $state<{
     title: string;
@@ -572,6 +592,8 @@
 
   let requestedTimelineKey: string | null = null;
   let timelineLoadVersion = 0;
+  /** The newest `loadTimeline()` run, which `timelineLoadsSettled` follows. */
+  let latestTimelineLoad: Promise<void> = Promise.resolve();
   let revalidationVersion = 0;
   let gitRefreshVersion = 0;
 
@@ -618,7 +640,7 @@
     timeline = cached;
     loadedTimelineKey = timelineKey;
     loading = false;
-    prunedSessionIds = prunePendingSessionItems(branch.id, cached);
+    prunePlaceholders(cached);
     if (fresh) {
       const version = ++revalidationVersion;
       fresh
@@ -629,7 +651,7 @@
           error = null;
           timeline = next;
           loadedTimelineKey = timelineKey;
-          prunedSessionIds = prunePendingSessionItems(branch.id, next);
+          prunePlaceholders(next);
         })
         .catch((e) => {
           if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
@@ -816,7 +838,27 @@
     return () => window.removeEventListener('cache-stale', handler);
   });
 
-  async function loadTimeline({
+  function loadTimeline(options?: { timelineKey?: string | null; force?: boolean }) {
+    const load = runTimelineLoad(options);
+    latestTimelineLoad = load;
+    return load;
+  }
+
+  /**
+   * Resolves once the newest timeline load has settled. A load that a newer
+   * one supersedes returns early, before anything it fetched is shown, so
+   * awaiting a `loadTimeline()` does not mean its rows are on screen. This
+   * follows on to whichever load started last.
+   */
+  async function timelineLoadsSettled() {
+    let load: Promise<void>;
+    do {
+      load = latestTimelineLoad;
+      await load;
+    } while (load !== latestTimelineLoad);
+  }
+
+  async function runTimelineLoad({
     timelineKey = branchTimelineReadyKey(branch),
     force = false,
   }: { timelineKey?: string | null; force?: boolean } = {}) {
@@ -850,7 +892,7 @@
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;
       loadedTimelineKey = timelineKey;
-      prunedSessionIds = prunePendingSessionItems(branch.id, nextTimeline);
+      prunePlaceholders(nextTimeline);
     } catch (e) {
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       error = e instanceof Error ? e.message : String(e);
@@ -1662,8 +1704,6 @@
   let shouldMountInterior = $state(false);
   let interiorEl: HTMLDivElement | undefined = $state();
 
-  let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
-
   function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isMaybeTextFile);
     const imagePaths = paths.filter(isImageAttachmentFile);
@@ -1672,8 +1712,9 @@
       const placeholders = textPaths.map((filePath) => ({
         key: `drop-${Date.now()}-${filePath}`,
         title: fileNameFromPath(filePath),
+        type: 'generating-note' as const,
       }));
-      pendingDropNotes = [...pendingDropNotes, ...placeholders];
+      pendingAdds = [...pendingAdds, ...placeholders];
 
       Promise.all(
         textPaths.map(async (filePath, i) => {
@@ -1692,7 +1733,7 @@
               description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
             });
           } finally {
-            pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
+            pendingAdds = pendingAdds.filter((p) => p.key !== placeholders[i].key);
           }
         })
       ).then(() => {
@@ -1701,26 +1742,98 @@
     }
 
     if (imagePaths.length > 0) {
-      Promise.all(
-        imagePaths.map(async (filePath) => {
-          try {
-            await commands.createImage(branch.id, branch.projectId, filePath);
-          } catch (e) {
-            console.error('Failed to create image from drop:', e);
-            // Same shape as the text path, so a rejected PDF or oversized
-            // image ("could not open PDF", "media exceeds 10 MB limit") is
-            // not a silent no-op. The extension stays in the name, as in the
-            // composer's attach errors: it is what explains a PDF failure.
-            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
-            toast.error('Error', {
-              description: `Could not attach "${attachBasename(filePath)}"${reason ? ` \u2014 ${reason}` : ''}`,
-            });
-          }
-        })
-      ).then(() => {
-        loadTimeline();
-      });
+      addImagePaths(imagePaths);
     }
+  }
+
+  // =========================================================================
+  // Images → timeline (drop, or the "…" menu's "Add image")
+  // =========================================================================
+
+  let imagePicker: BranchImagePicker | undefined = $state();
+  let nextPendingImageId = 0;
+
+  /**
+   * Stores images straight onto the timeline — not pending on a session. A
+   * drop and "Add image" both land here, so a picked image ends up exactly
+   * where a dropped one does.
+   *
+   * Batches go through `storeTimelineImages`, one queue shared by every card,
+   * so only one file is stored at a time. Every image gets an "adding..." row
+   * up front, even when its batch queues behind another, since a multi-photo
+   * upload from iOS can take seconds.
+   * Each store publishes a branch change, and the reload it triggers brings in
+   * that image's real row. The placeholder carries the stored image's ID, so
+   * `prunePlaceholders` swaps one for the other in that reload's update.
+   */
+  async function addTimelineImages(images: TimelineImageUpload[]) {
+    // Keyed by counter, not name: iOS can hand back several "image.jpg"s.
+    const placeholders = images.map(({ name }) => ({
+      key: `image-${nextPendingImageId++}`,
+      title: name,
+      type: 'pending-image' as const,
+    }));
+    const removePlaceholders = (keys: string[]) => {
+      pendingAdds = pendingAdds.filter((p) => !keys.includes(p.key));
+    };
+    pendingAdds = [...pendingAdds, ...placeholders];
+
+    try {
+      const rejections = await storeTimelineImages(images, {
+        onStored: (i, image) => {
+          const { key } = placeholders[i];
+          pendingAdds = pendingAdds.map((p) => (p.key === key ? { ...p, imageId: image.id } : p));
+          // In case the change-feed reload landed before the store returned.
+          if (timeline) pendingAdds = pruneLandedImages(pendingAdds, timeline);
+        },
+        onRejected: (i) => removePlaceholders([placeholders[i].key]),
+      });
+      // One toast for the batch, like the composer's attach errors, so a
+      // rejected PDF or oversized image is not a silent no-op. The extension
+      // stays in each name: it is what explains a PDF failure.
+      const message = formatAttachErrors(rejections);
+      if (message) toast.error('Error', { description: message });
+
+      // Wait for the newest load, not just this one: a change-feed reload
+      // that supersedes it makes it return early, and dropping the rows below
+      // before that reload lands would blink them out.
+      void loadTimeline();
+      await timelineLoadsSettled();
+    } catch (e) {
+      notifyError('Could not add images', e);
+    } finally {
+      // Fallback for a stored image whose row never arrives (the refresh
+      // failed, or it was deleted meanwhile), and for every row after a batch
+      // that failed outright, so no spinner can stay forever.
+      removePlaceholders(placeholders.map((p) => p.key));
+    }
+  }
+
+  /** Desktop: files dropped on the card or picked in the open panel. */
+  function addImagePaths(paths: string[]) {
+    void addTimelineImages(
+      paths.map((filePath) => ({
+        name: attachBasename(filePath),
+        store: () => commands.createImage(branch.id, branch.projectId, filePath),
+      }))
+    );
+  }
+
+  /** Web: files picked through the file input (on iOS, Photo Library or Files). */
+  function addImageFiles(files: File[]) {
+    void addTimelineImages(
+      files.map((file) => ({
+        name: file.name,
+        store: async () =>
+          commands.createImageFromData(
+            branch.id,
+            branch.projectId,
+            file.name,
+            file.type,
+            await fileToBase64(file)
+          ),
+      }))
+    );
   }
 
   $effect(() => {
@@ -1937,7 +2050,7 @@
               timeline={timeline ?? emptyTimeline}
               repoDir={branch.worktreePath}
               {hashtagItems}
-              pendingDropNotes={isLocal ? pendingDropNotes : undefined}
+              {pendingAdds}
               pendingItems={getPendingSessionItems(branch.id)}
               {prunedSessionIds}
               {error}
@@ -1994,6 +2107,7 @@
                 ? (e) => sessionMgr.openNewSession('review', e)
                 : undefined}
               onWriteNote={() => (openWriteNote = { note: null })}
+              onAddImage={() => imagePicker?.open()}
               onPullOrigin={handlePullOrigin}
               onPushOrigin={handlePushOrigin}
               onOpenPushSession={pushSessionId && pushSessionId !== '__pending__'
@@ -2076,6 +2190,15 @@
     </div>
   {/if}
 </div>
+
+<!-- Outside the "…" menu, whose content unmounts as it closes: the web
+     build's file input has to outlive the tap that opened it. -->
+<BranchImagePicker
+  bind:this={imagePicker}
+  onPickPaths={addImagePaths}
+  onPickFiles={addImageFiles}
+  onError={(e) => notifyError('Could not open the image picker', e)}
+/>
 
 {#if openNote}
   <NoteModal

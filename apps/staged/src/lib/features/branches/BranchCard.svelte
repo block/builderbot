@@ -84,8 +84,9 @@
   import BranchCardPrButton from './BranchCardPrButton.svelte';
   import BranchImagePicker from './BranchImagePicker.svelte';
   import {
-    createImageStoreQueue,
     pruneLandedImages,
+    storeTimelineImages,
+    type PendingAdd,
     type TimelineImageUpload,
   } from './timelineImages';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
@@ -559,13 +560,10 @@
   let prunedSessionIds = $state<Set<string>>(new Set());
 
   /**
-   * "adding..." rows for dropped text files and dropped or picked images. An
-   * image's row gets `imageId` once it is stored. Declared before the cache
-   * hydration below, which prunes it.
+   * "adding..." rows for dropped text files and dropped or picked images.
+   * Declared before the cache hydration below, which prunes it.
    */
-  let pendingAdds = $state<
-    { key: string; title: string; type: 'generating-note' | 'pending-image'; imageId?: string }[]
-  >([]);
+  let pendingAdds = $state<PendingAdd[]>([]);
 
   /** Drops the placeholders whose real rows are in `next`, in the same update. */
   function prunePlaceholders(next: BranchTimelineData) {
@@ -1754,16 +1752,16 @@
 
   let imagePicker: BranchImagePicker | undefined = $state();
   let nextPendingImageId = 0;
-  /** One queue per card, so batches also store one file at a time between them. */
-  const storeImages = createImageStoreQueue();
 
   /**
    * Stores images straight onto the timeline — not pending on a session. A
    * drop and "Add image" both land here, so a picked image ends up exactly
    * where a dropped one does.
    *
-   * Every image gets an "adding..." row up front, even when its batch queues
-   * behind another, since a multi-photo upload from iOS can take seconds.
+   * Batches go through `storeTimelineImages`, one queue shared by every card,
+   * so only one file is stored at a time. Every image gets an "adding..." row
+   * up front, even when its batch queues behind another, since a multi-photo
+   * upload from iOS can take seconds.
    * Each store publishes a branch change, and the reload it triggers brings in
    * that image's real row. The placeholder carries the stored image's ID, so
    * `prunePlaceholders` swaps one for the other in that reload's update.
@@ -1780,29 +1778,35 @@
     };
     pendingAdds = [...pendingAdds, ...placeholders];
 
-    const rejections = await storeImages(images, {
-      onStored: (i, image) => {
-        const { key } = placeholders[i];
-        pendingAdds = pendingAdds.map((p) => (p.key === key ? { ...p, imageId: image.id } : p));
-        // In case the change-feed reload landed before the store returned.
-        if (timeline) pendingAdds = pruneLandedImages(pendingAdds, timeline);
-      },
-      onRejected: (i) => removePlaceholders([placeholders[i].key]),
-    });
-    // One toast for the batch, like the composer's attach errors, so a
-    // rejected PDF or oversized image is not a silent no-op. The extension
-    // stays in each name: it is what explains a PDF failure.
-    const message = formatAttachErrors(rejections);
-    if (message) toast.error('Error', { description: message });
+    try {
+      const rejections = await storeTimelineImages(images, {
+        onStored: (i, image) => {
+          const { key } = placeholders[i];
+          pendingAdds = pendingAdds.map((p) => (p.key === key ? { ...p, imageId: image.id } : p));
+          // In case the change-feed reload landed before the store returned.
+          if (timeline) pendingAdds = pruneLandedImages(pendingAdds, timeline);
+        },
+        onRejected: (i) => removePlaceholders([placeholders[i].key]),
+      });
+      // One toast for the batch, like the composer's attach errors, so a
+      // rejected PDF or oversized image is not a silent no-op. The extension
+      // stays in each name: it is what explains a PDF failure.
+      const message = formatAttachErrors(rejections);
+      if (message) toast.error('Error', { description: message });
 
-    // Fallback for a stored image whose row never arrives (the refresh
-    // failed, or it was deleted meanwhile), so its spinner can't stay forever.
-    // Wait for the newest load, not just this one: a change-feed reload that
-    // supersedes it makes it return early, and dropping the rows before that
-    // reload lands would blink them out.
-    await loadTimeline();
-    await timelineLoadsSettled();
-    removePlaceholders(placeholders.map((p) => p.key));
+      // Wait for the newest load, not just this one: a change-feed reload
+      // that supersedes it makes it return early, and dropping the rows below
+      // before that reload lands would blink them out.
+      void loadTimeline();
+      await timelineLoadsSettled();
+    } catch (e) {
+      notifyError('Could not add images', e);
+    } finally {
+      // Fallback for a stored image whose row never arrives (the refresh
+      // failed, or it was deleted meanwhile), and for every row after a batch
+      // that failed outright, so no spinner can stay forever.
+      removePlaceholders(placeholders.map((p) => p.key));
+    }
   }
 
   /** Desktop: files dropped on the card or picked in the open panel. */

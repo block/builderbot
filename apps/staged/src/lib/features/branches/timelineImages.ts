@@ -1,6 +1,18 @@
 import type { BranchTimeline, Image } from '../../types';
 import { attachErrorReason, type AttachRejection } from '../sessions/attachErrors';
 
+/**
+ * An "adding..." row for an item headed straight onto a branch timeline: a
+ * note from a dropped text file, or a dropped or picked image. An image's row
+ * gets `imageId` once it is stored.
+ */
+export interface PendingAdd {
+  key: string;
+  title: string;
+  type: 'generating-note' | 'pending-image';
+  imageId?: string;
+}
+
 /** One image headed straight onto a branch timeline (dropped or picked). */
 export interface TimelineImageUpload {
   name: string;
@@ -62,16 +74,24 @@ export function createImageStoreQueue() {
 }
 
 /**
+ * The queue every branch card stores its images through. It is shared, not
+ * per card, so the one-file-at-a-time guarantee holds across cards and
+ * survives a card remounting mid-upload (on a project switch, say), when the
+ * old instance's batch is still storing.
+ */
+export const storeTimelineImages = createImageStoreQueue();
+
+/**
  * Drops the "adding..." rows whose stored image is already in `timeline`.
  * Every stored image publishes a branch change, and the reload it triggers
  * brings in the image's real row; pruning in that same update swaps the row
  * for the image instead of showing both. Returns `adds` itself when nothing
  * has landed.
  */
-export function pruneLandedImages<T extends { imageId?: string }>(
-  adds: T[],
+export function pruneLandedImages(
+  adds: PendingAdd[],
   timeline: Pick<BranchTimeline, 'images'>
-): T[] {
+): PendingAdd[] {
   if (!adds.some((add) => add.imageId)) return adds;
   const landed = new Set(timeline.images.map((image) => image.id));
   const next = adds.filter((add) => !add.imageId || !landed.has(add.imageId));

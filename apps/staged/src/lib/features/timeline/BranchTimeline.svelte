@@ -26,6 +26,7 @@
     UpstreamRelation,
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
+  import type { PendingAdd } from '../branches/timelineImages';
   import TimelineRow from './TimelineRow.svelte';
   import TimelineContextMenu, {
     type TimelineContextMenuAction,
@@ -70,12 +71,7 @@
      * dropped text files, and dropped or picked images (with `imageId` once
      * stored).
      */
-    pendingAdds?: {
-      key: string;
-      title: string;
-      type: 'generating-note' | 'pending-image';
-      imageId?: string;
-    }[];
+    pendingAdds?: PendingAdd[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
     pendingItems?: PendingItem[];
     /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */

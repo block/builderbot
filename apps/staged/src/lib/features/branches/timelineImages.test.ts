@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImageTimelineItem } from '../../types';
 import { formatAttachErrors } from '../sessions/attachErrors';
-import { createImageStoreQueue, pruneLandedImages, storeImagesInOrder } from './timelineImages';
+import {
+  createImageStoreQueue,
+  pruneLandedImages,
+  storeImagesInOrder,
+  type PendingAdd,
+} from './timelineImages';
 
 function deferred() {
   let resolve!: () => void;
@@ -184,12 +189,20 @@ describe('pruneLandedImages', () => {
     };
   }
 
+  function note(key: string): PendingAdd {
+    return { key, title: `${key}.md`, type: 'generating-note' };
+  }
+
+  function image(key: string, imageId?: string): PendingAdd {
+    return { key, title: `${key}.png`, type: 'pending-image', imageId };
+  }
+
   it('drops rows whose stored image is on the timeline', () => {
     const adds = [
-      { key: 'note', imageId: undefined },
-      { key: 'landed', imageId: 'img-1' },
-      { key: 'stored', imageId: 'img-2' },
-      { key: 'storing' },
+      note('note'),
+      image('landed', 'img-1'),
+      image('stored', 'img-2'),
+      image('storing'),
     ];
 
     expect(pruneLandedImages(adds, timelineWith('img-1', 'other')).map((a) => a.key)).toEqual([
@@ -200,9 +213,9 @@ describe('pruneLandedImages', () => {
   });
 
   it('returns the same rows when nothing has landed', () => {
-    const adds = [{ key: 'stored', imageId: 'img-2' }, { key: 'storing' }];
+    const adds = [image('stored', 'img-2'), image('storing')];
 
-    const unstored = [{ key: 'storing', imageId: undefined }];
+    const unstored = [note('note'), image('storing')];
 
     expect(pruneLandedImages(adds, timelineWith('img-1'))).toBe(adds);
     expect(pruneLandedImages(unstored, timelineWith())).toBe(unstored);

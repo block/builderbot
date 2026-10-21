@@ -83,7 +83,11 @@
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
   import BranchImagePicker from './BranchImagePicker.svelte';
-  import { storeImagesInOrder, type TimelineImageUpload } from './timelineImages';
+  import {
+    createImageStoreQueue,
+    pruneLandedImages,
+    type TimelineImageUpload,
+  } from './timelineImages';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
   import {
     addPendingSession,
@@ -554,6 +558,21 @@
   /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
   let prunedSessionIds = $state<Set<string>>(new Set());
 
+  /**
+   * "adding..." rows for dropped text files and dropped or picked images. An
+   * image's row gets `imageId` once it is stored. Declared before the cache
+   * hydration below, which prunes it.
+   */
+  let pendingAdds = $state<
+    { key: string; title: string; type: 'generating-note' | 'pending-image'; imageId?: string }[]
+  >([]);
+
+  /** Drops the placeholders whose real rows are in `next`, in the same update. */
+  function prunePlaceholders(next: BranchTimelineData) {
+    prunedSessionIds = prunePendingSessionItems(branch.id, next);
+    pendingAdds = pruneLandedImages(pendingAdds, next);
+  }
+
   // Confirm delete dialog
   let confirmDelete = $state<{
     title: string;
@@ -575,6 +594,8 @@
 
   let requestedTimelineKey: string | null = null;
   let timelineLoadVersion = 0;
+  /** The newest `loadTimeline()` run, which `timelineLoadsSettled` follows. */
+  let latestTimelineLoad: Promise<void> = Promise.resolve();
   let revalidationVersion = 0;
   let gitRefreshVersion = 0;
 
@@ -621,7 +642,7 @@
     timeline = cached;
     loadedTimelineKey = timelineKey;
     loading = false;
-    prunedSessionIds = prunePendingSessionItems(branch.id, cached);
+    prunePlaceholders(cached);
     if (fresh) {
       const version = ++revalidationVersion;
       fresh
@@ -632,7 +653,7 @@
           error = null;
           timeline = next;
           loadedTimelineKey = timelineKey;
-          prunedSessionIds = prunePendingSessionItems(branch.id, next);
+          prunePlaceholders(next);
         })
         .catch((e) => {
           if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
@@ -819,7 +840,27 @@
     return () => window.removeEventListener('cache-stale', handler);
   });
 
-  async function loadTimeline({
+  function loadTimeline(options?: { timelineKey?: string | null; force?: boolean }) {
+    const load = runTimelineLoad(options);
+    latestTimelineLoad = load;
+    return load;
+  }
+
+  /**
+   * Resolves once the newest timeline load has settled. A load that a newer
+   * one supersedes returns early, before anything it fetched is shown, so
+   * awaiting a `loadTimeline()` does not mean its rows are on screen. This
+   * follows on to whichever load started last.
+   */
+  async function timelineLoadsSettled() {
+    let load: Promise<void>;
+    do {
+      load = latestTimelineLoad;
+      await load;
+    } while (load !== latestTimelineLoad);
+  }
+
+  async function runTimelineLoad({
     timelineKey = branchTimelineReadyKey(branch),
     force = false,
   }: { timelineKey?: string | null; force?: boolean } = {}) {
@@ -853,7 +894,7 @@
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;
       loadedTimelineKey = timelineKey;
-      prunedSessionIds = prunePendingSessionItems(branch.id, nextTimeline);
+      prunePlaceholders(nextTimeline);
     } catch (e) {
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       error = e instanceof Error ? e.message : String(e);
@@ -1665,11 +1706,6 @@
   let shouldMountInterior = $state(false);
   let interiorEl: HTMLDivElement | undefined = $state();
 
-  /** "adding..." rows for dropped text files and dropped or picked images. */
-  let pendingAdds = $state<
-    { key: string; title: string; type: 'generating-note' | 'pending-image' }[]
-  >([]);
-
   function handleFileDrop(paths: string[]) {
     const textPaths = paths.filter(isMaybeTextFile);
     const imagePaths = paths.filter(isImageAttachmentFile);
@@ -1718,15 +1754,19 @@
 
   let imagePicker: BranchImagePicker | undefined = $state();
   let nextPendingImageId = 0;
+  /** One queue per card, so batches also store one file at a time between them. */
+  const storeImages = createImageStoreQueue();
 
   /**
-   * Stores images straight onto the timeline — not pending on a session, so
-   * they show as soon as it refreshes. A drop and "Add image" both land here,
-   * so a picked image ends up exactly where a dropped one does.
+   * Stores images straight onto the timeline — not pending on a session. A
+   * drop and "Add image" both land here, so a picked image ends up exactly
+   * where a dropped one does.
    *
-   * Every image gets an "adding..." row up front: images publish no change
-   * event, so the one refresh after the batch is what shows them, and a
-   * multi-photo upload from iOS can take seconds.
+   * Every image gets an "adding..." row up front, even when its batch queues
+   * behind another, since a multi-photo upload from iOS can take seconds.
+   * Each store publishes a branch change, and the reload it triggers brings in
+   * that image's real row. The placeholder carries the stored image's ID, so
+   * `prunePlaceholders` swaps one for the other in that reload's update.
    */
   async function addTimelineImages(images: TimelineImageUpload[]) {
     // Keyed by counter, not name: iOS can hand back several "image.jpg"s.
@@ -1740,18 +1780,28 @@
     };
     pendingAdds = [...pendingAdds, ...placeholders];
 
-    // A rejected image's row goes at once; a stored one's stays until the
-    // refresh replaces it, so it never blinks out in between.
-    const rejections = await storeImagesInOrder(images, (i) =>
-      removePlaceholders([placeholders[i].key])
-    );
+    const rejections = await storeImages(images, {
+      onStored: (i, image) => {
+        const { key } = placeholders[i];
+        pendingAdds = pendingAdds.map((p) => (p.key === key ? { ...p, imageId: image.id } : p));
+        // In case the change-feed reload landed before the store returned.
+        if (timeline) pendingAdds = pruneLandedImages(pendingAdds, timeline);
+      },
+      onRejected: (i) => removePlaceholders([placeholders[i].key]),
+    });
     // One toast for the batch, like the composer's attach errors, so a
     // rejected PDF or oversized image is not a silent no-op. The extension
     // stays in each name: it is what explains a PDF failure.
     const message = formatAttachErrors(rejections);
     if (message) toast.error('Error', { description: message });
 
+    // Fallback for a stored image whose row never arrives (the refresh
+    // failed, or it was deleted meanwhile), so its spinner can't stay forever.
+    // Wait for the newest load, not just this one: a change-feed reload that
+    // supersedes it makes it return early, and dropping the rows before that
+    // reload lands would blink them out.
     await loadTimeline();
+    await timelineLoadsSettled();
     removePlaceholders(placeholders.map((p) => p.key));
   }
 

@@ -67,9 +67,15 @@
     repoDir?: string | null;
     /**
      * Placeholder rows for items the user is adding directly: notes from
-     * dropped text files, and dropped or picked images.
+     * dropped text files, and dropped or picked images (with `imageId` once
+     * stored).
      */
-    pendingAdds?: { key: string; title: string; type: 'generating-note' | 'pending-image' }[];
+    pendingAdds?: {
+      key: string;
+      title: string;
+      type: 'generating-note' | 'pending-image';
+      imageId?: string;
+    }[];
     /** Placeholder items for newly started sessions before timeline persistence catches up. */
     pendingItems?: PendingItem[];
     /** Session IDs that were just pruned from pendingItems because the real timeline item arrived. */
@@ -235,6 +241,18 @@
    */
   function maybeSlide(node: Element, params: { sessionId?: string }) {
     if (params.sessionId && prunedSessionIds.has(params.sessionId)) {
+      return { duration: 0 };
+    }
+    return slide(node, { duration: 200 });
+  }
+
+  /**
+   * The same for an "adding..." image row: when it leaves because its image
+   * is now on the timeline, the image row replaces it in place. Rows that go
+   * for any other reason (a rejected image, a finished text drop) slide out.
+   */
+  function maybeSlideAdd(node: Element, params: { imageId?: string }) {
+    if (params.imageId && timeline.images.some((image) => image.id === params.imageId)) {
       return { duration: 0 };
     }
     return slide(node, { duration: 200 });
@@ -1162,7 +1180,7 @@
         </div>
       {/each}
       {#each pendingAdds as add, index (add.key)}
-        <div transition:slide={{ duration: 200 }}>
+        <div in:slide={{ duration: 200 }} out:maybeSlideAdd={{ imageId: add.imageId }}>
           <TimelineRow
             type={add.type}
             title={add.title}

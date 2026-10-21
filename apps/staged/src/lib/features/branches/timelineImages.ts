@@ -1,9 +1,17 @@
+import type { BranchTimeline, Image } from '../../types';
 import { attachErrorReason, type AttachRejection } from '../sessions/attachErrors';
 
 /** One image headed straight onto a branch timeline (dropped or picked). */
 export interface TimelineImageUpload {
   name: string;
-  store: () => Promise<unknown>;
+  store: () => Promise<Pick<Image, 'id'>>;
+}
+
+export interface StoreImageHandlers {
+  /** The image at `index` was stored as `image`. */
+  onStored?: (index: number, image: Pick<Image, 'id'>) => void;
+  /** The image at `index` was rejected; its reason is in the returned list. */
+  onRejected?: (index: number) => void;
 }
 
 /**
@@ -19,17 +27,53 @@ export interface TimelineImageUpload {
  */
 export async function storeImagesInOrder(
   images: TimelineImageUpload[],
-  onRejected?: (index: number) => void
+  { onStored, onRejected }: StoreImageHandlers = {}
 ): Promise<AttachRejection[]> {
   const rejections: AttachRejection[] = [];
   for (const [index, { name, store }] of images.entries()) {
+    let image: Pick<Image, 'id'>;
     try {
-      await store();
+      image = await store();
     } catch (e) {
       console.error('Failed to add image:', e);
       rejections.push({ name, reason: attachErrorReason(e) });
       onRejected?.(index);
+      continue;
     }
+    onStored?.(index, image);
   }
   return rejections;
+}
+
+/**
+ * Returns a `storeImagesInOrder` that runs each batch only after every earlier
+ * one has finished. A pick or drop made while a batch is still storing then
+ * waits its turn, so across batches too only one file is stored at a time,
+ * and batches land on the timeline in the order they were made instead of
+ * interleaving.
+ */
+export function createImageStoreQueue() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (images: TimelineImageUpload[], handlers?: StoreImageHandlers) => {
+    const batch = tail.then(() => storeImagesInOrder(images, handlers));
+    tail = batch.catch(() => {});
+    return batch;
+  };
+}
+
+/**
+ * Drops the "adding..." rows whose stored image is already in `timeline`.
+ * Every stored image publishes a branch change, and the reload it triggers
+ * brings in the image's real row; pruning in that same update swaps the row
+ * for the image instead of showing both. Returns `adds` itself when nothing
+ * has landed.
+ */
+export function pruneLandedImages<T extends { imageId?: string }>(
+  adds: T[],
+  timeline: Pick<BranchTimeline, 'images'>
+): T[] {
+  if (!adds.some((add) => add.imageId)) return adds;
+  const landed = new Set(timeline.images.map((image) => image.id));
+  const next = adds.filter((add) => !add.imageId || !landed.has(add.imageId));
+  return next.length === adds.length ? adds : next;
 }

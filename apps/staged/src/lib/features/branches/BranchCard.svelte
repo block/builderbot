@@ -63,6 +63,7 @@
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import { splitNoteMarkdown } from '../notes/noteMarkdown';
   import { attachBasename } from '../sessions/attachErrors';
+  import { fileToBase64 } from '../sessions/attachmentData';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -81,6 +82,7 @@
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
+  import BranchImagePicker from './BranchImagePicker.svelte';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
   import {
     addPendingSession,
@@ -1701,26 +1703,68 @@
     }
 
     if (imagePaths.length > 0) {
-      Promise.all(
-        imagePaths.map(async (filePath) => {
-          try {
-            await commands.createImage(branch.id, branch.projectId, filePath);
-          } catch (e) {
-            console.error('Failed to create image from drop:', e);
-            // Same shape as the text path, so a rejected PDF or oversized
-            // image ("could not open PDF", "media exceeds 10 MB limit") is
-            // not a silent no-op. The extension stays in the name, as in the
-            // composer's attach errors: it is what explains a PDF failure.
-            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
-            toast.error('Error', {
-              description: `Could not attach "${attachBasename(filePath)}"${reason ? ` \u2014 ${reason}` : ''}`,
-            });
-          }
-        })
-      ).then(() => {
-        loadTimeline();
-      });
+      addImagePaths(imagePaths);
     }
+  }
+
+  // =========================================================================
+  // Images → timeline (drop, or the "…" menu's "Add image")
+  // =========================================================================
+
+  let imagePicker: BranchImagePicker | undefined = $state();
+
+  /**
+   * Stores images straight onto the timeline — not pending, so they show at
+   * once — then refreshes it. A drop and "Add image" both land here, so a
+   * picked image ends up exactly where a dropped one does.
+   */
+  function addTimelineImages(images: { name: string; store: () => Promise<unknown> }[]) {
+    Promise.all(
+      images.map(async ({ name, store }) => {
+        try {
+          await store();
+        } catch (e) {
+          console.error('Failed to add image:', e);
+          // Same shape as the text drop path, so a rejected PDF or oversized
+          // image ("could not open PDF", "media exceeds 10 MB limit") is
+          // not a silent no-op. The extension stays in the name, as in the
+          // composer's attach errors: it is what explains a PDF failure.
+          const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
+          toast.error('Error', {
+            description: `Could not attach "${name}"${reason ? ` \u2014 ${reason}` : ''}`,
+          });
+        }
+      })
+    ).then(() => {
+      loadTimeline();
+    });
+  }
+
+  /** Desktop: files dropped on the card or picked in the open panel. */
+  function addImagePaths(paths: string[]) {
+    addTimelineImages(
+      paths.map((filePath) => ({
+        name: attachBasename(filePath),
+        store: () => commands.createImage(branch.id, branch.projectId, filePath),
+      }))
+    );
+  }
+
+  /** Web: files picked through the file input (on iOS, Photo Library or Files). */
+  function addImageFiles(files: File[]) {
+    addTimelineImages(
+      files.map((file) => ({
+        name: file.name,
+        store: async () =>
+          commands.createImageFromData(
+            branch.id,
+            branch.projectId,
+            file.name,
+            file.type,
+            await fileToBase64(file)
+          ),
+      }))
+    );
   }
 
   $effect(() => {
@@ -1994,6 +2038,7 @@
                 ? (e) => sessionMgr.openNewSession('review', e)
                 : undefined}
               onWriteNote={() => (openWriteNote = { note: null })}
+              onAddImage={() => imagePicker?.open()}
               onPullOrigin={handlePullOrigin}
               onPushOrigin={handlePushOrigin}
               onOpenPushSession={pushSessionId && pushSessionId !== '__pending__'
@@ -2076,6 +2121,15 @@
     </div>
   {/if}
 </div>
+
+<!-- Outside the "…" menu, whose content unmounts as it closes: the web
+     build's file input has to outlive the tap that opened it. -->
+<BranchImagePicker
+  bind:this={imagePicker}
+  onPickPaths={addImagePaths}
+  onPickFiles={addImageFiles}
+  onError={(e) => notifyError('Could not open the image picker', e)}
+/>
 
 {#if openNote}
   <NoteModal

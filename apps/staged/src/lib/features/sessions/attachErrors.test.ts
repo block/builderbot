@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ATTACHMENT_ACCEPT,
+  IMAGE_ACCEPT,
   attachBasename,
   attachErrorReason,
   formatAttachErrors,
@@ -70,5 +71,12 @@ describe('isAttachableClipboardType', () => {
   it('offers the same types in the file picker', () => {
     expect(ATTACHMENT_ACCEPT.split(',')).toContain('application/pdf');
     expect(ATTACHMENT_ACCEPT.split(',')).toContain('image/png');
+  });
+
+  it('offers only image types in the image-only picker', () => {
+    const types = IMAGE_ACCEPT.split(',');
+    expect(types).toEqual(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+    expect(types.every(isAttachableClipboardType)).toBe(true);
+    expect(ATTACHMENT_ACCEPT.split(',')).toEqual([...types, 'application/pdf']);
   });
 });

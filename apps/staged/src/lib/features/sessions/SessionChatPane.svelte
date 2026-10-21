@@ -130,6 +130,7 @@
   import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
   import AttachmentThumb from './AttachmentThumb.svelte';
   import { localPreview, type AttachmentPreview } from './attachmentPreview';
+  import { fileToBase64 } from './attachmentData';
   import {
     attachBasename,
     attachErrorReason,
@@ -566,13 +567,7 @@
   /** Stores one file, returning the rejection reason or null on success. */
   async function addImageFile(file: File): Promise<string | null> {
     if (!projectId) return null;
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    const chunks: string[] = [];
-    for (let i = 0; i < bytes.length; i += 8192) {
-      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-    }
-    const base64 = btoa(chunks.join(''));
+    const base64 = await fileToBase64(file);
     try {
       const image = await createImageFromData(
         branchId ?? null,

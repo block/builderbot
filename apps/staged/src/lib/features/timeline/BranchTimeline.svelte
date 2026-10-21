@@ -16,6 +16,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import MoreHorizontal from '@lucide/svelte/icons/more-horizontal';
   import PencilLine from '@lucide/svelte/icons/pencil-line';
+  import ImagePlus from '@lucide/svelte/icons/image-plus';
   import { isResumableReason } from '../../types';
   import type {
     BranchGitState,
@@ -91,6 +92,8 @@
     onNewReview?: (e?: MouseEvent) => void;
     /** Open the editor for a note the user writes themselves (no agent session). */
     onWriteNote?: () => void;
+    /** Pick image files to add straight to the timeline. */
+    onAddImage?: () => void;
     onPullOrigin?: () => void;
     onPushOrigin?: () => void;
     onRebaseBranch?: () => void;
@@ -176,6 +179,7 @@
     onNewCommit,
     onNewReview,
     onWriteNote,
+    onAddImage,
     onPullOrigin,
     onPushOrigin,
     onRebaseBranch,
@@ -908,7 +912,12 @@
     return actions;
   });
   let actionFooterVisible = $derived(
-    !!onNewNote || !!onNewCommit || !!onNewReview || !!onWriteNote || !!footerActions
+    !!onNewNote ||
+      !!onNewCommit ||
+      !!onNewReview ||
+      !!onWriteNote ||
+      !!onAddImage ||
+      !!footerActions
   );
 
   /** True when the timeline has no content and action buttons should be enlarged. */
@@ -1370,8 +1379,8 @@
             {/if}
             <!-- The menu is the only way to reach an overflowed button, so it
                  renders whenever something overflowed — not just when there is
-                 a "Write note" action to hang off it. -->
-            {#if onWriteNote || overflowMenuActions.length > 0}
+                 a manual action to hang off it. -->
+            {#if onWriteNote || onAddImage || overflowMenuActions.length > 0}
               <DropdownMenu.Root>
                 <DropdownMenu.Trigger
                   class={buttonVariants({ variant: 'outline', size: 'icon-sm' })}
@@ -1383,7 +1392,7 @@
                 <DropdownMenu.Content align="start" sideOffset={4} class="min-w-[180px]">
                   <!-- Overflowed buttons lead, in their footer order, so the menu
                        reads as a continuation of the button row; the manual
-                       "Write note" action sits below them. -->
+                       "Write note" and "Add image" actions sit below them. -->
                   {#each overflowMenuActions as action (action)}
                     {#if action === 'note'}
                       <DropdownMenu.Item
@@ -1410,12 +1419,19 @@
                       </DropdownMenu.Item>
                     {/if}
                   {/each}
+                  {#if (onWriteNote || onAddImage) && overflowMenuActions.length > 0}
+                    <DropdownMenu.Separator />
+                  {/if}
                   {#if onWriteNote}
-                    {#if overflowMenuActions.length > 0}
-                      <DropdownMenu.Separator />
-                    {/if}
                     <DropdownMenu.Item onSelect={() => onWriteNote?.()}>
                       <PencilLine size={14} /> Write note
+                    </DropdownMenu.Item>
+                  {/if}
+                  {#if onAddImage}
+                    <!-- Called straight from the select so the picker opens
+                         inside the tap, as iOS requires. -->
+                    <DropdownMenu.Item onSelect={() => onAddImage?.()}>
+                      <ImagePlus size={14} /> Add image
                     </DropdownMenu.Item>
                   {/if}
                 </DropdownMenu.Content>

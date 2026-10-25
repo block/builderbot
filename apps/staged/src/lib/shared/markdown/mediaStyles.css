@@ -13,16 +13,27 @@
   max-width: 100%;
 }
 /*
- * Only images get a height cap; videos are capped by width alone. A height
- * cap squeezes portrait recordings into a narrow box, and WebKit's inline
- * controls drop the scrubber and time display as the box narrows (on iOS,
- * down to a lone play button). Full screen is the native control's job, so
- * there is no expand button either.
+ * Images get a tight height cap; videos mostly don't. A height cap squeezes
+ * portrait recordings into a narrow box, and WebKit's inline controls drop
+ * the scrubber and time display as the box narrows (on iOS, down to a lone
+ * play button). Full screen is the native control's job, so there is no
+ * expand button either.
  */
 .markdown-content .markdown-media img {
   max-height: 70vh;
   object-fit: contain;
   cursor: zoom-in;
+}
+/*
+ * Still keep a portrait recording from overflowing a wide desktop pane, where
+ * uncapped it would run past the viewport and scroll the controls away. Only
+ * when the viewport is tall enough that a 9:16 clip capped at its height stays
+ * wide enough (~320px) for full controls, so landscape phones are left alone.
+ */
+@media (min-height: 600px) {
+  .markdown-content .markdown-media video {
+    max-height: 100dvh;
+  }
 }
 .markdown-content .markdown-media figcaption {
   padding: 6px 10px;

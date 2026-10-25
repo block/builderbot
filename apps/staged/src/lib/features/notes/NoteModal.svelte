@@ -178,10 +178,15 @@
         ? 'Show chat pane'
         : 'View chat pane'
   );
+  // The note pane sizes to its content up to most of the window, so a short
+  // note gets a short dialog and a long one scrolls inside a tall one. With the
+  // chat pane open the height is pinned instead: its message list is a scroll
+  // region with no natural height, and a dialog that grew as replies streamed
+  // in would shift the composer under the pointer.
   // Keep chat toggles animated; the resize handle suspends this transition
   // while measuring and applying pointer, keyboard, and reset commands.
   let contentClass = $derived(
-    `dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col${
+    `dialog-resize-gutter ${chatOpen ? 'h-[90vh]' : 'max-h-[90vh]'} p-0 gap-0 overflow-hidden flex flex-col${
       resizing ? ' transition-none' : ' transition-[width] duration-150'
     }`
   );

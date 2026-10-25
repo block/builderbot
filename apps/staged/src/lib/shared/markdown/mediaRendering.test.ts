@@ -10,6 +10,8 @@ describe('note media rendering', () => {
     const html = renderMarkdown(`![Login](staged-media://${id}.png "Before")`);
     expect(html).toContain('class="markdown-media markdown-media-image"');
     expect(html).toContain(`src="/api/media/${id}.png"`);
+    // Captures are 2x; the density hint lays them out at logical size.
+    expect(html).toContain(`srcset="/api/media/${id}.png 2x"`);
     expect(html).toContain('loading="lazy" title="Before"');
     expect(html).toContain('<figcaption>Login</figcaption>');
     expect(html).toContain('aria-label="Open full screen"');

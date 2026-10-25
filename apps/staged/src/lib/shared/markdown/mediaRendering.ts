@@ -31,13 +31,19 @@ export function renderMarkdownMedia(token: Tokens.Image, parser?: Parser): strin
   const alt = escapeHtml(text);
   const title = token.title ? ` title="${escapeHtml(token.title)}"` : '';
   const src = escapeHtml(resolveStagedMediaUrl(id, ext));
+  // Note images are overwhelmingly high-density captures (Retina screenshots,
+  // PDF pages rasterized near 2000px) with no stored dimensions, so declare
+  // them 2x: the browser then lays the image out at its logical size instead
+  // of its pixel size, which otherwise doubles every screenshot narrower than
+  // the pane while clamping wider ones below logical size. `<video>` has no
+  // density descriptor, so recordings keep their pixel size under the width cap.
   // Videos get no expand button: the native controls already offer full
   // screen, and an overlay would sit over them.
   return [
     `<figure class="markdown-media markdown-media-${kind}" data-media-id="${id}" data-media-ext="${ext}" data-media-alt="${alt}">`,
     kind === 'video'
       ? `<video src="${src}" controls preload="metadata" playsinline aria-label="${alt || 'Video'}"${title}></video>`
-      : `<img src="${src}" alt="${alt}" loading="lazy"${title}>` + EXPAND_BUTTON,
+      : `<img src="${src}" srcset="${src} 2x" alt="${alt}" loading="lazy"${title}>` + EXPAND_BUTTON,
     alt ? `<figcaption>${alt}</figcaption>` : '',
     '</figure>',
   ].join('');

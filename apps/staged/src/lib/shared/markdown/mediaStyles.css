@@ -13,14 +13,19 @@
   max-width: 100%;
 }
 /*
- * Images get a tight height cap; videos mostly don't. A height cap squeezes
- * portrait recordings into a narrow box, and WebKit's inline controls drop
- * the scrubber and time display as the box narrows (on iOS, down to a lone
- * play button). Full screen is the native control's job, so there is no
- * expand button either.
+ * Images get a tight height cap; videos mostly don't.
+ *
+ * The image cap is bounded in px as well as vh so a portrait screenshot
+ * (660x860 logical) never fills the pane's scroll region on a tall window,
+ * while landscape captures (<=600 logical px tall) stay at their logical size.
+ *
+ * A height cap squeezes portrait recordings into a narrow box, and WebKit's
+ * inline controls drop the scrubber and time display as the box narrows (on
+ * iOS, down to a lone play button). Full screen is the native control's job,
+ * so there is no expand button either.
  */
 .markdown-content .markdown-media img {
-  max-height: 70vh;
+  max-height: min(60vh, 600px);
   object-fit: contain;
   cursor: zoom-in;
 }

@@ -267,6 +267,8 @@ mark.search-match-current {
 .hashtag-badge {
   display: inline-flex;
   align-items: center;
+  /* Replaces the old icon `margin-right` + literal space in the markup. Don't
+     reintroduce the space: a type with no icon would get a stray leading one. */
   gap: 4px;
   box-sizing: border-box;
   max-width: 100%;
@@ -290,10 +292,18 @@ mark.search-match-current {
  * The label is the only baseline-aligned item, so the badge's own baseline is
  * the title text's baseline (not the icon's bottom edge) and it sits on the
  * surrounding line like plain text. It shrinks and clips; the icon does not.
+ *
+ * `overflow: hidden` clips the block axis too, and a tight `line-height` (the
+ * timeline row uses 1; the system fonts' ascent + descent is ~1.2em) makes the
+ * label box shorter than its glyphs, shaving descenders. The block padding
+ * grows the clip box past the glyph area and the equal negative margin takes
+ * it back out of layout, so the badge's height and baseline are unchanged.
  */
 .hashtag-badge-label {
   align-self: baseline;
   min-width: 0;
+  padding-block: 0.2em;
+  margin-block: -0.2em;
   overflow: hidden;
   text-overflow: ellipsis;
 }

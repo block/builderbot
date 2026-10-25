@@ -15,12 +15,15 @@ describe('note media rendering', () => {
     expect(html).toContain('aria-label="Open full screen"');
   });
 
-  it.each(['mp4', 'mov', 'webm'])('renders %s with native video controls', (ext) => {
+  it.each(['mp4', 'mov', 'webm'])('renders %s with native controls only', (ext) => {
     const html = renderMarkdown(`![Recording](staged-media://${id}.${ext})`);
     expect(html).toContain(
       `<video src="/api/media/${id}.${ext}" controls preload="metadata" playsinline`
     );
     expect(html).not.toContain('autoplay');
+    // Full screen comes from the native controls; no Staged overlay sits on top.
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain('markdown-media-expand');
   });
 
   it.each([

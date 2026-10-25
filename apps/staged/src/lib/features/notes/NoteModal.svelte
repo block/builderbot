@@ -775,7 +775,6 @@
   <MediaViewerModal
     open={true}
     src={resolveStagedMediaUrl(mediaViewer.id, mediaViewer.ext)}
-    kind={mediaViewer.kind}
     title={mediaViewer.alt}
     onClose={() => (mediaViewer = null)}
   />

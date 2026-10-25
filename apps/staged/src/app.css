@@ -267,8 +267,9 @@ mark.search-match-current {
 .hashtag-badge {
   display: inline-flex;
   align-items: center;
-  /* Replaces the old icon `margin-right` + literal space in the markup. Don't
-     reintroduce the space: a type with no icon would get a stray leading one. */
+  /* Replaces the old icon `margin-right` + literal space in the markup. A
+     literal space between flex items is never rendered, so one here would be
+     inert: `gap` is the only spacing between icon and label. */
   gap: 4px;
   box-sizing: border-box;
   max-width: 100%;
@@ -282,7 +283,6 @@ mark.search-match-current {
 }
 
 .hashtag-badge svg {
-  display: inline-block; /* override Tailwind preflight's `svg { display: block }` */
   width: 12px;
   height: 12px;
   flex-shrink: 0;
@@ -298,12 +298,15 @@ mark.search-match-current {
  * label box shorter than its glyphs, shaving descenders. The block padding
  * grows the clip box past the glyph area and the equal negative margin takes
  * it back out of layout, so the badge's height and baseline are unchanged.
+ * 0.35em is more than the Latin overhang (~0.1em per side) needs, leaving room
+ * for emoji and fallback CJK glyphs, whose boxes are taller than the primary
+ * font's line-height accounts for.
  */
 .hashtag-badge-label {
   align-self: baseline;
   min-width: 0;
-  padding-block: 0.2em;
-  margin-block: -0.2em;
+  padding-block: 0.35em;
+  margin-block: -0.35em;
   overflow: hidden;
   text-overflow: ellipsis;
 }

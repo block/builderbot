@@ -9,16 +9,17 @@ describe('note media viewer activation', () => {
   it('resolves an image and nested expand icon to the same media', () => {
     const host = document.createElement('div');
     host.innerHTML = renderMarkdown(`![Look & see](staged-media://${id}.png)`);
-    const expected = { id, ext: 'png', kind: 'image', alt: 'Look & see' };
+    const expected = { id, ext: 'png', alt: 'Look & see' };
     expect(getMarkdownMediaFromEvent(host.querySelector('img'))).toEqual(expected);
     expect(getMarkdownMediaFromEvent(host.querySelector('path'))).toEqual(expected);
     expect(getMarkdownMediaFromEvent(host.querySelector('figcaption'))).toBeNull();
   });
-  it('opens video from its button, leaving native playback clicks alone', () => {
+  it('never opens video, leaving native playback clicks alone', () => {
     const host = document.createElement('div');
     host.innerHTML = renderMarkdown(`![Clip](staged-media://${id}.mp4)`);
-    expect(getMarkdownMediaFromEvent(host.querySelector('button'))?.kind).toBe('video');
+    expect(host.querySelector('button')).toBeNull();
     expect(getMarkdownMediaFromEvent(host.querySelector('video'))).toBeNull();
+    expect(getMarkdownMediaFromEvent(host.querySelector('figure'))).toBeNull();
     expect(getMarkdownMediaFromEvent(null)).toBeNull();
     expect(getMarkdownMediaFromEvent(document.createTextNode('text'))).toBeNull();
   });

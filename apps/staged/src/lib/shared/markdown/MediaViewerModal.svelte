@@ -1,21 +1,19 @@
 <script lang="ts">
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import type { MediaKind } from './mediaUrl';
   import { createDiagramZoomController } from './diagramZoom';
 
   interface Props {
     open: boolean;
     src: string;
-    kind: MediaKind;
     title: string;
     onClose: () => void;
   }
 
-  let { open, src, kind, title, onClose }: Props = $props();
+  let { open, src, title, onClose }: Props = $props();
   let failed = $state(false);
 
-  // Images get the diagram viewer's zoom controller (pinch, drag, wheel,
+  // The image gets the diagram viewer's zoom controller (pinch, drag, wheel,
   // double-tap). The app's viewport meta disables page zoom, so without it a
   // pinch on the full-screen image does nothing in mobile Safari. The image is
   // laid out at its natural size and the controller scales it to fit.
@@ -35,7 +33,6 @@
   let offsetY = $state(0);
   let dragging = $state(false);
 
-  let isImage = $derived(kind === 'image');
   let surfaceStyle = $derived(
     imageSize
       ? `width: ${imageSize.width}px; height: ${imageSize.height}px; transform: matrix(${scale}, 0, 0, ${scale}, ${offsetX}, ${offsetY});`
@@ -93,34 +90,21 @@
 
 <Dialog.Root {open} onOpenChange={(value) => !value && onClose()}>
   <Dialog.Content
-    class="max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] bg-background p-0 gap-0 overflow-hidden border border-[var(--border-subtle)] flex flex-col {isImage
-      ? 'w-[90vw] h-[90vh]'
-      : 'w-auto'}"
+    class="w-[90vw] h-[90vh] max-w-[90vw] sm:max-w-[90vw] max-h-[90vh] bg-background p-0 gap-0 overflow-hidden border border-[var(--border-subtle)] flex flex-col"
     showCloseButton={false}
   >
     <Dialog.Header
       class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]"
     >
       <Dialog.Title class="min-w-0 text-[var(--size-sm)] font-medium text-foreground truncate"
-        >{title || (kind === 'video' ? 'Video' : 'Image')}</Dialog.Title
+        >{title || 'Image'}</Dialog.Title
       >
       <Button variant="ghost" size="sm" onclick={onClose}>Close</Button>
     </Dialog.Header>
-    <div class="media-viewer-body" class:image={isImage}>
+    <div class="media-viewer-body">
       {#if open}
         {#key src}
-          {#if kind === 'video'}
-            <!-- Agent recordings need not contain speech; no caption track is available. -->
-            <!-- svelte-ignore a11y_media_has_caption -->
-            <video
-              {src}
-              controls
-              autoplay
-              playsinline
-              aria-label={title || 'Video'}
-              onerror={() => (failed = true)}
-            ></video>
-          {:else if !failed}
+          {#if !failed}
             <div class="viewer-stage" class:dragging bind:this={stageEl}>
               <div
                 class="image-surface"
@@ -149,25 +133,11 @@
 
 <style>
   .media-viewer-body {
-    min-height: 120px;
-    padding: 16px;
-    overflow: auto;
-  }
-  .media-viewer-body.image {
     display: flex;
     flex-direction: column;
     flex: 1;
     min-height: 0;
-    padding: 0;
     overflow: hidden;
-  }
-  .media-viewer-body video {
-    display: block;
-    max-width: 100%;
-    max-height: calc(90vh - 100px);
-    margin: auto;
-    object-fit: contain;
-    border-radius: 4px;
   }
   .viewer-stage {
     position: relative;
@@ -203,11 +173,9 @@
     -webkit-user-drag: none;
   }
   .media-viewer-body p {
+    margin: auto;
+    padding: 16px;
     color: var(--text-muted);
     font-size: var(--size-sm);
-    padding: 16px;
-  }
-  .media-viewer-body.image p {
-    margin: auto;
   }
 </style>

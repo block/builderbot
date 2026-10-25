@@ -11,10 +11,17 @@
 .markdown-content .markdown-media video {
   display: block;
   max-width: 100%;
+}
+/*
+ * Only images get a height cap; videos are capped by width alone. A height
+ * cap squeezes portrait recordings into a narrow box, and WebKit's inline
+ * controls drop the scrubber and time display as the box narrows (on iOS,
+ * down to a lone play button). Full screen is the native control's job, so
+ * there is no expand button either.
+ */
+.markdown-content .markdown-media img {
   max-height: 70vh;
   object-fit: contain;
-}
-.markdown-content .markdown-media img {
   cursor: zoom-in;
 }
 .markdown-content .markdown-media figcaption {

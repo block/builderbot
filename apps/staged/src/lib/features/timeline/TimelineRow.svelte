@@ -787,10 +787,7 @@
   }
 
   .timeline-title :global(.hashtag-badge) {
-    display: inline-flex;
-    align-items: center;
     line-height: 1;
-    vertical-align: -2px;
   }
 
   .timeline-row.git-state .timeline-title :global(.git-ref-badge) {

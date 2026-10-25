@@ -392,83 +392,73 @@ impl Store {
 
     /// Get all queued sessions for a branch, ordered by creation time (oldest first).
     ///
-    /// Sessions are linked to branches through artifacts (commits, notes, reviews),
-    /// or directly via `sessions.branch_id` for artifact-less work such as queued
-    /// push pipelines. This query covers both so a queued push takes its place in
-    /// the branch queue alongside artifact-backed sessions.
+    /// `sessions.branch_id` is the scheduling key for every branch-scoped
+    /// session (commit, note, review and pipeline alike), so this is a
+    /// single-table read; the artifact tables are not consulted.
     pub fn get_queued_sessions_for_branch(
         &self,
         branch_id: &str,
     ) -> Result<Vec<Session>, StoreError> {
+        self.get_sessions_for_branch_with_status(branch_id, "queued")
+    }
+
+    /// Get all running sessions for a branch, oldest first.
+    pub fn get_running_sessions_for_branch(
+        &self,
+        branch_id: &str,
+    ) -> Result<Vec<Session>, StoreError> {
+        self.get_sessions_for_branch_with_status(branch_id, "running")
+    }
+
+    fn get_sessions_for_branch_with_status(
+        &self,
+        branch_id: &str,
+        status: &str,
+    ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection, s.acp_title, s.branch_id, s.completion_effects_at
-             FROM sessions s
-             WHERE s.status = 'queued'
-               AND (
-                   s.branch_id = ?1
-                   OR EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
-                   OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
-                   OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1)
-               )
-             ORDER BY s.created_at ASC",
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+             FROM sessions
+             WHERE status = ?2 AND branch_id = ?1
+             ORDER BY created_at ASC",
         )?;
         let sessions = stmt
-            .query_map(params![branch_id], Self::row_to_session)?
+            .query_map(params![branch_id, status], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
     }
 
     /// Check whether a branch already has a running session.
     ///
-    /// Sessions linked through `sessions.branch_id` (running push pipelines)
-    /// count, so a push in flight blocks new branch work the same way a
-    /// commit does.
+    /// Any branch-scoped session counts, so a push in flight blocks new
+    /// branch work the same way a commit does.
     pub fn has_running_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sessions s
-             WHERE s.status = 'running'
-               AND (
-                   s.branch_id = ?1
-                   OR EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
-                   OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
-                   OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1)
-               )",
+            "SELECT COUNT(*) FROM sessions WHERE status = 'running' AND branch_id = ?1",
             params![branch_id],
             |row| row.get(0),
         )?;
         Ok(count > 0)
     }
 
-    /// Resolve the branch that owns a session through its linked artifact, or
-    /// through `sessions.branch_id` for artifact-less branch work (pipeline
-    /// pr/push sessions).
+    /// Resolve the branch that owns a session.
     ///
-    /// Project-note sessions do not belong to a branch and therefore return `None`.
-    /// This assumes all branch-linked artifacts for a session point at the same
-    /// branch; if a session somehow links artifacts across multiple branches,
-    /// the first row returned by SQLite wins.
+    /// Project-note sessions and Pikchr child sessions do not belong to a
+    /// branch and therefore return `None`.
     pub fn get_branch_id_for_session(
         &self,
         session_id: &str,
     ) -> Result<Option<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT branch_id FROM (
-                 SELECT branch_id FROM sessions WHERE id = ?1 AND branch_id IS NOT NULL
-                 UNION ALL
-                 SELECT branch_id FROM commits WHERE session_id = ?1
-                 UNION ALL
-                 SELECT branch_id FROM notes WHERE session_id = ?1
-                 UNION ALL
-                 SELECT branch_id FROM reviews WHERE session_id = ?1
-             ) LIMIT 1",
-            params![session_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
+        let branch_id: Option<Option<String>> = conn
+            .query_row(
+                "SELECT branch_id FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(branch_id.flatten())
     }
 
     /// Resolve the project that owns a session.
@@ -494,15 +484,8 @@ impl Store {
         }
         conn.query_row(
             "SELECT b.project_id FROM branches b
-             INNER JOIN (
-                 SELECT branch_id FROM sessions WHERE id = ?1 AND branch_id IS NOT NULL
-                 UNION ALL
-                 SELECT branch_id FROM commits WHERE session_id = ?1
-                 UNION ALL
-                 SELECT branch_id FROM notes WHERE session_id = ?1
-                 UNION ALL
-                 SELECT branch_id FROM reviews WHERE session_id = ?1
-             ) a ON a.branch_id = b.id
+             INNER JOIN sessions s ON s.branch_id = b.id
+             WHERE s.id = ?1
              LIMIT 1",
             params![session_id],
             |row| row.get(0),

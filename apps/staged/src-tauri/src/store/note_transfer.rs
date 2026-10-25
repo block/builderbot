@@ -135,6 +135,16 @@ impl Store {
         if changed != 1 {
             return Err(relocated_during_transfer(&existing.title));
         }
+        // The note's session is scheduled by `sessions.branch_id`, so it moves
+        // with the note; otherwise the destination branch would never see the
+        // session as queued or running work, and its completion would drain
+        // the branch it left.
+        if let Some(session_id) = existing.session_id.as_deref() {
+            tx.execute(
+                "UPDATE sessions SET branch_id = ?1 WHERE id = ?2",
+                params![target_branch_id, session_id],
+            )?;
+        }
         tx.commit()?;
 
         // Both timelines changed: the note left one and arrived on the other.
@@ -435,6 +445,33 @@ mod tests {
             .list_notes_for_branch(&f.source_branch.id)
             .unwrap()
             .is_empty());
+    }
+
+    /// The note's session is queued and drained by `sessions.branch_id`, so
+    /// it has to arrive on the destination with the note.
+    #[test]
+    fn move_takes_the_notes_session_to_the_destination_branch() {
+        let f = fixture();
+        let session = crate::store::Session::new_running("write", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
+        f.store.create_note(&note).unwrap();
+
+        f.store
+            .move_note_to_branch(
+                &note.id,
+                &f.source_branch.id,
+                &f.target_branch.id,
+                "body",
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(
+            f.store.get_branch_id_for_session(&session.id).unwrap(),
+            Some(f.target_branch.id.clone())
+        );
     }
 
     #[test]

@@ -636,7 +636,8 @@ impl ProjectToolsHandler {
             self.provider.clone()
         };
 
-        let mut session = crate::store::Session::new_queued(&p.instructions);
+        let mut session =
+            crate::store::Session::new_queued(&p.instructions).with_branch(&target.branch.id);
         if let Some(ref provider) = session_provider {
             session = session.with_provider(provider);
         }

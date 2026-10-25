@@ -2396,6 +2396,17 @@ impl QueuedSessionClaim {
     /// refused because of itself — the drain would `break` on a barrier that
     /// is not there, and the forced start would tell the user to stop a
     /// commit that is the row they just clicked and watched start.
+    ///
+    /// Invariant for every caller: **no `.await` between a `Started` claim
+    /// and the `start_session` / `start_pipeline_session` that hands the row
+    /// to the runner.** The claim stamps our pid on a `running` row that
+    /// nothing else will finish until the runner registers it; a caller
+    /// dropped at an await in that window (a web request whose client
+    /// disconnected, an MCP call the agent cancelled) leaves the branch
+    /// exclusively busy with no one to release it. Read SHAs, resolve paths
+    /// and build context *before* claiming — they only need the branch.
+    /// `session_commands::tests::queued_start_has_no_await_after_claim` pins
+    /// this for each start path.
     pub(crate) fn claim(&self, store: &Store) -> Result<QueuedSessionStart, String> {
         let launch_lock = branch_session_launch_lock_for(&self.branch_id);
         let _guard = launch_lock.lock().unwrap();
@@ -2553,7 +2564,9 @@ fn running_branch_session_kinds(
     store: &Store,
     branch_id: &str,
 ) -> Result<HashSet<BranchSessionScheduleKind>, String> {
-    let running = store.get_running_sessions().map_err(|e| e.to_string())?;
+    let running = store
+        .get_running_sessions_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
     let mut active = HashSet::new();
     for session in running {
         if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, false)?
@@ -2665,7 +2678,7 @@ fn branch_session_start_waits_for_provisioning(
     }
 }
 
-fn should_queue_branch_session_start(
+pub(crate) fn should_queue_branch_session_start(
     store: &Store,
     branch_id: &str,
     session_type: &BranchSessionType,
@@ -3251,7 +3264,8 @@ fn insert_running_branch_session(
     let stored_prompt = embed_launch_context(prompt, launch_context)?;
     let start_agent_id = new_pending_branch_start_agent_id();
     let mut session = with_optional_acp_config_selection(
-        store::Session::new_running(&stored_prompt, &target.working_dir),
+        store::Session::new_running(&stored_prompt, &target.working_dir)
+            .with_branch(&target.branch.id),
         acp_config_selection,
     );
     session.agent_id = Some(start_agent_id.clone());
@@ -3304,7 +3318,7 @@ fn insert_queued_branch_session(
 ) -> Result<BranchSessionResponse, String> {
     let queued_prompt = embed_launch_context(prompt, launch_context)?;
     let mut session = with_optional_acp_config_selection(
-        store::Session::new_queued(&queued_prompt),
+        store::Session::new_queued(&queued_prompt).with_branch(branch_id),
         acp_config_selection,
     );
     if let Some(ref p) = provider {
@@ -3913,7 +3927,30 @@ async fn gate_queued_session_start<R: tauri::Runtime>(
 ///
 /// This is shared by the Tauri command and backend lifecycle hooks so queue
 /// progression remains owned by the backend.
+///
+/// The body runs on its own task; this future only waits on the handle. A
+/// drain claims rows — flips them to `running` under our pid — and in web
+/// mode the future calling it is a request handler hyper drops at its next
+/// `.await` as soon as the client closes the connection. Dropping a
+/// `JoinHandle` detaches the task rather than cancelling it, so a dropped
+/// caller lets the drain finish instead of abandoning a half-claimed row.
 pub async fn drain_queued_sessions_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn(drain_branch_queue(
+        store, registry, app_handle, branch_id, provider,
+    ))
+    .await
+    .unwrap_or_else(|e| Err(format!("Drain task failed: {e}")))
+}
+
+/// The drain itself; see [`drain_queued_sessions_for_branch`] for why it only
+/// ever runs on a task of its own.
+async fn drain_branch_queue(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
@@ -4061,7 +4098,27 @@ pub async fn start_queued_session_now(
 /// this function's first look at the row the drain won on — or the row's
 /// dependency can never be met and the row was skipped instead, which its
 /// own status event already reports.
+///
+/// Runs on its own task for the same reason as
+/// [`drain_queued_sessions_for_branch`]: it claims the row, and the request
+/// future asking for it may be dropped at any await.
 pub async fn start_queued_session_now_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn(force_start_queued_session(
+        store, registry, app_handle, branch_id, session_id, provider,
+    ))
+    .await
+    .unwrap_or_else(|e| Err(format!("Start task failed: {e}")))
+}
+
+/// The forced start itself; see [`start_queued_session_now_for_branch`].
+async fn force_start_queued_session(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
@@ -4333,32 +4390,19 @@ async fn start_queued_session_for_branch(
         ),
     );
 
-    // Claim the row: the gate re-checked and the queued→running flip, together
-    // under the branch launch lock. Anything but `Started` means the row is not
-    // ours — either it is no longer queued, or the branch changed under us.
-    let claimed = claim.claim(&store)?;
-    if claimed != QueuedSessionStart::Started {
-        return Ok(claimed);
-    }
-
-    store
-        .mark_session_artifact_started(&session_id)
-        .map_err(|e| e.to_string())?;
-
-    // Update the session's working_dir and prompt now that we have context.
-    store
-        .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)
-        .map_err(|e| e.to_string())?;
-
-    // Update the review's commit_sha now that we have the working directory.
-    // At queue time, reviews are created with an empty commit_sha since the
-    // workspace may not exist yet.
-    if let Some(ref review_id) = schedule.review_id {
-        let tip_sha = review_tip_sha(&store, &branch, &working_dir).await?;
-        store
-            .update_review_commit_sha(review_id, &tip_sha)
-            .map_err(|e| e.to_string())?;
-    }
+    // The SHAs the artifact anchors to and the remote working directory are
+    // read here, with the rest of the slow work, rather than after the claim:
+    // they only need the branch and the working directory, which exist
+    // already, and nothing may await once the row is ours (see
+    // `QueuedSessionClaim::claim`).
+    //
+    // At queue time a review is created with an empty commit_sha since the
+    // workspace may not exist yet; the tip is read now and written once the
+    // row is ours.
+    let review_tip_sha = match schedule.review_id {
+        Some(_) => Some(review_tip_sha(&store, &branch, &working_dir).await?),
+        None => None,
+    };
 
     // Compute pre-head SHA for commit sessions.
     let pre_head_sha = match session_type {
@@ -4395,6 +4439,29 @@ async fn start_queued_session_for_branch(
     let image_ids = store
         .get_image_ids_for_session(&session_id)
         .unwrap_or_default();
+
+    // Claim the row: the gate re-checked and the queued→running flip, together
+    // under the branch launch lock. Anything but `Started` means the row is not
+    // ours — either it is no longer queued, or the branch changed under us.
+    let claimed = claim.claim(&store)?;
+    if claimed != QueuedSessionStart::Started {
+        return Ok(claimed);
+    }
+
+    store
+        .mark_session_artifact_started(&session_id)
+        .map_err(|e| e.to_string())?;
+
+    // Update the session's working_dir and prompt now that we have context.
+    store
+        .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)
+        .map_err(|e| e.to_string())?;
+
+    if let (Some(review_id), Some(tip_sha)) = (&schedule.review_id, &review_tip_sha) {
+        store
+            .update_review_commit_sha(review_id, tip_sha)
+            .map_err(|e| e.to_string())?;
+    }
 
     // No last look before the spawn here any more: `start_session` takes one
     // itself, a few statements further on (the status emit and the config it is
@@ -6270,12 +6337,30 @@ mod tests {
         session
     }
 
+    /// A branch-scoped row: `branch_id` is what the scheduler reads, the
+    /// artifact decides the kind.
+    fn create_branch_session_with_status(
+        store: &Arc<Store>,
+        branch_id: &str,
+        prompt: &str,
+        status: store::SessionStatus,
+    ) -> store::Session {
+        let session = match status {
+            store::SessionStatus::Queued => store::Session::new_queued(prompt),
+            store::SessionStatus::Running => store::Session::new_running(prompt, Path::new("/tmp")),
+            other => panic!("unsupported scheduler test status: {}", other.as_str()),
+        }
+        .with_branch(branch_id);
+        store.create_session(&session).unwrap();
+        session
+    }
+
     fn create_branch_note_session(
         store: &Arc<Store>,
         branch_id: &str,
         status: store::SessionStatus,
     ) -> store::Session {
-        let session = create_session_with_status(store, "note", status);
+        let session = create_branch_session_with_status(store, branch_id, "note", status);
         let note = store::Note::new(branch_id, "note", "").with_session(&session.id);
         store.create_note(&note).unwrap();
         session
@@ -6286,7 +6371,7 @@ mod tests {
         branch_id: &str,
         status: store::SessionStatus,
     ) -> store::Session {
-        let session = create_session_with_status(store, "review", status);
+        let session = create_branch_session_with_status(store, branch_id, "review", status);
         let review = store::Review::new(branch_id, "abc123", store::ReviewScope::Branch)
             .with_session(&session.id);
         store.create_review(&review).unwrap();
@@ -6298,7 +6383,7 @@ mod tests {
         branch_id: &str,
         status: store::SessionStatus,
     ) -> store::Session {
-        let session = create_session_with_status(store, "commit", status);
+        let session = create_branch_session_with_status(store, branch_id, "commit", status);
         let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
         store.create_commit(&commit).unwrap();
         session
@@ -6308,7 +6393,8 @@ mod tests {
         store: &Arc<Store>,
         branch_id: &str,
     ) -> store::Session {
-        let mut session = store::Session::new_running("rebase", Path::new("/tmp"));
+        let mut session =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(branch_id);
         session.pipeline =
             Some(store::PipelineExecution::from_steps(&[]).with_kind(store::PipelineKind::Rebase));
         store.create_session(&session).unwrap();
@@ -6337,6 +6423,40 @@ mod tests {
         session.pipeline = Some(store::PipelineExecution::from_steps(&[]).with_kind(kind));
         store.create_session(&session).unwrap();
         session
+    }
+
+    /// The window between a `Started` claim and the runner taking the row is
+    /// where a dropped caller strands a `running` row (see
+    /// `QueuedSessionClaim::claim`). Pin that no start path awaits inside it.
+    #[test]
+    fn queued_start_has_no_await_after_claim() {
+        let starts = [
+            (
+                include_str!("session_commands.rs"),
+                "async fn start_queued_session_for_branch(",
+                "session_runner::start_session(",
+            ),
+            (
+                include_str!("prs.rs"),
+                "async fn start_queued_commit_pipeline_for_branch(",
+                "session_runner::start_pipeline_session(",
+            ),
+            (
+                include_str!("prs.rs"),
+                "async fn start_queued_git_pipeline_for_branch(",
+                "session_runner::start_pipeline_session(",
+            ),
+        ];
+        for (source, start, launch) in starts {
+            let body = &source[source.find(start).expect(start)..];
+            let claim = body.find("claim.claim(&store)").expect("claim");
+            let launch_at = claim + body[claim..].find(launch).expect(launch);
+            let between = &body[claim..launch_at];
+            assert!(
+                !between.contains(".await"),
+                "`{start}` awaits between its claim and `{launch}`: {between}"
+            );
+        }
     }
 
     fn schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {

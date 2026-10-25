@@ -565,7 +565,8 @@ fn insert_running_commit_pipeline_session(
         pipeline = pipeline.with_rebase_target(target);
     }
 
-    let mut session = store::Session::new_running(prompt, &ctx.working_dir);
+    let mut session =
+        store::Session::new_running(prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
@@ -783,7 +784,8 @@ fn queue_commit_pipeline_locked(
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
     }
-    let mut session = store::Session::new_queued(pipeline_prompt(kind, false));
+    let mut session =
+        store::Session::new_queued(pipeline_prompt(kind, false)).with_branch(branch_id);
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
@@ -1369,47 +1371,82 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
+    let pull_store = Arc::clone(&store);
+    let pull_branch_id = branch_id.clone();
+    let drain_store = Arc::clone(&store);
+    let drain_branch_id = branch_id.clone();
+    pull_or_queue_branch_with(
+        store,
+        branch_id,
+        move || crate::timeline::pull_branch_ff_only_impl(&pull_store, &pull_branch_id),
+        move || {
+            // Anything the user requested while the pull held the branch is
+            // queued behind the marker session, and the marker bypassed the
+            // session runner that would normally drain it. Spawned rather than
+            // awaited so the pull's own result isn't held up by starting
+            // someone else's work.
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
+                    drain_store,
+                    registry,
+                    app_handle,
+                    drain_branch_id.clone(),
+                    None,
+                )
+                .await
+                {
+                    log::warn!(
+                        "[prs] Failed to drain queued sessions after pulling {drain_branch_id}: {e}"
+                    );
+                }
+            });
+        },
+    )
+    .await
+}
+
+/// [`pull_or_queue_branch_for_branch`] with the pull itself and the
+/// after-release hook injected, so a test can stand in a pull that blocks.
+async fn pull_or_queue_branch_with(
+    store: Arc<Store>,
+    branch_id: String,
+    pull: impl FnOnce() -> Result<(), String> + Send + 'static,
+    on_released: impl FnOnce() + Send + 'static,
+) -> Result<Option<String>, String> {
     let session_id = match claim_or_queue_pull_for_branch(&store, &branch_id)? {
         PullDisposition::Queued(session_id) => return Ok(Some(session_id)),
         PullDisposition::RunningNow(session_id) => session_id,
     };
 
-    let pull_store = Arc::clone(&store);
-    let pull_branch_id = branch_id.clone();
-    // A join failure (the pull task panicking, or runtime shutdown) folds into the
-    // pull's own error path rather than returning early: the marker session below
-    // is what marks the branch busy, and nothing else ever finishes it.
-    let pulled = tauri::async_runtime::spawn_blocking(move || {
-        crate::timeline::pull_branch_ff_only_impl(&pull_store, &pull_branch_id)
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Pull task failed: {e}")));
+    // From here on the marker row is the branch's busy state, and this future
+    // belongs to whoever asked for the pull: in web mode that is a request
+    // handler hyper drops at its next `.await` the moment the client closes
+    // the connection. The work that releases the marker must therefore run on
+    // its own task, with this future only waiting on the handle — dropping a
+    // `JoinHandle` detaches the task, it does not cancel it.
+    //
+    // A join failure (the pull task panicking, or runtime shutdown) folds into
+    // the pull's own error path rather than returning early: the marker
+    // session is what marks the branch busy, and nothing else ever finishes it.
+    let released = tauri::async_runtime::spawn(async move {
+        let pulled = tauri::async_runtime::spawn_blocking(pull)
+            .await
+            .unwrap_or_else(|e| Err(format!("Pull task failed: {e}")));
 
-    finish_immediate_pull_session(
-        &store,
-        &session_id,
-        pulled.as_ref().err().map(String::as_str),
-    );
+        finish_immediate_pull_session(
+            &store,
+            &session_id,
+            pulled.as_ref().err().map(String::as_str),
+        );
+        on_released();
 
-    // Anything the user requested while the pull held the branch is queued behind
-    // the marker session, and the marker bypassed the session runner that would
-    // normally drain it. Spawned rather than awaited so the pull's own result
-    // isn't held up by starting someone else's work.
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
-            store,
-            registry,
-            app_handle,
-            branch_id.clone(),
-            None,
-        )
-        .await
-        {
-            log::warn!("[prs] Failed to drain queued sessions after pulling {branch_id}: {e}");
-        }
+        pulled
     });
 
-    pulled.map(|()| None)
+    released
+        .await
+        .unwrap_or_else(|e| Err(format!("Pull task failed: {e}")))
+        .map(|()| None)
 }
 
 /// Pull origin's new commits into the branch.
@@ -2224,10 +2261,11 @@ mod tests {
         (store, branch)
     }
 
-    /// Make the branch busy by linking a running note session to it, which is
-    /// what `has_running_session_for_branch` looks for.
+    /// Make the branch busy with a running note session on it, which is what
+    /// `has_running_session_for_branch` looks for.
     fn start_running_note_session(store: &Arc<Store>, branch_id: &str) {
-        let session = store::Session::new_running("write a note", Path::new("/tmp/staged-test"));
+        let session = store::Session::new_running("write a note", Path::new("/tmp/staged-test"))
+            .with_branch(branch_id);
         store.create_session(&session).unwrap();
         let note = store::Note::new(branch_id, "note", "").with_session(&session.id);
         store.create_note(&note).unwrap();
@@ -2242,6 +2280,78 @@ mod tests {
         queue_commit_pipeline_if_branch_busy(store, branch_id, &kind, None, target, false)
             .unwrap()
             .map(|response| response.session_id)
+    }
+
+    /// The stale-lock reproduction. In web mode the request future owns the
+    /// pull: hyper drops it the moment the client goes away (its HTTP/1
+    /// half-close default closes the connection on a mid-request EOF), and a
+    /// `running` Pull row with no runner behind it is what used to be left.
+    /// That row is an exclusive kind, so every later note, commit, review and
+    /// push on the branch queued behind it with nothing to ever release it.
+    ///
+    /// Poll the request once — far enough to insert the marker — drop it, let
+    /// the pull finish, and the marker must still complete and the branch must
+    /// still take a Note without queueing it.
+    #[tokio::test]
+    async fn dropping_the_request_future_mid_pull_no_longer_strands_the_marker() {
+        let (store, branch) = setup_branch_store();
+        let workdir = store::Workdir::new(&branch.project_id, "/tmp/staged-test-pull")
+            .with_branch(&branch.id);
+        store.create_workdir(&workdir).unwrap();
+
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let request = pull_or_queue_branch_with(
+            Arc::clone(&store),
+            branch.id.clone(),
+            move || {
+                released.recv().map_err(|e| e.to_string())?;
+                Ok(())
+            },
+            || {},
+        );
+        {
+            let mut request = std::pin::pin!(request);
+            std::future::poll_fn(|cx| {
+                assert!(
+                    std::future::Future::poll(request.as_mut(), cx).is_pending(),
+                    "the pull must still be in flight after one poll"
+                );
+                std::task::Poll::Ready(())
+            })
+            .await;
+            // The client is gone.
+        }
+
+        let marker = store
+            .get_running_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.branch_id.as_deref() == Some(branch.id.as_str()))
+            .expect("the marker row is inserted before the first await");
+        release.send(()).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            let status = store.get_session(&marker.id).unwrap().unwrap().status;
+            if status != store::SessionStatus::Running || std::time::Instant::now() > deadline {
+                break status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(
+            status,
+            store::SessionStatus::Completed,
+            "the marker must be released by the pull, not by the request future"
+        );
+        assert!(
+            !crate::session_commands::should_queue_branch_session_start(
+                &store,
+                &branch.id,
+                &crate::session_commands::BranchSessionType::Note,
+            )
+            .unwrap(),
+            "a note on the branch must start, not queue behind a stale pull marker"
+        );
     }
 
     #[test]

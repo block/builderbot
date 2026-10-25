@@ -37,6 +37,7 @@ pub use driver::{
     BackgroundHoldStatus, BackgroundHoldTask, BasicMessageWriter, MessageWriter,
     OutOfTurnPermissionPolicy, PromptImage, ReplayBoundary, SessionConnection, SessionLifetime,
     SessionSettleReason, SessionSettled, Store, BACKGROUND_CONTINUATION_ORIGIN,
+    MODEL_CONFIRMATION_EXHAUSTED_MESSAGE,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

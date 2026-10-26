@@ -20,6 +20,8 @@
 //!   runner token, no liveness hold — is ended and its branch kicked. No
 //!   clock is involved; every writer of a `running` row keeps its registry
 //!   entry for the row's whole time in `running`.
+//! - [`teardown`] stops a branch's sessions before a delete cascades their
+//!   rows away, so nothing is left running against a branch that is gone.
 //!
 //! Every kick logs its source at `info`, every sweep action is a `warn`, and
 //! the Doctor's "Session Queue" check reports [`sweep::queue_health`], so a
@@ -27,6 +29,7 @@
 
 pub(crate) mod kick;
 pub(crate) mod sweep;
+pub(crate) mod teardown;
 #[cfg(test)]
 mod tests;
 

@@ -851,6 +851,26 @@ impl SessionRegistry {
         }
     }
 
+    /// Wait until none of `session_ids` is [live](Self::is_live) — no
+    /// registered token and no hold — or until `timeout` elapses. Returns
+    /// `true` if they were all released in time.
+    ///
+    /// [`wait_for_sessions`](Self::wait_for_sessions) is the shutdown's wait
+    /// and deliberately ignores holds; a branch teardown has to wait them out
+    /// too, since a held row is one whose owner is about to write it.
+    pub(crate) fn wait_until_released(&self, session_ids: &[String], timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if session_ids.iter().all(|id| !self.is_live(id)) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// Register a session whose work is driven outside `start_session` (e.g. a
     /// pikchr diagram child session run by a `generate_pikchr` worker thread),
     /// so a user cancel reaches the actual work instead of taking

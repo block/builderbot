@@ -2607,6 +2607,67 @@ pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
     error
 }
 
+/// Terminal write for a queued row whose start failed before its claim, on a
+/// branch that is provisioned.
+///
+/// The row is still `queued` and no event will re-kick the branch for it, so
+/// left alone it would sit first in line indefinitely — reported as `queued`
+/// to an MCP caller polling `wait_for_repo_session`, holding every row behind
+/// it. This ends it as `Error` with the real cause instead, the pre-claim
+/// counterpart of [`fail_claimed_queued_start`].
+///
+/// Returns `Ok(true)` when the row was ended here, `Ok(false)` when it left
+/// `queued` under us (a Stop or a forced start got there first and owns its
+/// state — the caller re-reads the branch's running kinds), and `Err` with the
+/// start's error when the write itself failed: queued rows have no sweep to
+/// fall back on, so that stops the pass.
+fn fail_queued_start_before_claim<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    branch: &store::Branch,
+    session_id: &str,
+    error: String,
+) -> Result<bool, String> {
+    match store.transition_from_queued(
+        session_id,
+        store::SessionStatus::Error,
+        Some(&error),
+        Some(&store::CompletionReason::Crashed),
+    ) {
+        Ok(true) => {
+            log::error!(
+                "[session_queue] queued session {session_id} on branch {} failed to start; \
+                 moving on to the rows behind it: {error}",
+                branch.id
+            );
+            session_runner::emit_status(
+                app_handle,
+                session_id,
+                store::SessionStatus::Error.as_str(),
+                Some(error),
+                Some(&store::CompletionReason::Crashed),
+                Some(branch.id.clone()),
+                Some(branch.project_id.clone()),
+            );
+            Ok(true)
+        }
+        Ok(false) => {
+            log::info!(
+                "[session_queue] queued session {session_id} failed to start ({error}); the row \
+                 had already left `queued`"
+            );
+            Ok(false)
+        }
+        Err(write_error) => {
+            log::warn!(
+                "[session_queue] queued session {session_id} failed to start ({error}) and \
+                 recording it failed too ({write_error})"
+            );
+            Err(error)
+        }
+    }
+}
+
 fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
@@ -2853,10 +2914,17 @@ fn branch_session_start_waits_for_provisioning(
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    branch_waits_for_provisioning(store, &branch)
+}
 
+/// Whether `branch` has nowhere to run a session yet: a local branch with no
+/// worktree, or a remote one whose workspace is not `Running`. Its queued rows
+/// wait for the kick provisioning sends when it lands
+/// (`create_and_link_worktree`, `workspace_status_written`).
+fn branch_waits_for_provisioning(store: &Store, branch: &store::Branch) -> Result<bool, String> {
     match branch.branch_type {
         store::BranchType::Local => store
-            .get_workdir_for_branch(branch_id)
+            .get_workdir_for_branch(&branch.id)
             .map(|workdir| workdir.is_none())
             .map_err(|e| e.to_string()),
         store::BranchType::Remote => {
@@ -4146,6 +4214,20 @@ pub(crate) async fn drain_branch_queue(
         return Ok(false);
     }
 
+    // A branch with nowhere to run yet is not a failure: its rows wait for the
+    // kick provisioning sends when the worktree or workspace lands. Checked
+    // here rather than discovered per row, so that a start failing below means
+    // "this provisioned branch could not start this row" and can be recorded
+    // on the row. A branch that is gone is being deleted, rows and all.
+    let Some(branch) = store.get_branch(&branch_id).map_err(|e| e.to_string())? else {
+        log::debug!("[session_queue] branch {branch_id} is gone; nothing to drain");
+        return Ok(false);
+    };
+    if branch_waits_for_provisioning(&store, &branch)? {
+        log::debug!("[session_queue] branch {branch_id} is still provisioning; its queue waits");
+        return Ok(false);
+    }
+
     let queued = store
         .get_queued_sessions_for_branch(&branch_id)
         .map_err(|e| e.to_string())?;
@@ -4190,7 +4272,20 @@ pub(crate) async fn drain_branch_queue(
 
         // A row gated on another session ("Rebase and force push") is asked
         // last, since a rebase dependency's check reads the worktree.
-        match gate_queued_session_start(&store, &app_handle, &branch_id, &session).await? {
+        let gate = match gate_queued_session_start(&store, &app_handle, &branch_id, &session).await
+        {
+            Ok(gate) => gate,
+            // Its dependency check failed (it can read the worktree): the
+            // row cannot be judged, and like a failed context build below,
+            // nothing would re-kick the branch for it.
+            Err(e) => {
+                if !fail_queued_start_before_claim(&store, &app_handle, &branch, &session.id, e)? {
+                    active = running_branch_session_kinds(&store, &branch_id)?;
+                }
+                continue;
+            }
+        };
+        match gate {
             GatedQueuedStart::Proceed => {}
             // The dependency is queued ahead of this row or running, so it has
             // usually stopped the loop already. Not always: a queued dependency
@@ -4222,7 +4317,23 @@ pub(crate) async fn drain_branch_queue(
             Err(e) => {
                 let row = store.get_session(&session_id).map_err(|e| e.to_string())?;
                 match failed_queued_start_disposition(row.as_ref()) {
-                    FailedQueuedStart::Stop => return Err(e),
+                    // Failed in the context build, before its claim. The
+                    // branch is provisioned (gated above), so nothing would
+                    // re-kick it: end the row with the cause, where
+                    // `wait_for_repo_session` and the UI read it, and move
+                    // on — an errored row is no barrier.
+                    FailedQueuedStart::StillQueued => {
+                        if !fail_queued_start_before_claim(
+                            &store,
+                            &app_handle,
+                            &branch,
+                            &session_id,
+                            e,
+                        )? {
+                            active = running_branch_session_kinds(&store, &branch_id)?;
+                        }
+                        continue;
+                    }
                     FailedQueuedStart::Continue => {
                         log::error!(
                             "[session_queue] queued session {session_id} on branch {branch_id} \
@@ -4270,14 +4381,15 @@ enum FailedQueuedStart {
     /// the rows behind it are still this pass's to try.
     Continue,
     /// The row is still `queued`: the start failed before its claim, in the
-    /// context build. It is still first in line, so the pass stops at it as
-    /// the pre-check would have, rather than letting later rows jump it.
-    Stop,
+    /// context build. Nothing else will end it, so the drain does
+    /// ([`fail_queued_start_before_claim`]) and then goes on as for
+    /// `Continue`.
+    StillQueued,
 }
 
 fn failed_queued_start_disposition(row: Option<&store::Session>) -> FailedQueuedStart {
     match row {
-        Some(row) if row.status == store::SessionStatus::Queued => FailedQueuedStart::Stop,
+        Some(row) if row.status == store::SessionStatus::Queued => FailedQueuedStart::StillQueued,
         _ => FailedQueuedStart::Continue,
     }
 }
@@ -8274,13 +8386,13 @@ mod tests {
     /// A queued start that fails after its claim has ended its own row
     /// (`start_session` records the failure) and is no barrier, so the pass
     /// goes on to the rows behind it. One that fails before the claim leaves
-    /// the row `queued` and first in line, so the pass stops at it.
+    /// the row `queued`, for the drain to end itself.
     #[test]
-    fn a_failed_queued_start_stops_the_pass_only_while_its_row_is_still_queued() {
+    fn a_failed_queued_start_is_ended_by_the_drain_only_while_its_row_is_still_queued() {
         let queued = store::Session::new_queued("note");
         assert_eq!(
             failed_queued_start_disposition(Some(&queued)),
-            FailedQueuedStart::Stop
+            FailedQueuedStart::StillQueued
         );
 
         let mut errored = store::Session::new_running("note", Path::new("/tmp"));
@@ -8372,6 +8484,103 @@ mod tests {
             row.completion_reason,
             Some(store::CompletionReason::Interrupted)
         );
+    }
+
+    /// A queued start that fails before its claim, on a provisioned branch,
+    /// has nothing left to re-kick it. The drain ends the row as `Error` with
+    /// the cause — which `wait_for_repo_session` reports as `failed` — and
+    /// emits the status; a row a Stop got to first keeps the Stop's state.
+    #[test]
+    fn a_queued_start_that_fails_before_its_claim_ends_its_own_row() {
+        use tauri::Listener;
+
+        let (store, branch) = setup_branch_store_with_workdir();
+        let app = mock_app();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&events);
+        app.handle()
+            .listen_any("session-status-changed", move |event| {
+                seen.lock().unwrap().push(event.payload().to_string());
+            });
+
+        let session = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+
+        assert!(fail_queued_start_before_claim(
+            &store,
+            app.handle(),
+            &branch,
+            &session.id,
+            "No such remote ref".to_string(),
+        )
+        .unwrap());
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Error);
+        assert_eq!(row.error_message.as_deref(), Some("No such remote ref"));
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Crashed)
+        );
+        assert_eq!(
+            failed_queued_start_disposition(Some(&row)),
+            FailedQueuedStart::Continue
+        );
+        assert!(
+            !has_queued_branch_session(&store, &branch.id).unwrap(),
+            "the failed row no longer holds the queue"
+        );
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains(&session.id) && events[0].contains("\"error\""));
+
+        // A Stop that got there first owns the terminal state.
+        let stopped = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&stopped).unwrap();
+        assert!(store
+            .transition_from_queued(
+                &stopped.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::Interrupted),
+            )
+            .unwrap());
+        assert!(!fail_queued_start_before_claim(
+            &store,
+            app.handle(),
+            &branch,
+            &stopped.id,
+            "No such remote ref".to_string(),
+        )
+        .unwrap());
+        let row = store.get_session(&stopped.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
+        );
+    }
+
+    /// The drain's provisioning gate: a branch with nowhere to run is a
+    /// stated wait, not a per-row start failure the drain would record.
+    #[test]
+    fn the_drain_waits_on_provisioning_only_until_the_branch_can_run() {
+        let (store, branch) = setup_branch_store();
+        assert!(branch_waits_for_provisioning(&store, &branch).unwrap());
+
+        let (store, branch) = setup_branch_store_with_workdir();
+        assert!(!branch_waits_for_provisioning(&store, &branch).unwrap());
+
+        for status in [
+            store::WorkspaceStatus::Starting,
+            store::WorkspaceStatus::Stopped,
+            store::WorkspaceStatus::Error,
+        ] {
+            let (store, branch) = setup_remote_branch_store(status);
+            assert!(branch_waits_for_provisioning(&store, &branch).unwrap());
+        }
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Running);
+        assert!(!branch_waits_for_provisioning(&store, &branch).unwrap());
     }
 
     /// A queued row with no artifact left to say what it is must not make a

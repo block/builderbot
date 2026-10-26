@@ -11,6 +11,7 @@ pub mod agent;
 pub mod app_lifecycle;
 pub mod background_sync;
 pub mod blox;
+mod branch_teardown;
 pub mod branches;
 pub(crate) mod commit_reassociation;
 pub mod diff_cache;
@@ -627,80 +628,22 @@ fn clear_project_repo_reason(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn remove_project_repo(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
     registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
+    session_registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     project_id: String,
     project_repo_id: String,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
-    let removed = store
-        .get_project_repo(&project_repo_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-    let branches = store
-        .list_branches_for_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
-        .collect::<Vec<_>>();
-
-    // Stop running actions for branches being removed.
-    let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-    actions::commands::stop_actions_for_branches(&executor, &registry, &branch_ids);
-
-    // Run heavy cleanup (worktree removal, remote workspace deletion) off the
-    // main thread so the UI stays responsive for large repos.
-    tauri::async_runtime::spawn_blocking({
-        let store = Arc::clone(&store);
-        let branches = branches.clone();
-        move || -> Result<(), String> {
-            for branch in &branches {
-                branches::cleanup_branch_resources(&store, branch)?;
-            }
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
-
-    for branch in &branches {
-        store.delete_branch(&branch.id).map_err(|e| e.to_string())?;
-    }
-    store
-        .delete_project_repo(&project_repo_id)
-        .map_err(|e| e.to_string())?;
-
-    if removed.is_primary {
-        let next_primary = store
-            .list_project_repos(&project_id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next();
-        let project = store
-            .get_project(&project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project not found: {project_id}"))?;
-        if let Some(next) = next_primary {
-            store
-                .set_primary_project_repo(&project_id, &next.id)
-                .map_err(|e| e.to_string())?;
-            store
-                .update_project(
-                    &project_id,
-                    &project.name,
-                    Some(&next.github_repo),
-                    &project.location,
-                    next.subpath.as_deref(),
-                )
-                .map_err(|e| e.to_string())?;
-        } else {
-            store
-                .update_project(&project_id, &project.name, None, &project.location, None)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
+    let services = branch_teardown::TeardownServices {
+        store: get_store(&store)?,
+        action_executor: Arc::clone(&executor),
+        action_registry: Arc::clone(&registry),
+        session_registry: Arc::clone(&session_registry),
+        app_handle,
+    };
+    branch_teardown::remove_project_repo_impl(services, project_id, project_repo_id).await
 }
 
 /// Set or clear (`None`) the user-chosen status shown in place of a project's
@@ -764,55 +707,21 @@ fn update_project_repo_branch_name(
 
 #[tauri::command]
 async fn delete_project(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
     registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
+    session_registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     id: String,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
-
-    // Clean up branch-backed resources (local worktrees / remote workspaces)
-    // before removing DB records via cascade.
-    let branches = store
-        .list_branches_for_project(&id)
-        .map_err(|e| e.to_string())?;
-
-    // Stop all running actions for branches in this project before cleanup.
-    let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-    actions::commands::stop_actions_for_branches(&executor, &registry, &branch_ids);
-
-    // Run heavy cleanup (worktree removal, remote workspace deletion, directory
-    // cleanup) off the main thread so the UI stays responsive for large repos.
-    tauri::async_runtime::spawn_blocking({
-        let store = Arc::clone(&store);
-        let id = id.clone();
-        let branches = branches.clone();
-        move || {
-            cleanup_project_branches_best_effort(
-                &branches,
-                |branch| branches::cleanup_branch_resources_best_effort(&store, branch),
-                |branch| store.delete_branch(&branch.id).map_err(|e| e.to_string()),
-            );
-
-            // Best-effort cleanup for project-scoped local worktree roots.
-            // Worktree-level cleanup removes individual directories; this removes any
-            // leftover project container folder.
-            if let Ok(project_root) = git::project_worktree_root_for(&id) {
-                if project_root.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&project_root) {
-                        log::warn!(
-                            "failed to remove project worktree root '{}': {e}",
-                            project_root.display()
-                        );
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
-
-    store.delete_project(&id).map_err(|e| e.to_string())
+    let services = branch_teardown::TeardownServices {
+        store: get_store(&store)?,
+        action_executor: Arc::clone(&executor),
+        action_registry: Arc::clone(&registry),
+        session_registry: Arc::clone(&session_registry),
+        app_handle,
+    };
+    branch_teardown::delete_project_impl(services, id).await
 }
 
 // =============================================================================

@@ -2602,32 +2602,21 @@ pub async fn resume_workspace(
 
 #[tauri::command]
 pub async fn delete_branch(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<ActionExecutor>>,
     registry: tauri::State<'_, Arc<ActionRegistry>>,
+    session_registry: tauri::State<'_, Arc<crate::session_runner::SessionRegistry>>,
     branch_id: String,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
-
-    // Stop any running actions for this branch before cleanup.
-    crate::actions::commands::stop_actions_for_branches(&executor, &registry, &[&branch_id]);
-
-    // Get the branch
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    tauri::async_runtime::spawn_blocking({
-        let store = Arc::clone(&store);
-        let branch = branch.clone();
-        move || cleanup_branch_resources(&store, &branch)
-    })
-    .await
-    .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
-
-    // Delete the branch record (cascades to commits, notes, reviews)
-    store.delete_branch(&branch_id).map_err(|e| e.to_string())
+    let services = crate::branch_teardown::TeardownServices {
+        store: get_store(&store)?,
+        action_executor: Arc::clone(&executor),
+        action_registry: Arc::clone(&registry),
+        session_registry: Arc::clone(&session_registry),
+        app_handle,
+    };
+    crate::branch_teardown::delete_branch_impl(services, branch_id).await
 }
 
 /// Move a branch into another project, taking its notes, commits, reviews,

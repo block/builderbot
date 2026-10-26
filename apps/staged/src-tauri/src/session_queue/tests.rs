@@ -687,3 +687,99 @@ async fn queue_health_reports_what_the_sweep_would_do_and_has_done() {
     assert!(after.stranded.is_empty());
     assert_eq!(after.swept_total, 1);
 }
+
+/// What deleting a branch does to its sessions before the cascade: a queued
+/// row is cancelled, a running row with a token is signalled and waited for
+/// until its thread has written `cancelled` and deregistered, a held row is
+/// waited out, and a row nothing here owns is cancelled in the store. Every
+/// row is terminal by the time the branch row is deleted.
+#[test]
+fn deleting_a_branch_cancels_its_queued_rows_and_signals_its_running_ones() {
+    use crate::session_queue::teardown::{signal_branch_sessions, stop_branch_sessions};
+
+    let (store, branch) = store_with_branch();
+    let registered = note_session(&store, &branch.id, SessionStatus::Running);
+    let held = note_session(&store, &branch.id, SessionStatus::Running);
+    let orphan = note_session(&store, &branch.id, SessionStatus::Running);
+    let queued = note_session(&store, &branch.id, SessionStatus::Queued);
+
+    let app = mock_app();
+    let registry = Arc::new(SessionRegistry::new());
+
+    // The runner thread: waits on its token, records the cancel, deregisters.
+    let registration = registry.register_external(&registered.id);
+    let thread = std::thread::spawn({
+        let store = Arc::clone(&store);
+        let session_id = registered.id.clone();
+        move || {
+            while !registration.token().is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(store
+                .transition_from_running(
+                    &session_id,
+                    SessionStatus::Cancelled,
+                    None,
+                    Some(&store::CompletionReason::Interrupted),
+                )
+                .unwrap());
+            drop(registration);
+        }
+    });
+    let hold = registry.hold(&held.id);
+
+    let mut owned =
+        signal_branch_sessions(&store, &registry, app.handle(), &[branch.clone()]).unwrap();
+    owned.sort();
+    let mut expected = vec![registered.id.clone(), held.id.clone()];
+    expected.sort();
+    assert_eq!(owned, expected);
+    assert_eq!(
+        status_of(&store, &queued.id),
+        Some(SessionStatus::Cancelled)
+    );
+    assert_eq!(
+        status_of(&store, &orphan.id),
+        Some(SessionStatus::Cancelled)
+    );
+
+    // The held row's owner finishes it, then lets go.
+    assert!(store
+        .transition_from_running(&held.id, SessionStatus::Cancelled, None, None)
+        .unwrap());
+    drop(hold);
+
+    tauri::async_runtime::block_on(stop_branch_sessions(
+        &store,
+        &registry,
+        app.handle(),
+        &[branch.clone()],
+    ))
+    .unwrap();
+    thread.join().unwrap();
+    assert!(!registry.is_live(&registered.id));
+    for id in [&registered.id, &held.id, &orphan.id, &queued.id] {
+        assert_eq!(
+            status_of(&store, id),
+            Some(SessionStatus::Cancelled),
+            "{id}"
+        );
+    }
+
+    store.delete_branch(&branch.id).unwrap();
+    for id in [&registered.id, &held.id, &orphan.id, &queued.id] {
+        assert_eq!(status_of(&store, id), None, "{id}");
+    }
+}
+
+/// The hazard `stop_branch_sessions` exists for: `sessions.branch_id`
+/// cascades, so a branch delete removes a `running` row out from under its
+/// runner. The artifact cleanup triggers spare running rows; this FK does not.
+#[test]
+fn a_branch_delete_cascades_to_its_running_session_rows() {
+    let (store, branch) = store_with_branch();
+    let running = note_session(&store, &branch.id, SessionStatus::Running);
+
+    store.delete_branch(&branch.id).unwrap();
+    assert_eq!(status_of(&store, &running.id), None);
+}

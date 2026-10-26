@@ -1128,77 +1128,21 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "remove_project_repo" => {
-            let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let project_repo_id: String = arg(&args, "projectRepoId")?;
-
-            let removed = store
-                .get_project_repo(&project_repo_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-            let branches = store
-                .list_branches_for_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
-                .collect::<Vec<_>>();
-
-            let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-            crate::actions::commands::stop_actions_for_branches(
-                action_executor,
-                action_registry,
-                &branch_ids,
-            );
-
-            tauri::async_runtime::spawn_blocking({
-                let store = Arc::clone(&store);
-                let branches = branches.clone();
-                move || -> Result<(), String> {
-                    for branch in &branches {
-                        crate::branches::cleanup_branch_resources(&store, branch)?;
-                    }
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
-
-            for branch in &branches {
-                store.delete_branch(&branch.id).map_err(|e| e.to_string())?;
-            }
-            store
-                .delete_project_repo(&project_repo_id)
-                .map_err(|e| e.to_string())?;
-
-            if removed.is_primary {
-                let next_primary = store
-                    .list_project_repos(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .next();
-                let project = store
-                    .get_project(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project not found: {project_id}"))?;
-                if let Some(next) = next_primary {
-                    store
-                        .set_primary_project_repo(&project_id, &next.id)
-                        .map_err(|e| e.to_string())?;
-                    store
-                        .update_project(
-                            &project_id,
-                            &project.name,
-                            Some(&next.github_repo),
-                            &project.location,
-                            next.subpath.as_deref(),
-                        )
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    store
-                        .update_project(&project_id, &project.name, None, &project.location, None)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
+            let services = crate::branch_teardown::TeardownServices {
+                store: get_store(store_mutex)?,
+                action_executor: Arc::clone(action_executor),
+                action_registry: Arc::clone(action_registry),
+                session_registry: Arc::clone(session_registry),
+                app_handle: app_handle.clone(),
+            };
+            detached(crate::branch_teardown::remove_project_repo_impl(
+                services,
+                project_id,
+                project_repo_id,
+            ))
+            .await?;
             Ok(Value::Null)
         }
         "set_project_status_override" => {
@@ -1237,38 +1181,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "delete_project" => {
-            let store = get_store(store_mutex)?;
             let id: String = arg(&args, "id")?;
-            let branches = store
-                .list_branches_for_project(&id)
-                .map_err(|e| e.to_string())?;
-            let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-            crate::actions::commands::stop_actions_for_branches(
-                action_executor,
-                action_registry,
-                &branch_ids,
-            );
-
-            tauri::async_runtime::spawn_blocking({
-                let store = Arc::clone(&store);
-                let id = id.clone();
-                let branches = branches.clone();
-                move || {
-                    for branch in &branches {
-                        crate::branches::cleanup_branch_resources_best_effort(&store, branch);
-                        let _ = store.delete_branch(&branch.id);
-                    }
-                    if let Ok(project_root) = crate::git::project_worktree_root_for(&id) {
-                        if project_root.exists() {
-                            let _ = std::fs::remove_dir_all(&project_root);
-                        }
-                    }
-                }
-            })
-            .await
-            .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
-
-            store.delete_project(&id).map_err(|e| e.to_string())?;
+            let services = crate::branch_teardown::TeardownServices {
+                store: get_store(store_mutex)?,
+                action_executor: Arc::clone(action_executor),
+                action_registry: Arc::clone(action_registry),
+                session_registry: Arc::clone(session_registry),
+                app_handle: app_handle.clone(),
+            };
+            detached(crate::branch_teardown::delete_project_impl(services, id)).await?;
             Ok(Value::Null)
         }
 
@@ -1728,27 +1649,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(serde_json::to_value(enriched).unwrap())
         }
         "delete_branch" => {
-            let store = get_store(store_mutex)?;
             let id: String = arg(&args, "branchId")?;
-            let branch = store
-                .get_branch(&id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {id}"))?;
-            let branch_ids = vec![id.as_str()];
-            crate::actions::commands::stop_actions_for_branches(
-                action_executor,
-                action_registry,
-                &branch_ids,
-            );
-
-            tauri::async_runtime::spawn_blocking({
-                let store = Arc::clone(&store);
-                let branch = branch.clone();
-                move || crate::branches::cleanup_branch_resources(&store, &branch)
-            })
-            .await
-            .map_err(|e| format!("Failed: {e}"))??;
-            store.delete_branch(&id).map_err(|e| e.to_string())?;
+            let services = crate::branch_teardown::TeardownServices {
+                store: get_store(store_mutex)?,
+                action_executor: Arc::clone(action_executor),
+                action_registry: Arc::clone(action_registry),
+                session_registry: Arc::clone(session_registry),
+                app_handle: app_handle.clone(),
+            };
+            detached(crate::branch_teardown::delete_branch_impl(services, id)).await?;
             Ok(Value::Null)
         }
         "rename_branch" => {
@@ -4485,11 +4394,12 @@ mod tests {
         );
     }
 
-    /// The delete arms must reach the bodies the Tauri commands use. Those
-    /// bodies kick the branch queue after the delete — a queued commit is the
-    /// barrier in front of everything queued behind it — and an arm that
-    /// re-implemented the delete inline would drop the kick without any
-    /// compile error.
+    /// The delete arms must reach the bodies the Tauri commands use. The
+    /// artifact deletes kick the branch queue after the delete — a queued
+    /// commit is the barrier in front of everything queued behind it — and the
+    /// branch deletes stop the branch's sessions before the cascade takes
+    /// their rows; an arm that re-implemented either inline would drop that
+    /// without any compile error.
     #[test]
     fn web_delete_arms_share_the_tauri_bodies() {
         let source = include_str!("web_server.rs");
@@ -4501,6 +4411,12 @@ mod tests {
                 "timeline::delete_pending_commit_impl(",
             ),
             ("delete_session", "session_commands::delete_session_impl("),
+            ("delete_branch", "branch_teardown::delete_branch_impl("),
+            (
+                "remove_project_repo",
+                "branch_teardown::remove_project_repo_impl(",
+            ),
+            ("delete_project", "branch_teardown::delete_project_impl("),
         ] {
             let arm = dispatch_arm_body(source, command);
             assert!(

@@ -715,8 +715,11 @@ impl ProjectToolsHandler {
         // The session created above carries its own resolved provider on its
         // row, so the kick's drain needs no branch-wide default. The drain runs
         // on the kicker's task: a cancelled tool call can no longer abandon a
-        // half-claimed row, and a drain failure surfaces on the session row,
-        // where `wait_for_repo_session` reports it.
+        // half-claimed row. A start that fails ends the row as `failed` with
+        // its cause, where `wait_for_repo_session` reports it — before the
+        // claim the drain writes it (`fail_queued_start_before_claim`), after
+        // it the start does. A branch still provisioning is not a failure: the
+        // row stays `queued` until provisioning kicks the branch.
         //
         // One behaviour the inline drain this replaced had is gone with it:
         // it passed `self.provider` as the default for *other* queued rows on

@@ -31,9 +31,10 @@
  *
  * `session-background-hold` is folded into projectState as a sub-state of a
  * running session, so the project row can say "waiting on background work"
- * instead of spinning generically for up to the hold cap. The snapshot carries
- * no hold information, so hydration re-asks `get_session_background_hold` for
- * each running session it keeps.
+ * instead of spinning generically for up to the hold cap. The hold also rides
+ * on the `get_active_sessions` snapshot as `holding`, applied in the snapshot
+ * loop for each running session hydration keeps, so a hold event missed while
+ * this client was away is picked up by the next hydration.
  */
 
 import { toast } from 'svelte-sonner';
@@ -120,7 +121,13 @@ function listenForRehydrateTriggers(): UnlistenFn {
   };
   window.addEventListener('focus', onReturn);
   document.addEventListener('visibilitychange', onReturn);
-  const interval = setInterval(() => void hydrateActiveSessions(), REHYDRATE_INTERVAL_MS);
+  // A hidden (minimised, occluded) window skips the periodic tick so it is not
+  // polling `get_active_sessions` for as long as it lives; `visibilitychange`
+  // above does the catch-up hydration when it comes back.
+  const interval = setInterval(() => {
+    if (document.visibilityState === 'hidden') return;
+    void hydrateActiveSessions();
+  }, REHYDRATE_INTERVAL_MS);
   return () => {
     window.removeEventListener('focus', onReturn);
     document.removeEventListener('visibilitychange', onReturn);

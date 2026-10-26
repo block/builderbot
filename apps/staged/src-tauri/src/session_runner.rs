@@ -3587,7 +3587,17 @@ pub fn spawn_dead_session_sweep(store: Arc<Store>, app_handle: AppHandle) {
         interval.tick().await;
         loop {
             interval.tick().await;
-            recover_dead_sessions(Arc::clone(&store), app_handle.clone());
+            // The sweep is synchronous (store mutex, a `kill -0` subprocess per
+            // foreign-pid row), so run it off the async workers.
+            let store = Arc::clone(&store);
+            let app_handle = app_handle.clone();
+            if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+                recover_dead_sessions(store, app_handle);
+            })
+            .await
+            {
+                log::error!("[session_runner] Dead-session sweep panicked: {e}");
+            }
         }
     });
 }

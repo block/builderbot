@@ -495,8 +495,8 @@ describe('sessionStatusListener busy-state hydration', () => {
 
   // -------------------------------------------------------------------------
   // Background hold: a sub-state of a running session, folded into the
-  // project's busy state from the hold event and re-asked on hydration (the
-  // snapshot carries no hold information).
+  // project's busy state from the hold event and from the `holding` flag the
+  // `get_active_sessions` snapshot carries for each running row.
   // -------------------------------------------------------------------------
 
   describe('background hold', () => {

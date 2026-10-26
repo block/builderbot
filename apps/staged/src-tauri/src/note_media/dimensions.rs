@@ -10,8 +10,10 @@
 //! a whole multiple of 72 dpi (144, 216, 288 — what screenshot tools write)
 //! is read as a screen density; a camera's or scanner's 300 or 600 is a print
 //! intent and, like a file that declares nothing or an unspecified unit, is
-//! 1x. A JPEG's EXIF `Orientation` is honoured too, since browsers draw the
-//! photo rotated and the size must describe what they draw.
+//! 1x. EXIF `Orientation` is honoured too, since browsers draw the photo
+//! rotated and the size must describe what they draw: from a JPEG's APP1
+//! segment, a PNG's `eXIf` chunk, or a WebP's `EXIF` chunk — the three
+//! places browsers read it from.
 
 use crate::store::ImageDimensions;
 
@@ -29,19 +31,17 @@ pub(crate) fn probe(bytes: &[u8]) -> Option<ImageDimensions> {
     if width == 0 || height == 0 {
         return None;
     }
-    let (dpi, transposed) = match format {
-        "png" => (png_dpi(bytes), false),
-        "jpg" => {
-            let metadata = jpeg_metadata(bytes);
-            (metadata.dpi, metadata.transposed)
-        }
-        _ => (None, false),
+    let metadata = match format {
+        "png" => png_metadata(bytes),
+        "jpg" => jpeg_metadata(bytes),
+        "webp" => webp_metadata(bytes),
+        _ => Metadata::default(),
     };
     // Browsers default to `image-orientation: from-image`, so a phone photo
     // stored as landscape data with orientation 6 is drawn portrait; the
     // size has to describe the drawn image or `width`/`height` would be
     // swapped and the capped figure would letterbox it.
-    let (width, height) = if transposed {
+    let (width, height) = if metadata.transposed {
         (height, width)
     } else {
         (width, height)
@@ -49,7 +49,7 @@ pub(crate) fn probe(bytes: &[u8]) -> Option<ImageDimensions> {
     Some(ImageDimensions {
         width,
         height,
-        density: density_from_dpi(dpi),
+        density: density_from_dpi(metadata.dpi),
     })
 }
 
@@ -78,30 +78,75 @@ fn density_from_dpi(dpi: Option<f64>) -> u8 {
     }
 }
 
-/// Horizontal resolution from the `pHYs` chunk, when its unit is the metre.
-fn png_dpi(bytes: &[u8]) -> Option<f64> {
-    let reader = png::Decoder::new(std::io::Cursor::new(bytes))
-        .read_info()
-        .ok()?;
-    let dims = reader.info().pixel_dims?;
-    (dims.unit == png::Unit::Meter && dims.xppu > 0).then(|| f64::from(dims.xppu) * 0.0254)
-}
-
-/// What a JPEG's headers say about how it is to be drawn.
+/// What a file's headers say about how it is to be drawn.
 #[derive(Default)]
-struct JpegMetadata {
-    /// JFIF density when its unit is specified, else the EXIF resolution.
+struct Metadata {
+    /// Declared resolution in dots per inch: the PNG `pHYs` chunk, or a
+    /// JPEG's JFIF density when its unit is specified, else its EXIF
+    /// resolution. WebP has none.
     dpi: Option<f64>,
     /// EXIF `Orientation` 5..=8: the stored rows run down the drawn image, so
     /// the drawn width is the stored height.
     transposed: bool,
 }
 
+impl Metadata {
+    fn with_orientation(dpi: Option<f64>, orientation: Option<u16>) -> Self {
+        Self {
+            dpi,
+            transposed: matches!(orientation, Some(5..=8)),
+        }
+    }
+}
+
+/// Horizontal resolution from the `pHYs` chunk, when its unit is the metre,
+/// and the orientation from an `eXIf` chunk. Both come from the chunks before
+/// the first `IDAT`, which is as far as the decoder's header read goes and
+/// as far as browsers look for `eXIf` too.
+fn png_metadata(bytes: &[u8]) -> Metadata {
+    let Ok(reader) = png::Decoder::new(std::io::Cursor::new(bytes)).read_info() else {
+        return Metadata::default();
+    };
+    let info = reader.info();
+    let dpi = info
+        .pixel_dims
+        .filter(|dims| dims.unit == png::Unit::Meter && dims.xppu > 0)
+        .map(|dims| f64::from(dims.xppu) * 0.0254);
+    let orientation = info
+        .exif_metadata
+        .as_deref()
+        .and_then(exif_ifd0)
+        .and_then(|ifd| ifd.orientation);
+    Metadata::with_orientation(dpi, orientation)
+}
+
+/// The orientation from an extended (VP8X) WebP's `EXIF` chunk. The
+/// container spec puts it after the bitstream, so the walk hops every chunk
+/// header (fourcc, little-endian size, payload padded to an even length) up
+/// to the end of the file; a size that runs past the buffer ends the walk.
+fn webp_metadata(bytes: &[u8]) -> Metadata {
+    let mut at = 12;
+    let orientation = loop {
+        let Some(header) = bytes.get(at..at + 8) else {
+            break None;
+        };
+        let size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let Some(payload) = bytes.get(at + 8..at + 8 + size) else {
+            break None;
+        };
+        if &header[..4] == b"EXIF" {
+            break exif_ifd0(payload).and_then(|ifd| ifd.orientation);
+        }
+        at += 8 + size + (size & 1);
+    };
+    Metadata::with_orientation(None, orientation)
+}
+
 /// A walk over the marker segments before the first scan: APP0 `JFIF\0`
 /// carries a unit byte (1 inch, 2 centimetre, 0 aspect ratio only) and X/Y
 /// densities; APP1 `Exif\0\0` carries a TIFF header. Segment lengths are
 /// trusted only as far as the buffer goes, so a truncated file gives None.
-fn jpeg_metadata(bytes: &[u8]) -> JpegMetadata {
+fn jpeg_metadata(bytes: &[u8]) -> Metadata {
     let mut at = 2;
     let mut jfif_dpi = None;
     let mut exif = None;
@@ -131,20 +176,16 @@ fn jpeg_metadata(bytes: &[u8]) -> JpegMetadata {
             0xE0 if jfif_dpi.is_none() && payload.starts_with(b"JFIF\0") => {
                 jfif_dpi = jfif_density(payload);
             }
-            0xE1 if exif.is_none() => {
-                if let Some(tiff) = payload.strip_prefix(b"Exif\0\0") {
-                    exif = exif_ifd0(tiff);
-                }
+            // An APP1 without the identifier is XMP or similar, not EXIF.
+            0xE1 if exif.is_none() && payload.starts_with(b"Exif\0\0") => {
+                exif = exif_ifd0(payload);
             }
             _ => {}
         }
         at += 2 + length;
     }
     let exif = exif.unwrap_or_default();
-    JpegMetadata {
-        dpi: jfif_dpi.or(exif.dpi),
-        transposed: matches!(exif.orientation, Some(5..=8)),
-    }
+    Metadata::with_orientation(jfif_dpi.or(exif.dpi), exif.orientation)
 }
 
 /// X density of a JFIF APP0 payload in dots per inch, when its unit is
@@ -167,10 +208,12 @@ struct ExifIfd0 {
     orientation: Option<u16>,
 }
 
-/// IFD0 of a TIFF header — the payload of a JPEG APP1 segment after
-/// `Exif\0\0`. Only the three tags above are read; a pointer that runs off
-/// the end gives None.
-fn exif_ifd0(tiff: &[u8]) -> Option<ExifIfd0> {
+/// IFD0 of an EXIF block: a TIFF header, which a JPEG APP1 segment (and some
+/// WebP writers) prefix with the `Exif\0\0` identifier and a PNG `eXIf`
+/// chunk holds bare. Only the three tags above are read; a pointer that runs
+/// off the end gives None.
+fn exif_ifd0(exif: &[u8]) -> Option<ExifIfd0> {
+    let tiff = exif.strip_prefix(b"Exif\0\0").unwrap_or(exif);
     let big_endian = match tiff.get(0..2)? {
         b"MM" => true,
         b"II" => false,
@@ -247,12 +290,22 @@ pub(crate) mod tests {
     }
 
     fn png_with_phys(phys: Option<png::PixelDimensions>) -> Vec<u8> {
+        png_with_chunks(phys, None)
+    }
+
+    /// An 8x6 PNG with the given `pHYs` and `eXIf` chunks, both written
+    /// ahead of the image data as the encoder does.
+    fn png_with_chunks(phys: Option<png::PixelDimensions>, exif: Option<&[u8]>) -> Vec<u8> {
+        let mut info = png::Info::with_size(8, 6);
+        info.color_type = png::ColorType::Rgb;
+        info.bit_depth = png::BitDepth::Eight;
+        info.pixel_dims = phys;
+        info.exif_metadata = exif.map(|exif| exif.to_vec().into());
         let mut bytes = Vec::new();
-        let mut encoder = png::Encoder::new(&mut bytes, 8, 6);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_pixel_dims(phys);
-        let mut writer = encoder.write_header().unwrap();
+        let mut writer = png::Encoder::with_info(&mut bytes, info)
+            .unwrap()
+            .write_header()
+            .unwrap();
         writer.write_image_data(&[0; 8 * 6 * 3]).unwrap();
         writer.finish().unwrap();
         bytes
@@ -481,11 +534,137 @@ pub(crate) mod tests {
             exif_ifd0(&tiff(false, 144, 1, 2, Some(6))).map(|ifd| ifd.orientation),
             Some(Some(6))
         );
+        // The identifier a JPEG segment carries is stripped before the walk.
+        assert_eq!(
+            exif_ifd0(&prefixed(&tiff(true, 144, 1, 2, Some(6)))).map(|ifd| ifd.orientation),
+            Some(Some(6))
+        );
         // Orientation is only read from the TIFF header, so a JFIF-only file
         // and the fixture (sips writes no Orientation tag) keep the stored
         // axes.
         assert_eq!(probe(&jfif_only(1, 144)), dims(8, 6, 2));
         assert_eq!(probe(SIPS_144DPI_JPG), dims(8, 6, 2));
+    }
+
+    /// `tiff` with the `Exif\0\0` identifier a JPEG APP1 carries, which
+    /// some PNG and WebP writers keep too.
+    fn prefixed(tiff: &[u8]) -> Vec<u8> {
+        let mut bytes = b"Exif\0\0".to_vec();
+        bytes.extend_from_slice(tiff);
+        bytes
+    }
+
+    #[test]
+    fn png_exif_orientation_transposes_the_drawn_size() {
+        let retina = phys(5669, png::Unit::Meter);
+        // The chunk holds a bare TIFF header; 1 keeps the stored axes.
+        assert_eq!(
+            probe(&png_with_chunks(
+                retina,
+                Some(&tiff(true, 72, 1, 2, Some(1)))
+            )),
+            dims(8, 6, 2)
+        );
+        for big_endian in [true, false] {
+            assert_eq!(
+                probe(&png_with_chunks(
+                    retina,
+                    Some(&tiff(big_endian, 72, 1, 2, Some(6)))
+                )),
+                dims(6, 8, 2),
+                "big_endian {big_endian}"
+            );
+        }
+        // A writer that kept the identifier, and one that wrote something
+        // else entirely.
+        assert_eq!(
+            probe(&png_with_chunks(
+                retina,
+                Some(&prefixed(&tiff(true, 72, 1, 2, Some(6))))
+            )),
+            dims(6, 8, 2)
+        );
+        assert_eq!(
+            probe(&png_with_chunks(retina, Some(b"not a tiff header"))),
+            dims(8, 6, 2)
+        );
+        // Density is the PNG's own `pHYs`; an EXIF resolution is not read.
+        assert_eq!(
+            probe(&png_with_chunks(
+                None,
+                Some(&tiff(true, 144, 1, 2, Some(8)))
+            )),
+            dims(6, 8, 1)
+        );
+    }
+
+    /// An extended-format WebP: a VP8X header with the canvas size, an
+    /// odd-length stand-in bitstream chunk (so the padding rule is walked),
+    /// then the `EXIF` chunk where the container spec puts it.
+    fn webp_vp8x(width: u32, height: u32, exif: Option<&[u8]>) -> Vec<u8> {
+        let mut chunks = Vec::new();
+        let mut chunk = |fourcc: &[u8; 4], payload: &[u8]| {
+            chunks.extend_from_slice(fourcc);
+            chunks.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            chunks.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                chunks.push(0);
+            }
+        };
+        let mut vp8x = vec![0x08, 0, 0, 0];
+        vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+        vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+        chunk(b"VP8X", &vp8x);
+        chunk(b"VP8L", &[0x2f, 0, 0, 0, 0]);
+        if let Some(exif) = exif {
+            chunk(b"EXIF", exif);
+        }
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(4 + chunks.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WEBP");
+        bytes.extend_from_slice(&chunks);
+        bytes
+    }
+
+    #[test]
+    fn webp_exif_orientation_transposes_the_drawn_size() {
+        assert_eq!(probe(&webp_vp8x(64, 48, None)), dims(64, 48, 1));
+        assert_eq!(
+            probe(&webp_vp8x(64, 48, Some(&tiff(true, 72, 1, 2, Some(1))))),
+            dims(64, 48, 1)
+        );
+        for big_endian in [true, false] {
+            assert_eq!(
+                probe(&webp_vp8x(
+                    64,
+                    48,
+                    Some(&tiff(big_endian, 72, 1, 2, Some(6)))
+                )),
+                dims(48, 64, 1),
+                "big_endian {big_endian}"
+            );
+        }
+        // With and without the identifier; a chunk that is not EXIF at all.
+        assert_eq!(
+            probe(&webp_vp8x(
+                64,
+                48,
+                Some(&prefixed(&tiff(false, 72, 1, 2, Some(8))))
+            )),
+            dims(48, 64, 1)
+        );
+        assert_eq!(
+            probe(&webp_vp8x(64, 48, Some(b"not a tiff header"))),
+            dims(64, 48, 1)
+        );
+        // A truncated file: the EXIF chunk's declared size runs past the end.
+        let whole = webp_vp8x(64, 48, Some(&tiff(true, 72, 1, 2, Some(6))));
+        assert_eq!(probe(&whole[..whole.len() - 4]), dims(64, 48, 1));
+        // WebP declares no resolution, so a 2x capture saved as WebP is 1x.
+        assert_eq!(
+            probe(&webp_vp8x(1320, 960, Some(&tiff(true, 144, 1, 2, None)))),
+            dims(1320, 960, 1)
+        );
     }
 
     #[test]

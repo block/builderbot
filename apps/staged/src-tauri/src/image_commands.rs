@@ -331,10 +331,23 @@ mod tests {
         assert_eq!(retina.dimensions, dims(8, 6, 2));
         let plain = attach(&f, "plain.png", "image/png", NO_PHYS_PNG).unwrap();
         assert_eq!(plain.dimensions, dims(8, 6, 1));
-        // Headers that cannot be read leave the columns NULL rather than
-        // failing the attach.
+        // Headers that cannot be read do not fail the attach: the row has no
+        // dimensions, and is recorded as read so the backfill does not open
+        // the file — even once it would parse.
         let stub = attach(&f, "stub.png", "image/png", PNG).unwrap();
         assert_eq!(stub.dimensions, None);
+        assert!(f.store.image_dimensions_recorded(&stub.id).unwrap());
+        std::fs::write(
+            crate::store::images::image_file_path(&f.project.id, &stub.id, &stub.filename).unwrap(),
+            PHYS_144DPI_PNG,
+        )
+        .unwrap();
+        let read_back = media_dimensions_impl(&f.store, std::slice::from_ref(&stub.id));
+        assert!(read_back.is_empty(), "{read_back:?}");
+        assert_eq!(
+            f.store.get_image(&stub.id).unwrap().unwrap().dimensions,
+            None
+        );
 
         for image in [&retina, &plain, &stub] {
             let stored = f.store.get_image(&image.id).unwrap().unwrap();
@@ -343,9 +356,24 @@ mod tests {
         let listed = f.store.list_all_images_for_branch(&f.branch.id).unwrap();
         assert_eq!(listed.len(), 3);
         assert!(listed.iter().any(|i| i.dimensions == dims(8, 6, 2)));
+
+        // A video has nothing to read and stays NULL, as before.
+        let clip = crate::note_media::files::store_media_file(
+            &f.store,
+            Some(&f.branch.id),
+            &f.project.id,
+            Some(&f.session.id),
+            "clip.mp4",
+            b"\0\0\0\x18ftypisom\0\0\0\0",
+            true,
+        )
+        .unwrap();
+        assert_eq!(clip.dimensions, None);
+        assert!(!f.store.image_dimensions_recorded(&clip.id).unwrap());
     }
 
-    /// A row that predates the columns, with its file on disk.
+    /// A row that predates the columns, with its file on disk. Inserting a
+    /// raster row records the sentinel, so the columns are cleared after.
     fn legacy_image(f: &Fixture, filename: &str, mime: &str, bytes: Option<&[u8]>) -> String {
         let mut image = crate::store::Image::new(
             Some(&f.branch.id),
@@ -363,7 +391,9 @@ mod tests {
             std::fs::write(path, bytes).unwrap();
         }
         f.store.create_image(&image).unwrap();
+        f.store.forget_image_dimensions(&image.id).unwrap();
         assert_eq!(image.dimensions, None);
+        assert!(!f.store.image_dimensions_recorded(&image.id).unwrap());
         image.id
     }
 

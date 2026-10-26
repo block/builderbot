@@ -11,10 +11,11 @@ use super::{Store, StoreChange, StoreError};
 
 const IMAGE_COLUMNS: &str = "id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at, width, height, density";
 
-/// Stored in the dimension columns of a raster image whose file was read and
-/// yielded no usable header: distinct from NULL (never read) so the backfill
-/// does not reopen it, and read back as `dimensions: None` since a real
-/// density is 1..=4.
+/// Stored in the dimension columns of a raster image whose bytes were read
+/// (probed on attach, or read back from disk by the backfill) and yielded no
+/// usable header: distinct from NULL (never read) so the backfill does not
+/// open it again, and read back as `dimensions: None` since a real density
+/// is 1..=4.
 const UNREADABLE_DIMENSIONS: ImageDimensions = ImageDimensions {
     width: 0,
     height: 0,
@@ -70,6 +71,19 @@ impl Store {
         conn: &rusqlite::Connection,
         image: &Image,
     ) -> Result<(), StoreError> {
+        // Every raster row inserted since the columns exist has had its
+        // bytes probed on the way in (`write_media` and the note-transfer
+        // copy are the producers), so None on an `image/*` row means the
+        // header could not be read: store the sentinel now rather than let
+        // the backfill read the file once more to learn the same thing.
+        // Videos and PDFs have nothing to read and stay NULL; only rows from
+        // before migration 0033 are raster and NULL.
+        let dimensions = image.dimensions.or_else(|| {
+            image
+                .mime_type
+                .starts_with("image/")
+                .then_some(UNREADABLE_DIMENSIONS)
+        });
         conn.execute(
             &format!(
                 "INSERT INTO images ({IMAGE_COLUMNS})
@@ -84,10 +98,23 @@ impl Store {
                 image.mime_type,
                 image.size_bytes,
                 image.created_at,
-                image.dimensions.map(|d| d.width),
-                image.dimensions.map(|d| d.height),
-                image.dimensions.map(|d| d.density),
+                dimensions.map(|d| d.width),
+                dimensions.map(|d| d.height),
+                dimensions.map(|d| d.density),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Put a row back to how migration 0033 left it, for tests that need a
+    /// raster row whose file has never been read; nothing in the app makes
+    /// one.
+    #[cfg(test)]
+    pub(crate) fn forget_image_dimensions(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE images SET width = NULL, height = NULL, density = NULL WHERE id = ?1",
+            params![id],
         )?;
         Ok(())
     }

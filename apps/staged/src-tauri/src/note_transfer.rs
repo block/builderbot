@@ -1220,6 +1220,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, retina).unwrap();
         f.store.create_image(&image).unwrap();
+        f.store.forget_image_dimensions(&image.id).unwrap();
         let note = ProjectNote::new(
             &f.source.id,
             "Plan",

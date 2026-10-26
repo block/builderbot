@@ -1085,7 +1085,8 @@ pub struct Image {
     /// Pixel size and density read from the file's own metadata; None for
     /// videos, PDFs, rows that predate the columns and have not been read
     /// back yet, and files whose headers could not be parsed (those hold a
-    /// zero sentinel once read, so they are not read again).
+    /// zero sentinel from the attach or the first read, so they are not
+    /// read again).
     #[serde(default)]
     pub dimensions: Option<ImageDimensions>,
 }

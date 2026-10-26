@@ -24,7 +24,6 @@
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
-  import { BitsConfig } from 'bits-ui';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -612,119 +611,115 @@
   }
 </script>
 
-<!-- Every bits-ui portal lands in #portal-root (index.html) instead of <body>,
-     so opening or closing one never changes #app's sibling position. -->
-<BitsConfig defaultPortalTo="#portal-root">
-  {#if preferences.loaded}
-    {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
-      <main class="reset-shell">
-        <div class="update-state">
-          <div class="update-card">
-            <div class="update-header">
-              <h1 class="update-title">Update Required</h1>
-              <span class="version-badge new">v{storeIncompat.appVersion}</span>
-            </div>
-            <p>
-              Staged beta updates can require backwards-incompatible changes. The info stored by
-              Staged (session history, notes) will be cleared, but your
-              <strong>git repos and branches are not affected</strong>.
+{#if preferences.loaded}
+  {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
+    <main class="reset-shell">
+      <div class="update-state">
+        <div class="update-card">
+          <div class="update-header">
+            <h1 class="update-title">Update Required</h1>
+            <span class="version-badge new">v{storeIncompat.appVersion}</span>
+          </div>
+          <p>
+            Staged beta updates can require backwards-incompatible changes. The info stored by
+            Staged (session history, notes) will be cleared, but your
+            <strong>git repos and branches are not affected</strong>.
+          </p>
+          <div class="update-footer">
+            <p class="version-hint">
+              Not ready? Install <code>v{storeIncompat.dbAppVersion}</code> instead.
             </p>
-            <div class="update-footer">
-              <p class="version-hint">
-                Not ready? Install <code>v{storeIncompat.dbAppVersion}</code> instead.
-              </p>
-              <div class="update-actions">
-                <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
-                <Button variant="outline" size="sm" onclick={handleResetStore} disabled={resetting}>
-                  {resetting ? 'Resetting…' : 'Reset & Update'}
-                </Button>
-              </div>
+            <div class="update-actions">
+              <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
+              <Button variant="outline" size="sm" onclick={handleResetStore} disabled={resetting}>
+                {resetting ? 'Resetting…' : 'Reset & Update'}
+              </Button>
             </div>
           </div>
         </div>
-      </main>
-    {:else if storeIncompat && storeIncompat.kind === 'too_new'}
-      <main class="reset-shell">
-        <div class="update-state">
-          <div class="update-card">
-            <div class="update-header">
-              <h1 class="update-title">Update Staged</h1>
-              <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
-            </div>
-            <p>
-              This database was last used by a newer version of Staged. Please install
-              <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
-            </p>
-            <div class="update-footer">
-              <div></div>
-              <div class="update-actions">
-                <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
-              </div>
+      </div>
+    </main>
+  {:else if storeIncompat && storeIncompat.kind === 'too_new'}
+    <main class="reset-shell">
+      <div class="update-state">
+        <div class="update-card">
+          <div class="update-header">
+            <h1 class="update-title">Update Staged</h1>
+            <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
+          </div>
+          <p>
+            This database was last used by a newer version of Staged. Please install
+            <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
+          </p>
+          <div class="update-footer">
+            <div></div>
+            <div class="update-actions">
+              <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
             </div>
           </div>
         </div>
-      </main>
-    {:else}
-      <main>
-        <TopBar />
-        <div class="content">
-          {#if storeError}
-            <div class="error-state">
-              <p>{storeError}</p>
-            </div>
-          {:else if navigation.activeView === 'settings'}
-            <SettingsPage />
-          {:else if navigation.currentRoute.kind === 'diff'}
-            {@const diffRoute = navigation.currentRoute}
-            <DiffModal
-              branchId={diffRoute.branchId}
-              projectId={diffRoute.projectId}
-              commitSha={diffRoute.commitSha}
-              scope={diffRoute.scope}
-              reviewId={diffRoute.reviewId}
-              beforeLabel={diffRoute.beforeLabel}
-              afterLabel={diffRoute.afterLabel}
-              readonly={diffRoute.readonly}
-              commits={diffRoute.commits}
-              baseBranchLabel={diffRoute.baseBranchLabel}
-              branchLabel={diffRoute.branchLabel}
-              projectName={diffRoute.projectName}
-              githubRepo={diffRoute.githubRepo}
-              subpath={diffRoute.subpath}
-              onClose={() => closeDiffRouteIfCurrent(diffRoute)}
-            />
-          {:else}
-            <div class="workspace">
-              <!-- Hoisted out of ProjectHome so it survives project↔repos
+      </div>
+    </main>
+  {:else}
+    <main>
+      <TopBar />
+      <div class="content">
+        {#if storeError}
+          <div class="error-state">
+            <p>{storeError}</p>
+          </div>
+        {:else if navigation.activeView === 'settings'}
+          <SettingsPage />
+        {:else if navigation.currentRoute.kind === 'diff'}
+          {@const diffRoute = navigation.currentRoute}
+          <DiffModal
+            branchId={diffRoute.branchId}
+            projectId={diffRoute.projectId}
+            commitSha={diffRoute.commitSha}
+            scope={diffRoute.scope}
+            reviewId={diffRoute.reviewId}
+            beforeLabel={diffRoute.beforeLabel}
+            afterLabel={diffRoute.afterLabel}
+            readonly={diffRoute.readonly}
+            commits={diffRoute.commits}
+            baseBranchLabel={diffRoute.baseBranchLabel}
+            branchLabel={diffRoute.branchLabel}
+            projectName={diffRoute.projectName}
+            githubRepo={diffRoute.githubRepo}
+            subpath={diffRoute.subpath}
+            onClose={() => closeDiffRouteIfCurrent(diffRoute)}
+          />
+        {:else}
+          <div class="workspace">
+            <!-- Hoisted out of ProjectHome so it survives project↔repos
                  transitions; hidden on the landing page. -->
-              {#if navigation.selectedProjectId || navigation.showReposList}
-                <ProjectsSidebar />
-              {/if}
-              {#if navigation.showReposList}
-                <ReposListView />
-              {:else if navigation.selectedProjectId}
-                <ProjectHome selectedProjectId={navigation.selectedProjectId} />
-              {:else}
-                <ProjectsList />
-              {/if}
-            </div>
-          {/if}
-        </div>
-      </main>
-    {/if}
-
-    {#if showSessionLab}
-      <SessionLauncher onClose={() => (showSessionLab = false)} />
-    {/if}
-
-    <!-- Shared remove-project confirmation — serves every route's delete entry
-       point (sidebar, landing grid, ProjectHome top bar/shortcut). -->
-    <ProjectDeleteDialog />
-
-    <ReferenceModalHost />
-    <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
+            {#if navigation.selectedProjectId || navigation.showReposList}
+              <ProjectsSidebar />
+            {/if}
+            {#if navigation.showReposList}
+              <ReposListView />
+            {:else if navigation.selectedProjectId}
+              <ProjectHome selectedProjectId={navigation.selectedProjectId} />
+            {:else}
+              <ProjectsList />
+            {/if}
+          </div>
+        {/if}
+      </div>
+    </main>
   {/if}
-</BitsConfig>
+
+  {#if showSessionLab}
+    <SessionLauncher onClose={() => (showSessionLab = false)} />
+  {/if}
+
+  <!-- Shared remove-project confirmation — serves every route's delete entry
+       point (sidebar, landing grid, ProjectHome top bar/shortcut). -->
+  <ProjectDeleteDialog />
+
+  <ReferenceModalHost />
+  <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
+{/if}
 
 <style>
   :global(body) {

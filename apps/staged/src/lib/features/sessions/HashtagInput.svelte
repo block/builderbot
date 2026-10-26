@@ -558,7 +558,7 @@
     <!-- Dropdown -->
     {#if showDropdown && filteredItems.length > 0}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <!-- Portaled to <body> so position:fixed escapes the dialog's transformed
+      <!-- Portaled to #portal-root so position:fixed escapes the dialog's transformed
            containing block; pointerdown is stopped so selecting an item doesn't
            trip bits-ui's dismiss-on-interact-outside and close the dialog. -->
       <div

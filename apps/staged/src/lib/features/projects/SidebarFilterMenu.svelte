@@ -33,7 +33,7 @@
 
   // Checkbox semantics: toggle within the current set.
   function toggle(filter: FilterKind) {
-    projectFiltersStore.toggleFilter(filter, { shiftKey: true } as MouseEvent);
+    projectFiltersStore.toggleFilter(filter, { additive: true });
   }
 
   // The repo entries and their counts derive from reposByProject, which

@@ -390,6 +390,16 @@
               <PinnedRepoCards repos={sidebarRepos} reorderable={!searching} />
             {:else if searching}
               <div class="state no-matches">No repos match "{searchQuery.trim()}"</div>
+            {:else}
+              <!-- Repos exist but none are pinned: point at where pinning lives
+                   so the "Pinned repos 0" header isn't the only affordance. -->
+              <div class="state no-matches">
+                <span>
+                  Pin repos from
+                  <button type="button" class="state-link" onclick={showAllRepos}>All repos</button>
+                  to keep them here.
+                </span>
+              </div>
             {/if}
           {/if}
 
@@ -412,9 +422,8 @@
                   <span>No projects match "{searchQuery.trim()}"</span>
                 {:else}
                   <span>No projects match filters</span>
-                  <button
-                    class="clear-filters-link"
-                    onclick={() => projectFiltersStore.clearFilters()}>Clear filters</button
+                  <button class="state-link" onclick={() => projectFiltersStore.clearFilters()}
+                    >Clear filters</button
                   >
                 {/if}
               </div>
@@ -768,7 +777,7 @@
     padding: 8px 2px;
   }
 
-  .clear-filters-link {
+  .state-link {
     border: none;
     background: transparent;
     padding: 0;
@@ -778,7 +787,7 @@
     cursor: pointer;
   }
 
-  .clear-filters-link:hover {
+  .state-link:hover {
     text-decoration: underline;
   }
 

@@ -20,14 +20,10 @@
 
   let { repos, reorderable = false }: Props = $props();
 
-  // Local copy so a drag reorder applies optimistically; re-synced whenever
-  // the input list changes.
-  let ordered = $state<RepoHomeItem[]>([]);
+  // Tracks the input list, but a drop reassigns it so the reorder applies
+  // optimistically (derived override); the next `repos` change re-syncs.
+  let ordered = $derived(repos);
   let dragSourceIndex = $state<number | null>(null);
-
-  $effect(() => {
-    ordered = repos;
-  });
 
   function handleDragStart(index: number) {
     return (e: DragEvent) => {
@@ -74,7 +70,9 @@
   }
 </script>
 
-<div class="pinned-repos-list" role="list" aria-label="Pinned repos">
+<!-- Unlabelled on purpose: the SidebarSectionHead directly above already
+     announces "Pinned repos" or "Repos · N results" for the current contents. -->
+<div class="pinned-repos-list" role="list">
   {#each ordered as repo, index (repo.githubRepo + '\t' + repo.subpath)}
     <RepoCard
       {repo}

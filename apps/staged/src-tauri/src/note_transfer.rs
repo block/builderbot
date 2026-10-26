@@ -445,6 +445,11 @@ fn stage_media_copies(
                     );
                     copy.session_id =
                         Some(owner_session.unwrap_or(NOTE_MEDIA_SESSION_ID).to_owned());
+                    // Same bytes, same size; a source row that predates the
+                    // dimension columns is read here rather than left NULL.
+                    copy.dimensions = source
+                        .dimensions
+                        .or_else(|| crate::note_media::dimensions::probe(&bytes));
                     let path = image_file_path(project_id, &copy.id, &filename)?;
                     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
                     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
@@ -1200,19 +1205,22 @@ mod tests {
         let f = fixture();
         let session = Session::new_running("note", Path::new("/tmp/wt"));
         f.store.create_session(&session).unwrap();
+        // A row from before the dimension columns: the copy reads the file.
+        let retina = crate::note_media::dimensions::tests::PHYS_144DPI_PNG;
         let mut image = Image::new(
             None,
             &f.source.id,
             "shot.png",
             "image/png",
-            PNG.len() as i64,
+            retina.len() as i64,
             false,
         );
         image.session_id = Some(session.id.clone());
         let path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, PNG).unwrap();
+        std::fs::write(&path, retina).unwrap();
         f.store.create_image(&image).unwrap();
+        f.store.forget_image_dimensions(&image.id).unwrap();
         let note = ProjectNote::new(
             &f.source.id,
             "Plan",
@@ -1230,5 +1238,13 @@ mod tests {
         assert!(image_file_path(&f.target.id, &copied.id, &copied.filename)
             .unwrap()
             .exists());
+        assert_eq!(
+            copied.dimensions,
+            Some(crate::store::ImageDimensions {
+                width: 8,
+                height: 6,
+                density: 2
+            })
+        );
     }
 }

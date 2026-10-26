@@ -12,6 +12,7 @@ function image(filename: string, mimeType: string): Image {
     mimeType,
     sizeBytes: 3,
     createdAt: 0,
+    dimensions: null,
   };
 }
 

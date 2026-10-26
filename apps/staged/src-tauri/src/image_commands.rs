@@ -6,6 +6,7 @@ pub use thumbnail::*;
 pub use tool_results::*;
 
 use crate::store::Store;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -116,6 +117,64 @@ pub fn list_branch_images(
     crate::get_store(&store)?
         .list_images_for_branch(&branch_id)
         .map_err(|e| e.to_string())
+}
+
+/// Size and density of the raster images a note embeds, keyed by id, for
+/// `mediaRendering.ts` to size them at logical pixels. Ids that are unknown,
+/// not raster images, or unreadable are left out. Rows that predate the
+/// dimension columns are read from disk and filled in on this first use,
+/// whatever the read found, so a file is opened at most once; only a file
+/// that is missing altogether is looked for again.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_media_dimensions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    image_ids: Vec<String>,
+) -> Result<HashMap<String, crate::store::ImageDimensions>, String> {
+    let store = crate::get_store(&store)?;
+    // Backfilling reads whole files (headers only are parsed, but a legacy
+    // note may embed a dozen multi-megabyte captures).
+    tauri::async_runtime::spawn_blocking(move || media_dimensions_impl(&store, &image_ids))
+        .await
+        .map_err(|e| format!("Dimensions task failed: {e}"))
+}
+
+pub(crate) fn media_dimensions_impl(
+    store: &Store,
+    image_ids: &[String],
+) -> HashMap<String, crate::store::ImageDimensions> {
+    let mut found = HashMap::new();
+    for id in image_ids {
+        let Ok(Some(image)) = store.get_image(id) else {
+            continue;
+        };
+        let dimensions = match image.dimensions {
+            Some(dimensions) => Some(dimensions),
+            None if image.mime_type.starts_with("image/")
+                && !store.image_dimensions_recorded(id).unwrap_or(true) =>
+            {
+                let bytes = crate::store::images::image_file_path(
+                    &image.project_id,
+                    &image.id,
+                    &image.filename,
+                )
+                .ok()
+                .and_then(|path| std::fs::read(path).ok());
+                // A missing file is left NULL: it costs a stat to miss again,
+                // and a later transfer or restore may put it back.
+                let Some(bytes) = bytes else { continue };
+                let dimensions = crate::note_media::dimensions::probe(&bytes);
+                if let Err(e) = store.set_image_dimensions(id, dimensions) {
+                    log::warn!("Failed to record dimensions of image {id}: {e}");
+                }
+                dimensions
+            }
+            None => None,
+        };
+        if let Some(dimensions) = dimensions {
+            found.insert(id.clone(), dimensions);
+        }
+    }
+    found
 }
 
 /// Read an image file and return its data as a base64-encoded data URL.
@@ -254,6 +313,151 @@ mod tests {
         assert!(err.contains("unsupported image format"), "{err}");
         let err = attach(&f, "clip.png", "", b"\0\0\0\x18ftypisom\0\0\0\0").unwrap_err();
         assert!(err.contains("only images"), "{err}");
+    }
+
+    fn dims(width: u32, height: u32, density: u8) -> Option<crate::store::ImageDimensions> {
+        Some(crate::store::ImageDimensions {
+            width,
+            height,
+            density,
+        })
+    }
+
+    #[test]
+    fn attachments_record_their_size_and_density() {
+        use crate::note_media::dimensions::tests::{NO_PHYS_PNG, PHYS_144DPI_PNG};
+        let f = Fixture::new();
+        let retina = attach(&f, "retina.png", "image/png", PHYS_144DPI_PNG).unwrap();
+        assert_eq!(retina.dimensions, dims(8, 6, 2));
+        let plain = attach(&f, "plain.png", "image/png", NO_PHYS_PNG).unwrap();
+        assert_eq!(plain.dimensions, dims(8, 6, 1));
+        // Headers that cannot be read do not fail the attach: the row has no
+        // dimensions, and is recorded as read so the backfill does not open
+        // the file — even once it would parse.
+        let stub = attach(&f, "stub.png", "image/png", PNG).unwrap();
+        assert_eq!(stub.dimensions, None);
+        assert!(f.store.image_dimensions_recorded(&stub.id).unwrap());
+        std::fs::write(
+            crate::store::images::image_file_path(&f.project.id, &stub.id, &stub.filename).unwrap(),
+            PHYS_144DPI_PNG,
+        )
+        .unwrap();
+        let read_back = media_dimensions_impl(&f.store, std::slice::from_ref(&stub.id));
+        assert!(read_back.is_empty(), "{read_back:?}");
+        assert_eq!(
+            f.store.get_image(&stub.id).unwrap().unwrap().dimensions,
+            None
+        );
+
+        for image in [&retina, &plain, &stub] {
+            let stored = f.store.get_image(&image.id).unwrap().unwrap();
+            assert_eq!(stored.dimensions, image.dimensions, "{}", image.filename);
+        }
+        let listed = f.store.list_all_images_for_branch(&f.branch.id).unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed.iter().any(|i| i.dimensions == dims(8, 6, 2)));
+
+        // A video has nothing to read and stays NULL, as before.
+        let clip = crate::note_media::files::store_media_file(
+            &f.store,
+            Some(&f.branch.id),
+            &f.project.id,
+            Some(&f.session.id),
+            "clip.mp4",
+            b"\0\0\0\x18ftypisom\0\0\0\0",
+            true,
+        )
+        .unwrap();
+        assert_eq!(clip.dimensions, None);
+        assert!(!f.store.image_dimensions_recorded(&clip.id).unwrap());
+    }
+
+    /// A row that predates the columns, with its file on disk. Inserting a
+    /// raster row records the sentinel, so the columns are cleared after.
+    fn legacy_image(f: &Fixture, filename: &str, mime: &str, bytes: Option<&[u8]>) -> String {
+        let mut image = crate::store::Image::new(
+            Some(&f.branch.id),
+            &f.project.id,
+            filename,
+            mime,
+            bytes.map_or(0, |b| b.len() as i64),
+            false,
+        );
+        image.session_id = Some(f.session.id.clone());
+        if let Some(bytes) = bytes {
+            let path =
+                crate::store::images::image_file_path(&f.project.id, &image.id, filename).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        f.store.create_image(&image).unwrap();
+        f.store.forget_image_dimensions(&image.id).unwrap();
+        assert_eq!(image.dimensions, None);
+        assert!(!f.store.image_dimensions_recorded(&image.id).unwrap());
+        image.id
+    }
+
+    #[test]
+    fn media_dimensions_are_read_back_from_disk_once_for_legacy_rows() {
+        use crate::note_media::dimensions::tests::PHYS_144DPI_PNG;
+        let f = Fixture::new();
+        let legacy = legacy_image(&f, "legacy.png", "image/png", Some(PHYS_144DPI_PNG));
+        let video = legacy_image(&f, "clip.mp4", "video/mp4", Some(b"   ftypisom"));
+        let stub = legacy_image(&f, "stub.png", "image/png", Some(PNG));
+        let missing = legacy_image(&f, "gone.png", "image/png", None);
+        let fresh = attach(&f, "fresh.png", "image/png", PHYS_144DPI_PNG).unwrap();
+
+        let ids: Vec<String> = [
+            &legacy,
+            &video,
+            &stub,
+            &missing,
+            &fresh.id,
+            &"nope".to_string(),
+        ]
+        .into_iter()
+        .cloned()
+        .collect();
+        let found = media_dimensions_impl(&f.store, &ids);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found.get(&legacy).copied(), dims(8, 6, 2));
+        assert_eq!(found.get(&fresh.id).copied(), dims(8, 6, 2));
+
+        // The backfill is persisted: the file is no longer consulted.
+        let legacy_row = f.store.get_image(&legacy).unwrap().unwrap();
+        assert_eq!(legacy_row.dimensions, dims(8, 6, 2));
+        std::fs::remove_file(
+            crate::store::images::image_file_path(&f.project.id, &legacy, "legacy.png").unwrap(),
+        )
+        .unwrap();
+        let again = media_dimensions_impl(&f.store, std::slice::from_ref(&legacy));
+        assert_eq!(again.get(&legacy).copied(), dims(8, 6, 2));
+
+        // An unreadable header is absent, and recorded as such: the file is
+        // not consulted again even once it would read.
+        assert_eq!(f.store.get_image(&stub).unwrap().unwrap().dimensions, None);
+        assert!(f.store.image_dimensions_recorded(&stub).unwrap());
+        std::fs::write(
+            crate::store::images::image_file_path(&f.project.id, &stub, "stub.png").unwrap(),
+            PHYS_144DPI_PNG,
+        )
+        .unwrap();
+        let again = media_dimensions_impl(&f.store, std::slice::from_ref(&stub));
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(f.store.get_image(&stub).unwrap().unwrap().dimensions, None);
+
+        // A missing file stays NULL, so it is found once it exists; a video
+        // is never read.
+        assert!(!f.store.image_dimensions_recorded(&missing).unwrap());
+        assert!(!f.store.image_dimensions_recorded(&video).unwrap());
+        std::fs::write(
+            crate::store::images::image_file_path(&f.project.id, &missing, "gone.png").unwrap(),
+            PHYS_144DPI_PNG,
+        )
+        .unwrap();
+        let restored = media_dimensions_impl(&f.store, std::slice::from_ref(&missing));
+        assert_eq!(restored.get(&missing).copied(), dims(8, 6, 2));
+        assert!(!f.store.image_dimensions_recorded("nope").unwrap());
     }
 
     #[test]

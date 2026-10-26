@@ -15,6 +15,50 @@ describe('note media rendering', () => {
     expect(html).toContain('aria-label="Open full screen"');
   });
 
+  it('lays a 2x capture out at logical size with a matching density descriptor', () => {
+    const html = renderMarkdown(`![Login](staged-media://${id}.png)`, {
+      mediaDimensions: () => ({ width: 1320, height: 960, density: 2 }),
+    });
+    expect(html).toContain(
+      `<img src="/api/media/${id}.png" srcset="/api/media/${id}.png 2x" width="660" height="480" style="--media-width: 660px; --media-aspect: 1.3750" alt="Login" loading="lazy">`
+    );
+  });
+
+  it('keeps a 1x image at pixel size without a srcset', () => {
+    const html = renderMarkdown(`![Photo](staged-media://${id}.jpg)`, {
+      mediaDimensions: () => ({ width: 800, height: 601, density: 1 }),
+    });
+    expect(html).toContain(
+      `<img src="/api/media/${id}.jpg" width="800" height="601" style="--media-width: 800px; --media-aspect: 1.3311" alt="Photo" loading="lazy">`
+    );
+    expect(html).not.toContain('srcset');
+  });
+
+  it('emits no size attributes for an image with unknown metadata', () => {
+    for (const html of [
+      renderMarkdown(`![Login](staged-media://${id}.png)`),
+      renderMarkdown(`![Login](staged-media://${id}.png)`, { mediaDimensions: () => null }),
+      renderMarkdown(`![Login](staged-media://${id}.png)`, {
+        mediaDimensions: () => ({ width: 0, height: 0, density: 1 }),
+      }),
+    ]) {
+      expect(html).toContain(`<img src="/api/media/${id}.png" alt="Login" loading="lazy">`);
+      expect(html.match(/<img [^>]*>/)?.[0]).not.toMatch(/srcset|width=|height=|style=/);
+    }
+  });
+
+  it('looks dimensions up by the embedded image id and ignores them for videos', () => {
+    const lookup = vi.fn(() => ({ width: 100, height: 50, density: 2 }));
+    const html = renderMarkdown(
+      `![a](staged-media://${id}.png)\n\n![b](staged-media://${id}.mp4)`,
+      { mediaDimensions: lookup }
+    );
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledWith(id);
+    expect(html).toContain('width="50" height="25"');
+    expect(html).toContain(`<video src="/api/media/${id}.mp4" controls`);
+  });
+
   it.each(['mp4', 'mov', 'webm'])('renders %s with native controls only', (ext) => {
     const html = renderMarkdown(`![Recording](staged-media://${id}.${ext})`);
     expect(html).toContain(

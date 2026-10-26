@@ -321,6 +321,20 @@ export interface Image {
   mimeType: string;
   sizeBytes: number;
   createdAt: number;
+  /** Null for videos, PDFs, and raster files whose headers could not be read. */
+  dimensions: ImageDimensions | null;
+}
+
+/**
+ * Pixel size of a stored raster image and the density its own metadata
+ * declares (PNG `pHYs`, JPEG JFIF/EXIF resolution), so a 1320x960 Retina
+ * capture lays out at 660x480. `density` is 1..=4; 1 when the file says
+ * nothing.
+ */
+export interface ImageDimensions {
+  width: number;
+  height: number;
+  density: number;
 }
 
 export interface BranchRef {

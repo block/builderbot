@@ -6,8 +6,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::Image;
+use super::models::{Image, ImageDimensions};
 use super::{Store, StoreChange, StoreError};
+
+const IMAGE_COLUMNS: &str = "id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at, width, height, density";
+
+/// Stored in the dimension columns of a raster image whose bytes were read
+/// (probed on attach, or read back from disk by the backfill) and yielded no
+/// usable header: distinct from NULL (never read) so the backfill does not
+/// open it again, and read back as `dimensions: None` since a real density
+/// is 1..=4.
+const UNREADABLE_DIMENSIONS: ImageDimensions = ImageDimensions {
+    width: 0,
+    height: 0,
+    density: 0,
+};
 
 impl Store {
     /// Conservative reference check: even a reference inside an example keeps
@@ -58,9 +71,24 @@ impl Store {
         conn: &rusqlite::Connection,
         image: &Image,
     ) -> Result<(), StoreError> {
+        // Every raster row inserted since the columns exist has had its
+        // bytes probed on the way in (`write_media` and the note-transfer
+        // copy are the producers), so None on an `image/*` row means the
+        // header could not be read: store the sentinel now rather than let
+        // the backfill read the file once more to learn the same thing.
+        // Videos and PDFs have nothing to read and stay NULL; only rows from
+        // before migration 0033 are raster and NULL.
+        let dimensions = image.dimensions.or_else(|| {
+            image
+                .mime_type
+                .starts_with("image/")
+                .then_some(UNREADABLE_DIMENSIONS)
+        });
         conn.execute(
-            "INSERT INTO images (id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &format!(
+                "INSERT INTO images ({IMAGE_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+            ),
             params![
                 image.id,
                 image.branch_id,
@@ -70,16 +98,71 @@ impl Store {
                 image.mime_type,
                 image.size_bytes,
                 image.created_at,
+                dimensions.map(|d| d.width),
+                dimensions.map(|d| d.height),
+                dimensions.map(|d| d.density),
             ],
         )?;
         Ok(())
     }
 
+    /// Put a row back to how migration 0033 left it, for tests that need a
+    /// raster row whose file has never been read; nothing in the app makes
+    /// one.
+    #[cfg(test)]
+    pub(crate) fn forget_image_dimensions(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE images SET width = NULL, height = NULL, density = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Record what reading an image's file for its dimensions found, for rows
+    /// that predate the columns (`get_media_dimensions` reads them from disk
+    /// the first time a note embedding the image is opened). `None` stores
+    /// [`UNREADABLE_DIMENSIONS`] so the file is consulted once, not on every
+    /// open. Nothing on the timeline shows these, so no change is published.
+    pub fn set_image_dimensions(
+        &self,
+        id: &str,
+        dimensions: Option<ImageDimensions>,
+    ) -> Result<(), StoreError> {
+        let ImageDimensions {
+            width,
+            height,
+            density,
+        } = dimensions.unwrap_or(UNREADABLE_DIMENSIONS);
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE images SET width = ?1, height = ?2, density = ?3 WHERE id = ?4",
+            params![width, height, density, id],
+        )?;
+        Ok(())
+    }
+
+    /// Whether an image's file has been read for its dimensions: false only
+    /// for rows that predate the columns and have not been read back yet. A
+    /// file that was read and gave nothing holds the sentinel, which comes
+    /// back as `dimensions: None` like NULL does, so this is what tells the
+    /// backfill not to read it again.
+    pub fn image_dimensions_recorded(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT density IS NOT NULL FROM images WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|recorded| recorded.unwrap_or(false))
+        .map_err(Into::into)
+    }
+
     pub fn get_image(&self, id: &str) -> Result<Option<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE id = ?1",
+            &format!("SELECT {IMAGE_COLUMNS} FROM images WHERE id = ?1"),
             params![id],
             Self::row_to_image,
         )
@@ -93,10 +176,10 @@ impl Store {
     /// attachments that only appear in the session message history.
     pub fn list_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE branch_id = ?1 AND session_id IS NULL ORDER BY created_at DESC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {IMAGE_COLUMNS} FROM images
+             WHERE branch_id = ?1 AND session_id IS NULL ORDER BY created_at DESC"
+        ))?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_image)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -108,10 +191,9 @@ impl Store {
     /// account for the files on disk (moving a branch between projects).
     pub fn list_all_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE branch_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {IMAGE_COLUMNS} FROM images WHERE branch_id = ?1 ORDER BY created_at ASC"
+        ))?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_image)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -263,6 +345,16 @@ impl Store {
             mime_type: row.get(5)?,
             size_bytes: row.get(6)?,
             created_at: row.get(7)?,
+            dimensions: match (row.get(8)?, row.get(9)?, row.get(10)?) {
+                (Some(width), Some(height), Some(density)) if density > 0 => {
+                    Some(ImageDimensions {
+                        width,
+                        height,
+                        density,
+                    })
+                }
+                _ => None,
+            },
         })
     }
 }

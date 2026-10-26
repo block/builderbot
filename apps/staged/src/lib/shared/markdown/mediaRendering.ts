@@ -1,5 +1,9 @@
 import type { Parser, Tokens } from 'marked';
+import type { ImageDimensions } from '../../types';
 import { parseStagedMediaReference, resolveStagedMediaUrl } from './mediaUrl';
+
+/** Stored size and density of an embedded image, when the caller has it. */
+export type MediaDimensionsLookup = (id: string) => ImageDimensions | null | undefined;
 
 function escapeHtml(text: string): string {
   return text
@@ -22,7 +26,11 @@ const EXPAND_BUTTON =
  * marked's own image renderer, flatten the inline tokens to plain text first.
  * The flattened text is unescaped, so escaping still happens afterwards.
  */
-export function renderMarkdownMedia(token: Tokens.Image, parser?: Parser): string | null {
+export function renderMarkdownMedia(
+  token: Tokens.Image,
+  parser?: Parser,
+  dimensionsFor?: MediaDimensionsLookup
+): string | null {
   const media = parseStagedMediaReference(token.href);
   if (!media) return null;
   const { id, ext, kind } = media;
@@ -37,8 +45,36 @@ export function renderMarkdownMedia(token: Tokens.Image, parser?: Parser): strin
     `<figure class="markdown-media markdown-media-${kind}" data-media-id="${id}" data-media-ext="${ext}" data-media-alt="${alt}">`,
     kind === 'video'
       ? `<video src="${src}" controls preload="metadata" playsinline aria-label="${alt || 'Video'}"${title}></video>`
-      : `<img src="${src}" alt="${alt}" loading="lazy"${title}>` + EXPAND_BUTTON,
+      : `<img src="${src}"${imageSizeAttributes(src, dimensionsFor?.(id))} alt="${alt}" loading="lazy"${title}>` +
+        EXPAND_BUTTON,
     alt ? `<figcaption>${alt}</figcaption>` : '',
     '</figure>',
   ].join('');
+}
+
+/**
+ * Lay a stored image out at its logical size.
+ *
+ * `width`/`height` are the pixel size over the density the file's own metadata
+ * declares, so a 1320x960 Retina capture takes 660x480 (and reserves that box
+ * before it loads), while a 1x screenshot, a photo, or a rasterized PDF page
+ * keeps its pixel size. The `Nx` descriptor makes the browser agree about the
+ * intrinsic size on any screen, and is only emitted when it says something.
+ * The custom properties repeat the logical width and the aspect for
+ * mediaStyles.css, which applies the height cap through `width` so a capped
+ * portrait image shrinks on both axes (an attribute width alone would make
+ * `max-height` letterbox it). Nothing is emitted for an image with no stored
+ * metadata, which then falls back to the CSS caps alone.
+ */
+function imageSizeAttributes(src: string, dimensions: ImageDimensions | null | undefined): string {
+  if (!dimensions) return '';
+  const { width, height, density } = dimensions;
+  if (!(width > 0 && height > 0 && density >= 1)) return '';
+  const logicalWidth = Math.round(width / density);
+  const logicalHeight = Math.round(height / density);
+  const srcset = density > 1 ? ` srcset="${src} ${density}x"` : '';
+  return (
+    `${srcset} width="${logicalWidth}" height="${logicalHeight}"` +
+    ` style="--media-width: ${logicalWidth}px; --media-aspect: ${(width / height).toFixed(4)}"`
+  );
 }

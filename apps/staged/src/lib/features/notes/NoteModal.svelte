@@ -30,6 +30,7 @@
   import {
     countAssistantMessagesAfter,
     getBranchNoteBySession,
+    getMediaDimensions,
     getNote,
     getProjectNote,
     getProjectNoteBySession,
@@ -48,7 +49,10 @@
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
   import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
-  import { resolveStagedMediaUrl } from '../../shared/markdown/mediaUrl';
+  import {
+    collectStagedMediaImageIds,
+    resolveStagedMediaUrl,
+  } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
@@ -57,7 +61,13 @@
   } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
-  import type { HashtagItem, NotesChangedEvent, ProjectRepo, Session } from '../../types';
+  import type {
+    HashtagItem,
+    ImageDimensions,
+    NotesChangedEvent,
+    ProjectRepo,
+    Session,
+  } from '../../types';
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
@@ -178,10 +188,15 @@
         ? 'Show chat pane'
         : 'View chat pane'
   );
+  // The note pane sizes to its content up to most of the window, so a short
+  // note gets a short dialog and a long one scrolls inside a tall one. With the
+  // chat pane open the height is pinned instead: its message list is a scroll
+  // region with no natural height, and a dialog that grew as replies streamed
+  // in would shift the composer under the pointer.
   // Keep chat toggles animated; the resize handle suspends this transition
   // while measuring and applying pointer, keyboard, and reset commands.
   let contentClass = $derived(
-    `dialog-resize-gutter h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col${
+    `dialog-resize-gutter ${chatOpen ? 'h-[90vh]' : 'max-h-[90vh]'} p-0 gap-0 overflow-hidden flex flex-col${
       resizing ? ' transition-none' : ' transition-[width] duration-150'
     }`
   );
@@ -206,13 +221,48 @@
   let pikchrRendererLoadKey = $derived(noteMarkdown);
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
+  // Stored size and density of the images the note embeds, so they render at
+  // logical size (see mediaRendering.ts). Keyed by image id, which names
+  // immutable bytes, so a lookup outlives the note it was made for; a miss
+  // (video, unreadable file, failed lookup) is kept as null so it is not
+  // asked again and renders on the CSS caps alone.
+  let mediaDimensions = $state<Record<string, ImageDimensions | null>>({});
+  let noteMediaImageIds = $derived(collectStagedMediaImageIds(noteMarkdown));
+  let mediaDimensionsKnown = $derived(noteMediaImageIds.every((id) => id in mediaDimensions));
+  $effect(() => {
+    if (!open) return;
+    const missing = noteMediaImageIds.filter((id) => !(id in mediaDimensions));
+    if (!missing.length) return;
+    let cancelled = false;
+    const record = (found: Record<string, ImageDimensions>) => {
+      if (cancelled) return;
+      const next = { ...mediaDimensions };
+      for (const id of missing) next[id] = found[id] ?? null;
+      mediaDimensions = next;
+    };
+    getMediaDimensions(missing).then(record, (error) => {
+      console.warn('Failed to load note image dimensions', error);
+      record({});
+    });
+    return () => {
+      cancelled = true;
+    };
+  });
+  // The note is not rendered until its images' dimensions are in: `{@html}`
+  // rebuilds the DOM when the string changes, so rendering unsized first and
+  // again once the (local) lookup answers would reload every image and jump
+  // the ones already painted. A note with no embedded images, or whose
+  // images are already known, renders at once.
   let renderedNoteHtml = $derived(
-    renderNoteMarkdown(noteMarkdown, {
-      pikchrRenderer,
-      renderInlineText: hashtagItems.length
-        ? (text) => renderHashtagTokens(text, hashtagItems)
-        : undefined,
-    })
+    mediaDimensionsKnown
+      ? renderNoteMarkdown(noteMarkdown, {
+          pikchrRenderer,
+          renderInlineText: hashtagItems.length
+            ? (text) => renderHashtagTokens(text, hashtagItems)
+            : undefined,
+          mediaDimensions: (id) => mediaDimensions[id],
+        })
+      : null
   );
   let mediaViewer = $state<MarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
@@ -687,9 +737,11 @@
           onkeydown={handleContentKeydown}
         >
           {#if hasNoteContent}
-            <div class="markdown-content">
-              {@html renderedNoteHtml}
-            </div>
+            {#if renderedNoteHtml !== null}
+              <div class="markdown-content">
+                {@html renderedNoteHtml}
+              </div>
+            {/if}
           {:else}
             <p class="empty-note">This note has no content.</p>
           {/if}

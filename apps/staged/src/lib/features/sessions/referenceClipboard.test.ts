@@ -171,13 +171,42 @@ describe('serializeRange', () => {
         '<custom-el>tail</custom-el>'
     );
     expect(serializeRange(rangeOf(root), 'text')).toBe(
-      'Title\nbold em c site bad\none\ntwo\na\tb\ntail'
+      'Title\n\nbold em c site bad\n\none\ntwo\n\na\tb\ntail'
     );
     expect(serializeRange(rangeOf(root), 'html')).toBe(
       '<h2>Title</h2><p><strong>bold</strong> <em>em</em> <code>c</code> ' +
         '<a href="https://example.com/x">site</a> bad</p>' +
         '<ul><li>one</li><li>two</li></ul><table><tbody><tr><td>a</td><td>b</td></tr></tbody></table>tail'
     );
+  });
+
+  it('keeps the blank line between paragraphs that the browser’s own copy gives', () => {
+    const badge = renderHashtagTokens(`#note:${NOTE_ID}`, items);
+    const root = mount(`<div><p>first ${badge}</p>\n<p>second</p></div>`);
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`first #note:${NOTE_ID}\n\nsecond`);
+    expect(serializeRange(rangeOf(root), 'html')).toBe(
+      `<div><p>first <span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></p><p>second</p></div>`
+    );
+  });
+
+  it('separates list items by a single newline and a heading from a paragraph by a blank one', () => {
+    const badge = renderHashtagTokens(`#commit:${SHA}`, items);
+    const list = mount(`<ul>\n<li>one ${badge}</li>\n<li>two</li>\n<li>three</li>\n</ul>`);
+    expect(serializeRange(rangeOf(list), 'text')).toBe(`one #commit:${SHA}\ntwo\nthree`);
+    expect(serializeRange(rangeOf(list), 'html')).toBe(
+      `<ul><li>one <span data-staged-ref="#commit:${SHA}">fix: keep refs</span></li><li>two</li><li>three</li></ul>`
+    );
+
+    const headed = mount(`<h3>Plan</h3>\n<p>see ${badge}</p>`);
+    expect(serializeRange(rangeOf(headed), 'text')).toBe(`Plan\n\nsee #commit:${SHA}`);
+    expect(serializeRange(rangeOf(headed), 'html')).toBe(
+      `<h3>Plan</h3><p>see <span data-staged-ref="#commit:${SHA}">fix: keep refs</span></p>`
+    );
+  });
+
+  it('never doubles a blank line a trailing <br> or an empty paragraph already supplies', () => {
+    const root = mount('<p>a<br></p><p>b</p><p></p><p>c</p>');
+    expect(serializeRange(rangeOf(root), 'text')).toBe('a\n\nb\n\nc');
   });
 
   it('leaves out what the page never shows, as the browser’s own copy would', () => {
@@ -187,7 +216,7 @@ describe('serializeRange', () => {
         '<template><p>stamp</p></template><noscript>enable js</noscript>' +
         '<p hidden>secret</p><p>done <span hidden>also secret</span></p></div>'
     );
-    expect(serializeRange(rangeOf(root), 'text')).toBe(`see #note:${NOTE_ID}\ndone `);
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`see #note:${NOTE_ID}\n\ndone `);
     expect(serializeRange(rangeOf(root), 'html')).toBe(
       `<div><p>see <span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></p><p>done </p></div>`
     );

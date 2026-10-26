@@ -55,6 +55,24 @@ const BLOCK_TAGS = new Set([
   'article',
 ]);
 const CELL_TAGS = new Set(['td', 'th']);
+/**
+ * Markdown separates these with a blank line, as the browser's own `text/plain`
+ * does; list items, table rows and layout containers are single lines.
+ */
+const MARKDOWN_BLOCK_TAGS = new Set([
+  'p',
+  'blockquote',
+  'pre',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'ul',
+  'ol',
+  'table',
+]);
 
 /** The tags the HTML flavour keeps, so a rich target gets structure as well as text. */
 const SEMANTIC_TAGS = new Set([
@@ -265,26 +283,41 @@ function reference(ref: string, label: string, format: CopyFormat): string {
 /**
  * The children in order. The whitespace the markup puts between blocks is
  * layout, not content, and is dropped. The text flavour has no tags to carry
- * structure, so blocks are separated by a newline and table cells by a tab.
+ * structure, so siblings are separated as `siblingSeparator` says; the HTML
+ * flavour keeps its tags and needs nothing between them.
  */
 function children(parent: Node, format: CopyFormat, range?: Range): string {
   let out = '';
-  let afterBlock = false;
+  let previousTag = '';
   for (const child of parent.childNodes) {
     if (isLayoutWhitespace(child)) continue;
     const part = serializeNode(child, format, range);
     if (!part) continue;
     const tag =
       child.nodeType === Node.ELEMENT_NODE ? (child as Element).tagName.toLowerCase() : '';
-    const block = BLOCK_TAGS.has(tag);
-    if (format === 'text' && out) {
-      if ((block || afterBlock) && !out.endsWith('\n')) out += '\n';
-      else if (CELL_TAGS.has(tag) && !/[\n\t]$/.test(out)) out += '\t';
-    }
+    if (format === 'text' && out) out += pad(out, part, siblingSeparator(previousTag, tag));
     out += part;
-    afterBlock = block;
+    previousTag = tag;
   }
   return out;
+}
+
+/** What the text flavour puts between two siblings; text and inline elements have the empty tag. */
+function siblingSeparator(previous: string, current: string): string {
+  if (CELL_TAGS.has(previous) || CELL_TAGS.has(current)) return '\t';
+  if (MARKDOWN_BLOCK_TAGS.has(previous) && MARKDOWN_BLOCK_TAGS.has(current)) return '\n\n';
+  return BLOCK_TAGS.has(previous) || BLOCK_TAGS.has(current) ? '\n' : '';
+}
+
+/**
+ * The part of `separator` the ends of `before` and `after` do not already
+ * supply, so a trailing `<br>` or an empty line is not doubled up.
+ */
+function pad(before: string, after: string, separator: string): string {
+  if (!separator) return '';
+  if (separator === '\t') return /[\n\t]$/.test(before) ? '' : '\t';
+  const have = (before.match(/\n*$/)?.[0].length ?? 0) + (after.match(/^\n*/)?.[0].length ?? 0);
+  return '\n'.repeat(Math.max(0, separator.length - have));
 }
 
 /** A whitespace-only text node beside a block element, or alone in one. */

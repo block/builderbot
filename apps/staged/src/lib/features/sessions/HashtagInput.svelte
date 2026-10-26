@@ -16,11 +16,11 @@
     onkeydown  — pass-through keydown handler (called after hashtag handling)
     oninput    — pass-through input handler
     onpaste    — pass-through paste handler (e.g. for image paste)
+    textareaEl — bindable element reference (the contenteditable div)
 
   Copy, cut and paste keep references: the clipboard is written as `#type:id`
   text plus this app's tagged HTML (see referenceClipboard.ts), and a pasted
   `#type:id` the items resolve is inserted as a badge.
-    textareaEl — bindable element reference (the contenteditable div)
 -->
 <script lang="ts">
   import { tick } from 'svelte';

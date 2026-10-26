@@ -284,22 +284,35 @@ function reference(ref: string, label: string, format: CopyFormat): string {
  * The children in order. The whitespace the markup puts between blocks is
  * layout, not content, and is dropped. The text flavour has no tags to carry
  * structure, so siblings are separated as `siblingSeparator` says; the HTML
- * flavour keeps its tags and needs nothing between them.
+ * flavour keeps its tags and needs nothing between them. A sibling that
+ * serializes to nothing takes no separator and gives none, except a table
+ * cell: it still holds its column, so its tab is kept and the columns of the
+ * row line up.
  */
 function children(parent: Node, format: CopyFormat, range?: Range): string {
   let out = '';
-  let previousTag = '';
+  let previousTag: string | undefined;
   for (const child of parent.childNodes) {
     if (isLayoutWhitespace(child)) continue;
     const part = serializeNode(child, format, range);
-    if (!part) continue;
+    if (!part && !keepsColumn(child, range)) continue;
     const tag =
       child.nodeType === Node.ELEMENT_NODE ? (child as Element).tagName.toLowerCase() : '';
-    if (format === 'text' && out) out += pad(out, part, siblingSeparator(previousTag, tag));
+    if (format === 'text' && previousTag !== undefined) {
+      out += pad(out, part, siblingSeparator(previousTag, tag));
+    }
     out += part;
     previousTag = tag;
   }
   return out;
+}
+
+/** A rendered table cell inside the selection, which keeps its column even when empty. */
+function keepsColumn(node: Node, range?: Range): boolean {
+  if (node.nodeType !== Node.ELEMENT_NODE) return false;
+  const element = node as Element;
+  if (!CELL_TAGS.has(element.tagName.toLowerCase()) || unrendered(element)) return false;
+  return !range || range.intersectsNode(element);
 }
 
 /** What the text flavour puts between two siblings; text and inline elements have the empty tag. */
@@ -311,11 +324,14 @@ function siblingSeparator(previous: string, current: string): string {
 
 /**
  * The part of `separator` the ends of `before` and `after` do not already
- * supply, so a trailing `<br>` or an empty line is not doubled up.
+ * supply, so a trailing `<br>` or an empty line is not doubled up. A tab is
+ * always supplied: every cell after the first takes one, as the browser's own
+ * copy gives, however the neighbouring cells end — an empty cell is two tabs
+ * in a row, and a cell ending in `<br>` keeps the next one on its row.
  */
 function pad(before: string, after: string, separator: string): string {
   if (!separator) return '';
-  if (separator === '\t') return /[\n\t]$/.test(before) ? '' : '\t';
+  if (separator === '\t') return '\t';
   const have = (before.match(/\n*$/)?.[0].length ?? 0) + (after.match(/^\n*/)?.[0].length ?? 0);
   return '\n'.repeat(Math.max(0, separator.length - have));
 }

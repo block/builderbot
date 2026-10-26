@@ -209,6 +209,42 @@ describe('serializeRange', () => {
     expect(serializeRange(rangeOf(root), 'text')).toBe('a\n\nb\n\nc');
   });
 
+  it('keeps the column of an empty cell, as the browser’s own copy does', () => {
+    const badge = renderHashtagTokens(`#note:${NOTE_ID}`, items);
+    const root = mount(
+      `<table><tr><td>a ${badge}</td><td></td><td>c</td></tr>` +
+        '<tr><td></td><td>e</td><td>f</td></tr></table>'
+    );
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`a #note:${NOTE_ID}\t\tc\n\te\tf`);
+    expect(serializeRange(rangeOf(root), 'html')).toBe(
+      `<table><tbody><tr><td>a <span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></td>` +
+        '<td></td><td>c</td></tr><tr><td></td><td>e</td><td>f</td></tr></tbody></table>'
+    );
+  });
+
+  it('keeps a cell that ends in a line break on its row', () => {
+    const badge = renderHashtagTokens(`#commit:${SHA}`, items);
+    const root = mount(`<table><tr><td>a<br></td><td>${badge}</td></tr></table>`);
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`a\n\t#commit:${SHA}`);
+    expect(serializeRange(rangeOf(root), 'html')).toBe(
+      `<table><tbody><tr><td>a<br></td><td><span data-staged-ref="#commit:${SHA}">fix: keep refs</span></td></tr></tbody></table>`
+    );
+  });
+
+  it('separates a table head from its body by a single newline', () => {
+    const badge = renderHashtagTokens(`#note:${NOTE_ID}`, items);
+    const root = mount(
+      '<table>\n<thead>\n<tr><th>Item</th><th>Note</th></tr>\n</thead>\n' +
+        `<tbody>\n<tr><td>one</td><td>${badge}</td></tr>\n<tr><td>two</td><td></td></tr>\n</tbody>\n</table>`
+    );
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`Item\tNote\none\t#note:${NOTE_ID}\ntwo\t`);
+    expect(serializeRange(rangeOf(root), 'html')).toBe(
+      '<table><thead><tr><th>Item</th><th>Note</th></tr></thead>' +
+        `<tbody><tr><td>one</td><td><span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></td></tr>` +
+        '<tr><td>two</td><td></td></tr></tbody></table>'
+    );
+  });
+
   it('leaves out what the page never shows, as the browser’s own copy would', () => {
     const root = mount(
       `<div><p>see ${renderHashtagTokens(`#note:${NOTE_ID}`, items)}</p>` +

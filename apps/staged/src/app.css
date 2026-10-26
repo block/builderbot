@@ -258,8 +258,21 @@ mark.search-match-current {
 }
 
 /* ── Hashtag badges (shared across all badge contexts) ── */
+/*
+ * A badge never grows past the line it sits on: `max-width: 100%` caps it at
+ * the containing block and the label truncates with an ellipsis. Otherwise a
+ * long referenced title widens the surrounding content (a note body, a chat
+ * bubble) past its scroll container.
+ */
 .hashtag-badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  /* Replaces the old icon `margin-right` + literal space in the markup. A
+     literal space between flex items is never rendered, so one here would be
+     inert: `gap` is the only spacing between icon and label. */
+  gap: 4px;
+  box-sizing: border-box;
+  max-width: 100%;
   padding: 3px 6px;
   border-radius: 4px;
   font-size: 0.85em;
@@ -270,12 +283,32 @@ mark.search-match-current {
 }
 
 .hashtag-badge svg {
-  display: inline-block; /* override Tailwind preflight's `svg { display: block }` */
   width: 12px;
   height: 12px;
-  vertical-align: middle;
-  margin-right: 2px;
   flex-shrink: 0;
+}
+
+/*
+ * The label is the only baseline-aligned item, so the badge's own baseline is
+ * the title text's baseline (not the icon's bottom edge) and it sits on the
+ * surrounding line like plain text. It shrinks and clips; the icon does not.
+ *
+ * `overflow: hidden` clips the block axis too, and a tight `line-height` (the
+ * timeline row uses 1; the system fonts' ascent + descent is ~1.2em) makes the
+ * label box shorter than its glyphs, shaving descenders. The block padding
+ * grows the clip box past the glyph area and the equal negative margin takes
+ * it back out of layout, so the badge's height and baseline are unchanged.
+ * 0.35em is more than the Latin overhang (~0.1em per side) needs, leaving room
+ * for emoji and fallback CJK glyphs, whose boxes are taller than the primary
+ * font's line-height accounts for.
+ */
+.hashtag-badge-label {
+  align-self: baseline;
+  min-width: 0;
+  padding-block: 0.35em;
+  margin-block: -0.35em;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /*

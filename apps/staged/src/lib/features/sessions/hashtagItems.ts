@@ -392,7 +392,9 @@ function hashtagBadgeLabel(type: string, id: string, item: HashtagItem | undefin
  * Colours come from CSS classes (`.hashtag-badge.type-<kind>`) rather than
  * inline `style`, so a badge keeps them in any context that strips `style`.
  * The `data-hashtag-*` attributes let a delegated click handler navigate to the
- * referenced item.
+ * referenced item. The label sits in its own span so `.hashtag-badge-label` can
+ * truncate a long title with an ellipsis while the type icon stays visible; the
+ * `title` attribute keeps the full title reachable on hover.
  */
 export function renderHashtagBadge(
   type: string,
@@ -411,7 +413,8 @@ export function renderHashtagBadge(
   return (
     `<span class="hashtag-badge type-${targetType} stable-raster stable-raster-glyphs"` +
     `${interactionAttributes} data-hashtag-type="${escapeHtml(targetType)}" ` +
-    `data-hashtag-id="${escapeHtml(item?.id ?? id)}">${iconSvg} ${escapeHtml(label)}</span>`
+    `data-hashtag-id="${escapeHtml(item?.id ?? id)}" title="${escapeHtml(label)}">` +
+    `${iconSvg}<span class="hashtag-badge-label">${escapeHtml(label)}</span></span>`
   );
 }
 

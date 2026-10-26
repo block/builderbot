@@ -253,8 +253,9 @@
     badge.className = 'hashtag-badge stable-raster stable-raster-glyphs';
     badge.contentEditable = 'false';
     badge.dataset.token = `#${item.type}:${item.id}`;
+    badge.title = item.title;
     const iconSvg = hashtagTypeIconSvg[item.type] ?? '';
-    badge.innerHTML = `${iconSvg} ${escapeHtml(item.title)}`;
+    badge.innerHTML = `${iconSvg}<span class="hashtag-badge-label">${escapeHtml(item.title)}</span>`;
     badge.style.cssText = `background: var(${item.bgColor}); color: var(${item.color});`;
     return badge;
   }

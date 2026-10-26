@@ -3845,20 +3845,26 @@ fn branch_session_start_still_owned(
     ))
 }
 
-/// Leave a session row terminal when its start fails after the row is already
+/// Leave a session row terminal when its start fails in the steps *before*
+/// `session_runner::start_session` is entered, after the row is already
 /// `running`.
 ///
 /// Every start path flips (or inserts) its row as `running` before the
-/// fallible work that follows — a note stub, the persisted config selection,
-/// `session_runner::start_session` itself. An `Err` from any of those has no
-/// session thread to record it, so the row would otherwise stay `running`
-/// under this live pid: neither the quit sweep nor `recover_dead_sessions`
-/// touches it, every busy-state snapshot reports it, and its linked
-/// note/commit/review stub reads as generating for good. The failure goes
-/// through [`session_runner::finish_failed_before_run`], which gates on
-/// winning the transition (a Stop that landed first keeps its `cancelled`)
-/// and announces the result. Winning it owes the branch queue the drain any
-/// terminal state owes, the same as the session thread's own terminal path.
+/// fallible work that follows — the project note stub, the persisted ACP
+/// config selection, the queued-session preparation. An `Err` from one of
+/// those has no session thread and no runner to record it, so the row would
+/// otherwise stay `running` under this live pid: neither the quit sweep nor
+/// `recover_dead_sessions` touches it, every busy-state snapshot reports it,
+/// and its linked note/commit/review stub reads as generating for good.
+///
+/// Failures inside the runner itself (driver, provider, user-message persist)
+/// are finalized by the runner's own `register_for_startup` on-failure
+/// closure before its `Err` reaches here, so for those this helper loses the
+/// `transition_from_running` CAS and takes
+/// [`session_runner::finish_failed_before_run`]'s `Ok(false)` "already
+/// finalized" debug arm. That same gate keeps a Stop's `cancelled` intact.
+/// Winning the transition owes the branch queue the drain any terminal state
+/// owes, the same as the session thread's own terminal path.
 ///
 /// The error is returned to the caller unchanged.
 fn fail_session_start_on_error<T>(

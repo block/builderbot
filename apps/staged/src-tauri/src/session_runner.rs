@@ -1386,13 +1386,20 @@ pub fn start_session(
         // during the startup is the state the user asked for; otherwise the
         // row carries the real cause — "No ACP agent found", a missing
         // worktree — rather than being left `running` for the sweep to end
-        // as "Staged lost track of this session". Every caller that put the
-        // row into `running` is covered: the immediate and queued branch
-        // starts (whose own `finish_failed_before_run` then loses the CAS
-        // and writes nothing), the pipeline handoff (whose
-        // `finish_failed_pipeline_handoff_start` stamps the step off the row
-        // this writes), and the plain `start_session` / `resume_session`
-        // commands, which write no terminal state of their own.
+        // as "Staged lost track of this session". This closure finalizes
+        // runner-originated failures — driver creation, provider resolution,
+        // persisting the user message — for every caller that put the row
+        // into `running`: the immediate and queued branch starts (whose own
+        // `finish_failed_before_run` then loses the CAS and writes nothing),
+        // the pipeline handoff (whose `finish_failed_pipeline_handoff_start`
+        // stamps the step off the row this writes), and the plain
+        // `start_session` / `resume_session` / `start_project_session`
+        // commands. Those commands wrap the runner call in
+        // `fail_session_start_on_error` (session_commands.rs), which covers
+        // failures in the steps *before* the runner is entered — the project
+        // note stub, the persisted ACP config selection — and, for a runner
+        // failure, loses the `transition_from_running` CAS to this closure
+        // and takes its `Ok(false)` "already finalized" debug arm.
         |error, accepted_cancellation| {
             let transitioned = match accepted_cancellation {
                 Some(completion_reason) => finish_cancelled_before_run(
@@ -3583,6 +3590,10 @@ const DEAD_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 pub fn spawn_dead_session_sweep(store: Arc<Store>, app_handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(DEAD_SESSION_SWEEP_INTERVAL);
+        // A sweep that overruns the interval (several instances, each with
+        // foreign running rows to probe) should be followed by one tick a full
+        // interval later, not by a burst of catch-up ticks.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The first tick completes immediately; startup already ran that sweep.
         interval.tick().await;
         loop {

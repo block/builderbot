@@ -25,6 +25,7 @@
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
+  import { lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -102,17 +103,27 @@
   // Focus that lands in it goes back to the control the user had in the view
   // on top — focusing the bare host instead would drop their keystrokes until
   // they clicked again — except when they got there by tabbing out of the
-  // host, which should wrap to the host's first control rather than bounce
-  // back to its last. When parking happens with focus inside, move it out.
+  // host: Tab should wrap to the host's first control rather than bounce back
+  // to its last, and Shift+Tab should carry on to the top bar, which sits
+  // before the workspace in DOM order and would otherwise be unreachable
+  // backwards. When parking happens with focus inside, move it out.
   let lastHostFocus: HTMLElement | null = null;
-  let tabKeyDown = false;
+  let tabInFlight: 'forward' | 'backward' | null = null;
   function handleHostFocusIn(e: FocusEvent) {
     if (e.target instanceof HTMLElement && e.target !== detailHostEl) lastHostFocus = e.target;
   }
   function handleWorkspaceFocusIn() {
     if (!workspaceParked) return;
-    const restore = !tabKeyDown && lastHostFocus?.isConnected ? lastHostFocus : null;
-    (restore ?? detailHostEl)?.focus({ preventScroll: true });
+    if (tabInFlight === 'backward') {
+      const before = workspaceEl ? lastTabbableBefore(workspaceEl) : null;
+      (before ?? detailHostEl)?.focus({ preventScroll: true });
+      return;
+    }
+    const restore = tabInFlight === null && lastHostFocus?.isConnected ? lastHostFocus : null;
+    restore?.focus({ preventScroll: true });
+    // Connected is not focusable: `.focus()` on a control that is still in the
+    // DOM but hidden is a silent no-op, which would leave focus in here.
+    if (document.activeElement !== restore) detailHostEl?.focus({ preventScroll: true });
   }
   $effect(() => {
     if (!workspaceParked) return;
@@ -649,11 +660,16 @@
   }
 </script>
 
+<!-- The blur reset covers a Tab keyup the webview never sees (the window
+     deactivating or a native menu taking over mid-press). -->
 <svelte:window
-  onkeydowncapture={(e) => (tabKeyDown = e.key === 'Tab')}
-  onkeyupcapture={(e) => {
-    if (e.key === 'Tab') tabKeyDown = false;
+  onkeydowncapture={(e) => {
+    tabInFlight = e.key === 'Tab' ? (e.shiftKey ? 'backward' : 'forward') : null;
   }}
+  onkeyupcapture={(e) => {
+    if (e.key === 'Tab') tabInFlight = null;
+  }}
+  onblur={() => (tabInFlight = null)}
 />
 
 {#if preferences.loaded}

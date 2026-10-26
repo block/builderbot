@@ -139,11 +139,11 @@
         class="file-input-hidden"
         onchange={handleImageFileSelect}
       />
-      <span class="inline-flex" title="Attach image or PDF">
+      <span class="inline-flex" title="Attach image">
         <Button
           variant="outline"
           class={attachButtonClass}
-          aria-label="Attach image or PDF"
+          aria-label="Attach image"
           onclick={openImagePicker}
           disabled={isLive}
         >

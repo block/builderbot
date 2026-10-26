@@ -653,7 +653,10 @@ impl SessionRegistry {
                 self.mark_finished(session_id, epoch);
                 let accepted = self.cancellation_completion_reason(session_id);
                 record_failure(&error, accepted.clone());
-                let at_removal = self.cancellation_completion_reason(session_id);
+                // Scoped to this epoch for the same reason the removal is: by
+                // now the row is terminal and a Resume may have registered a
+                // successor under this id, whose Stop is its own to report.
+                let at_removal = self.cancellation_completion_reason_of(session_id, epoch);
                 self.deregister(session_id, epoch);
                 if accepted.is_none() && at_removal.is_some() {
                     log::info!(
@@ -723,6 +726,29 @@ impl SessionRegistry {
             .unwrap()
             .running
             .get(session_id)
+            .and_then(|running| {
+                running
+                    .cancellation_completion_reason
+                    .lock()
+                    .unwrap()
+                    .clone()
+            })
+    }
+
+    /// [`cancellation_completion_reason`](Self::cancellation_completion_reason)
+    /// for the entry `epoch` registered only; `None` if a successor has taken
+    /// the id over (see [`RegistrationEpoch`]).
+    fn cancellation_completion_reason_of(
+        &self,
+        session_id: &str,
+        epoch: RegistrationEpoch,
+    ) -> Option<CompletionReason> {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .filter(|running| running.epoch == epoch)
             .and_then(|running| {
                 running
                     .cancellation_completion_reason

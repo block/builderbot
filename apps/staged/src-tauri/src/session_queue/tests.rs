@@ -254,6 +254,47 @@ async fn deleting_a_queued_barrier_commit_starts_the_notes_behind_it() {
     assert_eq!(status_of(&store, &note_2.id), Some(SessionStatus::Running));
 }
 
+/// "Start now" on a queued commit claims it ahead of the drain. If the start
+/// then fails between the claim and the handoff, `fail_claimed_queued_start`
+/// ends the row — and, unlike the drain, the forced start has no loop that
+/// goes on to the rows behind it, so the failure must kick the branch itself
+/// or the note behind the commit waits for an unrelated terminal event.
+///
+/// The forced start needs the real runtime, so this performs what it does
+/// after its precheck: the claim's own write, then the shared failure body.
+#[tokio::test]
+async fn a_forced_start_that_fails_after_its_claim_starts_the_rows_behind_it() {
+    let (store, branch) = store_with_branch();
+    let (commit, _) = commit_session(&store, &branch.id, SessionStatus::Queued);
+    let note = note_session(&store, &branch.id, SessionStatus::Queued);
+
+    let kicker = claiming_kicker(&store);
+    let app = app_with_kicker(&kicker);
+
+    // The forced start's claim: the commit is `running` under our pid and the
+    // note is parked behind it.
+    assert!(store.transition_queued_to_running(&commit.id).unwrap());
+    assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Queued));
+
+    crate::session_commands::fail_claimed_queued_start(
+        &store,
+        app.handle(),
+        &branch.id,
+        &branch.project_id,
+        &commit.id,
+        "database is locked".to_string(),
+    );
+
+    // The failure's own kick is the only one; nothing else ended on the branch.
+    assert_eq!(
+        kicker.kicked(),
+        vec![(branch.id.clone(), KickSource::ClaimedStartFailed)]
+    );
+    kicker.wait_until_idle().await;
+    assert_eq!(status_of(&store, &commit.id), Some(SessionStatus::Error));
+    assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Running));
+}
+
 /// Same for a review in front of a note: one review runs at a time, and a
 /// queued review's deletion is what lets a note behind it go.
 #[tokio::test]

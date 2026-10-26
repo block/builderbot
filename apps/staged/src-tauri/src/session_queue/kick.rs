@@ -17,6 +17,8 @@ pub(crate) enum KickSource {
     TerminalState,
     /// An immediate start failed or was superseded before it launched an agent.
     StartFailed,
+    /// A queued row's start failed after the claim had made it `running`.
+    ClaimedStartFailed,
     /// A Stop on a row with no live token took the store-write fallback.
     CancelFallback,
     /// A note, review or pending commit was deleted.
@@ -44,6 +46,7 @@ impl KickSource {
         match self {
             Self::TerminalState => "terminal state",
             Self::StartFailed => "start failed",
+            Self::ClaimedStartFailed => "claimed start failed",
             Self::CancelFallback => "cancel fallback",
             Self::ArtifactDeleted => "artifact deleted",
             Self::SessionDeleted => "session deleted",

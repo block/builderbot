@@ -2556,6 +2556,14 @@ impl QueuedSessionClaim {
 /// that reach here are sqlite failures, so this write may well fail too: it is
 /// logged and otherwise ignored — the sweep remains the backstop. Returns the
 /// error for the caller to propagate.
+///
+/// When the write wins, the branch is kicked as well, as `start_session`'s own
+/// failure path does: the row it ended was the claim's, and nothing else will
+/// re-read the queue behind it. The drain's claims absorb that as one
+/// coalesced rerun; the forced start (`force_start_queued_session`) has no
+/// loop to go on to, and `can_force_start_with_active` lets it claim a row
+/// the drain was stopping at, so without the kick the rows behind a failed
+/// forced start waited for an unrelated terminal event on the branch.
 pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
     store: &Store,
     app_handle: &tauri::AppHandle<R>,
@@ -2580,6 +2588,11 @@ pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
                 Some(&store::CompletionReason::Crashed),
                 Some(branch_id.to_string()),
                 Some(project_id.to_string()),
+            );
+            crate::session_queue::kick(
+                app_handle,
+                branch_id,
+                crate::session_queue::KickSource::ClaimedStartFailed,
             );
         }
         Ok(false) => log::info!(

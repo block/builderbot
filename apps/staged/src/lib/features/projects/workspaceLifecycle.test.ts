@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('WorkspaceLifecycleController.retryWorktree', () => {
   let setupWorktreeAndRunPrerun: ReturnType<typeof vi.fn>;
-  let branchesByProject: Map<string, Array<{ id: string; worktreePath?: string }>>;
+  let commandsMock: Record<string, ReturnType<typeof vi.fn>>;
+  let branchesByProject: Map<
+    string,
+    Array<{ id: string; worktreePath?: string; branchType?: string; workspaceStatus?: string }>
+  >;
 
   beforeEach(() => {
     vi.resetModules();
@@ -12,12 +16,14 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     vi.stubGlobal('$derived', (value: unknown) => value);
 
     setupWorktreeAndRunPrerun = vi.fn();
-    vi.doMock('../../api/commands', () => ({
+    // Only the commands the controller legitimately issues. Anything else it
+    // reaches for (a queue drain, say) fails loudly as a missing export.
+    commandsMock = {
       setupWorktree: vi.fn(),
       setupWorktreeAndRunPrerun,
-      drainQueuedSessions: vi.fn(async () => {}),
       pollAllWorkspaceStatuses: vi.fn(async () => ({})),
-    }));
+    };
+    vi.doMock('../../api/commands', () => commandsMock);
     vi.doMock('svelte-sonner', () => ({ toast: { error: vi.fn() } }));
     vi.doMock('../settings/preferences.svelte', () => ({
       getPreferredAgent: () => 'claude',
@@ -84,6 +90,28 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
 
     await lifecycle.retryWorktree('branch-1', 'project-1');
     expect(setupWorktreeAndRunPrerun).toHaveBeenCalledTimes(2);
+    lifecycle.stop();
+  });
+
+  // The backend kicks the branch queue when it writes the `running` workspace
+  // status, so the frontend must not issue its own drain on the transition —
+  // the only command a `running` transition may trigger is the status poll.
+  it('issues no queue drain when a workspace becomes running', async () => {
+    branchesByProject = new Map([
+      ['project-1', [{ id: 'branch-1', branchType: 'remote', workspaceStatus: 'starting' }]],
+    ]);
+
+    const lifecycle = await newController();
+    lifecycle.handleWorkspaceStatusChange('project-1', 'branch-1', 'running');
+    await Promise.resolve();
+
+    expect(branchesByProject.get('project-1')).toEqual([
+      { id: 'branch-1', branchType: 'remote', workspaceStatus: 'running' },
+    ]);
+    const issued = Object.entries(commandsMock)
+      .filter(([, fn]) => fn.mock.calls.length > 0)
+      .map(([name]) => name);
+    expect(issued).toEqual(['pollAllWorkspaceStatuses']);
     lifecycle.stop();
   });
 });

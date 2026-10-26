@@ -932,9 +932,9 @@ fn refused_start_completion_reason(
 /// Stop produces nothing the user can see: on the pipeline-handoff path
 /// `finish_failed_pipeline_handoff_start` wins `transition_from_running` and
 /// the row reads `error`/`Crashed`, and on the queued-branch path the `Err`
-/// reaches nothing but a log line — or a `let _` — in
-/// `drain_queued_sessions_for_branch`'s callers, leaving the row `running`
-/// under our pid for the next launch to report as an errored session.
+/// reaches nothing but a log line in the queue kicker's drain loop, leaving
+/// the row `running` under our pid for the next launch to report as an
+/// errored session.
 ///
 /// Writing `Cancelled` first is also what restores the ordering the
 /// pre-registration code had by accident: the `!was_running` fallback wrote it
@@ -1178,8 +1178,8 @@ pub fn start_session(
                 // one for every branch session it ends, cancelled ones
                 // included, and nothing else will do it for a session whose
                 // thread never spawned — the `Err` below reaches only a log
-                // line in `drain_queued_sessions_for_branch`'s callers, and the
-                // drain that produced this session has already aborted on it.
+                // line in the queue kicker's drain loop, and the drain that
+                // produced this session has already aborted on it.
                 // Without this the branch's remaining queued rows sit parked
                 // until some unrelated session happens to finish.
                 if transitioned {

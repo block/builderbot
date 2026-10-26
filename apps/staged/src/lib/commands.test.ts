@@ -370,23 +370,6 @@ describe('browser-native command wrappers', () => {
     });
   });
 
-  it('drains queued sessions without overriding the queued session provider or config', async () => {
-    const invokeCommand = vi.fn().mockResolvedValue(true);
-    vi.doMock('./transport', () => ({
-      invokeCommand,
-      isTauri: true,
-    }));
-
-    const { drainQueuedSessions } = await import('./commands');
-
-    await drainQueuedSessions('branch-1');
-
-    expect(invokeCommand).toHaveBeenCalledWith('drain_queued_sessions', {
-      branchId: 'branch-1',
-      provider: null,
-    });
-  });
-
   it('starts a queued session now without overriding the queued session provider or config', async () => {
     const invokeCommand = vi.fn().mockResolvedValue(true);
     vi.doMock('./transport', () => ({

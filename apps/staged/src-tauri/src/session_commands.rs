@@ -3865,7 +3865,9 @@ pub async fn start_or_queue_branch_session(
 ///
 /// Creates a session with `Queued` status and links it to an artifact stub
 /// (commit or note), but does NOT resolve working directory, git context,
-/// or spawn an agent. The session will be started later via `drain_queued_sessions`.
+/// or spawn an agent. The backend's queue kicker
+/// ([`crate::session_queue::kick`]) starts it later, when the branch can
+/// take it.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session(
@@ -3889,31 +3891,6 @@ pub fn queue_branch_session(
         launch_context,
         acp_config_selection,
     )
-}
-
-/// Drain queued sessions for a branch by starting compatible work.
-///
-/// Queries queued sessions for the given branch oldest-first, starts compatible
-/// note/review pairs, and stops at the first FIFO barrier. Returns whether at
-/// least one session was started.
-#[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
-pub async fn drain_queued_sessions(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
-    app_handle: tauri::AppHandle,
-    branch_id: String,
-    provider: Option<String>,
-) -> Result<bool, String> {
-    let store = get_store(&store)?;
-    drain_queued_sessions_for_branch(
-        store,
-        Arc::clone(&registry),
-        app_handle,
-        branch_id,
-        provider,
-    )
-    .await
 }
 
 /// What a queued row's dependency gate lets a start path do with it.
@@ -3956,33 +3933,16 @@ async fn gate_queued_session_start<R: tauri::Runtime>(
 
 /// Start queued branch sessions while they can safely run together.
 ///
-/// This is shared by the Tauri command and backend lifecycle hooks so queue
-/// progression remains owned by the backend.
+/// Queries the branch's queued sessions oldest-first, starts compatible
+/// note/review pairs, and stops at the first FIFO barrier. Returns whether at
+/// least one session was started.
 ///
-/// The body runs on its own task; this future only waits on the handle. A
-/// drain claims rows — flips them to `running` under our pid — and in web
-/// mode the future calling it is a request handler hyper drops at its next
-/// `.await` as soon as the client closes the connection. Dropping a
-/// `JoinHandle` detaches the task rather than cancelling it, so a dropped
-/// caller lets the drain finish instead of abandoning a half-claimed row.
-pub async fn drain_queued_sessions_for_branch(
-    store: Arc<Store>,
-    registry: Arc<session_runner::SessionRegistry>,
-    app_handle: tauri::AppHandle,
-    branch_id: String,
-    provider: Option<String>,
-) -> Result<bool, String> {
-    tauri::async_runtime::spawn(drain_branch_queue(
-        store, registry, app_handle, branch_id, provider,
-    ))
-    .await
-    .unwrap_or_else(|e| Err(format!("Drain task failed: {e}")))
-}
-
-/// The drain itself; see [`drain_queued_sessions_for_branch`] for why it only
-/// ever runs on a task of its own. The queue kicker
-/// ([`crate::session_queue::kick`]) runs this directly, on the task it already
-/// owns.
+/// Only the queue kicker ([`crate::session_queue::kick`]) calls this, on the
+/// task it already owns; there is no client-facing command. A drain claims
+/// rows — flips them to `running` under our pid — so it must never run on a
+/// future a client can drop: in web mode a request handler is dropped at its
+/// next `.await` as soon as the client closes the connection, which would
+/// abandon a half-claimed row.
 pub(crate) async fn drain_branch_queue(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -4168,9 +4128,9 @@ pub async fn start_queued_session_now(
 /// dependency can never be met and the row was skipped instead, which its
 /// own status event already reports.
 ///
-/// Runs on its own task for the same reason as
-/// [`drain_queued_sessions_for_branch`]: it claims the row, and the request
-/// future asking for it may be dropped at any await.
+/// Runs on its own task for the same reason the kicker's drain does: it
+/// claims the row, and the request future asking for it may be dropped at
+/// any await.
 pub async fn start_queued_session_now_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,

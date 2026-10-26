@@ -5,8 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
+use tauri::Manager;
 
 use crate::managed_acp_tools::ManagedTool;
+use crate::session_queue::sweep::{self, QueueHealth};
+use crate::session_runner::SessionRegistry;
+use crate::store::Store;
 
 pub use doctor::types::{AuthStatus, InstallSource};
 pub use doctor::{
@@ -343,9 +347,14 @@ fn execute_fix_options(
 /// install/auth status but does not probe registries for version freshness.
 /// The frontend calls this first for an instant paint, then follows up with
 /// [`run_doctor_freshness`] to fill in version/update information.
+///
+/// Takes the app handle rather than `State` borrows so the command keeps its
+/// plain `DoctorReport` return: the session-queue check reads store and
+/// registry state synchronously before the first await.
 #[tauri::command]
-pub async fn run_doctor() -> DoctorReport {
-    run_doctor_report(false).await
+pub async fn run_doctor(app_handle: tauri::AppHandle) -> DoctorReport {
+    let queue = session_queue_doctor_check(&app_handle);
+    run_doctor_report(false, queue).await
 }
 
 /// Run all health checks with version freshness enabled.
@@ -356,13 +365,16 @@ pub async fn run_doctor() -> DoctorReport {
 /// `updateAvailable`, and the source-aware `updateCommand`/`updateFixType` on
 /// each readout. Hits the network, so it must never block first paint.
 #[tauri::command]
-pub async fn run_doctor_freshness() -> DoctorReport {
-    run_doctor_report(true).await
+pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport {
+    let queue = session_queue_doctor_check(&app_handle);
+    run_doctor_report(true, queue).await
 }
 
 /// Run the doctor crate's checks plus Staged-local ones over one shared env
-/// snapshot: the managed Node.js runtime check, and the managed-bridge
-/// version readouts layered onto the Claude/Codex rows (see
+/// snapshot: the managed Node.js runtime check, the session-queue check the
+/// caller already took (`queue_check`; both passes carry it, since the
+/// frontend merges the freshness report into the first by check id), and the
+/// managed-bridge version readouts layered onto the Claude/Codex rows (see
 /// [`apply_managed_bridge_readouts`]). Bundled readouts are labeled by the
 /// doctor crate itself via `RunChecksOptions::bundled_tools_dir`.
 ///
@@ -370,7 +382,10 @@ pub async fn run_doctor_freshness() -> DoctorReport {
 /// installed version is a local `package.json` read on both passes, and the
 /// registry lookup for the latest version runs only when `check_freshness`
 /// is set, so the first paint never waits on the network.
-async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
+async fn run_doctor_report(
+    check_freshness: bool,
+    queue_check: Option<DoctorCheck>,
+) -> DoctorReport {
     let env_vars = doctor_env_vars().await;
     let (mut report, node_runtime, managed_versions) = tokio::join!(
         doctor::run_checks_with_options(run_checks_options(
@@ -392,6 +407,7 @@ async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
     if let Some(check) = node_runtime {
         report.checks.push(check);
     }
+    report.checks.extend(queue_check);
     report
 }
 
@@ -1155,6 +1171,107 @@ fn parse_version_triple(version: &str) -> Option<(u64, u64, u64)> {
 
 const NODE_RUNTIME_CHECK_ID: &str = "node-runtime";
 const NODE_RUNTIME_CHECK_LABEL: &str = "Node.js Runtime";
+const SESSION_QUEUE_CHECK_ID: &str = "session-queue";
+const SESSION_QUEUE_CHECK_LABEL: &str = "Session Queue";
+
+/// The session-queue readout: what the stranded-session sweep sees right now
+/// and how often it has had to act. `None` until the store is open — the
+/// needs-reset flow runs the Doctor with no store managed.
+fn session_queue_doctor_check<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Option<DoctorCheck> {
+    let store = crate::get_store(&app_handle.try_state::<Mutex<Option<Arc<Store>>>>()?).ok()?;
+    let registry = app_handle.try_state::<Arc<SessionRegistry>>()?;
+    match sweep::queue_health(
+        &store,
+        &registry,
+        crate::store::now_timestamp(),
+        sweep::STRANDED_GRACE_MS,
+    ) {
+        Ok(health) => Some(build_session_queue_check(&health)),
+        Err(e) => {
+            log::warn!("[doctor] session-queue check failed to read the store: {e}");
+            None
+        }
+    }
+}
+
+/// `Warn` while any row would be swept right now; `Pass` otherwise, naming
+/// the lifetime sweep count when it is non-zero so a recurrence stays
+/// visible after the sweep has already cleaned up.
+fn build_session_queue_check(health: &QueueHealth) -> DoctorCheck {
+    let stranded = health.stranded.len();
+    let (status, message) = if stranded > 0 {
+        (
+            CheckStatus::Warn,
+            format!(
+                "{} {} running with no live owner; the stranded-session sweep ends {} within a minute",
+                stranded,
+                if stranded == 1 { "session is" } else { "sessions are" },
+                if stranded == 1 { "it" } else { "them" },
+            ),
+        )
+    } else if health.swept_total > 0 {
+        (
+            CheckStatus::Pass,
+            format!(
+                "No stranded sessions; the sweep has ended {} so far",
+                if health.swept_total == 1 {
+                    "1 session".to_string()
+                } else {
+                    format!("{} sessions", health.swept_total)
+                }
+            ),
+        )
+    } else {
+        (CheckStatus::Pass, "No stranded sessions".to_string())
+    };
+
+    let mut detail = vec![
+        "checked: running session rows owned by this process".to_string(),
+        format!("owned running rows: {}", health.owned_running),
+        format!(
+            "of which registered to a live runner: {}",
+            health.registered
+        ),
+        format!(
+            "grace before a quiet, unregistered row counts as stranded: {}s",
+            sweep::STRANDED_GRACE_MS / 1000
+        ),
+        format!("stranded now: {stranded}"),
+    ];
+    detail.extend(health.stranded.iter().map(|row| {
+        format!(
+            "- session {} (branch {}) quiet for {}s",
+            row.session_id,
+            row.branch_id.as_deref().unwrap_or("none"),
+            row.quiet_secs
+        )
+    }));
+    detail.push(format!("ended by the sweep so far: {}", health.swept_total));
+
+    DoctorCheck {
+        id: SESSION_QUEUE_CHECK_ID.to_string(),
+        label: SESSION_QUEUE_CHECK_LABEL.to_string(),
+        status,
+        message,
+        fix_url: None,
+        fix_command: None,
+        fix_type: None,
+        path: None,
+        bridge_path: None,
+        raw_output: Some(detail.join("\n")),
+        auth_status: None,
+        login_command: None,
+        installed_version: None,
+        latest_version: None,
+        update_available: None,
+        install_source: None,
+        self_updating: None,
+        main: None,
+        bridge: None,
+    }
+}
 
 /// Disk states of the Staged-managed Node.js runtime the check reports on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1313,6 +1430,63 @@ mod tests {
 
     fn pinned_version() -> String {
         crate::managed_node::node_runtime_lock().version.clone()
+    }
+
+    fn queue_health(stranded: Vec<sweep::StrandedRow>, swept_total: usize) -> QueueHealth {
+        QueueHealth {
+            owned_running: stranded.len() + 1,
+            registered: 1,
+            stranded,
+            swept_total,
+        }
+    }
+
+    #[test]
+    fn session_queue_check_passes_when_nothing_is_stranded() {
+        let check = build_session_queue_check(&queue_health(Vec::new(), 0));
+
+        assert_eq!(check.id, SESSION_QUEUE_CHECK_ID);
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(check.message, "No stranded sessions");
+        assert!(check.fix_type.is_none());
+        let detail = check.raw_output.expect("detail is attached");
+        assert!(detail.contains("owned running rows: 1"), "{detail}");
+        assert!(detail.contains("stranded now: 0"), "{detail}");
+        assert!(detail.contains("ended by the sweep so far: 0"), "{detail}");
+    }
+
+    /// A sweep that has already acted leaves nothing stranded, so the status
+    /// stays `Pass` — but the count is what makes a recurrence visible.
+    #[test]
+    fn session_queue_check_reports_past_sweeps_without_warning() {
+        let check = build_session_queue_check(&queue_health(Vec::new(), 2));
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(
+            check.message,
+            "No stranded sessions; the sweep has ended 2 sessions so far"
+        );
+    }
+
+    #[test]
+    fn session_queue_check_warns_while_a_row_is_stranded() {
+        let row = sweep::StrandedRow {
+            session_id: "s-1".to_string(),
+            branch_id: Some("b-1".to_string()),
+            quiet_secs: 700,
+        };
+        let check = build_session_queue_check(&queue_health(vec![row], 0));
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(
+            check.message,
+            "1 session is running with no live owner; the stranded-session sweep ends it within a minute"
+        );
+        let detail = check.raw_output.expect("detail is attached");
+        assert!(
+            detail.contains("- session s-1 (branch b-1) quiet for 700s"),
+            "{detail}"
+        );
     }
 
     #[test]

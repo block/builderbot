@@ -285,6 +285,21 @@ impl Store {
         Ok(sessions)
     }
 
+    /// How many sessions ended with exactly this `error_message`.
+    ///
+    /// Backs the Doctor's session-queue readout: the stranded-session sweep
+    /// records one fixed message on every row it ends, so its count is the
+    /// number of times the queue needed rescuing.
+    pub fn count_sessions_with_error_message(&self, message: &str) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE error_message = ?1",
+            [message],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// Get all running and queued sessions, oldest first.
     ///
     /// Backs the `get_active_sessions` busy-state snapshot command, which

@@ -6,8 +6,8 @@ use tauri::Manager;
 
 use super::kick::{kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource};
 use super::sweep::{
-    is_stranded, reconcile_stranded_running_sessions, Liveness, STRANDED_GRACE_MS,
-    STRANDED_SESSION_MESSAGE,
+    is_stranded, queue_health, reconcile_stranded_running_sessions, Liveness, StrandedRow,
+    STRANDED_GRACE_MS, STRANDED_SESSION_MESSAGE,
 };
 use crate::session_commands::claim_startable_queued_sessions;
 use crate::session_runner::SessionRegistry;
@@ -478,6 +478,42 @@ async fn sweep_respects_grace_for_a_fresh_immediate_start() {
 
 /// The sweep prunes the registry's deregistration stamps it no longer needs,
 /// so the map stays bounded over a long-running process.
+/// The Doctor readout is the sweep's decision without the write: before the
+/// sweep runs a quiet unregistered row is "stranded now", and after it runs
+/// the same row is counted as swept instead.
+#[tokio::test]
+async fn queue_health_reports_what_the_sweep_would_do_and_has_done() {
+    let (store, branch) = store_with_branch();
+    let (stranded, _) = commit_session(&store, &branch.id, SessionStatus::Running);
+    let registered = note_session(&store, &branch.id, SessionStatus::Running);
+    let kicker = Arc::new(BranchQueueKicker::recording());
+    let app = app_with_kicker(&kicker);
+    let registry = Arc::new(SessionRegistry::new());
+    let _token = registry.register_external(&registered.id);
+
+    let now = stranded.updated_at + STRANDED_GRACE_MS + 1;
+    let before = queue_health(&store, &registry, now, STRANDED_GRACE_MS).unwrap();
+    assert_eq!(before.owned_running, 2);
+    assert_eq!(before.registered, 1);
+    assert_eq!(
+        before.stranded,
+        vec![StrandedRow {
+            session_id: stranded.id.clone(),
+            branch_id: Some(branch.id.clone()),
+            quiet_secs: (STRANDED_GRACE_MS + 1) / 1000,
+        }]
+    );
+    assert_eq!(before.swept_total, 0);
+
+    reconcile_stranded_running_sessions(&store, &registry, app.handle(), now, STRANDED_GRACE_MS);
+
+    let after = queue_health(&store, &registry, now, STRANDED_GRACE_MS).unwrap();
+    assert_eq!(after.owned_running, 1);
+    assert_eq!(after.registered, 1);
+    assert!(after.stranded.is_empty());
+    assert_eq!(after.swept_total, 1);
+}
+
 #[test]
 fn sweep_prunes_stale_deregistration_stamps() {
     let (store, _branch) = store_with_branch();

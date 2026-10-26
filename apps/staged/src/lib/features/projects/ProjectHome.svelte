@@ -87,13 +87,6 @@
   let initialLoadComplete = false;
   let lastSelectedProjectId: string | null = null;
 
-  // Startup queued-session drain: once per branch per mount, batched through
-  // the idle queue. Branches that become ready later (worktree setup or
-  // workspace start completing) are drained by workspaceLifecycle itself.
-  let queuedSessionDrainCancel: (() => void) | null = null;
-  const drainedSessionBranchIds = new Set<string>();
-  const pendingDrainBranchIds = new Set<string>();
-
   // Store health — if non-null the DB needs a reset before we can proceed
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
@@ -162,7 +155,6 @@
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:delete-current-project', onDeleteCurrentProject);
       unlistenDetection();
-      cancelQueuedSessionDrain();
       workspaceLifecycle.stop();
     };
   });
@@ -213,58 +205,12 @@
     void commands.quitApp().catch((e) => console.error('Failed to quit:', e));
   }
 
-  function scheduleDeferredTask(callback: () => void, timeout = 1500): () => void {
-    const schedule =
-      typeof requestIdleCallback === 'function'
-        ? (cb: () => void) => requestIdleCallback(cb, { timeout })
-        : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
-    const cancel =
-      typeof cancelIdleCallback === 'function'
-        ? (handle: number) => cancelIdleCallback(handle)
-        : (handle: number) => clearTimeout(handle);
-
-    const handle = schedule(callback);
-    return () => cancel(handle);
-  }
-
-  function cancelQueuedSessionDrain() {
-    queuedSessionDrainCancel?.();
-    queuedSessionDrainCancel = null;
-    pendingDrainBranchIds.clear();
-  }
-
-  function scheduleQueuedSessionDrain(branchMap: Map<string, Branch[]>) {
-    for (const branches of branchMap.values()) {
-      for (const branch of branches) {
-        const isLocalReady = branch.branchType === 'local' && branch.worktreePath;
-        const isRemoteReady =
-          branch.branchType === 'remote' && branch.workspaceStatus === 'running';
-        if ((isLocalReady || isRemoteReady) && !drainedSessionBranchIds.has(branch.id)) {
-          drainedSessionBranchIds.add(branch.id);
-          pendingDrainBranchIds.add(branch.id);
-        }
-      }
-    }
-
-    if (pendingDrainBranchIds.size === 0 || queuedSessionDrainCancel) return;
-
-    queuedSessionDrainCancel = scheduleDeferredTask(() => {
-      queuedSessionDrainCancel = null;
-      const branchIds = Array.from(pendingDrainBranchIds);
-      pendingDrainBranchIds.clear();
-      for (const branchId of branchIds) {
-        commands.drainQueuedSessions(branchId).catch((e) => {
-          console.error('[ProjectHome] Failed to drain queued sessions on startup:', e);
-        });
-      }
-    }, 3000);
-  }
-
   // View-lifecycle side effects wired off the store's branch data — worktree/
-  // workspace setup, the startup queued-session drain, and run-action
-  // hydration. All three dedupe internally, so re-running on every branch map
-  // reassignment is cheap. They stay out of the store deliberately: they are
-  // this view's policies, not properties of the data.
+  // workspace setup and run-action hydration. Both dedupe internally, so
+  // re-running on every branch map reassignment is cheap. They stay out of the
+  // store deliberately: they are this view's policies, not properties of the
+  // data. The branch session queue is not driven from here: the backend kicks
+  // it on startup and whenever a branch becomes ready.
   $effect(() => {
     const branchMap = projectsDataStore.branchesByProject;
     for (const [projectId, branches] of branchMap) {
@@ -272,7 +218,6 @@
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
       }
     }
-    scheduleQueuedSessionDrain(branchMap);
     projectRunActionsStore.hydrateFromProjectBranches(branchMap).catch(console.error);
   });
 

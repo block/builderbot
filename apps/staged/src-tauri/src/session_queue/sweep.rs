@@ -17,6 +17,11 @@
 //! hooks and terminal write, so a long turn's row is unregistered and stale
 //! for the length of its hooks. The registry's deregistration stamp covers
 //! that last stretch; the grace covers the rest.
+//!
+//! Every row the sweep ends is a `warn` in the log, and [`queue_health`]
+//! gives the Doctor the same view — what would be swept right now, and how
+//! many rows have been swept so far — so a recurrence shows up in the app
+//! rather than only in the log.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,6 +124,15 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
             )
             .unwrap_or(false);
         if !transitioned {
+            // An owner alive after all wrote first: the row left `running`
+            // between our read and the CAS. Harmless, but it means the grace
+            // was too short for that owner, which is worth seeing.
+            log::warn!(
+                "[session_queue] sweep lost the race for session {} (branch {:?}, quiet for {}s): its owner wrote first",
+                session.id,
+                session.branch_id,
+                now.saturating_sub(session.updated_at) / 1000
+            );
             continue;
         }
         let pending_start =
@@ -154,6 +168,69 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
     // Stamps older than the grace can no longer change a decision.
     registry.forget_deregistrations_before(now.saturating_sub(grace_ms));
     ended
+}
+
+/// A `running` row the sweep would end now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StrandedRow {
+    pub(crate) session_id: String,
+    pub(crate) branch_id: Option<String>,
+    /// Seconds since the row was last touched or deregistered.
+    pub(crate) quiet_secs: i64,
+}
+
+/// The sweep's view of the queue at one instant, for the Doctor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QueueHealth {
+    /// `running` rows this process owns.
+    pub(crate) owned_running: usize,
+    /// Of those, rows a thread or task is registered for.
+    pub(crate) registered: usize,
+    /// Rows [`is_stranded`] would end now, oldest-quiet first.
+    pub(crate) stranded: Vec<StrandedRow>,
+    /// Rows the sweep has ended over the store's lifetime.
+    pub(crate) swept_total: usize,
+}
+
+/// What the sweep would do now, without doing it.
+///
+/// Same decision as [`reconcile_stranded_running_sessions`], same `now` and
+/// `grace_ms` seams, no writes. `swept_total` counts rows carrying
+/// [`STRANDED_SESSION_MESSAGE`], which only the sweep writes.
+pub(crate) fn queue_health(
+    store: &Store,
+    registry: &SessionRegistry,
+    now: i64,
+    grace_ms: i64,
+) -> Result<QueueHealth, crate::store::StoreError> {
+    let own_pid = std::process::id();
+    let mut health = QueueHealth {
+        owned_running: 0,
+        registered: 0,
+        stranded: Vec::new(),
+        swept_total: store.count_sessions_with_error_message(STRANDED_SESSION_MESSAGE)?,
+    };
+    for session in store.get_running_sessions()? {
+        if session.owner_pid != Some(own_pid) {
+            continue;
+        }
+        health.owned_running += 1;
+        let liveness = Liveness::of(registry, &session.id);
+        if liveness.registered {
+            health.registered += 1;
+        }
+        if is_stranded(&session, liveness, own_pid, now, grace_ms) {
+            health.stranded.push(StrandedRow {
+                session_id: session.id,
+                branch_id: session.branch_id,
+                quiet_secs: now.saturating_sub(session.updated_at) / 1000,
+            });
+        }
+    }
+    health
+        .stranded
+        .sort_by_key(|row| std::cmp::Reverse(row.quiet_secs));
+    Ok(health)
 }
 
 /// Spawn the periodic sweep. Call once the store is ready, alongside the other

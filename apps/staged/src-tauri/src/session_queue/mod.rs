@@ -18,6 +18,10 @@
 //! - [`sweep`] is the safety net for the `running` marker itself: a row this
 //!   process owns, with no live token behind it, that has not moved for a
 //!   grace window, is ended and its branch kicked.
+//!
+//! Every kick logs its source at `info`, every sweep action is a `warn`, and
+//! the Doctor's "Session Queue" check reports [`sweep::queue_health`], so a
+//! stuck or rescued queue is visible without reading the log.
 
 pub(crate) mod kick;
 pub(crate) mod sweep;

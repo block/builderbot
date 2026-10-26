@@ -1215,15 +1215,6 @@ export function queueBranchSession(
   });
 }
 
-/** Drain queued sessions for a branch — starts the next queued session if any.
- *  Returns true if a session was started, false if the queue was empty. */
-export function drainQueuedSessions(branchId: string): Promise<boolean> {
-  return invokeCommand('drain_queued_sessions', {
-    branchId,
-    provider: null,
-  });
-}
-
 /** Start one queued session ahead of the branch queue ("Start now").
  *  Returns false when a concurrent drain claimed the session first; rejects when
  *  the branch is still provisioning or something already holds its worktree. */

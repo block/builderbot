@@ -390,9 +390,12 @@
               <PinnedRepoCards repos={sidebarRepos} reorderable={!searching} />
             {:else if searching}
               <div class="state no-matches">No repos match "{searchQuery.trim()}"</div>
-            {:else}
+            {:else if projectsDataStore.homeRepos.length > 0}
               <!-- Repos exist but none are pinned: point at where pinning lives
-                   so the "Pinned repos 0" header isn't the only affordance. -->
+                   so the "Pinned repos 0" header isn't the only affordance.
+                   With no repos at all (only reachable on the All repos view,
+                   which keeps the section) the header stands alone — that
+                   view is already the place to add one. -->
               <div class="state no-matches">
                 <span>
                   Pin repos from

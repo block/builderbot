@@ -11,6 +11,7 @@
   import type { RepoHomeItem } from '../../types';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import * as commands from '../../api/commands';
+  import { moveRepo, repoKey } from './repoReorder';
   import RepoCard from './RepoCard.svelte';
 
   interface Props {
@@ -23,11 +24,13 @@
   // Tracks the input list, but a drop reassigns it so the reorder applies
   // optimistically (derived override); the next `repos` change re-syncs.
   let ordered = $derived(repos);
-  let dragSourceIndex = $state<number | null>(null);
+  // The dragged card by key, not index: `repos` can change between dragstart
+  // and drop, so both ends are resolved against `ordered` at drop time.
+  let dragSourceKey = $state<string | null>(null);
 
-  function handleDragStart(index: number) {
+  function handleDragStart(repo: RepoHomeItem) {
     return (e: DragEvent) => {
-      dragSourceIndex = index;
+      dragSourceKey = repoKey(repo);
       if (e.dataTransfer) {
         e.dataTransfer.effectAllowed = 'move';
       }
@@ -41,18 +44,20 @@
     }
   }
 
-  function handleDrop(index: number) {
+  function handleDrop(target: RepoHomeItem) {
     return async (_e: DragEvent) => {
-      if (dragSourceIndex === null || dragSourceIndex === index) {
-        dragSourceIndex = null;
-        return;
-      }
+      // Only a pinned-only list may be persisted as the pin order; the parent
+      // turns reorderable off while a search shows a mixed subset.
+      if (!reorderable) return;
+      const sourceKey = dragSourceKey;
+      dragSourceKey = null;
+      if (sourceKey === null) return;
 
-      const items = [...ordered];
-      const [moved] = items.splice(dragSourceIndex, 1);
-      items.splice(index, 0, moved);
+      // Null when the source or target left the list mid-drag, or they are
+      // the same card: nothing to apply, nothing to persist.
+      const items = moveRepo(ordered, sourceKey, repoKey(target));
+      if (!items) return;
       ordered = items;
-      dragSourceIndex = null;
 
       const orderedKeys: [string, string][] = items.map((r) => [r.githubRepo, r.subpath]);
       try {
@@ -66,21 +71,21 @@
   }
 
   function handleDragEnd() {
-    dragSourceIndex = null;
+    dragSourceKey = null;
   }
 </script>
 
 <!-- Unlabelled on purpose: the SidebarSectionHead directly above already
      announces "Pinned repos" or "Repos · N results" for the current contents. -->
 <div class="pinned-repos-list" role="list">
-  {#each ordered as repo, index (repo.githubRepo + '\t' + repo.subpath)}
+  {#each ordered as repo (repoKey(repo))}
     <RepoCard
       {repo}
       hidePinButton
       {reorderable}
-      onReorderStart={handleDragStart(index)}
+      onReorderStart={handleDragStart(repo)}
       onReorderOver={handleDragOver}
-      onReorderDrop={handleDrop(index)}
+      onReorderDrop={handleDrop(repo)}
       onReorderEnd={handleDragEnd}
       onChange={() => projectsDataStore.refreshHomeRepos()}
     />

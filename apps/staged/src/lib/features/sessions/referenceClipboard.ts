@@ -286,8 +286,8 @@ function reference(ref: string, label: string, format: CopyFormat): string {
  * structure, so siblings are separated as `siblingSeparator` says; the HTML
  * flavour keeps its tags and needs nothing between them. A sibling that
  * serializes to nothing takes no separator and gives none, except a table
- * cell: it still holds its column, so its tab is kept and the columns of the
- * row line up.
+ * cell: it still holds its column, so the tab after it is kept and the
+ * columns of the row line up.
  */
 function children(parent: Node, format: CopyFormat, range?: Range): string {
   let out = '';
@@ -324,26 +324,34 @@ function siblingSeparator(previous: string, current: string): string {
 
 /**
  * The part of `separator` the ends of `before` and `after` do not already
- * supply, so a trailing `<br>` or an empty line is not doubled up. A tab is
- * always supplied: every cell after the first takes one, as the browser's own
- * copy gives, however the neighbouring cells end — an empty cell is two tabs
- * in a row, and a cell ending in `<br>` keeps the next one on its row.
+ * supply, so a trailing `<br>` or an empty line is not doubled up. A tab
+ * follows the browser's own rule: every cell after the first takes one, even
+ * after an empty cell (two tabs in a row), unless the row has given nothing
+ * yet or ends in a newline — a leading empty cell starts no tab, and a cell
+ * ending in `<br>` is followed straight by the next one's text.
  */
 function pad(before: string, after: string, separator: string): string {
   if (!separator) return '';
-  if (separator === '\t') return '\t';
+  if (separator === '\t') return before && !before.endsWith('\n') ? '\t' : '';
   const have = (before.match(/\n*$/)?.[0].length ?? 0) + (after.match(/^\n*/)?.[0].length ?? 0);
   return '\n'.repeat(Math.max(0, separator.length - have));
 }
 
-/** A whitespace-only text node beside a block element, or alone in one. */
+/**
+ * A whitespace-only text node beside a block element or a table cell, or alone
+ * in a block: the newlines markup puts between blocks, and the ones `marked`
+ * puts between the cells of a row, which the browser never renders.
+ */
 function isLayoutWhitespace(node: Node): boolean {
   if (node.nodeType !== Node.TEXT_NODE || !/^[\n\r\t ]*$/.test((node as Text).data)) return false;
-  const besideBlock = (sibling: Node | null) =>
-    sibling === null
-      ? !!node.parentElement && BLOCK_TAGS.has(node.parentElement.tagName.toLowerCase())
-      : sibling.nodeType === Node.ELEMENT_NODE &&
-        BLOCK_TAGS.has((sibling as Element).tagName.toLowerCase());
+  const parentTag = node.parentElement?.tagName.toLowerCase();
+  if (parentTag === 'tr') return true;
+  const besideBlock = (sibling: Node | null) => {
+    if (sibling === null) return !!parentTag && BLOCK_TAGS.has(parentTag);
+    if (sibling.nodeType !== Node.ELEMENT_NODE) return false;
+    const tag = (sibling as Element).tagName.toLowerCase();
+    return BLOCK_TAGS.has(tag) || CELL_TAGS.has(tag);
+  };
   return besideBlock(node.previousSibling) || besideBlock(node.nextSibling);
 }
 

@@ -9,6 +9,7 @@ vi.mock('../../commands', () => ({
 import type { HashtagItem } from '../../types';
 import { createBadgeElement } from './hashtagEditorContent';
 import { renderHashtagTokens } from './hashtagItems';
+import { renderMarkdown } from '../../shared/markdown/renderMarkdown';
 import {
   badgeReference,
   listenForReferenceCopy,
@@ -215,17 +216,17 @@ describe('serializeRange', () => {
       `<table><tr><td>a ${badge}</td><td></td><td>c</td></tr>` +
         '<tr><td></td><td>e</td><td>f</td></tr></table>'
     );
-    expect(serializeRange(rangeOf(root), 'text')).toBe(`a #note:${NOTE_ID}\t\tc\n\te\tf`);
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`a #note:${NOTE_ID}\t\tc\ne\tf`);
     expect(serializeRange(rangeOf(root), 'html')).toBe(
       `<table><tbody><tr><td>a <span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></td>` +
         '<td></td><td>c</td></tr><tr><td></td><td>e</td><td>f</td></tr></tbody></table>'
     );
   });
 
-  it('keeps a cell that ends in a line break on its row', () => {
+  it('puts no tab after a cell that ends in a line break, as the browser’s own copy does', () => {
     const badge = renderHashtagTokens(`#commit:${SHA}`, items);
     const root = mount(`<table><tr><td>a<br></td><td>${badge}</td></tr></table>`);
-    expect(serializeRange(rangeOf(root), 'text')).toBe(`a\n\t#commit:${SHA}`);
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`a\n#commit:${SHA}`);
     expect(serializeRange(rangeOf(root), 'html')).toBe(
       `<table><tbody><tr><td>a<br></td><td><span data-staged-ref="#commit:${SHA}">fix: keep refs</span></td></tr></tbody></table>`
     );
@@ -242,6 +243,25 @@ describe('serializeRange', () => {
       '<table><thead><tr><th>Item</th><th>Note</th></tr></thead>' +
         `<tbody><tr><td>one</td><td><span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></td></tr>` +
         '<tr><td>two</td><td></td></tr></tbody></table>'
+    );
+  });
+
+  it('copies a rendered GFM table one row per line and one tab per column', () => {
+    const root = mount(
+      renderMarkdown(
+        '| Item | Note | Extra |\n|---|---|---|\n' +
+          `| one | #note:${NOTE_ID} | |\n| two | three | |\n`,
+        { renderInlineText: (text) => renderHashtagTokens(text, items) }
+      )
+    );
+    expect(root.querySelector('tr')!.innerHTML.startsWith('\n<th>')).toBe(true);
+    expect(serializeRange(rangeOf(root), 'text')).toBe(
+      `Item\tNote\tExtra\none\t#note:${NOTE_ID}\t\ntwo\tthree\t`
+    );
+    expect(serializeRange(rangeOf(root), 'html')).toBe(
+      '<table><thead><tr><th>Item</th><th>Note</th><th>Extra</th></tr></thead>' +
+        `<tbody><tr><td>one</td><td><span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></td><td></td></tr>` +
+        '<tr><td>two</td><td>three</td><td></td></tr></tbody></table>'
     );
   });
 

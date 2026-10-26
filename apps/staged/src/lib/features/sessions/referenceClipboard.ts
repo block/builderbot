@@ -87,6 +87,9 @@ const SEMANTIC_TAGS = new Set([
 
 const ZERO_WIDTH_SPACE = /\u200B/g;
 
+/** Elements whose content the page never shows, so a copy must not show it either. */
+const UNRENDERED_TAGS = new Set(['script', 'style', 'template', 'noscript']);
+
 /**
  * The `#type:id` a badge stands for, or null for any other element.
  *
@@ -221,6 +224,7 @@ function serializeNode(node: Node, format: CopyFormat, range?: Range): string {
   if (node.nodeType !== Node.ELEMENT_NODE) return '';
 
   const element = node as Element;
+  if (unrendered(element)) return '';
   const tag = element.tagName.toLowerCase();
   if (tag === 'br') return format === 'html' ? '<br>' : '\n';
 
@@ -241,6 +245,15 @@ function serializeNode(node: Node, format: CopyFormat, range?: Range): string {
   }
   if (SEMANTIC_TAGS.has(tag)) return `<${tag}>${inner}</${tag}>`;
   return BLOCK_TAGS.has(tag) ? `<div>${inner}</div>` : inner;
+}
+
+/**
+ * The walk reads the DOM, not the rendering, so what the browser's own copy
+ * would leave out — script, style and template content, `[hidden]` elements —
+ * has to be left out here.
+ */
+function unrendered(element: Element): boolean {
+  return UNRENDERED_TAGS.has(element.tagName.toLowerCase()) || element.hasAttribute('hidden');
 }
 
 function reference(ref: string, label: string, format: CopyFormat): string {
@@ -295,8 +308,14 @@ function text(node: Text, format: CopyFormat, range?: Range): string {
   return format === 'html' ? escapeHtml(value) : value;
 }
 
-/** A badge keeps its identity only when all of its text is inside the selection. */
+/**
+ * A badge keeps its identity only when all of its text is inside the
+ * selection. One with no text has nothing to select, so it never does: the
+ * comparison below would otherwise hold for any range that merely touches it.
+ */
 function whole(element: Element, range: Range): boolean {
+  const label = visible(element.textContent ?? '');
+  if (!label) return false;
   const content = element.ownerDocument.createRange();
   content.selectNodeContents(element);
   const clipped = range.cloneRange();
@@ -306,7 +325,7 @@ function whole(element: Element, range: Range): boolean {
   if (clipped.compareBoundaryPoints(Range.END_TO_END, content) > 0) {
     clipped.setEnd(content.endContainer, content.endOffset);
   }
-  return visible(clipped.toString()) === visible(element.textContent ?? '');
+  return visible(clipped.toString()) === label;
 }
 
 function visible(value: string): string {

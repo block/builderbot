@@ -180,6 +180,25 @@ describe('serializeRange', () => {
     );
   });
 
+  it('leaves out what the page never shows, as the browser’s own copy would', () => {
+    const root = mount(
+      `<div><p>see ${renderHashtagTokens(`#note:${NOTE_ID}`, items)}</p>` +
+        '<style>.x { color: red }</style><script>var leak = 1;</script>' +
+        '<template><p>stamp</p></template><noscript>enable js</noscript>' +
+        '<p hidden>secret</p><p>done <span hidden>also secret</span></p></div>'
+    );
+    expect(serializeRange(rangeOf(root), 'text')).toBe(`see #note:${NOTE_ID}\ndone `);
+    expect(serializeRange(rangeOf(root), 'html')).toBe(
+      `<div><p>see <span data-staged-ref="#note:${NOTE_ID}">Porting notes</span></p><p>done </p></div>`
+    );
+  });
+
+  it('never keeps a badge that has no text to select', () => {
+    const root = mount(`<p>see <span data-token="#note:${NOTE_ID}"> </span> done</p>`);
+    expect(serializeRange(rangeOf(root), 'text')).toBe('see  done');
+    expect(serializeRange(rangeOf(root), 'html')).toBe('<p>see  done</p>');
+  });
+
   it('escapes titles and text read from the DOM', () => {
     const hostile: HashtagItem = { ...items[0], title: '"><img src=x onerror=alert(1)>' };
     const root = mount(`<p>${renderHashtagTokens(`#note:${NOTE_ID} <b>`, [hostile])}</p>`);

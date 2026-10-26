@@ -466,12 +466,17 @@
       if (e.defaultPrevented) return;
     }
 
+    // With nothing to read, or no selection in the editor to insert at, the
+    // browser's own paste is left to run rather than swallowed.
+    const sel = window.getSelection();
+    if (!e.clipboardData || !editorEl || !sel?.rangeCount || !editorEl.contains(sel.anchorNode)) {
+      return;
+    }
     e.preventDefault();
-    if (!e.clipboardData) return;
     // Our own HTML carries references; any other HTML is reduced to its text.
     const text = readReferenceClipboard(e.clipboardData);
     if (resolvesReference(text)) {
-      insertContent(text);
+      insertContent(text, sel.getRangeAt(0));
     } else {
       document.execCommand('insertText', false, text);
     }
@@ -488,15 +493,12 @@
   }
 
   /**
-   * Insert `text` at the selection as the badges and text renderContent would
-   * build, which execCommand('insertText') cannot. The input event is raised
-   * by hand so the value is extracted exactly as it is after typing.
+   * Replace `range`, a selection inside the editor, with `text` as the badges
+   * and text renderContent would build, which execCommand('insertText')
+   * cannot. The input event is raised by hand so the value is extracted
+   * exactly as it is after typing.
    */
-  function insertContent(text: string) {
-    const sel = window.getSelection();
-    if (!editorEl || !sel?.rangeCount || !editorEl.contains(sel.anchorNode)) return;
-
-    const range = sel.getRangeAt(0);
+  function insertContent(text: string, range: Range) {
     range.deleteContents();
     const { fragment, unresolved } = hashtagContentFragment(text, itemsById);
     const last = fragment.lastChild;
@@ -504,11 +506,12 @@
     if (last) {
       range.setStartAfter(last);
       range.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(range);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
     }
     hasUnresolvedTokens = hasUnresolvedTokens || unresolved;
-    editorEl.dispatchEvent(
+    editorEl?.dispatchEvent(
       new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' })
     );
   }

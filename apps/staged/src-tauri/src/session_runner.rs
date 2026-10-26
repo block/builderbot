@@ -2850,7 +2850,7 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
 /// just as terminal (`cancelled`, written by [`finish_cancelled_before_run`])
 /// and whose branch queue would otherwise sit parked until some unrelated
 /// session happened to finish.
-fn drain_queued_after_terminal_state(
+pub(crate) fn drain_queued_after_terminal_state(
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
     app_handle: AppHandle,
@@ -3478,16 +3478,23 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 // Orphaned session recovery
 // =============================================================================
 
-/// On startup, recover any sessions whose owner process is no longer alive.
+/// Recover any sessions whose owner process is no longer alive.
 ///
 /// Each session records the PID of the Staged process that started it
-/// (`owner_pid`). On startup we check each running session:
-/// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
+/// (`owner_pid`). Run once at startup and then on a timer by
+/// [`spawn_dead_session_sweep`]; for each running session:
+/// - `owner_pid` is our own PID → ours; its session thread owns the row, skip.
 /// - `owner_pid` belongs to a live process → another Staged instance owns
 ///   it; leave it alone.
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
 ///   error with `AppQuit` reason and emit `session-status-changed` so the
 ///   frontend learns the outcome.
+///
+/// Only `running` rows are swept. A `queued` row carries no owner — it waits
+/// for a branch drain, and whether one is still coming depends on the
+/// branch's other sessions, dependency gating and in-flight worktree
+/// operations — so there is no cheap test here for a queued row that nothing
+/// will ever drain.
 pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
@@ -3516,6 +3523,13 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
                 .unwrap_or(false);
             let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
             let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
+            if transitioned {
+                log::info!(
+                    "Recovered session {} whose owner process {:?} is gone",
+                    session.id,
+                    session.owner_pid
+                );
+            }
             emit_status(
                 &app_handle,
                 &session.id,
@@ -3536,6 +3550,29 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
             }
         }
     }
+}
+
+/// How often [`spawn_dead_session_sweep`] re-runs [`recover_dead_sessions`].
+const DEAD_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Re-run [`recover_dead_sessions`] periodically for the life of the process.
+///
+/// The startup sweep only helps the instance that restarts. Every build
+/// flavour shares one database, status events are delivered in-process, and a
+/// desktop window hydrates its busy state once at load — so a session owned
+/// by an instance that dies later stays `running` in every *other* window's
+/// sidebar until one of them happens to restart. Sweeping on a timer finalizes
+/// the row and emits its terminal event from whichever instance is still up.
+pub fn spawn_dead_session_sweep(store: Arc<Store>, app_handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(DEAD_SESSION_SWEEP_INTERVAL);
+        // The first tick completes immediately; startup already ran that sweep.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            recover_dead_sessions(Arc::clone(&store), app_handle.clone());
+        }
+    });
 }
 
 /// On startup, return unsent queued follow-up messages claimed by dead owners

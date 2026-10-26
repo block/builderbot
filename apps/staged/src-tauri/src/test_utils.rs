@@ -12,6 +12,12 @@ pub struct TempGitRepo {
     path: PathBuf,
 }
 
+impl Default for TempGitRepo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TempGitRepo {
     pub fn new() -> Self {
         let path = std::env::temp_dir().join(format!("staged-test-{}", Uuid::new_v4()));

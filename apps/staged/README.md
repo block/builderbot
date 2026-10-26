@@ -89,10 +89,9 @@ This project uses [Hermit](https://github.com/cashapp/hermit) to manage developm
 
 ```bash
 source bin/activate-hermit   # Activate hermit environment
-rustup default stable        # Set the default Rust toolchain
 ```
 
-After activation, `cargo`, `node`, `npm`, and `just` are all available from the hermit-managed versions.
+After activation, `cargo`, `node`, `npm`, and `just` are all available from the hermit-managed versions. The Rust toolchain is pinned by the repo-root `rust-toolchain.toml`; hermit's `rustup` reads it and installs the pinned version on first use, so there is no need to run `rustup default`.
 
 ### Quick Start
 

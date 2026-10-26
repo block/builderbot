@@ -1367,14 +1367,12 @@ fn finish_immediate_pull_session(store: &Arc<Store>, session_id: &str, error: Op
 /// its turn on the branch queue.
 pub(crate) async fn pull_or_queue_branch_for_branch(
     store: Arc<Store>,
-    registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
     let pull_store = Arc::clone(&store);
     let pull_branch_id = branch_id.clone();
-    let drain_store = Arc::clone(&store);
-    let drain_branch_id = branch_id.clone();
+    let kick_branch_id = branch_id.clone();
     pull_or_queue_branch_with(
         store,
         branch_id,
@@ -1382,24 +1380,12 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
         move || {
             // Anything the user requested while the pull held the branch is
             // queued behind the marker session, and the marker bypassed the
-            // session runner that would normally drain it. Spawned rather than
-            // awaited so the pull's own result isn't held up by starting
-            // someone else's work.
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
-                    drain_store,
-                    registry,
-                    app_handle,
-                    drain_branch_id.clone(),
-                    None,
-                )
-                .await
-                {
-                    log::warn!(
-                        "[prs] Failed to drain queued sessions after pulling {drain_branch_id}: {e}"
-                    );
-                }
-            });
+            // session runner that would normally drain it.
+            crate::session_queue::kick(
+                &app_handle,
+                &kick_branch_id,
+                crate::session_queue::KickSource::ImmediatePull,
+            );
         },
     )
     .await
@@ -1456,12 +1442,11 @@ async fn pull_or_queue_branch_with(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn pull_or_queue_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
     let store = get_store(&store)?;
-    pull_or_queue_branch_for_branch(store, Arc::clone(&registry), app_handle, branch_id).await
+    pull_or_queue_branch_for_branch(store, app_handle, branch_id).await
 }
 
 fn create_pr_handoff_prompt(

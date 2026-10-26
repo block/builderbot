@@ -173,8 +173,9 @@ impl QuitState {
 }
 
 /// [`QuitState::is_quitting`] from anywhere that holds an `AppHandle`. `false`
-/// when the state isn't managed (mock apps in tests).
-pub(crate) fn is_quitting(app: &AppHandle) -> bool {
+/// when the state isn't managed (mock apps in tests). Generic over the runtime
+/// so the queue kicker, which mock-app tests drive, can read it too.
+pub(crate) fn is_quitting<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     app.try_state::<QuitState>()
         .is_some_and(|quit_state| quit_state.is_quitting())
 }

@@ -145,24 +145,29 @@ impl Store {
     /// compare-before-publish in [`Store::update_branch_pr_status`]. (Unlike
     /// that method the write itself is skippable: the only column a no-op would
     /// touch is `updated_at`, which nothing reads.)
+    ///
+    /// Returns whether the status moved, so a caller that must act on the
+    /// transition itself — a workspace reaching `Running` kicks the branch's
+    /// session queue — keys off the same detector the publish does.
     pub fn update_branch_workspace_status(
         &self,
         id: &str,
         status: &WorkspaceStatus,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
             "UPDATE branches SET workspace_status = ?1, updated_at = ?2
              WHERE id = ?3 AND workspace_status IS NOT ?1",
             params![status.as_str(), now_timestamp(), id],
         )?;
-        if rows > 0 {
+        let changed = rows > 0;
+        if changed {
             self.publish_with(|| StoreChange::Branch {
                 branch_id: id.to_string(),
                 project_id: Self::branch_project_id(&conn, id),
             });
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Update workspace status for all branches sharing a given workspace name.

@@ -1861,7 +1861,7 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                         status: "cancelled".to_string(),
                         error_message: None,
                         completion_reason: Some("interrupted".to_string()),
-                        branch_id,
+                        branch_id: branch_id.clone(),
                         project_id,
                         session_type: None,
                     },
@@ -1873,6 +1873,16 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                     &store, app_handle, session_id,
                 ) {
                     log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
+                }
+                // The row was the branch's busy marker (or a queued barrier);
+                // the terminal-state drain that would normally follow belongs
+                // to a runner this row never had.
+                if let Some(branch_id) = branch_id {
+                    crate::session_queue::kick(
+                        app_handle,
+                        &branch_id,
+                        crate::session_queue::KickSource::CancelFallback,
+                    );
                 }
             }
         }
@@ -1931,13 +1941,38 @@ pub fn get_session_background_hold(
 pub fn delete_session(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     session_id: String,
 ) -> Result<(), String> {
-    registry.cancel(&session_id);
+    delete_session_impl(&registry, &get_store(&store)?, &app_handle, &session_id)
+}
 
-    get_store(&store)?
-        .delete_session(&session_id)
-        .map_err(|e| e.to_string())
+/// Delete a session row, for both transports.
+///
+/// A queued or running row is the branch's busy marker or a barrier in its
+/// queue, so its branch is resolved before the delete — the row is the only
+/// link — and kicked after it.
+pub(crate) fn delete_session_impl<R: tauri::Runtime>(
+    registry: &session_runner::SessionRegistry,
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
+) -> Result<(), String> {
+    registry.cancel(session_id);
+    let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
+
+    store
+        .delete_session(session_id)
+        .map_err(|e| e.to_string())?;
+
+    if let Some(branch_id) = branch_id {
+        crate::session_queue::kick(
+            app_handle,
+            &branch_id,
+            crate::session_queue::KickSource::SessionDeleted,
+        );
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -3630,15 +3665,11 @@ async fn complete_running_branch_session_start(
     };
 
     if owes_drain {
-        match drain_queued_sessions_for_branch(store, registry, app_handle, branch_id, None).await {
-            Ok(true) => log::info!(
-                "Drained next queued session after session {session_id} did not start an agent"
-            ),
-            Ok(false) => {}
-            Err(e) => log::error!(
-                "Failed to drain queued sessions after session {session_id} did not start an agent: {e}"
-            ),
-        }
+        crate::session_queue::kick(
+            &app_handle,
+            &branch_id,
+            crate::session_queue::KickSource::StartFailed,
+        );
     }
 }
 
@@ -3949,8 +3980,10 @@ pub async fn drain_queued_sessions_for_branch(
 }
 
 /// The drain itself; see [`drain_queued_sessions_for_branch`] for why it only
-/// ever runs on a task of its own.
-async fn drain_branch_queue(
+/// ever runs on a task of its own. The queue kicker
+/// ([`crate::session_queue::kick`]) runs this directly, on the task it already
+/// owns.
+pub(crate) async fn drain_branch_queue(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
@@ -4057,6 +4090,42 @@ async fn drain_branch_queue(
     }
 
     Ok(started_any)
+}
+
+/// The drain's scheduling scan with the runner taken out: claim every queued
+/// row the branch's rules would let [`drain_branch_queue`] start, in order,
+/// stopping at the same barriers, and return the claimed ids.
+///
+/// What a test kicker drains with. The real drain hands each claimed row to
+/// `start_session`, which needs the concrete app runtime; this leaves them
+/// `running` so a store-level test can observe which rows a kick moved.
+#[cfg(test)]
+pub(crate) fn claim_startable_queued_sessions(
+    store: &Store,
+    branch_id: &str,
+) -> Result<Vec<String>, String> {
+    let queued = store
+        .get_queued_sessions_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    let mut active = running_branch_session_kinds(store, branch_id)?;
+    let mut claimed = Vec::new();
+    for session in queued {
+        let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, true)?
+        else {
+            continue;
+        };
+        if !can_start_with_active_branch_sessions(schedule.kind, &active) {
+            break;
+        }
+        if store
+            .transition_queued_to_running(&session.id)
+            .map_err(|e| e.to_string())?
+        {
+            active.insert(schedule.kind);
+            claimed.push(session.id);
+        }
+    }
+    Ok(claimed)
 }
 
 /// Start one specific queued session now, ahead of the branch's queue.

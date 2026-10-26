@@ -231,6 +231,15 @@ struct RegistryInner {
     /// lets `register` apply it the instant the session appears, closing the
     /// race that a fixed-delay retry could miss for slow (e.g. remote) startups.
     pending_cancellations: HashMap<String, CompletionReason>,
+    /// When each session left `running`, as a store timestamp (ms).
+    ///
+    /// A session thread deregisters *before* its post-completion hooks and
+    /// terminal write (see `deregister`'s callers), so for that stretch the row
+    /// is `running` with no token and an `updated_at` as old as the turn. The
+    /// stranded-session sweep (`session_queue::sweep`) reads this to tell that
+    /// stretch apart from a row nothing will ever finish; it prunes the stamps
+    /// older than its grace, so the map stays bounded.
+    deregistered_at: HashMap<String, i64>,
 }
 
 struct RunningSession {
@@ -424,7 +433,30 @@ impl SessionRegistry {
     /// Remove a session from the registry (called by the background thread
     /// on exit, regardless of success/failure/cancellation).
     fn deregister(&self, session_id: &str) {
-        self.inner.lock().unwrap().running.remove(session_id);
+        let mut inner = self.inner.lock().unwrap();
+        inner.running.remove(session_id);
+        inner
+            .deregistered_at
+            .insert(session_id.to_string(), crate::store::now_timestamp());
+    }
+
+    /// When `session_id` last deregistered, if the sweep has not pruned it.
+    pub(crate) fn deregistered_at(&self, session_id: &str) -> Option<i64> {
+        self.inner
+            .lock()
+            .unwrap()
+            .deregistered_at
+            .get(session_id)
+            .copied()
+    }
+
+    /// Drop the deregistration stamps older than `cutoff`.
+    pub(crate) fn forget_deregistrations_before(&self, cutoff: i64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .deregistered_at
+            .retain(|_, at| *at >= cutoff);
     }
 
     /// Remove a session from the registry and report the cancellation it had
@@ -435,12 +467,12 @@ impl SessionRegistry {
     /// thread deregisters *because* it observed the cancel and is about to write
     /// the terminal state itself.
     fn deregister_reporting_cancellation(&self, session_id: &str) -> Option<CompletionReason> {
-        self.inner
-            .lock()
-            .unwrap()
-            .running
-            .remove(session_id)
-            .and_then(|running| running.accepted_cancellation())
+        let mut inner = self.inner.lock().unwrap();
+        let removed = inner.running.remove(session_id);
+        inner
+            .deregistered_at
+            .insert(session_id.to_string(), crate::store::now_timestamp());
+        removed.and_then(|running| running.accepted_cancellation())
     }
 
     /// Register `session_id` around its fallible startup work: the token
@@ -1761,25 +1793,11 @@ pub fn start_session(
                     }
 
                     if let Some(branch_id) = branch_id {
-                        match crate::session_commands::drain_queued_sessions_for_branch(
-                            Arc::clone(&store_for_follow_up),
-                            Arc::clone(&registry_for_follow_up),
-                            app_handle_for_follow_up.clone(),
-                            branch_id.clone(),
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                log::info!("Drained next queued session for branch {branch_id}");
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                log::error!(
-                                    "Failed to drain queued sessions for branch {branch_id}: {e}"
-                                );
-                            }
-                        }
+                        crate::session_queue::kick(
+                            &app_handle_for_follow_up,
+                            &branch_id,
+                            crate::session_queue::KickSource::TerminalState,
+                        );
                     }
                 });
             }
@@ -2594,21 +2612,11 @@ fn drain_queued_after_terminal_state(
         }
 
         if let Some(branch_id) = branch_id {
-            match crate::session_commands::drain_queued_sessions_for_branch(
-                store,
-                registry,
-                app_handle,
-                branch_id.clone(),
-                None,
-            )
-            .await
-            {
-                Ok(true) => log::info!("Drained next queued session for branch {branch_id}"),
-                Ok(false) => {}
-                Err(e) => log::error!(
-                    "Failed to drain queued sessions after a terminal state for branch {branch_id}: {e}"
-                ),
-            }
+            crate::session_queue::kick(
+                &app_handle,
+                &branch_id,
+                crate::session_queue::KickSource::TerminalState,
+            );
         }
     });
 }
@@ -3209,11 +3217,7 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
 ///   error with `AppQuit` reason and emit `session-status-changed` so the
 ///   frontend learns the outcome.
-pub fn recover_dead_sessions(
-    store: Arc<Store>,
-    registry: Arc<SessionRegistry>,
-    app_handle: AppHandle,
-) {
+pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -3251,34 +3255,12 @@ pub fn recover_dead_sessions(
                 recovered_project_id,
             );
             if transitioned {
-                let branch_id = recovered_branch_id;
-                if let Some(branch_id) = branch_id {
-                    let store_for_follow_up = Arc::clone(&store);
-                    let registry_for_follow_up = Arc::clone(&registry);
-                    let app_handle_for_follow_up = app_handle.clone();
-                    tauri::async_runtime::spawn(async move {
-                        match crate::session_commands::drain_queued_sessions_for_branch(
-                            store_for_follow_up,
-                            registry_for_follow_up,
-                            app_handle_for_follow_up,
-                            branch_id.clone(),
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                log::info!(
-                                    "Drained next queued session after orphan recovery for branch {branch_id}"
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                log::error!(
-                                    "Failed to drain queued sessions after orphan recovery for branch {branch_id}: {e}"
-                                );
-                            }
-                        }
-                    });
+                if let Some(branch_id) = recovered_branch_id {
+                    crate::session_queue::kick(
+                        &app_handle,
+                        &branch_id,
+                        crate::session_queue::KickSource::DeadOwnerRecovered,
+                    );
                 }
             }
         }
@@ -4292,9 +4274,10 @@ fn find_closing_fence(text: &str) -> Option<usize> {
 }
 
 /// Generic over the runtime purely so the paths that end a session *before* it
-/// runs (see [`finish_cancelled_before_run`]) can be driven by a mock app in
-/// tests. Every production caller passes the concrete handle.
-fn emit_status<R: tauri::Runtime>(
+/// runs (see [`finish_cancelled_before_run`]) and the stranded-session sweep
+/// can be driven by a mock app in tests. Every production caller passes the
+/// concrete handle.
+pub(crate) fn emit_status<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     session_id: &str,
     status: &str,

@@ -1296,22 +1296,44 @@ pub(crate) fn cleanup_reviews_after_commit(
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_review(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     review_id: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
-    let store = crate::get_store(&store)?;
+    delete_review_impl(
+        &crate::get_store(&store)?,
+        &app_handle,
+        &review_id,
+        delete_session.unwrap_or(false),
+    )
+}
+
+/// The body of [`delete_review`], shared with the web dispatcher's arm. Kicks
+/// the branch afterwards for the reason given on
+/// [`crate::note_commands::delete_note_impl`].
+pub(crate) fn delete_review_impl<R: tauri::Runtime>(
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
+    review_id: &str,
+    delete_session: bool,
+) -> Result<(), String> {
     let review = store
-        .get_review(&review_id)
+        .get_review(review_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Review not found: {review_id}"))?;
 
-    store.delete_review(&review_id).map_err(|e| e.to_string())?;
+    store.delete_review(review_id).map_err(|e| e.to_string())?;
 
-    if delete_session.unwrap_or(false) {
+    if delete_session {
         if let Some(sid) = review.session_id {
             let _ = store.delete_session(&sid);
         }
     }
+    crate::session_queue::kick(
+        app_handle,
+        &review.branch_id,
+        crate::session_queue::KickSource::ArtifactDeleted,
+    );
     Ok(())
 }
 
@@ -1321,13 +1343,34 @@ pub fn delete_review(
 pub fn delete_pending_commit(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     commit_id: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
-    let store = crate::get_store(&store)?;
+    delete_pending_commit_impl(
+        &crate::get_store(&store)?,
+        &registry,
+        &app_handle,
+        &commit_id,
+        delete_session.unwrap_or(false),
+    )
+}
 
+/// The body of [`delete_pending_commit`], shared with the web dispatcher's
+/// arm.
+///
+/// A queued commit is the FIFO barrier in front of everything queued after
+/// it, so the kick here is what lets those rows start once the barrier is
+/// gone — without it they waited for a client's follow-up drain.
+pub(crate) fn delete_pending_commit_impl<R: tauri::Runtime>(
+    store: &Arc<Store>,
+    registry: &session_runner::SessionRegistry,
+    app_handle: &tauri::AppHandle<R>,
+    commit_id: &str,
+    delete_session: bool,
+) -> Result<(), String> {
     let commit = store
-        .get_commit(&commit_id)
+        .get_commit(commit_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Commit not found: {commit_id}"))?;
 
@@ -1340,15 +1383,20 @@ pub fn delete_pending_commit(
     }
 
     // Clean up reviews created at or after this commit
-    cleanup_reviews_after_commit(&store, &registry, &commit);
+    cleanup_reviews_after_commit(store, registry, &commit);
 
-    store.delete_commit(&commit_id).map_err(|e| e.to_string())?;
+    store.delete_commit(commit_id).map_err(|e| e.to_string())?;
 
-    if delete_session.unwrap_or(false) {
+    if delete_session {
         if let Some(sid) = commit.session_id {
             let _ = store.delete_session(&sid);
         }
     }
+    crate::session_queue::kick(
+        app_handle,
+        &commit.branch_id,
+        crate::session_queue::KickSource::ArtifactDeleted,
+    );
 
     Ok(())
 }

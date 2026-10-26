@@ -712,22 +712,16 @@ impl ProjectToolsHandler {
                 Err(e) => return e,
             };
 
-        // The inherited provider, not the review-resolved one: this argument is the
-        // branch-wide default the drain pass applies to every queued session without
-        // a stored provider, so a review's fallback agent must not pull unrelated
-        // queued sessions off the project session's provider. The session created
-        // above carries its own resolved provider on its row.
-        if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
-            Arc::clone(&self.store),
-            Arc::clone(&self.registry),
-            self.app_handle.clone(),
-            target.branch.id.clone(),
-            self.provider.clone(),
-        )
-        .await
-        {
-            return format!("Error draining queued sessions: {e}");
-        }
+        // The session created above carries its own resolved provider on its
+        // row, so the kick's drain needs no branch-wide default. The drain runs
+        // on the kicker's task: a cancelled tool call can no longer abandon a
+        // half-claimed row, and a drain failure surfaces on the session row,
+        // where `wait_for_repo_session` reports it.
+        crate::session_queue::kick(
+            &self.app_handle,
+            &target.branch.id,
+            crate::session_queue::KickSource::Mcp,
+        );
 
         serde_json::json!({
             "repo_session_id": repo_session_id,
@@ -825,14 +819,11 @@ impl ProjectToolsHandler {
                         session_type: None,
                     },
                 );
-                let _ = crate::session_commands::drain_queued_sessions_for_branch(
-                    Arc::clone(&self.store),
-                    Arc::clone(&self.registry),
-                    self.app_handle.clone(),
-                    branch_id,
-                    None,
-                )
-                .await;
+                crate::session_queue::kick(
+                    &self.app_handle,
+                    &branch_id,
+                    crate::session_queue::KickSource::Mcp,
+                );
             }
         } else {
             // Session is running (or already terminal). Ask the runner to cancel.
@@ -998,10 +989,11 @@ impl ProjectToolsHandler {
             );
             let branch_id = branch.id.clone();
             let store = Arc::clone(&self.store);
+            let app_handle = self.app_handle.clone();
             let worktree_result = tauri::async_runtime::spawn_blocking(move || {
                 // We need to run the worktree setup synchronously
                 // Reuse the core logic from branches::setup_worktree
-                crate::branches::setup_worktree_sync(&store, &branch_id, None)
+                crate::branches::setup_worktree_sync(&store, &branch_id, &app_handle)
             })
             .await;
 

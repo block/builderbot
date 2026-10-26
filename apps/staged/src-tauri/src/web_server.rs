@@ -989,7 +989,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                                 crate::branches::setup_worktree_sync(
                                     &store_clone,
                                     &branch_id_clone,
-                                    Some(&app_handle_clone),
+                                    &app_handle_clone,
                                 )
                             })
                             .await;
@@ -1867,9 +1867,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     }
                 }
             }
-            store
+            let changed = store
                 .update_branch_workspace_status(&branch_id, &new_status)
                 .map_err(|e| e.to_string())?;
+            crate::branches::workspace_status_written(app_handle, &branch_id, changed, &new_status);
             Ok(serde_json::to_value(crate::PollWorkspaceResult {
                 status: new_status.as_str().to_string(),
                 workstation_id: crate::branches::cached_workstation_id(ws_name),
@@ -1951,9 +1952,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                                 cache.insert(ws_name.to_string(), ws_id);
                             }
                         }
-                        store
-                            .update_branch_workspace_status(branch_id, &new_status)
-                            .ok();
+                        if let Ok(changed) =
+                            store.update_branch_workspace_status(branch_id, &new_status)
+                        {
+                            crate::branches::workspace_status_written(
+                                app_handle,
+                                branch_id,
+                                changed,
+                                &new_status,
+                            );
+                        }
                         if new_status == store::WorkspaceStatus::Starting {
                             starting_workspaces
                                 .entry(ws_name.to_string())
@@ -2071,6 +2079,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             let worktree_str = crate::branches::create_and_link_worktree(
                 &store,
+                app_handle,
                 &branch,
                 &repo_path,
                 &desired_worktree_path,
@@ -2123,6 +2132,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
                 crate::branches::create_and_link_worktree(
                     &store,
+                    app_handle,
                     &branch,
                     &repo_path,
                     &desired_worktree_path,
@@ -2312,12 +2322,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             &branch.branch_name,
                         )
                         .await?;
-                        store
+                        let changed = store
                             .update_branch_workspace_status(
                                 &branch_id,
                                 &store::WorkspaceStatus::Running,
                             )
                             .map_err(|e| e.to_string())?;
+                        crate::branches::workspace_status_written(
+                            app_handle,
+                            &branch_id,
+                            changed,
+                            &store::WorkspaceStatus::Running,
+                        );
                         return Ok(Value::Null);
                     }
                 }
@@ -2746,13 +2762,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             // Returns the queued session id, or null when the pull ran now.
-            let queued_session_id = crate::prs::pull_or_queue_branch_for_branch(
-                store,
-                Arc::clone(session_registry),
-                app_handle.clone(),
-                branch_id,
-            )
-            .await?;
+            let queued_session_id =
+                crate::prs::pull_or_queue_branch_for_branch(store, app_handle.clone(), branch_id)
+                    .await?;
             Ok(serde_json::to_value(queued_session_id).unwrap())
         }
         "reset_branch_to_remote" => {
@@ -2820,20 +2832,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let note = store
-                .get_note(&note_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Note not found: {note_id}"))?;
-            store.delete_note(&note_id).map_err(|e| e.to_string())?;
-            crate::note_media::cleanup_unreferenced(
+            crate::note_commands::delete_note_impl(
                 &store,
-                crate::note_media::refs::media_ids(&note.content),
-            );
-            if delete_session_flag.unwrap_or(false) {
-                if let Some(sid) = note.session_id {
-                    let _ = store.delete_session(&sid);
-                }
-            }
+                app_handle,
+                &note_id,
+                delete_session_flag.unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "get_note" => {
@@ -3073,36 +3077,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let review_id: String = arg(&args, "reviewId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let review = store
-                .get_review(&review_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Review not found: {review_id}"))?;
-            store.delete_review(&review_id).map_err(|e| e.to_string())?;
-            if delete_session_flag.unwrap_or(false) {
-                if let Some(sid) = review.session_id {
-                    let _ = store.delete_session(&sid);
-                }
-            }
+            crate::timeline::delete_review_impl(
+                &store,
+                app_handle,
+                &review_id,
+                delete_session_flag.unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "delete_pending_commit" => {
             let store = get_store(store_mutex)?;
             let commit_id: String = arg(&args, "commitId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let commit = store
-                .get_commit(&commit_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Commit not found: {commit_id}"))?;
-            if commit.sha.is_some() {
-                return Err("Cannot use delete_pending_commit for commits with a SHA".to_string());
-            }
-            crate::timeline::cleanup_reviews_after_commit(&store, session_registry, &commit);
-            store.delete_commit(&commit_id).map_err(|e| e.to_string())?;
-            if delete_session_flag.unwrap_or(false) {
-                if let Some(sid) = commit.session_id {
-                    let _ = store.delete_session(&sid);
-                }
-            }
+            crate::timeline::delete_pending_commit_impl(
+                &store,
+                session_registry,
+                app_handle,
+                &commit_id,
+                delete_session_flag.unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "delete_commit" => {
@@ -3939,10 +3932,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "delete_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            session_registry.cancel(&session_id);
-            store
-                .delete_session(&session_id)
-                .map_err(|e| e.to_string())?;
+            session_commands::delete_session_impl(
+                session_registry,
+                &store,
+                app_handle,
+                &session_id,
+            )?;
             Ok(Value::Null)
         }
         // =====================================================================
@@ -4449,6 +4444,31 @@ mod tests {
             "the web `cancel_session` arm must call the shared body, not cancel \
              through the registry alone: {arm}"
         );
+    }
+
+    /// The delete arms must reach the bodies the Tauri commands use. Those
+    /// bodies kick the branch queue after the delete — a queued commit is the
+    /// barrier in front of everything queued behind it — and an arm that
+    /// re-implemented the delete inline would drop the kick without any
+    /// compile error.
+    #[test]
+    fn web_delete_arms_share_the_tauri_bodies() {
+        let source = include_str!("web_server.rs");
+        for (command, body) in [
+            ("delete_note", "note_commands::delete_note_impl("),
+            ("delete_review", "timeline::delete_review_impl("),
+            (
+                "delete_pending_commit",
+                "timeline::delete_pending_commit_impl(",
+            ),
+            ("delete_session", "session_commands::delete_session_impl("),
+        ] {
+            let arm = dispatch_arm_body(source, command);
+            assert!(
+                arm.contains(body),
+                "the web `{command}` arm must call `{body}`, not delete inline: {arm}"
+            );
+        }
     }
 
     /// The windowed transcript read must accept the same optional window the

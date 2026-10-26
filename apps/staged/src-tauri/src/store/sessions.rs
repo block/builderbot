@@ -428,6 +428,24 @@ impl Store {
         Ok(sessions)
     }
 
+    /// Every branch with at least one queued session.
+    ///
+    /// The startup kick's read: a branch whose queue was left parked — by a
+    /// previous run, or by a client that never got to its own drain — is
+    /// moved along without anyone connected.
+    pub fn branch_ids_with_queued_sessions(&self) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT branch_id FROM sessions
+             WHERE status = 'queued' AND branch_id IS NOT NULL
+             ORDER BY branch_id",
+        )?;
+        let branch_ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(branch_ids)
+    }
+
     /// Check whether a branch already has a running session.
     ///
     /// Any branch-scoped session counts, so a push in flight blocks new

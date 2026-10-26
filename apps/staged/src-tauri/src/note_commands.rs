@@ -90,27 +90,51 @@ pub fn update_note(
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
     note_id: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
-    let store = crate::get_store(&store)?;
+    delete_note_impl(
+        &crate::get_store(&store)?,
+        &app_handle,
+        &note_id,
+        delete_session.unwrap_or(false),
+    )
+}
+
+/// The body of [`delete_note`], shared with the web dispatcher's arm.
+///
+/// A note's session may be the branch's busy marker or a barrier in its
+/// queue, so the branch is kicked after the delete; the kick is what starts
+/// whatever was queued behind it without a client's follow-up.
+pub(crate) fn delete_note_impl<R: tauri::Runtime>(
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
+    note_id: &str,
+    delete_session: bool,
+) -> Result<(), String> {
     // Look up the note first so we can find its session
     let note = store
-        .get_note(&note_id)
+        .get_note(note_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Note not found: {note_id}"))?;
 
-    store.delete_note(&note_id).map_err(|e| e.to_string())?;
+    store.delete_note(note_id).map_err(|e| e.to_string())?;
     crate::note_media::cleanup_unreferenced(
-        &store,
+        store,
         crate::note_media::refs::media_ids(&note.content),
     );
 
-    if delete_session.unwrap_or(false) {
+    if delete_session {
         if let Some(sid) = note.session_id {
             let _ = store.delete_session(&sid);
         }
     }
+    crate::session_queue::kick(
+        app_handle,
+        &note.branch_id,
+        crate::session_queue::KickSource::ArtifactDeleted,
+    );
     Ok(())
 }
 

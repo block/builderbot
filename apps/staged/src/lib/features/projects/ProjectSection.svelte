@@ -5,7 +5,7 @@
   controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { listenToEvent } from '../../transport';
   import FileText from '@lucide/svelte/icons/file-text';
   import type {
@@ -41,7 +41,7 @@
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
-  import { openDiffRoute } from '../layout/navigation.svelte';
+  import { navigation, openDiffRoute } from '../layout/navigation.svelte';
   import {
     disabledReferenceNav,
     pushReferenceEntry,
@@ -312,6 +312,20 @@
   let childHashtagItems = $state<HashtagItem[]>([]);
   let childHashtagLoadGeneration = 0;
   let noteModalHashtagItems = $derived([...hashtagItems, ...childHashtagItems]);
+
+  // This section stays mounted, parked, under settings and the diff view
+  // (App.svelte); its dialogs would otherwise stay open above them. Close them
+  // as unmounting used to — the composer hands its draft back on the way out.
+  $effect(() => {
+    if (!navigation.workspaceParked) return;
+    untrack(() => {
+      showProjectSessionModal = false;
+      if (openNote) {
+        closeOpenNote();
+        void loadProjectNotes();
+      }
+    });
+  });
 
   $effect(() => {
     const _signature = hashtagSignature;

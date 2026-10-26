@@ -279,8 +279,8 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    // Still mounted, parked, under the settings page.
-    if (navigation.activeView !== 'workspace') return;
+    // Still mounted, parked, under settings or the diff view.
+    if (navigation.workspaceParked) return;
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
     // Typing in an input must not trigger shortcuts, but the natural flow for

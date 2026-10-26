@@ -22,7 +22,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type {
@@ -410,6 +410,9 @@
     });
   });
 
+  // Set by the close paths below; see onDestroy.
+  let closed = false;
+
   function handleSubmit(e?: Event) {
     e?.preventDefault();
     // Review mode allows empty prompts; other modes require text or a snippet.
@@ -426,6 +429,7 @@
       acpConfigSelection: acpPickerSelection.acpConfigSelection,
     });
     // Close immediately; parent handles async start + optimistic timeline row.
+    closed = true;
     onClose({ prompt: '', mode: currentMode, imageIds: [] });
   }
 
@@ -433,12 +437,20 @@
     // Snippets are modal-local state, so they'd die with the component on an
     // accidental dismiss. Fold them into the preserved draft prompt instead —
     // reopening then shows the same text the submit would have sent.
+    closed = true;
     onClose({
       prompt: foldSnippetsIntoPrompt(prompt, textSnippets),
       mode: currentMode,
       imageIds,
     });
   }
+
+  // The owner can also take the dialog down itself (a branch card closes its
+  // dialogs when the workspace parks under settings). Hand the draft back then
+  // too, so it is not lost with the component.
+  onDestroy(() => {
+    if (initialized && !closed) handleClose();
+  });
 
   function handleAcpSelectionChange(selection: AcpConfigPickerSelection) {
     acpPickerSelection = selection;

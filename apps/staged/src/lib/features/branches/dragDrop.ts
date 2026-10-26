@@ -32,6 +32,29 @@ export type DragDropSubscription = {
 let subscribers: DragDropSubscription[] = [];
 let globalUnlisten: UnlistenFn | null = null;
 let initPromise: Promise<void> | null = null;
+let coveredElement: HTMLElement | null = null;
+
+/**
+ * Exclude every subscriber inside `element` from hit-testing until cleared.
+ *
+ * App.svelte sets this to the workspace while settings or the diff view cover
+ * it: the branch cards underneath stay mounted and subscribed, and their
+ * geometry still matches the cursor, so without this a native drop over the
+ * settings page would land on a card the user cannot see. Checked per event
+ * rather than registered as a `blocking` subscriber from the cover so that a
+ * card mounted after the cover went up (change feed) cannot out-rank it.
+ */
+export function setDragDropCoveredElement(element: HTMLElement | null): void {
+  coveredElement = element;
+  if (currentHover && isCovered(currentHover)) {
+    currentHover.onDragOver(false);
+    currentHover = null;
+  }
+}
+
+function isCovered(sub: DragDropSubscription): boolean {
+  return coveredElement !== null && coveredElement.contains(sub.element);
+}
 
 /** Check if a logical position is within an element's bounding rect. */
 function isPositionOverElement(el: HTMLElement, x: number, y: number): boolean {
@@ -51,6 +74,7 @@ function handleEvent(type: string, x: number, y: number, paths?: string[]) {
     // coordinates.
     let found: DragDropSubscription | null = null;
     for (let i = subscribers.length - 1; i >= 0; i--) {
+      if (isCovered(subscribers[i])) continue;
       if (isPositionOverElement(subscribers[i].element, x, y)) {
         found = subscribers[i];
         break;
@@ -76,6 +100,7 @@ function handleEvent(type: string, x: number, y: number, paths?: string[]) {
   } else if (type === 'drop') {
     // Find the drop target (reverse order — prefer topmost element)
     for (let i = subscribers.length - 1; i >= 0; i--) {
+      if (isCovered(subscribers[i])) continue;
       if (isPositionOverElement(subscribers[i].element, x, y)) {
         subscribers[i].onDrop(paths ?? []);
         break;

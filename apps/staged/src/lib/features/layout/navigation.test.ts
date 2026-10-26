@@ -268,3 +268,52 @@ describe('initNavigation', () => {
     expect(navigation.selectedProjectId).toBe('p1');
   });
 });
+
+describe('parked workspace', () => {
+  it('keeps the repos list as the workspace under settings and restores it on Back', async () => {
+    const { showAllRepos, openSettings, popDetailRoute, navigation } = await importNavigation();
+
+    showAllRepos();
+    expect(navigation.showReposList).toBe(true);
+    expect(navigation.workspaceParked).toBe(false);
+
+    openSettings('general');
+    expect(navigation.activeView).toBe('settings');
+    expect(navigation.workspaceParked).toBe(true);
+    // The workspace's inputs come from the route underneath, so ReposListView
+    // stays mounted rather than being swapped for ProjectsList under the cover.
+    expect(navigation.showReposList).toBe(true);
+    expect(navigation.selectedProjectId).toBeNull();
+
+    popDetailRoute();
+    expect(navigation.workspaceParked).toBe(false);
+    expect(navigation.showReposList).toBe(true);
+  });
+
+  it('keeps the project under a diff and settings and parks for both', async () => {
+    // Popping the diff route announces itself on `window` (node has none).
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const { selectProject, openDiffRoute, openSettings, popDetailRoute, navigation } =
+      await importNavigation();
+
+    selectProject('p1');
+    openDiffRoute({ branchId: 'b1', projectId: 'p1' });
+    expect(navigation.workspaceParked).toBe(true);
+    expect(navigation.activeView).toBe('workspace');
+    expect(navigation.selectedProjectId).toBe('p1');
+
+    openSettings('doctor');
+    expect(navigation.workspaceParked).toBe(true);
+    expect(navigation.activeView).toBe('settings');
+    expect(navigation.settingsSection).toBe('doctor');
+    expect(navigation.selectedProjectId).toBe('p1');
+
+    popDetailRoute();
+    expect(navigation.currentRoute.kind).toBe('diff');
+    expect(navigation.workspaceParked).toBe(true);
+
+    popDetailRoute();
+    expect(navigation.currentRoute).toEqual({ kind: 'project', projectId: 'p1' });
+    expect(navigation.workspaceParked).toBe(false);
+  });
+});

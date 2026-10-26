@@ -24,6 +24,7 @@
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
+  import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -92,21 +93,38 @@
   // Settings and the diff route render over the workspace, which stays
   // mounted but parked (see the template). Window-level requests that the
   // parked views would otherwise still answer are gated on this.
-  let workspaceParked = $derived(
-    navigation.activeView === 'settings' || navigation.currentRoute.kind === 'diff'
-  );
+  let workspaceParked = $derived(navigation.workspaceParked);
   let workspaceEl = $state<HTMLDivElement | null>(null);
   let detailHostEl = $state<HTMLDivElement | null>(null);
 
   // The parked workspace is covered, not inert (see the template for why), so
-  // it stays in the tab order: hand any focus that lands in it to the view on
-  // top, and move focus out when parking happens with focus inside.
+  // it stays in the tab order and its components can still call `.focus()`.
+  // Focus that lands in it goes back to the control the user had in the view
+  // on top — focusing the bare host instead would drop their keystrokes until
+  // they clicked again — except when they got there by tabbing out of the
+  // host, which should wrap to the host's first control rather than bounce
+  // back to its last. When parking happens with focus inside, move it out.
+  let lastHostFocus: HTMLElement | null = null;
+  let tabKeyDown = false;
+  function handleHostFocusIn(e: FocusEvent) {
+    if (e.target instanceof HTMLElement && e.target !== detailHostEl) lastHostFocus = e.target;
+  }
   function handleWorkspaceFocusIn() {
-    if (workspaceParked) detailHostEl?.focus({ preventScroll: true });
+    if (!workspaceParked) return;
+    const restore = !tabKeyDown && lastHostFocus?.isConnected ? lastHostFocus : null;
+    (restore ?? detailHostEl)?.focus({ preventScroll: true });
   }
   $effect(() => {
     if (!workspaceParked) return;
+    lastHostFocus = null;
     if (workspaceEl?.contains(document.activeElement)) detailHostEl?.focus({ preventScroll: true });
+  });
+
+  // Native drag-drop hit-tests subscribed elements, not the DOM, so the cover
+  // alone does not keep drops off the parked branch cards.
+  $effect(() => {
+    setDragDropCoveredElement(workspaceParked ? workspaceEl : null);
+    return () => setDragDropCoveredElement(null);
   });
 
   // =========================================================================
@@ -631,6 +649,13 @@
   }
 </script>
 
+<svelte:window
+  onkeydowncapture={(e) => (tabKeyDown = e.key === 'Tab')}
+  onkeyupcapture={(e) => {
+    if (e.key === 'Tab') tabKeyDown = false;
+  }}
+/>
+
 {#if preferences.loaded}
   {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
     <main class="reset-shell">
@@ -723,6 +748,7 @@
             class:active={workspaceParked}
             tabindex="-1"
             bind:this={detailHostEl}
+            onfocusin={handleHostFocusIn}
           >
             {#if navigation.activeView === 'settings'}
               <SettingsPage />

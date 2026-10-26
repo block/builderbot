@@ -24,6 +24,8 @@
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
+  import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
+  import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -88,6 +90,60 @@
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
+
+  // Settings and the diff route render over the workspace, which stays
+  // mounted but parked (see the template). Window-level requests that the
+  // parked views would otherwise still answer are gated on this.
+  let workspaceParked = $derived(navigation.workspaceParked);
+  let workspaceEl = $state<HTMLDivElement | null>(null);
+  let detailHostEl = $state<HTMLDivElement | null>(null);
+
+  // The parked workspace is covered, not inert (see the template for why), so
+  // it stays in the tab order and its components can still call `.focus()`.
+  // Focus that lands in it goes back to the control the user had in the view
+  // on top — focusing the bare host instead would drop their keystrokes until
+  // they clicked again — except when they got there by tabbing: Tab (from the
+  // top bar, or wrapping around from the host's last control) should land on
+  // the host's first control rather than on the host itself, which is not a
+  // tab stop and would cost an extra press, and Shift+Tab should carry on to
+  // the top bar, which sits before the workspace in DOM order and would
+  // otherwise be unreachable backwards. When parking happens with focus
+  // inside, move it out.
+  let lastHostFocus: HTMLElement | null = null;
+  let tabInFlight: 'forward' | 'backward' | null = null;
+  function handleHostFocusIn(e: FocusEvent) {
+    if (e.target instanceof HTMLElement && e.target !== detailHostEl) lastHostFocus = e.target;
+  }
+  function handleWorkspaceFocusIn() {
+    if (!workspaceParked) return;
+    if (tabInFlight === 'backward') {
+      const before = workspaceEl ? lastTabbableBefore(workspaceEl) : null;
+      (before ?? detailHostEl)?.focus({ preventScroll: true });
+      return;
+    }
+    if (tabInFlight === 'forward') {
+      const first = detailHostEl ? firstTabbableWithin(detailHostEl) : null;
+      (first ?? detailHostEl)?.focus({ preventScroll: true });
+      return;
+    }
+    const restore = lastHostFocus?.isConnected ? lastHostFocus : null;
+    restore?.focus({ preventScroll: true });
+    // Connected is not focusable: `.focus()` on a control that is still in the
+    // DOM but hidden is a silent no-op, which would leave focus in here.
+    if (document.activeElement !== restore) detailHostEl?.focus({ preventScroll: true });
+  }
+  $effect(() => {
+    if (!workspaceParked) return;
+    lastHostFocus = null;
+    if (workspaceEl?.contains(document.activeElement)) detailHostEl?.focus({ preventScroll: true });
+  });
+
+  // Native drag-drop hit-tests subscribed elements, not the DOM, so the cover
+  // alone does not keep drops off the parked branch cards.
+  $effect(() => {
+    setDragDropCoveredElement(workspaceParked ? workspaceEl : null);
+    return () => setDragDropCoveredElement(null);
+  });
 
   // =========================================================================
   // App-wide PR polling — the backend scheduler owns cadence/concurrency and
@@ -155,7 +211,7 @@
   }
 
   function requestNewProject() {
-    if (navigation.activeView === 'settings') return;
+    if (workspaceParked) return;
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
@@ -611,6 +667,18 @@
   }
 </script>
 
+<!-- The blur reset covers a Tab keyup the webview never sees (the window
+     deactivating or a native menu taking over mid-press). -->
+<svelte:window
+  onkeydowncapture={(e) => {
+    tabInFlight = e.key === 'Tab' ? (e.shiftKey ? 'backward' : 'forward') : null;
+  }}
+  onkeyupcapture={(e) => {
+    if (e.key === 'Tab') tabInFlight = null;
+  }}
+  onblur={() => (tabInFlight = null)}
+/>
+
 {#if preferences.loaded}
   {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
     <main class="reset-shell">
@@ -668,29 +736,23 @@
           <div class="error-state">
             <p>{storeError}</p>
           </div>
-        {:else if navigation.activeView === 'settings'}
-          <SettingsPage />
-        {:else if navigation.currentRoute.kind === 'diff'}
-          {@const diffRoute = navigation.currentRoute}
-          <DiffModal
-            branchId={diffRoute.branchId}
-            projectId={diffRoute.projectId}
-            commitSha={diffRoute.commitSha}
-            scope={diffRoute.scope}
-            reviewId={diffRoute.reviewId}
-            beforeLabel={diffRoute.beforeLabel}
-            afterLabel={diffRoute.afterLabel}
-            readonly={diffRoute.readonly}
-            commits={diffRoute.commits}
-            baseBranchLabel={diffRoute.baseBranchLabel}
-            branchLabel={diffRoute.branchLabel}
-            projectName={diffRoute.projectName}
-            githubRepo={diffRoute.githubRepo}
-            subpath={diffRoute.subpath}
-            onClose={() => closeDiffRouteIfCurrent(diffRoute)}
-          />
         {:else}
-          <div class="workspace">
+          <!-- The workspace stays mounted while settings or a diff is shown;
+               the detail host below covers it, so returning is a hide/show
+               instead of rebuilding the sidebar and project home and
+               refetching everything they hold. Parked, it keeps its geometry
+               (scroll positions, the cards' intersection state) and, on
+               purpose, its style: on WebKit any style change on this element
+               — `visibility`, `inert`, even `opacity` — or a change to its
+               sibling position restyles the whole ~4k-node subtree (~55 ms),
+               which is why it is covered rather than hidden and why the host
+               is always present rather than conditionally rendered. -->
+          <div
+            class="workspace"
+            aria-hidden={workspaceParked || undefined}
+            bind:this={workspaceEl}
+            onfocusin={handleWorkspaceFocusIn}
+          >
             <!-- Hoisted out of ProjectHome so it survives project↔repos
                  transitions; hidden on the landing page. -->
             {#if navigation.selectedProjectId || navigation.showReposList}
@@ -702,6 +764,36 @@
               <ProjectHome selectedProjectId={navigation.selectedProjectId} />
             {:else}
               <ProjectsList />
+            {/if}
+          </div>
+          <div
+            class="detail-host"
+            class:active={workspaceParked}
+            tabindex="-1"
+            bind:this={detailHostEl}
+            onfocusin={handleHostFocusIn}
+          >
+            {#if navigation.activeView === 'settings'}
+              <SettingsPage />
+            {:else if navigation.currentRoute.kind === 'diff'}
+              {@const diffRoute = navigation.currentRoute}
+              <DiffModal
+                branchId={diffRoute.branchId}
+                projectId={diffRoute.projectId}
+                commitSha={diffRoute.commitSha}
+                scope={diffRoute.scope}
+                reviewId={diffRoute.reviewId}
+                beforeLabel={diffRoute.beforeLabel}
+                afterLabel={diffRoute.afterLabel}
+                readonly={diffRoute.readonly}
+                commits={diffRoute.commits}
+                baseBranchLabel={diffRoute.baseBranchLabel}
+                branchLabel={diffRoute.branchLabel}
+                projectName={diffRoute.projectName}
+                githubRepo={diffRoute.githubRepo}
+                subpath={diffRoute.subpath}
+                onClose={() => closeDiffRouteIfCurrent(diffRoute)}
+              />
             {/if}
           </div>
         {/if}
@@ -738,21 +830,47 @@
     background-color: var(--bg-chrome);
   }
 
+  /* One grid cell shared by the workspace and the detail host over it, so
+     the parked workspace keeps exactly the box it had and the detail view
+     gets the same box the flex column used to give it. */
   .content {
     flex: 1;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
-  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper). */
+  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper).
+     Its own stacking context, so the host's z-index wins over the sticky and
+     positioned descendants in here. */
   .workspace {
-    flex: 1;
+    grid-area: 1 / 1;
     min-width: 0;
     min-height: 0;
     display: flex;
     background-color: var(--bg-chrome);
     overflow: hidden;
+    isolation: isolate;
+  }
+
+  /* Settings / diff: reproduces the flex column their roots were written
+     for. Hidden (not hit-testable) while empty so the workspace under it
+     stays usable; its views paint their own opaque background. */
+  .detail-host {
+    grid-area: 1 / 1;
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    visibility: hidden;
+    outline: none;
+  }
+
+  .detail-host.active {
+    visibility: visible;
   }
 
   .reset-shell {

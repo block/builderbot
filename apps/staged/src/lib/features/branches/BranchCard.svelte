@@ -111,7 +111,7 @@
     onBranchSetupProgress,
     onSessionStatusChanged,
   } from '../../services/branchEventService';
-  import { openDiffRoute } from '../layout/navigation.svelte';
+  import { navigation, onWorkspaceParked, openDiffRoute } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import {
@@ -549,6 +549,20 @@
   // Image viewer modal (opened by clicking an image in the timeline)
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
+
+  // Parked under settings or the diff view, the card's dialogs would stay
+  // open above them. The composer hands its draft back on the way out.
+  onWorkspaceParked(() => {
+    openNote = null;
+    openWriteNote = null;
+    viewImageId = null;
+    sessionMgr.showNewSession = false;
+    if (sessionMgr.openSessionId) void handleSessionModalClose();
+    showForcePushDialog = false;
+    showResetToOriginDialog = false;
+    confirmDelete = null;
+  });
+
   let deletingImageIds = $state<Set<string>>(new Set());
   let deletingCommitKeys = $state<Set<string>>(new Set());
   let timelineDeletingItems = $derived([

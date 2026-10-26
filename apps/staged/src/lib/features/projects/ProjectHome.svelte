@@ -22,7 +22,7 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject } from '../layout/navigation.svelte';
+  import { goHome, onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
@@ -105,6 +105,13 @@
   // shared projectActions module + App-level ProjectDeleteDialog)
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
+
+  // Parked under settings or the diff view, these would stay open above them.
+  onWorkspaceParked(() => {
+    showNewProjectModal = false;
+    showAddRepoModal = false;
+    branchToDelete = null;
+  });
   // Guards the delete shortcut while the async safe-to-delete check is in flight,
   // before projectActions.pendingDelete/deletingProjectNames are set, so a held
   // key only deletes once.
@@ -206,11 +213,12 @@
   }
 
   // View-lifecycle side effects wired off the store's branch data — worktree/
-  // workspace setup and run-action hydration. Both dedupe internally, so
-  // re-running on every branch map reassignment is cheap. They stay out of the
-  // store deliberately: they are this view's policies, not properties of the
-  // data. The branch session queue is not driven from here: the backend kicks
-  // it on startup and whenever a branch becomes ready.
+  // workspace setup and run-action hydration. Both dedupe internally (the
+  // run-action store skips a call whose project/branch membership is
+  // unchanged), so re-running on every branch map reassignment is cheap. They
+  // stay out of the store deliberately: they are this view's policies, not
+  // properties of the data. The branch session queue is not driven from here:
+  // the backend kicks it on startup and whenever a branch becomes ready.
   $effect(() => {
     const branchMap = projectsDataStore.branchesByProject;
     for (const [projectId, branches] of branchMap) {

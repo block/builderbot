@@ -558,7 +558,7 @@
     <!-- Dropdown -->
     {#if showDropdown && filteredItems.length > 0}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <!-- Portaled to <body> so position:fixed escapes the dialog's transformed
+      <!-- Portaled to #portal-root so position:fixed escapes the dialog's transformed
            containing block; pointerdown is stopped so selecting an item doesn't
            trip bits-ui's dismiss-on-interact-outside and close the dialog. -->
       <div
@@ -676,7 +676,7 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     padding: 4px;
     /* bits-ui sets `body { pointer-events: none }` while a dialog is open. The
-       dropdown portals to body, so re-enable pointer events on it explicitly. */
+       dropdown portals out of the dialog, so re-enable pointer events on it explicitly. */
     pointer-events: auto;
   }
 

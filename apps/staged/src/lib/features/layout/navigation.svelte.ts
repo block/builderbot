@@ -11,6 +11,7 @@
  * so concurrent windows can't fight over the one key.
  */
 
+import { untrack } from 'svelte';
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { getWindowLabel } from '../../transport';
 import { takeWindowSeed } from '../../commands';
@@ -85,7 +86,26 @@ export const navigation = $state({
   detailStack: initialDetailStack,
   currentRoute: initialDetailStack[initialDetailStack.length - 1] ?? rootRoute(),
   canGoBack: initialDetailStack.length > 1,
+  // Settings and the diff route render over the workspace, which stays mounted
+  // underneath (App.svelte). The one predicate for "covered", so the gates on
+  // window-level requests the parked views would otherwise still answer can't
+  // drift apart.
+  workspaceParked: false,
 });
+
+/**
+ * Run `close` when the workspace gets parked under settings or the diff view.
+ * Its components stay mounted then (App.svelte), so a dialog, alert or
+ * popover one of them owns would stay open above the view on top — before the
+ * workspace was kept mounted, unmounting closed them. Call from component
+ * setup with whatever unmounting used to close.
+ */
+export function onWorkspaceParked(close: () => void): void {
+  $effect(() => {
+    if (!navigation.workspaceParked) return;
+    untrack(close);
+  });
+}
 
 function currentRoute(): DetailRoute {
   return navigation.detailStack[navigation.detailStack.length - 1] ?? rootRoute();
@@ -100,27 +120,35 @@ function lastProjectRouteProjectId(stack = navigation.detailStack): string | nul
   return null;
 }
 
+/**
+ * The route the parked workspace is showing: the nearest one below any
+ * settings / diff routes on top. Those render over the workspace rather than
+ * replacing it, so the workspace's inputs must come from here — deriving them
+ * from the top route remounted the view underneath (repos → settings swapped
+ * ReposListView for ProjectsList under the cover, and its top bar with it).
+ */
+function workspaceRoute(stack = navigation.detailStack): DetailRoute {
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const route = stack[i];
+    if (route.kind !== 'settings' && route.kind !== 'diff') return route;
+  }
+  return rootRoute();
+}
+
 function syncCompatibilityState(): void {
   const route = currentRoute();
+  const base = workspaceRoute();
   navigation.currentRoute = route;
   navigation.canGoBack = navigation.detailStack.length > 1;
+  navigation.workspaceParked = route.kind === 'settings' || route.kind === 'diff';
+  navigation.activeView = route.kind === 'settings' ? 'settings' : 'workspace';
+  if (route.kind === 'settings') navigation.settingsSection = route.section;
 
-  if (route.kind === 'settings') {
-    navigation.activeView = 'settings';
-    navigation.selectedProjectId = lastProjectRouteProjectId();
-    navigation.showReposList = false;
-    navigation.settingsSection = route.section;
-    return;
-  }
-
-  navigation.activeView = 'workspace';
-  navigation.showReposList = route.kind === 'repos';
+  navigation.showReposList = base.kind === 'repos';
+  // A diff opened without a project route under it (an arbitrary route from a
+  // reference) still names its project through lastProjectRouteProjectId.
   navigation.selectedProjectId =
-    route.kind === 'project'
-      ? route.projectId
-      : route.kind === 'diff'
-        ? (route.projectId ?? lastProjectRouteProjectId())
-        : null;
+    base.kind === 'project' ? base.projectId : lastProjectRouteProjectId();
 }
 
 function setDetailStack(routes: DetailRoute[]): void {

@@ -12,6 +12,12 @@ export interface TopBarContent {
 
 export type TopBarRegistration = Partial<TopBarContent>;
 
+export interface TopBarHandle {
+  /** Replace this registration's content in place; shows only while it is the top one. */
+  update(content: TopBarRegistration): void;
+  release(): void;
+}
+
 export const topBar = $state<TopBarContent>({
   title: '',
   subtitle: null,
@@ -22,7 +28,11 @@ export const topBar = $state<TopBarContent>({
   rightActions: null,
 });
 
-let activeRegistration = 0;
+// Views register in mount order and the most recent one owns the bar. The
+// workspace views stay mounted (parked) under settings and the diff view, so
+// a plain "latest wins, clear on release" slot would blank the bar when the
+// view on top goes away; a stack hands it back to the view underneath.
+let registrations: { content: TopBarRegistration }[] = [];
 
 function applyTopBar(content: TopBarRegistration): void {
   topBar.title = content.title ?? '';
@@ -34,17 +44,23 @@ function applyTopBar(content: TopBarRegistration): void {
   topBar.rightActions = content.rightActions ?? null;
 }
 
-function clearTopBar(): void {
-  applyTopBar({});
+function syncTopBar(): void {
+  applyTopBar(registrations[registrations.length - 1]?.content ?? {});
 }
 
-export function registerTopBar(content: TopBarRegistration): () => void {
-  const registration = ++activeRegistration;
-  applyTopBar(content);
+export function registerTopBar(content: TopBarRegistration): TopBarHandle {
+  const registration = { content };
+  registrations.push(registration);
+  syncTopBar();
 
-  return () => {
-    if (activeRegistration === registration) {
-      clearTopBar();
-    }
+  return {
+    update(next) {
+      registration.content = next;
+      if (registrations[registrations.length - 1] === registration) syncTopBar();
+    },
+    release() {
+      registrations = registrations.filter((r) => r !== registration);
+      syncTopBar();
+    },
   };
 }

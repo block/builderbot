@@ -26,9 +26,15 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { filterKey, projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
+  import { onWorkspaceParked } from '../layout/navigation.svelte';
 
   let open = $state(false);
   let stuck = $state(false);
+
+  // Parked under settings or the diff view, the popover would stay open above them.
+  onWorkspaceParked(() => {
+    open = false;
+  });
 
   // The hairline under the row should only exist while it's pinned, and CSS
   // has no pinned-state selector for sticky elements. With the scroll
@@ -36,24 +42,32 @@
   // to the pinned state — clipped at the bottom just means the row scrolled
   // below the fold — and an observer also catches pinning caused by content
   // above the row changing height, which fires no scroll event.
+  //
+  // The scroll-container walk waits for the next frame: during the mount
+  // flush the rest of the workspace is still being inserted, and the first
+  // getComputedStyle would force a style recalc over that half-built tree.
   function observeStuck(node: HTMLElement) {
-    let scrollParent = node.parentElement;
-    while (scrollParent && !/auto|scroll/.test(getComputedStyle(scrollParent).overflowY)) {
-      scrollParent = scrollParent.parentElement;
-    }
-    if (!scrollParent) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        stuck =
-          entry.intersectionRatio < 1 &&
-          entry.boundingClientRect.top <= (entry.rootBounds?.top ?? Number.NEGATIVE_INFINITY);
-      },
-      { root: scrollParent, threshold: 1, rootMargin: '-1px 0px 0px 0px' }
-    );
-    observer.observe(node);
+    let observer: IntersectionObserver | null = null;
+    const frame = requestAnimationFrame(() => {
+      let scrollParent = node.parentElement;
+      while (scrollParent && !/auto|scroll/.test(getComputedStyle(scrollParent).overflowY)) {
+        scrollParent = scrollParent.parentElement;
+      }
+      if (!scrollParent) return;
+      observer = new IntersectionObserver(
+        ([entry]) => {
+          stuck =
+            entry.intersectionRatio < 1 &&
+            entry.boundingClientRect.top <= (entry.rootBounds?.top ?? Number.NEGATIVE_INFINITY);
+        },
+        { root: scrollParent, threshold: 1, rootMargin: '-1px 0px 0px 0px' }
+      );
+      observer.observe(node);
+    });
     return {
       destroy() {
-        observer.disconnect();
+        cancelAnimationFrame(frame);
+        observer?.disconnect();
       },
     };
   }

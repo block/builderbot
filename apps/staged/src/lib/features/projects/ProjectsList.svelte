@@ -16,7 +16,13 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import {
+    navigation,
+    onWorkspaceParked,
+    openSettings,
+    selectProject,
+    showAllRepos,
+  } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
@@ -64,6 +70,11 @@
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
+
+  // Parked under settings or the diff view, the modal would stay open above them.
+  onWorkspaceParked(() => {
+    showNewProjectModal = false;
+  });
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let isCommandKeyHeld = $state(false);
@@ -275,6 +286,8 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // Still mounted, parked, under settings or the diff view.
+    if (navigation.workspaceParked) return;
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
     // Typing in an input must not trigger shortcuts, but the natural flow for

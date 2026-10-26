@@ -41,7 +41,7 @@
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
-  import { openDiffRoute } from '../layout/navigation.svelte';
+  import { navigation, onWorkspaceParked, openDiffRoute } from '../layout/navigation.svelte';
   import {
     disabledReferenceNav,
     pushReferenceEntry,
@@ -312,6 +312,16 @@
   let childHashtagItems = $state<HashtagItem[]>([]);
   let childHashtagLoadGeneration = 0;
   let noteModalHashtagItems = $derived([...hashtagItems, ...childHashtagItems]);
+
+  // Parked under settings or the diff view, this section's dialogs would stay
+  // open above them. The composer hands its draft back on the way out.
+  onWorkspaceParked(() => {
+    showProjectSessionModal = false;
+    if (openNote) {
+      closeOpenNote();
+      void loadProjectNotes();
+    }
+  });
 
   $effect(() => {
     const _signature = hashtagSignature;

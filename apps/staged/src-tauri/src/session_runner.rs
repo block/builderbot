@@ -1212,24 +1212,35 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     error: &str,
 ) -> bool {
-    let transitioned = store
-        .transition_from_running(
-            session_id,
-            SessionStatus::Error,
-            Some(error),
-            Some(&CompletionReason::Crashed),
-        )
-        .unwrap_or(false);
-    if transitioned {
-        log::error!("Session {session_id} failed before its run started: {error}");
-    } else {
-        // Routine, not a fault: a Stop that landed first already wrote
-        // `cancelled` (or the row is gone), and that terminal state stands.
-        log::debug!(
-            "Session {session_id} failed before its run started, but its row was \
-             already finalized: {error}"
-        );
-    }
+    let transitioned = match store.transition_from_running(
+        session_id,
+        SessionStatus::Error,
+        Some(error),
+        Some(&CompletionReason::Crashed),
+    ) {
+        Ok(true) => {
+            log::error!("Session {session_id} failed before its run started: {error}");
+            true
+        }
+        Ok(false) => {
+            // Routine, not a fault: a Stop that landed first already wrote
+            // `cancelled` (or the row is gone), and that terminal state stands.
+            log::debug!(
+                "Session {session_id} failed before its run started, but its row was \
+                 already finalized: {error}"
+            );
+            false
+        }
+        Err(store_error) => {
+            // The row may still read `running`; nothing finalizes it until the
+            // dead-owner sweep, so this is a fault worth surfacing.
+            log::error!(
+                "Session {session_id} failed before its run started ({error}), and \
+                 recording the failure also failed: {store_error}"
+            );
+            false
+        }
+    };
     if transitioned || matches!(store.get_session(session_id), Ok(None)) {
         emit_status(
             app_handle,

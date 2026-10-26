@@ -717,7 +717,8 @@ impl ProjectToolsHandler {
         // on the kicker's task: a cancelled tool call can no longer abandon a
         // half-claimed row. A start that fails ends the row as `failed` with
         // its cause, where `wait_for_repo_session` reports it — before the
-        // claim the drain writes it (`fail_queued_start_before_claim`), after
+        // claim the drain writes it, after a few delayed retries for the
+        // failures that clear on their own (`session_queue::retry`); after
         // it the start does. A branch still provisioning is not a failure: the
         // row stays `queued` until provisioning kicks the branch.
         //

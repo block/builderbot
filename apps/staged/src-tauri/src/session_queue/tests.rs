@@ -5,6 +5,10 @@ use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 use super::kick::{kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource};
+use super::retry::{
+    queued_start_retry, QueuedStartAttempts, QueuedStartRetry, MAX_QUEUED_START_ATTEMPTS,
+    QUEUED_START_RETRY_DELAYS,
+};
 use super::sweep::{
     end_observed_row, is_stranded, queue_health, reconcile_stranded_running_sessions, StrandedRow,
     STRANDED_SESSION_MESSAGE,
@@ -180,6 +184,152 @@ async fn a_panicking_drain_frees_its_branch_for_the_next_kick() {
         2,
         "the kick after a panicked drain must run a drain of its own"
     );
+}
+
+/// A kick scheduled with a delay runs a drain once the delay has passed —
+/// the drain's retry of a failed pre-claim start has no other event to ride.
+#[tokio::test]
+async fn a_scheduled_kick_fires_after_its_delay() {
+    let drains = Arc::new(AtomicUsize::new(0));
+    let drain: DrainFn = {
+        let drains = Arc::clone(&drains);
+        Arc::new(move |_branch_id: String| {
+            let drains = Arc::clone(&drains);
+            Box::pin(async move {
+                drains.fetch_add(1, Ordering::SeqCst);
+                Ok(false)
+            })
+        })
+    };
+    let kicker = Arc::new(BranchQueueKicker::new(drain));
+
+    kicker.kick_after(
+        "branch-1",
+        std::time::Duration::from_millis(20),
+        KickSource::StartRetry,
+    );
+    assert_eq!(
+        kicker.scheduled(),
+        vec![(
+            "branch-1".to_string(),
+            std::time::Duration::from_millis(20),
+            KickSource::StartRetry
+        )]
+    );
+    assert!(
+        kicker.kicked().is_empty(),
+        "nothing is kicked before the delay"
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while drains.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "scheduled kick never ran"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    kicker.wait_until_idle().await;
+    assert_eq!(drains.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        kicker.kicked(),
+        vec![("branch-1".to_string(), KickSource::StartRetry)]
+    );
+}
+
+/// The retry bound is a pure function of how many starts have failed: one
+/// delayed retry per entry in `QUEUED_START_RETRY_DELAYS`, then the row is
+/// given up on. The tracker holds a row in backoff until its retry is due,
+/// drops a row it gives up on, and forgets rows that left the queue.
+#[test]
+fn queued_start_attempts_retry_with_growing_delays_then_give_up() {
+    assert_eq!(MAX_QUEUED_START_ATTEMPTS, 3);
+    assert_eq!(
+        queued_start_retry(1),
+        QueuedStartRetry::After {
+            failures: 1,
+            delay: QUEUED_START_RETRY_DELAYS[0]
+        }
+    );
+    assert_eq!(
+        queued_start_retry(2),
+        QueuedStartRetry::After {
+            failures: 2,
+            delay: QUEUED_START_RETRY_DELAYS[1]
+        }
+    );
+    assert_eq!(
+        queued_start_retry(3),
+        QueuedStartRetry::GiveUp { failures: 3 }
+    );
+    assert!(
+        QUEUED_START_RETRY_DELAYS.windows(2).all(|w| w[0] < w[1]),
+        "each retry waits longer than the last"
+    );
+
+    let attempts = QueuedStartAttempts::default();
+    let t0 = std::time::Instant::now();
+
+    assert_eq!(
+        attempts.record_failure("b", "s1", t0),
+        QueuedStartRetry::After {
+            failures: 1,
+            delay: QUEUED_START_RETRY_DELAYS[0]
+        }
+    );
+    assert!(attempts.in_backoff("b", "s1", t0));
+    assert!(attempts.in_backoff(
+        "b",
+        "s1",
+        t0 + QUEUED_START_RETRY_DELAYS[0] - std::time::Duration::from_millis(1)
+    ));
+    assert!(!attempts.in_backoff("b", "s1", t0 + QUEUED_START_RETRY_DELAYS[0]));
+    assert!(
+        !attempts.in_backoff("b", "s2", t0),
+        "an untried row is not in backoff"
+    );
+    assert!(!attempts.in_backoff("other", "s1", t0));
+
+    let t1 = t0 + QUEUED_START_RETRY_DELAYS[0];
+    assert_eq!(
+        attempts.record_failure("b", "s1", t1),
+        QueuedStartRetry::After {
+            failures: 2,
+            delay: QUEUED_START_RETRY_DELAYS[1]
+        }
+    );
+    assert_eq!(attempts.failures("b", "s1"), 2);
+    assert!(attempts.in_backoff("b", "s1", t1 + QUEUED_START_RETRY_DELAYS[0]));
+    assert!(!attempts.in_backoff("b", "s1", t1 + QUEUED_START_RETRY_DELAYS[1]));
+
+    // Another row on the branch counts on its own.
+    assert_eq!(
+        attempts.record_failure("b", "s2", t1),
+        QueuedStartRetry::After {
+            failures: 1,
+            delay: QUEUED_START_RETRY_DELAYS[0]
+        }
+    );
+
+    // Giving up drops the entry; the row is about to be ended.
+    let t2 = t1 + QUEUED_START_RETRY_DELAYS[1];
+    assert_eq!(
+        attempts.record_failure("b", "s1", t2),
+        QueuedStartRetry::GiveUp { failures: 3 }
+    );
+    assert_eq!(attempts.failures("b", "s1"), 0);
+    assert!(!attempts.in_backoff("b", "s1", t2));
+
+    // A row that left the queue (stopped, forced, deleted) is forgotten on
+    // the next drain's prune; the branch's map goes with its last row.
+    attempts.retain_queued("b", |id| id == "s2");
+    assert_eq!(attempts.failures("b", "s2"), 1);
+    attempts.retain_queued("b", |_| false);
+    assert!(attempts.is_empty());
+
+    attempts.record_failure("gone", "s3", t2);
+    attempts.forget_branch("gone");
+    assert!(attempts.is_empty());
 }
 
 /// A handle with no kicker managed drops the kick rather than panicking: the

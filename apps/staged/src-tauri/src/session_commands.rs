@@ -2614,7 +2614,9 @@ pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
 /// left alone it would sit first in line indefinitely — reported as `queued`
 /// to an MCP caller polling `wait_for_repo_session`, holding every row behind
 /// it. This ends it as `Error` with the real cause instead, the pre-claim
-/// counterpart of [`fail_claimed_queued_start`].
+/// counterpart of [`fail_claimed_queued_start`]. The drain reaches it through
+/// [`retry_or_fail_queued_start_before_claim`], once the row's retries are
+/// spent.
 ///
 /// Returns `Ok(true)` when the row was ended here, `Ok(false)` when it left
 /// `queued` under us (a Stop or a forced start got there first and owns its
@@ -2666,6 +2668,78 @@ fn fail_queued_start_before_claim<R: tauri::Runtime>(
             Err(error)
         }
     }
+}
+
+/// What the drain does after a queued start failed before its claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreClaimStartFailure {
+    /// Attempts remain: the row is still `queued` and a retry kick is
+    /// scheduled. It stays the barrier it was, so the pass stops here — the
+    /// failures that clear on their own (an SSH blip, a held `index.lock`)
+    /// are branch-wide, and trying the rows behind it would spend their
+    /// attempts on the same cause.
+    Retrying,
+    /// The attempts are spent and the row is ended; it is no barrier.
+    Ended,
+    /// The row left `queued` under us; the caller re-reads the branch's
+    /// running kinds.
+    LeftQueued,
+}
+
+/// Retry a queued row whose start failed before its claim while its attempts
+/// last ([`crate::session_queue::retry`]), then end it with the cause.
+///
+/// The attempt count lives on the kicker, so a mock app with none managed
+/// gets no retries and ends the row at once — the production drain only ever
+/// runs from the kicker.
+fn retry_or_fail_queued_start_before_claim<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    kicker: Option<&Arc<crate::session_queue::BranchQueueKicker>>,
+    branch: &store::Branch,
+    session_id: &str,
+    error: String,
+) -> Result<PreClaimStartFailure, String> {
+    use crate::session_queue::retry::{QueuedStartRetry, MAX_QUEUED_START_ATTEMPTS};
+
+    let failures = match kicker {
+        Some(kicker) => {
+            match kicker.start_attempts().record_failure(
+                &branch.id,
+                session_id,
+                std::time::Instant::now(),
+            ) {
+                QueuedStartRetry::After { failures, delay } => {
+                    log::warn!(
+                        "[session_queue] queued session {session_id} on branch {} failed to \
+                         start (attempt {failures} of {MAX_QUEUED_START_ATTEMPTS}); retrying in \
+                         {delay:?}: {error}",
+                        branch.id
+                    );
+                    kicker.kick_after(
+                        &branch.id,
+                        delay,
+                        crate::session_queue::KickSource::StartRetry,
+                    );
+                    return Ok(PreClaimStartFailure::Retrying);
+                }
+                QueuedStartRetry::GiveUp { failures } => failures,
+            }
+        }
+        None => 1,
+    };
+    let error = if failures > 1 {
+        format!("Failed to start after {failures} attempts: {error}")
+    } else {
+        error
+    };
+    Ok(
+        if fail_queued_start_before_claim(store, app_handle, branch, session_id, error)? {
+            PreClaimStartFailure::Ended
+        } else {
+            PreClaimStartFailure::LeftQueued
+        },
+    )
 }
 
 fn note_session_schedule() -> BranchSessionSchedule {
@@ -4219,8 +4293,17 @@ pub(crate) async fn drain_branch_queue(
     // here rather than discovered per row, so that a start failing below means
     // "this provisioned branch could not start this row" and can be recorded
     // on the row. A branch that is gone is being deleted, rows and all.
+    // The kicker is also where failed pre-claim starts are counted (see
+    // `retry_or_fail_queued_start_before_claim`); it is the only caller, so it
+    // is always managed outside tests.
+    let kicker = app_handle
+        .try_state::<Arc<crate::session_queue::BranchQueueKicker>>()
+        .map(|kicker| Arc::clone(&kicker));
     let Some(branch) = store.get_branch(&branch_id).map_err(|e| e.to_string())? else {
         log::debug!("[session_queue] branch {branch_id} is gone; nothing to drain");
+        if let Some(kicker) = &kicker {
+            kicker.start_attempts().forget_branch(&branch_id);
+        }
         return Ok(false);
     };
     if branch_waits_for_provisioning(&store, &branch)? {
@@ -4231,6 +4314,11 @@ pub(crate) async fn drain_branch_queue(
     let queued = store
         .get_queued_sessions_for_branch(&branch_id)
         .map_err(|e| e.to_string())?;
+    if let Some(kicker) = &kicker {
+        kicker
+            .start_attempts()
+            .retain_queued(&branch_id, |id| queued.iter().any(|s| s.id == id));
+    }
 
     let mut active = running_branch_session_kinds(&store, &branch_id)?;
     let mut started_any = false;
@@ -4259,6 +4347,22 @@ pub(crate) async fn drain_branch_queue(
             break;
         }
 
+        // A row waiting out the delay from a failed start keeps its place:
+        // its retry kick will try it, and a kick before then must not spend
+        // another of its attempts on a cause that has had no time to clear.
+        if kicker.as_ref().is_some_and(|kicker| {
+            kicker
+                .start_attempts()
+                .in_backoff(&branch_id, &session.id, std::time::Instant::now())
+        }) {
+            log::debug!(
+                "[session_queue] queued session {} on branch {branch_id} is waiting to retry \
+                 its start; its queue waits",
+                session.id
+            );
+            break;
+        }
+
         // The entry gate, re-checked before each claim: every start below
         // awaits, so a shutdown claimed mid-drain would otherwise keep being
         // fed the rows the remaining iterations were about to take. Kept for
@@ -4279,10 +4383,21 @@ pub(crate) async fn drain_branch_queue(
             // row cannot be judged, and like a failed context build below,
             // nothing would re-kick the branch for it.
             Err(e) => {
-                if !fail_queued_start_before_claim(&store, &app_handle, &branch, &session.id, e)? {
-                    active = running_branch_session_kinds(&store, &branch_id)?;
+                match retry_or_fail_queued_start_before_claim(
+                    &store,
+                    &app_handle,
+                    kicker.as_ref(),
+                    &branch,
+                    &session.id,
+                    e,
+                )? {
+                    PreClaimStartFailure::Retrying => break,
+                    PreClaimStartFailure::Ended => continue,
+                    PreClaimStartFailure::LeftQueued => {
+                        active = running_branch_session_kinds(&store, &branch_id)?;
+                        continue;
+                    }
                 }
-                continue;
             }
         };
         match gate {
@@ -4319,20 +4434,26 @@ pub(crate) async fn drain_branch_queue(
                 match failed_queued_start_disposition(row.as_ref()) {
                     // Failed in the context build, before its claim. The
                     // branch is provisioned (gated above), so nothing would
-                    // re-kick it: end the row with the cause, where
+                    // re-kick it: retry a bounded number of times on a
+                    // scheduled kick, then end the row with the cause, where
                     // `wait_for_repo_session` and the UI read it, and move
                     // on — an errored row is no barrier.
                     FailedQueuedStart::StillQueued => {
-                        if !fail_queued_start_before_claim(
+                        match retry_or_fail_queued_start_before_claim(
                             &store,
                             &app_handle,
+                            kicker.as_ref(),
                             &branch,
                             &session_id,
                             e,
                         )? {
-                            active = running_branch_session_kinds(&store, &branch_id)?;
+                            PreClaimStartFailure::Retrying => break,
+                            PreClaimStartFailure::Ended => continue,
+                            PreClaimStartFailure::LeftQueued => {
+                                active = running_branch_session_kinds(&store, &branch_id)?;
+                                continue;
+                            }
                         }
-                        continue;
                     }
                     FailedQueuedStart::Continue => {
                         log::error!(
@@ -4381,9 +4502,10 @@ enum FailedQueuedStart {
     /// the rows behind it are still this pass's to try.
     Continue,
     /// The row is still `queued`: the start failed before its claim, in the
-    /// context build. Nothing else will end it, so the drain does
-    /// ([`fail_queued_start_before_claim`]) and then goes on as for
-    /// `Continue`.
+    /// context build. Nothing else will move it, so the drain does
+    /// ([`retry_or_fail_queued_start_before_claim`]): a bounded number of
+    /// delayed retries while it stays the barrier, then it is ended and the
+    /// pass goes on as for `Continue`.
     StillQueued,
 }
 
@@ -8559,6 +8681,151 @@ mod tests {
             row.completion_reason,
             Some(store::CompletionReason::Interrupted)
         );
+    }
+
+    /// A pre-claim start failure is retried before it is recorded: the first
+    /// failures leave the row `queued`, in backoff, with a delayed kick
+    /// scheduled for the branch — nothing else would re-kick it — and the
+    /// drain treats the row as the barrier it was. The failure that spends
+    /// the last attempt ends the row as `Error`, naming the attempts and the
+    /// cause. A mock app with no kicker managed has nowhere to count, and
+    /// ends the row at once.
+    #[test]
+    fn a_queued_start_that_fails_before_its_claim_is_retried_before_it_is_ended() {
+        use crate::session_queue::retry::{MAX_QUEUED_START_ATTEMPTS, QUEUED_START_RETRY_DELAYS};
+        use crate::session_queue::{BranchQueueKicker, KickSource};
+
+        let (store, branch) = setup_branch_store_with_workdir();
+        let kicker = Arc::new(BranchQueueKicker::recording());
+        let app = mock_app();
+        app.manage(Arc::clone(&kicker));
+
+        let session = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+
+        for (failures, delay) in QUEUED_START_RETRY_DELAYS.iter().enumerate() {
+            assert_eq!(
+                retry_or_fail_queued_start_before_claim(
+                    &store,
+                    app.handle(),
+                    Some(&kicker),
+                    &branch,
+                    &session.id,
+                    "ssh: connect to host blox port 22: Connection timed out".to_string(),
+                )
+                .unwrap(),
+                PreClaimStartFailure::Retrying,
+                "failure {}",
+                failures + 1
+            );
+            let row = store.get_session(&session.id).unwrap().unwrap();
+            assert_eq!(row.status, store::SessionStatus::Queued);
+            assert_eq!(row.error_message, None);
+            assert!(kicker.start_attempts().in_backoff(
+                &branch.id,
+                &session.id,
+                std::time::Instant::now()
+            ));
+            assert_eq!(
+                kicker.scheduled().last(),
+                Some(&(branch.id.clone(), *delay, KickSource::StartRetry))
+            );
+        }
+        assert_eq!(
+            kicker.scheduled().len(),
+            QUEUED_START_RETRY_DELAYS.len(),
+            "one delayed kick per retry"
+        );
+
+        assert_eq!(
+            retry_or_fail_queued_start_before_claim(
+                &store,
+                app.handle(),
+                Some(&kicker),
+                &branch,
+                &session.id,
+                "ssh: connect to host blox port 22: Connection timed out".to_string(),
+            )
+            .unwrap(),
+            PreClaimStartFailure::Ended
+        );
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Error);
+        assert_eq!(
+            row.error_message.as_deref(),
+            Some(&*format!(
+                "Failed to start after {MAX_QUEUED_START_ATTEMPTS} attempts: ssh: connect to \
+                 host blox port 22: Connection timed out"
+            ))
+        );
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Crashed)
+        );
+        assert!(
+            !kicker
+                .start_attempts()
+                .in_backoff(&branch.id, &session.id, std::time::Instant::now()),
+            "an ended row holds no backoff"
+        );
+        assert_eq!(kicker.scheduled().len(), QUEUED_START_RETRY_DELAYS.len());
+
+        // A Stop that got there first owns the terminal state, retries or not.
+        let stopped = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&stopped).unwrap();
+        assert!(store
+            .transition_from_queued(
+                &stopped.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::Interrupted),
+            )
+            .unwrap());
+        for _ in 0..QUEUED_START_RETRY_DELAYS.len() {
+            retry_or_fail_queued_start_before_claim(
+                &store,
+                app.handle(),
+                Some(&kicker),
+                &branch,
+                &stopped.id,
+                "index.lock exists".to_string(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            retry_or_fail_queued_start_before_claim(
+                &store,
+                app.handle(),
+                Some(&kicker),
+                &branch,
+                &stopped.id,
+                "index.lock exists".to_string(),
+            )
+            .unwrap(),
+            PreClaimStartFailure::LeftQueued
+        );
+        let row = store.get_session(&stopped.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+
+        // No kicker: nowhere to count, so the row is ended with the bare cause.
+        let bare = mock_app();
+        let unretried = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&unretried).unwrap();
+        assert_eq!(
+            retry_or_fail_queued_start_before_claim(
+                &store,
+                bare.handle(),
+                None,
+                &branch,
+                &unretried.id,
+                "No such remote ref".to_string(),
+            )
+            .unwrap(),
+            PreClaimStartFailure::Ended
+        );
+        let row = store.get_session(&unretried.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Error);
+        assert_eq!(row.error_message.as_deref(), Some("No such remote ref"));
     }
 
     /// The drain's provisioning gate: a branch with nowhere to run is a

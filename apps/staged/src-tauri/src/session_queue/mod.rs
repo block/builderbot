@@ -15,6 +15,9 @@
 //!   Kicks are coalesced per branch and run on their own task, so a kick is
 //!   never dropped with a request future and overlapping kicks collapse into
 //!   "run once more after the current drain".
+//! - [`retry`] bounds what the drain does with a queued row whose start fails
+//!   before its claim: a few delayed re-kicks for the failures that clear on
+//!   their own, then the row is ended with its cause.
 //! - [`sweep`] is the safety net for the `running` marker itself: a row this
 //!   process owns that nothing in the process is registered as owning — no
 //!   runner token, no liveness hold — is ended and its branch kicked. No
@@ -28,6 +31,7 @@
 //! stuck or rescued queue is visible without reading the log.
 
 pub(crate) mod kick;
+pub(crate) mod retry;
 pub(crate) mod sweep;
 pub(crate) mod teardown;
 #[cfg(test)]

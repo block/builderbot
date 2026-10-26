@@ -4,9 +4,11 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::Manager;
 
+use super::retry::QueuedStartAttempts;
 use crate::store::Store;
 
 /// Why a branch was kicked; logged per kick so a stuck queue can be traced
@@ -19,6 +21,9 @@ pub(crate) enum KickSource {
     StartFailed,
     /// A queued row's start failed after the claim had made it `running`.
     ClaimedStartFailed,
+    /// A queued row's start failed before its claim and the delay before its
+    /// next attempt has passed.
+    StartRetry,
     /// A Stop on a row with no live token took the store-write fallback.
     CancelFallback,
     /// A note, review or pending commit was deleted.
@@ -47,6 +52,7 @@ impl KickSource {
             Self::TerminalState => "terminal state",
             Self::StartFailed => "start failed",
             Self::ClaimedStartFailed => "claimed start failed",
+            Self::StartRetry => "start retry",
             Self::CancelFallback => "cancel fallback",
             Self::ArtifactDeleted => "artifact deleted",
             Self::SessionDeleted => "session deleted",
@@ -76,8 +82,14 @@ pub(crate) struct BranchQueueKicker {
     drain: DrainFn,
     /// Branches with a drain in flight, and whether a rerun was requested.
     in_flight: Mutex<HashMap<String, bool>>,
+    /// Queued rows whose pre-claim start has failed, and how often; the
+    /// drain consults it to retry a bounded number of times before ending
+    /// the row (see [`super::retry`]).
+    start_attempts: QueuedStartAttempts,
     #[cfg(test)]
     kicks: Mutex<Vec<(String, KickSource)>>,
+    #[cfg(test)]
+    scheduled: Mutex<Vec<(String, Duration, KickSource)>>,
 }
 
 impl BranchQueueKicker {
@@ -85,9 +97,17 @@ impl BranchQueueKicker {
         Self {
             drain,
             in_flight: Mutex::new(HashMap::new()),
+            start_attempts: QueuedStartAttempts::default(),
             #[cfg(test)]
             kicks: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            scheduled: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The drain's record of failed pre-claim starts.
+    pub(crate) fn start_attempts(&self) -> &QueuedStartAttempts {
+        &self.start_attempts
     }
 
     /// The production kicker: drains through
@@ -173,6 +193,34 @@ impl BranchQueueKicker {
         });
     }
 
+    /// Kick `branch_id` once `delay` has passed. The drain schedules these
+    /// for a queued row whose start failed before its claim: nothing else
+    /// would re-kick a provisioned branch for such a row, so the retry has
+    /// to carry its own kick.
+    pub(crate) fn kick_after(
+        self: &Arc<Self>,
+        branch_id: &str,
+        delay: Duration,
+        source: KickSource,
+    ) {
+        #[cfg(test)]
+        self.scheduled
+            .lock()
+            .unwrap()
+            .push((branch_id.to_string(), delay, source));
+
+        log::info!(
+            "[session_queue] kick for branch {branch_id} ({}) scheduled in {delay:?}",
+            source.as_str()
+        );
+        let kicker = Arc::clone(self);
+        let branch_id = branch_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(delay).await;
+            kicker.kick(&branch_id, source);
+        });
+    }
+
     /// A kicker whose drain does nothing, for tests that only need to know
     /// which branches were kicked.
     #[cfg(test)]
@@ -184,6 +232,12 @@ impl BranchQueueKicker {
     #[cfg(test)]
     pub(crate) fn kicked(&self) -> Vec<(String, KickSource)> {
         self.kicks.lock().unwrap().clone()
+    }
+
+    /// Every delayed kick scheduled so far, oldest first.
+    #[cfg(test)]
+    pub(crate) fn scheduled(&self) -> Vec<(String, Duration, KickSource)> {
+        self.scheduled.lock().unwrap().clone()
     }
 
     /// The branch ids kicked so far, oldest first.

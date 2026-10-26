@@ -83,25 +83,11 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
     for (const id of ['b2', 'b3', 'b4']) requestsFor(id)[0].resolve([]);
     await Promise.all([first, second]);
 
-    // Once settled, the same branches are not requested again…
+    // Once settled, the same branches are not requested again.
     await store.hydrateFromProjectBranches(branches);
     expect(getRunningBranchActions).toHaveBeenCalledTimes(4);
     expect(store.getRunActionPhase('p1')).toBe('running');
     expect(store.getRunActionPhase('p2')).toBeNull();
-
-    // …unless forced, which re-requests every branch.
-    const forced = store.hydrateFromProjectBranches(branches, { force: true });
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(7);
-    requestsFor('b1')[1].resolve([]);
-    requestsFor('b2')[1].resolve([]);
-    requestsFor('b3')[1].resolve([runAction('b3', 'e3')]);
-    await forced;
-    // Hydration is additive — removals arrive via action_status events — so
-    // the earlier execution is kept and the new one is picked up.
-    expect(store.getRunActionPhase('p1')).toBe('running');
-    expect(store.getRunActionPhase('p2')).toBe('running');
-    await store.hydrateFromProjectBranches(branches);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(7);
   });
 
   it('awaits the in-flight request instead of resolving early for a concurrent caller', async () => {
@@ -110,15 +96,60 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
 
     void store.hydrateFromProjectBranches(branches);
     let secondDone = false;
-    const second = store.hydrateFromProjectBranches(branches).then(() => {
-      secondDone = true;
-    });
+    const second = store
+      .hydrateFromProjectBranches(new Map([...branches, ['p2', [{ id: 'b2' }] as never]]))
+      .then(() => {
+        secondDone = true;
+      });
+    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
+    requestsFor('b2')[0].resolve([]);
     await settle();
     expect(secondDone).toBe(false);
 
     requestsFor('b1')[0].resolve([runAction('b1', 'e1')]);
     await second;
     expect(store.getRunActionPhase('p1')).toBe('running');
+  });
+
+  it('skips the call entirely when the project/branch membership is unchanged', async () => {
+    const store = await importStore();
+    const updateBranchProjectMap = vi.spyOn(store, 'updateBranchProjectMap');
+    const first = store.hydrateFromProjectBranches(
+      new Map([
+        ['p1', [{ id: 'b1', name: 'main' }] as never],
+        ['p2', [{ id: 'b2' }] as never],
+      ])
+    );
+    expect(updateBranchProjectMap).toHaveBeenCalledTimes(1);
+    requestsFor('b1')[0].resolve([runAction('b1', 'e1')]);
+    requestsFor('b2')[0].resolve([]);
+    await first;
+
+    // The data store hands over a fresh Map (new Branch objects, different
+    // project order) on every reassignment; same membership, so no work.
+    await store.hydrateFromProjectBranches(
+      new Map([
+        ['p2', [{ id: 'b2' }] as never],
+        ['p1', [{ id: 'b1', name: 'main*' }] as never],
+      ])
+    );
+    expect(updateBranchProjectMap).toHaveBeenCalledTimes(1);
+    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
+    expect(store.getRunActionPhase('p1')).toBe('running');
+
+    // A membership change re-enters: the map is rebuilt and only the new
+    // branch is requested.
+    const grown = store.hydrateFromProjectBranches(
+      new Map([
+        ['p1', [{ id: 'b1' }] as never],
+        ['p2', [{ id: 'b2' }, { id: 'b3' }] as never],
+      ])
+    );
+    expect(updateBranchProjectMap).toHaveBeenCalledTimes(2);
+    expect(getRunningBranchActions).toHaveBeenCalledTimes(3);
+    requestsFor('b3')[0].resolve([runAction('b3', 'e3')]);
+    await grown;
+    expect(store.getRunActionPhase('p2')).toBe('running');
   });
 
   it('retries a branch whose request was rejected', async () => {
@@ -130,6 +161,8 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
     await first;
     expect(getRunningBranchActions).toHaveBeenCalledTimes(1);
 
+    // Same membership as the failed call: the rejection must have invalidated
+    // the early-out so this one re-requests the branch.
     const retry = store.hydrateFromProjectBranches(branches);
     expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
     requestsFor('b1')[1].resolve([runAction('b1', 'e1')]);
@@ -141,24 +174,23 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
     expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
   });
 
-  it('lets a forced refresh supersede a stale in-flight request', async () => {
+  it('drops an in-flight answer after stopListening and re-requests the branch next time', async () => {
     const store = await importStore();
     const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
 
     const stale = store.hydrateFromProjectBranches(branches);
-    const fresh = store.hydrateFromProjectBranches(branches, { force: true });
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
-
-    // The fresh request answers first (nothing running), then the stale one
-    // arrives claiming an action is running; the stale answer must be dropped.
-    requestsFor('b1')[1].resolve([]);
-    await fresh;
+    store.stopListening();
+    // The stale answer arrives claiming an action is running; it must be
+    // dropped rather than applied to the reset store.
     requestsFor('b1')[0].resolve([runAction('b1', 'e-stale')]);
     await stale;
-    expect(store.getRunActionPhase('p1')).toBeNull();
 
-    // The branch counts as hydrated by the fresh request.
-    await store.hydrateFromProjectBranches(branches);
+    const fresh = store.hydrateFromProjectBranches(branches);
     expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
+    requestsFor('b1')[1].resolve([]);
+    await fresh;
+    // Had the stale answer been applied, the rebuilt branch→project map would
+    // now surface its execution as running.
+    expect(store.getRunActionPhase('p1')).toBeNull();
   });
 });

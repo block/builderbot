@@ -5,7 +5,7 @@
   project (detail view) or multiple projects when no filter is provided.
 -->
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount } from 'svelte';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import CirclePause from '@lucide/svelte/icons/circle-pause';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -205,42 +205,20 @@
     void commands.quitApp().catch((e) => console.error('Failed to quit:', e));
   }
 
-  // Stable signature of the project → branch membership. The store replaces
-  // `branchesByProject` with a new Map once per project while hydrating, so an
-  // effect keyed on Map identity would re-run ~once per project during startup
-  // even when no branch was added; keying on this string re-runs it only when
-  // the membership actually changes.
-  const branchMembershipSignature = $derived.by(() => {
-    const keys: string[] = [];
-    for (const [projectId, branches] of projectsDataStore.branchesByProject) {
-      for (const branch of branches) keys.push(`${projectId}/${branch.id}`);
-    }
-    return keys.sort().join('\n');
-  });
-
   // View-lifecycle side effects wired off the store's branch data — worktree/
-  // workspace setup and run-action hydration. They stay out of the store
-  // deliberately: they are this view's policies, not properties of the data.
-  // The branch session queue is not driven from here: the backend kicks it on
-  // startup and whenever a branch becomes ready.
-  //
-  // Workspace setup dedupes in memory and also reacts to branch attributes
-  // (a remote branch turning up as running restarts the poller), so it keeps
-  // re-running on every branch map reassignment.
+  // workspace setup and run-action hydration. Both dedupe internally (the
+  // run-action store skips a call whose project/branch membership is
+  // unchanged), so re-running on every branch map reassignment is cheap. They
+  // stay out of the store deliberately: they are this view's policies, not
+  // properties of the data. The branch session queue is not driven from here:
+  // the backend kicks it on startup and whenever a branch becomes ready.
   $effect(() => {
-    for (const [projectId, branches] of projectsDataStore.branchesByProject) {
+    const branchMap = projectsDataStore.branchesByProject;
+    for (const [projectId, branches] of branchMap) {
       if (branches.length > 0) {
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
       }
     }
-  });
-
-  // Run-action hydration is one request per not-yet-queried branch, so it is
-  // only re-entered when the membership signature changes; the map itself is
-  // read untracked.
-  $effect(() => {
-    branchMembershipSignature;
-    const branchMap = untrack(() => projectsDataStore.branchesByProject);
     projectRunActionsStore.hydrateFromProjectBranches(branchMap).catch(console.error);
   });
 

@@ -8,6 +8,7 @@ import type { Node } from '@milkdown/kit/prose/model';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import { $prose } from '@milkdown/kit/utils';
 
+import { stagedCopyHtml } from '../sessions/referenceClipboard';
 import { canBeNoteTitleText } from './noteMarkdown';
 
 /**
@@ -87,4 +88,23 @@ function canHoldTitle(node: Node): boolean {
   return !holdsLinkOrImage && canBeNoteTitleText(node.textContent);
 }
 
-export const wysiwygPlugins = [firstLineTitlePlugin];
+/**
+ * Paste this app's own copies with their `#type:id` references intact.
+ *
+ * A copy made inside the app carries each reference as a tagged span in its
+ * `text/html` (see `referenceClipboard`), and ProseMirror reads HTML ahead of
+ * the `text/plain` that already spells the references out. Left alone, the
+ * span would parse down to the referenced item's title; here it goes back to
+ * the `#type:id` text the note stores and the viewer renders as a badge. Any
+ * other HTML is left to the parser as it is.
+ */
+const referencePastePlugin = $prose(() => {
+  return new Plugin({
+    key: new PluginKey('WRITTEN_NOTE_REFERENCE_PASTE'),
+    props: {
+      transformPastedHTML: (html) => stagedCopyHtml(html) ?? html,
+    },
+  });
+});
+
+export const wysiwygPlugins = [firstLineTitlePlugin, referencePastePlugin];

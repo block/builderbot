@@ -164,3 +164,28 @@ describe('stored note media', () => {
     expect(currentMarkdown()).toContain(`![Video](${video})`);
   });
 });
+
+describe('referencePastePlugin', () => {
+  const own =
+    '<div data-staged-copy><p>see <span data-staged-ref="#note:abc">Porting notes</span> ' +
+    '<strong>now</strong></p></div>';
+
+  async function pasteAtEnd(html: string): Promise<string> {
+    const view = await createEditor('# Title\n\nbody');
+    view.dispatch(view.state.tr.setSelection(TextSelection.atEnd(view.state.doc)));
+    // jsdom has no ClipboardEvent; the plugin only reads the HTML.
+    view.pasteHTML(html, new Event('paste') as ClipboardEvent);
+    return currentMarkdown();
+  }
+
+  it("restores references from this app's own HTML", async () => {
+    const markdown = await pasteAtEnd(own);
+    expect(markdown).toContain('bodysee #note:abc **now**');
+    expect(markdown).not.toContain('Porting notes');
+  });
+
+  it('leaves other HTML to the parser as it is', async () => {
+    const foreign = '<p>see <span data-staged-ref="#note:abc">Porting notes</span></p>';
+    expect(await pasteAtEnd(foreign)).toContain('bodysee Porting notes');
+  });
+});

@@ -62,6 +62,7 @@
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
   import { listenForMenuEvents } from './lib/listeners/menuListener';
+  import { listenForReferenceCopy } from './lib/features/sessions/referenceClipboard';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { sweepCache } from './lib/cache';
@@ -72,6 +73,7 @@
 
   let showSessionLab = $state(false);
   let unlistenMenu: UnlistenFn | undefined;
+  let unlistenReferenceCopy: (() => void) | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let unlistenCacheInvalidation: UnlistenFn | undefined;
   let unlistenPageLifecycle: (() => void) | undefined;
@@ -341,6 +343,8 @@
     // App-menu items, all nine registered and torn down as one. See
     // menuListener.ts for why they're window-scoped.
     unlistenMenu = listenForMenuEvents();
+    // Copies out of rendered messages, notes and titles keep their references.
+    unlistenReferenceCopy = listenForReferenceCopy();
     unlistenStoreReset = listenToEvent<void>('store-reset-completed', () => {
       storeIncompat = null;
       storeError = null;
@@ -575,6 +579,7 @@
     document.removeEventListener('keydown', handleKonamiKey);
     unregisterShortcuts?.();
     unlistenMenu?.();
+    unlistenReferenceCopy?.();
     unlistenSessionStatus?.();
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();

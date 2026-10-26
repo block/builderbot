@@ -89,6 +89,26 @@
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
 
+  // Settings and the diff route render over the workspace, which stays
+  // mounted but parked (see the template). Window-level requests that the
+  // parked views would otherwise still answer are gated on this.
+  let workspaceParked = $derived(
+    navigation.activeView === 'settings' || navigation.currentRoute.kind === 'diff'
+  );
+  let workspaceEl = $state<HTMLDivElement | null>(null);
+  let detailHostEl = $state<HTMLDivElement | null>(null);
+
+  // The parked workspace is covered, not inert (see the template for why), so
+  // it stays in the tab order: hand any focus that lands in it to the view on
+  // top, and move focus out when parking happens with focus inside.
+  function handleWorkspaceFocusIn() {
+    if (workspaceParked) detailHostEl?.focus({ preventScroll: true });
+  }
+  $effect(() => {
+    if (!workspaceParked) return;
+    if (workspaceEl?.contains(document.activeElement)) detailHostEl?.focus({ preventScroll: true });
+  });
+
   // =========================================================================
   // App-wide PR polling — the backend scheduler owns cadence/concurrency and
   // derives the project list from the DB. The frontend only forwards the
@@ -155,7 +175,7 @@
   }
 
   function requestNewProject() {
-    if (navigation.activeView === 'settings') return;
+    if (workspaceParked) return;
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
@@ -668,29 +688,23 @@
           <div class="error-state">
             <p>{storeError}</p>
           </div>
-        {:else if navigation.activeView === 'settings'}
-          <SettingsPage />
-        {:else if navigation.currentRoute.kind === 'diff'}
-          {@const diffRoute = navigation.currentRoute}
-          <DiffModal
-            branchId={diffRoute.branchId}
-            projectId={diffRoute.projectId}
-            commitSha={diffRoute.commitSha}
-            scope={diffRoute.scope}
-            reviewId={diffRoute.reviewId}
-            beforeLabel={diffRoute.beforeLabel}
-            afterLabel={diffRoute.afterLabel}
-            readonly={diffRoute.readonly}
-            commits={diffRoute.commits}
-            baseBranchLabel={diffRoute.baseBranchLabel}
-            branchLabel={diffRoute.branchLabel}
-            projectName={diffRoute.projectName}
-            githubRepo={diffRoute.githubRepo}
-            subpath={diffRoute.subpath}
-            onClose={() => closeDiffRouteIfCurrent(diffRoute)}
-          />
         {:else}
-          <div class="workspace">
+          <!-- The workspace stays mounted while settings or a diff is shown;
+               the detail host below covers it, so returning is a hide/show
+               instead of rebuilding the sidebar and project home and
+               refetching everything they hold. Parked, it keeps its geometry
+               (scroll positions, the cards' intersection state) and, on
+               purpose, its style: on WebKit any style change on this element
+               — `visibility`, `inert`, even `opacity` — or a change to its
+               sibling position restyles the whole ~4k-node subtree (~55 ms),
+               which is why it is covered rather than hidden and why the host
+               is always present rather than conditionally rendered. -->
+          <div
+            class="workspace"
+            aria-hidden={workspaceParked || undefined}
+            bind:this={workspaceEl}
+            onfocusin={handleWorkspaceFocusIn}
+          >
             <!-- Hoisted out of ProjectHome so it survives project↔repos
                  transitions; hidden on the landing page. -->
             {#if navigation.selectedProjectId || navigation.showReposList}
@@ -702,6 +716,35 @@
               <ProjectHome selectedProjectId={navigation.selectedProjectId} />
             {:else}
               <ProjectsList />
+            {/if}
+          </div>
+          <div
+            class="detail-host"
+            class:active={workspaceParked}
+            tabindex="-1"
+            bind:this={detailHostEl}
+          >
+            {#if navigation.activeView === 'settings'}
+              <SettingsPage />
+            {:else if navigation.currentRoute.kind === 'diff'}
+              {@const diffRoute = navigation.currentRoute}
+              <DiffModal
+                branchId={diffRoute.branchId}
+                projectId={diffRoute.projectId}
+                commitSha={diffRoute.commitSha}
+                scope={diffRoute.scope}
+                reviewId={diffRoute.reviewId}
+                beforeLabel={diffRoute.beforeLabel}
+                afterLabel={diffRoute.afterLabel}
+                readonly={diffRoute.readonly}
+                commits={diffRoute.commits}
+                baseBranchLabel={diffRoute.baseBranchLabel}
+                branchLabel={diffRoute.branchLabel}
+                projectName={diffRoute.projectName}
+                githubRepo={diffRoute.githubRepo}
+                subpath={diffRoute.subpath}
+                onClose={() => closeDiffRouteIfCurrent(diffRoute)}
+              />
             {/if}
           </div>
         {/if}
@@ -738,21 +781,47 @@
     background-color: var(--bg-chrome);
   }
 
+  /* One grid cell shared by the workspace and the detail host over it, so
+     the parked workspace keeps exactly the box it had and the detail view
+     gets the same box the flex column used to give it. */
   .content {
     flex: 1;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
-  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper). */
+  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper).
+     Its own stacking context, so the host's z-index wins over the sticky and
+     positioned descendants in here. */
   .workspace {
-    flex: 1;
+    grid-area: 1 / 1;
     min-width: 0;
     min-height: 0;
     display: flex;
     background-color: var(--bg-chrome);
     overflow: hidden;
+    isolation: isolate;
+  }
+
+  /* Settings / diff: reproduces the flex column their roots were written
+     for. Hidden (not hit-testable) while empty so the workspace under it
+     stays usable; its views paint their own opaque background. */
+  .detail-host {
+    grid-area: 1 / 1;
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    visibility: hidden;
+    outline: none;
+  }
+
+  .detail-host.active {
+    visibility: visible;
   }
 
   .reset-shell {

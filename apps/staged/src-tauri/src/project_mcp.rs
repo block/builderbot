@@ -636,7 +636,8 @@ impl ProjectToolsHandler {
             self.provider.clone()
         };
 
-        let mut session = crate::store::Session::new_queued(&p.instructions);
+        let mut session =
+            crate::store::Session::new_queued(&p.instructions).with_branch(&target.branch.id);
         if let Some(ref provider) = session_provider {
             session = session.with_provider(provider);
         }
@@ -711,22 +712,27 @@ impl ProjectToolsHandler {
                 Err(e) => return e,
             };
 
-        // The inherited provider, not the review-resolved one: this argument is the
-        // branch-wide default the drain pass applies to every queued session without
-        // a stored provider, so a review's fallback agent must not pull unrelated
-        // queued sessions off the project session's provider. The session created
-        // above carries its own resolved provider on its row.
-        if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
-            Arc::clone(&self.store),
-            Arc::clone(&self.registry),
-            self.app_handle.clone(),
-            target.branch.id.clone(),
-            self.provider.clone(),
-        )
-        .await
-        {
-            return format!("Error draining queued sessions: {e}");
-        }
+        // The session created above carries its own resolved provider on its
+        // row, so the kick's drain needs no branch-wide default. The drain runs
+        // on the kicker's task: a cancelled tool call can no longer abandon a
+        // half-claimed row. A start that fails ends the row as `failed` with
+        // its cause, where `wait_for_repo_session` reports it — before the
+        // claim the drain writes it, after a few delayed retries for the
+        // failures that clear on their own (`session_queue::retry`); after
+        // it the start does. A branch still provisioning is not a failure: the
+        // row stays `queued` until provisioning kicks the branch.
+        //
+        // One behaviour the inline drain this replaced had is gone with it:
+        // it passed `self.provider` as the default for *other* queued rows on
+        // the branch that carry no provider of their own, so when this call
+        // was what moved them they started on the project session's
+        // provider. The kicker drains with no default, so such rows now start
+        // on the app default, as they do when any other event moves them.
+        crate::session_queue::kick(
+            &self.app_handle,
+            &target.branch.id,
+            crate::session_queue::KickSource::Mcp,
+        );
 
         serde_json::json!({
             "repo_session_id": repo_session_id,
@@ -824,14 +830,11 @@ impl ProjectToolsHandler {
                         session_type: None,
                     },
                 );
-                let _ = crate::session_commands::drain_queued_sessions_for_branch(
-                    Arc::clone(&self.store),
-                    Arc::clone(&self.registry),
-                    self.app_handle.clone(),
-                    branch_id,
-                    None,
-                )
-                .await;
+                crate::session_queue::kick(
+                    &self.app_handle,
+                    &branch_id,
+                    crate::session_queue::KickSource::Mcp,
+                );
             }
         } else {
             // Session is running (or already terminal). Ask the runner to cancel.
@@ -997,10 +1000,11 @@ impl ProjectToolsHandler {
             );
             let branch_id = branch.id.clone();
             let store = Arc::clone(&self.store);
+            let app_handle = self.app_handle.clone();
             let worktree_result = tauri::async_runtime::spawn_blocking(move || {
                 // We need to run the worktree setup synchronously
                 // Reuse the core logic from branches::setup_worktree
-                crate::branches::setup_worktree_sync(&store, &branch_id, None)
+                crate::branches::setup_worktree_sync(&store, &branch_id, &app_handle)
             })
             .await;
 

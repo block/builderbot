@@ -1441,9 +1441,6 @@
       try {
         await deleteSessionLinkedItem(() => commands.deleteNote(noteId, !!sessionId), sessionId);
         loadTimeline();
-        commands
-          .drainQueuedSessions(branch.id)
-          .catch((e) => console.error('Failed to drain queued sessions:', e));
       } catch (e) {
         console.error('Failed to delete note:', e);
         notifyError('Failed to delete note', e);
@@ -1471,9 +1468,6 @@
           sessionId
         );
         loadTimeline();
-        commands
-          .drainQueuedSessions(branch.id)
-          .catch((e) => console.error('Failed to drain queued sessions:', e));
       } catch (e) {
         console.error('Failed to delete review:', e);
         notifyError('Failed to delete review', e);
@@ -1530,9 +1524,6 @@
         sessionId
       );
       await loadTimeline();
-      commands
-        .drainQueuedSessions(branch.id)
-        .catch((e) => console.error('Failed to drain queued sessions:', e));
     } catch (e) {
       console.error('Failed to delete pending commit:', e);
       notifyError('Failed to delete pending commit', e);

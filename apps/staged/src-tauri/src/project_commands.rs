@@ -210,7 +210,7 @@ pub(crate) fn spawn_project_repo_setup(
             let store_clone = Arc::clone(&store);
             let app_handle_clone = app_handle.clone();
             let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                branches::setup_worktree_sync(&store_clone, &branch_id, Some(&app_handle_clone))
+                branches::setup_worktree_sync(&store_clone, &branch_id, &app_handle_clone)
             })
             .await;
 
@@ -255,7 +255,7 @@ pub(crate) fn spawn_project_repo_setup(
         } else {
             // Remote branch: clone the repo into the running workspace,
             // fetch the base branch, and create the feature branch.
-            match branches::setup_remote_repo_clone(&store, &branch.id).await {
+            match branches::setup_remote_repo_clone(&store, &app_handle, &branch.id).await {
                 Ok(()) => {
                     log::info!(
                         "[add_project_repo] remote repo cloned for branch '{}'",

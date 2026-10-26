@@ -434,7 +434,8 @@ mod tests {
     #[test]
     fn keeps_the_branch_artifacts_and_their_sessions() {
         let f = fixture();
-        let session = Session::new_running("do the thing", Path::new("/tmp/wt"));
+        let session =
+            Session::new_running("do the thing", Path::new("/tmp/wt")).with_branch(&f.branch.id);
         f.store.create_session(&session).unwrap();
         let note = Note::new(&f.branch.id, "Findings", "body").with_session(&session.id);
         f.store.create_note(&note).unwrap();
@@ -446,7 +447,7 @@ mod tests {
             1
         );
         assert!(f.store.get_session(&session.id).unwrap().is_some());
-        // The session resolves to the destination through the branch join.
+        // The session resolves to the destination through its branch.
         assert_eq!(
             f.store
                 .get_project_id_for_session(&session.id)

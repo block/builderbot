@@ -10,6 +10,18 @@
 //!
 //! All `/api/*` routes (except `/api/auth`) require authentication via either
 //! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
+//!
+//! # Handler futures must not own queue state
+//!
+//! `invoke_command` awaits [`dispatch`] inline, and hyper's HTTP/1 default
+//! (`http1_half_close = false`) drops the in-flight handler future at its next
+//! `.await` the moment the client closes the connection — a closed tab, mobile
+//! Safari backgrounding. An arm that writes a `running` session row or a
+//! workspace status and then awaits would leave that write with nothing to
+//! release it: the row is the branch's busy marker, so everything queued
+//! behind it parks. Such arms run their work through [`detached`], which
+//! spawns it and only awaits the handle; the source-text test
+//! `web_arms_that_write_running_rows_are_detached` keeps new arms honest.
 
 // The full implementation is preserved here but start() is currently stubbed out,
 // so most items appear unused to the compiler.
@@ -811,6 +823,24 @@ where
 }
 
 /// Helper to get the Store Arc from the shared mutex slot.
+/// Run `fut` on its own task and wait for its result.
+///
+/// For arms that write a `running` session row or a workspace status and then
+/// await. The request future may be dropped at any `.await` (see the module
+/// docs); dropping a `JoinHandle` detaches the task rather than cancelling it,
+/// so the write is always followed by its release and the client merely
+/// misses the response. A task that panics surfaces as a plain `Err`, like
+/// any other arm failure.
+async fn detached<T, F>(fut: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T, String>> + Send + 'static,
+{
+    tauri::async_runtime::spawn(fut)
+        .await
+        .unwrap_or_else(|e| Err(format!("Detached task failed: {e}")))
+}
+
 fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
     store
         .lock()
@@ -989,7 +1019,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                                 crate::branches::setup_worktree_sync(
                                     &store_clone,
                                     &branch_id_clone,
-                                    Some(&app_handle_clone),
+                                    &app_handle_clone,
                                 )
                             })
                             .await;
@@ -1098,77 +1128,21 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "remove_project_repo" => {
-            let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let project_repo_id: String = arg(&args, "projectRepoId")?;
-
-            let removed = store
-                .get_project_repo(&project_repo_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-            let branches = store
-                .list_branches_for_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
-                .collect::<Vec<_>>();
-
-            let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-            crate::actions::commands::stop_actions_for_branches(
-                action_executor,
-                action_registry,
-                &branch_ids,
-            );
-
-            tauri::async_runtime::spawn_blocking({
-                let store = Arc::clone(&store);
-                let branches = branches.clone();
-                move || -> Result<(), String> {
-                    for branch in &branches {
-                        crate::branches::cleanup_branch_resources(&store, branch)?;
-                    }
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
-
-            for branch in &branches {
-                store.delete_branch(&branch.id).map_err(|e| e.to_string())?;
-            }
-            store
-                .delete_project_repo(&project_repo_id)
-                .map_err(|e| e.to_string())?;
-
-            if removed.is_primary {
-                let next_primary = store
-                    .list_project_repos(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .next();
-                let project = store
-                    .get_project(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project not found: {project_id}"))?;
-                if let Some(next) = next_primary {
-                    store
-                        .set_primary_project_repo(&project_id, &next.id)
-                        .map_err(|e| e.to_string())?;
-                    store
-                        .update_project(
-                            &project_id,
-                            &project.name,
-                            Some(&next.github_repo),
-                            &project.location,
-                            next.subpath.as_deref(),
-                        )
-                        .map_err(|e| e.to_string())?;
-                } else {
-                    store
-                        .update_project(&project_id, &project.name, None, &project.location, None)
-                        .map_err(|e| e.to_string())?;
-                }
-            }
+            let services = crate::branch_teardown::TeardownServices {
+                store: get_store(store_mutex)?,
+                action_executor: Arc::clone(action_executor),
+                action_registry: Arc::clone(action_registry),
+                session_registry: Arc::clone(session_registry),
+                app_handle: app_handle.clone(),
+            };
+            detached(crate::branch_teardown::remove_project_repo_impl(
+                services,
+                project_id,
+                project_repo_id,
+            ))
+            .await?;
             Ok(Value::Null)
         }
         "set_project_status_override" => {
@@ -1207,38 +1181,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "delete_project" => {
-            let store = get_store(store_mutex)?;
             let id: String = arg(&args, "id")?;
-            let branches = store
-                .list_branches_for_project(&id)
-                .map_err(|e| e.to_string())?;
-            let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-            crate::actions::commands::stop_actions_for_branches(
-                action_executor,
-                action_registry,
-                &branch_ids,
-            );
-
-            tauri::async_runtime::spawn_blocking({
-                let store = Arc::clone(&store);
-                let id = id.clone();
-                let branches = branches.clone();
-                move || {
-                    for branch in &branches {
-                        crate::branches::cleanup_branch_resources_best_effort(&store, branch);
-                        let _ = store.delete_branch(&branch.id);
-                    }
-                    if let Ok(project_root) = crate::git::project_worktree_root_for(&id) {
-                        if project_root.exists() {
-                            let _ = std::fs::remove_dir_all(&project_root);
-                        }
-                    }
-                }
-            })
-            .await
-            .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
-
-            store.delete_project(&id).map_err(|e| e.to_string())?;
+            let services = crate::branch_teardown::TeardownServices {
+                store: get_store(store_mutex)?,
+                action_executor: Arc::clone(action_executor),
+                action_registry: Arc::clone(action_registry),
+                session_registry: Arc::clone(session_registry),
+                app_handle: app_handle.clone(),
+            };
+            detached(crate::branch_teardown::delete_project_impl(services, id)).await?;
             Ok(Value::Null)
         }
 
@@ -1698,27 +1649,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(serde_json::to_value(enriched).unwrap())
         }
         "delete_branch" => {
-            let store = get_store(store_mutex)?;
             let id: String = arg(&args, "branchId")?;
-            let branch = store
-                .get_branch(&id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {id}"))?;
-            let branch_ids = vec![id.as_str()];
-            crate::actions::commands::stop_actions_for_branches(
-                action_executor,
-                action_registry,
-                &branch_ids,
-            );
-
-            tauri::async_runtime::spawn_blocking({
-                let store = Arc::clone(&store);
-                let branch = branch.clone();
-                move || crate::branches::cleanup_branch_resources(&store, &branch)
-            })
-            .await
-            .map_err(|e| format!("Failed: {e}"))??;
-            store.delete_branch(&id).map_err(|e| e.to_string())?;
+            let services = crate::branch_teardown::TeardownServices {
+                store: get_store(store_mutex)?,
+                action_executor: Arc::clone(action_executor),
+                action_registry: Arc::clone(action_registry),
+                session_registry: Arc::clone(session_registry),
+                app_handle: app_handle.clone(),
+            };
+            detached(crate::branch_teardown::delete_branch_impl(services, id)).await?;
             Ok(Value::Null)
         }
         "rename_branch" => {
@@ -1867,9 +1806,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     }
                 }
             }
-            store
+            let changed = store
                 .update_branch_workspace_status(&branch_id, &new_status)
                 .map_err(|e| e.to_string())?;
+            crate::branches::workspace_status_written(app_handle, &branch_id, changed, &new_status);
             Ok(serde_json::to_value(crate::PollWorkspaceResult {
                 status: new_status.as_str().to_string(),
                 workstation_id: crate::branches::cached_workstation_id(ws_name),
@@ -1951,9 +1891,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                                 cache.insert(ws_name.to_string(), ws_id);
                             }
                         }
-                        store
-                            .update_branch_workspace_status(branch_id, &new_status)
-                            .ok();
+                        if let Ok(changed) =
+                            store.update_branch_workspace_status(branch_id, &new_status)
+                        {
+                            crate::branches::workspace_status_written(
+                                app_handle,
+                                branch_id,
+                                changed,
+                                &new_status,
+                            );
+                        }
                         if new_status == store::WorkspaceStatus::Starting {
                             starting_workspaces
                                 .entry(ws_name.to_string())
@@ -2071,6 +2018,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             let worktree_str = crate::branches::create_and_link_worktree(
                 &store,
+                app_handle,
                 &branch,
                 &repo_path,
                 &desired_worktree_path,
@@ -2123,6 +2071,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
                 crate::branches::create_and_link_worktree(
                     &store,
+                    app_handle,
                     &branch,
                     &repo_path,
                     &desired_worktree_path,
@@ -2258,193 +2207,204 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "start_workspace" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
+            let app_handle = app_handle.clone();
+            detached(async move {
+                let branch = store
+                    .get_branch(&branch_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+                let project = store
+                    .get_project(&branch.project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+                let ws_name = branch
+                    .workspace_name
+                    .as_deref()
+                    .ok_or("Branch has no workspace name")?;
+                let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
+                let ref_name = crate::branches::normalize_branch_ref(&branch.base_branch);
+                let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
 
-            let ws_name = branch
-                .workspace_name
-                .as_deref()
-                .ok_or("Branch has no workspace name")?;
-            let repo_subpath = crate::branches::resolve_branch_workspace_subpath(&store, &branch)?;
-            let ref_name = crate::branches::normalize_branch_ref(&branch.base_branch);
-            let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
-
-            // Pre-flight auth check
-            if let Err(e) = crate::branches::run_blox_blocking(crate::blox::check_auth).await {
-                store
-                    .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
-                    .ok();
-                return Err(e.to_string());
-            }
-
-            // Secondary repo setup in an already-running shared workspace
-            if let Some(repo_subpath) = repo_subpath.as_deref() {
-                if let Ok(info) = crate::branches::run_blox_blocking({
-                    let ws_name = ws_name.to_string();
-                    move || crate::blox::ws_info(&ws_name)
-                })
-                .await
-                {
-                    let ws_status = info
-                        .status
-                        .as_deref()
-                        .map(|s| s.to_ascii_lowercase())
-                        .unwrap_or_default();
-                    if let Some(ws_id) = info.workstation_id {
-                        if let Ok(mut cache) = crate::branches::workstation_id_cache().lock() {
-                            cache.insert(ws_name.to_string(), ws_id);
-                        }
-                    }
-                    if ws_status == "running" {
-                        crate::branches::clone_repo_into_workspace(
-                            ws_name,
-                            repo_subpath,
-                            &repo_slug,
-                            &ref_name,
-                            &branch.branch_name,
-                        )
-                        .await?;
-                        store
-                            .update_branch_workspace_status(
-                                &branch_id,
-                                &store::WorkspaceStatus::Running,
-                            )
-                            .map_err(|e| e.to_string())?;
-                        return Ok(Value::Null);
-                    }
-                }
-            }
-
-            let resolved_source = Some(format!(
-                "https://github.com/{}.git?ref={}",
-                repo_slug, ref_name
-            ));
-            log::info!(
-                "[start_workspace] branch={} workspace={} starting",
-                branch_id,
-                ws_name
-            );
-            let ws_start_started_at = std::time::Instant::now();
-
-            match crate::branches::run_blox_blocking({
-                let ws_name = ws_name.to_string();
-                let source = resolved_source.clone();
-                move || {
-                    crate::blox::ws_start(
-                        &ws_name,
-                        source.as_deref(),
-                        Some(crate::branches::WORKSPACE_IDLE_TIMEOUT_MINUTES),
-                    )
-                }
-            })
-            .await
-            {
-                Ok(_) => {
-                    log::info!(
-                        "[start_workspace] branch={} workspace={} ws_start completed elapsed_ms={}",
-                        branch_id,
-                        ws_name,
-                        ws_start_started_at.elapsed().as_millis()
-                    );
-                    let has_remote_branch = crate::branches::run_workspace_git_async(
-                        ws_name,
-                        repo_subpath.as_deref(),
-                        &["fetch", "origin", &branch.branch_name],
-                    )
-                    .await
-                    .is_ok();
-
-                    let remote_ref = format!("origin/{}", branch.branch_name);
-                    let checkout_result = if has_remote_branch {
-                        crate::branches::run_workspace_git_async(
-                            ws_name,
-                            repo_subpath.as_deref(),
-                            &["checkout", "-B", &branch.branch_name, &remote_ref],
-                        )
-                        .await
-                    } else {
-                        crate::branches::run_workspace_git_async(
-                            ws_name,
-                            repo_subpath.as_deref(),
-                            &["checkout", "-b", &branch.branch_name],
-                        )
-                        .await
-                    };
-                    if let Err(e) = checkout_result {
-                        log::warn!(
-                            "failed to create branch '{}' in workspace '{}': {e}",
-                            branch.branch_name,
-                            ws_name
-                        );
-                    }
-                    Ok(Value::Null)
-                }
-                Err(crate::blox::BloxError::NotAuthenticated) => {
+                // Pre-flight auth check
+                if let Err(e) = crate::branches::run_blox_blocking(crate::blox::check_auth).await {
                     store
                         .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
                         .ok();
-                    Err("Not authenticated with Blox. Run: sq login".to_string())
+                    return Err(e.to_string());
                 }
-                Err(e) => {
-                    if crate::branches::is_blox_onboarding_precondition_error(&e) {
-                        store
-                            .update_branch_workspace_status(
-                                &branch_id,
-                                &store::WorkspaceStatus::Error,
+
+                // Secondary repo setup in an already-running shared workspace
+                if let Some(repo_subpath) = repo_subpath.as_deref() {
+                    if let Ok(info) = crate::branches::run_blox_blocking({
+                        let ws_name = ws_name.to_string();
+                        move || crate::blox::ws_info(&ws_name)
+                    })
+                    .await
+                    {
+                        let ws_status = info
+                            .status
+                            .as_deref()
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        if let Some(ws_id) = info.workstation_id {
+                            if let Ok(mut cache) = crate::branches::workstation_id_cache().lock() {
+                                cache.insert(ws_name.to_string(), ws_id);
+                            }
+                        }
+                        if ws_status == "running" {
+                            crate::branches::clone_repo_into_workspace(
+                                ws_name,
+                                repo_subpath,
+                                &repo_slug,
+                                &ref_name,
+                                &branch.branch_name,
                             )
-                            .ok();
-                        return Err(e.to_string());
+                            .await?;
+                            let changed = store
+                                .update_branch_workspace_status(
+                                    &branch_id,
+                                    &store::WorkspaceStatus::Running,
+                                )
+                                .map_err(|e| e.to_string())?;
+                            crate::branches::workspace_status_written(
+                                &app_handle,
+                                &branch_id,
+                                changed,
+                                &store::WorkspaceStatus::Running,
+                            );
+                            return Ok(Value::Null);
+                        }
                     }
-                    log::warn!(
-                        "blox ws start failed for '{}', leaving status as Starting for polling to resolve: {e}",
-                        ws_name
-                    );
-                    Ok(Value::Null)
                 }
-            }
+
+                let resolved_source = Some(format!(
+                    "https://github.com/{}.git?ref={}",
+                    repo_slug, ref_name
+                ));
+                log::info!(
+                    "[start_workspace] branch={} workspace={} starting",
+                    branch_id,
+                    ws_name
+                );
+                let ws_start_started_at = std::time::Instant::now();
+
+                match crate::branches::run_blox_blocking({
+                    let ws_name = ws_name.to_string();
+                    let source = resolved_source.clone();
+                    move || {
+                        crate::blox::ws_start(
+                            &ws_name,
+                            source.as_deref(),
+                            Some(crate::branches::WORKSPACE_IDLE_TIMEOUT_MINUTES),
+                        )
+                    }
+                })
+                .await
+                {
+                    Ok(_) => {
+                        log::info!(
+                            "[start_workspace] branch={} workspace={} ws_start completed elapsed_ms={}",
+                            branch_id,
+                            ws_name,
+                            ws_start_started_at.elapsed().as_millis()
+                        );
+                        let has_remote_branch = crate::branches::run_workspace_git_async(
+                            ws_name,
+                            repo_subpath.as_deref(),
+                            &["fetch", "origin", &branch.branch_name],
+                        )
+                        .await
+                        .is_ok();
+
+                        let remote_ref = format!("origin/{}", branch.branch_name);
+                        let checkout_result = if has_remote_branch {
+                            crate::branches::run_workspace_git_async(
+                                ws_name,
+                                repo_subpath.as_deref(),
+                                &["checkout", "-B", &branch.branch_name, &remote_ref],
+                            )
+                            .await
+                        } else {
+                            crate::branches::run_workspace_git_async(
+                                ws_name,
+                                repo_subpath.as_deref(),
+                                &["checkout", "-b", &branch.branch_name],
+                            )
+                            .await
+                        };
+                        if let Err(e) = checkout_result {
+                            log::warn!(
+                                "failed to create branch '{}' in workspace '{}': {e}",
+                                branch.branch_name,
+                                ws_name
+                            );
+                        }
+                        Ok(Value::Null)
+                    }
+                    Err(crate::blox::BloxError::NotAuthenticated) => {
+                        store
+                            .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Error)
+                            .ok();
+                        Err("Not authenticated with Blox. Run: sq login".to_string())
+                    }
+                    Err(e) => {
+                        if crate::branches::is_blox_onboarding_precondition_error(&e) {
+                            store
+                                .update_branch_workspace_status(
+                                    &branch_id,
+                                    &store::WorkspaceStatus::Error,
+                                )
+                                .ok();
+                            return Err(e.to_string());
+                        }
+                        log::warn!(
+                            "blox ws start failed for '{}', leaving status as Starting for polling to resolve: {e}",
+                            ws_name
+                        );
+                        Ok(Value::Null)
+                    }
+                }
+            })
+            .await
         }
         "resume_workspace" => {
             let store = get_store(store_mutex)?;
             let workspace_name: String = arg(&args, "workspaceName")?;
-
-            let branch_ids = store
-                .update_workspace_status_by_workspace_name(
-                    &workspace_name,
-                    &store::WorkspaceStatus::Starting,
-                )
-                .map_err(|e| e.to_string())?;
-
-            if branch_ids.is_empty() {
-                return Err(format!("No branches found for workspace: {workspace_name}"));
-            }
-
-            let ws = workspace_name.clone();
-            if let Err(e) =
-                crate::branches::run_blox_blocking(move || crate::blox::ws_resume(&ws)).await
-            {
-                log::warn!(
-                    "[resume_workspace] workspace={} resume failed: {}",
-                    workspace_name,
-                    e
-                );
-                store
+            detached(async move {
+                let branch_ids = store
                     .update_workspace_status_by_workspace_name(
                         &workspace_name,
-                        &store::WorkspaceStatus::Error,
+                        &store::WorkspaceStatus::Starting,
                     )
-                    .ok();
-                return Err(e.to_string());
-            }
+                    .map_err(|e| e.to_string())?;
 
-            Ok(serde_json::to_value(branch_ids).unwrap())
+                if branch_ids.is_empty() {
+                    return Err(format!("No branches found for workspace: {workspace_name}"));
+                }
+
+                let ws = workspace_name.clone();
+                if let Err(e) =
+                    crate::branches::run_blox_blocking(move || crate::blox::ws_resume(&ws)).await
+                {
+                    log::warn!(
+                        "[resume_workspace] workspace={} resume failed: {}",
+                        workspace_name,
+                        e
+                    );
+                    store
+                        .update_workspace_status_by_workspace_name(
+                            &workspace_name,
+                            &store::WorkspaceStatus::Error,
+                        )
+                        .ok();
+                    return Err(e.to_string());
+                }
+
+                Ok(serde_json::to_value(branch_ids).unwrap())
+            })
+            .await
         }
 
         // =====================================================================
@@ -2746,12 +2706,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             // Returns the queued session id, or null when the pull ran now.
-            let queued_session_id = crate::prs::pull_or_queue_branch_for_branch(
+            let queued_session_id = detached(crate::prs::pull_or_queue_branch_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
-            )
+            ))
             .await?;
             Ok(serde_json::to_value(queued_session_id).unwrap())
         }
@@ -2820,20 +2780,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let note = store
-                .get_note(&note_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Note not found: {note_id}"))?;
-            store.delete_note(&note_id).map_err(|e| e.to_string())?;
-            crate::note_media::cleanup_unreferenced(
+            crate::note_commands::delete_note_impl(
                 &store,
-                crate::note_media::refs::media_ids(&note.content),
-            );
-            if delete_session_flag.unwrap_or(false) {
-                if let Some(sid) = note.session_id {
-                    let _ = store.delete_session(&sid);
-                }
-            }
+                app_handle,
+                &note_id,
+                delete_session_flag.unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "get_note" => {
@@ -3073,36 +3025,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let review_id: String = arg(&args, "reviewId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let review = store
-                .get_review(&review_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Review not found: {review_id}"))?;
-            store.delete_review(&review_id).map_err(|e| e.to_string())?;
-            if delete_session_flag.unwrap_or(false) {
-                if let Some(sid) = review.session_id {
-                    let _ = store.delete_session(&sid);
-                }
-            }
+            crate::timeline::delete_review_impl(
+                &store,
+                app_handle,
+                &review_id,
+                delete_session_flag.unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "delete_pending_commit" => {
             let store = get_store(store_mutex)?;
             let commit_id: String = arg(&args, "commitId")?;
             let delete_session_flag: Option<bool> = opt_arg(&args, "deleteSession")?;
-            let commit = store
-                .get_commit(&commit_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Commit not found: {commit_id}"))?;
-            if commit.sha.is_some() {
-                return Err("Cannot use delete_pending_commit for commits with a SHA".to_string());
-            }
-            crate::timeline::cleanup_reviews_after_commit(&store, session_registry, &commit);
-            store.delete_commit(&commit_id).map_err(|e| e.to_string())?;
-            if delete_session_flag.unwrap_or(false) {
-                if let Some(sid) = commit.session_id {
-                    let _ = store.delete_session(&sid);
-                }
-            }
+            crate::timeline::delete_pending_commit_impl(
+                &store,
+                session_registry,
+                app_handle,
+                &commit_id,
+                delete_session_flag.unwrap_or(false),
+            )?;
             Ok(Value::Null)
         }
         "delete_commit" => {
@@ -3436,6 +3377,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             if let Some(ref p) = provider {
                 session = session.with_provider(p);
             }
+            // Live from before the `running` write until the runner has
+            // registered (see `SessionRegistry::hold`).
+            let _liveness = session_registry.hold(&session.id);
             store.create_session(&session).map_err(|e| e.to_string())?;
 
             session_runner::start_session(
@@ -3476,202 +3420,212 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
             let acp_config_selection: Option<store::AcpConfigSelection> =
                 opt_arg(&args, "acpConfigSelection")?;
+            let app_handle = app_handle.clone();
+            let session_registry = Arc::clone(session_registry);
+            let action_executor = Arc::clone(action_executor);
+            let action_registry = Arc::clone(action_registry);
+            detached(async move {
+                let session = store
+                    .get_session(&session_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
-            let session = store
-                .get_session(&session_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Session not found: {session_id}"))?;
+                let provider = session.provider.clone();
+                let pending_start_agent_id =
+                    session_commands::pending_branch_start_agent_id(session.agent_id.as_deref())
+                        .map(ToString::to_string);
+                let agent_session_id =
+                    session_commands::resumable_agent_session_id(session.agent_id.as_deref());
+                let working_dir = std::path::PathBuf::from(&session.working_dir);
+                let effective_acp_config_selection =
+                    session_commands::resolve_resume_acp_config_selection(
+                        &store,
+                        &session,
+                        acp_config_selection,
+                    );
+                let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
-            let provider = session.provider.clone();
-            let pending_start_agent_id =
-                session_commands::pending_branch_start_agent_id(session.agent_id.as_deref())
-                    .map(ToString::to_string);
-            let agent_session_id =
-                session_commands::resumable_agent_session_id(session.agent_id.as_deref());
-            let working_dir = std::path::PathBuf::from(&session.working_dir);
-            let effective_acp_config_selection =
-                session_commands::resolve_resume_acp_config_selection(
-                    &store,
-                    &session,
-                    acp_config_selection,
-                );
-            let acp_config_selection_to_persist = effective_acp_config_selection.clone();
+                let project_note = store
+                    .get_project_note_by_session(&session_id)
+                    .ok()
+                    .flatten();
+                let mcp_project_id = project_note.as_ref().map(|note| note.project_id.clone());
+                let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
+                let linked_note = store.get_note_by_session(&session_id).ok().flatten();
+                let linked_review = store.get_review_by_session(&session_id).ok().flatten();
 
-            let project_note = store
-                .get_project_note_by_session(&session_id)
-                .ok()
-                .flatten();
-            let mcp_project_id = project_note.as_ref().map(|note| note.project_id.clone());
-            let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
-            let linked_note = store.get_note_by_session(&session_id).ok().flatten();
-            let linked_review = store.get_review_by_session(&session_id).ok().flatten();
+                let branch_from_id = branch_id
+                    .as_deref()
+                    .and_then(|bid| store.get_branch(bid).ok().flatten());
 
-            let branch_from_id = branch_id
-                .as_deref()
-                .and_then(|bid| store.get_branch(bid).ok().flatten());
+                let linked_branch = if branch_from_id.is_some() {
+                    branch_from_id.clone()
+                } else if let Some(commit) = &linked_commit {
+                    store.get_branch(&commit.branch_id).ok().flatten()
+                } else if let Some(note) = &linked_note {
+                    store.get_branch(&note.branch_id).ok().flatten()
+                } else if let Some(review) = &linked_review {
+                    store.get_branch(&review.branch_id).ok().flatten()
+                } else {
+                    None
+                };
 
-            let linked_branch = if branch_from_id.is_some() {
-                branch_from_id.clone()
-            } else if let Some(commit) = &linked_commit {
-                store.get_branch(&commit.branch_id).ok().flatten()
-            } else if let Some(note) = &linked_note {
-                store.get_branch(&note.branch_id).ok().flatten()
-            } else if let Some(review) = &linked_review {
-                store.get_branch(&review.branch_id).ok().flatten()
-            } else {
-                None
-            };
+                let session_type = if project_note.is_some() {
+                    Some("note".to_string())
+                } else if linked_commit.is_some() {
+                    Some("commit".to_string())
+                } else if linked_note.is_some() {
+                    Some("note".to_string())
+                } else if linked_review.is_some() {
+                    Some("review".to_string())
+                } else {
+                    session_commands::infer_branch_resume_session_type(&session.prompt)
+                        .map(str::to_string)
+                };
+                let event_branch_id = linked_branch.as_ref().map(|branch| branch.id.clone());
+                let event_project_id = if let Some(note) = &project_note {
+                    Some(note.project_id.clone())
+                } else {
+                    linked_branch
+                        .as_ref()
+                        .map(|branch| branch.project_id.clone())
+                };
 
-            let session_type = if project_note.is_some() {
-                Some("note".to_string())
-            } else if linked_commit.is_some() {
-                Some("commit".to_string())
-            } else if linked_note.is_some() {
-                Some("note".to_string())
-            } else if linked_review.is_some() {
-                Some("review".to_string())
-            } else {
-                session_commands::infer_branch_resume_session_type(&session.prompt)
-                    .map(str::to_string)
-            };
-            let event_branch_id = linked_branch.as_ref().map(|branch| branch.id.clone());
-            let event_project_id = if let Some(note) = &project_note {
-                Some(note.project_id.clone())
-            } else {
-                linked_branch
-                    .as_ref()
-                    .map(|branch| branch.project_id.clone())
-            };
+                let (pre_head_sha, workspace_name) = {
+                    if let Some(ref branch) = linked_branch {
+                        let ws_name = branch.workspace_name.clone();
+                        let head = if linked_commit.is_some() {
+                            crate::branches::branch_head_sha(&store, branch, &working_dir)
+                                .await
+                                .ok()
+                        } else {
+                            None
+                        };
+                        (head, ws_name)
+                    } else {
+                        (None, None)
+                    }
+                };
 
-            let (pre_head_sha, workspace_name) = {
-                if let Some(ref branch) = linked_branch {
-                    let ws_name = branch.workspace_name.clone();
-                    let head = if linked_commit.is_some() {
-                        crate::branches::branch_head_sha(&store, branch, &working_dir)
-                            .await
+                let remote_working_dir = if let Some(ref branch) = linked_branch {
+                    if branch.workspace_name.is_some() {
+                        let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
+                        let store_for_resolve = Arc::clone(&store);
+                        let branch_for_resolve = branch.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            crate::branches::resolve_branch_workspace_subpath(
+                                &store_for_resolve,
+                                &branch_for_resolve,
+                            )
                             .ok()
+                            .flatten()
+                            .and_then(|subpath| {
+                                crate::branches::resolve_workspace_repo_path(&ws_name, &subpath)
+                                    .ok()
+                            })
+                        })
+                        .await
+                        {
+                            Ok(Some(path)) => Some(std::path::PathBuf::from(path)),
+                            _ => None,
+                        }
                     } else {
                         None
-                    };
-                    (head, ws_name)
-                } else {
-                    (None, None)
-                }
-            };
-
-            let remote_working_dir = if let Some(ref branch) = linked_branch {
-                if branch.workspace_name.is_some() {
-                    let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
-                    let store_for_resolve = Arc::clone(&store);
-                    let branch_for_resolve = branch.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        crate::branches::resolve_branch_workspace_subpath(
-                            &store_for_resolve,
-                            &branch_for_resolve,
-                        )
-                        .ok()
-                        .flatten()
-                        .and_then(|subpath| {
-                            crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
-                        })
-                    })
-                    .await
-                    {
-                        Ok(Some(path)) => Some(std::path::PathBuf::from(path)),
-                        _ => None,
                     }
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            let transitioned = store
-                .transition_to_running_clearing_agent_id(
-                    &session_id,
-                    pending_start_agent_id.as_deref(),
-                )
-                .map_err(|e| e.to_string())?;
-            if !transitioned {
-                return Err("Session is already running".to_string());
-            }
-
-            let config_branch_id = event_branch_id.clone();
-            let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
-            // Note follow-ups (project notes or local branch notes) get the
-            // pikchr tool; remote branch notes can't reach localhost.
-            let expose_pikchr_tools = session_commands::local_note_pikchr_tools_available(
-                project_note.is_some() || linked_note.is_some(),
-                workspace_name.as_deref(),
-            );
-
-            emit_to_all(
-                app_handle,
-                "session-status-changed",
-                session_runner::SessionStatusEvent {
-                    session_id: session_id.clone(),
-                    status: "running".to_string(),
-                    error_message: None,
-                    completion_reason: None,
-                    branch_id: event_branch_id,
-                    project_id: event_project_id.or(mcp_project_id.clone()),
-                    session_type,
-                },
-            );
-
-            // Persist the effective selection before spawning the run: on an
-            // unavailable-config failure the run clears the stored selection,
-            // so persisting afterwards could resurrect the stale value it
-            // just cleared.
-            if acp_config_selection_to_persist != session.acp_config_selection {
-                store
-                    .set_session_acp_config_selection(
+                // Live from before the `running` write until the runner has
+                // registered (see `SessionRegistry::hold`).
+                let _liveness = session_registry.hold(&session_id);
+                let transitioned = store
+                    .transition_to_running_clearing_agent_id(
                         &session_id,
-                        acp_config_selection_to_persist.as_ref(),
+                        pending_start_agent_id.as_deref(),
                     )
                     .map_err(|e| e.to_string())?;
-            }
+                if !transitioned {
+                    return Err("Session is already running".to_string());
+                }
 
-            session_runner::start_session(
-                SessionConfig {
-                    session_id: session_id.clone(),
-                    prompt,
-                    working_dir,
-                    agent_session_id,
-                    pre_head_sha,
-                    provider,
-                    workspace_name,
-                    extra_env: vec![],
-                    mcp_project_id: mcp_project_id.clone(),
-                    action_executor: if mcp_project_id.is_some() {
-                        Some(Arc::clone(action_executor))
-                    } else {
-                        None
-                    },
-                    action_registry: if mcp_project_id.is_some() {
-                        Some(Arc::clone(action_registry))
-                    } else {
-                        None
-                    },
-                    remote_working_dir,
-                    image_ids: image_ids.unwrap_or_default(),
-                    queued_message_id: None,
-                    acp_config_selection: effective_acp_config_selection,
-                    branch_id: config_branch_id,
-                    project_id: config_project_id,
-                    expose_pikchr_tools,
-                    // When resuming a project session, keep its parent project note
-                    // in scope so `child_note` repo sessions still attach to it.
-                    parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
-                    background_hold: session_commands::default_background_hold(),
-                },
-                Arc::clone(&store),
-                app_handle.clone(),
-                Arc::clone(session_registry),
-            )?;
+                let config_branch_id = event_branch_id.clone();
+                let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
+                // Note follow-ups (project notes or local branch notes) get the
+                // pikchr tool; remote branch notes can't reach localhost.
+                let expose_pikchr_tools = session_commands::local_note_pikchr_tools_available(
+                    project_note.is_some() || linked_note.is_some(),
+                    workspace_name.as_deref(),
+                );
 
-            Ok(Value::Null)
+                emit_to_all(
+                    &app_handle,
+                    "session-status-changed",
+                    session_runner::SessionStatusEvent {
+                        session_id: session_id.clone(),
+                        status: "running".to_string(),
+                        error_message: None,
+                        completion_reason: None,
+                        branch_id: event_branch_id,
+                        project_id: event_project_id.or(mcp_project_id.clone()),
+                        session_type,
+                    },
+                );
+
+                // Persist the effective selection before spawning the run: on an
+                // unavailable-config failure the run clears the stored selection,
+                // so persisting afterwards could resurrect the stale value it
+                // just cleared.
+                if acp_config_selection_to_persist != session.acp_config_selection {
+                    store
+                        .set_session_acp_config_selection(
+                            &session_id,
+                            acp_config_selection_to_persist.as_ref(),
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+
+                session_runner::start_session(
+                    SessionConfig {
+                        session_id: session_id.clone(),
+                        prompt,
+                        working_dir,
+                        agent_session_id,
+                        pre_head_sha,
+                        provider,
+                        workspace_name,
+                        extra_env: vec![],
+                        mcp_project_id: mcp_project_id.clone(),
+                        action_executor: if mcp_project_id.is_some() {
+                            Some(Arc::clone(&action_executor))
+                        } else {
+                            None
+                        },
+                        action_registry: if mcp_project_id.is_some() {
+                            Some(Arc::clone(&action_registry))
+                        } else {
+                            None
+                        },
+                        remote_working_dir,
+                        image_ids: image_ids.unwrap_or_default(),
+                        queued_message_id: None,
+                        acp_config_selection: effective_acp_config_selection,
+                        branch_id: config_branch_id,
+                        project_id: config_project_id,
+                        expose_pikchr_tools,
+                        // When resuming a project session, keep its parent project note
+                        // in scope so `child_note` repo sessions still attach to it.
+                        parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+                        background_hold: session_commands::default_background_hold(),
+                    },
+                    Arc::clone(&store),
+                    app_handle.clone(),
+                    Arc::clone(&session_registry),
+                )?;
+
+                Ok(Value::Null)
+            })
+            .await
         }
         "queue_session_message" => {
             let store = get_store(store_mutex)?;
@@ -3803,6 +3757,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             if let Some(ref p) = provider {
                 session = session.with_provider(p);
             }
+            // Live from before the `running` write until the runner has
+            // registered (see `SessionRegistry::hold`).
+            let _liveness = session_registry.hold(&session.id);
             store.create_session(&session).map_err(|e| e.to_string())?;
 
             let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
@@ -3875,36 +3832,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             Ok(serde_json::to_value(result).unwrap())
         }
-        "drain_queued_sessions" => {
-            let store = get_store(store_mutex)?;
-            let branch_id: String = arg(&args, "branchId")?;
-            let provider: Option<String> = opt_arg(&args, "provider")?;
-
-            let result = session_commands::drain_queued_sessions_for_branch(
-                store,
-                Arc::clone(session_registry),
-                app_handle.clone(),
-                branch_id,
-                provider,
-            )
-            .await?;
-
-            Ok(serde_json::to_value(result).unwrap())
-        }
         "start_queued_session_now" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let session_id: String = arg(&args, "sessionId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
 
-            let result = session_commands::start_queued_session_now_for_branch(
+            let result = detached(session_commands::start_queued_session_now_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
                 session_id,
                 provider,
-            )
+            ))
             .await?;
 
             Ok(serde_json::to_value(result).unwrap())
@@ -3939,10 +3880,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "delete_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
-            session_registry.cancel(&session_id);
-            store
-                .delete_session(&session_id)
-                .map_err(|e| e.to_string())?;
+            session_commands::delete_session_impl(
+                session_registry,
+                &store,
+                app_handle,
+                &session_id,
+            )?;
             Ok(Value::Null)
         }
         // =====================================================================
@@ -3953,14 +3896,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
             let draft: Option<bool> = opt_arg(&args, "draft")?;
-            let session_id = crate::prs::start_create_pr_pipeline_for_branch(
+            let session_id = detached(crate::prs::start_create_pr_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
                 provider,
                 draft,
-            )
+            ))
             .await?;
             Ok(serde_json::to_value(session_id).unwrap())
         }
@@ -3969,14 +3912,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
             let force: Option<bool> = opt_arg(&args, "force")?;
-            let response = crate::prs::start_or_queue_push_pipeline_for_branch(
+            let response = detached(crate::prs::start_or_queue_push_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
                 provider,
                 force,
-            )
+            ))
             .await?;
             Ok(serde_json::to_value(response).unwrap())
         }
@@ -3988,7 +3931,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // silently downgrading it to a base rebase.
             let target: Option<String> = opt_arg(&args, "target")?;
             let then_force_push: Option<bool> = opt_arg(&args, "thenForcePush")?;
-            let response = crate::prs::start_or_queue_commit_pipeline_for_branch(
+            let response = detached(crate::prs::start_or_queue_commit_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
@@ -3997,7 +3940,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 provider,
                 target,
                 then_force_push.unwrap_or(false),
-            )
+            ))
             .await?;
             Ok(serde_json::to_value(response).unwrap())
         }
@@ -4005,7 +3948,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
-            let response = crate::prs::start_or_queue_commit_pipeline_for_branch(
+            let response = detached(crate::prs::start_or_queue_commit_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
@@ -4014,7 +3957,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 provider,
                 None,
                 false,
-            )
+            ))
             .await?;
             Ok(serde_json::to_value(response).unwrap())
         }
@@ -4303,11 +4246,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // Doctor
         // =====================================================================
         "run_doctor" => {
-            let report = crate::doctor::run_doctor().await;
+            let report = crate::doctor::run_doctor(app_handle.clone()).await;
             Ok(serde_json::to_value(report).unwrap())
         }
         "run_doctor_freshness" => {
-            let report = crate::doctor::run_doctor_freshness().await;
+            let report = crate::doctor::run_doctor_freshness(app_handle.clone()).await;
             Ok(serde_json::to_value(report).unwrap())
         }
         "start_doctor_login" => {
@@ -4451,6 +4394,118 @@ mod tests {
         );
     }
 
+    /// The delete arms must reach the bodies the Tauri commands use. The
+    /// artifact deletes kick the branch queue after the delete — a queued
+    /// commit is the barrier in front of everything queued behind it — and the
+    /// branch deletes stop the branch's sessions before the cascade takes
+    /// their rows; an arm that re-implemented either inline would drop that
+    /// without any compile error.
+    #[test]
+    fn web_delete_arms_share_the_tauri_bodies() {
+        let source = include_str!("web_server.rs");
+        for (command, body) in [
+            ("delete_note", "note_commands::delete_note_impl("),
+            ("delete_review", "timeline::delete_review_impl("),
+            (
+                "delete_pending_commit",
+                "timeline::delete_pending_commit_impl(",
+            ),
+            ("delete_session", "session_commands::delete_session_impl("),
+            ("delete_branch", "branch_teardown::delete_branch_impl("),
+            (
+                "remove_project_repo",
+                "branch_teardown::remove_project_repo_impl(",
+            ),
+            ("delete_project", "branch_teardown::delete_project_impl("),
+        ] {
+            let arm = dispatch_arm_body(source, command);
+            assert!(
+                arm.contains(body),
+                "the web `{command}` arm must call `{body}`, not delete inline: {arm}"
+            );
+        }
+    }
+
+    /// Arms that write a `running` session row or a workspace status and then
+    /// await must run that work through [`detached`]: the request future is
+    /// dropped at its next `.await` when the client disconnects (see the module
+    /// docs), and a dropped arm would leave its write with nothing to release
+    /// it. Keyed on explicit lists so a new arm that writes-then-awaits fails
+    /// here until it is either detached or exempted with a reason.
+    #[test]
+    fn web_arms_that_write_running_rows_are_detached() {
+        /// Calls that write a `running` row or a workspace status.
+        const WRITE_MARKERS: &[&str] = &[
+            "Session::new_running(",
+            "transition_to_running",
+            "update_branch_workspace_status(",
+            "update_workspace_status_by_workspace_name(",
+            "_pipeline_for_branch(",
+            "pull_or_queue_branch_for_branch(",
+            "start_queued_session_now_for_branch(",
+        ];
+        /// Arms whose bodies run through `detached`.
+        const DETACHED: &[&str] = &[
+            "start_workspace",
+            "resume_workspace",
+            "pull_or_queue_branch",
+            "resume_session",
+            "start_queued_session_now",
+            "push_branch",
+            "rebase_branch",
+            "squash_commits",
+            "create_pr",
+        ];
+        /// Arms that write only after their last await, with the kick in the
+        /// same synchronous stretch: a drop before the write loses nothing the
+        /// next poll won't redo, and nothing is left half-written.
+        const WRITES_AFTER_LAST_AWAIT: &[&str] =
+            &["poll_workspace_status", "poll_all_workspace_statuses"];
+
+        let source = include_str!("web_server.rs");
+        for (commands, arm) in dispatch_arms(source) {
+            let command = commands.join(" | ");
+            let writes = WRITE_MARKERS.iter().any(|marker| arm.contains(marker));
+            let awaits = arm.contains(".await");
+            if commands.iter().any(|c| DETACHED.contains(&c.as_str())) {
+                assert!(
+                    writes,
+                    "the web `{command}` arm no longer writes a running row or workspace \
+                     status; drop it from DETACHED"
+                );
+                assert!(
+                    arm.contains("detached("),
+                    "the web `{command}` arm writes a running row or workspace status and \
+                     awaits, so it must run through `detached(...)`: {arm}"
+                );
+            } else if commands
+                .iter()
+                .any(|c| WRITES_AFTER_LAST_AWAIT.contains(&c.as_str()))
+            {
+                let last_await = arm.rfind(".await").expect("exempted arm should await");
+                let first_write = WRITE_MARKERS
+                    .iter()
+                    .filter_map(|marker| arm.find(marker))
+                    .min()
+                    .expect("exempted arm should write");
+                assert!(
+                    first_write > last_await,
+                    "the web `{command}` arm writes before its last await; it no longer \
+                     qualifies for WRITES_AFTER_LAST_AWAIT and must run through \
+                     `detached(...)`"
+                );
+            } else {
+                assert!(
+                    !(writes && awaits),
+                    "the web `{command}` arm writes a running row or workspace status and \
+                     then awaits; run that work through `detached(...)` and add it to \
+                     DETACHED, or add it to WRITES_AFTER_LAST_AWAIT if every write follows \
+                     its last await: {arm}"
+                );
+            }
+        }
+    }
+
     /// The windowed transcript read must accept the same optional window the
     /// Tauri command does, and keep reading off the runtime thread: this is the
     /// largest payload the server produces, and the client pages through it
@@ -4571,6 +4626,45 @@ mod tests {
         }
 
         source[start..end.min(source.len())].to_string()
+    }
+
+    /// Every arm of the dispatch match as (its command patterns, its body),
+    /// including the `"a" | "b" =>` arms `dispatch_arm_body` can't address.
+    fn dispatch_arms(source: &str) -> Vec<(Vec<String>, String)> {
+        let marker = "match command {";
+        let start = source
+            .find(marker)
+            .expect("dispatch command match should exist")
+            + marker.len();
+        let mut depth = 1isize;
+        let mut arms = Vec::new();
+        let mut current: Option<(Vec<String>, String)> = None;
+
+        for line in source[start..].lines() {
+            if depth == 1 {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("_ =>") {
+                    break;
+                }
+                let commands = extract_match_pattern_strings(trimmed);
+                if !commands.is_empty() {
+                    current = Some((commands, String::new()));
+                }
+            }
+            if let Some((_, body)) = current.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+
+            depth += brace_delta_ignoring_strings(line);
+            if depth == 1 {
+                arms.extend(current.take());
+            } else if depth == 0 {
+                break;
+            }
+        }
+
+        arms
     }
 
     fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {

@@ -568,13 +568,14 @@ pub struct Session {
     /// Used as an interim display name while the session is running.
     #[serde(default)]
     pub acp_title: Option<String>,
-    /// Branch this session belongs to, for sessions that create no artifact.
+    /// Branch this session belongs to — the branch queue's scheduling key.
     ///
-    /// Branch-scoped sessions are normally found through their commit, note, or
-    /// review row. Pipeline-launched (pr/push) sessions have none of those, so
-    /// they record the branch here to stay visible to the branch queue and to
-    /// let completion side-effects resolve the branch from the DB alone.
-    /// `None` for artifact-backed sessions and for project-level sessions.
+    /// Set for every branch-scoped session (commit, note, review, and the
+    /// pr/push/pull pipelines), so "what is queued or running on this branch"
+    /// is a single-table read and completion side-effects can resolve the
+    /// branch after the session's artifact is gone. The artifact rows keep
+    /// their own `session_id` for the timeline; they are not consulted for
+    /// scheduling. `None` for project-level and Pikchr child sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_id: Option<String>,
     /// When this session's pipeline (pr/push) completion outcome events were
@@ -709,7 +710,8 @@ impl Session {
         self
     }
 
-    /// Link an artifact-less session to its branch so the branch queue sees it.
+    /// Link a session to its branch so the branch queue sees it. Every
+    /// branch-scoped insert must call this; see [`Session::branch_id`].
     pub fn with_branch(mut self, branch_id: &str) -> Self {
         self.branch_id = Some(branch_id.to_string());
         self

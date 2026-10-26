@@ -979,7 +979,9 @@ fn test_queued_session_acp_config_selection_round_trips() {
             label: Some("Medium".to_string()),
         }),
     };
-    let session = Session::new_queued("queued").with_acp_config_selection(selection.clone());
+    let session = Session::new_queued("queued")
+        .with_branch(&branch.id)
+        .with_acp_config_selection(selection.clone());
     store.create_session(&session).unwrap();
     let note = Note::new(&branch.id, "queued", "").with_session(&session.id);
     store.create_note(&note).unwrap();
@@ -1198,7 +1200,7 @@ fn test_queued_pipeline_commit_owns_branch_queue_position() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let mut session = Session::new_queued("Rebase branch");
+    let mut session = Session::new_queued("Rebase branch").with_branch(&branch.id);
     session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
     store.create_session(&session).unwrap();
     let commit = Commit::new_pending(&branch.id).with_session(&session.id);
@@ -1427,7 +1429,8 @@ fn test_running_pipeline_commit_marks_branch_busy_and_resolves_branch() {
     let branch = Branch::new(&project.id, "feature", "main");
     store.create_branch(&branch).unwrap();
 
-    let mut session = Session::new_running("Squash commits", Path::new("/tmp"));
+    let mut session =
+        Session::new_running("Squash commits", Path::new("/tmp")).with_branch(&branch.id);
     session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Squash));
     store.create_session(&session).unwrap();
     let commit = Commit::new_pending(&branch.id).with_session(&session.id);

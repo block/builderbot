@@ -11,6 +11,7 @@ pub mod agent;
 pub mod app_lifecycle;
 pub mod background_sync;
 pub mod blox;
+mod branch_teardown;
 pub mod branches;
 pub(crate) mod commit_reassociation;
 pub mod diff_cache;
@@ -40,6 +41,7 @@ pub mod prs;
 pub mod review_commands;
 pub mod session_commands;
 pub mod session_completion;
+pub mod session_queue;
 pub mod session_runner;
 pub mod shell_env;
 pub mod store;
@@ -272,12 +274,16 @@ pub(crate) fn get_store(
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
+/// The registry is a parameter rather than a state read: at setup this runs
+/// before the registry is managed.
 fn start_store_services(
     store: Arc<Store>,
     pr_scheduler: Arc<pr_poll_scheduler::PrPollScheduler>,
+    registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
 ) {
     background_sync::spawn(Arc::clone(&store), app_handle.clone());
+    session_queue::sweep::spawn(Arc::clone(&store), registry, app_handle.clone());
     pr_poll_scheduler::spawn(pr_scheduler, store, app_handle);
 }
 
@@ -332,9 +338,15 @@ fn confirm_reset_store(
     store_slot: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     store_change_tx: tauri::State<'_, tokio::sync::broadcast::Sender<store::StoreChange>>,
     pr_scheduler: tauri::State<'_, Arc<pr_poll_scheduler::PrPollScheduler>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
 ) -> Result<(), String> {
     if let Some(store) = reset_store(&db_state, &store_slot, &store_change_tx)? {
-        start_store_services(store, Arc::clone(pr_scheduler.inner()), app_handle.clone());
+        start_store_services(
+            store,
+            Arc::clone(pr_scheduler.inner()),
+            Arc::clone(registry.inner()),
+            app_handle.clone(),
+        );
         // Every window owns its prompt state. Tell peers to dismiss it after
         // the shared backend store has been replaced successfully.
         if let Err(error) = app_handle.emit("store-reset-completed", ()) {
@@ -483,11 +495,7 @@ fn create_project(
                 let branch_id_clone = branch_id.clone();
                 let app_handle_clone = app_handle.clone();
                 let worktree_result = tauri::async_runtime::spawn_blocking(move || {
-                    branches::setup_worktree_sync(
-                        &store_clone,
-                        &branch_id_clone,
-                        Some(&app_handle_clone),
-                    )
+                    branches::setup_worktree_sync(&store_clone, &branch_id_clone, &app_handle_clone)
                 })
                 .await;
 
@@ -620,80 +628,22 @@ fn clear_project_repo_reason(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn remove_project_repo(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
     registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
+    session_registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     project_id: String,
     project_repo_id: String,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
-    let removed = store
-        .get_project_repo(&project_repo_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project repo not found: {project_repo_id}"))?;
-    let branches = store
-        .list_branches_for_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|b| b.project_repo_id.as_deref() == Some(project_repo_id.as_str()))
-        .collect::<Vec<_>>();
-
-    // Stop running actions for branches being removed.
-    let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-    actions::commands::stop_actions_for_branches(&executor, &registry, &branch_ids);
-
-    // Run heavy cleanup (worktree removal, remote workspace deletion) off the
-    // main thread so the UI stays responsive for large repos.
-    tauri::async_runtime::spawn_blocking({
-        let store = Arc::clone(&store);
-        let branches = branches.clone();
-        move || -> Result<(), String> {
-            for branch in &branches {
-                branches::cleanup_branch_resources(&store, branch)?;
-            }
-            Ok(())
-        }
-    })
-    .await
-    .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
-
-    for branch in &branches {
-        store.delete_branch(&branch.id).map_err(|e| e.to_string())?;
-    }
-    store
-        .delete_project_repo(&project_repo_id)
-        .map_err(|e| e.to_string())?;
-
-    if removed.is_primary {
-        let next_primary = store
-            .list_project_repos(&project_id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next();
-        let project = store
-            .get_project(&project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project not found: {project_id}"))?;
-        if let Some(next) = next_primary {
-            store
-                .set_primary_project_repo(&project_id, &next.id)
-                .map_err(|e| e.to_string())?;
-            store
-                .update_project(
-                    &project_id,
-                    &project.name,
-                    Some(&next.github_repo),
-                    &project.location,
-                    next.subpath.as_deref(),
-                )
-                .map_err(|e| e.to_string())?;
-        } else {
-            store
-                .update_project(&project_id, &project.name, None, &project.location, None)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(())
+    let services = branch_teardown::TeardownServices {
+        store: get_store(&store)?,
+        action_executor: Arc::clone(&executor),
+        action_registry: Arc::clone(&registry),
+        session_registry: Arc::clone(&session_registry),
+        app_handle,
+    };
+    branch_teardown::remove_project_repo_impl(services, project_id, project_repo_id).await
 }
 
 /// Set or clear (`None`) the user-chosen status shown in place of a project's
@@ -757,55 +707,21 @@ fn update_project_repo_branch_name(
 
 #[tauri::command]
 async fn delete_project(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<actions::ActionExecutor>>,
     registry: tauri::State<'_, Arc<actions::ActionRegistry>>,
+    session_registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     id: String,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
-
-    // Clean up branch-backed resources (local worktrees / remote workspaces)
-    // before removing DB records via cascade.
-    let branches = store
-        .list_branches_for_project(&id)
-        .map_err(|e| e.to_string())?;
-
-    // Stop all running actions for branches in this project before cleanup.
-    let branch_ids: Vec<&str> = branches.iter().map(|b| b.id.as_str()).collect();
-    actions::commands::stop_actions_for_branches(&executor, &registry, &branch_ids);
-
-    // Run heavy cleanup (worktree removal, remote workspace deletion, directory
-    // cleanup) off the main thread so the UI stays responsive for large repos.
-    tauri::async_runtime::spawn_blocking({
-        let store = Arc::clone(&store);
-        let id = id.clone();
-        let branches = branches.clone();
-        move || {
-            cleanup_project_branches_best_effort(
-                &branches,
-                |branch| branches::cleanup_branch_resources_best_effort(&store, branch),
-                |branch| store.delete_branch(&branch.id).map_err(|e| e.to_string()),
-            );
-
-            // Best-effort cleanup for project-scoped local worktree roots.
-            // Worktree-level cleanup removes individual directories; this removes any
-            // leftover project container folder.
-            if let Ok(project_root) = git::project_worktree_root_for(&id) {
-                if project_root.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&project_root) {
-                        log::warn!(
-                            "failed to remove project worktree root '{}': {e}",
-                            project_root.display()
-                        );
-                    }
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
-
-    store.delete_project(&id).map_err(|e| e.to_string())
+    let services = branch_teardown::TeardownServices {
+        store: get_store(&store)?,
+        action_executor: Arc::clone(&executor),
+        action_registry: Arc::clone(&registry),
+        session_registry: Arc::clone(&session_registry),
+        app_handle,
+    };
+    branch_teardown::delete_project_impl(services, id).await
 }
 
 // =============================================================================
@@ -2001,6 +1917,12 @@ pub fn run() {
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
             let session_registry = Arc::new(session_runner::SessionRegistry::new());
+            // The branch queue's single entry point; every backend event that
+            // can unblock a branch kicks through it. Managed before the store
+            // so startup recovery below can kick.
+            app.manage(Arc::new(session_queue::BranchQueueKicker::for_app(
+                app.handle().clone(),
+            )));
             // Store change feed: every mutating store method publishes a
             // StoreChange here; the coalescer forwards them to all windows
             // and web clients as domain events. Created unconditionally
@@ -2022,13 +1944,6 @@ pub fn run() {
                         .map_err(|e| format!("Failed to open store: {e}"))?
                         .with_change_sender(store_change_tx.clone());
                     let store_arc = Arc::new(s);
-                    // Recover sessions whose owner process is dead; leave sessions
-                    // owned by other live Staged instances untouched.
-                    session_runner::recover_dead_sessions(
-                        Arc::clone(&store_arc),
-                        Arc::clone(&session_registry),
-                        app.handle().clone(),
-                    );
                     session_runner::recover_stale_queued_session_messages(&store_arc);
                     // Release action-detection windows whose owner process is
                     // dead — a hard kill mid-detection otherwise leaves the
@@ -2056,6 +1971,7 @@ pub fn run() {
                     start_store_services(
                         Arc::clone(&store_arc),
                         Arc::clone(&pr_scheduler),
+                        Arc::clone(&session_registry),
                         app.handle().clone(),
                     );
                     // `fsmonitor-v1` only flips `.git/config` flags on stale
@@ -2127,6 +2043,24 @@ pub fn run() {
             // so the web server and event emitters can access it.
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
+
+            // Startup queue recovery, once every piece of state a drain reads
+            // is managed: the kicks below run drains on their own tasks, and
+            // those resolve the store and registry from the handle.
+            //
+            // First the sessions whose owner process is dead (other live
+            // Staged instances' sessions are left alone), then every branch
+            // with queued rows — a queue left parked by a previous run, or by
+            // a client that never got to its own startup drain, moves without
+            // anyone connected.
+            if let Ok(store) = get_store(&app.state::<Mutex<Option<Arc<Store>>>>()) {
+                session_runner::recover_dead_sessions(Arc::clone(&store), app.handle().clone());
+                session_queue::kick_all_with_queued_work(
+                    app.handle(),
+                    &store,
+                    session_queue::KickSource::Startup,
+                );
+            }
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
             }
@@ -2398,7 +2332,6 @@ pub fn run() {
             session_commands::start_branch_session,
             session_commands::start_or_queue_branch_session,
             session_commands::queue_branch_session,
-            session_commands::drain_queued_sessions,
             session_commands::start_queued_session_now,
             session_commands::start_project_session,
             // Actions

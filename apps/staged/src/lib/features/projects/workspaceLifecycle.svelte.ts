@@ -160,19 +160,11 @@ class WorkspaceLifecycleController {
       this.startingTimestamps.delete(branchId);
     }
 
-    // Kick the poller when a workspace enters an active state.
+    // Kick the poller when a workspace enters an active state. Queued
+    // sessions are not drained from here: the backend kicks the branch queue
+    // itself when it writes the `running` status.
     if (workspaceStatus === 'starting' || workspaceStatus === 'running') {
       this.ensurePolling();
-    }
-
-    // Drain queued sessions when a workspace becomes ready.
-    if (workspaceStatus === 'running') {
-      commands.drainQueuedSessions(branchId).catch((e) => {
-        console.error(
-          '[workspaceLifecycle] Failed to drain queued sessions on workspace ready:',
-          e
-        );
-      });
     }
   }
 
@@ -518,15 +510,9 @@ class WorkspaceLifecycleController {
 
       // NOTE: prerun actions are only triggered here when opts.runPrerun
       // is set (e.g. the retry path). The normal creation paths run them
-      // in the backend (create_project / add_project_repo / MCP).
-
-      // Drain queued sessions now that the worktree is ready.
-      commands.drainQueuedSessions(branchId).catch((e) => {
-        console.error(
-          '[workspaceLifecycle] Failed to drain queued sessions after worktree setup:',
-          e
-        );
-      });
+      // in the backend (create_project / add_project_repo / MCP). Queued
+      // sessions are likewise started by the backend when it links the
+      // worktree, not from here.
     } catch (e) {
       console.error('[workspaceLifecycle] Failed to setup worktree:', e);
       const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);

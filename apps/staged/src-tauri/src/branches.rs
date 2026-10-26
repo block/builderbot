@@ -690,13 +690,36 @@ pub(crate) async fn clone_repo_into_workspace(
     Ok(())
 }
 
+/// Kick the branch's session queue when a workspace-status write moved it to
+/// `Running`.
+///
+/// Every site that writes a workspace status calls this with what
+/// [`Store::update_branch_workspace_status`] reported, so a queued session
+/// waiting on provisioning starts whichever poller or setup path saw the
+/// workspace come up — the frontend's own drain used to be the only one.
+pub(crate) fn workspace_status_written<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+    changed: bool,
+    status: &store::WorkspaceStatus,
+) {
+    if changed && *status == store::WorkspaceStatus::Running {
+        crate::session_queue::kick(
+            app_handle,
+            branch_id,
+            crate::session_queue::KickSource::WorkspaceRunning,
+        );
+    }
+}
+
 /// Clone a repo into an already-running remote workspace for a given branch.
 ///
 /// Resolves the workspace name, repo slug, subpath, and base ref from the
 /// branch and project, then delegates to `clone_repo_into_workspace`. Updates
 /// the branch's workspace status to Running on success.
-pub(crate) async fn setup_remote_repo_clone(
+pub(crate) async fn setup_remote_repo_clone<R: tauri::Runtime>(
     store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
     branch_id: &str,
 ) -> Result<(), String> {
     let branch = store
@@ -727,9 +750,15 @@ pub(crate) async fn setup_remote_repo_clone(
     )
     .await?;
 
-    store
+    let changed = store
         .update_branch_workspace_status(branch_id, &store::WorkspaceStatus::Running)
         .map_err(|e| e.to_string())?;
+    workspace_status_written(
+        app_handle,
+        branch_id,
+        changed,
+        &store::WorkspaceStatus::Running,
+    );
 
     Ok(())
 }
@@ -1308,8 +1337,13 @@ pub fn create_branch(
 /// and links the workdir in the database.
 ///
 /// Returns the worktree path as a string.
-pub(crate) fn create_and_link_worktree(
+///
+/// Kicks the branch's session queue once the worktree is linked: a session
+/// queued on an unprovisioned branch waits for exactly this, and every setup
+/// entry point (both transports, the project-setup pass, MCP) funnels here.
+pub(crate) fn create_and_link_worktree<R: tauri::Runtime>(
     store: &Arc<Store>,
+    app_handle: &tauri::AppHandle<R>,
     branch: &store::Branch,
     repo_path: &std::path::Path,
     desired_worktree_path: &std::path::Path,
@@ -1579,6 +1613,12 @@ pub(crate) fn create_and_link_worktree(
         }
     }
 
+    crate::session_queue::kick(
+        app_handle,
+        &branch.id,
+        crate::session_queue::KickSource::WorktreeCreated,
+    );
+
     // _guard dropped here, releasing the per-branch lock.
     Ok(worktree_str)
 }
@@ -1591,6 +1631,7 @@ pub(crate) fn create_and_link_worktree(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn setup_worktree(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: AppHandle,
     branch_id: String,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
@@ -1626,8 +1667,13 @@ pub async fn setup_worktree(
         git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
 
-    let worktree_str =
-        create_and_link_worktree(&store, &branch, &repo_path, &desired_worktree_path)?;
+    let worktree_str = create_and_link_worktree(
+        &store,
+        &app_handle,
+        &branch,
+        &repo_path,
+        &desired_worktree_path,
+    )?;
 
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
@@ -1648,7 +1694,7 @@ pub async fn setup_worktree_and_run_prerun(
     provider: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     // Delegate to the existing setup_worktree command for worktree creation.
-    let result = setup_worktree(store.clone(), branch_id.clone()).await?;
+    let result = setup_worktree(store.clone(), app_handle.clone(), branch_id.clone()).await?;
 
     spawn_prerun_actions(
         get_store(&store)?,
@@ -1789,6 +1835,7 @@ pub async fn create_remote_branch(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: AppHandle,
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
@@ -1848,9 +1895,15 @@ pub async fn start_workspace(
                     &branch.branch_name,
                 )
                 .await?;
-                store
+                let changed = store
                     .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Running)
                     .map_err(|e| e.to_string())?;
+                workspace_status_written(
+                    &app_handle,
+                    &branch_id,
+                    changed,
+                    &store::WorkspaceStatus::Running,
+                );
 
                 return Ok(());
             }
@@ -2057,6 +2110,7 @@ pub(crate) fn map_blox_status_to_workspace_status(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn poll_workspace_status(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: AppHandle,
     branch_id: String,
 ) -> Result<PollWorkspaceResult, String> {
     let store = get_store(&store)?;
@@ -2216,9 +2270,10 @@ pub async fn poll_workspace_status(
         }
     }
 
-    store
+    let changed = store
         .update_branch_workspace_status(&branch_id, &new_status)
         .map_err(|e| e.to_string())?;
+    workspace_status_written(&app_handle, &branch_id, changed, &new_status);
 
     Ok(PollWorkspaceResult {
         status: new_status.as_str().to_string(),
@@ -2413,9 +2468,9 @@ pub async fn poll_all_workspace_statuses(
                     }
                 }
 
-                store
-                    .update_branch_workspace_status(branch_id, &new_status)
-                    .ok();
+                if let Ok(changed) = store.update_branch_workspace_status(branch_id, &new_status) {
+                    workspace_status_written(&app_handle, branch_id, changed, &new_status);
+                }
 
                 // Track workspaces still starting so we can fetch bootstrap progress.
                 if new_status == store::WorkspaceStatus::Starting {
@@ -2547,32 +2602,21 @@ pub async fn resume_workspace(
 
 #[tauri::command]
 pub async fn delete_branch(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     executor: tauri::State<'_, Arc<ActionExecutor>>,
     registry: tauri::State<'_, Arc<ActionRegistry>>,
+    session_registry: tauri::State<'_, Arc<crate::session_runner::SessionRegistry>>,
     branch_id: String,
 ) -> Result<(), String> {
-    let store = get_store(&store)?;
-
-    // Stop any running actions for this branch before cleanup.
-    crate::actions::commands::stop_actions_for_branches(&executor, &registry, &[&branch_id]);
-
-    // Get the branch
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    tauri::async_runtime::spawn_blocking({
-        let store = Arc::clone(&store);
-        let branch = branch.clone();
-        move || cleanup_branch_resources(&store, &branch)
-    })
-    .await
-    .map_err(|e| format!("Failed to clean up branch resources: {e}"))??;
-
-    // Delete the branch record (cascades to commits, notes, reviews)
-    store.delete_branch(&branch_id).map_err(|e| e.to_string())
+    let services = crate::branch_teardown::TeardownServices {
+        store: get_store(&store)?,
+        action_executor: Arc::clone(&executor),
+        action_registry: Arc::clone(&registry),
+        session_registry: Arc::clone(&session_registry),
+        app_handle,
+    };
+    crate::branch_teardown::delete_branch_impl(services, branch_id).await
 }
 
 /// Move a branch into another project, taking its notes, commits, reviews,
@@ -3078,12 +3122,10 @@ fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
 pub(crate) fn setup_worktree_sync(
     store: &Arc<Store>,
     branch_id: &str,
-    app_handle: Option<&tauri::AppHandle>,
+    app_handle: &tauri::AppHandle,
 ) -> Result<String, String> {
     let emit_progress = |phase: &str, detail: Option<String>| {
-        if let Some(handle) = app_handle {
-            emit_setup_progress(handle, branch_id, phase, detail);
-        }
+        emit_setup_progress(app_handle, branch_id, phase, detail)
     };
 
     let branch = store
@@ -3107,8 +3149,8 @@ pub(crate) fn setup_worktree_sync(
     // Resolve the repo slug for this branch
     let repo_slug = resolve_branch_repo_slug(store, &project, &branch)?;
     emit_progress("cloning", None);
-    let repo_path = if let Some(handle) = app_handle {
-        let handle = handle.clone();
+    let repo_path = {
+        let handle = app_handle.clone();
         let bid = branch_id.to_string();
         let mut last_emit = std::time::Instant::now();
         crate::git::ensure_local_clone_with_progress(&repo_slug, |line| {
@@ -3130,8 +3172,6 @@ pub(crate) fn setup_worktree_sync(
             }
         })
         .map_err(|e| e.to_string())?
-    } else {
-        crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?
     };
     emit_progress("fetching", None);
     fetch_for_worktree_with_offline_fallback(
@@ -3145,8 +3185,13 @@ pub(crate) fn setup_worktree_sync(
             .map_err(|e| e.to_string())?;
 
     emit_progress("creating_worktree", None);
-    let worktree_str =
-        create_and_link_worktree(store, &branch, &repo_path, &desired_worktree_path)?;
+    let worktree_str = create_and_link_worktree(
+        store,
+        app_handle,
+        &branch,
+        &repo_path,
+        &desired_worktree_path,
+    )?;
 
     Ok(worktree_str)
 }
@@ -3950,6 +3995,30 @@ mod upstream_tracking_tests {
         (origin, clone, stale)
     }
 
+    fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("failed to build mock app")
+    }
+
+    /// [`create_and_link_worktree`] under a mock app with no kicker managed,
+    /// for the tests that are about the worktree rather than the queue.
+    fn link_worktree(
+        store: &Arc<Store>,
+        branch: &store::Branch,
+        repo_path: &Path,
+        desired_worktree_path: &Path,
+    ) -> Result<String, String> {
+        let app = mock_app();
+        create_and_link_worktree(
+            store,
+            app.handle(),
+            branch,
+            repo_path,
+            desired_worktree_path,
+        )
+    }
+
     fn store_with_project() -> (Arc<Store>, store::Project) {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = store::Project::new("acme/widgets");
@@ -4008,7 +4077,7 @@ mod upstream_tracking_tests {
         store.create_branch(&branch).unwrap();
 
         let worktrees = TempDir::new("worktrees");
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4052,7 +4121,7 @@ mod upstream_tracking_tests {
         store.create_branch(&branch).unwrap();
 
         let worktrees = TempDir::new("worktrees");
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4091,7 +4160,7 @@ mod upstream_tracking_tests {
         store.create_branch(&branch).unwrap();
 
         let worktrees = TempDir::new("worktrees");
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4112,6 +4181,44 @@ mod upstream_tracking_tests {
         assert_eq!(resolve_remote_branch_sync(&store, &branch), "feature-new");
     }
 
+    /// Provisioning is one of the events the queue waits on: a session queued
+    /// on a branch with no worktree yet starts when the worktree appears, and
+    /// the backend — not a client's follow-up drain — is what moves it.
+    #[test]
+    fn worktree_creation_kicks_the_branch() {
+        let (_origin, clone, _stale) = clone_of_origin(false);
+        let (store, project) = store_with_project();
+        let branch = store::Branch::new(&project.id, "feature-new", "main");
+        store.create_branch(&branch).unwrap();
+
+        let app = mock_app();
+        let kicker = Arc::new(crate::session_queue::BranchQueueKicker::recording());
+        app.manage(Arc::clone(&kicker));
+
+        let worktrees = TempDir::new("worktrees");
+        create_and_link_worktree(
+            &store,
+            app.handle(),
+            &branch,
+            clone.path(),
+            &worktrees.path().join("feature-new"),
+        )
+        .unwrap();
+        assert_eq!(kicker.kicked_branches(), vec![branch.id.clone()]);
+
+        // The fast path — the worktree already exists — provisions nothing,
+        // so it kicks nothing.
+        create_and_link_worktree(
+            &store,
+            app.handle(),
+            &branch,
+            clone.path(),
+            &worktrees.path().join("feature-new"),
+        )
+        .unwrap();
+        assert_eq!(kicker.kicked_branches(), vec![branch.id.clone()]);
+    }
+
     /// The ordinary case: a branch that exists on origin, with no collision,
     /// tracks itself.
     #[test]
@@ -4122,7 +4229,7 @@ mod upstream_tracking_tests {
         store.create_branch(&branch).unwrap();
 
         let worktrees = TempDir::new("worktrees");
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4159,7 +4266,7 @@ mod upstream_tracking_tests {
         store.create_branch(&branch).unwrap();
 
         let worktrees = TempDir::new("worktrees");
-        create_and_link_worktree(
+        link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4194,7 +4301,7 @@ mod upstream_tracking_tests {
         store.create_branch(&branch).unwrap();
 
         let worktrees = TempDir::new("worktrees");
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4292,7 +4399,7 @@ mod upstream_tracking_tests {
         store.create_branch(&loose).unwrap();
         let worktrees = TempDir::new("worktrees");
 
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &tracked,
             clone.path(),
@@ -4317,7 +4424,7 @@ mod upstream_tracking_tests {
             "feature-x"
         );
 
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &loose,
             clone.path(),
@@ -4356,7 +4463,7 @@ mod upstream_tracking_tests {
         assert!(git::remote_branch_exists(clone.path(), "feature-x").unwrap());
 
         let worktrees = TempDir::new("worktrees");
-        let path = create_and_link_worktree(
+        let path = link_worktree(
             &store,
             &branch,
             clone.path(),
@@ -4419,7 +4526,7 @@ mod upstream_tracking_tests {
 
         let worktrees = TempDir::new("worktrees");
         let desired = worktrees.path().join("feature-x");
-        let err = create_and_link_worktree(&store, &branch, clone.path(), &desired).unwrap_err();
+        let err = link_worktree(&store, &branch, clone.path(), &desired).unwrap_err();
         assert!(err.contains("upstream"), "{err}");
 
         assert!(!desired.exists());
@@ -4431,7 +4538,7 @@ mod upstream_tracking_tests {
 
         // The retry gets `-2` again, not `-3`.
         std::fs::remove_file(&config_lock).unwrap();
-        let path = create_and_link_worktree(&store, &branch, clone.path(), &desired).unwrap();
+        let path = link_worktree(&store, &branch, clone.path(), &desired).unwrap();
         assert_eq!(
             git(Path::new(&path), &["rev-parse", "--abbrev-ref", "HEAD"]),
             "feature-x-2"

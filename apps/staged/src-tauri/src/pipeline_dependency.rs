@@ -399,7 +399,7 @@ mod tests {
             .with_branch(&branch.id);
         store.create_workdir(&workdir).unwrap();
 
-        let rebase = rebase_session(rebase_status);
+        let rebase = rebase_session(rebase_status).with_branch(&branch.id);
         store.create_session(&rebase).unwrap();
         store
             .create_commit(&store::Commit::new_pending(&branch.id).with_session(&rebase.id))

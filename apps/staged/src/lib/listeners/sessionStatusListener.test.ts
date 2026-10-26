@@ -71,7 +71,6 @@ function createFakeWorkflowStore(
 describe('sessionStatusListener busy-state hydration', () => {
   let getActiveSessions: ReturnType<typeof vi.fn>;
   let getSession: ReturnType<typeof vi.fn>;
-  let getSessionBackgroundHold: ReturnType<typeof vi.fn>;
   let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
   let getFreshSessionMessages: ReturnType<typeof vi.fn>;
   let updateBranchPr: ReturnType<typeof vi.fn>;
@@ -112,7 +111,6 @@ describe('sessionStatusListener busy-state hydration', () => {
 
     getActiveSessions = vi.fn().mockResolvedValue([]);
     getSession = vi.fn().mockResolvedValue(null);
-    getSessionBackgroundHold = vi.fn().mockResolvedValue({ holding: false, liveTasks: 0 });
     invalidateBranchTimeline = vi.fn();
     getFreshSessionMessages = vi.fn().mockResolvedValue([]);
     updateBranchPr = vi.fn().mockResolvedValue(undefined);
@@ -161,7 +159,6 @@ describe('sessionStatusListener busy-state hydration', () => {
       getActiveSessions,
       invalidateBranchTimeline,
       getSession,
-      getSessionBackgroundHold,
       getFreshSessionMessages,
       updateBranchPr,
       refreshPrStatus,
@@ -347,6 +344,7 @@ describe('sessionStatusListener busy-state hydration', () => {
           branchId: 'branch-1',
           sessionType: 'commit',
           status: 'running',
+          holding: true,
         },
       ];
     });
@@ -357,6 +355,7 @@ describe('sessionStatusListener busy-state hydration', () => {
 
     expect(sessionRegistry.register).not.toHaveBeenCalled();
     expect(projectStateStore.addRunningSession).not.toHaveBeenCalled();
+    expect(projectStateStore.setSessionBackgroundHold).not.toHaveBeenCalled();
     expect(sessionRegistry.getMetadata('racy-1')).toBeNull();
   });
 
@@ -544,83 +543,51 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledTimes(1);
     });
 
-    it('re-asks the hold of every running session the snapshot keeps', async () => {
+    it('applies the hold the snapshot reports for every running session it keeps', async () => {
       sessionRegistry.register('known', 'project-1', 'commit');
       getActiveSessions.mockResolvedValue([
-        { sessionId: 'known', status: 'running', projectId: 'project-1', sessionType: 'commit' },
-        { sessionId: 'fresh', status: 'running', projectId: 'project-2', sessionType: 'note' },
-        { sessionId: 'queued', status: 'queued', projectId: 'project-2', sessionType: 'note' },
-        { sessionId: 'orphan', status: 'running', projectId: null, sessionType: 'other' },
+        {
+          sessionId: 'known',
+          status: 'running',
+          projectId: 'project-1',
+          sessionType: 'commit',
+          holding: false,
+        },
+        {
+          sessionId: 'fresh',
+          status: 'running',
+          projectId: 'project-2',
+          sessionType: 'note',
+          holding: true,
+        },
+        {
+          sessionId: 'queued',
+          status: 'queued',
+          projectId: 'project-2',
+          sessionType: 'note',
+          holding: false,
+        },
+        {
+          sessionId: 'orphan',
+          status: 'running',
+          projectId: null,
+          sessionType: 'other',
+          holding: true,
+        },
       ]);
-      getSessionBackgroundHold.mockImplementation(async (sessionId: string) => ({
-        holding: sessionId === 'fresh',
-        liveTasks: sessionId === 'fresh' ? 1 : 0,
-      }));
 
       const { hydrateActiveSessions } = await import('./sessionStatusListener');
       await hydrateActiveSessions();
 
-      expect(getSessionBackgroundHold.mock.calls.map(([id]) => id).sort()).toEqual([
-        'fresh',
-        'known',
+      expect(projectStateStore.setSessionBackgroundHold.mock.calls).toEqual([
+        ['project-1', 'known', false],
+        ['project-2', 'fresh', true],
       ]);
-      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
-        'project-1',
-        'known',
-        false
-      );
-      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
-        'project-2',
-        'fresh',
-        true
-      );
-    });
-
-    it('lets a live report that lands during the lookup win', async () => {
-      getActiveSessions.mockResolvedValue([
-        { sessionId: 'held-1', status: 'running', projectId: 'project-1', sessionType: 'commit' },
-      ]);
-      let resolveHold: (snapshot: { holding: boolean; liveTasks: number }) => void = () => {};
-      getSessionBackgroundHold.mockReturnValue(
-        new Promise((resolve) => {
-          resolveHold = resolve;
-        })
-      );
-
-      const { listenForSessionStatus } = await import('./sessionStatusListener');
-      listenForSessionStatus();
-      await vi.waitFor(() => expect(getSessionBackgroundHold).toHaveBeenCalledWith('held-1'));
-
-      eventCallbacks.get('session-background-hold')?.({
-        sessionId: 'held-1',
-        projectId: 'project-1',
-        holding: false,
-        liveTasks: 0,
-      });
-      resolveHold({ holding: true, liveTasks: 1 });
-      // Flush the lookup's continuation without running the re-hydrate interval.
-      await vi.advanceTimersByTimeAsync(1);
-
-      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledTimes(1);
-      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
-        'project-1',
-        'held-1',
-        false
-      );
-    });
-
-    it('changes nothing when the hold lookup throws', async () => {
-      getActiveSessions.mockResolvedValue([
-        { sessionId: 'held-1', status: 'running', projectId: 'project-1', sessionType: 'commit' },
-      ]);
-      getSessionBackgroundHold.mockRejectedValue(new Error('offline'));
-      vi.spyOn(console, 'error').mockImplementation(() => {});
-
-      const { hydrateActiveSessions } = await import('./sessionStatusListener');
-      await hydrateActiveSessions();
-
-      expect(projectStateStore.addRunningSession).toHaveBeenCalledWith('project-1', 'held-1');
-      expect(projectStateStore.setSessionBackgroundHold).not.toHaveBeenCalled();
+      // A session new to this client is registered before its hold is set, so
+      // the store (which drops holds for untracked sessions) keeps it.
+      const addOrder = projectStateStore.addRunningSession.mock.invocationCallOrder[0];
+      const holdOrder = projectStateStore.setSessionBackgroundHold.mock.invocationCallOrder[1];
+      expect(addOrder).toBeLessThan(holdOrder);
     });
   });
 

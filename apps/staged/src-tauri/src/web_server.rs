@@ -3267,7 +3267,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
         "get_active_sessions" => {
             let store = get_store(store_mutex)?;
-            let sessions = crate::session_commands::get_active_sessions_impl(&store)?;
+            let sessions =
+                crate::session_commands::get_active_sessions_impl(&store, session_registry)?;
             Ok(serde_json::to_value(sessions).unwrap())
         }
         "get_session" => {

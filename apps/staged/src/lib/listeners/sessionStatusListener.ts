@@ -52,7 +52,6 @@ import type {
   PushCompletedPayload,
   Session,
   SessionBackgroundHoldPayload,
-  SessionBackgroundHoldSnapshot,
   SessionStatus,
   SessionStatusPayload,
 } from '../types';
@@ -64,10 +63,6 @@ import type {
 const REHYDRATE_INTERVAL_MS = 60_000;
 const REHYDRATE_MIN_GAP_MS = 5_000;
 let lastHydrationStartedAt = 0;
-
-// Bumped on every `session-background-hold` report. A hold lookup started
-// before a report arrived answers for a state the report has since replaced.
-let holdReportVersion = 0;
 
 // Terminal deltas processed while a snapshot fetch is in flight are newer
 // than that snapshot, which may still report the session as running — the
@@ -138,10 +133,9 @@ function listenForRehydrateTriggers(): UnlistenFn {
  * project when the backend can resolve one; otherwise the registry answers for
  * sessions this client registered itself (pipeline sessions link no artifact).
  * A report for a session not tracked as running is dropped by the store — the
- * next hydration asks for the hold again once the session is registered.
+ * next hydration's snapshot carries the hold once the session is registered.
  */
 function handleBackgroundHold(payload: SessionBackgroundHoldPayload): void {
-  holdReportVersion++;
   const projectId = payload.projectId ?? sessionRegistry.getProjectId(payload.sessionId);
   if (!projectId) return;
   projectStateStore.setSessionBackgroundHold(projectId, payload.sessionId, payload.holding);
@@ -237,7 +231,6 @@ export async function hydrateActiveSessions(): Promise<void> {
   lastHydrationStartedAt = fetchStartedAt;
   const sweptWorkflows: SweptWorkflowSession[] = [];
   const untrackedPushes = new Map<string, UntrackedPush>();
-  const holdLookups: HoldLookup[] = [];
   hydrationFetchesInFlight++;
   try {
     let active: ActiveSessionInfo[];
@@ -282,19 +275,23 @@ export async function hydrateActiveSessions(): Promise<void> {
       }
       if (session.status !== 'running') continue;
       if (!session.projectId) continue;
-      // Every running session with a project, whether new to this client or
-      // already registered: the snapshot says nothing about holds, and the
-      // hold event is only emitted on change, so a hold entered (or withdrawn)
-      // while this client wasn't listening is otherwise never learned.
-      holdLookups.push({ sessionId: session.sessionId, projectId: session.projectId });
-      if (sessionRegistry.getMetadata(session.sessionId)) continue;
-      sessionRegistry.register(
-        session.sessionId,
+      if (!sessionRegistry.getMetadata(session.sessionId)) {
+        sessionRegistry.register(
+          session.sessionId,
+          session.projectId,
+          (session.sessionType as SessionType) ?? 'other',
+          session.branchId ?? undefined
+        );
+        projectStateStore.addRunningSession(session.projectId, session.sessionId);
+      }
+      // Whether new to this client or already registered: the hold event is
+      // only emitted on change, so a hold entered (or withdrawn) while this
+      // client wasn't listening is only ever learned from the snapshot.
+      projectStateStore.setSessionBackgroundHold(
         session.projectId,
-        (session.sessionType as SessionType) ?? 'other',
-        session.branchId ?? undefined
+        session.sessionId,
+        session.holding
       );
-      projectStateStore.addRunningSession(session.projectId, session.sessionId);
     }
   } finally {
     hydrationFetchesInFlight--;
@@ -310,34 +307,7 @@ export async function hydrateActiveSessions(): Promise<void> {
   await Promise.all([
     ...sweptWorkflows.map(reconcileSweptWorkflowSession),
     ...Array.from(untrackedPushes.values(), adoptUntrackedPush),
-    ...holdLookups.map(reconcileBackgroundHold),
   ]);
-}
-
-interface HoldLookup {
-  sessionId: string;
-  projectId: string;
-}
-
-/**
- * Bring a running session's hold flag in line with what the backend reports
- * (one `getSessionBackgroundHold` per running session with a project —
- * normally a handful). A live report that lands during the lookup is newer
- * and wins; a thrown lookup changes nothing, like the other reconcilers. A
- * session that reached a terminal state meanwhile is no longer running in the
- * store, which drops the write.
- */
-async function reconcileBackgroundHold({ sessionId, projectId }: HoldLookup): Promise<void> {
-  const versionAtStart = holdReportVersion;
-  let snapshot: SessionBackgroundHoldSnapshot;
-  try {
-    snapshot = await commands.getSessionBackgroundHold(sessionId);
-  } catch (e) {
-    console.error('Failed to look up background hold:', sessionId, e);
-    return;
-  }
-  if (holdReportVersion !== versionAtStart) return;
-  projectStateStore.setSessionBackgroundHold(projectId, sessionId, snapshot.holding);
 }
 
 interface UntrackedPush {

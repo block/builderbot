@@ -1038,6 +1038,12 @@ pub struct ActiveSessionInfo {
     pub branch_id: Option<String>,
     pub session_type: Option<String>,
     pub status: String,
+    /// Whether the session is in a background hold right now (see
+    /// `SessionBackgroundHoldEvent`). Stamped from the registry by
+    /// [`get_active_sessions_impl`]; the hold event is emitted on change only,
+    /// so a client hydrating mid-hold has no other way to learn of it. False
+    /// for a session owned by another instance, which this one cannot see.
+    pub holding: bool,
 }
 
 /// Project one session to branch/project context and session type.
@@ -1097,25 +1103,34 @@ pub(crate) fn project_active_session(store: &Store, session: &store::Session) ->
         branch_id,
         session_type,
         status: session.status.as_str().to_string(),
+        holding: false,
     }
 }
 
 /// Synchronous body of [`get_active_sessions`], shared with the web-mode
 /// `dispatch()` arm.
-pub(crate) fn get_active_sessions_impl(store: &Store) -> Result<Vec<ActiveSessionInfo>, String> {
+pub(crate) fn get_active_sessions_impl(
+    store: &Store,
+    registry: &session_runner::SessionRegistry,
+) -> Result<Vec<ActiveSessionInfo>, String> {
     let sessions = store.get_active_sessions().map_err(|e| e.to_string())?;
     Ok(sessions
         .iter()
-        .map(|session| project_active_session(store, session))
+        .map(|session| {
+            let mut info = project_active_session(store, session);
+            info.holding = registry.background_hold(&session.id).holding;
+            info
+        })
         .collect())
 }
 
 #[tauri::command]
 pub fn get_active_sessions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
 ) -> Result<Vec<ActiveSessionInfo>, String> {
     let store = get_store(&store)?;
-    get_active_sessions_impl(&store)
+    get_active_sessions_impl(&store, &registry)
 }
 
 #[tauri::command]
@@ -1296,11 +1311,6 @@ pub async fn start_session(
     let _liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Announce the row the way the resume path does, so a client that did not
-    // launch this session — or whose launch-site registration trails a fast
-    // terminal event — still holds a `running` entry for that event to clear.
-    emit_session_running(&app_handle, &session.id, None);
-
     let started = session_runner::start_session(
         SessionConfig {
             session_id: session.id.clone(),
@@ -1339,28 +1349,6 @@ pub async fn start_session(
     )?;
 
     Ok(session)
-}
-
-/// Emit `session-status-changed: running` for a session row that has no
-/// branch and no session type — the plain and project start commands.
-fn emit_session_running(
-    app_handle: &tauri::AppHandle,
-    session_id: &str,
-    project_id: Option<String>,
-) {
-    crate::web_server::emit_to_all(
-        app_handle,
-        "session-status-changed",
-        session_runner::SessionStatusEvent {
-            session_id: session_id.to_string(),
-            status: "running".to_string(),
-            error_message: None,
-            completion_reason: None,
-            branch_id: None,
-            project_id,
-            session_type: None,
-        },
-    );
 }
 
 /// Send a follow-up message to an existing session.
@@ -3299,7 +3287,20 @@ pub async fn start_project_session(
     // Announce the row the way the resume path does, so a client that did not
     // launch this session — or whose launch-site registration trails a fast
     // terminal event — still holds a `running` entry for that event to clear.
-    emit_session_running(&app_handle, &session.id, Some(project_id.clone()));
+    // No branch and no session type: a project session has neither.
+    crate::web_server::emit_to_all(
+        &app_handle,
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session.id.clone(),
+            status: "running".to_string(),
+            error_message: None,
+            completion_reason: None,
+            branch_id: None,
+            project_id: Some(project_id.clone()),
+            session_type: None,
+        },
+    );
 
     // The row is `running` from here on, so a failure in the rest of the start
     // is recorded on it rather than returned alone.
@@ -7232,7 +7233,8 @@ mod tests {
         let review_session =
             create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 3);
 
         let info_for = |session_id: &str| {
@@ -7269,7 +7271,8 @@ mod tests {
         let note = store::ProjectNote::new(&project.id, "note", "").with_session(&session.id);
         store.create_project_note(&note).unwrap();
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].project_id.as_deref(), Some(project.id.as_str()));
         assert_eq!(snapshot[0].branch_id, None);
@@ -7300,7 +7303,8 @@ mod tests {
         let unknown_session =
             create_session_with_status(&store, "anything else", store::SessionStatus::Running);
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 4);
 
         let info_for = |session_id: &str| {
@@ -7340,7 +7344,8 @@ mod tests {
         session.pipeline = Some(store::PipelineExecution::from_steps(&[]));
         store.create_session(&session).unwrap();
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].branch_id.as_deref(), Some(branch.id.as_str()));
         assert_eq!(
@@ -7358,7 +7363,11 @@ mod tests {
             .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
             .unwrap();
 
-        assert!(get_active_sessions_impl(&store).unwrap().is_empty());
+        assert!(
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A mock app so [`cancel_session_impl`]'s status event has somewhere to

@@ -1220,10 +1220,16 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
             Some(&CompletionReason::Crashed),
         )
         .unwrap_or(false);
-    log::error!(
-        "Session {session_id} failed before its run started (transition won: \
-         {transitioned}): {error}"
-    );
+    if transitioned {
+        log::error!("Session {session_id} failed before its run started: {error}");
+    } else {
+        // Routine, not a fault: a Stop that landed first already wrote
+        // `cancelled` (or the row is gone), and that terminal state stands.
+        log::debug!(
+            "Session {session_id} failed before its run started, but its row was \
+             already finalized: {error}"
+        );
+    }
     if transitioned || matches!(store.get_session(session_id), Ok(None)) {
         emit_status(
             app_handle,

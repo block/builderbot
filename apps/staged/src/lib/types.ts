@@ -730,6 +730,12 @@ export interface ActiveSessionInfo {
   branchId: string | null;
   sessionType: string | null;
   status: SessionStatus;
+  /**
+   * Whether the session is in a background hold right now. The hold event is
+   * emitted on change only, so this is how a client hydrating mid-hold learns
+   * of it. False for a session another instance owns.
+   */
+  holding: boolean;
 }
 
 /**

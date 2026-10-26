@@ -1,8 +1,12 @@
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { isTauri } from '../../transport';
 
-const mediaReference =
-  /^staged-media:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(png|jpg|jpeg|gif|webp|mp4|webm|mov)$/;
+// One pattern, anchored for parsing a single href and unanchored (global) for
+// finding every reference in a markdown text; both capture (id, ext).
+const mediaReferencePattern =
+  /staged-media:\/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(png|jpg|jpeg|gif|webp|mp4|webm|mov)/;
+const mediaReference = new RegExp(`^${mediaReferencePattern.source}$`);
+const mediaImageOccurrence = new RegExp(mediaReferencePattern.source, 'g');
 
 export type MediaKind = 'image' | 'video';
 
@@ -13,8 +17,6 @@ export function parseStagedMediaReference(href: string) {
   const kind: MediaKind = ['mp4', 'webm', 'mov'].includes(ext) ? 'video' : 'image';
   return { id, ext, kind };
 }
-
-const mediaImageOccurrence = new RegExp(mediaReference.source.slice(1, -1), 'g');
 
 /** Ids of the images (not videos) a markdown text embeds, each once, in order. */
 export function collectStagedMediaImageIds(markdown: string): string[] {

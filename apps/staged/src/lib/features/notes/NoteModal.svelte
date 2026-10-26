@@ -224,34 +224,45 @@
   // Stored size and density of the images the note embeds, so they render at
   // logical size (see mediaRendering.ts). Keyed by image id, which names
   // immutable bytes, so a lookup outlives the note it was made for; a miss
-  // (video, unreadable file) is kept as null so it is not asked again.
+  // (video, unreadable file, failed lookup) is kept as null so it is not
+  // asked again and renders on the CSS caps alone.
   let mediaDimensions = $state<Record<string, ImageDimensions | null>>({});
   let noteMediaImageIds = $derived(collectStagedMediaImageIds(noteMarkdown));
+  let mediaDimensionsKnown = $derived(noteMediaImageIds.every((id) => id in mediaDimensions));
   $effect(() => {
     if (!open) return;
     const missing = noteMediaImageIds.filter((id) => !(id in mediaDimensions));
     if (!missing.length) return;
     let cancelled = false;
-    getMediaDimensions(missing)
-      .then((found) => {
-        if (cancelled) return;
-        const next = { ...mediaDimensions };
-        for (const id of missing) next[id] = found[id] ?? null;
-        mediaDimensions = next;
-      })
-      .catch((error) => console.warn('Failed to load note image dimensions', error));
+    const record = (found: Record<string, ImageDimensions>) => {
+      if (cancelled) return;
+      const next = { ...mediaDimensions };
+      for (const id of missing) next[id] = found[id] ?? null;
+      mediaDimensions = next;
+    };
+    getMediaDimensions(missing).then(record, (error) => {
+      console.warn('Failed to load note image dimensions', error);
+      record({});
+    });
     return () => {
       cancelled = true;
     };
   });
+  // The note is not rendered until its images' dimensions are in: `{@html}`
+  // rebuilds the DOM when the string changes, so rendering unsized first and
+  // again once the (local) lookup answers would reload every image and jump
+  // the ones already painted. A note with no embedded images, or whose
+  // images are already known, renders at once.
   let renderedNoteHtml = $derived(
-    renderNoteMarkdown(noteMarkdown, {
-      pikchrRenderer,
-      renderInlineText: hashtagItems.length
-        ? (text) => renderHashtagTokens(text, hashtagItems)
-        : undefined,
-      mediaDimensions: (id) => mediaDimensions[id],
-    })
+    mediaDimensionsKnown
+      ? renderNoteMarkdown(noteMarkdown, {
+          pikchrRenderer,
+          renderInlineText: hashtagItems.length
+            ? (text) => renderHashtagTokens(text, hashtagItems)
+            : undefined,
+          mediaDimensions: (id) => mediaDimensions[id],
+        })
+      : null
   );
   let mediaViewer = $state<MarkdownMedia | null>(null);
   let diagramViewerSvg = $state<string | null>(null);
@@ -726,9 +737,11 @@
           onkeydown={handleContentKeydown}
         >
           {#if hasNoteContent}
-            <div class="markdown-content">
-              {@html renderedNoteHtml}
-            </div>
+            {#if renderedNoteHtml !== null}
+              <div class="markdown-content">
+                {@html renderedNoteHtml}
+              </div>
+            {/if}
           {:else}
             <p class="empty-note">This note has no content.</p>
           {/if}

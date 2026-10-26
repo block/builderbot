@@ -11,6 +11,16 @@ use super::{Store, StoreChange, StoreError};
 
 const IMAGE_COLUMNS: &str = "id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at, width, height, density";
 
+/// Stored in the dimension columns of a raster image whose file was read and
+/// yielded no usable header: distinct from NULL (never read) so the backfill
+/// does not reopen it, and read back as `dimensions: None` since a real
+/// density is 1..=4.
+const UNREADABLE_DIMENSIONS: ImageDimensions = ImageDimensions {
+    width: 0,
+    height: 0,
+    density: 0,
+};
+
 impl Store {
     /// Conservative reference check: even a reference inside an example keeps
     /// its file. No note ownership columns or reconciliation state are needed.
@@ -82,21 +92,44 @@ impl Store {
         Ok(())
     }
 
-    /// Record the size and density read from an image's file, for rows that
-    /// predate the columns (`get_media_dimensions` fills them in from disk the
-    /// first time a note embedding the image is opened). Nothing on the
-    /// timeline shows these, so no change is published.
+    /// Record what reading an image's file for its dimensions found, for rows
+    /// that predate the columns (`get_media_dimensions` reads them from disk
+    /// the first time a note embedding the image is opened). `None` stores
+    /// [`UNREADABLE_DIMENSIONS`] so the file is consulted once, not on every
+    /// open. Nothing on the timeline shows these, so no change is published.
     pub fn set_image_dimensions(
         &self,
         id: &str,
-        dimensions: ImageDimensions,
+        dimensions: Option<ImageDimensions>,
     ) -> Result<(), StoreError> {
+        let ImageDimensions {
+            width,
+            height,
+            density,
+        } = dimensions.unwrap_or(UNREADABLE_DIMENSIONS);
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE images SET width = ?1, height = ?2, density = ?3 WHERE id = ?4",
-            params![dimensions.width, dimensions.height, dimensions.density, id],
+            params![width, height, density, id],
         )?;
         Ok(())
+    }
+
+    /// Whether an image's file has been read for its dimensions: false only
+    /// for rows that predate the columns and have not been read back yet. A
+    /// file that was read and gave nothing holds the sentinel, which comes
+    /// back as `dimensions: None` like NULL does, so this is what tells the
+    /// backfill not to read it again.
+    pub fn image_dimensions_recorded(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT density IS NOT NULL FROM images WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|recorded| recorded.unwrap_or(false))
+        .map_err(Into::into)
     }
 
     pub fn get_image(&self, id: &str) -> Result<Option<Image>, StoreError> {
@@ -286,11 +319,13 @@ impl Store {
             size_bytes: row.get(6)?,
             created_at: row.get(7)?,
             dimensions: match (row.get(8)?, row.get(9)?, row.get(10)?) {
-                (Some(width), Some(height), Some(density)) => Some(ImageDimensions {
-                    width,
-                    height,
-                    density,
-                }),
+                (Some(width), Some(height), Some(density)) if density > 0 => {
+                    Some(ImageDimensions {
+                        width,
+                        height,
+                        density,
+                    })
+                }
                 _ => None,
             },
         })

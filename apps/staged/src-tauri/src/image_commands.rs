@@ -122,7 +122,9 @@ pub fn list_branch_images(
 /// Size and density of the raster images a note embeds, keyed by id, for
 /// `mediaRendering.ts` to size them at logical pixels. Ids that are unknown,
 /// not raster images, or unreadable are left out. Rows that predate the
-/// dimension columns are read from disk and filled in on this first use.
+/// dimension columns are read from disk and filled in on this first use,
+/// whatever the read found, so a file is opened at most once; only a file
+/// that is missing altogether is looked for again.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_media_dimensions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -146,26 +148,31 @@ pub(crate) fn media_dimensions_impl(
             continue;
         };
         let dimensions = match image.dimensions {
-            Some(dimensions) => dimensions,
-            None if image.mime_type.starts_with("image/") => {
-                let Some(dimensions) = crate::store::images::image_file_path(
+            Some(dimensions) => Some(dimensions),
+            None if image.mime_type.starts_with("image/")
+                && !store.image_dimensions_recorded(id).unwrap_or(true) =>
+            {
+                let bytes = crate::store::images::image_file_path(
                     &image.project_id,
                     &image.id,
                     &image.filename,
                 )
                 .ok()
-                .and_then(|path| std::fs::read(path).ok())
-                .and_then(|bytes| crate::note_media::dimensions::probe(&bytes)) else {
-                    continue;
-                };
+                .and_then(|path| std::fs::read(path).ok());
+                // A missing file is left NULL: it costs a stat to miss again,
+                // and a later transfer or restore may put it back.
+                let Some(bytes) = bytes else { continue };
+                let dimensions = crate::note_media::dimensions::probe(&bytes);
                 if let Err(e) = store.set_image_dimensions(id, dimensions) {
                     log::warn!("Failed to record dimensions of image {id}: {e}");
                 }
                 dimensions
             }
-            None => continue,
+            None => None,
         };
-        found.insert(id.clone(), dimensions);
+        if let Some(dimensions) = dimensions {
+            found.insert(id.clone(), dimensions);
+        }
     }
     found
 }
@@ -395,8 +402,32 @@ mod tests {
         .unwrap();
         let again = media_dimensions_impl(&f.store, std::slice::from_ref(&legacy));
         assert_eq!(again.get(&legacy).copied(), dims(8, 6, 2));
-        // Unreadable headers stay NULL and are simply absent.
+
+        // An unreadable header is absent, and recorded as such: the file is
+        // not consulted again even once it would read.
         assert_eq!(f.store.get_image(&stub).unwrap().unwrap().dimensions, None);
+        assert!(f.store.image_dimensions_recorded(&stub).unwrap());
+        std::fs::write(
+            crate::store::images::image_file_path(&f.project.id, &stub, "stub.png").unwrap(),
+            PHYS_144DPI_PNG,
+        )
+        .unwrap();
+        let again = media_dimensions_impl(&f.store, std::slice::from_ref(&stub));
+        assert!(again.is_empty(), "{again:?}");
+        assert_eq!(f.store.get_image(&stub).unwrap().unwrap().dimensions, None);
+
+        // A missing file stays NULL, so it is found once it exists; a video
+        // is never read.
+        assert!(!f.store.image_dimensions_recorded(&missing).unwrap());
+        assert!(!f.store.image_dimensions_recorded(&video).unwrap());
+        std::fs::write(
+            crate::store::images::image_file_path(&f.project.id, &missing, "gone.png").unwrap(),
+            PHYS_144DPI_PNG,
+        )
+        .unwrap();
+        let restored = media_dimensions_impl(&f.store, std::slice::from_ref(&missing));
+        assert_eq!(restored.get(&missing).copied(), dims(8, 6, 2));
+        assert!(!f.store.image_dimensions_recorded("nope").unwrap());
     }
 
     #[test]

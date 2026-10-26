@@ -6,8 +6,12 @@
 //! rasterized PDF pages. Only the file itself knows which it is, so density
 //! comes from what the encoder wrote — the PNG `pHYs` chunk (pixels per
 //! metre; 5669 is the 144 dpi macOS stamps on Retina captures, 2835 is 72)
-//! and a JPEG's JFIF density or EXIF `XResolution`/`ResolutionUnit`. A file
-//! that declares nothing, an unspecified unit, or 72 dpi or less is 1x.
+//! and a JPEG's JFIF density or EXIF `XResolution`/`ResolutionUnit`. Only
+//! a whole multiple of 72 dpi (144, 216, 288 — what screenshot tools write)
+//! is read as a screen density; a camera's or scanner's 300 or 600 is a print
+//! intent and, like a file that declares nothing or an unspecified unit, is
+//! 1x. A JPEG's EXIF `Orientation` is honoured too, since browsers draw the
+//! photo rotated and the size must describe what they draw.
 
 use crate::store::ImageDimensions;
 
@@ -25,10 +29,22 @@ pub(crate) fn probe(bytes: &[u8]) -> Option<ImageDimensions> {
     if width == 0 || height == 0 {
         return None;
     }
-    let dpi = match format {
-        "png" => png_dpi(bytes),
-        "jpg" => jpeg_dpi(bytes),
-        _ => None,
+    let (dpi, transposed) = match format {
+        "png" => (png_dpi(bytes), false),
+        "jpg" => {
+            let metadata = jpeg_metadata(bytes);
+            (metadata.dpi, metadata.transposed)
+        }
+        _ => (None, false),
+    };
+    // Browsers default to `image-orientation: from-image`, so a phone photo
+    // stored as landscape data with orientation 6 is drawn portrait; the
+    // size has to describe the drawn image or `width`/`height` would be
+    // swapped and the capped figure would letterbox it.
+    let (width, height) = if transposed {
+        (height, width)
+    } else {
+        (width, height)
     };
     Some(ImageDimensions {
         width,
@@ -37,13 +53,28 @@ pub(crate) fn probe(bytes: &[u8]) -> Option<ImageDimensions> {
     })
 }
 
-/// `round(dpi / 72)` clamped to 1..=4. 72 dpi is the 1x baseline, so a file
-/// at or below it — including the 72 many encoders write by default — is 1x
-/// rather than a fraction; anything the metadata cannot settle is 1x too.
+/// How far a declared resolution may sit from a multiple of 72 dpi and still
+/// count as one: enough for the integer px/m and px/cm the formats store
+/// (5669 px/m is 143.99 dpi, 57 px/cm is 144.8) and well short of anything
+/// a camera or scanner writes.
+const DPI_TOLERANCE: f64 = 2.0;
+
+/// 2, 3, or 4 when the metadata says 144, 216, or 288 dpi, else 1.
+///
+/// Declared resolutions are a screen density only when a screenshot tool
+/// wrote them: macOS stamps 144 on Retina captures, 216 is a 3x phone. A
+/// camera's 300 or 350, a scanner's 300 or 600, and the 96 some Windows
+/// encoders default to are print intent or convention, and reading them as
+/// density would shrink a 1200x800 photo to 300x200 — so anything off the
+/// 72 multiples is 1x, as is 72 itself, nothing at all, or an unspecified
+/// unit.
 fn density_from_dpi(dpi: Option<f64>) -> u8 {
-    match dpi {
-        Some(dpi) if dpi > 72.0 => ((dpi / 72.0).round() as u8).clamp(1, 4),
-        _ => 1,
+    let Some(dpi) = dpi else { return 1 };
+    let multiple = (dpi / 72.0).round();
+    if (2.0..=4.0).contains(&multiple) && (dpi - multiple * 72.0).abs() <= DPI_TOLERANCE {
+        multiple as u8
+    } else {
+        1
     }
 }
 
@@ -56,17 +87,31 @@ fn png_dpi(bytes: &[u8]) -> Option<f64> {
     (dims.unit == png::Unit::Meter && dims.xppu > 0).then(|| f64::from(dims.xppu) * 0.0254)
 }
 
-/// JFIF density when its unit is specified, else the EXIF resolution.
-///
+/// What a JPEG's headers say about how it is to be drawn.
+#[derive(Default)]
+struct JpegMetadata {
+    /// JFIF density when its unit is specified, else the EXIF resolution.
+    dpi: Option<f64>,
+    /// EXIF `Orientation` 5..=8: the stored rows run down the drawn image, so
+    /// the drawn width is the stored height.
+    transposed: bool,
+}
+
 /// A walk over the marker segments before the first scan: APP0 `JFIF\0`
 /// carries a unit byte (1 inch, 2 centimetre, 0 aspect ratio only) and X/Y
 /// densities; APP1 `Exif\0\0` carries a TIFF header. Segment lengths are
 /// trusted only as far as the buffer goes, so a truncated file gives None.
-fn jpeg_dpi(bytes: &[u8]) -> Option<f64> {
+fn jpeg_metadata(bytes: &[u8]) -> JpegMetadata {
     let mut at = 2;
+    let mut jfif_dpi = None;
     let mut exif = None;
-    while bytes.get(at) == Some(&0xFF) {
-        let marker = *bytes.get(at + 1)?;
+    loop {
+        if bytes.get(at) != Some(&0xFF) {
+            break;
+        }
+        let Some(&marker) = bytes.get(at + 1) else {
+            break;
+        };
         if marker == 0xFF {
             at += 1;
             continue;
@@ -75,37 +120,57 @@ fn jpeg_dpi(bytes: &[u8]) -> Option<f64> {
         if matches!(marker, 0xDA | 0xD9 | 0xD8 | 0x01 | 0xD0..=0xD7) {
             break;
         }
-        let length = usize::from(u16::from_be_bytes([
-            *bytes.get(at + 2)?,
-            *bytes.get(at + 3)?,
-        ]));
-        let payload = bytes.get(at + 4..at + 2 + length)?;
+        let (Some(&high), Some(&low)) = (bytes.get(at + 2), bytes.get(at + 3)) else {
+            break;
+        };
+        let length = usize::from(u16::from_be_bytes([high, low]));
+        let Some(payload) = bytes.get(at + 4..at + 2 + length) else {
+            break;
+        };
         match marker {
-            0xE0 if payload.starts_with(b"JFIF\0") => {
-                let x_density = f64::from(u16::from_be_bytes([*payload.get(8)?, *payload.get(9)?]));
-                match payload.get(7)? {
-                    1 if x_density > 0.0 => return Some(x_density),
-                    2 if x_density > 0.0 => return Some(x_density * 2.54),
-                    _ => {}
-                }
+            0xE0 if jfif_dpi.is_none() && payload.starts_with(b"JFIF\0") => {
+                jfif_dpi = jfif_density(payload);
             }
             0xE1 if exif.is_none() => {
                 if let Some(tiff) = payload.strip_prefix(b"Exif\0\0") {
-                    exif = exif_dpi(tiff);
+                    exif = exif_ifd0(tiff);
                 }
             }
             _ => {}
         }
         at += 2 + length;
     }
-    exif
+    let exif = exif.unwrap_or_default();
+    JpegMetadata {
+        dpi: jfif_dpi.or(exif.dpi),
+        transposed: matches!(exif.orientation, Some(5..=8)),
+    }
 }
 
-/// `XResolution` (tag 0x011A, RATIONAL) in `ResolutionUnit` (tag 0x0128,
-/// SHORT: 2 inch, 3 centimetre, default inch) from IFD0 of a TIFF header —
-/// the payload of a JPEG APP1 segment after `Exif\0\0`. Only these two tags
-/// are read; a pointer that runs off the end gives None.
-fn exif_dpi(tiff: &[u8]) -> Option<f64> {
+/// X density of a JFIF APP0 payload in dots per inch, when its unit is
+/// inches or centimetres and the density is set.
+fn jfif_density(payload: &[u8]) -> Option<f64> {
+    let x_density = f64::from(u16::from_be_bytes([*payload.get(8)?, *payload.get(9)?]));
+    match payload.get(7)? {
+        1 if x_density > 0.0 => Some(x_density),
+        2 if x_density > 0.0 => Some(x_density * 2.54),
+        _ => None,
+    }
+}
+/// The IFD0 tags read from an EXIF TIFF header.
+#[derive(Default)]
+struct ExifIfd0 {
+    /// `XResolution` (tag 0x011A, RATIONAL) in `ResolutionUnit` (tag 0x0128,
+    /// SHORT: 2 inch, 3 centimetre, default inch), as dots per inch.
+    dpi: Option<f64>,
+    /// `Orientation` (tag 0x0112, SHORT), 1..=8 when present.
+    orientation: Option<u16>,
+}
+
+/// IFD0 of a TIFF header — the payload of a JPEG APP1 segment after
+/// `Exif\0\0`. Only the three tags above are read; a pointer that runs off
+/// the end gives None.
+fn exif_ifd0(tiff: &[u8]) -> Option<ExifIfd0> {
     let big_endian = match tiff.get(0..2)? {
         b"MM" => true,
         b"II" => false,
@@ -134,6 +199,7 @@ fn exif_dpi(tiff: &[u8]) -> Option<f64> {
     let entries = usize::from(u16_at(ifd)?);
     let mut x_resolution = None;
     let mut unit = 2;
+    let mut orientation = None;
     for index in 0..entries {
         let entry = ifd + 2 + index * 12;
         match (u16_at(entry)?, u16_at(entry + 2)?) {
@@ -145,14 +211,18 @@ fn exif_dpi(tiff: &[u8]) -> Option<f64> {
                 }
             }
             (0x0128, 3) => unit = u16_at(entry + 8)?,
+            (0x0112, 3) => orientation = Some(u16_at(entry + 8)?),
             _ => {}
         }
     }
-    match unit {
-        2 => x_resolution,
-        3 => x_resolution.map(|per_cm| per_cm * 2.54),
-        _ => None,
-    }
+    Some(ExifIfd0 {
+        dpi: match unit {
+            2 => x_resolution,
+            3 => x_resolution.map(|per_cm| per_cm * 2.54),
+            _ => None,
+        },
+        orientation,
+    })
 }
 
 #[cfg(test)]
@@ -210,18 +280,23 @@ pub(crate) mod tests {
             probe(&png_with_phys(phys(5669, png::Unit::Unspecified))),
             dims(8, 6, 1)
         );
-        // 3x phones, a 300 dpi scan (4.17x), and 600 dpi all stay in 1..=4.
+        // 216 and 288 dpi (3x and 4x) in whole pixels per metre.
         assert_eq!(
             probe(&png_with_phys(phys(8504, png::Unit::Meter))),
             dims(8, 6, 3)
         );
         assert_eq!(
-            probe(&png_with_phys(phys(11811, png::Unit::Meter))),
+            probe(&png_with_phys(phys(11339, png::Unit::Meter))),
             dims(8, 6, 4)
+        );
+        // A 300 or 600 dpi scan is print intent, not a screen density.
+        assert_eq!(
+            probe(&png_with_phys(phys(11811, png::Unit::Meter))),
+            dims(8, 6, 1)
         );
         assert_eq!(
             probe(&png_with_phys(phys(23622, png::Unit::Meter))),
-            dims(8, 6, 4)
+            dims(8, 6, 1)
         );
     }
 
@@ -266,8 +341,15 @@ pub(crate) mod tests {
         assert_eq!(probe(&jpeg_without(true, true)), dims(8, 6, 1));
     }
 
-    /// IFD0 with `XResolution = numerator/denominator` and `ResolutionUnit`.
-    fn tiff(big_endian: bool, numerator: u32, denominator: u32, unit: u16) -> Vec<u8> {
+    /// IFD0 with `XResolution = numerator/denominator`, `ResolutionUnit`,
+    /// and optionally `Orientation`.
+    fn tiff(
+        big_endian: bool,
+        numerator: u32,
+        denominator: u32,
+        unit: u16,
+        orientation: Option<u16>,
+    ) -> Vec<u8> {
         let u16b = |v: u16| {
             if big_endian {
                 v.to_be_bytes()
@@ -282,40 +364,128 @@ pub(crate) mod tests {
                 v.to_le_bytes()
             }
         };
+        let entries = 2 + usize::from(orientation.is_some());
+        // The RATIONAL sits after the entry count, the entries, and the
+        // next-IFD link.
+        let rational_at = 8 + 2 + entries * 12 + 4;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(if big_endian { b"MM" } else { b"II" });
         bytes.extend_from_slice(&u16b(42));
         bytes.extend_from_slice(&u32b(8));
-        bytes.extend_from_slice(&u16b(2));
-        // XResolution: RATIONAL at offset 38 (after 2 entries + next-IFD link).
+        bytes.extend_from_slice(&u16b(entries as u16));
+        if let Some(orientation) = orientation {
+            bytes.extend_from_slice(&u16b(0x0112));
+            bytes.extend_from_slice(&u16b(3));
+            bytes.extend_from_slice(&u32b(1));
+            bytes.extend_from_slice(&u16b(orientation));
+            bytes.extend_from_slice(&u16b(0));
+        }
         bytes.extend_from_slice(&u16b(0x011A));
         bytes.extend_from_slice(&u16b(5));
         bytes.extend_from_slice(&u32b(1));
-        bytes.extend_from_slice(&u32b(38));
+        bytes.extend_from_slice(&u32b(rational_at as u32));
         bytes.extend_from_slice(&u16b(0x0128));
         bytes.extend_from_slice(&u16b(3));
         bytes.extend_from_slice(&u32b(1));
         bytes.extend_from_slice(&u16b(unit));
         bytes.extend_from_slice(&u16b(0));
         bytes.extend_from_slice(&u32b(0));
-        assert_eq!(bytes.len(), 38);
+        assert_eq!(bytes.len(), rational_at);
         bytes.extend_from_slice(&u32b(numerator));
         bytes.extend_from_slice(&u32b(denominator));
         bytes
     }
 
+    fn exif_dpi(tiff: &[u8]) -> Option<f64> {
+        exif_ifd0(tiff)?.dpi
+    }
+
     #[test]
     fn exif_resolution_honours_byte_order_and_unit() {
-        assert_eq!(exif_dpi(&tiff(true, 144, 1, 2)), Some(144.0));
-        assert_eq!(exif_dpi(&tiff(false, 144, 1, 2)), Some(144.0));
-        assert_eq!(exif_dpi(&tiff(true, 57, 1, 3)).map(f64::round), Some(145.0));
-        assert_eq!(exif_dpi(&tiff(true, 144, 1, 1)), None);
-        assert_eq!(exif_dpi(&tiff(true, 144, 0, 2)), None);
-        assert_eq!(exif_dpi(&tiff(true, 144, 1, 2)[..20]), None);
-        assert_eq!(exif_dpi(b"XX\0\x2a"), None);
-        assert_eq!(density_from_dpi(Some(300.0)), 4);
-        assert_eq!(density_from_dpi(Some(96.0)), 1);
-        assert_eq!(density_from_dpi(Some(f64::MAX)), 4);
+        assert_eq!(exif_dpi(&tiff(true, 144, 1, 2, None)), Some(144.0));
+        assert_eq!(exif_dpi(&tiff(false, 144, 1, 2, None)), Some(144.0));
+        assert_eq!(
+            exif_dpi(&tiff(true, 57, 1, 3, None)).map(f64::round),
+            Some(145.0)
+        );
+        assert_eq!(exif_dpi(&tiff(true, 144, 1, 1, None)), None);
+        assert_eq!(exif_dpi(&tiff(true, 144, 0, 2, None)), None);
+        assert!(exif_ifd0(&tiff(true, 144, 1, 2, None)[..20]).is_none());
+        assert!(exif_ifd0(b"XX\0\x2a").is_none());
+    }
+
+    #[test]
+    fn only_whole_multiples_of_72_dpi_are_screen_densities() {
+        assert_eq!(density_from_dpi(None), 1);
+        assert_eq!(density_from_dpi(Some(72.0)), 1);
+        assert_eq!(density_from_dpi(Some(144.0)), 2);
+        assert_eq!(density_from_dpi(Some(216.0)), 3);
+        assert_eq!(density_from_dpi(Some(288.0)), 4);
+        // Within the tolerance that integer px/m and px/cm need.
+        assert_eq!(density_from_dpi(Some(5669.0 * 0.0254)), 2);
+        assert_eq!(density_from_dpi(Some(57.0 * 2.54)), 2);
+        assert_eq!(density_from_dpi(Some(113.0 * 2.54)), 4);
+        // Print intent and encoder conventions: cameras (300, 350), scanners
+        // (300, 600), Windows (96), and anything past 4x.
+        for dpi in [96.0, 150.0, 300.0, 350.0, 600.0, 360.0, f64::MAX] {
+            assert_eq!(density_from_dpi(Some(dpi)), 1, "{dpi}");
+        }
+    }
+
+    /// The fixture's picture with its APP0 and APP1 replaced by one APP1
+    /// carrying `tiff`.
+    fn jpeg_with_exif(tiff: &[u8]) -> Vec<u8> {
+        let mut bytes = SIPS_144DPI_JPG[..2].to_vec();
+        bytes.extend_from_slice(b"\xff\xe1");
+        bytes.extend_from_slice(&u16::try_from(2 + 6 + tiff.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(b"Exif\0\0");
+        bytes.extend_from_slice(tiff);
+        bytes.extend_from_slice(&jpeg_without(true, true)[2..]);
+        bytes
+    }
+
+    #[test]
+    fn exif_orientation_transposes_the_drawn_size() {
+        // Sanity: the synthesized segment reads like the fixture's own.
+        assert_eq!(
+            probe(&jpeg_with_exif(&tiff(true, 144, 1, 2, None))),
+            dims(8, 6, 2)
+        );
+        for big_endian in [true, false] {
+            // 1 (as stored) and 3 (rotated 180) keep the stored axes.
+            for upright in [1, 3] {
+                assert_eq!(
+                    probe(&jpeg_with_exif(&tiff(big_endian, 144, 1, 2, Some(upright)))),
+                    dims(8, 6, 2),
+                    "orientation {upright}, big_endian {big_endian}"
+                );
+            }
+            // 5..=8 are rotated by a quarter turn: an iPhone portrait shot is
+            // landscape data with orientation 6, drawn with the stored height
+            // as its width.
+            for quarter_turn in 5..=8 {
+                assert_eq!(
+                    probe(&jpeg_with_exif(&tiff(
+                        big_endian,
+                        144,
+                        1,
+                        2,
+                        Some(quarter_turn)
+                    ))),
+                    dims(6, 8, 2),
+                    "orientation {quarter_turn}, big_endian {big_endian}"
+                );
+            }
+        }
+        assert_eq!(
+            exif_ifd0(&tiff(false, 144, 1, 2, Some(6))).map(|ifd| ifd.orientation),
+            Some(Some(6))
+        );
+        // Orientation is only read from the TIFF header, so a JFIF-only file
+        // and the fixture (sips writes no Orientation tag) keep the stored
+        // axes.
+        assert_eq!(probe(&jfif_only(1, 144)), dims(8, 6, 2));
+        assert_eq!(probe(SIPS_144DPI_JPG), dims(8, 6, 2));
     }
 
     #[test]

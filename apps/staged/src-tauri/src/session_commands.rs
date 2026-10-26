@@ -2544,6 +2544,56 @@ impl QueuedSessionClaim {
     }
 }
 
+/// Best-effort terminal write for a claimed queued row whose start failed
+/// between `QueuedSessionClaim::claim` and the runner handoff.
+///
+/// The claim flipped the row to `running` under our pid, and the caller's
+/// liveness hold drops as it returns `Err`. Without a write the row would sit
+/// `running` until the stranded-session sweep ended it as "Staged lost track
+/// of this session", counted by `failed_queued_start_disposition` as an
+/// active exclusive kind until then; this records the real cause instead,
+/// like `finish_failed_before_run` does for the immediate start. The failures
+/// that reach here are sqlite failures, so this write may well fail too: it is
+/// logged and otherwise ignored — the sweep remains the backstop. Returns the
+/// error for the caller to propagate.
+pub(crate) fn fail_claimed_queued_start<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    branch_id: &str,
+    project_id: &str,
+    session_id: &str,
+    error: String,
+) -> String {
+    match store.transition_from_running(
+        session_id,
+        store::SessionStatus::Error,
+        Some(&error),
+        Some(&store::CompletionReason::Crashed),
+    ) {
+        Ok(true) => {
+            log::error!("Queued session {session_id} failed after its claim: {error}");
+            session_runner::emit_status(
+                app_handle,
+                session_id,
+                store::SessionStatus::Error.as_str(),
+                Some(error.clone()),
+                Some(&store::CompletionReason::Crashed),
+                Some(branch_id.to_string()),
+                Some(project_id.to_string()),
+            );
+        }
+        Ok(false) => log::info!(
+            "Queued session {session_id} failed after its claim ({error}); the row had already \
+             left `running`"
+        ),
+        Err(write_error) => log::warn!(
+            "Queued session {session_id} failed after its claim ({error}) and recording it \
+             failed too ({write_error}); the stranded-session sweep will end the row"
+        ),
+    }
+    error
+}
+
 fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
@@ -4662,19 +4712,34 @@ async fn start_queued_session_for_branch(
         return Ok(claimed);
     }
 
-    store
-        .mark_session_artifact_started(&session_id)
-        .map_err(|e| e.to_string())?;
-
-    // Update the session's working_dir and prompt now that we have context.
-    store
-        .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)
-        .map_err(|e| e.to_string())?;
-
-    if let (Some(review_id), Some(tip_sha)) = (&schedule.review_id, &review_tip_sha) {
+    // The row is ours and `running` from here: a failure before the handoff
+    // ends it itself (see `fail_claimed_queued_start`).
+    let prepared = (|| -> Result<(), String> {
         store
-            .update_review_commit_sha(review_id, tip_sha)
+            .mark_session_artifact_started(&session_id)
             .map_err(|e| e.to_string())?;
+
+        // Update the session's working_dir and prompt now that we have context.
+        store
+            .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)
+            .map_err(|e| e.to_string())?;
+
+        if let (Some(review_id), Some(tip_sha)) = (&schedule.review_id, &review_tip_sha) {
+            store
+                .update_review_commit_sha(review_id, tip_sha)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = prepared {
+        return Err(fail_claimed_queued_start(
+            &store,
+            &app_handle,
+            &branch_id,
+            &branch.project_id,
+            &session_id,
+            error,
+        ));
     }
 
     // No last look before the spawn here any more: `start_session` takes one
@@ -8219,6 +8284,80 @@ mod tests {
         assert_eq!(
             failed_queued_start_disposition(None),
             FailedQueuedStart::Continue
+        );
+    }
+
+    /// A start that fails between its claim and the runner handoff has a
+    /// `running` row under our pid and is about to drop its liveness hold.
+    /// It ends the row itself, with the real error, so the sweep has nothing
+    /// to end and the drain sees no barrier; a row a Stop already ended is
+    /// left as the Stop wrote it.
+    #[test]
+    fn a_claimed_start_that_fails_before_the_handoff_ends_its_own_row() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let registry = test_registry();
+        let app = mock_app();
+
+        let session = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+        assert!(store.transition_queued_to_running(&session.id).unwrap());
+
+        let returned = fail_claimed_queued_start(
+            &store,
+            app.handle(),
+            &branch.id,
+            &branch.project_id,
+            &session.id,
+            "database is locked".to_string(),
+        );
+        assert_eq!(returned, "database is locked");
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Error);
+        assert_eq!(row.error_message.as_deref(), Some("database is locked"));
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Crashed)
+        );
+        assert_eq!(
+            failed_queued_start_disposition(Some(&row)),
+            FailedQueuedStart::Continue
+        );
+        assert!(
+            crate::session_queue::sweep::reconcile_stranded_running_sessions(
+                &store,
+                &registry,
+                app.handle()
+            )
+            .is_empty(),
+            "nothing is left for the sweep"
+        );
+
+        // A Stop that got there first owns the terminal state.
+        let stopped = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&stopped).unwrap();
+        assert!(store.transition_queued_to_running(&stopped.id).unwrap());
+        assert!(store
+            .transition_from_running(
+                &stopped.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::Interrupted),
+            )
+            .unwrap());
+        fail_claimed_queued_start(
+            &store,
+            app.handle(),
+            &branch.id,
+            &branch.project_id,
+            &stopped.id,
+            "database is locked".to_string(),
+        );
+        let row = store.get_session(&stopped.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Cancelled);
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted)
         );
     }
 

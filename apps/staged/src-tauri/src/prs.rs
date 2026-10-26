@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::git;
-use crate::session_commands::{BranchSessionLaunchStatus, QueuedSessionClaim, QueuedSessionStart};
+use crate::session_commands::{
+    fail_claimed_queued_start, BranchSessionLaunchStatus, QueuedSessionClaim, QueuedSessionStart,
+};
 use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineKind, PipelineStep, Store};
 
@@ -997,19 +999,33 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         return Ok(claimed);
     }
 
-    store
-        .mark_session_artifact_started(&session.id)
-        .map_err(|e| e.to_string())?;
-
-    store
-        .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
-        .map_err(|e| e.to_string())?;
-    store
-        .update_session_pipeline(&session.id, &pipeline)
-        .map_err(|e| e.to_string())?;
-
     let branch_id = ctx.branch.id.clone();
     let project_id = ctx.branch.project_id.clone();
+
+    // The row is ours and `running` from here: a failure before the handoff
+    // ends it itself (see `fail_claimed_queued_start`).
+    let prepared = (|| -> Result<(), String> {
+        store
+            .mark_session_artifact_started(&session.id)
+            .map_err(|e| e.to_string())?;
+
+        store
+            .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
+            .map_err(|e| e.to_string())?;
+        store
+            .update_session_pipeline(&session.id, &pipeline)
+            .map_err(|e| e.to_string())
+    })();
+    if let Err(error) = prepared {
+        return Err(fail_claimed_queued_start(
+            &store,
+            &app_handle,
+            &branch_id,
+            &project_id,
+            &session.id,
+            error,
+        ));
+    }
 
     session_runner::emit_session_running(
         &app_handle,
@@ -1261,18 +1277,33 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         return Ok(claimed);
     }
 
+    let branch_id = ctx.branch.id.clone();
+    let project_id = ctx.branch.project_id.clone();
+
     // No `mark_session_artifact_started` call: a git pipeline has no queued
     // artifact stub whose timestamp needs restamping when the work actually
     // starts.
-    store
-        .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
-        .map_err(|e| e.to_string())?;
-    store
-        .update_session_pipeline(&session.id, &pipeline)
-        .map_err(|e| e.to_string())?;
-
-    let branch_id = ctx.branch.id.clone();
-    let project_id = ctx.branch.project_id.clone();
+    //
+    // The row is ours and `running` from here: a failure before the handoff
+    // ends it itself (see `fail_claimed_queued_start`).
+    let prepared = (|| -> Result<(), String> {
+        store
+            .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
+            .map_err(|e| e.to_string())?;
+        store
+            .update_session_pipeline(&session.id, &pipeline)
+            .map_err(|e| e.to_string())
+    })();
+    if let Err(error) = prepared {
+        return Err(fail_claimed_queued_start(
+            &store,
+            &app_handle,
+            &branch_id,
+            &project_id,
+            &session.id,
+            error,
+        ));
+    }
 
     session_runner::emit_session_running(
         &app_handle,

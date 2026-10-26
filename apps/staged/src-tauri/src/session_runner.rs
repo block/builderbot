@@ -514,8 +514,9 @@ impl SessionRegistry {
     /// Not what an ordinary [`deregister`](Self::deregister) wants: the session
     /// thread deregisters *after* writing the terminal state itself, and only
     /// its own entry. This takes any entry, because the caller is ending a
-    /// session it did not register — a failed startup, or the shutdown refusal
-    /// taking over the pipeline handoff's entry.
+    /// session it did not register — the shutdown refusal taking over the
+    /// pipeline handoff's entry. A failed startup registered its own entry
+    /// and so deregisters by epoch, like the thread would have.
     fn deregister_reporting_cancellation(&self, session_id: &str) -> Option<CompletionReason> {
         let mut inner = self.inner.lock().unwrap();
         let removed = inner.running.remove(session_id);
@@ -624,8 +625,9 @@ impl SessionRegistry {
     /// [`refused_start_completion_reason`]'s: a Stop landing between the peek
     /// and the removal is answered `true`, writes nothing, and is recorded on
     /// the row as the startup error rather than as `cancelled`. The row is
-    /// terminal either way, which is what the Stop asked for; the removal
-    /// still reports it, so the mismatch is at least logged.
+    /// terminal either way, which is what the Stop asked for; a second peek
+    /// ahead of the removal still reports it, so the mismatch is at least
+    /// logged.
     ///
     /// The report misses nothing, because the removal and every cancel take the
     /// same lock (see [`RegistryInner::cancel_registered`]): a cancel is either
@@ -642,9 +644,17 @@ impl SessionRegistry {
         match startup() {
             Ok(value) => Ok((token, epoch, value)),
             Err(error) => {
+                // Finished before the write and removed by epoch after it,
+                // like the session thread's own exit: a Resume that wins the
+                // row between the two registers a successor under this id,
+                // which must neither inherit the Stop this entry accepted nor
+                // be taken out of the map with it (see `mark_finished`,
+                // `deregister`).
+                self.mark_finished(session_id, epoch);
                 let accepted = self.cancellation_completion_reason(session_id);
                 record_failure(&error, accepted.clone());
-                let at_removal = self.deregister_reporting_cancellation(session_id);
+                let at_removal = self.cancellation_completion_reason(session_id);
+                self.deregister(session_id, epoch);
                 if accepted.is_none() && at_removal.is_some() {
                     log::info!(
                         "Session {session_id} was cancelled while its failed startup was being \
@@ -1042,6 +1052,9 @@ fn refuse_start_during_shutdown<R: tauri::Runtime>(
         refused_start_completion_reason(registry, session_id),
     );
     // The handoff's entry, if this was one; a no-op for every other caller.
+    // Unconditional removal is safe here, unlike `register_for_startup`'s
+    // failure arm: `start_session` is `is_quitting`-gated, so no successor
+    // can register under this id behind the refusal.
     let _ = registry.deregister_reporting_cancellation(session_id);
     SessionStartOutcome::RefusedShuttingDown
 }
@@ -4572,6 +4585,7 @@ mod tests {
     mod note_completion;
     use super::*;
     use crate::git::strip_git_env;
+    use std::cell::RefCell;
 
     fn session_message(role: MessageRole, content: &str) -> SessionMessage {
         SessionMessage {
@@ -5634,6 +5648,54 @@ mod tests {
         let failure = result.unwrap_err();
         assert_eq!(failure.error, "No ACP agent found.");
         assert!(!registry.is_running("session-cancelled-mid-startup"));
+    }
+
+    /// The failed-startup path writes its terminal state and then removes
+    /// its entry, and a Resume can win the now-terminal row in between and
+    /// register a successor under the same id. That successor must start
+    /// clean — the Stop this entry accepted was answered by the row it
+    /// ended — and must still be registered once the failure path has left,
+    /// or the resumed turn is `running` and unregistered, which the sweep
+    /// ends. The mirror of `register_does_not_inherit_a_finished_predecessors_cancellation`
+    /// for `register_for_startup`.
+    #[test]
+    fn a_failed_startup_leaves_a_resumes_entry_clean_and_in_place() {
+        let registry = SessionRegistry::new();
+        let resumed = RefCell::new(None);
+
+        let result: Result<(CancellationToken, RegistrationEpoch, ()), StartupFailure> = registry
+            .register_for_startup(
+                "session-resumed-over-failure",
+                || {
+                    assert!(registry.cancel_with_completion_reason(
+                        "session-resumed-over-failure",
+                        CompletionReason::Interrupted
+                    ));
+                    Err("No ACP agent found.".to_string())
+                },
+                |_, accepted| {
+                    assert_eq!(accepted, Some(CompletionReason::Interrupted));
+                    // The terminal write lands here; the Resume registers
+                    // over the finished entry before the removal.
+                    let (token, _) = registry.register("session-resumed-over-failure");
+                    *resumed.borrow_mut() = Some(token);
+                },
+            );
+
+        assert!(result.is_err());
+        let token = resumed.borrow_mut().take().expect("the resume registered");
+        assert!(
+            !token.is_cancelled(),
+            "a Stop on the failed start must not cancel the resumed turn"
+        );
+        assert!(
+            registry.is_running("session-resumed-over-failure"),
+            "the failure path must not remove the successor's entry"
+        );
+        assert_eq!(
+            registry.cancellation_completion_reason("session-resumed-over-failure"),
+            None
+        );
     }
 
     /// The pipeline handoff replaces a live entry rather than deregistering it,

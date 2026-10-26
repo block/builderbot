@@ -222,8 +222,8 @@
         variant="outline"
         size="icon"
         class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-        title="Add image or PDF"
-        aria-label="Add image or PDF"
+        title="Add image"
+        aria-label="Add image"
         onclick={openFilePicker}
       >
         <Plus size={16} />
@@ -251,7 +251,7 @@
       onclick={openFilePicker}
     >
       <ImagePlus size={14} />
-      <span>Attach images or PDFs</span>
+      <span>Attach images</span>
     </Button>
     {#if onAttachClipboard}
       <Button

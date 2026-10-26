@@ -16,6 +16,10 @@
     onkeydown  — pass-through keydown handler (called after hashtag handling)
     oninput    — pass-through input handler
     onpaste    — pass-through paste handler (e.g. for image paste)
+
+  Copy, cut and paste keep references: the clipboard is written as `#type:id`
+  text plus this app's tagged HTML (see referenceClipboard.ts), and a pasted
+  `#type:id` the items resolve is inserted as a badge.
     textareaEl — bindable element reference (the contenteditable div)
 -->
 <script lang="ts">
@@ -25,12 +29,9 @@
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ImageLucide from '@lucide/svelte/icons/image';
-  import {
-    HASHTAG_TOKEN_RE,
-    createExtractedValueBuilder,
-    hashtagTypeIconSvg,
-    escapeHtml,
-  } from './hashtagItems';
+  import { HASHTAG_TOKEN_RE, createExtractedValueBuilder } from './hashtagItems';
+  import { createBadgeElement, hashtagContentFragment } from './hashtagEditorContent';
+  import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
   import { portal } from '../../shared/portal';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -248,60 +249,11 @@
     return result;
   }
 
-  function createBadgeElement(item: HashtagItem): HTMLSpanElement {
-    const badge = document.createElement('span');
-    badge.className = 'hashtag-badge stable-raster stable-raster-glyphs';
-    badge.contentEditable = 'false';
-    badge.dataset.token = `#${item.type}:${item.id}`;
-    badge.title = item.title;
-    const iconSvg = hashtagTypeIconSvg[item.type] ?? '';
-    badge.innerHTML = `${iconSvg}<span class="hashtag-badge-label">${escapeHtml(item.title)}</span>`;
-    badge.style.cssText = `background: var(${item.bgColor}); color: var(${item.color});`;
-    return badge;
-  }
-
   function renderContent(val: string) {
     if (!editorEl) return;
-    editorEl.innerHTML = '';
-
-    const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
-    let lastIndex = 0;
-    let match;
-    let unresolved = false;
-
-    while ((match = regex.exec(val)) !== null) {
-      if (match.index > lastIndex) {
-        appendTextNodes(editorEl, val.slice(lastIndex, match.index));
-      }
-
-      const type = match[1];
-      const id = match[2];
-      const item = itemsById.get(`${type}:${id}`);
-      if (item) {
-        editorEl.appendChild(createBadgeElement(item));
-        // Zero-width space so cursor can be placed after badge
-        editorEl.appendChild(document.createTextNode('\u200B'));
-      } else {
-        editorEl.appendChild(document.createTextNode(match[0]));
-        unresolved = true;
-      }
-
-      lastIndex = match.index + match[0].length;
-    }
-
-    if (lastIndex < val.length) {
-      appendTextNodes(editorEl, val.slice(lastIndex));
-    }
-
+    const { fragment, unresolved } = hashtagContentFragment(val, itemsById);
+    editorEl.replaceChildren(fragment);
     hasUnresolvedTokens = unresolved;
-  }
-
-  function appendTextNodes(parent: HTMLElement, text: string) {
-    const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (i > 0) parent.appendChild(document.createElement('br'));
-      if (lines[i]) parent.appendChild(document.createTextNode(lines[i]));
-    }
   }
 
   function extractValue(): string {
@@ -495,16 +447,70 @@
     onkeydown?.(e);
   }
 
+  function handleCopy(e: ClipboardEvent) {
+    const sel = window.getSelection();
+    if (!e.clipboardData || !sel || sel.isCollapsed) return;
+    writeReferenceClipboard(e.clipboardData, sel);
+    e.preventDefault();
+  }
+
+  function handleCut(e: ClipboardEvent) {
+    handleCopy(e);
+    // The browser would have deleted the selection along with its own copy.
+    if (e.defaultPrevented) document.execCommand('delete');
+  }
+
   function handlePaste(e: ClipboardEvent) {
     if (onpaste) {
       onpaste(e);
       if (e.defaultPrevented) return;
     }
 
-    // Strip HTML and insert plain text
     e.preventDefault();
-    const text = e.clipboardData?.getData('text/plain') ?? '';
-    document.execCommand('insertText', false, text);
+    if (!e.clipboardData) return;
+    // Our own HTML carries references; any other HTML is reduced to its text.
+    const text = readReferenceClipboard(e.clipboardData);
+    if (resolvesReference(text)) {
+      insertContent(text);
+    } else {
+      document.execCommand('insertText', false, text);
+    }
+  }
+
+  /** Whether any `#type:id` in `text` would render as a badge. */
+  function resolvesReference(text: string): boolean {
+    const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      if (itemsById.has(`${match[1]}:${match[2]}`)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Insert `text` at the selection as the badges and text renderContent would
+   * build, which execCommand('insertText') cannot. The input event is raised
+   * by hand so the value is extracted exactly as it is after typing.
+   */
+  function insertContent(text: string) {
+    const sel = window.getSelection();
+    if (!editorEl || !sel?.rangeCount || !editorEl.contains(sel.anchorNode)) return;
+
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    const { fragment, unresolved } = hashtagContentFragment(text, itemsById);
+    const last = fragment.lastChild;
+    range.insertNode(fragment);
+    if (last) {
+      range.setStartAfter(last);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    hasUnresolvedTokens = hasUnresolvedTokens || unresolved;
+    editorEl.dispatchEvent(
+      new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' })
+    );
   }
 
   function scrollSelectedIntoView() {
@@ -541,6 +547,8 @@
       oninput={handleInput}
       onkeydown={handleKeydown}
       onblur={handleBlur}
+      oncopy={handleCopy}
+      oncut={handleCut}
       onpaste={handlePaste}
     ></div>
 

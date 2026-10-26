@@ -14,6 +14,7 @@ export const keyboard = $state({ inset: 0 });
 
 let trackedViewport: VisualViewport | null = null;
 let subscriberCount = 0;
+let initialSyncFrame = 0;
 
 function syncKeyboardInset() {
   const vv = trackedViewport;
@@ -35,11 +36,22 @@ export function watchKeyboardInset(): () => void {
     trackedViewport.addEventListener('resize', syncKeyboardInset);
     trackedViewport.addEventListener('scroll', syncKeyboardInset);
   }
-  syncKeyboardInset();
+  // The initial read forces a style/layout flush. Subscribers call this from
+  // onMount — e.g. a dialog that has just been portalled in — so reading
+  // synchronously would make the mount flush pay that recalc before the
+  // first frame can paint. Defer it to the next frame instead.
+  if (!initialSyncFrame) {
+    initialSyncFrame = requestAnimationFrame(() => {
+      initialSyncFrame = 0;
+      syncKeyboardInset();
+    });
+  }
 
   return () => {
     subscriberCount = Math.max(0, subscriberCount - 1);
     if (subscriberCount === 0) {
+      cancelAnimationFrame(initialSyncFrame);
+      initialSyncFrame = 0;
       trackedViewport?.removeEventListener('resize', syncKeyboardInset);
       trackedViewport?.removeEventListener('scroll', syncKeyboardInset);
       trackedViewport = null;

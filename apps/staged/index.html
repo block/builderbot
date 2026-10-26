@@ -18,6 +18,10 @@
   </head>
   <body>
     <div id="app"></div>
+    <!-- Portal target for dialogs, menus and popovers (see BitsConfig in
+         App.svelte). Keeping it after #app means opening a portal never flips
+         #app's :last-child state, which would otherwise restyle the whole app. -->
+    <div id="portal-root"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

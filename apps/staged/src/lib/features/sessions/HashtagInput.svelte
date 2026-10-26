@@ -676,7 +676,7 @@
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     padding: 4px;
     /* bits-ui sets `body { pointer-events: none }` while a dialog is open. The
-       dropdown portals to body, so re-enable pointer events on it explicitly. */
+       dropdown portals out of the dialog, so re-enable pointer events on it explicitly. */
     pointer-events: auto;
   }
 

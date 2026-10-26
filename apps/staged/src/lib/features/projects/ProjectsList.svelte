@@ -19,6 +19,7 @@
   import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
+  import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import { projectActions } from './projectActions.svelte';
@@ -427,8 +428,12 @@
             {@const status = getProjectStatus(
               project.id,
               deletingProjectNames,
-              projectBranches.get(project.id) || []
+              projectBranches.get(project.id) || [],
+              workspaceLifecycle.getWorktreeErrors()
             )}
+            {@const busy = status.kind === 'running' || status.kind === 'backgroundHold'}
+            {@const busyTitle =
+              status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
             {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
@@ -449,9 +454,10 @@
                         <span class="number">{index + 1}</span>
                       </div>
                     {/if}
-                    {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                    {#if status.runActionPhase === 'running' && busy}
                       <div
                         class="status-indicator wave-spinner"
+                        title={busyTitle}
                         in:fade={{ duration: 300, delay: 150 }}
                         out:fade={{ duration: 150 }}
                       >
@@ -466,9 +472,10 @@
                       >
                         <SineWave size={14} />
                       </div>
-                    {:else if status.kind === 'runAction' || status.kind === 'running'}
+                    {:else if status.kind === 'runAction' || busy}
                       <div
                         class="status-indicator spinner"
+                        title={busyTitle}
                         in:fade={{ duration: 300, delay: 150 }}
                         out:fade={{ duration: 150 }}
                       >

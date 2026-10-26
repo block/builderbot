@@ -17,6 +17,7 @@ import type { Project, ProjectRepo } from '../../types';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { getProjectStatus } from './projectStatus';
+import { workspaceLifecycle } from './workspaceLifecycle.svelte';
 
 /** A repo+subpath a filter chip can target. */
 export interface RepoFilterRef {
@@ -221,9 +222,12 @@ class ProjectFiltersStore {
     const status = getProjectStatus(
       projectId,
       projectsDataStore.deletingProjectNames,
-      projectsDataStore.branchesByProject.get(projectId) || []
+      projectsDataStore.branchesByProject.get(projectId) || [],
+      workspaceLifecycle.getWorktreeErrors()
     );
-    return status.kind === 'running' || status.kind === 'runAction';
+    return (
+      status.kind === 'running' || status.kind === 'backgroundHold' || status.kind === 'runAction'
+    );
   }
 }
 

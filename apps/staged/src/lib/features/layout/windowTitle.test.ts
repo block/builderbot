@@ -26,6 +26,9 @@ beforeEach(() => {
     projectStateStore: { isUnread: () => false },
   }));
   vi.doMock('../projects/projectStatus', () => ({ getProjectStatus: vi.fn() }));
+  vi.doMock('../projects/workspaceLifecycle.svelte', () => ({
+    workspaceLifecycle: { getWorktreeErrors: () => new Map() },
+  }));
 
   setTitle = vi.fn().mockResolvedValue(undefined);
   vi.doMock('../../transport', () => ({ getWindowSync: () => ({ setTitle }) }));
@@ -35,6 +38,7 @@ afterEach(() => {
   vi.doUnmock('../../stores/projectsData.svelte');
   vi.doUnmock('../../stores/projectState.svelte');
   vi.doUnmock('../projects/projectStatus');
+  vi.doUnmock('../projects/workspaceLifecycle.svelte');
   vi.doUnmock('../../transport');
   vi.unstubAllGlobals();
 });

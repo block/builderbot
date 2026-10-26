@@ -71,6 +71,7 @@ function createFakeWorkflowStore(
 describe('sessionStatusListener busy-state hydration', () => {
   let getActiveSessions: ReturnType<typeof vi.fn>;
   let getSession: ReturnType<typeof vi.fn>;
+  let getSessionBackgroundHold: ReturnType<typeof vi.fn>;
   let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
   let getFreshSessionMessages: ReturnType<typeof vi.fn>;
   let updateBranchPr: ReturnType<typeof vi.fn>;
@@ -84,6 +85,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     addRunningSession: ReturnType<typeof vi.fn>;
     removeRunningSession: Mock<(projectId: string, sessionId: string) => void>;
     markAsUnread: ReturnType<typeof vi.fn>;
+    setSessionBackgroundHold: ReturnType<typeof vi.fn>;
   };
   let prStateStore: ReturnType<typeof createFakeWorkflowStore> & {
     clearSessionTracking: ReturnType<typeof vi.fn>;
@@ -110,6 +112,7 @@ describe('sessionStatusListener busy-state hydration', () => {
 
     getActiveSessions = vi.fn().mockResolvedValue([]);
     getSession = vi.fn().mockResolvedValue(null);
+    getSessionBackgroundHold = vi.fn().mockResolvedValue({ holding: false, liveTasks: 0 });
     invalidateBranchTimeline = vi.fn();
     getFreshSessionMessages = vi.fn().mockResolvedValue([]);
     updateBranchPr = vi.fn().mockResolvedValue(undefined);
@@ -126,6 +129,7 @@ describe('sessionStatusListener busy-state hydration', () => {
       addRunningSession: vi.fn(),
       removeRunningSession: vi.fn<(projectId: string, sessionId: string) => void>(),
       markAsUnread: vi.fn(),
+      setSessionBackgroundHold: vi.fn(),
     };
     sessionRegistry = createFakeRegistry(projectStateStore);
     prStateStore = {
@@ -157,6 +161,7 @@ describe('sessionStatusListener busy-state hydration', () => {
       getActiveSessions,
       invalidateBranchTimeline,
       getSession,
+      getSessionBackgroundHold,
       getFreshSessionMessages,
       updateBranchPr,
       refreshPrStatus,
@@ -427,9 +432,196 @@ describe('sessionStatusListener busy-state hydration', () => {
     await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
 
     unlisten();
-    expect(unlistenEvents).toHaveBeenCalledTimes(3);
+    expect(unlistenEvents).toHaveBeenCalledTimes(4);
     window.dispatchEvent(new CustomEvent('cache-stale'));
     expect(getActiveSessions).toHaveBeenCalledTimes(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // Tauri re-hydration: a desktop window has no reconnect and no `cache-stale`
+  // resume signal, so it re-hydrates on return to the window and on a slow
+  // interval, or a missed terminal event would spin for the life of the window.
+  // -------------------------------------------------------------------------
+
+  describe('tauri re-hydration triggers', () => {
+    it('re-hydrates on focus, rate-limited, and on the interval; detaches on unlisten', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      const unlisten = listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+      // Focus right after the startup hydration is within the minimum gap.
+      window.dispatchEvent(new Event('focus'));
+      expect(getActiveSessions).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(5_000);
+      window.dispatchEvent(new Event('focus'));
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
+
+      vi.advanceTimersByTime(60_000);
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(3));
+
+      unlisten();
+      vi.advanceTimersByTime(60_000);
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(getActiveSessions).toHaveBeenCalledTimes(3);
+    });
+
+    it('re-hydrates when the document becomes visible, not when it hides', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      vi.advanceTimersByTime(5_000);
+
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(getActiveSessions).toHaveBeenCalledTimes(1);
+
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
+    });
+
+    it('installs no triggers outside Tauri mode', async () => {
+      vi.doMock('../transport', () => ({ isTauri: false, listenToEvent }));
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+      vi.advanceTimersByTime(65_000);
+      window.dispatchEvent(new Event('focus'));
+      expect(getActiveSessions).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Background hold: a sub-state of a running session, folded into the
+  // project's busy state from the hold event and re-asked on hydration (the
+  // snapshot carries no hold information).
+  // -------------------------------------------------------------------------
+
+  describe('background hold', () => {
+    it('records a hold report against the project it names', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+      eventCallbacks.get('session-background-hold')?.({
+        sessionId: 'held-1',
+        projectId: 'project-1',
+        holding: true,
+        liveTasks: 2,
+      });
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
+        'project-1',
+        'held-1',
+        true
+      );
+    });
+
+    it('resolves the project through the registry when the report names none', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      sessionRegistry.register('held-1', 'project-1', 'pr', 'branch-1');
+
+      eventCallbacks.get('session-background-hold')?.({
+        sessionId: 'held-1',
+        holding: false,
+        liveTasks: 0,
+      });
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
+        'project-1',
+        'held-1',
+        false
+      );
+
+      eventCallbacks.get('session-background-hold')?.({
+        sessionId: 'unknown',
+        holding: true,
+        liveTasks: 1,
+      });
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-asks the hold of every running session the snapshot keeps', async () => {
+      sessionRegistry.register('known', 'project-1', 'commit');
+      getActiveSessions.mockResolvedValue([
+        { sessionId: 'known', status: 'running', projectId: 'project-1', sessionType: 'commit' },
+        { sessionId: 'fresh', status: 'running', projectId: 'project-2', sessionType: 'note' },
+        { sessionId: 'queued', status: 'queued', projectId: 'project-2', sessionType: 'note' },
+        { sessionId: 'orphan', status: 'running', projectId: null, sessionType: 'other' },
+      ]);
+      getSessionBackgroundHold.mockImplementation(async (sessionId: string) => ({
+        holding: sessionId === 'fresh',
+        liveTasks: sessionId === 'fresh' ? 1 : 0,
+      }));
+
+      const { hydrateActiveSessions } = await import('./sessionStatusListener');
+      await hydrateActiveSessions();
+
+      expect(getSessionBackgroundHold.mock.calls.map(([id]) => id).sort()).toEqual([
+        'fresh',
+        'known',
+      ]);
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
+        'project-1',
+        'known',
+        false
+      );
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
+        'project-2',
+        'fresh',
+        true
+      );
+    });
+
+    it('lets a live report that lands during the lookup win', async () => {
+      getActiveSessions.mockResolvedValue([
+        { sessionId: 'held-1', status: 'running', projectId: 'project-1', sessionType: 'commit' },
+      ]);
+      let resolveHold: (snapshot: { holding: boolean; liveTasks: number }) => void = () => {};
+      getSessionBackgroundHold.mockReturnValue(
+        new Promise((resolve) => {
+          resolveHold = resolve;
+        })
+      );
+
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getSessionBackgroundHold).toHaveBeenCalledWith('held-1'));
+
+      eventCallbacks.get('session-background-hold')?.({
+        sessionId: 'held-1',
+        projectId: 'project-1',
+        holding: false,
+        liveTasks: 0,
+      });
+      resolveHold({ holding: true, liveTasks: 1 });
+      // Flush the lookup's continuation without running the re-hydrate interval.
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledTimes(1);
+      expect(projectStateStore.setSessionBackgroundHold).toHaveBeenCalledWith(
+        'project-1',
+        'held-1',
+        false
+      );
+    });
+
+    it('changes nothing when the hold lookup throws', async () => {
+      getActiveSessions.mockResolvedValue([
+        { sessionId: 'held-1', status: 'running', projectId: 'project-1', sessionType: 'commit' },
+      ]);
+      getSessionBackgroundHold.mockRejectedValue(new Error('offline'));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const { hydrateActiveSessions } = await import('./sessionStatusListener');
+      await hydrateActiveSessions();
+
+      expect(projectStateStore.addRunningSession).toHaveBeenCalledWith('project-1', 'held-1');
+      expect(projectStateStore.setSessionBackgroundHold).not.toHaveBeenCalled();
+    });
   });
 
   it('still applies session-status-changed deltas on top of the snapshot', async () => {

@@ -18,6 +18,7 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { getProjectStatus } from './projectStatus';
+  import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
 
   interface Props {
@@ -28,7 +29,12 @@
 
   let branches = $derived(projectsDataStore.branchesByProject.get(project.id) ?? []);
   let status = $derived(
-    getProjectStatus(project.id, projectsDataStore.deletingProjectNames, branches)
+    getProjectStatus(
+      project.id,
+      projectsDataStore.deletingProjectNames,
+      branches,
+      workspaceLifecycle.getWorktreeErrors()
+    )
   );
   let badges = $derived(
     (projectsDataStore.reposByProject.get(project.id) ?? [])

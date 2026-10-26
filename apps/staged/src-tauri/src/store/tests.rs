@@ -1412,7 +1412,7 @@ fn test_failed_empty_note_orders_after_commit_completed_before_note_started() {
     let failed_note = store.get_note(&note.id).unwrap().unwrap();
     let failed_note_time = failed_note.completed_at.unwrap_or(failed_note.created_at);
     let commit_time = commit.created_at;
-    let mut timeline = vec![("failed-note", failed_note_time), ("commit", commit_time)];
+    let mut timeline = [("failed-note", failed_note_time), ("commit", commit_time)];
     timeline.sort_by_key(|(_, timestamp)| *timestamp);
 
     assert_eq!(timeline[0].0, "commit");

@@ -418,30 +418,6 @@ pub fn run() {
         });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{file_open_request, ready_probe_request};
-
-    #[test]
-    fn ready_probe_request_targets_ready_endpoint() {
-        // E-PENPAL-TAURI: verifies desktop shell readiness probe targets /api/ready.
-        let req = ready_probe_request("127.0.0.1:8080");
-        assert!(req.starts_with("GET /api/ready HTTP/1.0\r\n"));
-        assert!(req.contains("Host: 127.0.0.1:8080\r\n"));
-    }
-
-    #[test]
-    fn open_request_targets_api_open_with_json_body() {
-        // E-PENPAL-FILE-HANDLER-EVENT: verifies desktop file-open dispatch targets /api/open.
-        let body = r#"{"path":"notes.md"}"#;
-        let req = file_open_request("127.0.0.1:8080", body);
-        assert!(req.starts_with("POST /api/open HTTP/1.0\r\n"));
-        assert!(req.contains("Content-Type: application/json\r\n"));
-        assert!(req.contains(&format!("Content-Length: {}\r\n", body.len())));
-        assert!(req.ends_with(body));
-    }
-}
-
 fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> {
     let menu = Menu::new(app)?;
 
@@ -532,4 +508,28 @@ fn build_menu(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, tauri::Error> 
     menu.append(&window_menu)?;
 
     Ok(menu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_open_request, ready_probe_request};
+
+    #[test]
+    fn ready_probe_request_targets_ready_endpoint() {
+        // E-PENPAL-TAURI: verifies desktop shell readiness probe targets /api/ready.
+        let req = ready_probe_request("127.0.0.1:8080");
+        assert!(req.starts_with("GET /api/ready HTTP/1.0\r\n"));
+        assert!(req.contains("Host: 127.0.0.1:8080\r\n"));
+    }
+
+    #[test]
+    fn open_request_targets_api_open_with_json_body() {
+        // E-PENPAL-FILE-HANDLER-EVENT: verifies desktop file-open dispatch targets /api/open.
+        let body = r#"{"path":"notes.md"}"#;
+        let req = file_open_request("127.0.0.1:8080", body);
+        assert!(req.starts_with("POST /api/open HTTP/1.0\r\n"));
+        assert!(req.contains("Content-Type: application/json\r\n"));
+        assert!(req.contains(&format!("Content-Length: {}\r\n", body.len())));
+        assert!(req.ends_with(body));
+    }
 }

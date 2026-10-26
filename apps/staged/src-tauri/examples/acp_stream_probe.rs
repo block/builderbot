@@ -216,7 +216,7 @@ fn main() -> Result<()> {
             .iter()
             .filter(|(_, count)| **count > 1)
             .collect();
-        duplicate_ids.sort_by(|(a, _), (b, _)| a.cmp(b));
+        duplicate_ids.sort_by_key(|(id, _)| *id);
 
         if duplicate_ids.is_empty() {
             println!("[probe] duplicate_tool_call_ids=none");

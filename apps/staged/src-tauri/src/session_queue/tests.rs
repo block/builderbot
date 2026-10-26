@@ -6,8 +6,8 @@ use tauri::Manager;
 
 use super::kick::{kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource};
 use super::sweep::{
-    is_stranded, queue_health, reconcile_stranded_running_sessions, Liveness, StrandedRow,
-    STRANDED_GRACE_MS, STRANDED_SESSION_MESSAGE,
+    is_stranded, queue_health, reconcile_stranded_running_sessions, StrandedRow,
+    STRANDED_SESSION_MESSAGE,
 };
 use crate::session_commands::claim_startable_queued_sessions;
 use crate::session_runner::SessionRegistry;
@@ -312,69 +312,29 @@ fn startup_kicks_every_branch_with_queued_rows_without_a_client() {
 // Stranded sweep
 // ---------------------------------------------------------------------------
 
-fn unregistered() -> Liveness {
-    Liveness {
-        registered: false,
-        deregistered_at: None,
-    }
-}
-
 #[test]
-fn is_stranded_is_a_pure_function_of_now_and_grace() {
+fn is_stranded_is_a_pure_function_of_liveness_and_ownership() {
     let me = std::process::id();
     let mut row = Session::new_running("work", Path::new("/tmp"));
-    row.updated_at = 1_000_000;
-    let grace = 600_000;
+    // The row's age plays no part: this is as old as a row can be.
+    row.updated_at = 0;
 
-    // Quiet past the grace, owned by us, nothing registered: stranded.
-    assert!(is_stranded(&row, unregistered(), me, 1_600_001, grace));
-    // Exactly at the grace is not past it.
-    assert!(!is_stranded(&row, unregistered(), me, 1_600_000, grace));
-    // A registered token means a thread or task owns the row.
-    assert!(!is_stranded(
-        &row,
-        Liveness {
-            registered: true,
-            deregistered_at: None
-        },
-        me,
-        9_999_999,
-        grace
-    ));
-    // Deregistered recently: the session thread is in its post-completion
-    // hooks, about to write the terminal state itself.
-    assert!(!is_stranded(
-        &row,
-        Liveness {
-            registered: false,
-            deregistered_at: Some(1_500_000)
-        },
-        me,
-        1_600_001,
-        grace
-    ));
-    assert!(is_stranded(
-        &row,
-        Liveness {
-            registered: false,
-            deregistered_at: Some(1_500_000)
-        },
-        me,
-        2_100_001,
-        grace
-    ));
+    // Owned by us, nothing in the registry owns it: stranded, however fresh.
+    assert!(is_stranded(&row, false, me));
+    // Live in the registry means a thread or task owns the row, however old.
+    assert!(!is_stranded(&row, true, me));
     // Another process's row is its own to finish.
-    assert!(!is_stranded(&row, unregistered(), me + 1, 9_999_999, grace));
+    assert!(!is_stranded(&row, false, me + 1));
     // A row that is not running is never stranded, whatever else is true.
     row.status = SessionStatus::Queued;
-    assert!(!is_stranded(&row, unregistered(), me, 9_999_999, grace));
+    assert!(!is_stranded(&row, false, me));
 }
 
 /// The deadlock at the state level: a stranded `running` commit keeps a
 /// queued note from starting, no drain can move it, and the sweep is what
 /// ends the marker and lets the note go.
 #[tokio::test]
-async fn sweep_ends_an_owned_running_row_with_no_token_after_grace() {
+async fn sweep_ends_an_owned_running_row_nothing_owns() {
     let (store, branch) = store_with_branch();
     let (stranded, _) = commit_session(&store, &branch.id, SessionStatus::Running);
     let note = note_session(&store, &branch.id, SessionStatus::Queued);
@@ -387,14 +347,7 @@ async fn sweep_ends_an_owned_running_row_with_no_token_after_grace() {
     kicker.wait_until_idle().await;
     assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Queued));
 
-    let now = stranded.updated_at + STRANDED_GRACE_MS + 1;
-    let ended = reconcile_stranded_running_sessions(
-        &store,
-        &registry,
-        app.handle(),
-        now,
-        STRANDED_GRACE_MS,
-    );
+    let ended = reconcile_stranded_running_sessions(&store, &registry, app.handle());
     assert_eq!(ended, vec![stranded.id.clone()]);
 
     let row = store.get_session(&stranded.id).unwrap().unwrap();
@@ -413,116 +366,81 @@ async fn sweep_ends_an_owned_running_row_with_no_token_after_grace() {
     assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Running));
 }
 
+/// The sweep has no clock, so a row something in this process owns is never
+/// ended, whatever its age: a registered runner's row and a held row are
+/// both older here than any session could be, and both survive. A row that
+/// has lost its only owner is ended on the same pass — age is not a factor
+/// in either direction.
 #[tokio::test]
-async fn sweep_leaves_registered_rows_and_other_pids_alone() {
+async fn a_live_row_is_never_swept_however_old() {
     let (store, branch) = store_with_branch();
-    // Every row is long past the grace by its own `updated_at`; what keeps
-    // each one alive is something other than the clock.
     let mut registered = session(&branch.id, "registered", SessionStatus::Running);
     registered.updated_at = 0;
     store.create_session(&registered).unwrap();
+    let mut held = session(&branch.id, "held", SessionStatus::Running);
+    held.updated_at = 0;
+    store.create_session(&held).unwrap();
     let mut theirs = session(&branch.id, "theirs", SessionStatus::Running);
     theirs.owner_pid = Some(std::process::id() + 1);
     theirs.updated_at = 0;
     store.create_session(&theirs).unwrap();
-    let mut finishing = session(&branch.id, "finishing", SessionStatus::Running);
-    finishing.updated_at = 0;
-    store.create_session(&finishing).unwrap();
+    let mut released = session(&branch.id, "released", SessionStatus::Running);
+    released.updated_at = 0;
+    store.create_session(&released).unwrap();
 
     let kicker = Arc::new(BranchQueueKicker::recording());
     let app = app_with_kicker(&kicker);
     let registry = Arc::new(SessionRegistry::new());
     let _token = registry.register_external(&registered.id);
-    // Deregistered just now: the session thread is between its deregister and
-    // its terminal write, however old the row's own `updated_at` is.
-    drop(registry.register_external(&finishing.id));
+    let _hold = registry.hold(&held.id);
+    // Had a hold, and let it go without writing a terminal state: that is the
+    // one way a row this process wrote can be stranded.
+    drop(registry.hold(&released.id));
 
-    let now = store::now_timestamp() + 1;
-    let ended = reconcile_stranded_running_sessions(
-        &store,
-        &registry,
-        app.handle(),
-        now,
-        STRANDED_GRACE_MS,
+    let ended = reconcile_stranded_running_sessions(&store, &registry, app.handle());
+    assert_eq!(ended, vec![released.id.clone()]);
+    assert_eq!(
+        kicker.kicked(),
+        vec![(branch.id.clone(), KickSource::Sweep)]
     );
-    assert_eq!(ended, Vec::<String>::new());
-    assert!(kicker.kicked().is_empty());
-    for id in [&registered.id, &theirs.id, &finishing.id] {
+    for id in [&registered.id, &held.id, &theirs.id] {
         assert_eq!(status_of(&store, id), Some(SessionStatus::Running), "{id}");
     }
+    assert_eq!(status_of(&store, &released.id), Some(SessionStatus::Error));
 }
 
-/// The immediate start's second phase holds an unregistered `running` row
-/// while it builds context; the grace is what keeps the sweep off it.
-#[tokio::test]
-async fn sweep_respects_grace_for_a_fresh_immediate_start() {
-    let (store, branch) = store_with_branch();
-    let (fresh, _) = commit_session(&store, &branch.id, SessionStatus::Running);
-
-    let kicker = Arc::new(BranchQueueKicker::recording());
-    let app = app_with_kicker(&kicker);
-    let registry = SessionRegistry::new();
-
-    let now = fresh.updated_at + STRANDED_GRACE_MS - 1;
-    let ended = reconcile_stranded_running_sessions(
-        &store,
-        &registry,
-        app.handle(),
-        now,
-        STRANDED_GRACE_MS,
-    );
-    assert!(ended.is_empty());
-    assert!(kicker.kicked().is_empty());
-    assert_eq!(status_of(&store, &fresh.id), Some(SessionStatus::Running));
-}
-
-/// The sweep prunes the registry's deregistration stamps it no longer needs,
-/// so the map stays bounded over a long-running process.
 /// The Doctor readout is the sweep's decision without the write: before the
-/// sweep runs a quiet unregistered row is "stranded now", and after it runs
-/// the same row is counted as swept instead.
+/// sweep runs a row nothing owns is "stranded now", and after it runs the
+/// same row is counted as swept instead.
 #[tokio::test]
 async fn queue_health_reports_what_the_sweep_would_do_and_has_done() {
     let (store, branch) = store_with_branch();
     let (stranded, _) = commit_session(&store, &branch.id, SessionStatus::Running);
     let registered = note_session(&store, &branch.id, SessionStatus::Running);
+    let held = note_session(&store, &branch.id, SessionStatus::Running);
     let kicker = Arc::new(BranchQueueKicker::recording());
     let app = app_with_kicker(&kicker);
     let registry = Arc::new(SessionRegistry::new());
     let _token = registry.register_external(&registered.id);
+    let _hold = registry.hold(&held.id);
 
-    let now = stranded.updated_at + STRANDED_GRACE_MS + 1;
-    let before = queue_health(&store, &registry, now, STRANDED_GRACE_MS).unwrap();
-    assert_eq!(before.owned_running, 2);
-    assert_eq!(before.registered, 1);
+    let before = queue_health(&store, &registry).unwrap();
+    assert_eq!(before.owned_running, 3);
+    assert_eq!(before.live, 2);
     assert_eq!(
         before.stranded,
         vec![StrandedRow {
             session_id: stranded.id.clone(),
             branch_id: Some(branch.id.clone()),
-            quiet_secs: (STRANDED_GRACE_MS + 1) / 1000,
         }]
     );
     assert_eq!(before.swept_total, 0);
 
-    reconcile_stranded_running_sessions(&store, &registry, app.handle(), now, STRANDED_GRACE_MS);
+    reconcile_stranded_running_sessions(&store, &registry, app.handle());
 
-    let after = queue_health(&store, &registry, now, STRANDED_GRACE_MS).unwrap();
-    assert_eq!(after.owned_running, 1);
-    assert_eq!(after.registered, 1);
+    let after = queue_health(&store, &registry).unwrap();
+    assert_eq!(after.owned_running, 2);
+    assert_eq!(after.live, 2);
     assert!(after.stranded.is_empty());
     assert_eq!(after.swept_total, 1);
-}
-
-#[test]
-fn sweep_prunes_stale_deregistration_stamps() {
-    let (store, _branch) = store_with_branch();
-    let registry = Arc::new(SessionRegistry::new());
-    drop(registry.register_external("gone"));
-    assert!(registry.deregistered_at("gone").is_some());
-
-    let app = mock_app();
-    let now = store::now_timestamp() + STRANDED_GRACE_MS + 1;
-    reconcile_stranded_running_sessions(&store, &registry, app.handle(), now, STRANDED_GRACE_MS);
-    assert!(registry.deregistered_at("gone").is_none());
 }

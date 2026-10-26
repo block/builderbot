@@ -1291,6 +1291,9 @@ pub async fn start_session(
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
+    // Live from before the `running` write until the runner has registered
+    // (see `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     session_runner::start_session(
@@ -1500,6 +1503,9 @@ pub(crate) async fn resume_session_for_store(
         None
     };
 
+    // Live from before the `running` write until the runner has registered
+    // (see `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session_id);
     let transitioned = store
         .transition_to_running_clearing_agent_id(&session_id, pending_start_agent_id.as_deref())
         .map_err(|e| e.to_string())?;
@@ -2944,6 +2950,9 @@ pub async fn start_project_session(
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
+    // Live from before the `running` write until the runner has registered
+    // (see `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     // Create a project note stub linked to the session. The frontend uses the
@@ -3062,6 +3071,11 @@ struct CreatedBranchSession {
     session: store::Session,
     artifact_id: String,
     start_agent_id: String,
+    /// Keeps the row live for the stranded-session sweep until the second
+    /// phase has handed it to the runner or written its terminal state.
+    /// Released by dropping this struct — see
+    /// `complete_running_branch_session_start`.
+    _liveness: session_runner::LivenessHold,
 }
 
 fn acp_config_selection_for_session_start(
@@ -3288,6 +3302,7 @@ async fn prepare_branch_session_start(
 #[allow(clippy::too_many_arguments)]
 fn insert_running_branch_session(
     store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
     target: &BranchSessionTarget,
     prompt: &str,
     session_type: &BranchSessionType,
@@ -3307,6 +3322,10 @@ fn insert_running_branch_session(
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
+    // Taken before the row exists: the second phase that owns this row runs
+    // for as long as the context build takes, and the hold is what tells the
+    // stranded-session sweep that something will finish it.
+    let liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     store
@@ -3337,6 +3356,7 @@ fn insert_running_branch_session(
         session,
         artifact_id,
         start_agent_id,
+        _liveness: liveness,
     })
 }
 
@@ -3398,7 +3418,7 @@ fn launch_running_branch_session(
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     prepared: PreparedBranchSessionStart,
-    created: CreatedBranchSession,
+    session: &store::Session,
     image_ids: Vec<String>,
 ) -> Result<session_runner::SessionStartOutcome, String> {
     let session_type = prepared.session_type;
@@ -3415,7 +3435,7 @@ fn launch_running_branch_session(
 
     session_runner::start_session(
         SessionConfig {
-            session_id: created.session.id.clone(),
+            session_id: session.id.clone(),
             prompt: prepared.full_prompt,
             working_dir: prepared.working_dir,
             agent_session_id: None,
@@ -3429,7 +3449,7 @@ fn launch_running_branch_session(
             remote_working_dir: prepared.remote_working_dir,
             image_ids,
             queued_message_id: None,
-            acp_config_selection: acp_config_selection_for_session_start(&created.session),
+            acp_config_selection: acp_config_selection_for_session_start(session),
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
@@ -3639,7 +3659,7 @@ async fn complete_running_branch_session_start(
             Arc::clone(&registry),
             app_handle.clone(),
             prepared,
-            created,
+            &created.session,
             image_ids,
         )?;
         Ok(SecondPhaseOutcome::Launched)
@@ -3671,6 +3691,12 @@ async fn complete_running_branch_session_start(
             crate::session_queue::KickSource::StartFailed,
         );
     }
+
+    // The liveness hold the insert took goes last: past the runner's own
+    // registration on `Launched`, and past the terminal write on the other
+    // two outcomes. Until here the row was `running` under our pid, and the
+    // hold is what said someone would finish it.
+    drop(created);
 }
 
 /// Start a branch session now, or queue it behind the branch's running work.
@@ -3724,6 +3750,7 @@ pub async fn start_or_queue_branch_session_for_store(
         let target = resolve_branch_session_target(&store, &branch_id)?;
         let created = insert_running_branch_session(
             &store,
+            &registry,
             &target,
             &prompt,
             &session_type,
@@ -4468,6 +4495,12 @@ async fn start_queued_session_for_branch(
     let image_ids = store
         .get_image_ids_for_session(&session_id)
         .unwrap_or_default();
+
+    // Live from before the claim flips the row to `running` until
+    // `start_session` has registered it (see `SessionRegistry::hold`);
+    // released when this function returns. A claim that does not start
+    // writes no `running` row, so dropping it on those paths costs nothing.
+    let _liveness = registry.hold(&session_id);
 
     // Claim the row: the gate re-checked and the queued→running flip, together
     // under the branch launch lock. Anything but `Started` means the row is not
@@ -6249,6 +6282,10 @@ mod tests {
         (store, branch)
     }
 
+    fn test_registry() -> Arc<session_runner::SessionRegistry> {
+        Arc::new(session_runner::SessionRegistry::new())
+    }
+
     fn setup_branch_store_with_workdir() -> (Arc<Store>, store::Branch) {
         let (store, branch) = setup_branch_store();
         let workdir_path = format!("/tmp/staged-test-workdir-{}", branch.id);
@@ -6484,6 +6521,43 @@ mod tests {
             assert!(
                 !between.contains(".await"),
                 "`{start}` awaits between its claim and `{launch}`: {between}"
+            );
+        }
+    }
+
+    /// The claim flips a queued row to `running` under our pid, and the
+    /// runner registers it only when `start_session` /
+    /// `start_pipeline_session` is reached. The stranded-session sweep has no
+    /// grace for that stretch — a `running` row nothing in the registry owns
+    /// is ended on the next pass — so every start path must take its liveness
+    /// hold before the claim. Pinned by source text, like the await check
+    /// above, because the start paths need a concrete app runtime to drive.
+    #[test]
+    fn queued_start_holds_liveness_before_its_claim() {
+        let starts = [
+            (
+                include_str!("session_commands.rs"),
+                "async fn start_queued_session_for_branch(",
+                "registry.hold(&session_id)",
+            ),
+            (
+                include_str!("prs.rs"),
+                "async fn start_queued_commit_pipeline_for_branch(",
+                "registry.hold(&session.id)",
+            ),
+            (
+                include_str!("prs.rs"),
+                "async fn start_queued_git_pipeline_for_branch(",
+                "registry.hold(&session.id)",
+            ),
+        ];
+        for (source, start, hold) in starts {
+            let body = &source[source.find(start).expect(start)..];
+            let claim = body.find("claim.claim(&store)").expect("claim");
+            let before_claim = &body[..claim];
+            assert!(
+                before_claim.contains(hold),
+                "`{start}` must take `{hold}` before `claim.claim(&store)`"
             );
         }
     }
@@ -7877,6 +7951,7 @@ mod tests {
 
         let created = insert_running_branch_session(
             &store,
+            &test_registry(),
             &target,
             "capture a note",
             &BranchSessionType::Note,
@@ -7907,6 +7982,65 @@ mod tests {
         assert_eq!(note.session_id.as_deref(), Some(session.id.as_str()));
     }
 
+    /// The immediate start's row is `running` from the insert, under our
+    /// pid, and reaches the runner only after the second phase has built its
+    /// context. The hold the insert takes is what the stranded-session sweep
+    /// sees in the meantime; it travels with `CreatedBranchSession`, so the
+    /// row is live exactly as long as the second phase owns it.
+    #[test]
+    fn immediate_start_row_is_live_while_its_second_phase_owns_it() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let target = resolve_branch_session_target(&store, &branch.id).unwrap();
+        let registry = test_registry();
+        let app = mock_app();
+
+        let created = insert_running_branch_session(
+            &store,
+            &registry,
+            &target,
+            "capture a note",
+            &BranchSessionType::Note,
+            None,
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
+        let session_id = created.session.id.clone();
+
+        assert!(registry.is_live(&session_id));
+        assert!(
+            !registry.is_running(&session_id),
+            "a hold is not a cancellable registration"
+        );
+        assert!(
+            crate::session_queue::sweep::reconcile_stranded_running_sessions(
+                &store,
+                &registry,
+                app.handle()
+            )
+            .is_empty(),
+            "the sweep must leave a held row alone"
+        );
+        assert_eq!(
+            store.get_session(&session_id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+
+        // Second phase over without a handoff or a terminal write: the one
+        // case that genuinely strands the row, and the sweep's to end.
+        drop(created);
+        assert!(!registry.is_live(&session_id));
+        assert_eq!(
+            crate::session_queue::sweep::reconcile_stranded_running_sessions(
+                &store,
+                &registry,
+                app.handle()
+            ),
+            vec![session_id]
+        );
+    }
+
     /// A review inserted this way has no tip SHA yet — reading it is part of
     /// the slow half — so it starts empty like a queued review's and is
     /// filled in by `update_review_commit_sha` once the context is built.
@@ -7917,6 +8051,7 @@ mod tests {
 
         let created = insert_running_branch_session(
             &store,
+            &test_registry(),
             &target,
             "",
             &BranchSessionType::Review,
@@ -7971,6 +8106,7 @@ mod tests {
         let target = resolve_branch_session_target(&store, &branch.id).unwrap();
         let created = insert_running_branch_session(
             &store,
+            &test_registry(),
             &target,
             "capture a note",
             &BranchSessionType::Note,
@@ -8021,6 +8157,7 @@ mod tests {
         let target = resolve_branch_session_target(&store, &branch.id).unwrap();
         let created = insert_running_branch_session(
             &store,
+            &test_registry(),
             &target,
             "capture a note",
             &BranchSessionType::Note,
@@ -8086,6 +8223,7 @@ mod tests {
 
         let stopped = insert_running_branch_session(
             &store,
+            &test_registry(),
             &target,
             "capture a note",
             &BranchSessionType::Note,
@@ -8122,6 +8260,7 @@ mod tests {
 
         let deleted = insert_running_branch_session(
             &store,
+            &test_registry(),
             &target,
             "capture another note",
             &BranchSessionType::Note,

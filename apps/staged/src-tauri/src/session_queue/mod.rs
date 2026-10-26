@@ -16,8 +16,10 @@
 //!   never dropped with a request future and overlapping kicks collapse into
 //!   "run once more after the current drain".
 //! - [`sweep`] is the safety net for the `running` marker itself: a row this
-//!   process owns, with no live token behind it, that has not moved for a
-//!   grace window, is ended and its branch kicked.
+//!   process owns that nothing in the process is registered as owning — no
+//!   runner token, no liveness hold — is ended and its branch kicked. No
+//!   clock is involved; every writer of a `running` row keeps its registry
+//!   entry for the row's whole time in `running`.
 //!
 //! Every kick logs its source at `info`, every sweep action is a `warn`, and
 //! the Doctor's "Session Queue" check reports [`sweep::queue_health`], so a

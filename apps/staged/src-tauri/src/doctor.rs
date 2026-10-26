@@ -1182,12 +1182,7 @@ fn session_queue_doctor_check<R: tauri::Runtime>(
 ) -> Option<DoctorCheck> {
     let store = crate::get_store(&app_handle.try_state::<Mutex<Option<Arc<Store>>>>()?).ok()?;
     let registry = app_handle.try_state::<Arc<SessionRegistry>>()?;
-    match sweep::queue_health(
-        &store,
-        &registry,
-        crate::store::now_timestamp(),
-        sweep::STRANDED_GRACE_MS,
-    ) {
+    match sweep::queue_health(&store, &registry) {
         Ok(health) => Some(build_session_queue_check(&health)),
         Err(e) => {
             log::warn!("[doctor] session-queue check failed to read the store: {e}");
@@ -1205,9 +1200,10 @@ fn build_session_queue_check(health: &QueueHealth) -> DoctorCheck {
         (
             CheckStatus::Warn,
             format!(
-                "{} {} running with no live owner; the stranded-session sweep ends {} within a minute",
+                "{} {} running with nothing in this process owning {}; the stranded-session sweep ends {} within a minute",
                 stranded,
                 if stranded == 1 { "session is" } else { "sessions are" },
+                if stranded == 1 { "it" } else { "them" },
                 if stranded == 1 { "it" } else { "them" },
             ),
         )
@@ -1231,21 +1227,16 @@ fn build_session_queue_check(health: &QueueHealth) -> DoctorCheck {
         "checked: running session rows owned by this process".to_string(),
         format!("owned running rows: {}", health.owned_running),
         format!(
-            "of which registered to a live runner: {}",
-            health.registered
-        ),
-        format!(
-            "grace before a quiet, unregistered row counts as stranded: {}s",
-            sweep::STRANDED_GRACE_MS / 1000
+            "of which owned by a registered runner or a liveness hold: {}",
+            health.live
         ),
         format!("stranded now: {stranded}"),
     ];
     detail.extend(health.stranded.iter().map(|row| {
         format!(
-            "- session {} (branch {}) quiet for {}s",
+            "- session {} (branch {})",
             row.session_id,
             row.branch_id.as_deref().unwrap_or("none"),
-            row.quiet_secs
         )
     }));
     detail.push(format!("ended by the sweep so far: {}", health.swept_total));
@@ -1435,7 +1426,7 @@ mod tests {
     fn queue_health(stranded: Vec<sweep::StrandedRow>, swept_total: usize) -> QueueHealth {
         QueueHealth {
             owned_running: stranded.len() + 1,
-            registered: 1,
+            live: 1,
             stranded,
             swept_total,
         }
@@ -1473,18 +1464,18 @@ mod tests {
         let row = sweep::StrandedRow {
             session_id: "s-1".to_string(),
             branch_id: Some("b-1".to_string()),
-            quiet_secs: 700,
         };
         let check = build_session_queue_check(&queue_health(vec![row], 0));
 
         assert_eq!(check.status, CheckStatus::Warn);
         assert_eq!(
             check.message,
-            "1 session is running with no live owner; the stranded-session sweep ends it within a minute"
+            "1 session is running with nothing in this process owning it; the stranded-session sweep ends it within a minute"
         );
         let detail = check.raw_output.expect("detail is attached");
+        assert!(detail.contains("- session s-1 (branch b-1)"), "{detail}");
         assert!(
-            detail.contains("- session s-1 (branch b-1) quiet for 700s"),
+            detail.contains("of which owned by a registered runner or a liveness hold: 1"),
             "{detail}"
         );
     }

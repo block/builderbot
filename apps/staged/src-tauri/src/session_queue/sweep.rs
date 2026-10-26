@@ -8,20 +8,22 @@
 //! now" is refused. The startup dead-pid pass doesn't catch it because the
 //! pid is this process.
 //!
-//! The sweep defines a stranded row structurally: owned by this process, not
-//! registered in the [`SessionRegistry`], and quiet for longer than a grace
-//! window. The grace exists because two paths legitimately hold an
-//! unregistered `running` row for a while — the immediate start's second
-//! phase (context build, then runner handoff) and the immediate pull marker —
-//! and because a session thread deregisters *before* its post-completion
-//! hooks and terminal write, so a long turn's row is unregistered and stale
-//! for the length of its hooks. The registry's deregistration stamp covers
-//! that last stretch; the grace covers the rest.
+//! The sweep defines a stranded row structurally, with no clock: owned by
+//! this process and not live in the [`SessionRegistry`]. That is sound
+//! because of one invariant every writer of a `running` row keeps — **the row
+//! has a registry entry for its entire time in `running`**. Each owner takes
+//! its entry (a full `register` for a thread that observes a cancel token, a
+//! [`SessionRegistry::hold`] for a task that only finishes the row) *before*
+//! the write that makes the row `running`, and releases it *after* the
+//! terminal write. A session thread's entry therefore spans its
+//! post-completion hooks too, however long they take; a turn is never "quiet
+//! enough" to be mistaken for stranded, because quietness is not what is
+//! asked.
 //!
 //! Every row the sweep ends is a `warn` in the log, and [`queue_health`]
-//! gives the Doctor the same view — what would be swept right now, and how
-//! many rows have been swept so far — so a recurrence shows up in the app
-//! rather than only in the log.
+//! gives the Doctor the same view — what is stranded right now, and how many
+//! rows have been swept so far — so a recurrence shows up in the app rather
+//! than only in the log.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,74 +33,35 @@ use crate::store::{CompletionReason, Session, SessionStatus, Store};
 
 use super::{kick, KickSource};
 
-/// How long a row may sit `running`, unregistered and untouched before the
-/// sweep ends it. Conservative: the immediate start's context build is tens of
-/// seconds at worst, and post-completion hooks are seconds.
-pub(crate) const STRANDED_GRACE_MS: i64 = 10 * 60 * 1000;
-
-/// How often the sweep runs. Also how late it can be: a row is ended between
-/// one and two intervals after its grace expires.
+/// How often the sweep runs. Also how late it can be: a stranded row is ended
+/// within one interval of being stranded.
 const SWEEP_INTERVAL_SECS: u64 = 60;
 
 /// The error recorded on a row the sweep ends.
 pub(crate) const STRANDED_SESSION_MESSAGE: &str = "Staged lost track of this session";
 
-/// What the registry knows about a row, as the decision needs it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Liveness {
-    /// A cancellation token is registered: a thread or task owns the row.
-    pub(crate) registered: bool,
-    /// When the row last deregistered, if recently enough to still be stamped.
-    pub(crate) deregistered_at: Option<i64>,
-}
-
-impl Liveness {
-    pub(crate) fn of(registry: &SessionRegistry, session_id: &str) -> Self {
-        Self {
-            registered: registry.is_running(session_id),
-            deregistered_at: registry.deregistered_at(session_id),
-        }
-    }
-}
-
 /// Whether `session` is a row nothing will finish.
 ///
-/// Pure: `now` and `grace_ms` are parameters so the decision is testable
-/// against a fixed clock. `own_pid` is this process; rows under other pids
-/// belong to another instance on the same data dir and are left alone, like
-/// everywhere else.
-pub(crate) fn is_stranded(
-    session: &Session,
-    liveness: Liveness,
-    own_pid: u32,
-    now: i64,
-    grace_ms: i64,
-) -> bool {
-    if session.status != SessionStatus::Running || session.owner_pid != Some(own_pid) {
-        return false;
-    }
-    if liveness.registered {
-        return false;
-    }
-    let last_alive_at = liveness
-        .deregistered_at
-        .map_or(session.updated_at, |at| at.max(session.updated_at));
-    now.saturating_sub(last_alive_at) > grace_ms
+/// Pure: `live` is the registry's answer for the row ([`SessionRegistry::is_live`])
+/// and `own_pid` is this process. Rows under other pids belong to another
+/// instance on the same data dir and are left alone, like everywhere else.
+pub(crate) fn is_stranded(session: &Session, live: bool, own_pid: u32) -> bool {
+    session.status == SessionStatus::Running && session.owner_pid == Some(own_pid) && !live
 }
 
 /// End every stranded row this process owns and kick the branches they held.
 ///
-/// Returns the ids of the rows it ended. The terminal write is a
-/// `transition_from_running` CAS, so an owner that turns out to be alive and
-/// writes first wins and the sweep moves on; the `warn` makes any firing
-/// visible, since a legitimate owner losing this race would be a bug in the
-/// grace, not in the owner.
+/// Returns the ids of the rows it ended. The row is read before the registry
+/// is asked, and the terminal write is a `transition_from_running` CAS, which
+/// together make the only benign interleaving harmless: an owner that wrote
+/// its terminal state and deregistered between the two reads has left the
+/// row no longer `running`, so the CAS finds nothing to do. (The other order
+/// would not be safe — a row read as `running` *after* the registry said
+/// "not live" could be a fresh start whose entry was taken between the two.)
 pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
     store: &Arc<Store>,
     registry: &SessionRegistry,
     app_handle: &tauri::AppHandle<R>,
-    now: i64,
-    grace_ms: i64,
 ) -> Vec<String> {
     let running = match store.get_running_sessions() {
         Ok(sessions) => sessions,
@@ -111,8 +74,7 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
 
     let mut ended = Vec::new();
     for session in running {
-        let liveness = Liveness::of(registry, &session.id);
-        if !is_stranded(&session, liveness, own_pid, now, grace_ms) {
+        if !is_stranded(&session, registry.is_live(&session.id), own_pid) {
             continue;
         }
         let transitioned = store
@@ -124,14 +86,11 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
             )
             .unwrap_or(false);
         if !transitioned {
-            // An owner alive after all wrote first: the row left `running`
-            // between our read and the CAS. Harmless, but it means the grace
-            // was too short for that owner, which is worth seeing.
-            log::warn!(
-                "[session_queue] sweep lost the race for session {} (branch {:?}, quiet for {}s): its owner wrote first",
-                session.id,
-                session.branch_id,
-                now.saturating_sub(session.updated_at) / 1000
+            // The owner finished between our row read and our registry read;
+            // see the function doc. Nothing was stranded.
+            log::debug!(
+                "[session_queue] sweep skipped session {}: its owner finished it first",
+                session.id
             );
             continue;
         }
@@ -139,10 +98,10 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
             crate::session_commands::pending_branch_start_agent_id(session.agent_id.as_deref())
                 .is_some();
         log::warn!(
-            "[session_queue] ended stranded session {} (branch {:?}, quiet for {}s, {})",
+            "[session_queue] ended stranded session {} (branch {:?}, running since {}, {})",
             session.id,
             session.branch_id,
-            now.saturating_sub(session.updated_at) / 1000,
+            session.updated_at,
             if pending_start {
                 "an immediate start that never handed off to the runner"
             } else {
@@ -164,9 +123,6 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
         }
         ended.push(session.id);
     }
-
-    // Stamps older than the grace can no longer change a decision.
-    registry.forget_deregistrations_before(now.saturating_sub(grace_ms));
     ended
 }
 
@@ -175,8 +131,6 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
 pub(crate) struct StrandedRow {
     pub(crate) session_id: String,
     pub(crate) branch_id: Option<String>,
-    /// Seconds since the row was last touched or deregistered.
-    pub(crate) quiet_secs: i64,
 }
 
 /// The sweep's view of the queue at one instant, for the Doctor.
@@ -184,9 +138,10 @@ pub(crate) struct StrandedRow {
 pub(crate) struct QueueHealth {
     /// `running` rows this process owns.
     pub(crate) owned_running: usize,
-    /// Of those, rows a thread or task is registered for.
-    pub(crate) registered: usize,
-    /// Rows [`is_stranded`] would end now, oldest-quiet first.
+    /// Of those, rows the registry knows an owner for (a registered runner or
+    /// a liveness hold).
+    pub(crate) live: usize,
+    /// Rows [`is_stranded`] would end now.
     pub(crate) stranded: Vec<StrandedRow>,
     /// Rows the sweep has ended over the store's lifetime.
     pub(crate) swept_total: usize,
@@ -194,19 +149,20 @@ pub(crate) struct QueueHealth {
 
 /// What the sweep would do now, without doing it.
 ///
-/// Same decision as [`reconcile_stranded_running_sessions`], same `now` and
-/// `grace_ms` seams, no writes. `swept_total` counts rows carrying
-/// [`STRANDED_SESSION_MESSAGE`], which only the sweep writes.
+/// Same decision as [`reconcile_stranded_running_sessions`], no writes. With
+/// no CAS to absorb the row-then-registry interleaving, a row found not live
+/// is re-read and only reported if it is still `running` — otherwise a
+/// session finishing during the read would show as stranded for one Doctor
+/// run. `swept_total` counts rows carrying [`STRANDED_SESSION_MESSAGE`], which
+/// only the sweep writes.
 pub(crate) fn queue_health(
     store: &Store,
     registry: &SessionRegistry,
-    now: i64,
-    grace_ms: i64,
 ) -> Result<QueueHealth, crate::store::StoreError> {
     let own_pid = std::process::id();
     let mut health = QueueHealth {
         owned_running: 0,
-        registered: 0,
+        live: 0,
         stranded: Vec::new(),
         swept_total: store.count_sessions_with_error_message(STRANDED_SESSION_MESSAGE)?,
     };
@@ -215,21 +171,21 @@ pub(crate) fn queue_health(
             continue;
         }
         health.owned_running += 1;
-        let liveness = Liveness::of(registry, &session.id);
-        if liveness.registered {
-            health.registered += 1;
+        let live = registry.is_live(&session.id);
+        if live {
+            health.live += 1;
+            continue;
         }
-        if is_stranded(&session, liveness, own_pid, now, grace_ms) {
+        let still_running = store
+            .get_session(&session.id)?
+            .is_some_and(|row| is_stranded(&row, false, own_pid));
+        if still_running {
             health.stranded.push(StrandedRow {
                 session_id: session.id,
                 branch_id: session.branch_id,
-                quiet_secs: now.saturating_sub(session.updated_at) / 1000,
             });
         }
     }
-    health
-        .stranded
-        .sort_by_key(|row| std::cmp::Reverse(row.quiet_secs));
     Ok(health)
 }
 
@@ -237,9 +193,9 @@ pub(crate) fn queue_health(
 /// store-backed services; the store handle stays valid for the process
 /// lifetime for the same reason `pr_poll_scheduler::spawn`'s does.
 ///
-/// The first pass runs one interval in: at startup every row this process
-/// could own is younger than the grace, and the dead-owner recovery has
-/// already handled the rest.
+/// The first pass runs one interval in: at startup the dead-owner recovery
+/// has already handled every row from a previous process, and nothing this
+/// process owns can be stranded before it has started anything.
 pub(crate) fn spawn(
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
@@ -254,13 +210,7 @@ pub(crate) fn spawn(
             if crate::app_lifecycle::is_quitting(&app_handle) {
                 return;
             }
-            reconcile_stranded_running_sessions(
-                &store,
-                &registry,
-                &app_handle,
-                crate::store::now_timestamp(),
-                STRANDED_GRACE_MS,
-            );
+            reconcile_stranded_running_sessions(&store, &registry, &app_handle);
         }
     });
 }

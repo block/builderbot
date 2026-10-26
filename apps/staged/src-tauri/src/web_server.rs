@@ -2799,6 +2799,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // Returns the queued session id, or null when the pull ran now.
             let queued_session_id = detached(crate::prs::pull_or_queue_branch_for_branch(
                 store,
+                Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
             ))
@@ -3467,6 +3468,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             if let Some(ref p) = provider {
                 session = session.with_provider(p);
             }
+            // Live from before the `running` write until the runner has
+            // registered (see `SessionRegistry::hold`).
+            let _liveness = session_registry.hold(&session.id);
             store.create_session(&session).map_err(|e| e.to_string())?;
 
             session_runner::start_session(
@@ -3623,6 +3627,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     None
                 };
 
+                // Live from before the `running` write until the runner has
+                // registered (see `SessionRegistry::hold`).
+                let _liveness = session_registry.hold(&session_id);
                 let transitioned = store
                     .transition_to_running_clearing_agent_id(
                         &session_id,
@@ -3841,6 +3848,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             if let Some(ref p) = provider {
                 session = session.with_provider(p);
             }
+            // Live from before the `running` write until the runner has
+            // registered (see `SessionRegistry::hold`).
+            let _liveness = session_registry.hold(&session.id);
             store.create_session(&session).map_err(|e| e.to_string())?;
 
             let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);

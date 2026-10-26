@@ -187,6 +187,9 @@ fn start_pipeline_for_branch(
         session = session.with_provider(p);
     }
     session.pipeline = Some(pipeline.clone());
+    // Live from before the `running` write until the runner has registered
+    // (see `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     // Emit "running" event *before* returning so the global session listener
@@ -539,10 +542,16 @@ fn build_pull_pipeline_steps(remote_branch: &str) -> Vec<PipelineStep> {
 ///
 /// Inserted under the branch launch lock and consumed by
 /// [`launch_running_pipeline_session`] once the lock is released.
+///
+/// Carries the row's liveness hold (see `SessionRegistry::hold`), taken
+/// before the insert and released when this is dropped — after the runner
+/// has registered the session, for a launch; after the terminal write, for a
+/// rebase that failed before launching.
 struct RunningPipelineSession {
     session_id: String,
     pipeline: PipelineExecution,
     prompt: &'static str,
+    _liveness: session_runner::LivenessHold,
 }
 
 /// Insert the session and pending-commit rows for a rebase/squash that runs now.
@@ -553,6 +562,7 @@ struct RunningPipelineSession {
 /// await.
 fn insert_running_commit_pipeline_session(
     store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
     ctx: &BranchPipelineContext,
     kind: PipelineKind,
     steps: &[PipelineStep],
@@ -571,6 +581,7 @@ fn insert_running_commit_pipeline_session(
         session = session.with_provider(p);
     }
     session.pipeline = Some(pipeline.clone());
+    let liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     let commit = store::Commit::new_pending(&ctx.branch.id).with_session(&session.id);
@@ -580,6 +591,7 @@ fn insert_running_commit_pipeline_session(
         session_id: session.id,
         pipeline,
         prompt,
+        _liveness: liveness,
     })
 }
 
@@ -609,12 +621,18 @@ fn launch_running_pipeline_session(
         session_type,
     );
 
+    let RunningPipelineSession {
+        session_id,
+        pipeline,
+        prompt,
+        _liveness: liveness,
+    } = running;
     session_runner::start_pipeline_session(
         session_runner::PipelineConfig {
-            session_id: running.session_id.clone(),
-            prompt: running.prompt.to_string(),
+            session_id: session_id.clone(),
+            prompt: prompt.to_string(),
             steps,
-            pipeline: running.pipeline,
+            pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
             provider,
@@ -627,8 +645,10 @@ fn launch_running_pipeline_session(
         app_handle.clone(),
         Arc::clone(registry),
     )?;
+    // The runner registered the session at entry; the row is its now.
+    drop(liveness);
 
-    Ok(running.session_id)
+    Ok(session_id)
 }
 
 /// Queue a rebase/squash pipeline when the branch has work in flight.
@@ -861,6 +881,7 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
 
         let running = insert_running_commit_pipeline_session(
             &store,
+            &registry,
             &ctx,
             kind,
             &steps,
@@ -943,6 +964,11 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     }
     let effective_provider = session.provider.clone().or(provider);
 
+    // Live from before the claim flips the row to `running` until
+    // `start_pipeline_session` has registered it (see
+    // `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session.id);
+
     let claimed = claim.claim(&store)?;
     if claimed != QueuedSessionStart::Started {
         return Ok(claimed);
@@ -1001,6 +1027,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
 /// launch lock: this row is what makes the branch look busy.
 fn insert_running_push_pipeline_session(
     store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
     ctx: &BranchPipelineContext,
     force: bool,
     steps: &[PipelineStep],
@@ -1017,12 +1044,14 @@ fn insert_running_push_pipeline_session(
         session = session.with_provider(p);
     }
     session.pipeline = Some(pipeline.clone());
+    let liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     Ok(RunningPipelineSession {
         session_id: session.id,
         pipeline,
         prompt,
+        _liveness: liveness,
     })
 }
 
@@ -1199,6 +1228,11 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         .with_depends_on_session_id(depends_on);
     let effective_provider = session.provider.clone().or(provider);
 
+    // Live from before the claim flips the row to `running` until
+    // `start_pipeline_session` has registered it (see
+    // `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session.id);
+
     let claimed = claim.claim(&store)?;
     if claimed != QueuedSessionStart::Started {
         return Ok(claimed);
@@ -1252,8 +1286,13 @@ enum PullDisposition {
     /// already covers this request.
     Queued(String),
     /// The branch was idle, so the pull runs now. The id is the session that marks
-    /// the branch busy for its duration.
-    RunningNow(String),
+    /// the branch busy for its duration, and the hold is what says this process
+    /// will finish it (see `SessionRegistry::hold`) — it never goes through the
+    /// runner, so nothing else registers it.
+    RunningNow {
+        session_id: String,
+        liveness: session_runner::LivenessHold,
+    },
 }
 
 /// Decide between pulling now and queueing behind in-flight branch work, and
@@ -1278,6 +1317,7 @@ enum PullDisposition {
 /// pipeline never hands off to an agent.
 fn claim_or_queue_pull_for_branch(
     store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
     branch_id: &str,
 ) -> Result<PullDisposition, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
@@ -1312,12 +1352,16 @@ fn claim_or_queue_pull_for_branch(
     }
     .with_branch(branch_id);
     session.pipeline = Some(pipeline);
+    // Before the write, so the row is never `running` without it.
+    let liveness = (!busy).then(|| registry.hold(&session.id));
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    Ok(if busy {
-        PullDisposition::Queued(session.id)
-    } else {
-        PullDisposition::RunningNow(session.id)
+    Ok(match liveness {
+        None => PullDisposition::Queued(session.id),
+        Some(liveness) => PullDisposition::RunningNow {
+            session_id: session.id,
+            liveness,
+        },
     })
 }
 
@@ -1367,6 +1411,7 @@ fn finish_immediate_pull_session(store: &Arc<Store>, session_id: &str, error: Op
 /// its turn on the branch queue.
 pub(crate) async fn pull_or_queue_branch_for_branch(
     store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
@@ -1375,6 +1420,7 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
     let kick_branch_id = branch_id.clone();
     pull_or_queue_branch_with(
         store,
+        registry,
         branch_id,
         move || crate::timeline::pull_branch_ff_only_impl(&pull_store, &pull_branch_id),
         move || {
@@ -1395,14 +1441,19 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
 /// after-release hook injected, so a test can stand in a pull that blocks.
 async fn pull_or_queue_branch_with(
     store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
     branch_id: String,
     pull: impl FnOnce() -> Result<(), String> + Send + 'static,
     on_released: impl FnOnce() + Send + 'static,
 ) -> Result<Option<String>, String> {
-    let session_id = match claim_or_queue_pull_for_branch(&store, &branch_id)? {
-        PullDisposition::Queued(session_id) => return Ok(Some(session_id)),
-        PullDisposition::RunningNow(session_id) => session_id,
-    };
+    let (session_id, liveness) =
+        match claim_or_queue_pull_for_branch(&store, &registry, &branch_id)? {
+            PullDisposition::Queued(session_id) => return Ok(Some(session_id)),
+            PullDisposition::RunningNow {
+                session_id,
+                liveness,
+            } => (session_id, liveness),
+        };
 
     // From here on the marker row is the branch's busy state, and this future
     // belongs to whoever asked for the pull: in web mode that is a request
@@ -1424,6 +1475,9 @@ async fn pull_or_queue_branch_with(
             &session_id,
             pulled.as_ref().err().map(String::as_str),
         );
+        // Released after the terminal write, on the task that owns the marker
+        // — not with the request future, which may already be gone.
+        drop(liveness);
         on_released();
 
         pulled
@@ -1442,11 +1496,12 @@ async fn pull_or_queue_branch_with(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn pull_or_queue_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
     let store = get_store(&store)?;
-    pull_or_queue_branch_for_branch(store, app_handle, branch_id).await
+    pull_or_queue_branch_for_branch(store, Arc::clone(&registry), app_handle, branch_id).await
 }
 
 fn create_pr_handoff_prompt(
@@ -2101,7 +2156,14 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
             return Ok(BranchPipelineResponse::queued(session_id));
         }
 
-        insert_running_push_pipeline_session(&store, &ctx, force, &steps, provider.as_deref())?
+        insert_running_push_pipeline_session(
+            &store,
+            &registry,
+            &ctx,
+            force,
+            &steps,
+            provider.as_deref(),
+        )?
     };
 
     let session_id = launch_running_pipeline_session(
@@ -2237,6 +2299,10 @@ mod tests {
         }
     }
 
+    fn test_registry() -> Arc<session_runner::SessionRegistry> {
+        Arc::new(session_runner::SessionRegistry::new())
+    }
+
     fn setup_branch_store() -> (Arc<Store>, store::Branch) {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = store::Project::new("test-owner/test-repo");
@@ -2284,9 +2350,11 @@ mod tests {
             .with_branch(&branch.id);
         store.create_workdir(&workdir).unwrap();
 
+        let registry = test_registry();
         let (release, released) = std::sync::mpsc::channel::<()>();
         let request = pull_or_queue_branch_with(
             Arc::clone(&store),
+            Arc::clone(&registry),
             branch.id.clone(),
             move || {
                 released.recv().map_err(|e| e.to_string())?;
@@ -2313,6 +2381,14 @@ mod tests {
             .into_iter()
             .find(|session| session.branch_id.as_deref() == Some(branch.id.as_str()))
             .expect("the marker row is inserted before the first await");
+        // The marker never goes through the runner, so its liveness hold is
+        // what keeps the stranded-session sweep off it for as long as the
+        // pull takes — and the hold belongs to the pull task, not the
+        // request future that was just dropped.
+        assert!(
+            registry.is_live(&marker.id),
+            "the immediate pull's marker must be live in the registry while the pull runs"
+        );
         release.send(()).unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2327,6 +2403,14 @@ mod tests {
             status,
             store::SessionStatus::Completed,
             "the marker must be released by the pull, not by the request future"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while registry.is_live(&marker.id) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !registry.is_live(&marker.id),
+            "the hold is released once the marker has its terminal state"
         );
         assert!(
             !crate::session_commands::should_queue_branch_session_start(
@@ -2690,6 +2774,7 @@ mod tests {
         let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
         let running = insert_running_commit_pipeline_session(
             &store,
+            &test_registry(),
             &pipeline_context(&branch),
             PipelineKind::Rebase,
             &steps,
@@ -2745,6 +2830,7 @@ mod tests {
         let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
         let running = insert_running_commit_pipeline_session(
             &store,
+            &test_registry(),
             &pipeline_context(&branch),
             PipelineKind::Rebase,
             &steps,
@@ -2790,6 +2876,7 @@ mod tests {
         // rebase is left running for the runner, with nothing announced.
         let running = insert_running_commit_pipeline_session(
             &store,
+            &test_registry(),
             &pipeline_context(&branch),
             PipelineKind::Rebase,
             &steps,
@@ -2845,6 +2932,7 @@ mod tests {
         );
         insert_running_commit_pipeline_session(
             &store,
+            &test_registry(),
             &pipeline_context(&branch),
             PipelineKind::Rebase,
             &steps,
@@ -2874,6 +2962,7 @@ mod tests {
 
         insert_running_push_pipeline_session(
             &store,
+            &test_registry(),
             &pipeline_context(&branch),
             false,
             &steps,
@@ -3057,15 +3146,15 @@ mod tests {
     /// The queued session id, or `None` when the branch was idle and the pull
     /// claimed it to run now.
     fn queue_pull(store: &Arc<Store>, branch_id: &str) -> Option<String> {
-        match claim_or_queue_pull_for_branch(store, branch_id).unwrap() {
+        match claim_or_queue_pull_for_branch(store, &test_registry(), branch_id).unwrap() {
             PullDisposition::Queued(session_id) => Some(session_id),
-            PullDisposition::RunningNow(_) => None,
+            PullDisposition::RunningNow { .. } => None,
         }
     }
 
     fn claim_pull(store: &Arc<Store>, branch_id: &str) -> String {
-        match claim_or_queue_pull_for_branch(store, branch_id).unwrap() {
-            PullDisposition::RunningNow(session_id) => session_id,
+        match claim_or_queue_pull_for_branch(store, &test_registry(), branch_id).unwrap() {
+            PullDisposition::RunningNow { session_id, .. } => session_id,
             PullDisposition::Queued(session_id) => {
                 panic!("expected an immediate pull, got queued session {session_id}")
             }

@@ -231,18 +231,27 @@ struct RegistryInner {
     /// lets `register` apply it the instant the session appears, closing the
     /// race that a fixed-delay retry could miss for slow (e.g. remote) startups.
     pending_cancellations: HashMap<String, CompletionReason>,
-    /// When each session left `running`, as a store timestamp (ms).
-    ///
-    /// A session thread deregisters *before* its post-completion hooks and
-    /// terminal write (see `deregister`'s callers), so for that stretch the row
-    /// is `running` with no token and an `updated_at` as old as the turn. The
-    /// stranded-session sweep (`session_queue::sweep`) reads this to tell that
-    /// stretch apart from a row nothing will ever finish; it prunes the stamps
-    /// older than its grace, so the map stays bounded.
-    deregistered_at: HashMap<String, i64>,
+    /// Liveness holds (see [`SessionRegistry::hold`]), counted per session id
+    /// so overlapping holds on one row release independently.
+    held: HashMap<String, usize>,
+    /// The epoch the next `register` stamps on its entry.
+    next_epoch: u64,
 }
 
+/// Which registration an entry came from, so a `deregister` removes only the
+/// entry its caller made.
+///
+/// Entries are keyed by session id and a later registration *replaces* an
+/// earlier one — the pipeline handoff relies on that swap. Since a session
+/// thread now deregisters after its terminal write, a Resume that wins the
+/// row between that write and the deregister registers a successor under the
+/// same id; without this the finishing thread would remove the successor's
+/// entry, and the stranded-session sweep would end a live turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegistrationEpoch(u64);
+
 struct RunningSession {
+    epoch: RegistrationEpoch,
     token: CancellationToken,
     cancellation_completion_reason: std::sync::Mutex<Option<CompletionReason>>,
     /// Per-task stop handle for the session's current ACP connection, set once
@@ -401,19 +410,25 @@ impl SessionRegistry {
     /// the cancel answers `true` to a caller that writes no status and then
     /// lands on the predecessor this call has already dropped.
     ///
-    /// Finding a *live* entry to replace means the handoff: the thread of an
-    /// ordinary session deregisters before its terminal DB write, so while its
-    /// entry is present the row is still `running` and `transition_to_running`
-    /// refuses to start another turn on it.
-    fn register(&self, session_id: &str) -> CancellationToken {
+    /// Finding a *live* entry to replace almost always means the handoff: a
+    /// session thread deregisters only after its terminal DB write, so while
+    /// its entry is present the row is normally still `running` and
+    /// `transition_to_running` refuses to start another turn on it. The
+    /// exception is a Resume that wins the row in the instant between that
+    /// write and the deregister; the returned [`RegistrationEpoch`] is what
+    /// keeps the finishing thread's deregister off the successor's entry.
+    fn register(&self, session_id: &str) -> (CancellationToken, RegistrationEpoch) {
         let token = CancellationToken::new();
+        let mut inner = self.inner.lock().unwrap();
+        let epoch = RegistrationEpoch(inner.next_epoch);
+        inner.next_epoch += 1;
         let running_session = Arc::new(RunningSession {
+            epoch,
             token: token.clone(),
             cancellation_completion_reason: std::sync::Mutex::new(None),
             async_task_stop: std::sync::Mutex::new(None),
             background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
         });
-        let mut inner = self.inner.lock().unwrap();
         let pending = inner.pending_cancellations.remove(session_id);
         let carried = pending.or_else(|| {
             inner
@@ -427,52 +442,93 @@ impl SessionRegistry {
         inner
             .running
             .insert(session_id.to_string(), running_session);
-        token
+        (token, epoch)
     }
 
-    /// Remove a session from the registry (called by the background thread
-    /// on exit, regardless of success/failure/cancellation).
-    fn deregister(&self, session_id: &str) {
+    /// Remove the entry `epoch` registered, if it is still the one in the map.
+    ///
+    /// Called by the owning thread or task once it has written the session's
+    /// terminal state — never before. A `running` row this process owns with
+    /// no entry is, by definition, a row nothing will finish, and that is the
+    /// whole of what `session_queue::sweep` acts on; deregistering ahead of
+    /// the write would hand it a live session. An entry under the same id with
+    /// a different epoch belongs to a successor (see [`RegistrationEpoch`])
+    /// and is left alone.
+    fn deregister(&self, session_id: &str, epoch: RegistrationEpoch) {
         let mut inner = self.inner.lock().unwrap();
-        inner.running.remove(session_id);
-        inner
-            .deregistered_at
-            .insert(session_id.to_string(), crate::store::now_timestamp());
-    }
-
-    /// When `session_id` last deregistered, if the sweep has not pruned it.
-    pub(crate) fn deregistered_at(&self, session_id: &str) -> Option<i64> {
-        self.inner
-            .lock()
-            .unwrap()
-            .deregistered_at
+        if inner
+            .running
             .get(session_id)
-            .copied()
+            .is_some_and(|running| running.epoch == epoch)
+        {
+            inner.running.remove(session_id);
+        }
     }
 
-    /// Drop the deregistration stamps older than `cutoff`.
-    pub(crate) fn forget_deregistrations_before(&self, cutoff: i64) {
-        self.inner
-            .lock()
-            .unwrap()
-            .deregistered_at
-            .retain(|_, at| *at >= cutoff);
-    }
-
-    /// Remove a session from the registry and report the cancellation it had
-    /// accepted, for a caller that is taking over the entry's job of recording
-    /// the terminal state.
+    /// Remove whatever entry `session_id` has and report the cancellation it
+    /// had accepted, for a caller that is taking over the entry's job of
+    /// recording the terminal state.
     ///
     /// Not what an ordinary [`deregister`](Self::deregister) wants: the session
-    /// thread deregisters *because* it observed the cancel and is about to write
-    /// the terminal state itself.
+    /// thread deregisters *after* writing the terminal state itself, and only
+    /// its own entry. This takes any entry, because the caller is ending a
+    /// session it did not register — a failed startup, or the shutdown refusal
+    /// taking over the pipeline handoff's entry.
     fn deregister_reporting_cancellation(&self, session_id: &str) -> Option<CompletionReason> {
         let mut inner = self.inner.lock().unwrap();
         let removed = inner.running.remove(session_id);
-        inner
-            .deregistered_at
-            .insert(session_id.to_string(), crate::store::now_timestamp());
         removed.and_then(|running| running.accepted_cancellation())
+    }
+
+    /// Mark `session_id` as owned by a task that will write its terminal
+    /// state, without making it cancellable.
+    ///
+    /// The lighter of the registry's two entry kinds. A full `register` says
+    /// "a thread owns this session and observes its token": `cancel` answers
+    /// `true` and writes nothing, trusting the owner to record the cancel.
+    /// A hold says only "someone will finish this row": `cancel` does not see
+    /// it, so a Stop takes `cancel_session_impl`'s fallback and writes
+    /// `cancelled` straight to the row, which is what the immediate pull and
+    /// the start paths that hold one already rely on; and shutdown's
+    /// `cancel_owned_sessions` does not wait on it. What a hold does is make
+    /// [`is_live`](Self::is_live) true, which keeps the stranded-session sweep
+    /// off the row.
+    ///
+    /// Take it *before* the `running` write it covers and drop it after the
+    /// terminal write — or after the runner's own `register` has taken over,
+    /// for a path that hands the row to `start_session` /
+    /// `start_pipeline_session`. Those register at entry, so a hold spanning
+    /// the call overlaps the thread's entry and the row is live throughout.
+    pub(crate) fn hold(self: &Arc<Self>, session_id: &str) -> LivenessHold {
+        *self
+            .inner
+            .lock()
+            .unwrap()
+            .held
+            .entry(session_id.to_string())
+            .or_insert(0) += 1;
+        LivenessHold {
+            registry: Arc::clone(self),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    fn release_hold(&self, session_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(count) = inner.held.get_mut(session_id) {
+            *count -= 1;
+            if *count == 0 {
+                inner.held.remove(session_id);
+            }
+        }
+    }
+
+    /// Whether something in this process owns `session_id`'s `running` row:
+    /// a registered token or a [`hold`](Self::hold). The stranded-session
+    /// sweep's one question.
+    pub(crate) fn is_live(&self, session_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.running.contains_key(session_id) || inner.held.contains_key(session_id)
     }
 
     /// Register `session_id` around its fallible startup work: the token
@@ -524,10 +580,10 @@ impl SessionRegistry {
         &self,
         session_id: &str,
         startup: impl FnOnce() -> Result<T, String>,
-    ) -> Result<(CancellationToken, T), StartupFailure> {
-        let token = self.register(session_id);
+    ) -> Result<(CancellationToken, RegistrationEpoch, T), StartupFailure> {
+        let (token, epoch) = self.register(session_id);
         match startup() {
-            Ok(value) => Ok((token, value)),
+            Ok(value) => Ok((token, epoch, value)),
             Err(error) => Err(StartupFailure {
                 error,
                 accepted_cancellation: self.deregister_reporting_cancellation(session_id),
@@ -714,11 +770,27 @@ impl SessionRegistry {
     ///   against a flag it has already published. See
     ///   `pikchr_mcp::reserve_child_session`.
     pub fn register_external(self: &Arc<Self>, session_id: &str) -> ExternalSessionRegistration {
+        let (token, epoch) = self.register(session_id);
         ExternalSessionRegistration {
-            token: self.register(session_id),
+            token,
+            epoch,
             registry: Arc::clone(self),
             session_id: session_id.to_string(),
         }
+    }
+}
+
+/// A liveness hold from [`SessionRegistry::hold`]; dropping it releases the
+/// hold.
+#[must_use = "a hold keeps the sweep off the row only while it is alive"]
+pub(crate) struct LivenessHold {
+    registry: Arc<SessionRegistry>,
+    session_id: String,
+}
+
+impl Drop for LivenessHold {
+    fn drop(&mut self) {
+        self.registry.release_hold(&self.session_id);
     }
 }
 
@@ -729,6 +801,7 @@ pub struct ExternalSessionRegistration {
     registry: Arc<SessionRegistry>,
     session_id: String,
     token: CancellationToken,
+    epoch: RegistrationEpoch,
 }
 
 impl ExternalSessionRegistration {
@@ -740,7 +813,7 @@ impl ExternalSessionRegistration {
 
 impl Drop for ExternalSessionRegistration {
     fn drop(&mut self) {
-        self.registry.deregister(&self.session_id);
+        self.registry.deregister(&self.session_id, self.epoch);
     }
 }
 
@@ -878,7 +951,9 @@ impl SessionStartOutcome {
 /// Taking the entry out also means taking over its job, so a cancellation it
 /// had already accepted becomes the reason we persist, in preference to
 /// `AppQuit`: the `cancel` that recorded it was answered `true` and wrote no
-/// status.
+/// status. The entry goes *after* the write, like every other deregister: the
+/// row is `running` until then, and a `running` row with no entry is what the
+/// stranded-session sweep ends.
 fn refuse_start_during_shutdown<R: tauri::Runtime>(
     session_id: &str,
     branch_id: Option<String>,
@@ -901,23 +976,25 @@ fn refuse_start_during_shutdown<R: tauri::Runtime>(
         app_handle,
         refused_start_completion_reason(registry, session_id),
     );
+    // The handoff's entry, if this was one; a no-op for every other caller.
+    let _ = registry.deregister_reporting_cancellation(session_id);
     SessionStartOutcome::RefusedShuttingDown
 }
 
-/// The registry half of a refused start: drop the entry the session already
-/// had, if any, and answer with the reason its terminal write should carry.
+/// The reason a refused start's terminal write should carry.
 ///
-/// A cancellation the dropped entry had accepted wins over `AppQuit` — see
+/// A cancellation the session's entry has accepted wins over `AppQuit` — see
 /// [`RunningSession::accepted_cancellation`] for why an entry leaving the
 /// registry without an observer has to hand its cancellation on. Only the
 /// pipeline handoff has an entry to find here; every other caller reaches
-/// [`start_session`] with nothing registered, and gets `AppQuit`.
+/// [`start_session`] with nothing registered, and gets `AppQuit`. The entry
+/// itself is dropped by the caller once the write is done.
 fn refused_start_completion_reason(
     registry: &SessionRegistry,
     session_id: &str,
 ) -> CompletionReason {
     registry
-        .deregister_reporting_cancellation(session_id)
+        .cancellation_completion_reason(session_id)
         .unwrap_or(CompletionReason::AppQuit)
 }
 
@@ -1161,41 +1238,42 @@ pub fn start_session(
 
             Ok((driver, resolved_provider_id, turn_start_message_id))
         });
-    let (cancel_token, (driver, resolved_provider_id, turn_start_message_id)) = match started {
-        Ok(started) => started,
-        Err(failure) => {
-            if let Some(completion_reason) = failure.accepted_cancellation {
-                let transitioned = finish_cancelled_before_run(
-                    &config.session_id,
-                    config.branch_id.clone(),
-                    config.project_id.clone(),
-                    &store,
-                    &app_handle,
-                    completion_reason,
-                );
-                // This is a terminal state like any other, so it owes the
-                // branch its drain: the session thread's terminal path kicks
-                // one for every branch session it ends, cancelled ones
-                // included, and nothing else will do it for a session whose
-                // thread never spawned — the `Err` below reaches only a log
-                // line in the queue kicker's drain loop, and the drain that
-                // produced this session has already aborted on it.
-                // Without this the branch's remaining queued rows sit parked
-                // until some unrelated session happens to finish.
-                if transitioned {
-                    drain_queued_after_terminal_state(
-                        Arc::clone(&store),
-                        Arc::clone(&registry),
-                        app_handle.clone(),
-                        config.session_id.clone(),
+    let (cancel_token, registration, (driver, resolved_provider_id, turn_start_message_id)) =
+        match started {
+            Ok(started) => started,
+            Err(failure) => {
+                if let Some(completion_reason) = failure.accepted_cancellation {
+                    let transitioned = finish_cancelled_before_run(
+                        &config.session_id,
                         config.branch_id.clone(),
-                        false,
+                        config.project_id.clone(),
+                        &store,
+                        &app_handle,
+                        completion_reason,
                     );
+                    // This is a terminal state like any other, so it owes the
+                    // branch its drain: the session thread's terminal path kicks
+                    // one for every branch session it ends, cancelled ones
+                    // included, and nothing else will do it for a session whose
+                    // thread never spawned — the `Err` below reaches only a log
+                    // line in the queue kicker's drain loop, and the drain that
+                    // produced this session has already aborted on it.
+                    // Without this the branch's remaining queued rows sit parked
+                    // until some unrelated session happens to finish.
+                    if transitioned {
+                        drain_queued_after_terminal_state(
+                            Arc::clone(&store),
+                            Arc::clone(&registry),
+                            app_handle.clone(),
+                            config.session_id.clone(),
+                            config.branch_id.clone(),
+                            false,
+                        );
+                    }
                 }
+                return Err(failure.error);
             }
-            return Err(failure.error);
-        }
-    };
+        };
 
     let selected_acp_config_options =
         crate::acp_config::selected_acp_config_options(config.acp_config_selection.as_ref());
@@ -1626,8 +1704,12 @@ pub fn start_session(
         //
         // If the session was cancelled and then deleted, these DB writes
         // are harmless no-ops — see module-level docs on the race.
+        //
+        // Read once: the arms below and the late-Stop check after the hooks
+        // need to agree on what "cancelled before the run settled" means.
+        let cancel_requested = cancel_token.is_cancelled();
         let (new_status, error_msg, completion_reason) = match result {
-            Ok(AgentRunOutcome::Cancelled) if cancel_token.is_cancelled() => {
+            Ok(AgentRunOutcome::Cancelled) if cancel_requested => {
                 ("cancelled", None, cancellation_completion_reason.clone())
             }
             Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
@@ -1636,7 +1718,7 @@ pub fn start_session(
             // through to the completed arm so the stop can't erase the turn's
             // artifacts (commit detection, note generation, pr/push outcomes).
             Ok(AgentRunOutcome::Completed)
-                if cancel_token.is_cancelled()
+                if cancel_requested
                     && !completed_turn_survives_late_cancel(settle_reason.get()) =>
             {
                 ("cancelled", None, cancellation_completion_reason.clone())
@@ -1646,7 +1728,7 @@ pub fn start_session(
                 None,
                 completed_turn_completion_reason(settle_reason.get()),
             ),
-            Err(ref e) if cancel_token.is_cancelled() => {
+            Err(ref e) if cancel_requested => {
                 log::info!(
                     "Session {session_id_for_status} cancelled (error during teardown: {e})"
                 );
@@ -1657,10 +1739,6 @@ pub fn start_session(
                 ("error", Some(e.clone()), CompletionReason::Crashed)
             }
         };
-
-        // Always deregister after validation, so a corrective Pikchr follow-up
-        // can keep using the active cancellation token.
-        registry.deregister(&session_id_for_status);
 
         let completed_successfully =
             terminal_state_completed_successfully(new_status, &completion_reason);
@@ -1687,6 +1765,27 @@ pub fn start_session(
             );
         }
 
+        // The registry entry is still in place during the hooks, so a Stop
+        // that lands while they run fires this token: `cancel` answers `true`
+        // and `cancel_session_impl` writes nothing, leaving this thread to
+        // record it. (It used to find the entry already gone and write
+        // `cancelled` straight to the row; same outcome, different writer.)
+        // Only a Stop *newer* than the match above counts — one it already
+        // saw may have been folded into `completed` deliberately, see
+        // `completed_turn_survives_late_cancel`.
+        let (new_status, error_msg, completion_reason) =
+            if !cancel_requested && cancel_token.is_cancelled() {
+                log::info!(
+                    "Session {session_id_for_status} cancelled during its post-completion hooks"
+                );
+                let reason = registry
+                    .cancellation_completion_reason(&session_id_for_status)
+                    .unwrap_or(CompletionReason::Interrupted);
+                ("cancelled", None, reason)
+            } else {
+                (new_status, error_msg, completion_reason)
+            };
+
         let status_enum = SessionStatus::parse(new_status).unwrap();
         let transitioned = store_for_status
             .transition_from_running(
@@ -1696,6 +1795,14 @@ pub fn start_session(
                 Some(&completion_reason),
             )
             .unwrap_or(false);
+
+        // Deregister only now that the terminal state is written: a `running`
+        // row this process owns with no registry entry is what the
+        // stranded-session sweep ends, so the entry has to outlive the row's
+        // time in `running`. Epoch-guarded, because a Resume that wins the row
+        // between the write above and this line has registered a successor
+        // under the same id (see `RegistrationEpoch`).
+        registry.deregister(&session_id_for_status, registration);
 
         // Parse and persist pr/push outcomes and emit the pr-created /
         // push-completed domain events. Gated on winning the transition so
@@ -1727,29 +1834,21 @@ pub fn start_session(
         if transitioned {
             let branch_id = config.branch_id.clone();
             // Read the token again rather than reusing what the terminal-state
-            // match saw, to catch a Stop that landed between that read and the
-            // `deregister` above. Cancels apply under the registry lock, so
-            // that is now the whole of the window — a Stop can no longer be
-            // mid-flight past the deregister, holding a clone of an entry the
-            // map has already dropped.
-            //
-            // A Stop landing *later* — during the seconds-long post-completion
-            // hooks, say — never reaches this token at all: `apply_cancellation`
-            // is only reachable through the registry map, and the session was
-            // deregistered before those hooks ran. Such a Stop takes
-            // `session_commands::cancel_session_impl`'s `!was_running` branch,
-            // writes `Cancelled` straight to the DB, and so makes
-            // `transition_from_running` above return false — it is
-            // `transitioned`, not this gate, that suppresses the follow-up over
-            // that longer window. Moving the deregister after the hooks would
-            // hand this gate that job instead.
+            // match saw: the entry stayed registered through the hooks and up
+            // to the `deregister` above, so a Stop landing anywhere in that
+            // stretch reached this token. One that landed before the terminal
+            // write was recorded by the late-Stop check and is already
+            // `cancelled` in the row; one that landed between the write and
+            // the deregister changed no row — the turn was over — but still
+            // says the user does not want the queued follow-up to run.
             //
             // Naming the shared body rather than a command is the point: the
             // Tauri command and the web dispatcher's `cancel_session` arm both
-            // route through it, so this holds whichever transport the Stop
-            // arrived on. A transport that cancelled through the registry alone
-            // would leave the row `running`, let the transition win, and drain
-            // the follow-up anyway.
+            // route through `session_commands::cancel_session_impl`, so this
+            // holds whichever transport the Stop arrived on. A transport that
+            // cancelled through the registry alone would leave the row
+            // `running`, let the transition win, and drain the follow-up
+            // anyway.
             let should_drain_queued_message =
                 queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
             let session_id_for_follow_up = session_id_for_status.clone();
@@ -2001,7 +2100,7 @@ pub fn start_pipeline_session(
         ));
     }
 
-    let cancel_token = registry.register(&config.session_id);
+    let (cancel_token, registration) = registry.register(&config.session_id);
     let session_id = config.session_id.clone();
     let store_for_status = Arc::clone(&store);
 
@@ -2028,10 +2127,12 @@ pub fn start_pipeline_session(
                 let status_enum = SessionStatus::Completed;
                 let status_str = status_enum.as_str();
                 let reason = CompletionReason::TurnComplete;
-                registry.deregister(&session_id);
                 let transitioned = store_for_status
                     .transition_from_running(&session_id, status_enum, None, Some(&reason))
                     .unwrap_or(false);
+                // After the write, as in `start_session`'s thread: the entry
+                // is what keeps the stranded-session sweep off a `running` row.
+                registry.deregister(&session_id, registration);
                 if transitioned {
                     crate::session_completion::run_completion_side_effects(
                         &store_for_status,
@@ -2138,6 +2239,7 @@ pub fn start_pipeline_session(
                         &config,
                         &store_for_status,
                         &registry,
+                        registration,
                         &app_handle,
                         &e,
                         ai_step_index,
@@ -2170,7 +2272,6 @@ pub fn start_pipeline_session(
                     SessionStatus::Completed
                 };
                 let status_str = status_enum.as_str();
-                registry.deregister(&session_id);
                 let transitioned = store_for_status
                     .transition_from_running(
                         &session_id,
@@ -2179,6 +2280,7 @@ pub fn start_pipeline_session(
                         Some(&reason),
                     )
                     .unwrap_or(false);
+                registry.deregister(&session_id, registration);
                 if transitioned {
                     // Classifies the abort (e.g. push rejected non-fast-forward)
                     // and emits the push-completed domain event.
@@ -2215,7 +2317,6 @@ pub fn start_pipeline_session(
                 let reason = registry
                     .cancellation_completion_reason(&session_id)
                     .unwrap_or(CompletionReason::Interrupted);
-                registry.deregister(&session_id);
                 let transitioned = store_for_status
                     .transition_from_running(
                         &session_id,
@@ -2224,6 +2325,7 @@ pub fn start_pipeline_session(
                         Some(&reason),
                     )
                     .unwrap_or(false);
+                registry.deregister(&session_id, registration);
                 emit_status(
                     &app_handle,
                     &session_id,
@@ -2272,12 +2374,12 @@ fn finish_failed_pipeline_handoff_start<R: tauri::Runtime>(
     config: &PipelineConfig,
     store: &Store,
     registry: &SessionRegistry,
+    registration: RegistrationEpoch,
     app_handle: &AppHandle<R>,
     error: &str,
     ai_step_index: Option<usize>,
 ) -> bool {
     let session_id = &config.session_id;
-    registry.deregister(session_id);
     let transitioned = store
         .transition_from_running(
             session_id,
@@ -2286,6 +2388,10 @@ fn finish_failed_pipeline_handoff_start<R: tauri::Runtime>(
             Some(&CompletionReason::Crashed),
         )
         .unwrap_or(false);
+    // Usually a no-op: `start_session` replaced the pipeline's entry on the
+    // way in and its failed startup already removed the replacement. Kept
+    // for the shape — the entry, whichever it is, goes after the write.
+    registry.deregister(session_id, registration);
 
     // If the handoff came from an explicit AiHandoff step, mark it as failed so
     // the UI doesn't show a perpetual spinner.
@@ -4875,13 +4981,14 @@ mod tests {
         let app = mock_app();
 
         let registry = SessionRegistry::new();
-        registry.register(&config.session_id);
+        let (_, registration) = registry.register(&config.session_id);
         assert!(registry.is_running(&config.session_id));
 
         assert!(finish_failed_pipeline_handoff_start(
             &config,
             &store,
             &registry,
+            registration,
             app.handle(),
             "provider unavailable",
             Some(0),
@@ -4930,6 +5037,7 @@ mod tests {
             &config,
             &store,
             &SessionRegistry::new(),
+            RegistrationEpoch(0),
             app.handle(),
             "No ACP agent found.",
             Some(0),
@@ -5047,16 +5155,16 @@ mod tests {
     #[test]
     fn wait_for_sessions_returns_once_every_session_deregisters() {
         let registry = Arc::new(SessionRegistry::new());
-        registry.register("session-1");
-        registry.register("session-2");
+        let (_, first) = registry.register("session-1");
+        let (_, second) = registry.register("session-2");
         let session_ids = registry.running_session_ids();
         assert_eq!(session_ids.len(), 2);
 
         let deregistering = Arc::clone(&registry);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            deregistering.deregister("session-1");
-            deregistering.deregister("session-2");
+            deregistering.deregister("session-1", first);
+            deregistering.deregister("session-2", second);
         });
 
         assert!(registry.wait_for_sessions(&session_ids, Duration::from_secs(2)));
@@ -5109,7 +5217,7 @@ mod tests {
     #[test]
     fn the_registry_answers_the_hold_a_pane_mounting_mid_hold_missed() {
         let registry = SessionRegistry::new();
-        registry.register("session-holding");
+        let (_, holding_registration) = registry.register("session-holding");
 
         // Nothing reported yet: not holding, so a pane mounting before the
         // hold begins renders its usual running indicator.
@@ -5149,7 +5257,7 @@ mod tests {
         // A deregistered (finished) session, and one that never existed, both
         // answer "not holding" rather than a not-found the client must handle.
         registry.record_background_hold("session-holding", holding);
-        registry.deregister("session-holding");
+        registry.deregister("session-holding", holding_registration);
         assert!(!registry.background_hold("session-holding").holding);
         assert!(!registry.background_hold("session-never-seen").holding);
     }
@@ -5168,12 +5276,71 @@ mod tests {
 
         // When the session finally registers, the deferred cancellation is
         // applied immediately: the token is cancelled and the reason recorded.
-        let token = registry.register("session-startup");
+        let (token, _) = registry.register("session-startup");
         assert!(token.is_cancelled());
         assert_eq!(
             registry.cancellation_completion_reason("session-startup"),
             Some(CompletionReason::ProjectSessionInterrupted)
         );
+    }
+
+    /// A session thread deregisters after its terminal write, so a Resume can
+    /// win the row and register a successor under the same id before the
+    /// finishing thread gets there. Its deregister must not take the
+    /// successor's entry: the new turn would be `running` and unregistered —
+    /// exactly what the stranded-session sweep ends.
+    #[test]
+    fn deregister_leaves_a_successors_entry_in_place() {
+        let registry = SessionRegistry::new();
+
+        let (_, finishing) = registry.register("session-resumed");
+        let (successor_token, successor) = registry.register("session-resumed");
+
+        registry.deregister("session-resumed", finishing);
+        assert!(
+            registry.is_running("session-resumed"),
+            "the finishing thread's deregister must not remove the successor"
+        );
+        assert!(
+            registry.cancel("session-resumed"),
+            "the successor's token is the one a Stop now reaches"
+        );
+        assert!(successor_token.is_cancelled());
+
+        registry.deregister("session-resumed", successor);
+        assert!(!registry.is_running("session-resumed"));
+    }
+
+    /// A hold is the registry's lighter entry: it makes the row live for the
+    /// sweep without making it cancellable, so a Stop still takes
+    /// `cancel_session_impl`'s store-write fallback and shutdown's cancel
+    /// snapshot does not wait on it. Overlapping holds release independently,
+    /// and a hold coexists with a full registration for the same id.
+    #[test]
+    fn a_hold_counts_as_live_but_is_not_cancellable() {
+        let registry = Arc::new(SessionRegistry::new());
+
+        let hold = registry.hold("session-held");
+        assert!(registry.is_live("session-held"));
+        assert!(!registry.is_running("session-held"));
+        assert!(!registry.cancel("session-held"));
+        assert!(registry.running_session_ids().is_empty());
+
+        let second = registry.hold("session-held");
+        drop(hold);
+        assert!(
+            registry.is_live("session-held"),
+            "the second hold is still up"
+        );
+
+        let (_, registration) = registry.register("session-held");
+        drop(second);
+        assert!(
+            registry.is_live("session-held"),
+            "the runner's registration carries the row once the hold is gone"
+        );
+        registry.deregister("session-held", registration);
+        assert!(!registry.is_live("session-held"));
     }
 
     #[test]
@@ -5199,7 +5366,7 @@ mod tests {
     #[test]
     fn cancel_or_defer_cancels_already_registered_session() {
         let registry = SessionRegistry::new();
-        let token = registry.register("session-running");
+        let (token, _) = registry.register("session-running");
 
         registry.cancel_or_defer(
             "session-running",
@@ -5221,7 +5388,7 @@ mod tests {
     fn register_for_startup_makes_the_session_cancellable_during_startup() {
         let registry = SessionRegistry::new();
 
-        let (token, ()) = registry
+        let (token, _, ()) = registry
             .register_for_startup("session-starting", || {
                 assert!(registry.is_running("session-starting"));
                 assert!(registry
@@ -5249,7 +5416,7 @@ mod tests {
     fn register_for_startup_deregisters_when_startup_fails() {
         let registry = SessionRegistry::new();
 
-        let result: Result<(CancellationToken, ()), StartupFailure> =
+        let result: Result<(CancellationToken, RegistrationEpoch, ()), StartupFailure> =
             registry.register_for_startup("session-failing", || Err("no agent found".to_string()));
 
         let failure = result.unwrap_err();
@@ -5275,7 +5442,7 @@ mod tests {
     fn register_for_startup_reports_a_cancellation_that_landed_during_startup() {
         let registry = SessionRegistry::new();
 
-        let result: Result<(CancellationToken, ()), StartupFailure> = registry
+        let result: Result<(CancellationToken, RegistrationEpoch, ()), StartupFailure> = registry
             .register_for_startup("session-cancelled-mid-startup", || {
                 assert!(
                     registry.cancel_with_completion_reason(
@@ -5304,13 +5471,13 @@ mod tests {
     fn register_carries_a_cancelled_predecessors_state_onto_its_replacement() {
         let registry = SessionRegistry::new();
 
-        let pipeline_token = registry.register("session-handoff");
+        let (pipeline_token, _) = registry.register("session-handoff");
         assert!(
             registry.cancel_with_completion_reason("session-handoff", CompletionReason::AppQuit)
         );
         assert!(pipeline_token.is_cancelled());
 
-        let ai_token = registry.register("session-handoff");
+        let (ai_token, _) = registry.register("session-handoff");
 
         assert!(
             ai_token.is_cancelled(),
@@ -5437,7 +5604,7 @@ mod tests {
     #[test]
     fn register_carries_a_cancellation_that_is_still_being_applied() {
         let registry = Arc::new(SessionRegistry::new());
-        let pipeline_token = registry.register("session-handoff");
+        let (pipeline_token, _) = registry.register("session-handoff");
         let parked = park_a_cancel_mid_apply(
             &registry,
             "session-handoff",
@@ -5459,7 +5626,7 @@ mod tests {
             parked.finish(),
             "the cancel found an entry, so nothing else wrote a status for it"
         );
-        let ai_token = swapping.join().expect("the swapping thread must not panic");
+        let (ai_token, _) = swapping.join().expect("the swapping thread must not panic");
         assert!(
             ai_token.is_cancelled(),
             "the handed-off session must start already cancelled"
@@ -5478,7 +5645,7 @@ mod tests {
     #[test]
     fn a_removal_reports_a_cancellation_that_is_still_being_applied() {
         let registry = Arc::new(SessionRegistry::new());
-        let token = registry.register("session-failing-startup");
+        let (token, _) = registry.register("session-failing-startup");
         let parked = park_a_cancel_mid_apply(
             &registry,
             "session-failing-startup",
@@ -5514,7 +5681,7 @@ mod tests {
         let registry = SessionRegistry::new();
 
         registry.register("session-handoff");
-        let ai_token = registry.register("session-handoff");
+        let (ai_token, _) = registry.register("session-handoff");
 
         assert!(!ai_token.is_cancelled());
         assert_eq!(
@@ -5538,9 +5705,36 @@ mod tests {
     /// `deregister` so `register` can swap the token with no gap. A refusal
     /// never reaches that `register`, so it has to take the entry out itself —
     /// left behind, it would hold shutdown's `wait_for_sessions` open for the
-    /// whole budget on a session no thread is driving.
+    /// whole budget on a session no thread is driving. It does so only after
+    /// the row's terminal write, like every other deregister: a `running` row
+    /// with no entry is what the stranded-session sweep ends.
     #[test]
     fn a_refused_start_frees_the_handoff_predecessors_entry() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("handoff", std::path::Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        let app = mock_app();
+        let registry = SessionRegistry::new();
+        registry.register(&session.id);
+
+        let outcome =
+            refuse_start_during_shutdown(&session.id, None, None, &store, app.handle(), &registry);
+
+        assert!(matches!(outcome, SessionStartOutcome::RefusedShuttingDown));
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Cancelled);
+        assert_eq!(row.completion_reason, Some(CompletionReason::AppQuit));
+        assert!(!registry.is_running(&session.id));
+        assert!(
+            registry.wait_for_sessions(&[session.id.clone()], Duration::ZERO),
+            "shutdown must not wait on a session the refusal took over"
+        );
+    }
+
+    /// The reason read alone leaves the entry in place: the refusal removes
+    /// it itself once the row is written.
+    #[test]
+    fn reading_a_refused_starts_reason_does_not_take_the_entry() {
         let registry = SessionRegistry::new();
         registry.register("session-handoff");
 
@@ -5548,11 +5742,7 @@ mod tests {
             refused_start_completion_reason(&registry, "session-handoff"),
             CompletionReason::AppQuit
         );
-        assert!(!registry.is_running("session-handoff"));
-        assert!(
-            registry.wait_for_sessions(&["session-handoff".to_string()], Duration::ZERO),
-            "shutdown must not wait on a session the refusal took over"
-        );
+        assert!(registry.is_running("session-handoff"));
     }
 
     /// And when a Stop had already landed on that entry, the refusal is what

@@ -33,6 +33,7 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import RenameBranchDialog from './RenameBranchDialog.svelte';
   import MoveBranchDialog from './MoveBranchDialog.svelte';
+  import { onWorkspaceParked } from '../layout/navigation.svelte';
 
   interface Props {
     branch: Branch;
@@ -109,6 +110,13 @@
 
   let renameDialogOpen = $state(false);
   let moveDialogOpen = $state(false);
+
+  // Parked under settings or the diff view, these would stay open above them.
+  onWorkspaceParked(() => {
+    renameDialogOpen = false;
+    moveDialogOpen = false;
+    runner.closeOutputModal();
+  });
 
   // More menu state
   let openerApps = $state<OpenerApp[]>([]);

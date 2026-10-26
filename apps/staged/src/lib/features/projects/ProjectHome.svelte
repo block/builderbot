@@ -22,7 +22,7 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject } from '../layout/navigation.svelte';
+  import { goHome, onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
@@ -105,6 +105,13 @@
   // shared projectActions module + App-level ProjectDeleteDialog)
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
+
+  // Parked under settings or the diff view, these would stay open above them.
+  onWorkspaceParked(() => {
+    showNewProjectModal = false;
+    showAddRepoModal = false;
+    branchToDelete = null;
+  });
   // Guards the delete shortcut while the async safe-to-delete check is in flight,
   // before projectActions.pendingDelete/deletingProjectNames are set, so a held
   // key only deletes once.

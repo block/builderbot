@@ -111,7 +111,7 @@
     onBranchSetupProgress,
     onSessionStatusChanged,
   } from '../../services/branchEventService';
-  import { navigation, openDiffRoute } from '../layout/navigation.svelte';
+  import { navigation, onWorkspaceParked, openDiffRoute } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import {
@@ -550,18 +550,17 @@
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
 
-  // The card stays mounted, parked, under settings and the diff view
-  // (App.svelte); its dialogs would otherwise stay open above them. Close them
-  // as unmounting used to — the composer hands its draft back on the way out.
-  $effect(() => {
-    if (!navigation.workspaceParked) return;
-    untrack(() => {
-      openNote = null;
-      openWriteNote = null;
-      viewImageId = null;
-      sessionMgr.showNewSession = false;
-      if (sessionMgr.openSessionId) void handleSessionModalClose();
-    });
+  // Parked under settings or the diff view, the card's dialogs would stay
+  // open above them. The composer hands its draft back on the way out.
+  onWorkspaceParked(() => {
+    openNote = null;
+    openWriteNote = null;
+    viewImageId = null;
+    sessionMgr.showNewSession = false;
+    if (sessionMgr.openSessionId) void handleSessionModalClose();
+    showForcePushDialog = false;
+    showResetToOriginDialog = false;
+    confirmDelete = null;
   });
 
   let deletingImageIds = $state<Set<string>>(new Set());

@@ -18,6 +18,7 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
     navigation,
+    onWorkspaceParked,
     openSettings,
     selectProject,
     showAllRepos,
@@ -68,6 +69,11 @@
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
+
+  // Parked under settings or the diff view, the modal would stay open above them.
+  onWorkspaceParked(() => {
+    showNewProjectModal = false;
+  });
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let isCommandKeyHeld = $state(false);

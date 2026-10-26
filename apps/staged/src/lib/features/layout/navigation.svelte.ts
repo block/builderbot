@@ -11,6 +11,7 @@
  * so concurrent windows can't fight over the one key.
  */
 
+import { untrack } from 'svelte';
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { getWindowLabel } from '../../transport';
 import { takeWindowSeed } from '../../commands';
@@ -91,6 +92,20 @@ export const navigation = $state({
   // drift apart.
   workspaceParked: false,
 });
+
+/**
+ * Run `close` when the workspace gets parked under settings or the diff view.
+ * Its components stay mounted then (App.svelte), so a dialog, alert or
+ * popover one of them owns would stay open above the view on top — before the
+ * workspace was kept mounted, unmounting closed them. Call from component
+ * setup with whatever unmounting used to close.
+ */
+export function onWorkspaceParked(close: () => void): void {
+  $effect(() => {
+    if (!navigation.workspaceParked) return;
+    untrack(close);
+  });
+}
 
 function currentRoute(): DetailRoute {
   return navigation.detailStack[navigation.detailStack.length - 1] ?? rootRoute();

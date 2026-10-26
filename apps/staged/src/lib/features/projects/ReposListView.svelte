@@ -15,7 +15,7 @@
   import SearchField from '../../shared/SearchField.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
-  import { selectProject } from '../layout/navigation.svelte';
+  import { onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
 
   // Served from the shared home-repos cache: revisits paint instantly from
@@ -26,6 +26,11 @@
   let searchInputEl = $state<HTMLInputElement | null>(null);
   let showNewProjectModal = $state(false);
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
+
+  // Parked under settings or the diff view, the modal would stay open above them.
+  onWorkspaceParked(() => {
+    showNewProjectModal = false;
+  });
 
   function repoKey(r: RepoHomeItem): string {
     return `${r.githubRepo}:${r.subpath}`;

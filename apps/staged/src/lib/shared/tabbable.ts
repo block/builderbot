@@ -16,6 +16,17 @@ export function lastTabbableBefore(boundary: Element): HTMLElement | null {
   return last;
 }
 
+/**
+ * The first element in document order that Tab would land on inside `root`,
+ * or null when it holds nothing tabbable.
+ */
+export function firstTabbableWithin(root: Element): HTMLElement | null {
+  for (const el of root.querySelectorAll<HTMLElement>(TABBABLE_SELECTOR)) {
+    if (isTabbable(el)) return el;
+  }
+  return null;
+}
+
 function isTabbable(el: HTMLElement): boolean {
   if (el.tabIndex < 0 || el.matches(':disabled') || el.closest('[inert]')) return false;
   return el.checkVisibility?.() ?? true;

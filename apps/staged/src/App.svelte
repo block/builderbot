@@ -25,7 +25,7 @@
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
-  import { lastTabbableBefore } from './lib/shared/tabbable';
+  import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -102,11 +102,13 @@
   // it stays in the tab order and its components can still call `.focus()`.
   // Focus that lands in it goes back to the control the user had in the view
   // on top — focusing the bare host instead would drop their keystrokes until
-  // they clicked again — except when they got there by tabbing out of the
-  // host: Tab should wrap to the host's first control rather than bounce back
-  // to its last, and Shift+Tab should carry on to the top bar, which sits
-  // before the workspace in DOM order and would otherwise be unreachable
-  // backwards. When parking happens with focus inside, move it out.
+  // they clicked again — except when they got there by tabbing: Tab (from the
+  // top bar, or wrapping around from the host's last control) should land on
+  // the host's first control rather than on the host itself, which is not a
+  // tab stop and would cost an extra press, and Shift+Tab should carry on to
+  // the top bar, which sits before the workspace in DOM order and would
+  // otherwise be unreachable backwards. When parking happens with focus
+  // inside, move it out.
   let lastHostFocus: HTMLElement | null = null;
   let tabInFlight: 'forward' | 'backward' | null = null;
   function handleHostFocusIn(e: FocusEvent) {
@@ -119,7 +121,12 @@
       (before ?? detailHostEl)?.focus({ preventScroll: true });
       return;
     }
-    const restore = tabInFlight === null && lastHostFocus?.isConnected ? lastHostFocus : null;
+    if (tabInFlight === 'forward') {
+      const first = detailHostEl ? firstTabbableWithin(detailHostEl) : null;
+      (first ?? detailHostEl)?.focus({ preventScroll: true });
+      return;
+    }
+    const restore = lastHostFocus?.isConnected ? lastHostFocus : null;
     restore?.focus({ preventScroll: true });
     // Connected is not focusable: `.focus()` on a control that is still in the
     // DOM but hidden is a silent no-op, which would leave focus in here.

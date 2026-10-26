@@ -26,9 +26,15 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { filterKey, projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
+  import { onWorkspaceParked } from '../layout/navigation.svelte';
 
   let open = $state(false);
   let stuck = $state(false);
+
+  // Parked under settings or the diff view, the popover would stay open above them.
+  onWorkspaceParked(() => {
+    open = false;
+  });
 
   // The hairline under the row should only exist while it's pinned, and CSS
   // has no pinned-state selector for sticky elements. With the scroll

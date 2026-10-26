@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
-import { lastTabbableBefore } from './tabbable';
+import { firstTabbableWithin, lastTabbableBefore } from './tabbable';
 
 describe('lastTabbableBefore', () => {
   beforeEach(() => {
@@ -41,5 +41,35 @@ describe('lastTabbableBefore', () => {
     `;
 
     expect(lastTabbableBefore(document.getElementById('workspace')!)).toBeNull();
+  });
+});
+
+describe('firstTabbableWithin', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('returns the first tabbable descendant, skipping untabbable ones', () => {
+    document.body.innerHTML = `
+      <button id="outside">Outside</button>
+      <div id="host" tabindex="-1">
+        <button id="disabled" disabled>Nope</button>
+        <span id="skipped" tabindex="-1">Nope</span>
+        <div inert><button id="inert-child">Nope</button></div>
+        <input id="first" />
+        <button id="second">Second</button>
+      </div>
+    `;
+
+    expect(firstTabbableWithin(document.getElementById('host')!)?.id).toBe('first');
+  });
+
+  it('returns null when the root holds nothing tabbable', () => {
+    document.body.innerHTML = `
+      <div id="host" tabindex="-1"><span>Text</span></div>
+      <button id="after">After</button>
+    `;
+
+    expect(firstTabbableWithin(document.getElementById('host')!)).toBeNull();
   });
 });

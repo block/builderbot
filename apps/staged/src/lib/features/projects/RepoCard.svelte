@@ -68,6 +68,7 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { openRepoSettings } from '../settings/repoSettingsTarget';
   import { agentState } from '../agents/agent.svelte';
+  import { onWorkspaceParked } from '../layout/navigation.svelte';
 
   interface Props {
     repo: RepoHomeItem;
@@ -120,6 +121,10 @@
         getPreferredAgent(agentState.providers) ?? undefined
       ),
   });
+
+  // Parked under settings or the diff view, the output modal would stay open
+  // above them.
+  onWorkspaceParked(() => runner.closeOutputModal());
 
   /** Distinguishes an empty action context from one that hasn't loaded yet. */
   let actionsLoaded = $state(false);

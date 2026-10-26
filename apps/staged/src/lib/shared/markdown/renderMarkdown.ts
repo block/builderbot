@@ -1,6 +1,6 @@
 import { marked, Renderer, type Tokens } from 'marked';
 
-import { renderMarkdownMedia } from './mediaRendering';
+import { renderMarkdownMedia, type MediaDimensionsLookup } from './mediaRendering';
 import { sanitize } from '../sanitize';
 import {
   renderMarkdownDiagramCodeBlock,
@@ -15,6 +15,11 @@ export type MarkdownRenderingOptions = MarkdownDiagramRenderingOptions & {
    * must escape any user-controlled text before returning.
    */
   renderInlineText?: (text: string) => string;
+  /**
+   * Stored size and density of embedded `staged-media://` images, by id, so
+   * they lay out at logical size. Images it does not know keep the CSS caps.
+   */
+  mediaDimensions?: MediaDimensionsLookup;
 };
 
 interface TrustedHtmlReplacement {
@@ -44,7 +49,7 @@ function createMarkdownRenderer(
   const renderer = new Renderer();
   const renderImage = renderer.image.bind(renderer);
   renderer.image = (token: Tokens.Image) => {
-    const media = renderMarkdownMedia(token, renderer.parser);
+    const media = renderMarkdownMedia(token, renderer.parser, options.mediaDimensions);
     return media ? stashTrustedHtml(media, trustedHtml) : renderImage(token);
   };
   const renderCode = renderer.code.bind(renderer);

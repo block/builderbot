@@ -6,8 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::Image;
+use super::models::{Image, ImageDimensions};
 use super::{Store, StoreChange, StoreError};
+
+const IMAGE_COLUMNS: &str = "id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at, width, height, density";
 
 impl Store {
     /// Conservative reference check: even a reference inside an example keeps
@@ -59,8 +61,10 @@ impl Store {
         image: &Image,
     ) -> Result<(), StoreError> {
         conn.execute(
-            "INSERT INTO images (id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &format!(
+                "INSERT INTO images ({IMAGE_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+            ),
             params![
                 image.id,
                 image.branch_id,
@@ -70,7 +74,27 @@ impl Store {
                 image.mime_type,
                 image.size_bytes,
                 image.created_at,
+                image.dimensions.map(|d| d.width),
+                image.dimensions.map(|d| d.height),
+                image.dimensions.map(|d| d.density),
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the size and density read from an image's file, for rows that
+    /// predate the columns (`get_media_dimensions` fills them in from disk the
+    /// first time a note embedding the image is opened). Nothing on the
+    /// timeline shows these, so no change is published.
+    pub fn set_image_dimensions(
+        &self,
+        id: &str,
+        dimensions: ImageDimensions,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE images SET width = ?1, height = ?2, density = ?3 WHERE id = ?4",
+            params![dimensions.width, dimensions.height, dimensions.density, id],
         )?;
         Ok(())
     }
@@ -78,8 +102,7 @@ impl Store {
     pub fn get_image(&self, id: &str) -> Result<Option<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE id = ?1",
+            &format!("SELECT {IMAGE_COLUMNS} FROM images WHERE id = ?1"),
             params![id],
             Self::row_to_image,
         )
@@ -93,10 +116,10 @@ impl Store {
     /// attachments that only appear in the session message history.
     pub fn list_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE branch_id = ?1 AND session_id IS NULL ORDER BY created_at DESC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {IMAGE_COLUMNS} FROM images
+             WHERE branch_id = ?1 AND session_id IS NULL ORDER BY created_at DESC"
+        ))?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_image)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -108,10 +131,9 @@ impl Store {
     /// account for the files on disk (moving a branch between projects).
     pub fn list_all_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
-             FROM images WHERE branch_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {IMAGE_COLUMNS} FROM images WHERE branch_id = ?1 ORDER BY created_at ASC"
+        ))?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_image)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -263,6 +285,14 @@ impl Store {
             mime_type: row.get(5)?,
             size_bytes: row.get(6)?,
             created_at: row.get(7)?,
+            dimensions: match (row.get(8)?, row.get(9)?, row.get(10)?) {
+                (Some(width), Some(height), Some(density)) => Some(ImageDimensions {
+                    width,
+                    height,
+                    density,
+                }),
+                _ => None,
+            },
         })
     }
 }

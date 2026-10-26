@@ -30,6 +30,7 @@
   import {
     countAssistantMessagesAfter,
     getBranchNoteBySession,
+    getMediaDimensions,
     getNote,
     getProjectNote,
     getProjectNoteBySession,
@@ -48,7 +49,10 @@
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import MediaViewerModal from '../../shared/markdown/MediaViewerModal.svelte';
   import { getMarkdownMediaFromEvent, type MarkdownMedia } from '../../shared/markdown/mediaViewer';
-  import { resolveStagedMediaUrl } from '../../shared/markdown/mediaUrl';
+  import {
+    collectStagedMediaImageIds,
+    resolveStagedMediaUrl,
+  } from '../../shared/markdown/mediaUrl';
   import '../../shared/markdown/mediaStyles.css';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
@@ -57,7 +61,13 @@
   } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
-  import type { HashtagItem, NotesChangedEvent, ProjectRepo, Session } from '../../types';
+  import type {
+    HashtagItem,
+    ImageDimensions,
+    NotesChangedEvent,
+    ProjectRepo,
+    Session,
+  } from '../../types';
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
@@ -211,12 +221,36 @@
   let pikchrRendererLoadKey = $derived(noteMarkdown);
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
+  // Stored size and density of the images the note embeds, so they render at
+  // logical size (see mediaRendering.ts). Keyed by image id, which names
+  // immutable bytes, so a lookup outlives the note it was made for; a miss
+  // (video, unreadable file) is kept as null so it is not asked again.
+  let mediaDimensions = $state<Record<string, ImageDimensions | null>>({});
+  let noteMediaImageIds = $derived(collectStagedMediaImageIds(noteMarkdown));
+  $effect(() => {
+    if (!open) return;
+    const missing = noteMediaImageIds.filter((id) => !(id in mediaDimensions));
+    if (!missing.length) return;
+    let cancelled = false;
+    getMediaDimensions(missing)
+      .then((found) => {
+        if (cancelled) return;
+        const next = { ...mediaDimensions };
+        for (const id of missing) next[id] = found[id] ?? null;
+        mediaDimensions = next;
+      })
+      .catch((error) => console.warn('Failed to load note image dimensions', error));
+    return () => {
+      cancelled = true;
+    };
+  });
   let renderedNoteHtml = $derived(
     renderNoteMarkdown(noteMarkdown, {
       pikchrRenderer,
       renderInlineText: hashtagItems.length
         ? (text) => renderHashtagTokens(text, hashtagItems)
         : undefined,
+      mediaDimensions: (id) => mediaDimensions[id],
     })
   );
   let mediaViewer = $state<MarkdownMedia | null>(null);

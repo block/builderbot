@@ -3055,6 +3055,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(images).unwrap())
         }
+        "get_media_dimensions" => {
+            let store = get_store(store_mutex)?;
+            let image_ids: Vec<String> = arg(&args, "imageIds")?;
+            let dimensions = tauri::async_runtime::spawn_blocking(move || {
+                crate::image_commands::media_dimensions_impl(&store, &image_ids)
+            })
+            .await
+            .map_err(|e| format!("Dimensions task failed: {e}"))?;
+            Ok(serde_json::to_value(dimensions).unwrap())
+        }
 
         // =====================================================================
         // Timeline delete commands

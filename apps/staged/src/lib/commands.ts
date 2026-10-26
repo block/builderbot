@@ -50,6 +50,7 @@ import type {
   LinkedBranchPr,
   PollWorkspaceResult,
   Image,
+  ImageDimensions,
   AttachmentThumbnail,
   SuggestedRepo,
   AcpConfigSelection,
@@ -1994,6 +1995,15 @@ export function deleteImage(imageId: string): Promise<void> {
 /** List all images for a branch. */
 export function listBranchImages(branchId: string): Promise<Image[]> {
   return invokeCommand('list_branch_images', { branchId });
+}
+
+/**
+ * Size and density of the raster images a note embeds, keyed by id. Ids that
+ * are unknown, not raster images, or unreadable are absent. Rows from before
+ * the dimensions were recorded are read from disk and filled in here.
+ */
+export function getMediaDimensions(imageIds: string[]): Promise<Record<string, ImageDimensions>> {
+  return invokeCommand('get_media_dimensions', { imageIds });
 }
 
 /** Get the base64-encoded data URL for an image (or the PDF itself, for a PDF attachment). */

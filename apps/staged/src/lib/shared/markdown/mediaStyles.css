@@ -30,6 +30,24 @@
   cursor: zoom-in;
 }
 /*
+ * An image with stored dimensions arrives with `width`/`height` attributes
+ * and the same numbers as custom properties (see mediaRendering.ts). The
+ * attributes reserve its box before it loads, but a set width also stops
+ * `max-height` from narrowing the image proportionally — that only happens
+ * for an auto width — so the cap is applied here through `width`, as the
+ * lesser of the logical width and the cap scaled by the image's own aspect,
+ * with `height: auto` following the attribute ratio. Going through `width`
+ * rather than a percentage `max-width` also keeps the fit-content figure
+ * hugging the capped image: a percentage against a fit-content parent is
+ * ignored while its intrinsic size is computed. The shared `max-width: 100%`
+ * still clamps wide images to the pane, with the height following. Images
+ * without stored dimensions keep the auto-width replaced-element rules above.
+ */
+.markdown-content .markdown-media img[width] {
+  width: min(var(--media-width), calc(min(60vh, 600px) * var(--media-aspect)));
+  height: auto;
+}
+/*
  * Still keep a portrait recording from overflowing a wide desktop pane, where
  * uncapped it would run past the viewport and scroll the controls away. Only
  * when the viewport is tall enough that a 9:16 clip capped at its height stays

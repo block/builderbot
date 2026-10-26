@@ -85,6 +85,15 @@ tiny-skia = "0.12"
 tar = "0.4"
 flate2 = "1"
 
+# Note image dimensions (note_media::dimensions): header-only pixel size for
+# every stored raster format, and the PNG pHYs chunk. Both are already in the
+# lock (imagesize via tauri, png via `image`); neither decodes pixel data. No
+# crate in the tree reads a JPEG's JFIF/EXIF resolution (zune-jpeg's
+# `ImageInfo` density fields are never filled from APP0), so that segment
+# walk is in the module itself.
+imagesize = "0.15"
+png = "0.18"
+
 # PDF attachments: rasterize pages with CoreGraphics (note_media::pdf). All
 # three crates are already in the lock via arboard/tray-icon (and `image`'s
 # jpeg feature only adds zune-jpeg, which resvg pulls in); the feature lists

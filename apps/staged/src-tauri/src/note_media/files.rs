@@ -306,6 +306,7 @@ fn write_media(
         false,
     );
     image.session_id = session_id.map(str::to_owned);
+    image.dimensions = super::dimensions::probe(bytes);
     let path = crate::store::images::image_file_path(project_id, &image.id, &filename)?;
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     if let Err(e) = std::fs::write(&path, bytes) {

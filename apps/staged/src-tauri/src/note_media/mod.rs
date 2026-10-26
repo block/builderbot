@@ -2,6 +2,7 @@
 //! These helper types are transient; no new persisted ownership/schema is needed.
 
 mod blocks;
+pub(crate) mod dimensions;
 pub(crate) mod files;
 mod materialize;
 pub(crate) use materialize::materialize_note_media;

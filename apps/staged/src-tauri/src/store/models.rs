@@ -1082,6 +1082,25 @@ pub struct Image {
     pub mime_type: String,
     pub size_bytes: i64,
     pub created_at: i64,
+    /// Pixel size and density read from the file's own metadata; None for
+    /// videos, PDFs, rows that predate the columns and have not been read
+    /// back yet, and files whose headers could not be parsed.
+    #[serde(default)]
+    pub dimensions: Option<ImageDimensions>,
+}
+
+/// Intrinsic size of a raster image and the pixel density its metadata
+/// declares, so a 1320x960 Retina capture can be laid out at 660x480.
+///
+/// `density` is `round(dpi / 72)` clamped to 1..=4, from the PNG `pHYs` chunk
+/// or a JPEG's JFIF/EXIF resolution; 1 when the file declares nothing, an
+/// unspecified unit, or 72 dpi or less (see `note_media::dimensions`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageDimensions {
+    pub width: u32,
+    pub height: u32,
+    pub density: u8,
 }
 
 /// Sentinel value stored in `images.session_id` for images that are being
@@ -1129,6 +1148,7 @@ impl Image {
             mime_type: mime_type.to_string(),
             size_bytes,
             created_at: now_timestamp(),
+            dimensions: None,
         }
     }
 

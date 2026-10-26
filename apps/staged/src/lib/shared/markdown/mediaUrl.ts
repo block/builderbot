@@ -14,6 +14,17 @@ export function parseStagedMediaReference(href: string) {
   return { id, ext, kind };
 }
 
+const mediaImageOccurrence = new RegExp(mediaReference.source.slice(1, -1), 'g');
+
+/** Ids of the images (not videos) a markdown text embeds, each once, in order. */
+export function collectStagedMediaImageIds(markdown: string): string[] {
+  const ids = new Set<string>();
+  for (const [, id, ext] of markdown.matchAll(mediaImageOccurrence)) {
+    if (parseStagedMediaReference(`staged-media://${id}.${ext}`)?.kind === 'image') ids.add(id);
+  }
+  return [...ids];
+}
+
 export function resolveStagedMediaUrl(id: string, ext: string): string {
   return isTauri ? convertFileSrc(`${id}.${ext}`, 'staged-media') : `/api/media/${id}.${ext}`;
 }

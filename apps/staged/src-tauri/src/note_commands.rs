@@ -125,17 +125,27 @@ pub(crate) fn delete_note_impl<R: tauri::Runtime>(
         crate::note_media::refs::media_ids(&note.content),
     );
 
-    if delete_session {
-        if let Some(sid) = note.session_id {
-            let _ = store.delete_session(&sid);
-        }
-    }
+    // The session keeps its `branch_id` after the note is gone, so a `queued`
+    // row left behind would stay in the branch's queue with nothing to say
+    // what it is. Kept sessions are cancelled if queued (see
+    // `cancel_queued_session_of_deleted_artifact`); a failed delete is
+    // reported, not swallowed — but the branch is kicked either way, since
+    // the note itself is gone.
+    let session_outcome = match note.session_id.as_deref() {
+        Some(sid) if delete_session => store
+            .delete_session(sid)
+            .map_err(|e| format!("Failed to delete session {sid} of note {note_id}: {e}")),
+        Some(sid) => crate::session_commands::cancel_queued_session_of_deleted_artifact(
+            store, app_handle, sid,
+        ),
+        None => Ok(()),
+    };
     crate::session_queue::kick(
         app_handle,
         &note.branch_id,
         crate::session_queue::KickSource::ArtifactDeleted,
     );
-    Ok(())
+    session_outcome
 }
 
 /// Get a single branch note by its linked session ID.

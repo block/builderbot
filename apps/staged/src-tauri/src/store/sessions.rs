@@ -119,6 +119,38 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// [`Self::transition_from_running`] for exactly the `running` row the
+    /// caller read: the write also requires `updated_at` to still be
+    /// `observed_updated_at`.
+    ///
+    /// Every write that moves a row into or out of `running` restamps
+    /// `updated_at`, so a row that finished and was resumed between the
+    /// caller's read and this write — the same id, `running` again, but a new
+    /// turn — fails the predicate and is left alone. That is what lets the
+    /// stranded-session sweep act on a snapshot: it ends the incarnation it
+    /// saw, never the one that replaced it.
+    pub fn transition_from_running_observed_at(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if matches!(new_status, SessionStatus::Error | SessionStatus::Cancelled) {
+            error_message
+        } else {
+            None
+        };
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'running' AND updated_at = ?6",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, observed_updated_at],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Transition session status only if the row is still active *and ours*:
     /// `queued`, or `running` under `owner_pid`.
     ///

@@ -717,6 +717,13 @@ impl ProjectToolsHandler {
         // on the kicker's task: a cancelled tool call can no longer abandon a
         // half-claimed row, and a drain failure surfaces on the session row,
         // where `wait_for_repo_session` reports it.
+        //
+        // One behaviour the inline drain this replaced had is gone with it:
+        // it passed `self.provider` as the default for *other* queued rows on
+        // the branch that carry no provider of their own, so when this call
+        // was what moved them they started on the project session's
+        // provider. The kicker drains with no default, so such rows now start
+        // on the app default, as they do when any other event moves them.
         crate::session_queue::kick(
             &self.app_handle,
             &target.branch.id,

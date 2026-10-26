@@ -6,7 +6,7 @@ use tauri::Manager;
 
 use super::kick::{kick, kick_all_with_queued_work, BranchQueueKicker, DrainFn, KickSource};
 use super::sweep::{
-    is_stranded, queue_health, reconcile_stranded_running_sessions, StrandedRow,
+    end_observed_row, is_stranded, queue_health, reconcile_stranded_running_sessions, StrandedRow,
     STRANDED_SESSION_MESSAGE,
 };
 use crate::session_commands::claim_startable_queued_sessions;
@@ -85,6 +85,23 @@ fn status_of(store: &Store, session_id: &str) -> Option<SessionStatus> {
     store.get_session(session_id).unwrap().map(|s| s.status)
 }
 
+/// Link an image to `session`, so the store's cleanup triggers leave the
+/// session row in place when its artifact is deleted.
+fn attach_image(store: &Store, branch: &store::Branch, session: &Session) {
+    let image = store::Image::new(
+        Some(&branch.id),
+        &branch.project_id,
+        "shot.png",
+        "image/png",
+        1,
+        true,
+    );
+    store.create_image(&image).unwrap();
+    store
+        .set_images_session_id(std::slice::from_ref(&image.id), &session.id)
+        .unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Kick coalescing
 // ---------------------------------------------------------------------------
@@ -129,6 +146,40 @@ async fn overlapping_kicks_run_one_more_drain_not_n() {
     // branch-1: the first drain plus exactly one rerun; branch-2: one.
     assert_eq!(drains.load(Ordering::SeqCst), 3);
     assert_eq!(kicker.kicked().len(), 6);
+}
+
+/// A drain that panics must not take its branch's `in_flight` entry down with
+/// it: the next kick for the branch runs a fresh drain instead of being
+/// "folded into" one that is no longer running — which would park the queue
+/// for good, with no client drain left to paper over it.
+#[tokio::test]
+async fn a_panicking_drain_frees_its_branch_for_the_next_kick() {
+    let drains = Arc::new(AtomicUsize::new(0));
+    let drain: DrainFn = {
+        let drains = Arc::clone(&drains);
+        Arc::new(move |_branch_id: String| {
+            let drains = Arc::clone(&drains);
+            Box::pin(async move {
+                if drains.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("malformed row");
+                }
+                Ok(false)
+            })
+        })
+    };
+    let kicker = Arc::new(BranchQueueKicker::new(drain));
+
+    kicker.kick("branch-1", KickSource::Startup);
+    kicker.wait_until_idle().await;
+    assert_eq!(drains.load(Ordering::SeqCst), 1);
+
+    kicker.kick("branch-1", KickSource::TerminalState);
+    kicker.wait_until_idle().await;
+    assert_eq!(
+        drains.load(Ordering::SeqCst),
+        2,
+        "the kick after a panicked drain must run a drain of its own"
+    );
 }
 
 /// A handle with no kicker managed drops the kick rather than panicking: the
@@ -276,6 +327,113 @@ async fn deleting_a_session_row_kicks_the_branch_it_belonged_to() {
     assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Running));
 }
 
+/// A queued row whose artifact is gone — deleted without its session, or the
+/// session delete failed — keeps its `branch_id`, so the branch's queue still
+/// lists it. It used to fail the resolver and abort every drain on the branch
+/// for good; now it is stepped over and the rows behind it start.
+#[tokio::test]
+async fn an_orphaned_queued_row_is_stepped_over_not_a_barrier() {
+    let (store, branch) = store_with_branch();
+    let orphan = session(&branch.id, "orphan", SessionStatus::Queued);
+    store.create_session(&orphan).unwrap();
+    let note = note_session(&store, &branch.id, SessionStatus::Queued);
+
+    let kicker = claiming_kicker(&store);
+    kicker.kick(&branch.id, KickSource::Startup);
+    kicker.wait_until_idle().await;
+
+    assert_eq!(status_of(&store, &orphan.id), Some(SessionStatus::Queued));
+    assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Running));
+}
+
+/// Deleting an artifact but keeping its session (`deleteSession: false`)
+/// could leave a `queued` row with nothing to say what it is. The store's
+/// cleanup triggers remove a non-running session with its last artifact, so
+/// the row survives only while something else still references it — an
+/// attached image — and that is the row the shared delete bodies now cancel,
+/// for a commit, a review and a note alike. A `running` row is left to the
+/// thread that owns it. With the barriers gone, the note queued behind them
+/// starts.
+#[tokio::test]
+async fn deleting_an_artifact_but_keeping_its_queued_session_cancels_the_row() {
+    let (store, branch) = store_with_branch();
+    let (review, review_id) = review_session(&store, &branch.id, SessionStatus::Queued);
+    let (commit, commit_id) = commit_session(&store, &branch.id, SessionStatus::Queued);
+    let queued_note = note_session(&store, &branch.id, SessionStatus::Queued);
+    let running_note = note_session(&store, &branch.id, SessionStatus::Running);
+    let trailing = note_session(&store, &branch.id, SessionStatus::Queued);
+    for session in [&review, &commit, &queued_note] {
+        attach_image(&store, &branch, session);
+    }
+    let note_id_of =
+        |session: &Session| store.get_note_by_session(&session.id).unwrap().unwrap().id;
+    let queued_note_id = note_id_of(&queued_note);
+    let running_note_id = note_id_of(&running_note);
+
+    // No kicker during the deletes: the drain each one kicks off would race
+    // the next delete for the queued note, which it is free to start beside
+    // the running one.
+    let app = mock_app();
+    let registry = SessionRegistry::new();
+    // The review first: deleting the commit cleans up reviews created after it.
+    crate::timeline::delete_review_impl(&store, app.handle(), &review_id, false).unwrap();
+    crate::timeline::delete_pending_commit_impl(&store, &registry, app.handle(), &commit_id, false)
+        .unwrap();
+    crate::note_commands::delete_note_impl(&store, app.handle(), &queued_note_id, false).unwrap();
+    crate::note_commands::delete_note_impl(&store, app.handle(), &running_note_id, false).unwrap();
+
+    for (session, what) in [
+        (&review, "review"),
+        (&commit, "commit"),
+        (&queued_note, "note"),
+    ] {
+        let row = store
+            .get_session(&session.id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("the {what}'s session row is gone"));
+        assert_eq!(row.status, SessionStatus::Cancelled, "{what}");
+        assert_eq!(
+            row.completion_reason,
+            Some(store::CompletionReason::Interrupted),
+            "{what}"
+        );
+    }
+    assert_eq!(
+        status_of(&store, &running_note.id),
+        Some(SessionStatus::Running),
+        "a running row is its thread's to finish"
+    );
+
+    let kicker = claiming_kicker(&store);
+    let app = app_with_kicker(&kicker);
+    kick(app.handle(), &branch.id, KickSource::ArtifactDeleted);
+    kicker.wait_until_idle().await;
+    assert_eq!(
+        status_of(&store, &trailing.id),
+        Some(SessionStatus::Running),
+        "cancelled rows are not barriers"
+    );
+}
+
+/// The trigger path, for contrast: a queued session nothing else references
+/// goes with its artifact, so there is no row left to cancel and nothing in
+/// the queue either way.
+#[test]
+fn deleting_an_artifact_whose_queued_session_nothing_else_references_removes_the_row() {
+    let (store, branch) = store_with_branch();
+    let queued_note = note_session(&store, &branch.id, SessionStatus::Queued);
+    let note_id = store
+        .get_note_by_session(&queued_note.id)
+        .unwrap()
+        .unwrap()
+        .id;
+    let app = mock_app();
+
+    crate::note_commands::delete_note_impl(&store, app.handle(), &note_id, false).unwrap();
+
+    assert_eq!(status_of(&store, &queued_note.id), None);
+}
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -407,6 +565,50 @@ async fn a_live_row_is_never_swept_however_old() {
         assert_eq!(status_of(&store, id), Some(SessionStatus::Running), "{id}");
     }
     assert_eq!(status_of(&store, &released.id), Some(SessionStatus::Error));
+}
+
+/// The one interleaving `status = 'running'` alone could not tell apart: the
+/// sweep reads a row as `running`, its thread writes the terminal state and
+/// deregisters, and a Resume makes the same id `running` again before the
+/// sweep's write. The write is keyed on the `updated_at` the sweep saw, so
+/// the resumed turn is left alone — and a row unchanged since it was read is
+/// still ended.
+#[test]
+fn the_sweep_ends_only_the_running_incarnation_it_observed() {
+    let (store, branch) = store_with_branch();
+    let mut row = session(&branch.id, "turn", SessionStatus::Running);
+    row.updated_at = 1;
+    store.create_session(&row).unwrap();
+    let observed = store.get_session(&row.id).unwrap().unwrap();
+
+    // The thread finishes the turn the sweep saw...
+    assert!(store
+        .transition_from_running(
+            &row.id,
+            SessionStatus::Completed,
+            None,
+            Some(&store::CompletionReason::TurnComplete),
+        )
+        .unwrap());
+    // ...and a Resume wins the row before the sweep writes.
+    assert!(store.transition_to_running(&row.id).unwrap());
+
+    assert!(
+        !end_observed_row(&store, &observed),
+        "the resumed turn is not the row the sweep observed"
+    );
+    let resumed = store.get_session(&row.id).unwrap().unwrap();
+    assert_eq!(resumed.status, SessionStatus::Running);
+    assert_eq!(resumed.error_message, None);
+
+    // Read again and unchanged since: that is a stranded row, and it is ended.
+    assert!(end_observed_row(&store, &resumed));
+    let ended = store.get_session(&row.id).unwrap().unwrap();
+    assert_eq!(ended.status, SessionStatus::Error);
+    assert_eq!(
+        ended.error_message.as_deref(),
+        Some(STRANDED_SESSION_MESSAGE)
+    );
 }
 
 /// The Doctor readout is the sweep's decision without the write: before the

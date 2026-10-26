@@ -52,12 +52,20 @@ pub(crate) fn is_stranded(session: &Session, live: bool, own_pid: u32) -> bool {
 /// End every stranded row this process owns and kick the branches they held.
 ///
 /// Returns the ids of the rows it ended. The row is read before the registry
-/// is asked, and the terminal write is a `transition_from_running` CAS, which
-/// together make the only benign interleaving harmless: an owner that wrote
-/// its terminal state and deregistered between the two reads has left the
-/// row no longer `running`, so the CAS finds nothing to do. (The other order
-/// would not be safe — a row read as `running` *after* the registry said
-/// "not live" could be a fresh start whose entry was taken between the two.)
+/// is asked, and the terminal write is [`end_observed_row`]'s CAS on the
+/// exact row that was read, which together make every interleaving with a
+/// live owner harmless:
+///
+/// - An owner that wrote its terminal state and deregistered between the two
+///   reads has left the row no longer `running`, so the CAS finds nothing.
+/// - A Resume that then made the *same id* `running` again — the one path
+///   that re-runs an id, and the one case `status = 'running'` alone cannot
+///   tell from the row the sweep saw — restamped `updated_at`, so the CAS
+///   fails on that too and the new turn is left to its thread.
+///
+/// (The other read order would not be safe — a row read as `running` *after*
+/// the registry said "not live" could be a fresh start whose entry was taken
+/// between the two.)
 pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
     store: &Arc<Store>,
     registry: &SessionRegistry,
@@ -77,17 +85,10 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
         if !is_stranded(&session, registry.is_live(&session.id), own_pid) {
             continue;
         }
-        let transitioned = store
-            .transition_from_running(
-                &session.id,
-                SessionStatus::Error,
-                Some(STRANDED_SESSION_MESSAGE),
-                Some(&CompletionReason::Crashed),
-            )
-            .unwrap_or(false);
-        if !transitioned {
-            // The owner finished between our row read and our registry read;
-            // see the function doc. Nothing was stranded.
+        if !end_observed_row(store, &session) {
+            // The owner finished between our row read and our registry read
+            // (and may have been resumed since); see the function doc.
+            // Nothing was stranded.
             log::debug!(
                 "[session_queue] sweep skipped session {}: its owner finished it first",
                 session.id
@@ -124,6 +125,30 @@ pub(crate) fn reconcile_stranded_running_sessions<R: tauri::Runtime>(
         ended.push(session.id);
     }
     ended
+}
+
+/// End `session` as stranded, if the row is still the one that was read.
+///
+/// The CAS is on `status = 'running'` *and* the `updated_at` the snapshot
+/// carries. The status alone is not enough: a session thread writes its
+/// terminal state and then deregisters, and a Resume that wins the row in
+/// that instant makes the same id `running` again with its own hold and
+/// registration. A sweep that read the row before the terminal write and the
+/// registry after the deregister would otherwise end that live successor
+/// with "Staged lost track of this session". Every write that moves a row
+/// into or out of `running` restamps `updated_at`, so the successor fails
+/// this predicate and a genuinely stranded row — which nothing writes to —
+/// passes it.
+pub(crate) fn end_observed_row(store: &Store, session: &Session) -> bool {
+    store
+        .transition_from_running_observed_at(
+            &session.id,
+            session.updated_at,
+            SessionStatus::Error,
+            Some(STRANDED_SESSION_MESSAGE),
+            Some(&CompletionReason::Crashed),
+        )
+        .unwrap_or(false)
 }
 
 /// A `running` row the sweep would end now.

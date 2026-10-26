@@ -1896,6 +1896,60 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Cancel the queued session an artifact's delete left behind.
+///
+/// A commit, note or review session keeps its `branch_id` after its artifact
+/// is gone, so a `queued` row kept through the delete stays in the branch's
+/// queue as a row nothing can resolve — the drain steps over it
+/// (`BranchSessionLink::Unlinked`), but it would sit there for good. The
+/// store's cleanup triggers (`trg_cleanup_session_after_*_delete`) remove a
+/// non-running session with its last artifact, so usually there is no row
+/// left; this is for the one that survives because something else still
+/// references it — an image attached at queue time. The delete bodies call
+/// it when the caller asked to keep the session: a queued row is ended as
+/// `cancelled`, its dependents are settled, and the event clears the client's
+/// queued state. A `running` row is left to the thread that owns it, as
+/// before; a row in any other state is already terminal.
+pub(crate) fn cancel_queued_session_of_deleted_artifact<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &tauri::AppHandle<R>,
+    session_id: &str,
+) -> Result<(), String> {
+    let cancelled = store
+        .transition_from_queued(
+            session_id,
+            store::SessionStatus::Cancelled,
+            None,
+            Some(&store::CompletionReason::Interrupted),
+        )
+        .map_err(|e| e.to_string())?;
+    if !cancelled {
+        return Ok(());
+    }
+    log::info!("Cancelled queued session {session_id}: its artifact was deleted without it");
+    let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
+    let project_id = store.get_project_id_for_session(session_id).ok().flatten();
+    crate::web_server::emit_to_all(
+        app_handle,
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
+            session_id: session_id.to_string(),
+            status: "cancelled".to_string(),
+            error_message: None,
+            completion_reason: Some("interrupted".to_string()),
+            branch_id,
+            project_id,
+            session_type: None,
+        },
+    );
+    if let Err(e) =
+        crate::pipeline_dependency::skip_dependents_of_cancelled(store, app_handle, session_id)
+    {
+        log::warn!("Failed to skip sessions waiting on cancelled {session_id}: {e}");
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn cancel_session(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
@@ -2530,41 +2584,58 @@ fn pipeline_branch_link(session: &store::Session) -> Option<PipelineBranchLink> 
     }
 }
 
+/// How a session row relates to one branch's queue.
+enum BranchSessionLink {
+    /// The row is this branch's work, scheduled as given.
+    Scheduled(BranchSessionSchedule),
+    /// The row's artifact (or pipeline branch) is on another branch.
+    OtherBranch,
+    /// Nothing says what the row is: a commit, note or review session whose
+    /// artifact was deleted without it, or a pipeline row with no commit or
+    /// branch. The row keeps its `branch_id`, so the branch's queue still
+    /// lists it. Readers step over such a row rather than fail on it — one
+    /// orphan used to abort every drain on its branch for good, since each
+    /// kick met it again (see `drain_branch_queue`).
+    Unlinked,
+}
+
+impl BranchSessionLink {
+    fn scheduled(self) -> Option<BranchSessionSchedule> {
+        match self {
+            Self::Scheduled(schedule) => Some(schedule),
+            Self::OtherBranch | Self::Unlinked => None,
+        }
+    }
+}
+
 fn resolve_branch_session_schedule(
     store: &Store,
     branch_id: &str,
     session: &store::Session,
-    require_artifact: bool,
-) -> Result<Option<BranchSessionSchedule>, String> {
+) -> Result<BranchSessionLink, String> {
+    use BranchSessionLink::{OtherBranch, Scheduled, Unlinked};
+
     match pipeline_branch_link(session) {
         Some(PipelineBranchLink::Commit) => {
             let commit = store
                 .get_commit_by_session(&session.id)
                 .map_err(|e| e.to_string())?;
-            return match commit {
-                Some(commit) if commit.branch_id == branch_id => Ok(Some(
+            return Ok(match commit {
+                Some(commit) if commit.branch_id == branch_id => Scheduled(
                     exclusive_session_schedule(BranchSessionScheduleKind::CommitPipeline),
-                )),
-                Some(_) => Ok(None),
-                None if require_artifact => Err(format!(
-                    "Queued pipeline session {} has no linked commit",
-                    session.id
-                )),
-                None => Ok(None),
-            };
+                ),
+                Some(_) => OtherBranch,
+                None => Unlinked,
+            });
         }
         Some(PipelineBranchLink::Branch) => {
-            return match session.branch_id.as_deref() {
-                Some(linked) if linked == branch_id => Ok(Some(exclusive_session_schedule(
+            return Ok(match session.branch_id.as_deref() {
+                Some(linked) if linked == branch_id => Scheduled(exclusive_session_schedule(
                     BranchSessionScheduleKind::GitPipeline,
-                ))),
-                Some(_) => Ok(None),
-                None if require_artifact => Err(format!(
-                    "Queued git pipeline session {} has no linked branch",
-                    session.id
                 )),
-                None => Ok(None),
-            };
+                Some(_) => OtherBranch,
+                None => Unlinked,
+            });
         }
         None => {}
     }
@@ -2573,32 +2644,38 @@ fn resolve_branch_session_schedule(
         .get_commit_by_session(&session.id)
         .map_err(|e| e.to_string())?
     {
-        return Ok((commit.branch_id == branch_id)
-            .then(|| exclusive_session_schedule(BranchSessionScheduleKind::Commit)));
+        return Ok(if commit.branch_id == branch_id {
+            Scheduled(exclusive_session_schedule(
+                BranchSessionScheduleKind::Commit,
+            ))
+        } else {
+            OtherBranch
+        });
     }
 
     if let Some(note) = store
         .get_note_by_session(&session.id)
         .map_err(|e| e.to_string())?
     {
-        return Ok((note.branch_id == branch_id).then(note_session_schedule));
+        return Ok(if note.branch_id == branch_id {
+            Scheduled(note_session_schedule())
+        } else {
+            OtherBranch
+        });
     }
 
     if let Some(review) = store
         .get_review_by_session(&session.id)
         .map_err(|e| e.to_string())?
     {
-        return Ok((review.branch_id == branch_id).then(|| review_session_schedule(&review)));
+        return Ok(if review.branch_id == branch_id {
+            Scheduled(review_session_schedule(&review))
+        } else {
+            OtherBranch
+        });
     }
 
-    if require_artifact {
-        Err(format!(
-            "Queued session {} has no linked artifact",
-            session.id
-        ))
-    } else {
-        Ok(None)
-    }
+    Ok(Unlinked)
 }
 
 fn running_branch_session_kinds(
@@ -2610,7 +2687,8 @@ fn running_branch_session_kinds(
         .map_err(|e| e.to_string())?;
     let mut active = HashSet::new();
     for session in running {
-        if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, false)?
+        if let Some(schedule) =
+            resolve_branch_session_schedule(store, branch_id, &session)?.scheduled()
         {
             active.insert(schedule.kind);
         }
@@ -2691,7 +2769,12 @@ fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, Str
         .map_err(|e| e.to_string())?;
 
     for session in queued {
-        if resolve_branch_session_schedule(store, branch_id, &session, true)?.is_some() {
+        // An unlinked row (see `BranchSessionLink::Unlinked`) is no reason to
+        // queue a new start behind it: the drain steps over it too.
+        if resolve_branch_session_schedule(store, branch_id, &session)?
+            .scheduled()
+            .is_some()
+        {
             return Ok(true);
         }
     }
@@ -3507,10 +3590,14 @@ fn failed_immediate_branch_start_owes_drain<R: tauri::Runtime>(
                 error,
             )
         }
+        // The usual arm for a failure inside `start_session`, which records
+        // its own failed start on the row (see `register_for_startup`) —
+        // or a Stop got there first. Either way the row is terminal and says
+        // the right thing; only the drain is still owed.
         Ok(Some(session)) if session.agent_id.as_deref() == Some(start_agent_id) => {
-            log::error!(
-                "Session {session_id} failed before its run started after it was already \
-                 ended; preserving status {:?}: {error}",
+            log::info!(
+                "Session {session_id} failed before its run started and its row was already \
+                 ended (status {:?}); preserving it: {error}",
                 session.status
             );
             true
@@ -4004,9 +4091,23 @@ pub(crate) async fn drain_branch_queue(
     let mut started_any = false;
 
     for session in queued {
-        let schedule = match resolve_branch_session_schedule(&store, &branch_id, &session, true)? {
-            Some(schedule) => schedule,
-            None => continue,
+        let schedule = match resolve_branch_session_schedule(&store, &branch_id, &session)? {
+            BranchSessionLink::Scheduled(schedule) => schedule,
+            BranchSessionLink::OtherBranch => continue,
+            // A row whose artifact is gone (deleted without its session, or
+            // the session delete failed). Stepped over, not failed on: with
+            // `branch_id` keeping the row in this read, failing here made
+            // every kick on the branch fail the same way, and nothing queued
+            // behind it ever started. The delete bodies now cancel such
+            // rows; this covers the ones that slipped through.
+            BranchSessionLink::Unlinked => {
+                log::warn!(
+                    "[session_queue] queued session {} on branch {branch_id} has no linked \
+                     artifact; skipping it",
+                    session.id
+                );
+                continue;
+            }
         };
 
         if !can_start_with_active_branch_sessions(schedule.kind, &active) {
@@ -4041,7 +4142,8 @@ pub(crate) async fn drain_branch_queue(
             GatedQueuedStart::Skipped => continue,
         }
 
-        let started = start_queued_session_for_branch(
+        let session_id = session.id.clone();
+        let started = match start_queued_session_for_branch(
             Arc::clone(&store),
             Arc::clone(&registry),
             app_handle.clone(),
@@ -4051,7 +4153,23 @@ pub(crate) async fn drain_branch_queue(
             provider.clone(),
             QueuedSessionStartMode::Drain,
         )
-        .await?;
+        .await
+        {
+            Ok(started) => started,
+            Err(e) => {
+                let row = store.get_session(&session_id).map_err(|e| e.to_string())?;
+                match failed_queued_start_disposition(row.as_ref()) {
+                    FailedQueuedStart::Stop => return Err(e),
+                    FailedQueuedStart::Continue => {
+                        log::error!(
+                            "[session_queue] queued session {session_id} on branch {branch_id} \
+                             failed to start; moving on to the rows behind it: {e}"
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
 
         match started {
             QueuedSessionStart::Started => {
@@ -4079,6 +4197,28 @@ pub(crate) async fn drain_branch_queue(
     Ok(started_any)
 }
 
+/// What the drain does with the rows behind a queued start that returned
+/// `Err`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedQueuedStart {
+    /// The row has left `queued` — the start claimed it and then ended it
+    /// (`start_session` records a failed start's terminal state itself, and
+    /// kicks), or it was deleted under the start — so it is no barrier, and
+    /// the rows behind it are still this pass's to try.
+    Continue,
+    /// The row is still `queued`: the start failed before its claim, in the
+    /// context build. It is still first in line, so the pass stops at it as
+    /// the pre-check would have, rather than letting later rows jump it.
+    Stop,
+}
+
+fn failed_queued_start_disposition(row: Option<&store::Session>) -> FailedQueuedStart {
+    match row {
+        Some(row) if row.status == store::SessionStatus::Queued => FailedQueuedStart::Stop,
+        _ => FailedQueuedStart::Continue,
+    }
+}
+
 /// The drain's scheduling scan with the runner taken out: claim every queued
 /// row the branch's rules would let [`drain_branch_queue`] start, in order,
 /// stopping at the same barriers, and return the claimed ids.
@@ -4097,7 +4237,8 @@ pub(crate) fn claim_startable_queued_sessions(
     let mut active = running_branch_session_kinds(store, branch_id)?;
     let mut claimed = Vec::new();
     for session in queued {
-        let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, true)?
+        let BranchSessionLink::Scheduled(schedule) =
+            resolve_branch_session_schedule(store, branch_id, &session)?
         else {
             continue;
         };
@@ -4283,8 +4424,19 @@ fn forced_start_precheck(
         }
     }
 
-    let schedule = resolve_branch_session_schedule(store, branch_id, &session, true)?
-        .ok_or_else(|| format!("Session {session_id} does not belong to branch {branch_id}"))?;
+    // The user asked for this row, so both ways it can fail to resolve are
+    // errors here, where the drain would step over them.
+    let schedule = match resolve_branch_session_schedule(store, branch_id, &session)? {
+        BranchSessionLink::Scheduled(schedule) => schedule,
+        BranchSessionLink::OtherBranch => {
+            return Err(format!(
+                "Session {session_id} does not belong to branch {branch_id}"
+            ));
+        }
+        BranchSessionLink::Unlinked => {
+            return Err(format!("Session {session_id} has no linked artifact"));
+        }
+    };
 
     let active = running_branch_session_kinds(store, branch_id)?;
     if branch_worktree_operation_in_flight(branch_id)
@@ -8038,6 +8190,60 @@ mod tests {
                 app.handle()
             ),
             vec![session_id]
+        );
+    }
+
+    /// A queued start that fails after its claim has ended its own row
+    /// (`start_session` records the failure) and is no barrier, so the pass
+    /// goes on to the rows behind it. One that fails before the claim leaves
+    /// the row `queued` and first in line, so the pass stops at it.
+    #[test]
+    fn a_failed_queued_start_stops_the_pass_only_while_its_row_is_still_queued() {
+        let queued = store::Session::new_queued("note");
+        assert_eq!(
+            failed_queued_start_disposition(Some(&queued)),
+            FailedQueuedStart::Stop
+        );
+
+        let mut errored = store::Session::new_running("note", Path::new("/tmp"));
+        errored.status = store::SessionStatus::Error;
+        assert_eq!(
+            failed_queued_start_disposition(Some(&errored)),
+            FailedQueuedStart::Continue
+        );
+        let running = store::Session::new_running("note", Path::new("/tmp"));
+        assert_eq!(
+            failed_queued_start_disposition(Some(&running)),
+            FailedQueuedStart::Continue
+        );
+        assert_eq!(
+            failed_queued_start_disposition(None),
+            FailedQueuedStart::Continue
+        );
+    }
+
+    /// A queued row with no artifact left to say what it is must not make a
+    /// new start queue behind it, any more than it stops the drain: both read
+    /// the branch's queue through the same resolver.
+    #[test]
+    fn an_orphaned_queued_row_does_not_queue_new_starts_behind_it() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let orphan = store::Session::new_queued("orphan").with_branch(&branch.id);
+        store.create_session(&orphan).unwrap();
+
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+                .unwrap()
+        );
+
+        let queued = store::Session::new_queued("note").with_branch(&branch.id);
+        store.create_session(&queued).unwrap();
+        let note = store::Note::new(&branch.id, "note", "").with_session(&queued.id);
+        store.create_note(&note).unwrap();
+        assert!(
+            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+                .unwrap(),
+            "a queued note still is a reason to queue"
         );
     }
 

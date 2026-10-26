@@ -627,7 +627,7 @@ fn launch_running_pipeline_session(
         prompt,
         _liveness: liveness,
     } = running;
-    session_runner::start_pipeline_session(
+    let started = session_runner::start_pipeline_session(
         session_runner::PipelineConfig {
             session_id: session_id.clone(),
             prompt: prompt.to_string(),
@@ -638,13 +638,36 @@ fn launch_running_pipeline_session(
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
-            branch_id: Some(branch_id),
-            project_id: Some(project_id),
+            branch_id: Some(branch_id.clone()),
+            project_id: Some(project_id.clone()),
         },
-        store,
+        Arc::clone(&store),
         app_handle.clone(),
         Arc::clone(registry),
-    )?;
+    );
+    if let Err(error) = started {
+        // The row is `running` under our pid and the hold is still ours, so
+        // the failure goes on the row *before* the hold is released: left
+        // `running` with no owner, the sweep would end it within a minute as
+        // "Staged lost track of this session" in place of the real cause.
+        // The kick is the terminal-state drain a runner would have owed.
+        if session_runner::finish_failed_before_run(
+            &session_id,
+            Some(branch_id.clone()),
+            Some(project_id),
+            &store,
+            app_handle,
+            &error,
+        ) {
+            crate::session_queue::kick(
+                app_handle,
+                &branch_id,
+                crate::session_queue::KickSource::StartFailed,
+            );
+        }
+        drop(liveness);
+        return Err(error);
+    }
     // The runner registered the session at entry; the row is its now.
     drop(liveness);
 

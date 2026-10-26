@@ -1324,17 +1324,23 @@ pub(crate) fn delete_review_impl<R: tauri::Runtime>(
 
     store.delete_review(review_id).map_err(|e| e.to_string())?;
 
-    if delete_session {
-        if let Some(sid) = review.session_id {
-            let _ = store.delete_session(&sid);
-        }
-    }
+    // As in `delete_note_impl`: a kept session is cancelled if queued, a
+    // failed delete is reported, and the branch is kicked either way.
+    let session_outcome = match review.session_id.as_deref() {
+        Some(sid) if delete_session => store
+            .delete_session(sid)
+            .map_err(|e| format!("Failed to delete session {sid} of review {review_id}: {e}")),
+        Some(sid) => crate::session_commands::cancel_queued_session_of_deleted_artifact(
+            store, app_handle, sid,
+        ),
+        None => Ok(()),
+    };
     crate::session_queue::kick(
         app_handle,
         &review.branch_id,
         crate::session_queue::KickSource::ArtifactDeleted,
     );
-    Ok(())
+    session_outcome
 }
 
 /// Delete a pending commit (one with no SHA) by its DB id.
@@ -1387,18 +1393,24 @@ pub(crate) fn delete_pending_commit_impl<R: tauri::Runtime>(
 
     store.delete_commit(commit_id).map_err(|e| e.to_string())?;
 
-    if delete_session {
-        if let Some(sid) = commit.session_id {
-            let _ = store.delete_session(&sid);
-        }
-    }
+    // As in `delete_note_impl`: a kept session is cancelled if queued, a
+    // failed delete is reported, and the branch is kicked either way.
+    let session_outcome = match commit.session_id.as_deref() {
+        Some(sid) if delete_session => store
+            .delete_session(sid)
+            .map_err(|e| format!("Failed to delete session {sid} of commit {commit_id}: {e}")),
+        Some(sid) => crate::session_commands::cancel_queued_session_of_deleted_artifact(
+            store, app_handle, sid,
+        ),
+        None => Ok(()),
+    };
     crate::session_queue::kick(
         app_handle,
         &commit.branch_id,
         crate::session_queue::KickSource::ArtifactDeleted,
     );
 
-    Ok(())
+    session_outcome
 }
 
 /// Delete a commit: resets the branch HEAD to the parent commit,

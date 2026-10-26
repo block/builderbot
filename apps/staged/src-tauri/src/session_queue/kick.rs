@@ -135,7 +135,21 @@ impl BranchQueueKicker {
         let branch_id = branch_id.to_string();
         tauri::async_runtime::spawn(async move {
             loop {
-                match (kicker.drain)(branch_id.clone()).await {
+                // The drain runs on a task of its own, so a panic inside it
+                // (an `unwrap` on a row the store handed back malformed, say)
+                // comes back here as a `JoinError` and is handled like any
+                // other failed drain. Were it to unwind *this* task instead,
+                // the `in_flight` entry below would never be removed and
+                // every later kick for the branch would be "folded into the
+                // drain in flight" forever — the parked queue this module
+                // exists to remove, now with no client drain to paper over
+                // it.
+                let drained =
+                    match tauri::async_runtime::spawn((kicker.drain)(branch_id.clone())).await {
+                        Ok(drained) => drained,
+                        Err(e) => Err(format!("drain panicked: {e}")),
+                    };
+                match drained {
                     Ok(true) => {
                         log::info!("[session_queue] started queued work on branch {branch_id}")
                     }

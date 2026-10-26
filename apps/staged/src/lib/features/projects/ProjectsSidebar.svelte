@@ -2,13 +2,11 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { quintIn } from 'svelte/easing';
   import { fade } from 'svelte/transition';
-  import House from '@lucide/svelte/icons/house';
   import Plus from '@lucide/svelte/icons/plus';
-  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import type { RepoHomeItem } from '../../types';
   import { goHome, navigation, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
@@ -27,25 +25,22 @@
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
-  import RepoCard from './RepoCard.svelte';
+  import PinnedRepoCards from './PinnedRepoCards.svelte';
   import ProjectRowContent from './ProjectRowContent.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
-  import SidebarFilterRow from './SidebarFilterRow.svelte';
+  import SidebarFilterMenu from './SidebarFilterMenu.svelte';
+  import SidebarSearchField from './SidebarSearchField.svelte';
+  import SidebarSectionHead from './SidebarSectionHead.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
-  import * as commands from '../../api/commands';
+  import { searchProjects } from './projectSearch';
+  import { resultsLabel, visibleSidebarRepos } from './sidebarSearch';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
-  interface Props {
-    showAllProjectsRow?: boolean;
-  }
-
-  let { showAllProjectsRow = true }: Props = $props();
-
   // All rendered data comes from the shared projectsData store; only UI
-  // state (width, scroll, drag) lives here or in projectsSidebarState.
+  // state (width, scroll, search) lives here or in projectsSidebarState.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
@@ -59,33 +54,40 @@
   let restoreToken = 0;
   let trackedSidebarBodyEl: HTMLDivElement | null = null;
 
-  // ── Pinned repos ──
-  // Synced from the shared home-repos cache; kept as local state so a drag
-  // reorder applies optimistically before the persisted order round-trips.
-  let pinnedRepos = $state<RepoHomeItem[]>([]);
-  let dragSourceIndex = $state<number | null>(null);
+  // ── Search ──
+  // One field narrows both segments. Session-local like the landing page's
+  // query: it resets with the sidebar and is deliberately not persisted.
+  let searchQuery = $state('');
+  let searching = $derived(searchQuery.trim().length > 0);
 
-  $effect(() => {
-    pinnedRepos = projectsDataStore.homeRepos.filter((r) => r.pinned);
-  });
+  // ── Repos segment ──
+  // Pinned repos at rest; while searching, every home repo that matches, so
+  // the field is a way to reach any repo (pinned or not).
+  let pinnedCount = $derived(projectsDataStore.homeRepos.filter((r) => r.pinned).length);
+  let sidebarRepos = $derived(visibleSidebarRepos(projectsDataStore.homeRepos, searchQuery));
 
-  // Any repo (pinned or not) earns the All Repos entry; keeping it while the
-  // repos view is active means the row highlighting that view can't vanish
-  // out from under it.
-  let showAllReposRow = $derived(
+  // Any repo (pinned or not) earns the repos section and its All repos link;
+  // keeping it while the repos view is active means the link highlighting
+  // that view can't vanish out from under it.
+  let showReposSection = $derived(
     projectsDataStore.homeRepos.length > 0 || navigation.showReposList
   );
 
   // Project rows follow the shared filter state, with one exception: the
   // selected project stays visible (appended if filtered out) so the row
   // highlighting the active view can't vanish out from under it — the same
-  // rule that keeps the All Repos row above.
+  // rule that keeps the repos section above. The search query is applied
+  // last and is not exempted: a typed query is a deliberate narrowing (the
+  // landing page's visibleProjects makes the same call).
   let sidebarProjects = $derived.by(() => {
     const filtered = projectFiltersStore.filteredProjects;
     const selectedId = navigation.selectedProjectId;
-    if (!selectedId || filtered.some((p) => p.id === selectedId)) return filtered;
-    const selected = projects.find((p) => p.id === selectedId);
-    return selected ? [...filtered, selected] : filtered;
+    let withSelected = filtered;
+    if (selectedId && !filtered.some((p) => p.id === selectedId)) {
+      const selected = projects.find((p) => p.id === selectedId);
+      if (selected) withSelected = [...filtered, selected];
+    }
+    return searchProjects(withSelected, searchQuery);
   });
 
   // Keep run-action state hydrated for the row status dots and the Running
@@ -98,56 +100,6 @@
       .hydrateFromProjectBranches(projectsDataStore.branchesByProject)
       .catch(console.error);
   });
-
-  function handleDragStart(index: number) {
-    return (e: DragEvent) => {
-      dragSourceIndex = index;
-      if (e.dataTransfer) {
-        e.dataTransfer.effectAllowed = 'move';
-      }
-    };
-  }
-
-  function handleDragOver(index: number) {
-    return (e: DragEvent) => {
-      e.preventDefault();
-      if (e.dataTransfer) {
-        e.dataTransfer.dropEffect = 'move';
-      }
-    };
-  }
-
-  function handleDrop(index: number) {
-    return async (_e: DragEvent) => {
-      if (dragSourceIndex === null || dragSourceIndex === index) {
-        dragSourceIndex = null;
-        return;
-      }
-
-      // Reorder the array
-      const items = [...pinnedRepos];
-      const [moved] = items.splice(dragSourceIndex, 1);
-      items.splice(index, 0, moved);
-      pinnedRepos = items;
-      dragSourceIndex = null;
-
-      // Persist the new order
-      const orderedKeys: [string, string][] = items.map((r) => [r.githubRepo, r.subpath]);
-      try {
-        await commands.reorderPinnedRepos(orderedKeys);
-      } catch (e) {
-        console.error('[ProjectsSidebar] Failed to reorder pinned repos:', e);
-        // Reload to get the correct order
-        await projectsDataStore.refreshHomeRepos();
-      }
-    };
-  }
-
-  function handleDragEnd() {
-    return () => {
-      dragSourceIndex = null;
-    };
-  }
 
   function openProject(projectId: string) {
     const status = getProjectStatus(
@@ -396,6 +348,16 @@
           {/if}
         </span>
       </div>
+      <button
+        type="button"
+        class="new-project-button"
+        title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
+        onclick={openNewProject}
+      >
+        <Plus size={14} strokeWidth={2.4} />
+        <span class="new-project-label">New project</span>
+      </button>
+      <SidebarSearchField bind:value={searchQuery} />
     </div>
 
     <div class="sidebar-body" use:trackSidebarBody onscroll={handleSidebarScroll}>
@@ -405,73 +367,56 @@
         <div class="state">Loading projects…</div>
       {:else}
         <div class="projects-list">
-          {#if showAllReposRow}
-            <button
-              class="project-row all-repos-row"
-              class:active={navigation.showReposList}
-              onclick={showAllRepos}
+          {#if showReposSection}
+            <SidebarSectionHead
+              label={searching ? 'Repos' : 'Pinned repos'}
+              count={searching ? resultsLabel(sidebarRepos.length) : pinnedCount}
             >
-              <div class="row-main">
-                <FolderGit2 size={14} />
-                <span class="project-name">All Repos</span>
-              </div>
-            </button>
+              {#snippet trailing()}
+                <button
+                  type="button"
+                  class="all-repos-link"
+                  class:active={navigation.showReposList}
+                  onclick={showAllRepos}
+                >
+                  <FolderGit2 size={12} />
+                  All repos
+                  <ChevronRight size={11} />
+                </button>
+              {/snippet}
+            </SidebarSectionHead>
 
-            {#if pinnedRepos.length > 0}
-              <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
-                {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
-                  <RepoCard
-                    {repo}
-                    hidePinButton
-                    reorderable
-                    onReorderStart={handleDragStart(index)}
-                    onReorderOver={handleDragOver(index)}
-                    onReorderDrop={handleDrop(index)}
-                    onReorderEnd={handleDragEnd()}
-                    onChange={() => projectsDataStore.refreshHomeRepos()}
-                  />
-                {/each}
-              </div>
+            {#if sidebarRepos.length > 0}
+              <PinnedRepoCards repos={sidebarRepos} reorderable={!searching} />
+            {:else if searching}
+              <div class="state no-matches">No repos match "{searchQuery.trim()}"</div>
             {/if}
-
-            <div class="section-divider"></div>
           {/if}
-
-          {#if showAllProjectsRow}
-            <button
-              class="project-row all-projects-row"
-              class:active={navigation.selectedProjectId === null && !navigation.showReposList}
-              onclick={openAllProjects}
-            >
-              <div class="row-main">
-                <House size={14} />
-                <span class="project-name">All Projects</span>
-              </div>
-            </button>
-          {/if}
-
-          <button
-            class="project-row new-project-row"
-            title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
-            onclick={openNewProject}
-          >
-            <div class="row-main">
-              <Plus size={14} />
-              <span class="project-name">New project</span>
-            </div>
-          </button>
 
           {#if projects.length === 0}
             <div class="state">No projects yet.</div>
           {:else}
-            <SidebarFilterRow />
+            <SidebarSectionHead
+              label={searching ? 'Projects' : 'All projects'}
+              count={searching ? resultsLabel(sidebarProjects.length) : sidebarProjects.length}
+              active={navigation.selectedProjectId === null && !navigation.showReposList}
+              onclick={openAllProjects}
+            >
+              {#snippet trailing()}
+                <SidebarFilterMenu />
+              {/snippet}
+            </SidebarSectionHead>
             {#if sidebarProjects.length === 0}
               <div class="state no-matches">
-                <span>No projects match filters</span>
-                <button
-                  class="clear-filters-link"
-                  onclick={() => projectFiltersStore.clearFilters()}>Clear filters</button
-                >
+                {#if searching}
+                  <span>No projects match "{searchQuery.trim()}"</span>
+                {:else}
+                  <span>No projects match filters</span>
+                  <button
+                    class="clear-filters-link"
+                    onclick={() => projectFiltersStore.clearFilters()}>Clear filters</button
+                  >
+                {/if}
               </div>
             {/if}
             {#each sidebarProjects as project (project.id)}
@@ -595,9 +540,49 @@
   }
 
   .sidebar-header {
-    padding: 14px 12px 10px;
+    padding: 14px 12px 6px;
     display: flex;
     flex-direction: column;
+    gap: 10px;
+  }
+
+  .new-project-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    height: 30px;
+    border: none;
+    border-radius: 999px;
+    background: var(--ui-accent);
+    color: var(--bg-deepest);
+    font-size: var(--size-sm);
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition:
+      background-color 0.15s ease,
+      transform 0.1s ease;
+  }
+
+  .new-project-button:hover {
+    background: var(--ui-accent-hover);
+  }
+
+  .new-project-button:active {
+    transform: scale(0.985);
+  }
+
+  .new-project-button:focus-visible {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 2px;
+  }
+
+  .new-project-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .title-row {
@@ -685,8 +670,7 @@
     --project-row-meta-color: var(--text-primary);
   }
 
-  .project-row.active .row-status :global(svg),
-  .all-repos-row.active .row-main :global(svg) {
+  .project-row.active .row-status :global(svg) {
     stroke: var(--text-primary);
   }
 
@@ -702,29 +686,6 @@
 
   .project-row.project-item {
     min-height: 52px;
-  }
-
-  .row-main {
-    display: flex;
-    /* Single-line rows: centre the 14px icon on the label's line box. */
-    align-items: center;
-    gap: 10px;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .row-main :global(svg) {
-    flex-shrink: 0;
-    width: 16px;
-  }
-
-  .project-name {
-    font-size: var(--size-sm);
-    font-weight: 600;
-    color: inherit;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .row-status {
@@ -756,21 +717,37 @@
     font-weight: 600;
   }
 
-  .all-repos-row :global(svg) {
+  .all-repos-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    padding: 3px 4px 3px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .all-repos-link :global(svg) {
     stroke: var(--text-secondary);
   }
 
-  .pinned-repos-list {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 2px 0;
+  .all-repos-link:hover,
+  .all-repos-link.active {
+    background: var(--projects-sidebar-hover-bg);
+    color: var(--text-primary);
   }
 
-  .section-divider {
-    height: 1px;
-    background: color-mix(in srgb, var(--border-subtle) 40%, transparent);
-    margin: 4px 4px;
+  .all-repos-link:hover :global(svg),
+  .all-repos-link.active :global(svg) {
+    stroke: var(--text-primary);
   }
 
   .state {

@@ -39,6 +39,7 @@ export interface Theme {
   // Text colors
   text: {
     primary: string; // Main text
+    secondary: string; // Supporting text (between primary and muted)
     muted: string; // Subdued text (from comment color)
     faint: string; // Very subdued (placeholders)
     accent: string; // Links and interactive text
@@ -464,6 +465,7 @@ export function createAdaptiveTheme(
 
     text: {
       primary: syntaxFg,
+      secondary: mix(syntaxComment, syntaxFg, 0.45),
       muted: syntaxComment,
       faint: mix(primaryBg, syntaxComment, 0.5),
       accent: accentBlue,
@@ -585,6 +587,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--border-emphasis': t.border.emphasis,
 
     '--text-primary': t.text.primary,
+    '--text-secondary': t.text.secondary,
     '--text-muted': t.text.muted,
     '--text-faint': t.text.faint,
     '--text-accent': t.text.accent,

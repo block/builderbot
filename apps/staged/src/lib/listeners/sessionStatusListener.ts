@@ -12,9 +12,10 @@
  * Busy state follows a snapshot-then-deltas model: the backend is the source
  * of truth, and this module hydrates the registry from the
  * `get_active_sessions` snapshot (on startup, on WebSocket reconnect via
- * transport.ts, and on the page-lifecycle `cache-stale` resume signal), then
- * applies `session-status-changed` deltas on top. Sessions the snapshot
- * proves dead are swept, and a swept session still rendering a pr/push
+ * transport.ts, on the page-lifecycle `cache-stale` resume signal, and — in
+ * Tauri mode, which has neither of those — on window focus and a slow
+ * interval), then applies `session-status-changed` deltas on top. Sessions
+ * the snapshot proves dead are swept, and a swept session still rendering a pr/push
  * workflow chip is reconciled against its persisted terminal status — a
  * client that was offline through the whole completion missed both the
  * domain event and the terminal event, so the chip would otherwise stay
@@ -27,10 +28,17 @@
  * `session-status-changed` event. The handlers here are idempotent renderers
  * — they perform no writes, so any number of connected clients can process
  * the same events safely.
+ *
+ * `session-background-hold` is folded into projectState as a sub-state of a
+ * running session, so the project row can say "waiting on background work"
+ * instead of spinning generically for up to the hold cap. The hold also rides
+ * on the `get_active_sessions` snapshot as `holding`, applied in the snapshot
+ * loop for each running session hydration keeps, so a hold event missed while
+ * this client was away is picked up by the next hydration.
  */
 
 import { toast } from 'svelte-sonner';
-import { listenToEvent, type UnlistenFn } from '../transport';
+import { isTauri, listenToEvent, type UnlistenFn } from '../transport';
 import { invalidateBranchTimeline } from '../commands';
 import * as commands from '../api/commands';
 import { navigation } from '../features/layout/navigation.svelte';
@@ -44,9 +52,18 @@ import type {
   PrCreatedPayload,
   PushCompletedPayload,
   Session,
+  SessionBackgroundHoldPayload,
   SessionStatus,
   SessionStatusPayload,
 } from '../types';
+
+// Tauri windows re-hydrate on their own schedule (see listenForSessionStatus).
+// Focus fires in bursts (every app switch), so return-to-window hydrations are
+// rate-limited; the interval is the floor on how long a missed terminal event
+// can leave a spinner stuck.
+const REHYDRATE_INTERVAL_MS = 60_000;
+const REHYDRATE_MIN_GAP_MS = 5_000;
+let lastHydrationStartedAt = 0;
 
 // Terminal deltas processed while a snapshot fetch is in flight are newer
 // than that snapshot, which may still report the session as running — the
@@ -66,6 +83,10 @@ export function listenForSessionStatus(): UnlistenFn {
     'push-completed',
     handlePushCompleted
   );
+  const unlistenBackgroundHold = listenToEvent<SessionBackgroundHoldPayload>(
+    'session-background-hold',
+    handleBackgroundHold
+  );
 
   // Snapshot-then-deltas: hydrate now (app/page startup) and again after a
   // long hide (the page-lifecycle `cache-stale` resume signal). WebSocket
@@ -74,13 +95,57 @@ export function listenForSessionStatus(): UnlistenFn {
   void hydrateActiveSessions();
   const onCacheStale = () => void hydrateActiveSessions();
   window.addEventListener('cache-stale', onCacheStale);
+  // A desktop window gets neither of those: `cache-stale` never fires in
+  // Tauri mode and there is no socket to reconnect, so without its own
+  // triggers it hydrates exactly once and a terminal event missed afterwards
+  // (a session owned by another Staged instance on the shared DB, a row
+  // finalized by the backend's dead-owner sweep) spins for the life of the
+  // window.
+  const unlistenRehydrate = isTauri ? listenForRehydrateTriggers() : () => {};
 
   return () => {
+    unlistenRehydrate();
     window.removeEventListener('cache-stale', onCacheStale);
     unlistenEvents();
     unlistenPrCreated();
     unlistenPushCompleted();
+    unlistenBackgroundHold();
   };
+}
+
+function listenForRehydrateTriggers(): UnlistenFn {
+  const onReturn = () => {
+    if (document.visibilityState === 'hidden') return;
+    if (Date.now() - lastHydrationStartedAt < REHYDRATE_MIN_GAP_MS) return;
+    void hydrateActiveSessions();
+  };
+  window.addEventListener('focus', onReturn);
+  document.addEventListener('visibilitychange', onReturn);
+  // A hidden (minimised, occluded) window skips the periodic tick so it is not
+  // polling `get_active_sessions` for as long as it lives; `visibilitychange`
+  // above does the catch-up hydration when it comes back.
+  const interval = setInterval(() => {
+    if (document.visibilityState === 'hidden') return;
+    void hydrateActiveSessions();
+  }, REHYDRATE_INTERVAL_MS);
+  return () => {
+    window.removeEventListener('focus', onReturn);
+    document.removeEventListener('visibilitychange', onReturn);
+    clearInterval(interval);
+  };
+}
+
+/**
+ * Fold a hold report into the project's busy state. The report carries the
+ * project when the backend can resolve one; otherwise the registry answers for
+ * sessions this client registered itself (pipeline sessions link no artifact).
+ * A report for a session not tracked as running is dropped by the store — the
+ * next hydration's snapshot carries the hold once the session is registered.
+ */
+function handleBackgroundHold(payload: SessionBackgroundHoldPayload): void {
+  const projectId = payload.projectId ?? sessionRegistry.getProjectId(payload.sessionId);
+  if (!projectId) return;
+  projectStateStore.setSessionBackgroundHold(projectId, payload.sessionId, payload.holding);
 }
 
 async function handleSessionStatusChanged(payload: SessionStatusPayload): Promise<void> {
@@ -166,8 +231,11 @@ export async function hydrateActiveSessions(): Promise<void> {
   // snapshot, in both directions: entries registered mid-fetch (optimistic
   // launch-site registrations) must not be swept, and sessions whose terminal
   // delta was processed mid-fetch must not be re-registered from the
-  // snapshot's stale "running" claim.
+  // snapshot's stale "running" claim. No further grace period is needed for
+  // launch-site registrations: they land after the start IPC returns, by which
+  // point the row exists and any snapshot fetched afterwards includes it.
   const fetchStartedAt = Date.now();
+  lastHydrationStartedAt = fetchStartedAt;
   const sweptWorkflows: SweptWorkflowSession[] = [];
   const untrackedPushes = new Map<string, UntrackedPush>();
   hydrationFetchesInFlight++;
@@ -214,14 +282,23 @@ export async function hydrateActiveSessions(): Promise<void> {
       }
       if (session.status !== 'running') continue;
       if (!session.projectId) continue;
-      if (sessionRegistry.getMetadata(session.sessionId)) continue;
-      sessionRegistry.register(
-        session.sessionId,
+      if (!sessionRegistry.getMetadata(session.sessionId)) {
+        sessionRegistry.register(
+          session.sessionId,
+          session.projectId,
+          (session.sessionType as SessionType) ?? 'other',
+          session.branchId ?? undefined
+        );
+        projectStateStore.addRunningSession(session.projectId, session.sessionId);
+      }
+      // Whether new to this client or already registered: the hold event is
+      // only emitted on change, so a hold entered (or withdrawn) while this
+      // client wasn't listening is only ever learned from the snapshot.
+      projectStateStore.setSessionBackgroundHold(
         session.projectId,
-        (session.sessionType as SessionType) ?? 'other',
-        session.branchId ?? undefined
+        session.sessionId,
+        session.holding
       );
-      projectStateStore.addRunningSession(session.projectId, session.sessionId);
     }
   } finally {
     hydrationFetchesInFlight--;

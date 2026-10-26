@@ -63,12 +63,16 @@ beforeEach(() => {
     projectStateStore: { isUnread: () => false },
   }));
   vi.doMock('./projectStatus', () => ({ getProjectStatus: vi.fn() }));
+  vi.doMock('./workspaceLifecycle.svelte', () => ({
+    workspaceLifecycle: { getWorktreeErrors: () => new Map() },
+  }));
 });
 
 afterEach(() => {
   vi.doUnmock('../../stores/projectsData.svelte');
   vi.doUnmock('../../stores/projectState.svelte');
   vi.doUnmock('./projectStatus');
+  vi.doUnmock('./workspaceLifecycle.svelte');
   vi.unstubAllGlobals();
 });
 

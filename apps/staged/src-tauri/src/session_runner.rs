@@ -1212,18 +1212,35 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
     app_handle: &AppHandle<R>,
     error: &str,
 ) -> bool {
-    let transitioned = store
-        .transition_from_running(
-            session_id,
-            SessionStatus::Error,
-            Some(error),
-            Some(&CompletionReason::Crashed),
-        )
-        .unwrap_or(false);
-    log::error!(
-        "Session {session_id} failed before its run started (transition won: \
-         {transitioned}): {error}"
-    );
+    let transitioned = match store.transition_from_running(
+        session_id,
+        SessionStatus::Error,
+        Some(error),
+        Some(&CompletionReason::Crashed),
+    ) {
+        Ok(true) => {
+            log::error!("Session {session_id} failed before its run started: {error}");
+            true
+        }
+        Ok(false) => {
+            // Routine, not a fault: a Stop that landed first already wrote
+            // `cancelled` (or the row is gone), and that terminal state stands.
+            log::debug!(
+                "Session {session_id} failed before its run started, but its row was \
+                 already finalized: {error}"
+            );
+            false
+        }
+        Err(store_error) => {
+            // The row may still read `running`; nothing finalizes it until the
+            // dead-owner sweep, so this is a fault worth surfacing.
+            log::error!(
+                "Session {session_id} failed before its run started ({error}), and \
+                 recording the failure also failed: {store_error}"
+            );
+            false
+        }
+    };
     if transitioned || matches!(store.get_session(session_id), Ok(None)) {
         emit_status(
             app_handle,
@@ -1369,13 +1386,20 @@ pub fn start_session(
         // during the startup is the state the user asked for; otherwise the
         // row carries the real cause — "No ACP agent found", a missing
         // worktree — rather than being left `running` for the sweep to end
-        // as "Staged lost track of this session". Every caller that put the
-        // row into `running` is covered: the immediate and queued branch
-        // starts (whose own `finish_failed_before_run` then loses the CAS
-        // and writes nothing), the pipeline handoff (whose
-        // `finish_failed_pipeline_handoff_start` stamps the step off the row
-        // this writes), and the plain `start_session` / `resume_session`
-        // commands, which write no terminal state of their own.
+        // as "Staged lost track of this session". This closure finalizes
+        // runner-originated failures — driver creation, provider resolution,
+        // persisting the user message — for every caller that put the row
+        // into `running`: the immediate and queued branch starts (whose own
+        // `finish_failed_before_run` then loses the CAS and writes nothing),
+        // the pipeline handoff (whose `finish_failed_pipeline_handoff_start`
+        // stamps the step off the row this writes), and the plain
+        // `start_session` / `resume_session` / `start_project_session`
+        // commands. Those commands wrap the runner call in
+        // `fail_session_start_on_error` (session_commands.rs), which covers
+        // failures in the steps *before* the runner is entered — the project
+        // note stub, the persisted ACP config selection — and, for a runner
+        // failure, loses the `transition_from_running` CAS to this closure
+        // and takes its `Ok(false)` "already finalized" debug arm.
         |error, accepted_cancellation| {
             let transitioned = match accepted_cancellation {
                 Some(completion_reason) => finish_cancelled_before_run(
@@ -2850,7 +2874,7 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
 /// just as terminal (`cancelled`, written by [`finish_cancelled_before_run`])
 /// and whose branch queue would otherwise sit parked until some unrelated
 /// session happened to finish.
-fn drain_queued_after_terminal_state(
+pub(crate) fn drain_queued_after_terminal_state(
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
     app_handle: AppHandle,
@@ -3478,16 +3502,23 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 // Orphaned session recovery
 // =============================================================================
 
-/// On startup, recover any sessions whose owner process is no longer alive.
+/// Recover any sessions whose owner process is no longer alive.
 ///
 /// Each session records the PID of the Staged process that started it
-/// (`owner_pid`). On startup we check each running session:
-/// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
+/// (`owner_pid`). Run once at startup and then on a timer by
+/// [`spawn_dead_session_sweep`]; for each running session:
+/// - `owner_pid` is our own PID → ours; its session thread owns the row, skip.
 /// - `owner_pid` belongs to a live process → another Staged instance owns
 ///   it; leave it alone.
 /// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
 ///   error with `AppQuit` reason and emit `session-status-changed` so the
 ///   frontend learns the outcome.
+///
+/// Only `running` rows are swept. A `queued` row carries no owner — it waits
+/// for a branch drain, and whether one is still coming depends on the
+/// branch's other sessions, dependency gating and in-flight worktree
+/// operations — so there is no cheap test here for a queued row that nothing
+/// will ever drain.
 pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
@@ -3516,6 +3547,13 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
                 .unwrap_or(false);
             let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
             let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
+            if transitioned {
+                log::info!(
+                    "Recovered session {} whose owner process {:?} is gone",
+                    session.id,
+                    session.owner_pid
+                );
+            }
             emit_status(
                 &app_handle,
                 &session.id,
@@ -3536,6 +3574,43 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
             }
         }
     }
+}
+
+/// How often [`spawn_dead_session_sweep`] re-runs [`recover_dead_sessions`].
+const DEAD_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Re-run [`recover_dead_sessions`] periodically for the life of the process.
+///
+/// The startup sweep only helps the instance that restarts. Every build
+/// flavour shares one database, status events are delivered in-process, and a
+/// desktop window hydrates its busy state once at load — so a session owned
+/// by an instance that dies later stays `running` in every *other* window's
+/// sidebar until one of them happens to restart. Sweeping on a timer finalizes
+/// the row and emits its terminal event from whichever instance is still up.
+pub fn spawn_dead_session_sweep(store: Arc<Store>, app_handle: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(DEAD_SESSION_SWEEP_INTERVAL);
+        // A sweep that overruns the interval (several instances, each with
+        // foreign running rows to probe) should be followed by one tick a full
+        // interval later, not by a burst of catch-up ticks.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick completes immediately; startup already ran that sweep.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // The sweep is synchronous (store mutex, a `kill -0` subprocess per
+            // foreign-pid row), so run it off the async workers.
+            let store = Arc::clone(&store);
+            let app_handle = app_handle.clone();
+            if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+                recover_dead_sessions(store, app_handle);
+            })
+            .await
+            {
+                log::error!("[session_runner] Dead-session sweep panicked: {e}");
+            }
+        }
+    });
 }
 
 /// On startup, return unsent queued follow-up messages claimed by dead owners

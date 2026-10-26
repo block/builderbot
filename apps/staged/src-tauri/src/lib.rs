@@ -284,6 +284,10 @@ fn start_store_services(
 ) {
     background_sync::spawn(Arc::clone(&store), app_handle.clone());
     session_queue::sweep::spawn(Arc::clone(&store), registry, app_handle.clone());
+    // The startup dead-owner recovery only helps the instance that restarts:
+    // an instance that dies later leaves its sessions `running` in every other
+    // window until some instance sweeps them.
+    session_runner::spawn_dead_session_sweep(Arc::clone(&store), app_handle.clone());
     pr_poll_scheduler::spawn(pr_scheduler, store, app_handle);
 }
 

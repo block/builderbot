@@ -2,7 +2,8 @@ import type { Branch } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectRunActionsStore, type RunActionPhase } from '../../stores/projectRunActions.svelte';
 
-export type ProjectStatusKind = 'deleting' | 'runAction' | 'running' | 'unread' | 'idle';
+export type ProjectStatusKind =
+  'deleting' | 'runAction' | 'running' | 'backgroundHold' | 'unread' | 'idle';
 
 export interface ProjectStatus {
   kind: ProjectStatusKind;
@@ -10,21 +11,31 @@ export interface ProjectStatus {
   runActionPhase: RunActionPhase;
 }
 
-function hasProvisioningWorkspace(branches: Branch[]): boolean {
+function hasProvisioningWorkspace(
+  branches: Branch[],
+  worktreeErrors?: ReadonlyMap<string, string>
+): boolean {
   return branches.some((branch) => {
     if (branch.branchType === 'remote') {
       return branch.workspaceStatus === 'starting';
     }
 
-    // Local branches are considered provisioning until their worktree path is attached.
-    return !branch.worktreePath;
+    // Local branches are considered provisioning until their worktree path is
+    // attached — unless setup already failed: the branch card shows that error
+    // and nothing is in progress until a retry.
+    return !branch.worktreePath && !worktreeErrors?.has(branch.id);
   });
 }
 
+/**
+ * `worktreeErrors` is `workspaceLifecycle.getWorktreeErrors()`: branch id →
+ * message for local branches whose `setup_worktree` failed.
+ */
 export function getProjectStatus(
   projectId: string,
   deletingProjectNames?: Map<string, string>,
-  branches: Branch[] = []
+  branches: Branch[] = [],
+  worktreeErrors?: ReadonlyMap<string, string>
 ): ProjectStatus {
   if (deletingProjectNames?.has(projectId)) {
     return { kind: 'deleting', runningCount: 0, runActionPhase: null };
@@ -32,12 +43,16 @@ export function getProjectStatus(
 
   const runActionPhase = projectRunActionsStore.getRunActionPhase(projectId);
   const hasRunningSessions = projectStateStore.hasRunningSessions(projectId);
-  const hasStartingWorkspace = hasProvisioningWorkspace(branches);
+  const hasStartingWorkspace = hasProvisioningWorkspace(branches, worktreeErrors);
 
-  // Sessions or provisioning workspaces
+  // Sessions or provisioning workspaces. When every running session is parked
+  // on background work and nothing is provisioning, the project is busy but
+  // nothing visible is happening — report that rather than a generic spin.
   if (hasRunningSessions || hasStartingWorkspace) {
+    const waitingOnBackground =
+      !hasStartingWorkspace && projectStateStore.isWaitingOnBackground(projectId);
     return {
-      kind: 'running',
+      kind: waitingOnBackground ? 'backgroundHold' : 'running',
       runningCount: projectStateStore.getRunningSessionCount(projectId),
       runActionPhase,
     };

@@ -741,6 +741,7 @@ mod tests {
             branch_id: Some("b1".to_string()),
             session_type: session_type.map(str::to_string),
             status: status.as_str().to_string(),
+            holding: false,
         }
     }
 

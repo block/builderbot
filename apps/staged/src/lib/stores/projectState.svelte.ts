@@ -23,6 +23,9 @@ const UNREAD_PROJECTS_STORE_KEY = 'unread-projects';
 interface ProjectState {
   unread: boolean;
   runningSessions: Set<string>; // Set of session IDs currently running in this project
+  // Subset of runningSessions held open waiting on background work
+  // (`session-background-hold`). Always pruned together with runningSessions.
+  heldSessions: Set<string>;
 }
 
 class ProjectStateStore {
@@ -50,6 +53,7 @@ class ProjectStateStore {
       state = {
         unread: false,
         runningSessions: new Set(),
+        heldSessions: new Set(),
       };
       this.states.set(projectId, state);
       this.version++; // Trigger reactivity
@@ -125,8 +129,43 @@ class ProjectStateStore {
     const state = this.states.get(projectId);
     if (state) {
       state.runningSessions.delete(sessionId);
+      state.heldSessions.delete(sessionId);
       this.version++; // Trigger reactivity
     }
+  }
+
+  /**
+   * Record whether a running session is held open waiting on background work
+   * (`session-background-hold`). A hold is a sub-state of running: it is only
+   * recorded for a session this project is tracking as running, and leaves
+   * with it.
+   */
+  setSessionBackgroundHold(projectId: string, sessionId: string, holding: boolean): void {
+    const state = this.getState(projectId);
+    if (!state || !state.runningSessions.has(sessionId)) return;
+    const wasHeld = state.heldSessions.has(sessionId);
+    if (holding === wasHeld) return;
+    if (holding) {
+      state.heldSessions.add(sessionId);
+    } else {
+      state.heldSessions.delete(sessionId);
+    }
+    this.version++;
+  }
+
+  /**
+   * Check whether every running session in a project is waiting on background
+   * work, i.e. the project is busy but nothing visible is happening.
+   * False for projects with no running sessions.
+   */
+  isWaitingOnBackground(projectId: string): boolean {
+    this.version;
+    const state = this.getState(projectId);
+    if (!state || state.runningSessions.size === 0) return false;
+    for (const sessionId of state.runningSessions) {
+      if (!state.heldSessions.has(sessionId)) return false;
+    }
+    return true;
   }
 
   /**
@@ -166,6 +205,7 @@ class ProjectStateStore {
     const state = this.states.get(projectId);
     if (state) {
       state.runningSessions.clear();
+      state.heldSessions.clear();
       this.version++; // Trigger reactivity
     }
   }

@@ -1038,6 +1038,12 @@ pub struct ActiveSessionInfo {
     pub branch_id: Option<String>,
     pub session_type: Option<String>,
     pub status: String,
+    /// Whether the session is in a background hold right now (see
+    /// `SessionBackgroundHoldEvent`). Stamped from the registry by
+    /// [`get_active_sessions_impl`]; the hold event is emitted on change only,
+    /// so a client hydrating mid-hold has no other way to learn of it. False
+    /// for a session owned by another instance, which this one cannot see.
+    pub holding: bool,
 }
 
 /// Project one session to branch/project context and session type.
@@ -1097,25 +1103,34 @@ pub(crate) fn project_active_session(store: &Store, session: &store::Session) ->
         branch_id,
         session_type,
         status: session.status.as_str().to_string(),
+        holding: false,
     }
 }
 
 /// Synchronous body of [`get_active_sessions`], shared with the web-mode
 /// `dispatch()` arm.
-pub(crate) fn get_active_sessions_impl(store: &Store) -> Result<Vec<ActiveSessionInfo>, String> {
+pub(crate) fn get_active_sessions_impl(
+    store: &Store,
+    registry: &session_runner::SessionRegistry,
+) -> Result<Vec<ActiveSessionInfo>, String> {
     let sessions = store.get_active_sessions().map_err(|e| e.to_string())?;
     Ok(sessions
         .iter()
-        .map(|session| project_active_session(store, session))
+        .map(|session| {
+            let mut info = project_active_session(store, session);
+            info.holding = registry.background_hold(&session.id).holding;
+            info
+        })
         .collect())
 }
 
 #[tauri::command]
 pub fn get_active_sessions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
 ) -> Result<Vec<ActiveSessionInfo>, String> {
     let store = get_store(&store)?;
-    get_active_sessions_impl(&store)
+    get_active_sessions_impl(&store, &registry)
 }
 
 #[tauri::command]
@@ -1296,7 +1311,7 @@ pub async fn start_session(
     let _liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    session_runner::start_session(
+    let started = session_runner::start_session(
         SessionConfig {
             session_id: session.id.clone(),
             prompt,
@@ -1319,9 +1334,18 @@ pub async fn start_session(
             parent_project_note_id: None,
             background_hold: default_background_hold(),
         },
-        store,
-        app_handle,
+        Arc::clone(&store),
+        app_handle.clone(),
         Arc::clone(&registry),
+    );
+    fail_session_start_on_error(
+        &store,
+        &registry,
+        &app_handle,
+        &session.id,
+        None,
+        None,
+        started,
     )?;
 
     Ok(session)
@@ -1536,55 +1560,72 @@ pub(crate) async fn resume_session_for_store(
         },
     );
 
-    // Persist the effective selection before spawning the run: on an
-    // unavailable-config failure the run clears the stored selection, so
-    // persisting afterwards could resurrect the stale value it just cleared.
-    if acp_config_selection_to_persist != session.acp_config_selection {
-        store
-            .set_session_acp_config_selection(&session_id, acp_config_selection_to_persist.as_ref())
-            .map_err(|e| e.to_string())?;
-    }
+    // The row is `running` and announced from here on, so a failure in the
+    // rest of the start is recorded on it rather than returned alone.
+    let started = async {
+        // Persist the effective selection before spawning the run: on an
+        // unavailable-config failure the run clears the stored selection, so
+        // persisting afterwards could resurrect the stale value it just cleared.
+        if acp_config_selection_to_persist != session.acp_config_selection {
+            store
+                .set_session_acp_config_selection(
+                    &session_id,
+                    acp_config_selection_to_persist.as_ref(),
+                )
+                .map_err(|e| e.to_string())?;
+        }
 
-    session_runner::start_session(
-        SessionConfig {
-            session_id: session_id.clone(),
-            prompt,
-            working_dir,
-            agent_session_id,
-            pre_head_sha,
-            provider,
-            workspace_name,
-            extra_env: if linked_commit.is_some() {
-                session_runner::git_identity_env_from_global_config()
-            } else {
-                vec![]
+        session_runner::start_session(
+            SessionConfig {
+                session_id: session_id.clone(),
+                prompt,
+                working_dir,
+                agent_session_id,
+                pre_head_sha,
+                provider,
+                workspace_name,
+                extra_env: if linked_commit.is_some() {
+                    session_runner::git_identity_env_from_global_config()
+                } else {
+                    vec![]
+                },
+                mcp_project_id: mcp_project_id.clone(),
+                action_executor: if mcp_project_id.is_some() {
+                    Some(Arc::clone(&action_executor))
+                } else {
+                    None
+                },
+                action_registry: if mcp_project_id.is_some() {
+                    Some(Arc::clone(&action_registry))
+                } else {
+                    None
+                },
+                remote_working_dir,
+                image_ids: image_ids.unwrap_or_default(),
+                queued_message_id,
+                acp_config_selection: effective_acp_config_selection,
+                branch_id: config_branch_id.clone(),
+                project_id: config_project_id.clone(),
+                expose_pikchr_tools,
+                // When resuming a project session, keep its parent project note in
+                // scope so `child_note` repo sessions still attach to it.
+                parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+                background_hold: default_background_hold(),
             },
-            mcp_project_id: mcp_project_id.clone(),
-            action_executor: if mcp_project_id.is_some() {
-                Some(Arc::clone(&action_executor))
-            } else {
-                None
-            },
-            action_registry: if mcp_project_id.is_some() {
-                Some(Arc::clone(&action_registry))
-            } else {
-                None
-            },
-            remote_working_dir,
-            image_ids: image_ids.unwrap_or_default(),
-            queued_message_id,
-            acp_config_selection: effective_acp_config_selection,
-            branch_id: config_branch_id,
-            project_id: config_project_id,
-            expose_pikchr_tools,
-            // When resuming a project session, keep its parent project note in
-            // scope so `child_note` repo sessions still attach to it.
-            parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
-            background_hold: default_background_hold(),
-        },
-        Arc::clone(&store),
-        app_handle,
-        Arc::clone(&registry),
+            Arc::clone(&store),
+            app_handle.clone(),
+            Arc::clone(&registry),
+        )
+    }
+    .await;
+    fail_session_start_on_error(
+        &store,
+        &registry,
+        &app_handle,
+        &session_id,
+        config_branch_id,
+        config_project_id,
+        started,
     )?;
 
     Ok(())
@@ -3243,43 +3284,75 @@ pub async fn start_project_session(
     let _liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Create a project note stub linked to the session. The frontend uses the
-    // backend-resolved sessionStatus to determine whether the note is generating.
-    let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
-    store
-        .create_project_note(&note)
-        .map_err(|e| e.to_string())?;
-    let note_id = note.id.clone();
-
-    session_runner::start_session(
-        SessionConfig {
+    // Announce the row the way the resume path does, so a client that did not
+    // launch this session — or whose launch-site registration trails a fast
+    // terminal event — still holds a `running` entry for that event to clear.
+    // No branch and no session type: a project session has neither.
+    crate::web_server::emit_to_all(
+        &app_handle,
+        "session-status-changed",
+        session_runner::SessionStatusEvent {
             session_id: session.id.clone(),
-            prompt: full_prompt,
-            working_dir,
-            agent_session_id: None,
-            pre_head_sha: None,
-            provider,
-            workspace_name: None,
-            extra_env: vec![],
-            mcp_project_id: Some(project_id.clone()),
-            action_executor: Some(Arc::clone(&action_executor)),
-            action_registry: Some(Arc::clone(&action_registry)),
-            remote_working_dir: None,
-            image_ids: image_ids.unwrap_or_default(),
-            queued_message_id: None,
-            acp_config_selection,
+            status: "running".to_string(),
+            error_message: None,
+            completion_reason: None,
             branch_id: None,
-            project_id: Some(project_id),
-            // Project sessions are always local and write project notes.
-            expose_pikchr_tools: true,
-            // This project session's note is the parent for any `child_note`
-            // repo sessions it spawns.
-            parent_project_note_id: Some(note_id.clone()),
-            background_hold: default_background_hold(),
+            project_id: Some(project_id.clone()),
+            session_type: None,
         },
-        store,
-        app_handle,
-        Arc::clone(&registry),
+    );
+
+    // The row is `running` from here on, so a failure in the rest of the start
+    // is recorded on it rather than returned alone.
+    let started = async {
+        // Create a project note stub linked to the session. The frontend uses the
+        // backend-resolved sessionStatus to determine whether the note is generating.
+        let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
+        store
+            .create_project_note(&note)
+            .map_err(|e| e.to_string())?;
+
+        session_runner::start_session(
+            SessionConfig {
+                session_id: session.id.clone(),
+                prompt: full_prompt,
+                working_dir,
+                agent_session_id: None,
+                pre_head_sha: None,
+                provider,
+                workspace_name: None,
+                extra_env: vec![],
+                mcp_project_id: Some(project_id.clone()),
+                action_executor: Some(Arc::clone(&action_executor)),
+                action_registry: Some(Arc::clone(&action_registry)),
+                remote_working_dir: None,
+                image_ids: image_ids.unwrap_or_default(),
+                queued_message_id: None,
+                acp_config_selection,
+                branch_id: None,
+                project_id: Some(project_id.clone()),
+                // Project sessions are always local and write project notes.
+                expose_pikchr_tools: true,
+                // This project session's note is the parent for any `child_note`
+                // repo sessions it spawns.
+                parent_project_note_id: Some(note.id.clone()),
+                background_hold: default_background_hold(),
+            },
+            Arc::clone(&store),
+            app_handle.clone(),
+            Arc::clone(&registry),
+        )?;
+        Ok(note.id)
+    }
+    .await;
+    let note_id = fail_session_start_on_error(
+        &store,
+        &registry,
+        &app_handle,
+        &session.id,
+        None,
+        Some(project_id),
+        started,
     )?;
 
     Ok(ProjectSessionResponse {
@@ -3770,6 +3843,60 @@ fn branch_session_start_still_owned(
             if s.status == store::SessionStatus::Running
                 && s.agent_id.as_deref() == Some(start_agent_id)
     ))
+}
+
+/// Leave a session row terminal when its start fails in the steps *before*
+/// `session_runner::start_session` is entered, after the row is already
+/// `running`.
+///
+/// Every start path flips (or inserts) its row as `running` before the
+/// fallible work that follows — the project note stub, the persisted ACP
+/// config selection, the queued-session preparation. An `Err` from one of
+/// those has no session thread and no runner to record it, so the row would
+/// otherwise stay `running` under this live pid: neither the quit sweep nor
+/// `recover_dead_sessions` touches it, every busy-state snapshot reports it,
+/// and its linked note/commit/review stub reads as generating for good.
+///
+/// Failures inside the runner itself (driver, provider, user-message persist)
+/// are finalized by the runner's own `register_for_startup` on-failure
+/// closure before its `Err` reaches here, so for those this helper loses the
+/// `transition_from_running` CAS and takes
+/// [`session_runner::finish_failed_before_run`]'s `Ok(false)` "already
+/// finalized" debug arm. That same gate keeps a Stop's `cancelled` intact.
+/// Winning the transition owes the branch queue the drain any terminal state
+/// owes, the same as the session thread's own terminal path.
+///
+/// The error is returned to the caller unchanged.
+fn fail_session_start_on_error<T>(
+    store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    branch_id: Option<String>,
+    project_id: Option<String>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if let Err(error) = &result {
+        let transitioned = session_runner::finish_failed_before_run(
+            session_id,
+            branch_id.clone(),
+            project_id,
+            store,
+            app_handle,
+            error,
+        );
+        if transitioned {
+            session_runner::drain_queued_after_terminal_state(
+                Arc::clone(store),
+                Arc::clone(registry),
+                app_handle.clone(),
+                session_id.to_string(),
+                branch_id,
+                false,
+            );
+        }
+    }
+    result
 }
 
 fn failed_immediate_branch_start_owes_drain<R: tauri::Runtime>(
@@ -7112,7 +7239,8 @@ mod tests {
         let review_session =
             create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 3);
 
         let info_for = |session_id: &str| {
@@ -7149,7 +7277,8 @@ mod tests {
         let note = store::ProjectNote::new(&project.id, "note", "").with_session(&session.id);
         store.create_project_note(&note).unwrap();
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].project_id.as_deref(), Some(project.id.as_str()));
         assert_eq!(snapshot[0].branch_id, None);
@@ -7180,7 +7309,8 @@ mod tests {
         let unknown_session =
             create_session_with_status(&store, "anything else", store::SessionStatus::Running);
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 4);
 
         let info_for = |session_id: &str| {
@@ -7220,7 +7350,8 @@ mod tests {
         session.pipeline = Some(store::PipelineExecution::from_steps(&[]));
         store.create_session(&session).unwrap();
 
-        let snapshot = get_active_sessions_impl(&store).unwrap();
+        let snapshot =
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new()).unwrap();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].branch_id.as_deref(), Some(branch.id.as_str()));
         assert_eq!(
@@ -7238,7 +7369,11 @@ mod tests {
             .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
             .unwrap();
 
-        assert!(get_active_sessions_impl(&store).unwrap().is_empty());
+        assert!(
+            get_active_sessions_impl(&store, &session_runner::SessionRegistry::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A mock app so [`cancel_session_impl`]'s status event has somewhere to

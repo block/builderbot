@@ -16,6 +16,7 @@
   import SineWave from '../../shared/SineWave.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import { getProjectStatus } from './projectStatus';
+  import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import {
     hydrateProjectsSidebarState,
     projectsSidebarState,
@@ -477,8 +478,12 @@
               {@const status = getProjectStatus(
                 project.id,
                 deletingProjectNames,
-                projectBranches.get(project.id) || []
+                projectBranches.get(project.id) || [],
+                workspaceLifecycle.getWorktreeErrors()
               )}
+              {@const busy = status.kind === 'running' || status.kind === 'backgroundHold'}
+              {@const busyTitle =
+                status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
               <ContextMenu.Root>
                 <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
                   <button
@@ -492,9 +497,10 @@
                   >
                     <ProjectRowContent {project} />
                     <div class="row-status">
-                      {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                      {#if status.runActionPhase === 'running' && busy}
                         <span
                           class="status-running"
+                          title={busyTitle}
                           in:fade={{ duration: 300, delay: 150 }}
                           out:fade={{ duration: 150 }}
                         >
@@ -509,9 +515,10 @@
                         >
                           <SineWave size={12} />
                         </span>
-                      {:else if status.kind === 'runAction' || status.kind === 'running'}
+                      {:else if status.kind === 'runAction' || busy}
                         <span
                           class="status-running"
+                          title={busyTitle}
                           in:fade={{ duration: 300, delay: 150 }}
                           out:fade={{ duration: 150 }}
                         >

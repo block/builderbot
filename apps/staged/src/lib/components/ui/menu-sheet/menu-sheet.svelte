@@ -10,6 +10,9 @@
   that element, so bits-ui's own outside-interaction handling dismisses the
   menu on a tap there; `cancel` is rendered by the caller as a real menu item
   so it closes through bits-ui too.
+
+  Sub-menus (SubContentStatic) reuse the frame as a second sheet stacked over
+  the parent's, with a Back row in the `cancel` slot that closes only the sub.
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';

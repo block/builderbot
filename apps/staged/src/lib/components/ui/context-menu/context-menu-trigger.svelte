@@ -22,6 +22,7 @@
   // the release that follows can no longer click the item under the finger.
   const longPress = createLongPress({
     isDisabled: () => disabled,
+    trigger: () => ref,
     onLongPress: ({ target, clientX, clientY }) => {
       target.dispatchEvent(
         new MouseEvent('contextmenu', {
@@ -46,8 +47,11 @@
   data-slot="context-menu-trigger"
   class={cn('cn-context-menu-trigger select-none [-webkit-touch-callout:none]', className)}
   oncontextmenu={(e) => {
+    // Ours first: a trusted contextmenu trailing our synthetic one is eaten
+    // before the consumer handler runs again, and bits-ui's own opener
+    // (merged after these props) bails on the defaultPrevented event.
+    if (longPress.oncontextmenu(e)) return;
     oncontextmenu?.(e);
-    longPress.oncontextmenu(e);
   }}
   ontouchstart={(e) => {
     ontouchstart?.(e);

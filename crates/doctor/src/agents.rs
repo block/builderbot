@@ -213,17 +213,47 @@ pub fn derive_update_command(
     }
 }
 
-/// Append `--registry=<url>` to `command` when a registry override is supplied
-/// and the command is npm-backed. Non-npm commands (curl-pipe installers, auth
-/// commands, …) and the `None` registry case return the command unchanged.
+/// Append `--registry=<url>` — and, for a scoped package, its
+/// `--@scope:registry=<url>` — to `command` when a registry override is
+/// supplied and the command is npm-backed. Non-npm commands (curl-pipe
+/// installers, auth commands, …) and the `None` registry case return the
+/// command unchanged.
 ///
 /// The registry URL is always caller-supplied — the crate never bakes in a
 /// Block-specific (or any other) registry.
 pub(crate) fn apply_npm_registry(command: &str, registry: Option<&str>) -> String {
     match registry {
-        Some(url) if is_npm_command(command) => format!("{command} --registry={url}"),
+        Some(url) if is_npm_command(command) => {
+            let package = command
+                .split_whitespace()
+                .find(|token| npm_package_scope(token).is_some());
+            let flags = npm_registry_args(package.unwrap_or_default(), url);
+            format!("{command} {}", flags.join(" "))
+        }
         _ => command.to_string(),
     }
+}
+
+/// The flags that force an npm command for `package` onto `registry`.
+/// `--registry` alone only sets npm's *default* registry: a scoped package
+/// resolves through its `@scope:registry` config first, so a user npmrc
+/// carrying a scope entry would keep winning over the override. For a scoped
+/// package the scope's own key is forced too.
+pub(crate) fn npm_registry_args(package: &str, registry: &str) -> Vec<String> {
+    let mut args = vec![format!("--registry={registry}")];
+    if let Some(scope) = npm_package_scope(package) {
+        args.push(format!("--{scope}:registry={registry}"));
+    }
+    args
+}
+
+/// The `@scope` of a scoped package name (`@scope/name[@version]`), `@`
+/// included.
+fn npm_package_scope(package: &str) -> Option<&str> {
+    if !package.starts_with('@') {
+        return None;
+    }
+    package.split_once('/').map(|(scope, _)| scope)
 }
 
 /// Heuristic for whether `command` shells out to npm. Matches a leading `npm `
@@ -1284,6 +1314,30 @@ mod tests {
         assert_eq!(
             apply_npm_registry("npm view amp-acp version", Some("https://artifactory/npm")),
             "npm view amp-acp version --registry=https://artifactory/npm",
+        );
+    }
+
+    #[test]
+    fn apply_npm_registry_overrides_a_scoped_packages_scope_registry_too() {
+        assert_eq!(
+            apply_npm_registry(
+                "npm install -g @agentclientprotocol/claude-agent-acp@latest",
+                Some("https://artifactory/npm"),
+            ),
+            "npm install -g @agentclientprotocol/claude-agent-acp@latest \
+             --registry=https://artifactory/npm \
+             --@agentclientprotocol:registry=https://artifactory/npm",
+        );
+        assert_eq!(
+            npm_registry_args("@agentclientprotocol/codex-acp", "https://r/"),
+            vec![
+                "--registry=https://r/",
+                "--@agentclientprotocol:registry=https://r/"
+            ]
+        );
+        assert_eq!(
+            npm_registry_args("amp-acp", "https://r/"),
+            vec!["--registry=https://r/"]
         );
     }
 

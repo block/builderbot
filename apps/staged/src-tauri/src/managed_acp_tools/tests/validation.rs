@@ -1,6 +1,13 @@
-use super::*;
+use std::sync::Mutex;
+use std::time::Instant;
 
-const TIMEOUT: Duration = super::super::validation::VALIDATION_TIMEOUT;
+use super::*;
+use crate::managed_acp_tools::install::{install_npm_tool, shim_contents, write_shim};
+use crate::managed_acp_tools::reconcile::finish_reconcile_at;
+use crate::managed_acp_tools::test_support::*;
+use crate::managed_acp_tools::*;
+
+const TIMEOUT: Duration = VALIDATION_TIMEOUT;
 const MISSING_NATIVE: &str = "echo 'native binary not found for this platform' >&2\nexit 1\n";
 
 /// Installs `contents` as the fake `node` under `bin_dir`, through the
@@ -219,7 +226,7 @@ async fn personal_overrides_cannot_mask_missing_native_binary() {
     const MARKER: &str = "STAGED_TEST_ACP_VALIDATION";
     if std::env::var_os(MARKER).is_none() {
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "managed_acp_tools::tests::validation::personal_overrides_cannot_mask_missing_native_binary", "--nocapture"])
+            .args(["--exact", "managed_acp_tools::validation::tests::personal_overrides_cannot_mask_missing_native_binary", "--nocapture"])
             .env(MARKER, "1")
             .env("CLAUDE_CODE_EXECUTABLE", "/bin/true")
             .env("CODEX_PATH", "/bin/true")
@@ -342,9 +349,10 @@ async fn cancellation_kills_bridge_and_native_child() {
         let node = root.join("node");
         let staging = staging_install_dir(&root, tool.id);
         write_probe(&node, &staging, &tool, &format!("{HANGING_NATIVE}wait\n"));
-        let mut probe = tokio::spawn(async move {
-            super::super::validation::validate_staged_tool(&node, &staging, &tool, TIMEOUT).await
-        });
+        let mut probe =
+            tokio::spawn(
+                async move { validate_staged_tool(&node, &staging, &tool, TIMEOUT).await },
+            );
         // Validation should hang until aborted. If it returns first (say, the
         // node shim failed to start), report why instead of a bare timeout.
         let pids = tokio::select! {

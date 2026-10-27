@@ -439,15 +439,17 @@ fn latest_npm(
 ) -> ProbeResult {
     let mut cmd = Command::new("npm");
     cmd.args(["view", package_id, "version"]);
+    let mut display_command = format!("npm view {package_id} version");
     if let Some(registry) = npm_registry {
-        cmd.args(["--registry", registry]);
+        // `--registry` plus the package's scope key, so a scoped `~/.npmrc`
+        // entry cannot keep the probe on another registry than the install.
+        for arg in crate::agents::npm_registry_args(package_id, registry) {
+            display_command.push(' ');
+            display_command.push_str(&arg);
+            cmd.arg(arg);
+        }
     }
     apply_doctor_env(&mut cmd, env);
-    let display_command = if let Some(registry) = npm_registry {
-        format!("npm view {package_id} version --registry {registry}")
-    } else {
-        format!("npm view {package_id} version")
-    };
     let output = match run_command_with_timeout(cmd, display_command, FRESHNESS_PROBE_TIMEOUT) {
         Ok(output) => output,
         Err(CommandError::Timeout { command, timeout }) => {

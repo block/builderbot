@@ -103,7 +103,12 @@ Staged does not hardcode where packages come from:
   `registry.npmjs.org`). A corporate laptop whose `~/.npmrc` already points
   at an internal mirror keeps using it. Set `STAGED_NPM_REGISTRY` to force a
   registry for every Staged-run npm command (bridge installs, Doctor's
-  npm-based installs, and update checks).
+  npm-based installs, and update checks); it is passed as `--registry` and,
+  for a scoped package such as `@agentclientprotocol/*`, as that scope's
+  `--@scope:registry` too, so it also overrides a scoped `~/.npmrc` entry.
+  Doctor's cached "latest version" answers are keyed by this configuration
+  (override, environment, and `~/.npmrc` identity), so editing either is
+  picked up on the next check rather than after the cache's hour.
 - **Node.js runtime.** The pinned runtime (`node-runtime.lock.json`) is
   downloaded from `https://nodejs.org/dist` and verified against the lock's
   SHA-256. Set `STAGED_NODE_DIST_URL` to a mirror with the same path layout

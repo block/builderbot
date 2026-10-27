@@ -445,13 +445,20 @@ pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport 
 /// The managed versions are gathered concurrently with the crate's run: the
 /// installed version is a local `package.json` read on both passes, and the
 /// registry lookup for the latest version runs only when `check_freshness`
-/// is set, so the first paint never waits on the network.
+/// is set, so the first paint never waits on the network. The npm registry
+/// probe for a missing-managed-copy row (see [`managed_install_diagnostics`])
+/// joins them too, decided from the shim dir up front, so it never adds to
+/// the report's wall-clock after the crate's checks are in.
 async fn run_doctor_report(
     check_freshness: bool,
     queue_check: Option<DoctorCheck>,
 ) -> DoctorReport {
     let env_vars = doctor_env_vars().await;
-    let (mut report, node_runtime, managed_versions) = tokio::join!(
+    let shim_bin_dir = crate::managed_acp_tools::managed_shim_bin_dir();
+    let probe_registry = shim_bin_dir
+        .as_deref()
+        .is_some_and(any_managed_shim_missing);
+    let (mut report, node_runtime, managed_versions, npm_registry) = tokio::join!(
         doctor::run_checks_with_options(run_checks_options(
             check_freshness,
             env_vars.clone(),
@@ -459,12 +466,11 @@ async fn run_doctor_report(
         )),
         run_node_runtime_check(),
         managed_bridge_versions(check_freshness, &env_vars),
+        detect_npm_registry_label_if(probe_registry, &env_vars),
     );
-    match crate::managed_acp_tools::managed_shim_bin_dir() {
+    match shim_bin_dir {
         Some(shim_bin_dir) => {
-            let diagnostics =
-                managed_install_diagnostics(&report, &managed_versions, &shim_bin_dir, &env_vars)
-                    .await;
+            let diagnostics = managed_install_diagnostics(npm_registry);
             apply_managed_bridge_readouts(
                 &mut report,
                 &managed_versions,
@@ -1039,8 +1045,10 @@ struct ManagedInstallDiagnostics {
     last_reconcile: Option<ReconcileRecord>,
     /// The registry label for the row's raw output: the `STAGED_NPM_REGISTRY`
     /// override, what `npm config get registry` answered under the doctor
-    /// env snapshot, or "npm default" when neither could be asked.
-    npm_registry: String,
+    /// env snapshot, or "npm default" when neither could be asked. `None`
+    /// when the probe was skipped because every managed shim was present
+    /// when the report started (see [`any_managed_shim_missing`]).
+    npm_registry: Option<String>,
     /// Wall-clock milliseconds the reconcile age is rendered against.
     now_ms: u64,
 }
@@ -1055,13 +1063,21 @@ impl ManagedInstallDiagnostics {
     /// One raw-output line on the last managed install run.
     fn last_reconcile_line(&self) -> String {
         match &self.last_reconcile {
-            None => "last managed install: none recorded yet".to_string(),
+            None => "last managed install: not run yet (runs at launch and daily)".to_string(),
             Some(record) => format!(
                 "last managed install: {} {}",
                 if record.ok { "succeeded" } else { "failed" },
                 format_age(record.at_ms, self.now_ms)
             ),
         }
+    }
+
+    /// One raw-output line naming the npm registry Doctor detected.
+    fn npm_registry_line(&self) -> String {
+        format!(
+            "npm registry: {}",
+            self.npm_registry.as_deref().unwrap_or("not probed")
+        )
     }
 }
 
@@ -1090,36 +1106,38 @@ fn format_age(at_ms: u64, now_ms: u64) -> String {
     }
 }
 
-/// Gather [`ManagedInstallDiagnostics`] for a report. The registry probe
-/// spawns `npm`, so it runs only when a Claude/Codex row will actually show
-/// it: one that resolved to a copy outside the managed shim dir.
-async fn managed_install_diagnostics(
-    report: &DoctorReport,
-    versions: &[ManagedBridgeVersions],
-    shim_bin_dir: &Path,
-    env_vars: &[(String, String)],
-) -> ManagedInstallDiagnostics {
-    let unmanaged_row_present = report.checks.iter().any(|check| {
-        let Some(tool_id) = managed_tool_id_for_check(&check.id) else {
-            return false;
-        };
-        let Some(tool) = versions.iter().find(|v| v.tool.id == tool_id) else {
-            return false;
-        };
-        check
-            .path
-            .as_deref()
-            .is_some_and(|path| !is_managed_shim_path(path, shim_bin_dir, tool.tool.binary))
-    });
-    let npm_registry = if unmanaged_row_present {
-        detect_npm_registry_label(env_vars).await
-    } else {
-        String::new()
-    };
+/// Gather [`ManagedInstallDiagnostics`] for a report from `state.json` and
+/// the registry label the report's probes produced (see
+/// [`detect_npm_registry_label_if`]).
+fn managed_install_diagnostics(npm_registry: Option<String>) -> ManagedInstallDiagnostics {
     ManagedInstallDiagnostics {
         last_reconcile: last_reconcile_record(),
         npm_registry,
         now_ms: crate::managed_acp_tools::now_ms(),
+    }
+}
+
+/// Whether any managed bridge's shim is absent from `shim_bin_dir`. The shim
+/// dir is first on the probe PATH, so this is the only way a Claude/Codex row
+/// can resolve to a copy Staged does not manage — and so the only time the
+/// npm registry probe, which spawns `npm`, has a row to show its answer on.
+/// Decided before the probes run so that probe can join them rather than
+/// wait on the report.
+fn any_managed_shim_missing(shim_bin_dir: &Path) -> bool {
+    crate::managed_acp_tools::managed_tools()
+        .iter()
+        .any(|tool| !shim_bin_dir.join(tool.binary).is_file())
+}
+
+/// [`detect_npm_registry_label`] when `probe` is set; `None` otherwise.
+async fn detect_npm_registry_label_if(
+    probe: bool,
+    env_vars: &[(String, String)],
+) -> Option<String> {
+    if probe {
+        Some(detect_npm_registry_label(env_vars).await)
+    } else {
+        None
     }
 }
 
@@ -1131,7 +1149,9 @@ fn last_reconcile_record() -> Option<ReconcileRecord> {
 
 /// The npm registry a managed install resolves, labeled with where that
 /// answer came from — so a row can say which mirror (or the public registry)
-/// the failed install actually asked.
+/// the failed install actually asked. The underlying `npm config get
+/// registry` is bounded to 5 s and cached per env snapshot for a minute, so
+/// a Doctor refresh does not spawn npm again.
 async fn detect_npm_registry_label(env_vars: &[(String, String)]) -> String {
     if let Some(registry) = crate::managed_acp_tools::npm_registry_override() {
         return format!("{registry} (STAGED_NPM_REGISTRY)");
@@ -1209,12 +1229,14 @@ fn append_raw_output(check: &mut DoctorCheck, block: &str) {
 /// way to get the managed copy. So:
 ///
 /// - `status` drops to `Warn` (a row already warning or failing keeps its
-///   status), and `message` says which copy is in use, that the managed copy
-///   is missing, and — when the last reconcile recorded an error for this
-///   tool — that error, which names the registry or URL it used.
+///   status), and `message` says which copy is in use and, before any
+///   reconcile has finished, that the managed install "hasn't completed yet"
+///   — a healthy first launch, not a failure; after one, that the managed
+///   copy is missing, with — when the last reconcile recorded an error for
+///   this tool — the short of that error (see [`short_error_fragment`]).
 /// - `raw_output` gains the expected shim path, the last reconcile's outcome
-///   and age, the error with a classified hint on what to change
-///   (`install_failure_hint`), and the npm registry Doctor detected.
+///   and age, the full recorded error with a classified hint on what to
+///   change (`install_failure_hint`), and the npm registry Doctor detected.
 /// - The row's fix becomes the managed install (`Bridge`, which
 ///   `run_doctor_fix` routes to `install_managed_tool_logged` for these two
 ///   checks), described by [`managed_install_description`] — the same text
@@ -1239,17 +1261,19 @@ fn flag_missing_managed_copy(
         return false;
     }
     let reconcile_error = diagnostics.reconcile_error_for(tool.id);
-    let error_suffix = reconcile_error
-        .map(|error| format!(": {error}"))
-        .unwrap_or_default();
+    let situation = match (&diagnostics.last_reconcile, reconcile_error) {
+        (None, _) => "Staged's managed install hasn't completed yet".to_string(),
+        (Some(_), None) => "Staged's managed copy is missing".to_string(),
+        (Some(_), Some(error)) => format!(
+            "Staged's managed copy is missing: {}",
+            short_error_fragment(error)
+        ),
+    };
     if check.status == CheckStatus::Pass {
         check.status = CheckStatus::Warn;
-        check.message = format!("Using {path} — Staged's managed copy is missing{error_suffix}");
+        check.message = format!("Using {path} — {situation}");
     } else {
-        check.message = format!(
-            "{}; using {path} — Staged's managed copy is missing{error_suffix}",
-            check.message
-        );
+        check.message = format!("{}; using {path} — {situation}", check.message);
     }
 
     let mut detail = vec![
@@ -1265,7 +1289,7 @@ fn flag_missing_managed_copy(
             detail.push(format!("hint: {hint}"));
         }
     }
-    detail.push(format!("npm registry: {}", diagnostics.npm_registry));
+    detail.push(diagnostics.npm_registry_line());
     append_raw_output(check, &detail.join("\n"));
 
     let latest = versions.latest.as_deref().or_else(|| {
@@ -1278,6 +1302,31 @@ fn flag_missing_managed_copy(
     check.fix_command = Some(managed_install_description(tool, latest, &path));
     true
 }
+
+/// Most a recorded install error contributes to a row's one-line message:
+/// npm's own `npm error code <CODE>` when the error carries one (what
+/// `npm_error_summary` leads with), else the error's first
+/// [`SHORT_ERROR_CHARS`] characters, ellipsized. The full text, its hint and
+/// the registry stay in the raw output for **Copy details**.
+fn short_error_fragment(error: &str) -> String {
+    const NPM_CODE: &str = "npm error code ";
+    if let Some((_, rest)) = error.split_once(NPM_CODE) {
+        let code = rest
+            .split(|c: char| c == ';' || c.is_whitespace())
+            .next()
+            .unwrap_or_default();
+        if !code.is_empty() {
+            return format!("{NPM_CODE}{code}");
+        }
+    }
+    match error.char_indices().nth(SHORT_ERROR_CHARS) {
+        Some((cut, _)) => format!("{}…", error[..cut].trim_end()),
+        None => error.to_string(),
+    }
+}
+
+/// How much of a recorded error without an npm code fits on the row.
+const SHORT_ERROR_CHARS: usize = 120;
 
 /// Give a managed Claude/Codex row the two readouts its one executable
 /// stands for, and report whether it did.
@@ -1694,8 +1743,14 @@ fn build_node_runtime_check(
             record.errors.len()
         ));
         detail.extend(record.errors.iter().map(|error| format!("- {error}")));
-        if let Some(hint) =
-            crate::managed_acp_tools::install_failure_hint(&reconcile_headline(record), "Node.js")
+        // Only a runtime download error is this row's to advise on: a bridge's
+        // npm 404 as the headline must not read as "no registry carries
+        // Node.js".
+        let headline = reconcile_headline(record);
+        if let Some(hint) = headline
+            .starts_with(NODE_DOWNLOAD_ERROR_PREFIX)
+            .then(|| crate::managed_acp_tools::install_failure_hint(&headline, "Node.js"))
+            .flatten()
         {
             detail.push(format!("hint: {hint}"));
         }
@@ -1720,6 +1775,10 @@ fn build_node_runtime_check(
         fix,
     ))
 }
+
+/// How `ManagedNodeError`'s download failures (network, HTTP status) render,
+/// so the runtime row can tell its own download failure from a bridge's.
+const NODE_DOWNLOAD_ERROR_PREFIX: &str = "Node.js runtime download failed";
 
 /// The one error a failed reconcile is summarised by on the runtime row: the
 /// first that names the Node.js runtime download — the failure every bridge
@@ -2009,6 +2068,87 @@ mod tests {
         assert!(!check.raw_output.as_deref().unwrap().contains("hint:"));
     }
 
+    /// The hint is the runtime row's own only when the headline is a runtime
+    /// download failure: a bridge's npm 404 is still reported, but never as
+    /// "the configured registry does not carry Node.js". A 4xx from the dist
+    /// host points at the download URL.
+    #[test]
+    fn runtime_row_hints_only_on_its_own_download_failure() {
+        let bridge_404 = "codex-acp: npm install failed: npm install exited with exit status: 1 \
+             (registry: https://mirror.example.test/npm/): npm error code E404; 404 Not Found - \
+             GET https://mirror.example.test/npm/@agentclientprotocol%2fcodex-acp";
+        let check = build_node_runtime_check(
+            ManagedNodeRuntimeState::Missing,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &[],
+            Some(&reconcile_record(false, vec![bridge_404])),
+        )
+        .unwrap();
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check
+                .message
+                .ends_with("could not be installed: npm install failed: npm install exited with exit status: 1 \
+                 (registry: https://mirror.example.test/npm/): npm error code E404; 404 Not Found - \
+                 GET https://mirror.example.test/npm/@agentclientprotocol%2fcodex-acp"),
+            "{}",
+            check.message
+        );
+        let output = check.raw_output.as_deref().unwrap();
+        assert!(output.contains(&format!("- {bridge_404}")), "{output}");
+        assert!(!output.contains("hint:"), "{output}");
+        assert!(!output.contains("Node.js\n"), "{output}");
+
+        let check = build_node_runtime_check(
+            ManagedNodeRuntimeState::Missing,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &[],
+            Some(&reconcile_record(
+                false,
+                vec![
+                    bridge_404,
+                    "claude-acp: Node.js runtime download failed: HTTP 404",
+                ],
+            )),
+        )
+        .unwrap();
+        assert!(
+            check
+                .message
+                .ends_with("could not be installed: Node.js runtime download failed: HTTP 404"),
+            "{}",
+            check.message
+        );
+        let output = check.raw_output.as_deref().unwrap();
+        assert!(
+            output.contains(
+                "hint: the Node.js download URL returned HTTP 404 — check STAGED_NODE_DIST_URL"
+            ),
+            "{output}"
+        );
+
+        // A checksum mismatch is the headline but not a download failure Doctor
+        // has advice for.
+        let check = build_node_runtime_check(
+            ManagedNodeRuntimeState::Missing,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &[],
+            Some(&reconcile_record(
+                false,
+                vec!["claude-acp: Node.js runtime archive SHA-256 mismatch: expected a, got b"],
+            )),
+        )
+        .unwrap();
+        assert!(
+            check
+                .message
+                .ends_with("Node.js runtime archive SHA-256 mismatch: expected a, got b"),
+            "{}",
+            check.message
+        );
+        assert!(!check.raw_output.as_deref().unwrap().contains("hint:"));
+    }
+
     #[test]
     fn format_age_rounds_to_the_largest_whole_unit() {
         assert_eq!(format_age(1_000, 1_000), "just now");
@@ -2207,12 +2347,17 @@ mod tests {
         versions: &ManagedBridgeVersions,
         check_freshness: bool,
     ) -> DoctorCheck {
-        apply_with(
-            check,
-            versions,
-            check_freshness,
-            &ManagedInstallDiagnostics::default(),
-        )
+        apply_with(check, versions, check_freshness, &clean_diagnostics())
+    }
+
+    /// A reconcile that succeeded a minute ago and left nothing to report:
+    /// the managed copy is then simply missing, with no error to name.
+    fn clean_diagnostics() -> ManagedInstallDiagnostics {
+        ManagedInstallDiagnostics {
+            last_reconcile: Some(reconcile_record(true, vec![])),
+            npm_registry: Some("https://registry.npmjs.org/ (per npm config)".to_string()),
+            now_ms: 61_000,
+        }
     }
 
     fn apply_with(
@@ -2454,7 +2599,7 @@ mod tests {
             "{detail}"
         );
         assert!(
-            detail.contains("last managed install: none recorded yet"),
+            detail.contains("last managed install: succeeded 1 minute ago"),
             "{detail}"
         );
         assert!(!detail.contains("hint:"), "{detail}");
@@ -2480,10 +2625,69 @@ mod tests {
         assert_eq!(json(&without_missing_copy_flag(after)), before);
     }
 
+    /// Before the first reconcile has finished — a fresh profile whose launch
+    /// install is still downloading — a Homebrew copy on PATH is expected, so
+    /// the row must not read as a failure: it says the managed install hasn't
+    /// completed yet, the detail says when it runs, and the Fix stays
+    /// available for whoever would rather not wait. An already-warning row
+    /// keeps its own message in front.
+    #[test]
+    fn a_user_copy_before_the_first_reconcile_is_not_called_a_failure() {
+        let installed = versions(None, Some("0.17.0"));
+        let path = "/opt/homebrew/bin/claude-agent-acp";
+        let diagnostics = ManagedInstallDiagnostics {
+            last_reconcile: None,
+            npm_registry: Some("https://registry.npmjs.org/ (per npm config)".to_string()),
+            now_ms: 0,
+        };
+
+        let check =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        let after = apply_with(check, &installed, true, &diagnostics);
+        assert_eq!(after.status, CheckStatus::Warn);
+        assert_eq!(
+            after.message,
+            format!("Using {path} — Staged's managed install hasn't completed yet")
+        );
+        assert!(!after.message.contains("missing"), "{}", after.message);
+        assert_eq!(after.fix_type, Some(FixType::Bridge));
+        assert_eq!(
+            after.fix_command.as_deref(),
+            Some(
+                "install Staged's managed @agentclientprotocol/claude-agent-acp 0.17.0 in \
+                 ~/.staged/packages (the copy at /opt/homebrew/bin/claude-agent-acp is left as is)"
+            )
+        );
+        let detail = after.raw_output.as_deref().expect("detail");
+        assert!(
+            detail.contains("last managed install: not run yet (runs at launch and daily)"),
+            "{detail}"
+        );
+        assert!(!detail.contains("hint:"), "{detail}");
+        assert!(
+            detail.contains("npm registry: https://registry.npmjs.org/ (per npm config)"),
+            "{detail}"
+        );
+
+        let mut check =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        check.status = CheckStatus::Warn;
+        check.message = "Installed, not authenticated".to_string();
+        let after = apply_with(check, &installed, true, &diagnostics);
+        assert_eq!(
+            after.message,
+            format!(
+                "Installed, not authenticated; using {path} — Staged's managed install hasn't completed yet"
+            )
+        );
+        assert_eq!(after.fix_type, Some(FixType::Bridge));
+    }
+
     /// With a failed reconcile on record the row says why the managed copy is
-    /// missing — the recorded error for *this* tool, which names the registry
-    /// it used — and the detail adds the classified hint and the registry
-    /// Doctor detected. The other tool's error stays off this row.
+    /// missing — only the `npm error code` of the recorded error for *this*
+    /// tool, the rest of which (naming the registry it used) goes to the
+    /// detail with the classified hint and the registry Doctor detected. The
+    /// other tool's error stays off this row.
     #[test]
     fn a_user_copy_names_the_recorded_install_error_and_its_hint() {
         let installed = versions(None, None);
@@ -2504,7 +2708,7 @@ mod tests {
                         .to_string(),
                 ],
             }),
-            npm_registry: "https://registry.npmjs.org/ (per npm config)".to_string(),
+            npm_registry: Some("https://registry.npmjs.org/ (per npm config)".to_string()),
             now_ms: 5 * 60_000,
         };
 
@@ -2515,7 +2719,12 @@ mod tests {
         assert_eq!(after.status, CheckStatus::Warn);
         assert_eq!(
             after.message,
-            format!("Using {path} — Staged's managed copy is missing: {claude_error}")
+            format!("Using {path} — Staged's managed copy is missing: npm error code FETCH_ERROR")
+        );
+        assert!(
+            !after.message.contains("invalid json"),
+            "the full error stays out of the one-line message: {}",
+            after.message
         );
         assert_eq!(after.fix_type, Some(FixType::Bridge));
         let detail = after.raw_output.as_deref().expect("detail");
@@ -2552,7 +2761,7 @@ mod tests {
         assert_eq!(
             after.message,
             format!(
-                "Installed, not authenticated; using {path} — Staged's managed copy is missing: {claude_error}"
+                "Installed, not authenticated; using {path} — Staged's managed copy is missing: npm error code FETCH_ERROR"
             )
         );
         let detail = after.raw_output.as_deref().unwrap();
@@ -2560,6 +2769,97 @@ mod tests {
             detail.starts_with("strategy 0: PATH => /opt/homebrew/bin/claude-agent-acp\n\nStaged-managed copy: missing"),
             "the crate's trace stays on top: {detail}"
         );
+        assert!(
+            detail.contains(&format!("claude-acp: {claude_error}")),
+            "{detail}"
+        );
+
+        // An error with no npm code is ellipsized on the row and whole in the
+        // detail; the registry line says when the probe did not run.
+        let long_error = format!(
+            "installed ACP bridge is incomplete: @agentclientprotocol/claude-agent-acp: {}",
+            "validation probe exited with 1 and printed a very long explanation ".repeat(3)
+        );
+        let diagnostics = ManagedInstallDiagnostics {
+            last_reconcile: Some(reconcile_record(
+                false,
+                vec![&format!("claude-acp: {long_error}")],
+            )),
+            npm_registry: None,
+            now_ms: 0,
+        };
+        let check =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        let after = apply_with(check, &installed, true, &diagnostics);
+        let expected_fragment: String = long_error.chars().take(SHORT_ERROR_CHARS).collect();
+        assert_eq!(
+            after.message,
+            format!(
+                "Using {path} — Staged's managed copy is missing: {}…",
+                expected_fragment.trim_end()
+            )
+        );
+        let detail = after.raw_output.as_deref().unwrap();
+        assert!(
+            detail.contains(&format!("claude-acp: {long_error}")),
+            "{detail}"
+        );
+        assert!(detail.contains("npm registry: not probed"), "{detail}");
+    }
+
+    #[test]
+    fn short_error_fragment_prefers_the_npm_code_then_ellipsizes() {
+        assert_eq!(
+            short_error_fragment(
+                "npm install failed: npm install exited with exit status: 1 (registry: npm default \
+                 (per npm config)): npm error code FETCH_ERROR; invalid json response body at x"
+            ),
+            "npm error code FETCH_ERROR"
+        );
+        assert_eq!(
+            short_error_fragment(
+                "npm install failed: npm default registry (registry.npmjs.org) was blocked by a \
+                 network gateway; fallback https://f.example.test/ also failed: npm install exited \
+                 with exit status: 1 (registry: https://f.example.test/): npm error code E404"
+            ),
+            "npm error code E404"
+        );
+        assert_eq!(short_error_fragment("short"), "short");
+        let exact: String = "é".repeat(SHORT_ERROR_CHARS);
+        assert_eq!(
+            short_error_fragment(&exact),
+            exact,
+            "no ellipsis at the limit"
+        );
+        let over = format!("{exact}x");
+        assert_eq!(short_error_fragment(&over), format!("{exact}…"));
+        assert_eq!(
+            short_error_fragment(&format!(
+                "{} {}",
+                "a".repeat(SHORT_ERROR_CHARS - 1),
+                "b".repeat(5)
+            )),
+            format!("{}…", "a".repeat(SHORT_ERROR_CHARS - 1)),
+            "trailing whitespace before the cut is dropped"
+        );
+    }
+
+    /// The registry probe is decided from the shim dir alone: any managed
+    /// shim absent means a Claude/Codex row may resolve elsewhere.
+    #[test]
+    fn registry_probe_runs_only_while_a_managed_shim_is_absent() {
+        let tools = crate::managed_acp_tools::managed_tools();
+        if tools.is_empty() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(any_managed_shim_missing(dir.path()));
+        for tool in &tools {
+            std::fs::write(dir.path().join(tool.binary), "#!/bin/sh\n").unwrap();
+        }
+        assert!(!any_managed_shim_missing(dir.path()));
+        std::fs::remove_file(dir.path().join(tools[0].binary)).unwrap();
+        assert!(any_managed_shim_missing(dir.path()));
     }
 
     /// When this build does not manage bridges at all, a Homebrew copy is by

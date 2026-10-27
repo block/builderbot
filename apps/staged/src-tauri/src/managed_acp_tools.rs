@@ -204,12 +204,23 @@ pub(crate) enum InstallFailureHint {
     /// The registry or download host could not be reached at all: DNS,
     /// refused/reset connections, or a timeout on the request.
     HostUnreachable,
+    /// The Node.js dist host answered the runtime download with a 4xx — the
+    /// URL (`STAGED_NODE_DIST_URL`) points at the wrong path or host.
+    NodeDownloadRejected(u16),
 }
 
 /// Classify a recorded install error (see [`InstallFailureHint`]). `None`
 /// when the text names no network or registry cause Doctor has advice for —
 /// a validation failure, a missing entrypoint, a disk error.
 pub(crate) fn classify_install_failure(error: &str) -> Option<InstallFailureHint> {
+    // Checked first: `HTTP 404` from the dist host is a download URL problem,
+    // not a registry without the package. A 5xx is the host's, not the
+    // user's, so it gets no hint.
+    if let Some(status) = node_download_http_status(error) {
+        return (400..500)
+            .contains(&status)
+            .then_some(InstallFailureHint::NodeDownloadRejected(status));
+    }
     if error.contains("blocked by a network gateway")
         || classify_npm_failure(error) == NpmFailure::GatewayBlocked
     {
@@ -246,6 +257,19 @@ pub(crate) fn classify_install_failure(error: &str) -> Option<InstallFailureHint
     None
 }
 
+/// The status in a `Node.js runtime download failed: HTTP <status>` error
+/// (`ManagedNodeError::HttpStatus`'s wording), if that is what `error` is.
+fn node_download_http_status(error: &str) -> Option<u16> {
+    let (_, rest) = error.split_once(NODE_DOWNLOAD_HTTP_STATUS_PREFIX)?;
+    rest.split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// How `ManagedNodeError::HttpStatus` renders, up to the status code.
+const NODE_DOWNLOAD_HTTP_STATUS_PREFIX: &str = "Node.js runtime download failed: HTTP ";
+
 /// The one-line hint Doctor shows under a classified install failure, naming
 /// what to change: `package` is the npm package the install was for.
 pub(crate) fn install_failure_hint(error: &str, package: &str) -> Option<String> {
@@ -262,6 +286,9 @@ pub(crate) fn install_failure_hint(error: &str, package: &str) -> Option<String>
             "the configured registry/host did not respond — check `registry=` in ~/.npmrc \
              or STAGED_NODE_DIST_URL"
                 .to_string()
+        }
+        InstallFailureHint::NodeDownloadRejected(status) => {
+            format!("the Node.js download URL returned HTTP {status} — check STAGED_NODE_DIST_URL")
         }
     })
 }
@@ -1355,13 +1382,70 @@ async fn npm_view_version(
 /// How long Doctor waits on `npm config get registry`.
 const NPM_CONFIG_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a `npm config get registry` answer is reused for the same env
+/// snapshot. Doctor asks on every report while a managed bridge is missing —
+/// two passes per open, plus refreshes — and each ask spawns npm; one spawn a
+/// minute keeps that off the report's critical path without hiding a
+/// `~/.npmrc` edit for long. Unlike [`LatestVersionCache`] a `None` answer
+/// is cached too: it is what a hung or absent npm costs, and re-asking every
+/// pass is exactly the stall this avoids.
+const NPM_REGISTRY_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// The env snapshot a registry answer was asked under: the cache key, since
+/// the answer depends on the snapshot's `npm`, `~/.npmrc` and exports.
+type EnvSnapshot = Vec<(String, String)>;
+
+/// `npm config get registry` answers by the env snapshot they were asked
+/// under, with the time each was fetched.
+#[derive(Debug, Default)]
+struct NpmRegistryCache {
+    entries: HashMap<EnvSnapshot, (Option<String>, Instant)>,
+}
+
+impl NpmRegistryCache {
+    /// `Some(answer)` when a fresh answer (itself possibly `None`) is cached.
+    fn get_fresh(&self, env_vars: &[(String, String)], now: Instant) -> Option<Option<String>> {
+        let (registry, fetched_at) = self.entries.get(env_vars)?;
+        (now.saturating_duration_since(*fetched_at) <= NPM_REGISTRY_CACHE_TTL)
+            .then(|| registry.clone())
+    }
+
+    fn insert(&mut self, env_vars: &[(String, String)], registry: Option<String>, now: Instant) {
+        self.entries.insert(env_vars.to_vec(), (registry, now));
+    }
+}
+
+fn npm_registry_cache() -> &'static Mutex<NpmRegistryCache> {
+    static CACHE: OnceLock<Mutex<NpmRegistryCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(NpmRegistryCache::default()))
+}
+
 /// The registry npm would use under the `env_vars` snapshot with no
 /// `--registry` — `npm config get registry` asked of the snapshot's own
 /// `npm` (the managed runtime's, when installed), under exactly that env, so
 /// the answer is the one a managed install resolves. `None` when the
 /// snapshot has no `npm`, the probe fails or times out, or the answer is not
-/// a URL; Doctor then says "npm default" rather than guessing.
+/// a URL; Doctor then says "npm default" rather than guessing. Cached per
+/// snapshot for [`NPM_REGISTRY_CACHE_TTL`].
 pub(crate) async fn configured_npm_registry(env_vars: &[(String, String)]) -> Option<String> {
+    let now = Instant::now();
+    let cached = npm_registry_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_fresh(env_vars, now);
+    if let Some(registry) = cached {
+        return registry;
+    }
+    let registry = probe_configured_npm_registry(env_vars).await;
+    npm_registry_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(env_vars, registry.clone(), now);
+    registry
+}
+
+/// One uncached `npm config get registry` (see [`configured_npm_registry`]).
+async fn probe_configured_npm_registry(env_vars: &[(String, String)]) -> Option<String> {
     let npm_path = find_on_env_path(env_vars, "npm")?;
     let mut command = tokio::process::Command::new(npm_path);
     command.args(["config", "get", "registry"]);
@@ -1636,12 +1720,26 @@ mod tests {
                 "installed ACP bridge is incomplete: bridge entrypoint /x/index.js is missing after install",
                 None,
             ),
+            (
+                "Node.js runtime download failed: HTTP 404",
+                Some(InstallFailureHint::NodeDownloadRejected(404)),
+            ),
+            (
+                "Node.js runtime download failed: HTTP 403",
+                Some(InstallFailureHint::NodeDownloadRejected(403)),
+            ),
             ("Node.js runtime download failed: HTTP 503", None),
             ("", None),
         ];
         for (error, expected) in cases {
             assert_eq!(classify_install_failure(error), expected, "{error}");
         }
+
+        assert_eq!(
+            install_failure_hint("Node.js runtime download failed: HTTP 404", "Node.js").as_deref(),
+            Some("the Node.js download URL returned HTTP 404 — check STAGED_NODE_DIST_URL"),
+            "a 404 from the dist host is a URL problem, never a missing package"
+        );
 
         let hint = install_failure_hint(
             "npm install failed: … npm error code E404; 404 Not Found",
@@ -1767,6 +1865,72 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         assert_eq!(
             configured_npm_registry(&[("PATH".to_string(), empty.display().to_string())]).await,
+            None
+        );
+    }
+
+    /// Asking twice under one snapshot spawns npm once: the answer — a URL or
+    /// `None` alike — is reused within the TTL, so a Doctor refresh never
+    /// re-pays the probe. A different snapshot is a different question.
+    #[tokio::test]
+    async fn configured_npm_registry_is_cached_per_env_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let calls = dir.path().join("calls");
+        write_executable(
+            &bin.join("npm"),
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' \"${{FAKE_REGISTRY:-https://mirror.example.test/npm/}}\"\n",
+                calls.display()
+            ),
+        );
+        let spawns = || {
+            std::fs::read_to_string(&calls)
+                .map(|s| s.len())
+                .unwrap_or(0)
+        };
+        let env = vec![("PATH".to_string(), bin.display().to_string())];
+
+        assert_eq!(
+            configured_npm_registry(&env).await.as_deref(),
+            Some("https://mirror.example.test/npm/")
+        );
+        assert_eq!(
+            configured_npm_registry(&env).await.as_deref(),
+            Some("https://mirror.example.test/npm/")
+        );
+        assert_eq!(spawns(), 1, "the second ask is answered from the cache");
+
+        // A `None` answer is cached as well.
+        let mut env_garbage = env.clone();
+        env_garbage.push(("FAKE_REGISTRY".to_string(), "undefined".to_string()));
+        assert_eq!(configured_npm_registry(&env_garbage).await, None);
+        assert_eq!(configured_npm_registry(&env_garbage).await, None);
+        assert_eq!(spawns(), 2);
+    }
+
+    #[test]
+    fn npm_registry_cache_expires_after_the_ttl() {
+        let mut cache = NpmRegistryCache::default();
+        let now = Instant::now();
+        let env = vec![("PATH".to_string(), "/x".to_string())];
+        let other = vec![("PATH".to_string(), "/y".to_string())];
+        assert_eq!(cache.get_fresh(&env, now), None);
+
+        cache.insert(&env, Some("https://r.example.test/".to_string()), now);
+        cache.insert(&other, None, now);
+        assert_eq!(
+            cache.get_fresh(&env, now + Duration::from_secs(30)),
+            Some(Some("https://r.example.test/".to_string()))
+        );
+        assert_eq!(
+            cache.get_fresh(&other, now),
+            Some(None),
+            "a cached `None` is an answer, not a miss"
+        );
+        assert_eq!(
+            cache.get_fresh(&env, now + NPM_REGISTRY_CACHE_TTL + Duration::from_secs(1)),
             None
         );
     }

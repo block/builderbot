@@ -47,7 +47,12 @@ export function firstTabbableWithin(root: Element): HTMLElement | null {
 // `[aria-hidden="true"]` subtrees are the covered views (the parked workspace,
 // an inactive WorkspaceLayer); their controls are not tab stops to hand focus
 // to, even though — unlike `inert` — the attribute doesn't take them out of
-// the browser's tab order.
+// the browser's tab order. Note this also applies to App's `.detail-host`
+// guards (firstTabbableWithin(detailHostEl) / lastTabbableBefore(workspaceEl)):
+// a portal dialog that set `aria-hidden` on `#app` or the workspace while open
+// would make both fall through to focusing the bare hosts. Dialogs trap focus
+// themselves, so it doesn't surface today, but it is the first thing to check
+// if a focus-guard regression shows up with a dialog open.
 function isTabbable(el: HTMLElement): boolean {
   if (
     el.tabIndex < 0 ||

@@ -76,8 +76,10 @@
   }
 
   // Going inactive with focus inside: move it to the layer that took over.
+  // While parked, App's park effect owns focus (it moves it to the detail
+  // host), so a base-route change under a settings/diff view stays its call.
   $effect(() => {
-    if (active || !element) return;
+    if (active || navigation.workspaceParked || !element) return;
     if (element.contains(document.activeElement)) activeLayerHost()?.focus({ preventScroll: true });
   });
 </script>

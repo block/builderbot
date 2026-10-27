@@ -202,6 +202,38 @@ describe('restoreInitialRoute', () => {
     expect(getStoreValue).not.toHaveBeenCalled();
     expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
     expect(navigation.initialRouteSettled).toBe(true);
+    // The grid is this window's base route until a seed lands, so it must be
+    // retained here or a window with no seed renders two empty layers.
+    expect(navigation.homeLayerRetained).toBe(true);
+  });
+
+  // A secondary window settles at the root before initNavigation reads its
+  // seed. If the seed never lands the grid is all the window has, so the
+  // settle must have retained it: there is no Back affordance at the root to
+  // trigger a goHome that would.
+  it.each([
+    ['rejects', () => takeWindowSeed.mockRejectedValueOnce(new Error('no seed'))],
+    ['is null', () => takeWindowSeed.mockResolvedValueOnce(null)],
+    [
+      'names a deleted project',
+      () => {
+        takeWindowSeed.mockResolvedValueOnce('gone');
+        projectsStoreMock.loaded = true;
+        projectsStoreMock.projects = [{ id: 'p1' }];
+      },
+    ],
+  ])('keeps the grid for a secondary window whose seed %s', async (_, arrange) => {
+    windowLabel = 'win-2';
+    arrange();
+    const { restoreInitialRoute, initNavigation, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+    await initNavigation();
+
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
   });
 
   it('does not override navigation that happened while the store was read', async () => {

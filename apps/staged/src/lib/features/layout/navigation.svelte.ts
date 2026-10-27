@@ -212,6 +212,18 @@ function retainHomeLayerIfActive(): void {
 }
 
 /**
+ * Mark the initial route settled and retain the home layer if the grid is the
+ * base route at that point. Every settle path must go through here: a window
+ * that settles at the root without retaining the grid — e.g. a secondary
+ * window whose seed never lands — renders two empty layers and stays blank,
+ * with no Back affordance at the root to trigger the goHome that would.
+ */
+function settleInitialRoute(): void {
+  navigation.initialRouteSettled = true;
+  retainHomeLayerIfActive();
+}
+
+/**
  * Drop the retained project layer for `projectId` — because the project was
  * deleted, say — so the layer unmounts rather than showing a missing project.
  * Only while home is active: on a project the layer is the view on screen, and
@@ -280,7 +292,7 @@ export async function restoreInitialRoute(): Promise<void> {
   if (navigation.initialRouteSettled) return;
   const label = getWindowLabel();
   if ((label && label !== 'main') || navigation.detailStack.length > 1) {
-    navigation.initialRouteSettled = true;
+    settleInitialRoute();
     return;
   }
 
@@ -308,8 +320,7 @@ export async function restoreInitialRoute(): Promise<void> {
     clearTimeout(timer);
     // Same synchronous step as the push above, so no render can observe the
     // settled flag with the stack still at the root.
-    navigation.initialRouteSettled = true;
-    retainHomeLayerIfActive();
+    settleInitialRoute();
   }
 }
 

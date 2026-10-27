@@ -85,14 +85,20 @@ export function applyLatestWindow(current: TranscriptPage, fresh: TranscriptPage
 
 /**
  * Bound a window that a long-parked pane's catch-up delta has grown without
- * limit. Up to two pages are kept as they are — the poll appends, and the
- * user may have paged back — beyond that only the newest page stays, and the
- * rows dropped from the front are, by construction, older rows that exist on
- * the server, so `hasMore` turns true and `loadOlderMessages` pages them back
- * in from the new start.
+ * limit. The test is how much the delta added, not how big the window is:
+ * rows the user paged back into before the park are theirs to keep, however
+ * many pages that is, and a delta of up to a page is what a poll appends
+ * anyway. Past that the transcript has moved on by more than a page, and
+ * only the newest page stays; the rows dropped from the front are, by
+ * construction, older rows that exist on the server, so `hasMore` turns true
+ * and `loadOlderMessages` pages them back in from the new start.
  */
-export function trimLatestWindow(current: TranscriptPage, pageRows: number): TranscriptPage {
-  if (current.messages.length <= 2 * pageRows) return current;
+export function trimLatestWindow(
+  current: TranscriptPage,
+  pageRows: number,
+  rowsBeforeDelta: number
+): TranscriptPage {
+  if (current.messages.length - rowsBeforeDelta <= pageRows) return current;
   return { messages: current.messages.slice(current.messages.length - pageRows), hasMore: true };
 }
 

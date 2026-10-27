@@ -184,7 +184,21 @@
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
   import { latestAcpConfigDiscoveryFromMetadata } from './acpConfigMetadata';
-  import { reopenMode, restoredScrollTop, type ParkedScroll, type ReopenMode } from './paneReopen';
+  import {
+    reopenAfterRevalidate,
+    reopenMode,
+    restoredScrollTop,
+    type ParkedScroll,
+    type PollOutcome,
+    type ReopenMode,
+  } from './paneReopen';
+  import {
+    captureScrollAnchor,
+    restoreScrollAnchor,
+    anchorTopIn,
+    type ScrollAnchor,
+  } from './scrollAnchor';
+  import { createIntroGate } from './transcriptIntro';
 
   interface Props {
     active: boolean;
@@ -462,8 +476,9 @@
     };
   });
 
-  /** Whether the initial load has rendered — transitions are suppressed until then. */
-  let animateNewMessages = false;
+  /** Whether a mounting group slides in: off until the initial load has rendered
+   *  and around merges that are not live updates. */
+  const intro = createIntroGate();
 
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
@@ -878,8 +893,10 @@
   async function loadSession(mode: ReopenMode = 'full') {
     if (closed) return;
     if (mode === 'revalidate') {
-      await revalidateSession();
-      return;
+      if ((await revalidateSession()) === 'settled' || closed) return;
+      // The delta could not stand in for a load (the session is gone, or the
+      // request failed): fall through to the full load, which shows the same
+      // error state a fresh open would and never starts polling a dead session.
     }
     // Clear prior session state when loading a *different* session so a
     // bail-out or in-flight load can never paint the previously-viewed
@@ -962,7 +979,7 @@
       // is false) before enabling intro transitions, so existing messages
       // don't all slide in at once.
       await tick();
-      animateNewMessages = true;
+      intro.enable();
       scrollToBottom();
       // A first page shorter than the viewport leaves nothing to scroll, so
       // the scroll handler alone could never ask for the next one.
@@ -980,35 +997,56 @@
    * so the intro transition is suppressed around the merge as the load-older
    * path does. A long park on a busy session can return a delta far larger
    * than a page; the window is bounded afterwards so the `{#each}` below stays
-   * a page or two and `hasOlderMessages` still pages the rest back in.
+   * about a page and `hasOlderMessages` pages the rest back in. Resolves
+   * `'full'` when the delta could not bring the pane up to date (see
+   * `reopenAfterRevalidate`); the caller runs the full load then.
    */
-  async function revalidateSession() {
+  async function revalidateSession(): Promise<'settled' | 'full'> {
     // Whatever `session.status` says now is from the last time this pane was
     // shown; a hold must not be judged against it until the delta lands.
     statusLoadedForSessionId = null;
     const id = sessionId;
-    const animate = animateNewMessages;
-    animateNewMessages = false;
+    const rowsBeforeDelta = messages.length;
+    const resumeIntros = intro.suspend();
     try {
-      const applied = await poll();
-      if (closed || sessionId !== id) return;
-      if (applied) {
-        if (session) statusLoadedForSessionId = session.id;
-        if (backgroundHold) applyBackgroundHold(id, backgroundHold);
-        const bounded = trimLatestWindow(
-          { messages, hasMore: hasOlderMessages },
-          TRANSCRIPT_PAGE_ROWS
-        );
-        if (bounded.messages !== messages) {
-          messages = bounded.messages;
-          hasOlderMessages = bounded.hasMore;
+      const outcome = await poll();
+      if (closed || sessionId !== id) return 'settled';
+      const next = reopenAfterRevalidate(outcome);
+      if (next === 'full') return next;
+      if (session) statusLoadedForSessionId = session.id;
+      if (backgroundHold) applyBackgroundHold(id, backgroundHold);
+      const bounded = trimLatestWindow(
+        { messages, hasMore: hasOlderMessages },
+        TRANSCRIPT_PAGE_ROWS,
+        rowsBeforeDelta
+      );
+      if (bounded.messages !== messages) {
+        // `unpark` already restored the scroll position against the untrimmed
+        // rows, and WebKit has no scroll anchoring: dropping rows above the
+        // viewport would shift it onto other rows and hand `handleScroll` a
+        // spurious upward scroll. Hold the first visible group in place; when
+        // the trim removed it (the whole pre-delta window went, more than a
+        // page of new rows arrived in its place) follow the transcript to the
+        // bottom rather than land at the top and page the trimmed rows back.
+        const el = messagesEl;
+        const anchor = el && userScrolledUp ? captureScrollAnchor(el) : null;
+        messages = bounded.messages;
+        hasOlderMessages = bounded.hasMore;
+        await tick();
+        if (el) {
+          if (!anchor || !restoreScrollAnchor(el, anchor)) {
+            el.scrollTop = el.scrollHeight;
+            userScrolledUp = false;
+          }
+          noteScrollPosition(el);
         }
       }
-      // `unpark` restored the scroll position and `poll` follows the bottom
-      // when its merge appends, so nothing here forces layout on the open.
+      // Otherwise `unpark` restored the scroll position and `poll` follows the
+      // bottom when its merge appends, so nothing here forces layout on the open.
+      return next;
     } finally {
       await tick();
-      animateNewMessages = animate;
+      resumeIntros();
     }
   }
 
@@ -1020,8 +1058,8 @@
    *  reassigning the same data under a fresh identity would invalidate the
    *  grouped transcript and re-render the entire message list twice a second.
    */
-  async function poll(): Promise<boolean> {
-    if (!session || closed || pollInFlight) return false;
+  async function poll(): Promise<PollOutcome> {
+    if (!session || closed || pollInFlight) return 'skipped';
     pollInFlight = true;
     try {
       const statusVersionBeforeFetch = statusEventVersion;
@@ -1029,7 +1067,7 @@
       // there is nothing older to page in: `hasOlderMessages` stays false.
       const request = sessionPollRequest(messages, acpMetadataMessages);
       const result = await pollSession(sessionId, request);
-      if (closed) return false;
+      if (closed) return 'skipped';
       const s = result.session;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
       if (s && !statusEventDuringFetch && JSON.stringify(s) !== JSON.stringify(session)) {
@@ -1054,10 +1092,10 @@
       if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
         clearPollTimer();
       }
-      return true;
+      return s ? 'applied' : 'missing';
     } catch {
       // Polling errors are expected during shutdown — silently ignore
-      return false;
+      return 'failed';
     } finally {
       pollInFlight = false;
       if (finalPollPending) {
@@ -1417,6 +1455,14 @@
   /** Whether the user has intentionally scrolled up (disables auto-scroll). */
   let userScrolledUp = $state(false);
   let lastScrollTop = 0;
+  /**
+   * The first group in view, kept current from the scroll handler because
+   * `park` usually runs after the dialog's DOM is gone and cannot measure. Only
+   * meaningful while `userScrolledUp`: a pane following the bottom restores to
+   * the bottom, so the rect reads are skipped there (that is the live case,
+   * where appends scroll the box twice a second).
+   */
+  let scrollAnchor: ScrollAnchor | null = null;
 
   function handleScroll() {
     if (!messagesEl) return;
@@ -1431,8 +1477,16 @@
       // They're back at bottom — re-enable auto-scroll
       userScrolledUp = false;
     }
-    lastScrollTop = scrollTop;
+    noteScrollPosition(messagesEl);
     if (scrollTop < LOAD_OLDER_THRESHOLD_PX) void loadOlderMessages();
+  }
+
+  /** Record where the box is after a scroll — the user's or one of ours — so
+   *  `handleScroll` does not read our own jumps as the user scrolling up and
+   *  `park` has an anchor to save. */
+  function noteScrollPosition(el: HTMLElement) {
+    lastScrollTop = el.scrollTop;
+    if (userScrolledUp) scrollAnchor = captureScrollAnchor(el);
   }
 
   /**
@@ -1479,17 +1533,16 @@
       const anchor = el.querySelector<HTMLElement>('.transcript-group');
       const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
       const heightBefore = el.scrollHeight;
-      const animate = animateNewMessages;
-      animateNewMessages = false;
+      const resumeIntros = intro.suspend();
       messages = prependOlderMessages(messages, page.messages);
       hasOlderMessages = page.hasMore;
       await tick();
-      animateNewMessages = animate;
+      resumeIntros();
       el.scrollTop += anchor?.isConnected
         ? anchor.getBoundingClientRect().top - anchorTop
         : el.scrollHeight - heightBefore;
       // That jump is ours, not the user's.
-      lastScrollTop = el.scrollTop;
+      noteScrollPosition(el);
     } catch (e) {
       // Left for the next scroll to retry rather than looping on a dead server.
       console.error('Failed to load earlier messages:', e);
@@ -1950,18 +2003,21 @@
    * calls this before it detaches the host, but the dialog above the host is
    * usually gone already: Svelte removes a destroyed block's DOM before it
    * runs the teardowns inside it, and WebKit resets `scrollTop` to 0 on
-   * detach. So the offset is read from the box only while it is still in the
-   * document, and otherwise from `lastScrollTop`, which `handleScroll` keeps
-   * current. Search highlights are DOM state the next open must not inherit,
-   * and the viewers portal to `#portal-root`, where nothing of a parked pane
-   * may remain. `close` stops polling; the `active`-gated effects drop the
-   * listeners once the pool clears `active`.
+   * detach. So the position is read from the box only while it is still in
+   * the document, and otherwise from `lastScrollTop` and `scrollAnchor`, which
+   * `handleScroll` keeps current. Search highlights are DOM state the next
+   * open must not inherit, and the viewers portal to `#portal-root`, where
+   * nothing of a parked pane may remain. `close` stops polling; the
+   * `active`-gated effects (and PipelineSteps') drop the listeners once the
+   * pool clears `active`.
    */
   export function park() {
     if (messagesEl) {
+      const connected = messagesEl.isConnected;
       parkedScroll = {
-        scrollTop: messagesEl.isConnected ? messagesEl.scrollTop : lastScrollTop,
+        scrollTop: connected ? messagesEl.scrollTop : lastScrollTop,
         atBottom: !userScrolledUp,
+        anchor: connected && userScrolledUp ? captureScrollAnchor(messagesEl) : scrollAnchor,
       };
     }
     clearSearch();
@@ -1974,19 +2030,24 @@
    * Back in the document. Runs synchronously once the host is reattached
    * inside the new dialog and before `active` flips, so the read and write
    * below pay the reinsert's style and layout once, ahead of the first paint.
-   * `lastScrollTop` follows so `handleScroll` does not read the restore as
-   * the user scrolling up or ask for an older page.
+   * The anchored group is looked up in this layout, so a box of another width
+   * (the NoteModal aside vs. the SessionModal, a resized dialog) puts the same
+   * group back at the same offset. `lastScrollTop` follows so `handleScroll`
+   * does not read the restore as the user scrolling up or ask for an older page.
    */
   export function unpark() {
     const saved = parkedScroll;
     parkedScroll = null;
-    if (!saved || !messagesEl) return;
-    messagesEl.scrollTop = restoredScrollTop(
+    const el = messagesEl;
+    if (!saved || !el) return;
+    const anchorTop = saved.anchor && !saved.atBottom ? anchorTopIn(el, saved.anchor) : null;
+    el.scrollTop = restoredScrollTop(
       saved,
-      messagesEl.scrollHeight,
-      messagesEl.clientHeight
+      { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
+      anchorTop
     );
-    lastScrollTop = messagesEl.scrollTop;
+    lastScrollTop = el.scrollTop;
+    scrollAnchor = saved.anchor;
   }
 
   function selectorStateKey(
@@ -2229,7 +2290,7 @@
 
   /** Slide-in transition that is suppressed during the initial load. */
   function messageSlide(node: Element) {
-    if (!animateNewMessages) return { duration: 0 };
+    if (!intro.animate) return { duration: 0 };
     return slide(node, { duration: SLIDE_DURATION });
   }
 </script>
@@ -2268,7 +2329,7 @@
     onkeydown={handleContentKeydown}
   >
     {#if session?.pipeline}
-      <PipelineSteps {sessionId} pipeline={session.pipeline} />
+      <PipelineSteps {sessionId} pipeline={session.pipeline} {active} />
     {/if}
     {#if loading}
       <div class="center-state">
@@ -2307,6 +2368,7 @@
           <div
             in:messageSlide
             class={group.type === 'user' ? 'transcript-group user-group' : 'transcript-group'}
+            data-group-key={transcriptGroupKey(group)}
           >
             {#if group.type === 'user'}
               {@const hasBlocks = cachedHasXmlBlocks(group.message.content)}

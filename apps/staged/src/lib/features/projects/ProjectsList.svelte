@@ -893,6 +893,14 @@
     .projects-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    /* Two-column cards are shorter (median 81px wrapper on the same data set):
+       49px + 32px padding. WebKit has no scroll anchoring, so a placeholder
+       that is consistently too tall drifts the viewport when skipped rows
+       above it render while scrolling back up. */
+    .project-card {
+      contain-intrinsic-size: auto 49px;
+    }
   }
 
   @media (max-width: 640px) {
@@ -907,6 +915,8 @@
 
     .project-card {
       padding: 14px;
+      /* Median one-column wrapper is 75px: 47px + 28px padding. */
+      contain-intrinsic-size: auto 47px;
     }
 
     .card-header {

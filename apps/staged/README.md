@@ -74,6 +74,16 @@ name on your PATH, and **Settings -> Doctor** can install the npm-based ones
 into the same Staged-private prefix.
 
 Open **Settings -> Doctor** to verify agent checks are detected as installed.
+A Claude or Codex row that shows "Managed by Staged" is running Staged's copy.
+If the managed install failed, the row instead warns with the copy it is using
+(a Homebrew or npm global install found on your PATH, say), the error the
+last install attempt recorded — which names the registry or URL it used — and
+a **Fix** that installs the managed copy; **Copy details** adds a hint on what
+to change (a blocked `registry.npmjs.org`, a mirror without the package, an
+unreachable host) and the npm registry Doctor detected. The **Node.js
+Runtime** row likewise reports a failed runtime download rather than staying
+hidden. When managed installs are disabled (see `STAGED_ACP_TOOLS_DIR` below),
+the rows say so instead.
 
 To develop against a local bridge checkout, export `STAGED_ACP_TOOLS_DIR`
 pointing at a directory with the bridge binaries — this disables the managed

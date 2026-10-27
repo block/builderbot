@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde::Serialize;
 use tauri::Manager;
 
-use crate::managed_acp_tools::ManagedTool;
+use crate::managed_acp_tools::{ManagedTool, ReconcileRecord};
 use crate::session_queue::sweep::{self, QueueHealth};
 use crate::session_runner::SessionRegistry;
 use crate::store::Store;
@@ -460,13 +460,24 @@ async fn run_doctor_report(
         run_node_runtime_check(),
         managed_bridge_versions(check_freshness, &env_vars),
     );
-    if let Some(shim_bin_dir) = crate::managed_acp_tools::managed_shim_bin_dir() {
-        apply_managed_bridge_readouts(
-            &mut report,
-            &managed_versions,
-            &shim_bin_dir,
-            check_freshness,
-        );
+    match crate::managed_acp_tools::managed_shim_bin_dir() {
+        Some(shim_bin_dir) => {
+            let diagnostics =
+                managed_install_diagnostics(&report, &managed_versions, &shim_bin_dir, &env_vars)
+                    .await;
+            apply_managed_bridge_readouts(
+                &mut report,
+                &managed_versions,
+                &shim_bin_dir,
+                check_freshness,
+                &diagnostics,
+            );
+        }
+        None => {
+            if let Some(reason) = crate::managed_acp_tools::managed_tools_disabled_reason() {
+                note_managed_installs_disabled(&mut report, &reason);
+            }
+        }
     }
     if let Some(check) = node_runtime {
         report.checks.push(check);
@@ -1016,16 +1027,135 @@ async fn managed_bridge_versions(
     versions
 }
 
+/// What Doctor says about the managed installer on a Claude/Codex row whose
+/// executable is *not* the managed shim: the last reconcile's outcome from
+/// `state.json` — the only record a failed launch install leaves behind — and
+/// the npm registry a managed install resolves on this machine. Gathered once
+/// per report; nothing here is persisted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ManagedInstallDiagnostics {
+    /// `state.json`'s `lastReconcile`, `None` before the first reconcile has
+    /// finished (or with no `state.json` at all).
+    last_reconcile: Option<ReconcileRecord>,
+    /// The registry label for the row's raw output: the `STAGED_NPM_REGISTRY`
+    /// override, what `npm config get registry` answered under the doctor
+    /// env snapshot, or "npm default" when neither could be asked.
+    npm_registry: String,
+    /// Wall-clock milliseconds the reconcile age is rendered against.
+    now_ms: u64,
+}
+
+impl ManagedInstallDiagnostics {
+    /// The last reconcile's error for `tool_id`, without the `<id>: ` prefix
+    /// the reconciler records it under.
+    fn reconcile_error_for(&self, tool_id: &str) -> Option<&str> {
+        reconcile_error_for(self.last_reconcile.as_ref()?, tool_id)
+    }
+
+    /// One raw-output line on the last managed install run.
+    fn last_reconcile_line(&self) -> String {
+        match &self.last_reconcile {
+            None => "last managed install: none recorded yet".to_string(),
+            Some(record) => format!(
+                "last managed install: {} {}",
+                if record.ok { "succeeded" } else { "failed" },
+                format_age(record.at_ms, self.now_ms)
+            ),
+        }
+    }
+}
+
+/// The reconciler records each failure as `<tool id>: <error>`; the error on
+/// its own, for the tool asked about.
+fn reconcile_error_for<'a>(record: &'a ReconcileRecord, tool_id: &str) -> Option<&'a str> {
+    record
+        .errors
+        .iter()
+        .find_map(|error| error.strip_prefix(tool_id)?.strip_prefix(": "))
+}
+
+/// `just now`, `N minutes ago`, `N hours ago`, `N days ago` — enough to tell a
+/// stale record from the launch reconcile that just ran.
+fn format_age(at_ms: u64, now_ms: u64) -> String {
+    let seconds = now_ms.saturating_sub(at_ms) / 1000;
+    let ago = |count: u64, unit: &str| {
+        let plural = if count == 1 { "" } else { "s" };
+        format!("{count} {unit}{plural} ago")
+    };
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3599 => ago(seconds / 60, "minute"),
+        3600..=86_399 => ago(seconds / 3600, "hour"),
+        _ => ago(seconds / 86_400, "day"),
+    }
+}
+
+/// Gather [`ManagedInstallDiagnostics`] for a report. The registry probe
+/// spawns `npm`, so it runs only when a Claude/Codex row will actually show
+/// it: one that resolved to a copy outside the managed shim dir.
+async fn managed_install_diagnostics(
+    report: &DoctorReport,
+    versions: &[ManagedBridgeVersions],
+    shim_bin_dir: &Path,
+    env_vars: &[(String, String)],
+) -> ManagedInstallDiagnostics {
+    let unmanaged_row_present = report.checks.iter().any(|check| {
+        let Some(tool_id) = managed_tool_id_for_check(&check.id) else {
+            return false;
+        };
+        let Some(tool) = versions.iter().find(|v| v.tool.id == tool_id) else {
+            return false;
+        };
+        check
+            .path
+            .as_deref()
+            .is_some_and(|path| !is_managed_shim_path(path, shim_bin_dir, tool.tool.binary))
+    });
+    let npm_registry = if unmanaged_row_present {
+        detect_npm_registry_label(env_vars).await
+    } else {
+        String::new()
+    };
+    ManagedInstallDiagnostics {
+        last_reconcile: last_reconcile_record(),
+        npm_registry,
+        now_ms: crate::managed_acp_tools::now_ms(),
+    }
+}
+
+/// `state.json`'s last reconcile record, if any.
+fn last_reconcile_record() -> Option<ReconcileRecord> {
+    let packages_root = crate::paths::packages_dir()?;
+    crate::managed_acp_tools::read_state(&packages_root).last_reconcile
+}
+
+/// The npm registry a managed install resolves, labeled with where that
+/// answer came from — so a row can say which mirror (or the public registry)
+/// the failed install actually asked.
+async fn detect_npm_registry_label(env_vars: &[(String, String)]) -> String {
+    if let Some(registry) = crate::managed_acp_tools::npm_registry_override() {
+        return format!("{registry} (STAGED_NPM_REGISTRY)");
+    }
+    match crate::managed_acp_tools::configured_npm_registry(env_vars).await {
+        Some(registry) => format!("{registry} (per npm config)"),
+        None => "npm default (per npm config; no npm on PATH to ask)".to_string(),
+    }
+}
+
 /// Layer the managed ACP readout onto every check whose executable is one of
-/// the managed shims in `shim_bin_dir` (see [`apply_managed_bridge_readout`]),
-/// and point the rest of these checks' updates at the managed installer too
-/// (see [`redirect_unmanaged_update_to_managed_install`]) — on a managing
-/// build it is the only writer for these two packages.
+/// the managed shims in `shim_bin_dir` (see [`apply_managed_bridge_readout`]).
+/// Every other Claude/Codex row is a copy Staged does not manage: it is
+/// flagged as such, with why the managed copy is missing and the managed
+/// install as its fix (see [`flag_missing_managed_copy`]), and its update is
+/// pointed at the managed installer too (see
+/// [`redirect_unmanaged_update_to_managed_install`]) — on a managing build it
+/// is the only writer for these two packages.
 fn apply_managed_bridge_readouts(
     report: &mut DoctorReport,
     versions: &[ManagedBridgeVersions],
     shim_bin_dir: &Path,
     check_freshness: bool,
+    diagnostics: &ManagedInstallDiagnostics,
 ) {
     for check in &mut report.checks {
         let Some(tool_id) = managed_tool_id_for_check(&check.id) else {
@@ -1033,10 +1163,120 @@ fn apply_managed_bridge_readouts(
         };
         if let Some(versions) = versions.iter().find(|v| v.tool.id == tool_id) {
             if !apply_managed_bridge_readout(check, versions, shim_bin_dir, check_freshness) {
+                flag_missing_managed_copy(check, versions, shim_bin_dir, diagnostics);
                 redirect_unmanaged_update_to_managed_install(check, versions, shim_bin_dir);
             }
         }
     }
+}
+
+/// Note on the Claude/Codex rows that this build does not manage bridge
+/// installs, and why — the `STAGED_ACP_TOOLS_DIR` dev override, the
+/// `no-managed-acp-tools` feature, an unsupported target. A copy resolved from
+/// Homebrew (or the override dir) is then by design, and the row must not read
+/// like a failed install. Status is kept; only the message and raw output
+/// gain the note.
+fn note_managed_installs_disabled(report: &mut DoctorReport, reason: &str) {
+    for check in &mut report.checks {
+        if managed_tool_id_for_check(&check.id).is_none() {
+            continue;
+        }
+        let note = format!("managed installs disabled: {reason}");
+        check.message = format!("{} ({note})", check.message);
+        append_raw_output(check, &note);
+    }
+}
+
+/// Add a block to a check's raw output, below whatever the crate recorded.
+fn append_raw_output(check: &mut DoctorCheck, block: &str) {
+    check.raw_output = Some(match check.raw_output.take() {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{}\n\n{block}", existing.trim_end())
+        }
+        _ => block.to_string(),
+    });
+}
+
+/// Flag a Claude/Codex row whose executable is a copy Staged does not manage
+/// — Homebrew, the user's npm prefix, nvm — and report whether it did.
+///
+/// On a managing build the managed shim dir is first on the probe PATH, so a
+/// copy from anywhere else can only win while the managed copy is *absent*:
+/// the launch reconcile has not finished yet, or it failed (no network to the
+/// registry, a gateway block page, a 404 from a mirror, a validation failure).
+/// Left as the crate built it, the row is a green "Installed" pointing at
+/// `/opt/homebrew/bin`, indistinguishable from a healthy setup and with no
+/// way to get the managed copy. So:
+///
+/// - `status` drops to `Warn` (a row already warning or failing keeps its
+///   status), and `message` says which copy is in use, that the managed copy
+///   is missing, and — when the last reconcile recorded an error for this
+///   tool — that error, which names the registry or URL it used.
+/// - `raw_output` gains the expected shim path, the last reconcile's outcome
+///   and age, the error with a classified hint on what to change
+///   (`install_failure_hint`), and the npm registry Doctor detected.
+/// - The row's fix becomes the managed install (`Bridge`, which
+///   `run_doctor_fix` routes to `install_managed_tool_logged` for these two
+///   checks), described by [`managed_install_description`] — the same text
+///   [`redirect_unmanaged_update_to_managed_install`] gives the row's update
+///   when a newer release is known, so the two buttons never disagree. The
+///   fix is offered whether or not an update is available: the point is to
+///   get the managed copy, not to chase a version.
+///
+/// `path`, `main` and the version fields stay the crate's: the row still shows
+/// the copy that is actually on PATH and how old it is.
+fn flag_missing_managed_copy(
+    check: &mut DoctorCheck,
+    versions: &ManagedBridgeVersions,
+    shim_bin_dir: &Path,
+    diagnostics: &ManagedInstallDiagnostics,
+) -> bool {
+    let Some(path) = check.path.clone() else {
+        return false;
+    };
+    let tool = &versions.tool;
+    if is_managed_shim_path(&path, shim_bin_dir, tool.binary) {
+        return false;
+    }
+    let reconcile_error = diagnostics.reconcile_error_for(tool.id);
+    let error_suffix = reconcile_error
+        .map(|error| format!(": {error}"))
+        .unwrap_or_default();
+    if check.status == CheckStatus::Pass {
+        check.status = CheckStatus::Warn;
+        check.message = format!("Using {path} — Staged's managed copy is missing{error_suffix}");
+    } else {
+        check.message = format!(
+            "{}; using {path} — Staged's managed copy is missing{error_suffix}",
+            check.message
+        );
+    }
+
+    let mut detail = vec![
+        format!(
+            "Staged-managed copy: missing (expected {})",
+            shim_bin_dir.join(tool.binary).display()
+        ),
+        diagnostics.last_reconcile_line(),
+    ];
+    if let Some(error) = reconcile_error {
+        detail.push(format!("{}: {error}", tool.id));
+        if let Some(hint) = crate::managed_acp_tools::install_failure_hint(error, tool.package) {
+            detail.push(format!("hint: {hint}"));
+        }
+    }
+    detail.push(format!("npm registry: {}", diagnostics.npm_registry));
+    append_raw_output(check, &detail.join("\n"));
+
+    let latest = versions.latest.as_deref().or_else(|| {
+        check
+            .main
+            .as_ref()
+            .and_then(|main| main.latest_version.as_deref())
+    });
+    check.fix_type = Some(FixType::Bridge);
+    check.fix_command = Some(managed_install_description(tool, latest, &path));
+    true
 }
 
 /// Give a managed Claude/Codex row the two readouts its one executable
@@ -1061,10 +1301,11 @@ fn apply_managed_bridge_readouts(
 ///
 /// Nothing is touched unless the check's executable is the managed shim for
 /// this tool and the crate labeled it bundled: a copy that resolved elsewhere
-/// keeps its source-aware readout; its update is redirected to the managed
-/// install (see [`redirect_unmanaged_update_to_managed_install`]). An unknown
-/// installed or latest version leaves `update_available` unknown rather than
-/// false.
+/// keeps its source-aware readout, is flagged as missing the managed copy
+/// (see [`flag_missing_managed_copy`]), and has its update redirected to the
+/// managed install (see [`redirect_unmanaged_update_to_managed_install`]). An
+/// unknown installed or latest version leaves `update_available` unknown
+/// rather than false.
 fn apply_managed_bridge_readout(
     check: &mut DoctorCheck,
     versions: &ManagedBridgeVersions,
@@ -1367,7 +1608,12 @@ async fn run_node_runtime_check() -> Option<DoctorCheck> {
     .collect();
     npm_tools.sort();
     npm_tools.dedup();
-    build_node_runtime_check(state, &install_dir, &npm_tools)
+    build_node_runtime_check(
+        state,
+        &install_dir,
+        &npm_tools,
+        last_reconcile_record().as_ref(),
+    )
 }
 
 /// Names of the bin shims npm wrote into the Staged-private prefix — the
@@ -1383,23 +1629,40 @@ fn installed_npm_tool_names(bin_dir: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Build the runtime row. `last_reconcile` is `state.json`'s record of the
+/// last managed install run: a runtime that is `Missing` after a reconcile
+/// that *failed* is not "never needed", it is the install that could not
+/// happen — every managed bridge install starts by ensuring the runtime — so
+/// that case warns with the recorded error even when nothing is installed
+/// yet, instead of staying silent. With no record (first launch still
+/// reconciling, or a profile that never ran one) a missing runtime is
+/// reported only when installed tools need it, as before.
 fn build_node_runtime_check(
     state: ManagedNodeRuntimeState,
     install_dir: &Path,
     npm_tools: &[String],
+    last_reconcile: Option<&ReconcileRecord>,
 ) -> Option<DoctorCheck> {
     let version = &crate::managed_node::node_runtime_lock().version;
-    let (status, message) = match state {
-        ManagedNodeRuntimeState::Ready => (
+    let failed_reconcile = last_reconcile.filter(|record| !record.ok);
+    let (status, message) = match (&state, failed_reconcile) {
+        (ManagedNodeRuntimeState::Ready, _) => (
             CheckStatus::Pass,
             format!("Staged-managed Node.js {version} is installed"),
         ),
-        ManagedNodeRuntimeState::Broken => (
+        (ManagedNodeRuntimeState::Broken, _) => (
             CheckStatus::Warn,
             format!("Staged-managed Node.js {version} is damaged; run the fix to reinstall it"),
         ),
-        ManagedNodeRuntimeState::Missing if npm_tools.is_empty() => return None,
-        ManagedNodeRuntimeState::Missing => (
+        (ManagedNodeRuntimeState::Missing, Some(record)) => (
+            CheckStatus::Warn,
+            format!(
+                "Staged-managed Node.js {version} could not be installed: {}",
+                reconcile_headline(record)
+            ),
+        ),
+        (ManagedNodeRuntimeState::Missing, None) if npm_tools.is_empty() => return None,
+        (ManagedNodeRuntimeState::Missing, None) => (
             CheckStatus::Warn,
             format!(
                 "Staged-managed Node.js {version} is not installed; Staged-installed agent tools require it"
@@ -1424,6 +1687,19 @@ fn build_node_runtime_check(
         detail.push("Staged-installed npm tools:".to_string());
         detail.extend(npm_tools.iter().map(|name| format!("- {name}")));
     }
+    if let Some(record) = failed_reconcile {
+        detail.push(format!(
+            "last managed install: failed {} with {} error(s):",
+            format_age(record.at_ms, crate::managed_acp_tools::now_ms()),
+            record.errors.len()
+        ));
+        detail.extend(record.errors.iter().map(|error| format!("- {error}")));
+        if let Some(hint) =
+            crate::managed_acp_tools::install_failure_hint(&reconcile_headline(record), "Node.js")
+        {
+            detail.push(format!("hint: {hint}"));
+        }
+    }
 
     let node_path = (state == ManagedNodeRuntimeState::Ready)
         .then(|| install_dir.join("bin").join("node").display().to_string());
@@ -1443,6 +1719,34 @@ fn build_node_runtime_check(
         Some(detail.join("\n")),
         fix,
     ))
+}
+
+/// The one error a failed reconcile is summarised by on the runtime row: the
+/// first that names the Node.js runtime download — the failure every bridge
+/// shares when the runtime could not be fetched — else the first recorded,
+/// in both cases without the reconciler's `<tool id>: ` prefix.
+fn reconcile_headline(record: &ReconcileRecord) -> String {
+    record
+        .errors
+        .iter()
+        .find(|error| error.contains("Node.js runtime"))
+        .or_else(|| record.errors.first())
+        .map(|error| strip_tool_id_prefix(error).to_string())
+        .unwrap_or_else(|| "no error recorded".to_string())
+}
+
+/// `<tool id>: <error>` → `<error>`, for the ids this build knows; anything
+/// else is returned whole.
+fn strip_tool_id_prefix(error: &str) -> &str {
+    error
+        .split_once(": ")
+        .filter(|(id, _)| {
+            crate::managed_acp_tools::MANAGED_TOOLS
+                .iter()
+                .any(|tool| tool.id == *id)
+        })
+        .map(|(_, rest)| rest)
+        .unwrap_or(error)
 }
 
 fn node_runtime_doctor_check(
@@ -1547,6 +1851,7 @@ mod tests {
             ManagedNodeRuntimeState::Ready,
             Path::new("/data/packages/node/v9.9.9/plat"),
             &["copilot".to_string()],
+            None,
         )
         .expect("ready runtime is reported");
 
@@ -1573,6 +1878,7 @@ mod tests {
             ManagedNodeRuntimeState::Broken,
             Path::new("/data/packages/node/v9.9.9/plat"),
             &[],
+            None,
         )
         .expect("damaged runtime is reported");
 
@@ -1596,6 +1902,7 @@ mod tests {
             ManagedNodeRuntimeState::Missing,
             Path::new("/data/packages/node/v9.9.9/plat"),
             &["amp-acp".to_string(), "copilot".to_string()],
+            None,
         )
         .expect("needed-but-missing runtime is reported");
         assert_eq!(check.status, CheckStatus::Warn);
@@ -1604,14 +1911,113 @@ mod tests {
         let output = check.raw_output.as_deref().expect("raw output");
         assert!(output.contains("- amp-acp"));
         assert!(output.contains("- copilot"));
+        assert!(!output.contains("last managed install"), "{output}");
 
-        // Nothing installed that needs it: stay silent.
-        assert!(build_node_runtime_check(
+        // Nothing installed that needs it, and no reconcile on record (or a
+        // clean one): stay silent.
+        for record in [None, Some(reconcile_record(true, Vec::new()))] {
+            assert!(build_node_runtime_check(
+                ManagedNodeRuntimeState::Missing,
+                Path::new("/data/packages/node/v9.9.9/plat"),
+                &[],
+                record.as_ref(),
+            )
+            .is_none());
+        }
+    }
+
+    fn reconcile_record(ok: bool, errors: Vec<&str>) -> ReconcileRecord {
+        ReconcileRecord {
+            at_ms: 1_000,
+            ok,
+            errors: errors.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    /// A runtime that is missing *because* the last reconcile failed is the
+    /// install that could not happen, not one that was never needed: the row
+    /// warns with the recorded error even with nothing installed yet, lists
+    /// every error (and the URL they name) in its detail, and keeps the
+    /// reinstall fix.
+    #[test]
+    fn missing_runtime_after_a_failed_reconcile_warns_with_the_recorded_errors() {
+        let node_error = "claude-acp: Node.js runtime download failed: \
+             https://nodejs.org/dist/v9.9.9/node-v9.9.9-darwin-arm64.tar.gz: \
+             error sending request for url";
+        let record = reconcile_record(
+            false,
+            vec![
+                "codex-acp: npm install failed: npm install exited with exit status: 1",
+                node_error,
+            ],
+        );
+        let check = build_node_runtime_check(
             ManagedNodeRuntimeState::Missing,
             Path::new("/data/packages/node/v9.9.9/plat"),
             &[],
+            Some(&record),
         )
-        .is_none());
+        .expect("a failed install is reported");
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(
+            check.message,
+            format!(
+                "Staged-managed Node.js {} could not be installed: Node.js runtime download \
+                 failed: https://nodejs.org/dist/v9.9.9/node-v9.9.9-darwin-arm64.tar.gz: \
+                 error sending request for url",
+                pinned_version()
+            ),
+            "leads with the runtime download error, minus the tool id"
+        );
+        assert_eq!(check.fix_type, Some(FixType::Command));
+        assert!(check.fix_command.is_some());
+        let output = check.raw_output.as_deref().expect("raw output");
+        assert!(output.contains("state: missing"), "{output}");
+        assert!(output.contains("last managed install: failed"), "{output}");
+        assert!(output.contains("with 2 error(s):"), "{output}");
+        assert!(output.contains(&format!("- {node_error}")), "{output}");
+        assert!(
+            output.contains("- codex-acp: npm install failed"),
+            "{output}"
+        );
+        assert!(
+            output.contains("hint: the configured registry/host did not respond"),
+            "{output}"
+        );
+
+        // With no runtime-specific error the first recorded one is the
+        // headline, still without its tool id.
+        let record = reconcile_record(
+            false,
+            vec!["claude-acp: installed ACP bridge is incomplete: probe exited with 1"],
+        );
+        let check = build_node_runtime_check(
+            ManagedNodeRuntimeState::Missing,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &[],
+            Some(&record),
+        )
+        .unwrap();
+        assert!(
+            check.message.ends_with(
+                "could not be installed: installed ACP bridge is incomplete: probe exited with 1"
+            ),
+            "{}",
+            check.message
+        );
+        assert!(!check.raw_output.as_deref().unwrap().contains("hint:"));
+    }
+
+    #[test]
+    fn format_age_rounds_to_the_largest_whole_unit() {
+        assert_eq!(format_age(1_000, 1_000), "just now");
+        assert_eq!(format_age(0, 59_000), "just now");
+        assert_eq!(format_age(0, 60_000), "1 minute ago");
+        assert_eq!(format_age(0, 2 * 3_600_000 + 5), "2 hours ago");
+        assert_eq!(format_age(0, 3 * 86_400_000), "3 days ago");
+        // A clock that went backwards is not a panic.
+        assert_eq!(format_age(5_000, 1_000), "just now");
     }
 
     #[test]
@@ -1801,6 +2207,20 @@ mod tests {
         versions: &ManagedBridgeVersions,
         check_freshness: bool,
     ) -> DoctorCheck {
+        apply_with(
+            check,
+            versions,
+            check_freshness,
+            &ManagedInstallDiagnostics::default(),
+        )
+    }
+
+    fn apply_with(
+        check: DoctorCheck,
+        versions: &ManagedBridgeVersions,
+        check_freshness: bool,
+        diagnostics: &ManagedInstallDiagnostics,
+    ) -> DoctorCheck {
         let mut report = DoctorReport {
             checks: vec![check],
         };
@@ -1809,8 +2229,20 @@ mod tests {
             std::slice::from_ref(versions),
             Path::new(SHIM_BIN_DIR),
             check_freshness,
+            diagnostics,
         );
         report.checks.pop().unwrap()
+    }
+
+    /// Undo what [`flag_missing_managed_copy`] sets on a user-copy row, so a
+    /// test can assert that *nothing else* changed.
+    fn without_missing_copy_flag(mut check: DoctorCheck) -> DoctorCheck {
+        check.status = CheckStatus::Pass;
+        check.message = "Installed".to_string();
+        check.fix_type = None;
+        check.fix_command = None;
+        check.raw_output = None;
+        check
     }
 
     fn versions(installed: Option<&str>, latest: Option<&str>) -> ManagedBridgeVersions {
@@ -1988,11 +2420,13 @@ mod tests {
         assert_eq!(check.bridge.as_ref().unwrap().update_available, None);
     }
 
-    /// A copy the user installed themselves never gets the managed readout, and
-    /// with nothing to update is left byte-identical: its own location, source
-    /// and version are the honest ones for what is on PATH.
+    /// A copy the user installed themselves never gets the managed readout.
+    /// It is flagged — the managed copy is missing, and the managed install is
+    /// its fix — but nothing else changes: its own location, source and
+    /// version are the honest ones for what is on PATH, and with nothing to
+    /// update no update action is invented.
     #[test]
-    fn a_user_copy_without_an_update_is_left_untouched() {
+    fn a_user_copy_without_an_update_is_flagged_and_otherwise_left_alone() {
         let installed = versions(Some("0.16.2"), Some("0.17.0"));
         let path = "/opt/homebrew/bin/claude-agent-acp";
 
@@ -2000,20 +2434,186 @@ mod tests {
         let check =
             user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
         let before = json(&check);
-        assert_eq!(json(&apply_to(check, &installed, true)), before);
+        let after = apply_to(check, &installed, true);
+        assert_eq!(after.status, CheckStatus::Warn);
+        assert_eq!(
+            after.message,
+            "Using /opt/homebrew/bin/claude-agent-acp — Staged's managed copy is missing"
+        );
+        assert_eq!(after.fix_type, Some(FixType::Bridge));
+        assert_eq!(
+            after.fix_command.as_deref(),
+            Some(
+                "install Staged's managed @agentclientprotocol/claude-agent-acp 0.17.0 in \
+                 ~/.staged/packages (the copy at /opt/homebrew/bin/claude-agent-acp is left as is)"
+            )
+        );
+        let detail = after.raw_output.as_deref().expect("detail");
+        assert!(
+            detail.contains("Staged-managed copy: missing (expected /data/.staged/packages/bin/claude-agent-acp)"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("last managed install: none recorded yet"),
+            "{detail}"
+        );
+        assert!(!detail.contains("hint:"), "{detail}");
+        assert_eq!(json(&without_missing_copy_flag(after)), before);
 
         // The registry lookup failed: unknown, so no action is invented.
         let check = user_copy_claude_check(path, &InstallSource::Brew, None, None);
         let before = json(&check);
-        assert_eq!(json(&apply_to(check, &installed, true)), before);
+        let after = apply_to(check, &installed, true);
+        assert_eq!(after.fix_type, Some(FixType::Bridge));
+        assert_eq!(json(&without_missing_copy_flag(after)), before);
 
         // The initial (no-network) pass sets no update fields at all, so there
-        // is nothing to redirect there either.
+        // is nothing to redirect there either — but the flag and fix do not
+        // wait for the network: the base report already carries them.
         let mut check = managed_claude_check(path, false);
         check.main.as_mut().unwrap().bundled = None;
         check.main.as_mut().unwrap().install_source = Some(InstallSource::Npm);
         let before = json(&check);
-        assert_eq!(json(&apply_to(check, &installed, false)), before);
+        let after = apply_to(check, &installed, false);
+        assert_eq!(after.status, CheckStatus::Warn);
+        assert_eq!(after.fix_type, Some(FixType::Bridge));
+        assert_eq!(json(&without_missing_copy_flag(after)), before);
+    }
+
+    /// With a failed reconcile on record the row says why the managed copy is
+    /// missing — the recorded error for *this* tool, which names the registry
+    /// it used — and the detail adds the classified hint and the registry
+    /// Doctor detected. The other tool's error stays off this row.
+    #[test]
+    fn a_user_copy_names_the_recorded_install_error_and_its_hint() {
+        let installed = versions(None, None);
+        let path = "/opt/homebrew/bin/claude-agent-acp";
+        let claude_error = "npm install failed: npm install exited with exit status: 1 \
+             (registry: npm default (per npm config)): npm error code FETCH_ERROR; \
+             invalid json response body at \
+             https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp reason: \
+             Unexpected token '<'";
+        let diagnostics = ManagedInstallDiagnostics {
+            last_reconcile: Some(ReconcileRecord {
+                at_ms: 0,
+                ok: false,
+                errors: vec![
+                    format!("claude-acp: {claude_error}"),
+                    "codex-acp: npm install failed: npm install exited with exit status: 1 \
+                     (registry: npm default (per npm config)): npm error code E404"
+                        .to_string(),
+                ],
+            }),
+            npm_registry: "https://registry.npmjs.org/ (per npm config)".to_string(),
+            now_ms: 5 * 60_000,
+        };
+
+        let check =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        let after = apply_with(check, &installed, true, &diagnostics);
+
+        assert_eq!(after.status, CheckStatus::Warn);
+        assert_eq!(
+            after.message,
+            format!("Using {path} — Staged's managed copy is missing: {claude_error}")
+        );
+        assert_eq!(after.fix_type, Some(FixType::Bridge));
+        let detail = after.raw_output.as_deref().expect("detail");
+        assert!(
+            detail.contains("last managed install: failed 5 minutes ago"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains(&format!("claude-acp: {claude_error}")),
+            "{detail}"
+        );
+        assert!(!detail.contains("codex-acp"), "{detail}");
+        assert!(
+            detail.contains(
+                "hint: this network blocks registry.npmjs.org and npm has no registry configured"
+            ),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("npm registry: https://registry.npmjs.org/ (per npm config)"),
+            "{detail}"
+        );
+
+        // A row that already warns (installed, not signed in) keeps its own
+        // message in front and its status.
+        let mut check =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        check.status = CheckStatus::Warn;
+        check.message = "Installed, not authenticated".to_string();
+        check.raw_output =
+            Some("strategy 0: PATH => /opt/homebrew/bin/claude-agent-acp".to_string());
+        let after = apply_with(check, &installed, true, &diagnostics);
+        assert_eq!(after.status, CheckStatus::Warn);
+        assert_eq!(
+            after.message,
+            format!(
+                "Installed, not authenticated; using {path} — Staged's managed copy is missing: {claude_error}"
+            )
+        );
+        let detail = after.raw_output.as_deref().unwrap();
+        assert!(
+            detail.starts_with("strategy 0: PATH => /opt/homebrew/bin/claude-agent-acp\n\nStaged-managed copy: missing"),
+            "the crate's trace stays on top: {detail}"
+        );
+    }
+
+    /// When this build does not manage bridges at all, a Homebrew copy is by
+    /// design: the rows say so and keep their status, and no fix is added.
+    /// Rows for other agents are untouched.
+    #[test]
+    fn managed_installs_disabled_is_noted_on_the_bridge_rows_without_a_downgrade() {
+        let path = "/opt/homebrew/bin/claude-agent-acp";
+        let mut claude =
+            user_copy_claude_check(path, &InstallSource::Brew, Some(USER_COPY_VERSION), None);
+        claude.raw_output =
+            Some("strategy 0: PATH => /opt/homebrew/bin/claude-agent-acp".to_string());
+        let mut codex = user_copy_claude_check(
+            "/opt/homebrew/bin/codex-acp",
+            &InstallSource::Brew,
+            None,
+            None,
+        );
+        codex.id = "ai-agent-codex".to_string();
+        codex.status = CheckStatus::Fail;
+        codex.message = "Not installed (optional)".to_string();
+        codex.path = None;
+        let amp = DoctorCheck {
+            id: "ai-agent-amp".to_string(),
+            ..claude.clone()
+        };
+        let amp_before = json(&amp);
+        let mut report = DoctorReport {
+            checks: vec![claude, codex, amp],
+        };
+
+        note_managed_installs_disabled(&mut report, "STAGED_ACP_TOOLS_DIR is set to /dev/acp");
+
+        let claude = &report.checks[0];
+        assert_eq!(claude.status, CheckStatus::Pass);
+        assert_eq!(
+            claude.message,
+            "Installed (managed installs disabled: STAGED_ACP_TOOLS_DIR is set to /dev/acp)"
+        );
+        assert!(claude.fix_type.is_none());
+        assert_eq!(
+            claude.raw_output.as_deref(),
+            Some(
+                "strategy 0: PATH => /opt/homebrew/bin/claude-agent-acp\n\n\
+                 managed installs disabled: STAGED_ACP_TOOLS_DIR is set to /dev/acp"
+            )
+        );
+        let codex = &report.checks[1];
+        assert_eq!(codex.status, CheckStatus::Fail);
+        assert_eq!(
+            codex.message,
+            "Not installed (optional) (managed installs disabled: STAGED_ACP_TOOLS_DIR is set to /dev/acp)"
+        );
+        assert_eq!(json(&report.checks[2]), amp_before);
     }
 
     /// A user copy with a newer release keeps its readout but has its action
@@ -2082,14 +2682,27 @@ mod tests {
             assert!(!description.contains("npm install"), "{description}");
             assert!(!description.contains("brew upgrade"), "{description}");
 
-            // The action is the *only* change: path, source, both versions and
-            // `updateAvailable` still describe the copy that is on PATH — the
-            // readout's `latestVersion` stays the crate's, even though the
-            // description names the registry's.
+            // The row's fix is the same managed install, word for word, so the
+            // Update and Fix buttons never describe two different things.
+            assert_eq!(after.fix_type, Some(FixType::Bridge), "{source:?}");
+            assert_eq!(
+                after.fix_command.as_deref(),
+                Some(description),
+                "{source:?}"
+            );
+
+            // The action (and the missing-copy flag) are the *only* changes:
+            // path, source, both versions and `updateAvailable` still describe
+            // the copy that is on PATH — the readout's `latestVersion` stays
+            // the crate's, even though the description names the registry's.
             let main = after.main.as_mut().unwrap();
             main.update_command = command.map(str::to_string);
             main.update_fix_type = command.map(|_| FixType::UpdateMain);
-            assert_eq!(json(&after), before, "{source:?}");
+            assert_eq!(
+                json(&without_missing_copy_flag(after)),
+                before,
+                "{source:?}"
+            );
         }
     }
 
@@ -2182,7 +2795,13 @@ mod tests {
             ],
         };
         let before: Vec<_> = report.checks.iter().map(json).collect();
-        apply_managed_bridge_readouts(&mut report, &[], shim_bin_dir, true);
+        apply_managed_bridge_readouts(
+            &mut report,
+            &[],
+            shim_bin_dir,
+            true,
+            &ManagedInstallDiagnostics::default(),
+        );
         let after: Vec<_> = report.checks.iter().map(json).collect();
         assert_eq!(after, before);
 
@@ -2196,10 +2815,22 @@ mod tests {
             installed: Some("1.1.2".to_string()),
             latest: Some("1.2.0".to_string()),
         };
-        apply_managed_bridge_readouts(&mut report, &[codex_versions], shim_bin_dir, true);
+        apply_managed_bridge_readouts(
+            &mut report,
+            &[codex_versions],
+            shim_bin_dir,
+            true,
+            &ManagedInstallDiagnostics::default(),
+        );
         let after: Vec<_> = report.checks.iter().map(json).collect();
         assert_eq!(after, before);
-        apply_managed_bridge_readouts(&mut report, &[installed], shim_bin_dir, true);
+        apply_managed_bridge_readouts(
+            &mut report,
+            &[installed],
+            shim_bin_dir,
+            true,
+            &ManagedInstallDiagnostics::default(),
+        );
         assert!(report.checks[0].bridge.is_some());
         assert!(report.checks[1].bridge.is_none());
     }

@@ -188,6 +188,84 @@ pub(crate) fn gateway_retry_failed_message(fallback: &str, retry_error: &str) ->
     )
 }
 
+/// What a recorded managed-install error says the user can change, as far
+/// as the error text tells. Coarser than [`NpmFailure`] on purpose: this
+/// classifies the *recorded* error (`state.json`'s `lastReconcile.errors`,
+/// the Node download error), which carries npm's `error code` block via
+/// [`npm_error_summary`] rather than the full stderr, and it also covers the
+/// Node.js runtime download.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InstallFailureHint {
+    /// `registry.npmjs.org` answered with a network gateway's block page and
+    /// npm had no other registry configured.
+    GatewayBlocked,
+    /// The registry npm used answered 404 for the package.
+    PackageMissing,
+    /// The registry or download host could not be reached at all: DNS,
+    /// refused/reset connections, or a timeout on the request.
+    HostUnreachable,
+}
+
+/// Classify a recorded install error (see [`InstallFailureHint`]). `None`
+/// when the text names no network or registry cause Doctor has advice for —
+/// a validation failure, a missing entrypoint, a disk error.
+pub(crate) fn classify_install_failure(error: &str) -> Option<InstallFailureHint> {
+    if error.contains("blocked by a network gateway")
+        || classify_npm_failure(error) == NpmFailure::GatewayBlocked
+    {
+        return Some(InstallFailureHint::GatewayBlocked);
+    }
+    if error.contains("E404") || error.contains("404 Not Found") {
+        return Some(InstallFailureHint::PackageMissing);
+    }
+    const UNREACHABLE_MARKERS: [&str; 11] = [
+        "ENOTFOUND",
+        "ECONNREFUSED",
+        "ECONNRESET",
+        "ETIMEDOUT",
+        "EAI_AGAIN",
+        "EHOSTUNREACH",
+        "ENETUNREACH",
+        // reqwest's wording for the Node.js runtime download.
+        "error sending request",
+        "dns error",
+        "connection refused",
+        "operation timed out",
+    ];
+    if UNREACHABLE_MARKERS
+        .iter()
+        .any(|marker| error.contains(marker))
+    {
+        return Some(InstallFailureHint::HostUnreachable);
+    }
+    // The managed `npm install` itself timing out names its registry; a
+    // validation probe timing out does not, and is not a network problem.
+    if error.contains("timed out after") && error.contains("(registry:") {
+        return Some(InstallFailureHint::HostUnreachable);
+    }
+    None
+}
+
+/// The one-line hint Doctor shows under a classified install failure, naming
+/// what to change: `package` is the npm package the install was for.
+pub(crate) fn install_failure_hint(error: &str, package: &str) -> Option<String> {
+    Some(match classify_install_failure(error)? {
+        InstallFailureHint::GatewayBlocked => {
+            "this network blocks registry.npmjs.org and npm has no registry configured — \
+             add `registry=<mirror>` to ~/.npmrc or set STAGED_NPM_REGISTRY"
+                .to_string()
+        }
+        InstallFailureHint::PackageMissing => {
+            format!("the configured registry does not carry {package}")
+        }
+        InstallFailureHint::HostUnreachable => {
+            "the configured registry/host did not respond — check `registry=` in ~/.npmrc \
+             or STAGED_NODE_DIST_URL"
+                .to_string()
+        }
+    })
+}
+
 /// The `STAGED_ACP_TOOLS_DIR` override dir, when set and non-empty.
 pub fn dev_tools_override_dir() -> Option<PathBuf> {
     std::env::var_os(ACP_TOOLS_DIR_ENV)
@@ -218,6 +296,34 @@ fn managed_tools_enabled_from_parts(
     supported_target: bool,
 ) -> bool {
     !override_active && !managed_tools_disabled && supported_target
+}
+
+/// Why this build does not manage bridge installs, for Doctor to say so on
+/// the Claude/Codex rows — a copy resolved from Homebrew is then by design,
+/// not a failed install. `None` when management is on.
+pub(crate) fn managed_tools_disabled_reason() -> Option<String> {
+    managed_tools_disabled_reason_from_parts(
+        dev_tools_override_dir().as_deref(),
+        cfg!(feature = "no-managed-acp-tools"),
+        managed_node::current_target_triple().is_some(),
+    )
+}
+
+fn managed_tools_disabled_reason_from_parts(
+    override_dir: Option<&Path>,
+    managed_tools_disabled: bool,
+    supported_target: bool,
+) -> Option<String> {
+    if let Some(dir) = override_dir {
+        return Some(format!("{ACP_TOOLS_DIR_ENV} is set to {}", dir.display()));
+    }
+    if managed_tools_disabled {
+        return Some("this build was compiled without managed ACP tools".to_string());
+    }
+    if !supported_target {
+        return Some("no managed Node.js runtime is available for this platform".to_string());
+    }
+    None
 }
 
 /// The Staged-private npm global prefix, `~/.staged/packages/npm-prefix`.
@@ -807,6 +913,53 @@ fn push_captured_line(capture: &mut String, line: &str) {
     }
 }
 
+/// How many `npm error` detail lines after the `npm error code` line are
+/// kept in the recorded error, and how long each may be.
+const NPM_ERROR_SUMMARY_LINES: usize = 3;
+const NPM_ERROR_SUMMARY_LINE_LIMIT: usize = 240;
+
+/// npm's own account of why it failed, from its captured stderr: the last
+/// `npm error code <CODE>` line and the first few `npm error` detail lines
+/// after it (minus `errno`, which repeats the code, and the log-file pointer).
+/// Appended to the recorded install error so `state.json` and Doctor can say
+/// *why* — the exit status alone says nothing about a block page, a 404, or
+/// an unreachable mirror. `None` when npm printed no error block.
+fn npm_error_summary(stderr: &str) -> Option<String> {
+    let lines: Vec<&str> = stderr.lines().map(str::trim_end).collect();
+    let code_index = lines.iter().rposition(|line| {
+        line.starts_with("npm error code ") || line.starts_with("npm ERR! code ")
+    })?;
+    let mut summary = vec![clip_line(lines[code_index])];
+    let details = lines[code_index + 1..]
+        .iter()
+        .filter(|line| line.starts_with("npm error") || line.starts_with("npm ERR!"))
+        .map(|line| {
+            line.trim_start_matches("npm error")
+                .trim_start_matches("npm ERR!")
+                .trim()
+        })
+        .filter(|detail| {
+            !detail.is_empty()
+                && !detail.starts_with("errno ")
+                && !detail.starts_with("A complete log")
+        })
+        .take(NPM_ERROR_SUMMARY_LINES)
+        .map(clip_line);
+    summary.extend(details);
+    Some(summary.join("; "))
+}
+
+fn clip_line(line: &str) -> String {
+    if line.len() <= NPM_ERROR_SUMMARY_LINE_LIMIT {
+        return line.to_string();
+    }
+    let mut cut = NPM_ERROR_SUMMARY_LINE_LIMIT;
+    while !line.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &line[..cut])
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_floating_npm_install(
     packages_root: &Path,
@@ -941,8 +1094,11 @@ async fn run_floating_npm_install_capturing(
     if status.success() {
         Ok(())
     } else {
+        let summary = npm_error_summary(stderr_capture)
+            .map(|summary| format!(": {summary}"))
+            .unwrap_or_default();
         Err(ManagedToolError::NpmInstall(format!(
-            "npm install exited with {status} (registry: {label})"
+            "npm install exited with {status} (registry: {label}){summary}"
         )))
     }
 }
@@ -1107,7 +1263,7 @@ async fn probe_latest_version(
 /// resolved by hand because `Command::new("npm")` would search the *parent*
 /// process's PATH, not the snapshot's, and the snapshot is what puts the
 /// managed runtime's bin dir first.
-fn find_on_env_path(env_vars: &[(String, String)], name: &str) -> Option<PathBuf> {
+pub(crate) fn find_on_env_path(env_vars: &[(String, String)], name: &str) -> Option<PathBuf> {
     std::env::split_paths(snapshot_var(env_vars, "PATH")?)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
@@ -1194,6 +1350,39 @@ async fn npm_view_version(
         .is_some_and(|first| first.is_ascii_digit())
         .then_some(version)
         .ok_or(NpmViewFailure::Other)
+}
+
+/// How long Doctor waits on `npm config get registry`.
+const NPM_CONFIG_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The registry npm would use under the `env_vars` snapshot with no
+/// `--registry` — `npm config get registry` asked of the snapshot's own
+/// `npm` (the managed runtime's, when installed), under exactly that env, so
+/// the answer is the one a managed install resolves. `None` when the
+/// snapshot has no `npm`, the probe fails or times out, or the answer is not
+/// a URL; Doctor then says "npm default" rather than guessing.
+pub(crate) async fn configured_npm_registry(env_vars: &[(String, String)]) -> Option<String> {
+    let npm_path = find_on_env_path(env_vars, "npm")?;
+    let mut command = tokio::process::Command::new(npm_path);
+    command.args(["config", "get", "registry"]);
+    command.env_clear();
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(NPM_CONFIG_PROBE_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let registry = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    registry.starts_with("http").then_some(registry)
 }
 
 // =============================================================================
@@ -1293,7 +1482,7 @@ pub(crate) fn record_reconcile(packages_root: &Path, errors: Vec<String>) {
     }
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
@@ -1404,6 +1593,181 @@ mod tests {
             "npm default registry (registry.npmjs.org) was blocked by a network gateway; \
              fallback https://fallback.example.test/npm/ also failed: npm install exited with \
              exit status: 1 (registry: https://fallback.example.test/npm/)"
+        );
+    }
+
+    /// The Doctor hint classifies the *recorded* error: the block page (with
+    /// or without a fallback having been tried), a 404 from whichever
+    /// registry, and an unreachable registry or download host. A validation
+    /// failure, a missing entrypoint, and a probe timeout get no hint — there
+    /// is nothing network-side to change.
+    #[test]
+    fn classify_install_failure_names_the_three_fixable_causes() {
+        let cases = [
+            (
+                "npm install failed: npm install exited with exit status: 1 (registry: npm default (per npm config)): npm error code FETCH_ERROR; invalid json response body at https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp reason: Unexpected token '<'",
+                Some(InstallFailureHint::GatewayBlocked),
+            ),
+            (
+                "npm install failed: npm default registry (registry.npmjs.org) was blocked by a network gateway; fallback https://fallback.example.test/npm/ also failed: npm install exited with exit status: 1 (registry: https://fallback.example.test/npm/)",
+                Some(InstallFailureHint::GatewayBlocked),
+            ),
+            (
+                "npm install failed: npm install exited with exit status: 1 (registry: https://mirror.example.test/npm/): npm error code E404; 404 Not Found - GET https://mirror.example.test/npm/@agentclientprotocol%2fclaude-agent-acp",
+                Some(InstallFailureHint::PackageMissing),
+            ),
+            (
+                "npm install failed: npm install exited with exit status: 1 (registry: npm default (per npm config)): npm error code ENOTFOUND; network request to https://mirror.example.test/npm/x failed, reason: getaddrinfo ENOTFOUND mirror.example.test",
+                Some(InstallFailureHint::HostUnreachable),
+            ),
+            (
+                "Node.js runtime download failed: https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-arm64.tar.gz: error sending request for url",
+                Some(InstallFailureHint::HostUnreachable),
+            ),
+            (
+                "npm install failed: timed out after 900 seconds (registry: npm default (per npm config))",
+                Some(InstallFailureHint::HostUnreachable),
+            ),
+            (
+                "installed ACP bridge is incomplete: @agentclientprotocol/claude-agent-acp: validation probe timed out after 20 seconds",
+                None,
+            ),
+            (
+                "installed ACP bridge is incomplete: bridge entrypoint /x/index.js is missing after install",
+                None,
+            ),
+            ("Node.js runtime download failed: HTTP 503", None),
+            ("", None),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(classify_install_failure(error), expected, "{error}");
+        }
+
+        let hint = install_failure_hint(
+            "npm install failed: … npm error code E404; 404 Not Found",
+            "@agentclientprotocol/codex-acp",
+        )
+        .unwrap();
+        assert_eq!(
+            hint,
+            "the configured registry does not carry @agentclientprotocol/codex-acp"
+        );
+        assert!(install_failure_hint(
+            "npm error code FETCH_ERROR request to https://registry.npmjs.org/x failed",
+            "x"
+        )
+        .unwrap()
+        .contains("STAGED_NPM_REGISTRY"));
+        assert!(install_failure_hint("getaddrinfo ENOTFOUND mirror", "x")
+            .unwrap()
+            .contains("STAGED_NODE_DIST_URL"));
+        assert!(install_failure_hint("disk full", "x").is_none());
+    }
+
+    /// The recorded install error carries npm's own account: the last
+    /// `npm error code` line and the detail lines after it, minus the `errno`
+    /// repeat and the log-file pointer, each clipped. Without an error block
+    /// nothing is appended.
+    #[test]
+    fn npm_error_summary_keeps_the_code_and_the_first_details() {
+        let stderr = "npm warn deprecated foo@1.0.0: use bar\n\
+            npm error code FETCH_ERROR\n\
+            npm error errno FETCH_ERROR\n\
+            npm error invalid json response body at https://registry.npmjs.org/x reason: Unexpected token '<'\n\
+            npm error\n\
+            npm error A complete log of this run can be found in: /tmp/x.log\n";
+        assert_eq!(
+            npm_error_summary(stderr).as_deref(),
+            Some(
+                "npm error code FETCH_ERROR; invalid json response body at \
+                 https://registry.npmjs.org/x reason: Unexpected token '<'"
+            )
+        );
+        assert_eq!(
+            classify_npm_failure(&npm_error_summary(stderr).unwrap()),
+            NpmFailure::GatewayBlocked
+        );
+
+        // Older npm spelling, and more details than are kept.
+        let stderr = "npm ERR! code E404\nnpm ERR! 404 Not Found - GET https://r/x\nnpm ERR! 404\nnpm ERR! 404 'x@latest' is not in this registry.\nnpm ERR! 404 note\nnpm ERR! 404 more\n";
+        assert_eq!(
+            npm_error_summary(stderr).as_deref(),
+            Some("npm ERR! code E404; 404 Not Found - GET https://r/x; 404; 404 'x@latest' is not in this registry.")
+        );
+
+        assert_eq!(npm_error_summary("npm warn only\n"), None);
+        assert_eq!(npm_error_summary(""), None);
+
+        let long = format!("npm error code E1\nnpm error {}\n", "y".repeat(1000));
+        let summary = npm_error_summary(&long).unwrap();
+        assert!(summary.len() < 300, "{}", summary.len());
+        assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn managed_tools_disabled_reason_names_the_cause() {
+        assert_eq!(
+            managed_tools_disabled_reason_from_parts(None, false, true),
+            None
+        );
+        assert_eq!(
+            managed_tools_disabled_reason_from_parts(Some(Path::new("/dev/acp")), false, true)
+                .as_deref(),
+            Some("STAGED_ACP_TOOLS_DIR is set to /dev/acp")
+        );
+        assert_eq!(
+            managed_tools_disabled_reason_from_parts(None, true, true).as_deref(),
+            Some("this build was compiled without managed ACP tools")
+        );
+        assert_eq!(
+            managed_tools_disabled_reason_from_parts(None, false, false).as_deref(),
+            Some("no managed Node.js runtime is available for this platform")
+        );
+        // The override is the reason even on a build that is disabled anyway.
+        assert!(
+            managed_tools_disabled_reason_from_parts(Some(Path::new("/d")), true, false)
+                .unwrap()
+                .starts_with("STAGED_ACP_TOOLS_DIR")
+        );
+    }
+
+    /// The registry probe asks the snapshot's own `npm`, under the snapshot's
+    /// env, and reports only a URL-shaped answer.
+    #[tokio::test]
+    async fn configured_npm_registry_asks_the_snapshots_npm() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_executable(
+            &bin.join("npm"),
+            "#!/bin/sh\n[ \"$1 $2 $3\" = \"config get registry\" ] || exit 2\nprintf '%s\\n' \"${FAKE_REGISTRY:-https://mirror.example.test/npm/}\"\n",
+        );
+        let env = vec![("PATH".to_string(), bin.display().to_string())];
+        assert_eq!(
+            configured_npm_registry(&env).await.as_deref(),
+            Some("https://mirror.example.test/npm/")
+        );
+
+        // The env is the snapshot's, not the process's.
+        let mut env_with_registry = env.clone();
+        env_with_registry.push((
+            "FAKE_REGISTRY".to_string(),
+            "https://other.example.test/".to_string(),
+        ));
+        assert_eq!(
+            configured_npm_registry(&env_with_registry).await.as_deref(),
+            Some("https://other.example.test/")
+        );
+
+        // Not a URL: no answer. No npm on the snapshot PATH: no answer.
+        let mut env_garbage = env.clone();
+        env_garbage.push(("FAKE_REGISTRY".to_string(), "undefined".to_string()));
+        assert_eq!(configured_npm_registry(&env_garbage).await, None);
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert_eq!(
+            configured_npm_registry(&[("PATH".to_string(), empty.display().to_string())]).await,
+            None
         );
     }
 
@@ -2081,11 +2445,14 @@ mod tests {
 
         assert!(matches!(error, ManagedToolError::NpmInstall(_)), "{error}");
         let message = error.to_string();
+        // The retry's own `npm error code` line rides along, so the recorded
+        // error says what the fallback answered, not just that it failed.
         assert_eq!(
             message,
             "npm install failed: npm default registry (registry.npmjs.org) was blocked by a \
              network gateway; fallback https://fallback.example.test/npm/ also failed: \
-             npm install exited with exit status: 7 (registry: https://fallback.example.test/npm/)"
+             npm install exited with exit status: 7 (registry: https://fallback.example.test/npm/): \
+             npm error code E500"
         );
         assert!(
             message.contains(

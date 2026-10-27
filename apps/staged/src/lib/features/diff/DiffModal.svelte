@@ -1728,6 +1728,7 @@
     {branchId}
     {projectId}
     repoLabel={githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null}
+    {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => {
       openSessionId = null;

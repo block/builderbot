@@ -230,7 +230,11 @@
       stale = true;
     };
   });
-  let hashtagItems = $derived([...timelineHashtagItems, ...projectNoteHashtagItems]);
+  // Project notes first, matching buildBranchHashtagItems: its comparator
+  // orders by section before anything else and each sub-list is already
+  // sorted by it, so this concatenation is the same order the session pane
+  // would compute for itself.
+  let hashtagItems = $derived([...projectNoteHashtagItems, ...timelineHashtagItems]);
   let referenceDiffContext = $derived<ReferenceDiffContext>({
     branchId: branch.id,
     projectId: branch.projectId,
@@ -2321,6 +2325,7 @@
     branchId={branch.id}
     projectId={branch.projectId}
     {repoLabel}
+    {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={handleSessionModalClose}
     onOpenSession={handleOpenInnerSession}

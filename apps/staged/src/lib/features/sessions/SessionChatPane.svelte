@@ -113,6 +113,7 @@
     prependOlderMessages,
     TRANSCRIPT_PAGE_ROWS,
     transcriptPageFromRows,
+    trimLatestWindow,
   } from './transcriptWindow';
   import {
     buildBranchHashtagItems,
@@ -183,6 +184,7 @@
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
   import { latestAcpConfigDiscoveryFromMetadata } from './acpConfigMetadata';
+  import { reopenMode, restoredScrollTop, type ParkedScroll, type ReopenMode } from './paneReopen';
 
   interface Props {
     active: boolean;
@@ -684,11 +686,11 @@
     unlistenBackgroundHold?.();
   });
 
-  // This pane can be mounted once and reused across opens (the `active` prop toggles
-  // visibility), so the session must be (re)loaded reactively rather than in
-  // onMount — otherwise it would load once with whatever sessionId was set at
-  // mount time (often empty) and never refresh. Re-run whenever the modal is
-  // opened or the target session changes.
+  // This pane is mounted once and reused across opens (`sessionPanePool`
+  // parks it between dialogs and the `active` prop toggles visibility), so the
+  // session must be (re)loaded reactively rather than in onMount — otherwise it
+  // would load once with whatever sessionId was set at mount time and never
+  // refresh. Re-run whenever the modal is opened or the target session changes.
   $effect(() => {
     // Track active + sessionId only; loadSession()'s own state writes must not
     // retrigger this effect.
@@ -705,13 +707,29 @@
     // separately-declared reset effect raced ahead of this load.
     closed = false;
     stopPolling();
-    loadSession().then(() => {
+    const mode = untrack(() =>
+      reopenMode({
+        loadedSessionId: session?.id,
+        sessionId: id,
+        messageCount: messages.length,
+        error,
+      })
+    );
+    if (mode === 'revalidate') {
+      // The transcript and composer are already built and attached (the
+      // adopter unparks before it flips `active`), so focus now rather than
+      // after the round trip the full load waits for.
+      tick().then(() => {
+        if (!closed && active && sessionId === id) inputEl?.focus();
+      });
+    }
+    loadSession(mode).then(() => {
       if (closed || !active || sessionId !== id) return;
       if (session?.status === 'running') {
         startPolling();
       }
       // Focus input on open
-      tick().then(() => inputEl?.focus());
+      if (mode === 'full') tick().then(() => inputEl?.focus());
     });
   });
 
@@ -852,9 +870,17 @@
   // Data loading
   // =========================================================================
 
-  /** Initial full load. */
-  async function loadSession() {
+  /**
+   * Bring the pane up to date for `sessionId`. `revalidate` (a reopen of the
+   * session this pane already shows, see `reopenMode`) keeps the rendered
+   * transcript and fetches one delta; `full` is the initial load.
+   */
+  async function loadSession(mode: ReopenMode = 'full') {
     if (closed) return;
+    if (mode === 'revalidate') {
+      await revalidateSession();
+      return;
+    }
     // Clear prior session state when loading a *different* session so a
     // bail-out or in-flight load can never paint the previously-viewed
     // session — show a clean loading state for the requested id instead. When
@@ -945,6 +971,47 @@
     }
   }
 
+  /**
+   * Catch a parked pane up without touching `loading`, whose branch would swap
+   * the transcript for a spinner and rebuild every group. One `poll_session`
+   * delta returns the status, the queue, the rows written while the pane was
+   * parked and any that changed, and the metadata past the cursor. Groups the
+   * delta appends must not slide in — this is a reopen, not a live update —
+   * so the intro transition is suppressed around the merge as the load-older
+   * path does. A long park on a busy session can return a delta far larger
+   * than a page; the window is bounded afterwards so the `{#each}` below stays
+   * a page or two and `hasOlderMessages` still pages the rest back in.
+   */
+  async function revalidateSession() {
+    // Whatever `session.status` says now is from the last time this pane was
+    // shown; a hold must not be judged against it until the delta lands.
+    statusLoadedForSessionId = null;
+    const id = sessionId;
+    const animate = animateNewMessages;
+    animateNewMessages = false;
+    try {
+      const applied = await poll();
+      if (closed || sessionId !== id) return;
+      if (applied) {
+        if (session) statusLoadedForSessionId = session.id;
+        if (backgroundHold) applyBackgroundHold(id, backgroundHold);
+        const bounded = trimLatestWindow(
+          { messages, hasMore: hasOlderMessages },
+          TRANSCRIPT_PAGE_ROWS
+        );
+        if (bounded.messages !== messages) {
+          messages = bounded.messages;
+          hasOlderMessages = bounded.hasMore;
+        }
+      }
+      // `unpark` restored the scroll position and `poll` follows the bottom
+      // when its merge appends, so nothing here forces layout on the open.
+    } finally {
+      await tick();
+      animateNewMessages = animate;
+    }
+  }
+
   /** Incremental poll — one `pollSession` request per tick returns the status,
    *  the follow-up queue, the last message (may have grown) + any new ones, and
    *  the metadata rows past the cursor, all from one backend snapshot.
@@ -953,8 +1020,8 @@
    *  reassigning the same data under a fresh identity would invalidate the
    *  grouped transcript and re-render the entire message list twice a second.
    */
-  async function poll() {
-    if (!session || closed || pollInFlight) return;
+  async function poll(): Promise<boolean> {
+    if (!session || closed || pollInFlight) return false;
     pollInFlight = true;
     try {
       const statusVersionBeforeFetch = statusEventVersion;
@@ -962,7 +1029,7 @@
       // there is nothing older to page in: `hasOlderMessages` stays false.
       const request = sessionPollRequest(messages, acpMetadataMessages);
       const result = await pollSession(sessionId, request);
-      if (closed) return;
+      if (closed) return false;
       const s = result.session;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
       if (s && !statusEventDuringFetch && JSON.stringify(s) !== JSON.stringify(session)) {
@@ -987,8 +1054,10 @@
       if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
         clearPollTimer();
       }
+      return true;
     } catch {
       // Polling errors are expected during shutdown — silently ignore
+      return false;
     } finally {
       pollInFlight = false;
       if (finalPollPending) {
@@ -1871,6 +1940,53 @@
     if (closed) return;
     closed = true;
     stopPolling();
+  }
+
+  /** Scroll state saved by `park` for the next `unpark`. */
+  let parkedScroll: ParkedScroll | null = null;
+
+  /**
+   * Leave the document without being destroyed (`sessionPanePool`). The pool
+   * calls this before it detaches the host, but the dialog above the host is
+   * usually gone already: Svelte removes a destroyed block's DOM before it
+   * runs the teardowns inside it, and WebKit resets `scrollTop` to 0 on
+   * detach. So the offset is read from the box only while it is still in the
+   * document, and otherwise from `lastScrollTop`, which `handleScroll` keeps
+   * current. Search highlights are DOM state the next open must not inherit,
+   * and the viewers portal to `#portal-root`, where nothing of a parked pane
+   * may remain. `close` stops polling; the `active`-gated effects drop the
+   * listeners once the pool clears `active`.
+   */
+  export function park() {
+    if (messagesEl) {
+      parkedScroll = {
+        scrollTop: messagesEl.isConnected ? messagesEl.scrollTop : lastScrollTop,
+        atBottom: !userScrolledUp,
+      };
+    }
+    clearSearch();
+    mediaViewer = null;
+    diagramViewerSvg = null;
+    close();
+  }
+
+  /**
+   * Back in the document. Runs synchronously once the host is reattached
+   * inside the new dialog and before `active` flips, so the read and write
+   * below pay the reinsert's style and layout once, ahead of the first paint.
+   * `lastScrollTop` follows so `handleScroll` does not read the restore as
+   * the user scrolling up or ask for an older page.
+   */
+  export function unpark() {
+    const saved = parkedScroll;
+    parkedScroll = null;
+    if (!saved || !messagesEl) return;
+    messagesEl.scrollTop = restoredScrollTop(
+      saved,
+      messagesEl.scrollHeight,
+      messagesEl.clientHeight
+    );
+    lastScrollTop = messagesEl.scrollTop;
   }
 
   function selectorStateKey(

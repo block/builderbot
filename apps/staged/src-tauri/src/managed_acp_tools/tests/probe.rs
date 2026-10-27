@@ -457,7 +457,6 @@ async fn latest_published_version_reprobes_when_the_user_npmrc_changes() {
         &bin.join("npm"),
         "#!/bin/sh\ntest \"$1\" = view || exit 44\ncat \"$NPM_CONFIG_USERCONFIG\"\n",
     );
-    wait_until_executable(&bin.join("npm"));
     let tool = ManagedTool {
         id: "cache-key-probe",
         binary: "cache-key-probe",

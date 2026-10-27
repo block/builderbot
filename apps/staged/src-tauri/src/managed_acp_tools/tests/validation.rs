@@ -15,7 +15,7 @@ const MISSING_NATIVE: &str = "echo 'native binary not found for this platform' >
 /// validation probe execs it. A busy exec would otherwise fail validation
 /// with `could not start: Text file busy`.
 fn write_node_shim(bin_dir: &Path, contents: &str) {
-    write_shim(bin_dir, "node", contents).unwrap();
+    write_shim(bin_dir, "node", &with_exec_probe_guard(contents)).unwrap();
     wait_until_executable(&bin_dir.join("node"));
 }
 

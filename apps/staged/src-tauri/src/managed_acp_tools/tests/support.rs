@@ -68,10 +68,27 @@ pub(super) fn write_fake_node_with_npm(node_install_dir: &Path, template: &Path,
     }
 }
 
-/// Writes `contents` to `path` as a 0755 script and returns only once it
-/// can actually be exec'd (see [`wait_until_executable`]).
+/// Env var [`wait_until_executable`] sets on its probe run.
+const EXEC_PROBE_ENV: &str = "STAGED_EXEC_PROBE";
+/// Line [`with_exec_probe_guard`] puts right after the shebang: a probe run
+/// exits before reaching any of the fixture's own lines.
+const EXEC_PROBE_GUARD: &str = "[ -z \"$STAGED_EXEC_PROBE\" ] || exit 0\n";
+
+/// `contents` with [`EXEC_PROBE_GUARD`] inserted after its shebang line, so
+/// [`wait_until_executable`] can exec the script without running its body.
+pub(super) fn with_exec_probe_guard(contents: &str) -> String {
+    let (shebang, body) = contents
+        .split_once('\n')
+        .filter(|(shebang, _)| shebang.starts_with("#!"))
+        .expect("fixture script must start with a shebang line");
+    format!("{shebang}\n{EXEC_PROBE_GUARD}{body}")
+}
+
+/// Writes `contents` (behind [`with_exec_probe_guard`]) to `path` as a 0755
+/// script and returns only once it can actually be exec'd (see
+/// [`wait_until_executable`]).
 pub(super) fn write_executable(path: &Path, contents: &str) {
-    std::fs::write(path, contents).unwrap();
+    std::fs::write(path, with_exec_probe_guard(contents)).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     wait_until_executable(path);
@@ -81,20 +98,36 @@ pub(super) fn write_executable(path: &Path, contents: &str) {
 /// exec'd. On Linux, a test on another thread that forks while our write
 /// handle is open inherits it until its own exec, and exec of a file
 /// anyone still holds open for writing fails with `ETXTBSY` — which the
-/// code under test would faithfully report and fail the test. Probe-spawn
-/// (and immediately kill) the script until that window has passed, so the
-/// script must be harmless to run with no arguments.
+/// code under test would faithfully report and fail the test. Probe-run
+/// the script until that window has passed. The script must carry
+/// [`EXEC_PROBE_GUARD`]: the probe runs it with a cleared env plus
+/// `STAGED_EXEC_PROBE=1` and waits for it, so a probe run is a guaranteed
+/// no-op. (Killing an unguarded script instead races: on Linux `sh` can
+/// already be running its first lines — e.g. a fixture's `env > log` —
+/// under the test process env by the time the kill lands.)
 pub(super) fn wait_until_executable(path: &Path) {
+    let contents = std::fs::read_to_string(path).unwrap();
+    assert!(
+        contents.contains(EXEC_PROBE_GUARD),
+        "{} lacks the exec-probe guard; write it via with_exec_probe_guard",
+        path.display()
+    );
     for _ in 0..1000 {
         match std::process::Command::new(path)
+            .env_clear()
+            .env(EXEC_PROBE_ENV, "1")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
             Ok(mut child) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                let status = child.wait().unwrap();
+                assert!(
+                    status.success(),
+                    "exec probe of {} exited {status}",
+                    path.display()
+                );
                 return;
             }
             Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {

@@ -21,11 +21,17 @@
  *   the next `click` anywhere in the document is swallowed on the capture
  *   phase for a short window — unless a new touch has started since, which
  *   marks it as the user's next tap rather than the release's leftover;
- * - the gesture-wide events (`touchmove`, `touchend`, `touchcancel`) are
- *   listened for on the document while a press is live, not on the trigger:
- *   touch events are retargeted to the original `touchstart` target, so a
- *   descendant replaced mid-hold (a keyed re-render) would otherwise take the
- *   release with it and leave the press armed;
+ * - the rest of the gesture (`touchmove`, `touchend`, `touchcancel`) is
+ *   listened for on the document *and* on the touched element itself while a
+ *   press is live. Touch events are retargeted to the original `touchstart`
+ *   target and their path is built from that node's ancestors at dispatch
+ *   time, so a descendant replaced mid-hold (a keyed re-render) delivers the
+ *   release to nothing but itself — neither the trigger nor the document ever
+ *   sees it. Whichever listener fires first handles the release and tears all
+ *   of them down. Should a release still go unseen, the next single-finger
+ *   `touchstart` anywhere in the document while a press is on record means
+ *   the earlier finger already lifted: the stale press is dropped before the
+ *   new tap is looked at, so it cannot eat that tap's release;
  * - a browser that raises its own trusted `contextmenu` for the hold a few
  *   milliseconds after ours already opened the menu (Android Chrome) has that
  *   duplicate eaten, so consumer handlers and bits-ui's opener run once;
@@ -108,6 +114,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     }
   }
 
+  // Drops every reference to the gesture, the touched node included: a press
+  // whose target left the DOM must not keep it alive past its release.
   function reset() {
     clearTimer();
     unlistenGesture?.();
@@ -140,6 +148,21 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     };
   }
 
+  // A touchstart reaching the document while a press is on record. One
+  // finger: the pressing finger must already have lifted without us seeing
+  // the release (its target was detached), so the stale press is dropped
+  // before this tap's own touchend — which would otherwise be eaten — is
+  // looked at. Two or more: a second finger, which drops a pending press
+  // wherever it landed, not only on the trigger.
+  function ontouchstartAnywhere(event: TouchEvent) {
+    if (!start) return;
+    if (event.touches.length === 1) {
+      reset();
+      return;
+    }
+    clearTimer();
+  }
+
   function ontouchmove(event: TouchEvent) {
     if (!start) return;
     if (event.touches.length !== 1) {
@@ -156,7 +179,8 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   }
 
   function ontouchend(event: TouchEvent) {
-    if (fired && start) {
+    if (!start) return;
+    if (fired) {
       event.preventDefault();
       const scope = scopeFor(start.target);
       if (scope) armClickSwallow(scope);
@@ -168,18 +192,29 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     reset();
   }
 
-  // The listeners live only for the duration of a press; `touchend` must not
-  // be passive so the release can be default-prevented.
-  function listenGesture(scope: EventTarget) {
+  // The listeners live only for the duration of a press, on the document and
+  // on the touched node (the only place a release for a since-detached node
+  // is delivered). For a node still in the DOM both see the same event, the
+  // document's capture listener first; it resets the press, which removes
+  // the node's listener before the event reaches it. `touchend` must not be
+  // passive so the release can be default-prevented.
+  function listenGesture(scope: EventTarget, target: EventTarget) {
     unlistenGesture?.();
     const opts = { capture: true, passive: false };
-    scope.addEventListener('touchmove', ontouchmove as EventListener, opts);
-    scope.addEventListener('touchend', ontouchend as EventListener, opts);
-    scope.addEventListener('touchcancel', ontouchcancel, opts);
+    const nodes = target === scope ? [scope] : [scope, target];
+    for (const node of nodes) {
+      node.addEventListener('touchmove', ontouchmove as EventListener, opts);
+      node.addEventListener('touchend', ontouchend as EventListener, opts);
+      node.addEventListener('touchcancel', ontouchcancel, opts);
+    }
+    scope.addEventListener('touchstart', ontouchstartAnywhere as EventListener, opts);
     unlistenGesture = () => {
-      scope.removeEventListener('touchmove', ontouchmove as EventListener, opts);
-      scope.removeEventListener('touchend', ontouchend as EventListener, opts);
-      scope.removeEventListener('touchcancel', ontouchcancel, opts);
+      for (const node of nodes) {
+        node.removeEventListener('touchmove', ontouchmove as EventListener, opts);
+        node.removeEventListener('touchend', ontouchend as EventListener, opts);
+        node.removeEventListener('touchcancel', ontouchcancel, opts);
+      }
+      scope.removeEventListener('touchstart', ontouchstartAnywhere as EventListener, opts);
       unlistenGesture = null;
     };
   }
@@ -203,7 +238,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
       };
       const point = start;
       const scope = scopeFor(point.target);
-      if (scope) listenGesture(scope);
+      if (scope) listenGesture(scope, point.target);
       timer = setTimeout(() => {
         timer = null;
         fired = true;

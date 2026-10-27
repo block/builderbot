@@ -3,8 +3,8 @@
   import { cn } from '$lib/components/utils.js';
   import MenuSheet from '$lib/components/ui/menu-sheet/menu-sheet.svelte';
   import {
-    focusMenuSubTrigger,
     getMenuSub,
+    returnFocusFromMenuSub,
   } from '$lib/components/ui/menu-sheet/menu-close-context.js';
   import { viewport } from '$lib/shared/viewport.svelte';
 
@@ -31,11 +31,12 @@
 
   const sub = getMenuSub();
 
-  // Back (the row, or a tap on this sheet's scrim): hand focus to the
-  // sub-trigger first, so a keyboard user lands back on the parent sheet's
-  // row instead of `body` (see focusMenuSubTrigger).
+  // Back (the row, or a tap on this sheet's scrim): put focus back in the
+  // parent sheet first, so it does not drop to `body` — on the sub-trigger's
+  // row for a keyboard user, on the sheet itself for a tap (see
+  // returnFocusFromMenuSub).
   function back() {
-    focusMenuSubTrigger(ref);
+    returnFocusFromMenuSub(ref);
     sub?.close();
   }
 </script>

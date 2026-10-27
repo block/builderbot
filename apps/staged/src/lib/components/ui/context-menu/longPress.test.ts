@@ -43,7 +43,9 @@ describe('createLongPress', () => {
   // `doc` stands in for the document the gesture-wide listeners live on;
   // `trigger` is the trigger element and `row` the element under the finger
   // inside it. Only touchstart reaches the controller directly, the way the
-  // trigger wires it; the rest of the gesture is dispatched on `doc`.
+  // trigger wires it; the rest of the gesture is dispatched on `doc` (where
+  // a connected node's events arrive first), or on the node itself for the
+  // detached case.
   let doc: EventTarget;
   let trigger: EventTarget;
   let row: EventTarget;
@@ -70,9 +72,13 @@ describe('createLongPress', () => {
     });
   }
 
-  function gesture(type: 'touchmove' | 'touchend' | 'touchcancel', touches: FakeTouch[] = []) {
+  function gesture(
+    type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
+    touches: FakeTouch[] = [],
+    on: EventTarget = doc
+  ) {
     const event = Object.assign(new Event(type, { cancelable: true }), { touches });
-    doc.dispatchEvent(event);
+    on.dispatchEvent(event);
     return event;
   }
 
@@ -264,11 +270,53 @@ describe('createLongPress', () => {
     lp.ontouchstart(touchEvent([{ clientX: 10, clientY: 20, target: detached }]));
     vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
     expect(onLongPress).toHaveBeenCalledWith({ target: trigger, clientX: 10, clientY: 20 });
-    // The release is retargeted to the detached node by the browser and never
-    // bubbles to the trigger; the document listener still suppresses it.
-    const end = gesture('touchend');
+    // Blink dispatches the release at the stored touchstart target and walks
+    // its (now empty) ancestry for the path: the detached node is the only
+    // place it can be seen. Nothing reaches the document.
+    const end = gesture('touchend', [], detached);
     expect(end.defaultPrevented).toBe(true);
     expect(clickPassesThrough()).toBe(false);
+    vi.advanceTimersByTime(CLICK_SWALLOW_WINDOW_MS);
+    // The listeners came down with the press: a later event on the detached
+    // node, or on the document, is nobody's release.
+    expect(gesture('touchend', [], detached).defaultPrevented).toBe(false);
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    // The next tap on some other element is an ordinary tap.
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(100);
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    expect(clickPassesThrough()).toBe(true);
+  });
+
+  it('drops a stale press when a new single touch starts anywhere in the document', () => {
+    const lp = press();
+    // The press fired but its release was never delivered to us (its target
+    // was detached and the browser handed the touchend to no one else).
+    holdUntilFired(lp);
+    // The user's next tap lands on a row of the sheet that just opened: the
+    // document sees its touchstart before anything else does.
+    gesture('touchstart', [{ clientX: 100, clientY: 600, target: doc }]);
+    // That tap's release and click are left alone.
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    expect(clickPassesThrough()).toBe(true);
+    // And a trusted contextmenu afterwards is not mistaken for the hold's duplicate.
+    const native = contextMenuEvent({ trusted: true });
+    expect(lp.oncontextmenu(native)).toBe(false);
+    expect(native.defaultPrevented).toBe(false);
+  });
+
+  it('drops a pending press when a second finger lands outside the trigger', () => {
+    const lp = press();
+    lp.ontouchstart(touchEvent([{ clientX: 0, clientY: 0, target: row }]));
+    vi.advanceTimersByTime(100);
+    // Only the document sees a second finger that lands off the trigger.
+    gesture('touchstart', [
+      { clientX: 0, clientY: 0, target: row },
+      { clientX: 200, clientY: 0, target: doc },
+    ]);
+    vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
+    expect(onLongPress).not.toHaveBeenCalled();
+    expect(gesture('touchend').defaultPrevented).toBe(false);
   });
 
   it('does nothing while disabled', () => {
@@ -304,7 +352,8 @@ describe('createLongPress', () => {
     lp.destroy();
     vi.advanceTimersByTime(LONG_PRESS_DELAY_MS);
     expect(onLongPress).toHaveBeenCalledTimes(1);
-    const end = gesture('touchend');
-    expect(end.defaultPrevented).toBe(false);
+    expect(gesture('touchend').defaultPrevented).toBe(false);
+    // The touched node's own listeners go too.
+    expect(gesture('touchend', [], row).defaultPrevented).toBe(false);
   });
 });

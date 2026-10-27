@@ -102,6 +102,7 @@
   import { toast } from 'svelte-sonner';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
+  import { reuseHashtagItems } from '../sessions/hashtagItemsIdentity';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { pullStateStore } from '../../stores/pullState.svelte';
@@ -234,7 +235,19 @@
   // orders by section before anything else and each sub-list is already
   // sorted by it, so this concatenation is the same order the session pane
   // would compute for itself.
-  let hashtagItems = $derived([...projectNoteHashtagItems, ...timelineHashtagItems]);
+  //
+  // SessionChatPane keys its markdown cache on this array's identity, and
+  // `timeline` is reassigned far more often than its items change (every
+  // git-state merge, the cached→fresh reload), so hand out the previous
+  // array whenever the items are the same.
+  let lastHashtagItems: HashtagItem[] = [];
+  let hashtagItems = $derived.by(() => {
+    lastHashtagItems = reuseHashtagItems(lastHashtagItems, [
+      ...projectNoteHashtagItems,
+      ...timelineHashtagItems,
+    ]);
+    return lastHashtagItems;
+  });
   let referenceDiffContext = $derived<ReferenceDiffContext>({
     branchId: branch.id,
     projectId: branch.projectId,

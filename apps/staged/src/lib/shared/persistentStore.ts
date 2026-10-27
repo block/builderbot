@@ -46,14 +46,25 @@ type StoreBackend = TauriStoreBackend | WebStoreBackend | null;
 
 let backend: StoreBackend = null;
 let storePath: string | undefined;
+let initInFlight: Promise<void> | null = null;
 
 /**
  * Initialize the persistent store.
- * Must be called once at app startup before using get/set.
+ * Safe to call from several startup paths at once (initPreferences and the
+ * navigation restore both need it before the first render): the first call
+ * owns the one `preferences_store_path` round trip and concurrent callers
+ * await it. A failed init is forgotten so the next caller can retry.
  */
-export async function initPersistentStore(): Promise<void> {
-  if (backend) return;
+export function initPersistentStore(): Promise<void> {
+  if (backend) return Promise.resolve();
+  initInFlight ??= openBackend().catch((e) => {
+    initInFlight = null;
+    throw e;
+  });
+  return initInFlight;
+}
 
+async function openBackend(): Promise<void> {
   storePath = await invokeCommand<string>('preferences_store_path');
   if (isTauri) {
     const { load } = await import('@tauri-apps/plugin-store');

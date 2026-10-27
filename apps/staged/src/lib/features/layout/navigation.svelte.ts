@@ -12,7 +12,7 @@
  */
 
 import { untrack } from 'svelte';
-import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import { getStoreValue, initPersistentStore, setStoreValue } from '../../shared/persistentStore';
 import { getWindowLabel } from '../../transport';
 import { takeWindowSeed } from '../../commands';
 import {
@@ -28,6 +28,13 @@ import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
+
+/**
+ * How long the first workspace render waits for the persisted route. The
+ * store read runs alongside initPreferences' own sequential store round trips,
+ * so it normally settles first; the bound only matters if the store hangs.
+ */
+export const INITIAL_ROUTE_TIMEOUT_MS = 300;
 
 export type SettingsSection = 'general' | 'repo' | 'keyboard' | 'doctor';
 
@@ -77,9 +84,11 @@ const initialDetailStack: DetailRoute[] = initialProject
 
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
-  // Web and the first Tauri window seed synchronously from the localStorage
-  // mirror so <ProjectHome> and the Back affordance can paint before the async
-  // persistent store and `listProjects()` validation resolve (see initNavigation).
+  // Web mode seeds synchronously from the localStorage mirror so <ProjectHome>
+  // and the Back affordance can paint on the first frame. The snapshot is a
+  // no-op under Tauri (webSnapshot.ts), where the stack starts at the root and
+  // restoreInitialRoute pushes the persisted project before the workspace
+  // renders; `listProjects()` validation follows in initNavigation.
   selectedProjectId: initialProject,
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
@@ -91,6 +100,11 @@ export const navigation = $state({
   // window-level requests the parked views would otherwise still answer can't
   // drift apart.
   workspaceParked: false,
+  // Flips once restoreInitialRoute has either pushed the persisted project or
+  // decided there is none. App.svelte holds the workspace back until then, so
+  // a cold start into a project never mounts (and fetches for) the home grid
+  // only to replace it a moment later.
+  initialRouteSettled: false,
 });
 
 /**
@@ -189,11 +203,61 @@ function persistLastProject(projectId: string | null): void {
 }
 
 /**
+ * Put the persisted route in place before the first workspace render.
+ *
+ * Only the first window (label `main`) and web mode restore. A stack already
+ * seeded from the web snapshot is final; otherwise the persisted project is
+ * read from the store (initialising it if initPreferences hasn't yet — the two
+ * share one init) and pushed if the user hasn't navigated meanwhile. Settles
+ * `navigation.initialRouteSettled` whatever happens, after at most
+ * INITIAL_ROUTE_TIMEOUT_MS; a read that lands later is left to initNavigation,
+ * which restores a pristine stack the slow way.
+ */
+export async function restoreInitialRoute(): Promise<void> {
+  if (navigation.initialRouteSettled) return;
+  const label = getWindowLabel();
+  if ((label && label !== 'main') || navigation.detailStack.length > 1) {
+    navigation.initialRouteSettled = true;
+    return;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = Symbol('timeout');
+  const read = (async () => {
+    await initPersistentStore();
+    return await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
+  })();
+  try {
+    const lastProjectId = await Promise.race([
+      read,
+      new Promise<typeof timedOut>((resolve) => {
+        timer = setTimeout(() => resolve(timedOut), INITIAL_ROUTE_TIMEOUT_MS);
+      }),
+    ]);
+    if (lastProjectId === timedOut) {
+      console.warn('[Navigation] Persisted route not read in time, rendering the first route');
+      // Swallow the late result; initNavigation re-reads it.
+      read.catch(() => {});
+    } else if (lastProjectId && navigation.detailStack.length === 1) {
+      setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
+    }
+  } catch (e) {
+    console.warn('[Navigation] Could not read the persisted route:', e);
+  } finally {
+    clearTimeout(timer);
+    // Same synchronous step as the push above, so no render can observe the
+    // settled flag with the stack still at the root.
+    navigation.initialRouteSettled = true;
+  }
+}
+
+/**
  * Restore the last viewed project on app launch.
  *
  * Must be called after `initPersistentStore()` (which is done inside
- * `initPreferences()`). If the stored project no longer exists the
- * user is sent to the home screen instead.
+ * `initPreferences()`) and after `restoreInitialRoute()`, which normally has
+ * already pushed the persisted project so this only validates it. If the
+ * stored project no longer exists the user is sent to the home screen instead.
  *
  * Only the first window (label `main`) restores the persisted route on cold
  * start; a secondary window opens on the project its opener seeded it with.
@@ -213,10 +277,11 @@ export async function initNavigation(): Promise<void> {
   }
 
   const seeded = navigation.detailStack.length > 1;
-  // `selectedProjectId` may already be set synchronously from the localStorage
-  // mirror (web cold boot). Fall back to the async persistent store otherwise —
-  // it is the source of truth in Tauri mode. Either way we render immediately
-  // and only *correct* the route here if the project turns out to be gone.
+  // `selectedProjectId` is normally already set, from the localStorage mirror
+  // (web cold boot) or by restoreInitialRoute. Fall back to the async persistent
+  // store otherwise (it is the source of truth) — e.g. the restore timed out.
+  // Either way the first route has rendered and this only *corrects* it if the
+  // project turns out to be gone.
   const lastProjectId =
     navigation.selectedProjectId ?? (await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY));
   if (!lastProjectId) return;

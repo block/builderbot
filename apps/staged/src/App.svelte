@@ -41,6 +41,7 @@
   import {
     navigation,
     initNavigation,
+    restoreInitialRoute,
     closeDiffRouteIfCurrent,
     openSettings,
     popDetailRoute,
@@ -431,6 +432,11 @@
     // used to own it is mounted.
     projectRunActionsStore.startListening();
 
+    // Read the persisted route alongside initPreferences' own store round
+    // trips, so the first workspace render is already the last project rather
+    // than the home grid (plus its per-project fan-out) replaced a beat later.
+    // Never rejects, and settles within INITIAL_ROUTE_TIMEOUT_MS.
+    const initialRoute = restoreInitialRoute();
     try {
       await initPreferences();
     } catch (e) {
@@ -441,7 +447,8 @@
       preferences.loaded = true;
     }
 
-    // Restore the last viewed project (persistent store is now ready).
+    // Validate the restored project (persistent store is now ready).
+    await initialRoute;
     try {
       await initNavigation();
     } catch (e) {
@@ -730,7 +737,10 @@
         </div>
       </div>
     </main>
-  {:else}
+  {:else if navigation.initialRouteSettled}
+    <!-- Held back until the persisted route is in place (bounded by
+         INITIAL_ROUTE_TIMEOUT_MS): the whole main, not just the workspace,
+         so the top bar's Back affordance doesn't flip in either. -->
     <main>
       <TopBar />
       <div class="content">

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 let windowLabel: string | null;
 let getStoreValue: ReturnType<typeof vi.fn>;
+let initPersistentStore: ReturnType<typeof vi.fn>;
 let setStoreValue: ReturnType<typeof vi.fn>;
 let writeSnapshot: ReturnType<typeof vi.fn>;
 let clearSnapshot: ReturnType<typeof vi.fn>;
@@ -29,6 +30,7 @@ beforeEach(() => {
 
   windowLabel = 'main';
   getStoreValue = vi.fn().mockResolvedValue(null);
+  initPersistentStore = vi.fn().mockResolvedValue(undefined);
   setStoreValue = vi.fn().mockResolvedValue(undefined);
   writeSnapshot = vi.fn();
   clearSnapshot = vi.fn();
@@ -47,6 +49,7 @@ beforeEach(() => {
   }));
   vi.doMock('../../shared/persistentStore', () => ({
     getStoreValue,
+    initPersistentStore,
     setStoreValue,
   }));
   vi.doMock('../../shared/webSnapshot', () => ({
@@ -72,8 +75,133 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.resetAllMocks();
+});
+
+describe('restoreInitialRoute', () => {
+  it('pushes the stored project before settling on an untouched Tauri stack', async () => {
+    windowLabel = 'main';
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, navigation } = await importNavigation();
+    expect(navigation.initialRouteSettled).toBe(false);
+
+    await restoreInitialRoute();
+
+    expect(initPersistentStore).toHaveBeenCalledTimes(1);
+    expect(getStoreValue).toHaveBeenCalledWith('last-viewed-project');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.canGoBack).toBe(true);
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('settles at the root when the stored value is null', async () => {
+    getStoreValue.mockResolvedValueOnce(null);
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(navigation.selectedProjectId).toBeNull();
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('settles on timeout when the store read hangs', async () => {
+    vi.useFakeTimers();
+    getStoreValue.mockReturnValueOnce(new Promise(() => {}));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreInitialRoute, navigation, INITIAL_ROUTE_TIMEOUT_MS } = await importNavigation();
+
+    const restore = restoreInitialRoute();
+    await vi.advanceTimersByTimeAsync(INITIAL_ROUTE_TIMEOUT_MS - 1);
+    expect(navigation.initialRouteSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await restore;
+
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles when the store read rejects', async () => {
+    getStoreValue.mockRejectedValueOnce(new Error('store down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a web-snapshot-seeded stack alone', async () => {
+    snapshotProjectId = 'p1';
+    windowLabel = null;
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(initPersistentStore).not.toHaveBeenCalled();
+    expect(getStoreValue).not.toHaveBeenCalled();
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('leaves secondary windows unchanged', async () => {
+    windowLabel = 'win-2';
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(initPersistentStore).not.toHaveBeenCalled();
+    expect(getStoreValue).not.toHaveBeenCalled();
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('does not override navigation that happened while the store was read', async () => {
+    let resolveRead!: (value: string) => void;
+    getStoreValue.mockReturnValueOnce(
+      new Promise<string>((resolve) => {
+        resolveRead = resolve;
+      })
+    );
+    const { restoreInitialRoute, selectProject, navigation } = await importNavigation();
+
+    const restore = restoreInitialRoute();
+    selectProject('p2');
+    resolveRead('p1');
+    await restore;
+
+    expect(navigation.selectedProjectId).toBe('p2');
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('hands a restored project to initNavigation as a seeded stack', async () => {
+    getStoreValue.mockResolvedValueOnce('p1');
+    projectsStoreMock.loaded = true;
+    projectsStoreMock.projects = [{ id: 'p2' }];
+    const { restoreInitialRoute, initNavigation, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+    await initNavigation();
+
+    // Validation reused the pushed route rather than re-reading the store,
+    // and backed out because the project is gone.
+    expect(getStoreValue).toHaveBeenCalledTimes(1);
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(setStoreValue).toHaveBeenCalledWith('last-viewed-project', null);
+  });
 });
 
 describe('initial project restore', () => {

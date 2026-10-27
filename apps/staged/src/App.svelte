@@ -25,6 +25,8 @@
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
+  import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
+  import { tabDirection } from './lib/shared/tabDirection';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
@@ -111,18 +113,17 @@
   // otherwise be unreachable backwards. When parking happens with focus
   // inside, move it out.
   let lastHostFocus: HTMLElement | null = null;
-  let tabInFlight: 'forward' | 'backward' | null = null;
   function handleHostFocusIn(e: FocusEvent) {
     if (e.target instanceof HTMLElement && e.target !== detailHostEl) lastHostFocus = e.target;
   }
   function handleWorkspaceFocusIn() {
     if (!workspaceParked) return;
-    if (tabInFlight === 'backward') {
+    if (tabDirection.inFlight === 'backward') {
       const before = workspaceEl ? lastTabbableBefore(workspaceEl) : null;
       (before ?? detailHostEl)?.focus({ preventScroll: true });
       return;
     }
-    if (tabInFlight === 'forward') {
+    if (tabDirection.inFlight === 'forward') {
       const first = detailHostEl ? firstTabbableWithin(detailHostEl) : null;
       (first ?? detailHostEl)?.focus({ preventScroll: true });
       return;
@@ -676,16 +677,17 @@
   }
 </script>
 
-<!-- The blur reset covers a Tab keyup the webview never sees (the window
-     deactivating or a native menu taking over mid-press). -->
+<!-- Tab direction for the covered-view focus guards (here and in
+     WorkspaceLayer). The blur reset covers a Tab keyup the webview never sees
+     (the window deactivating or a native menu taking over mid-press). -->
 <svelte:window
   onkeydowncapture={(e) => {
-    tabInFlight = e.key === 'Tab' ? (e.shiftKey ? 'backward' : 'forward') : null;
+    tabDirection.inFlight = e.key === 'Tab' ? (e.shiftKey ? 'backward' : 'forward') : null;
   }}
   onkeyupcapture={(e) => {
-    if (e.key === 'Tab') tabInFlight = null;
+    if (e.key === 'Tab') tabDirection.inFlight = null;
   }}
-  onblur={() => (tabInFlight = null)}
+  onblur={() => (tabDirection.inFlight = null)}
 />
 
 {#if preferences.loaded}
@@ -765,18 +767,34 @@
             bind:this={workspaceEl}
             onfocusin={handleWorkspaceFocusIn}
           >
-            <!-- Hoisted out of ProjectHome so it survives project↔repos
-                 transitions; hidden on the landing page. -->
-            {#if navigation.selectedProjectId || navigation.showReposList}
-              <ProjectsSidebar />
-            {/if}
-            {#if navigation.showReposList}
-              <ReposListView />
-            {:else if navigation.selectedProjectId}
-              <ProjectHome selectedProjectId={navigation.selectedProjectId} />
-            {:else}
-              <ProjectsList />
-            {/if}
+            <!-- Two stacked layers in one grid cell. The home grid mounts on
+                 the first visit and then stays, covered by the project layer
+                 while a project is shown, so going home is a hide/show and
+                 not a 3k-node rebuild plus the home refetches. The project
+                 layer's view is still swapped per route for now. Both hosts
+                 are always present, like the detail host: inserting one as
+                 a sibling of the other's ~3k-node tree restyles that whole
+                 tree on WebKit (~55 ms), so views mount inside a host that
+                 is already there. The empty project host is clipped while
+                 inactive so it doesn't cover the grid. -->
+            <WorkspaceLayer active={navigation.homeActive}>
+              {#if navigation.homeLayerRetained}
+                <ProjectsList />
+              {/if}
+            </WorkspaceLayer>
+            <WorkspaceLayer active={!navigation.homeActive} clipWhenInactive>
+              {#if navigation.projectLayer && !navigation.homeActive}
+                {@const projectLayer = navigation.projectLayer}
+                <!-- Hoisted out of ProjectHome so it survives project↔repos
+                     transitions. -->
+                <ProjectsSidebar />
+                {#if projectLayer.kind === 'repos'}
+                  <ReposListView />
+                {:else}
+                  <ProjectHome selectedProjectId={projectLayer.projectId} />
+                {/if}
+              {/if}
+            </WorkspaceLayer>
           </div>
           <div
             class="detail-host"
@@ -853,14 +871,16 @@
     grid-template-rows: minmax(0, 1fr);
   }
 
-  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper).
-     Its own stacking context, so the host's z-index wins over the sticky and
-     positioned descendants in here. */
+  /* One grid cell shared by the home and project layers (WorkspaceLayer),
+     each a flex row of sidebar + view. Its own stacking context, so the
+     host's z-index wins over the sticky and positioned descendants in here. */
   .workspace {
     grid-area: 1 / 1;
     min-width: 0;
     min-height: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     background-color: var(--bg-chrome);
     overflow: hidden;
     isolation: isolate;

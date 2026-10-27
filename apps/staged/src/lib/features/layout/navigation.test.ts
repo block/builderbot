@@ -480,3 +480,168 @@ describe('parked workspace', () => {
     expect(navigation.workspaceParked).toBe(false);
   });
 });
+
+describe('workspace layers', () => {
+  // The workspace is two stacked layers (App.svelte): the home grid, mounted
+  // once `homeLayerRetained` and active while `homeActive`, and the project
+  // layer, holding the last project / repos base route in `projectLayer`.
+
+  it('seeds a cold Tauri start at the root with nothing retained until the route settles', async () => {
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(false);
+    expect(navigation.projectLayer).toBeNull();
+
+    await restoreInitialRoute();
+
+    // Restored into a project: the grid was never shown, so it isn't retained.
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.homeLayerRetained).toBe(false);
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+  });
+
+  it('retains home once a start without a persisted project settles at the root', async () => {
+    getStoreValue.mockResolvedValueOnce(null);
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+  });
+
+  it('seeds the project layer from the web snapshot without retaining home', async () => {
+    snapshotProjectId = 'p1';
+    windowLabel = null;
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+
+    await restoreInitialRoute();
+    expect(navigation.homeLayerRetained).toBe(false);
+  });
+
+  it('goHome keeps the project layer and activates and retains home', async () => {
+    const { restoreInitialRoute, selectProject, goHome, navigation } = await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+    const layer = navigation.projectLayer;
+
+    goHome();
+
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    expect(navigation.selectedProjectId).toBeNull();
+  });
+
+  it('keeps the layer object identity while the project is unchanged and replaces it otherwise', async () => {
+    const { restoreInitialRoute, selectProject, goHome, showAllRepos, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    selectProject('p1');
+    const p1 = navigation.projectLayer;
+    expect(p1).toEqual({ kind: 'project', projectId: 'p1' });
+    goHome();
+    selectProject('p1');
+    expect(navigation.projectLayer).toBe(p1);
+
+    goHome();
+    selectProject('p2');
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p2' });
+    expect(navigation.homeActive).toBe(false);
+
+    showAllRepos();
+    const repos = navigation.projectLayer;
+    expect(repos).toEqual({ kind: 'repos' });
+    goHome();
+    showAllRepos();
+    expect(navigation.projectLayer).toBe(repos);
+  });
+
+  it('keeps both layers through settings and a diff over home', async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const {
+      restoreInitialRoute,
+      selectProject,
+      goHome,
+      openSettings,
+      openDiffRoute,
+      popDetailRoute,
+      navigation,
+    } = await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+    goHome();
+    const layer = navigation.projectLayer;
+
+    openSettings();
+    expect(navigation.workspaceParked).toBe(true);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    popDetailRoute();
+
+    // A diff that names a project no longer mounts that project's view under
+    // it: the layers follow the base route, which is still home.
+    openDiffRoute({ branchId: 'b1' });
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    openDiffRoute({ branchId: 'b2', projectId: 'p2' });
+    expect(navigation.currentRoute.kind).toBe('diff');
+    expect(navigation.selectedProjectId).toBe('p2');
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    popDetailRoute();
+    expect(navigation.homeActive).toBe(true);
+  });
+
+  it('keeps home inactive and unparks back to the project under settings and a diff', async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const {
+      restoreInitialRoute,
+      selectProject,
+      openSettings,
+      openDiffRoute,
+      popDetailRoute,
+      navigation,
+    } = await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+    const layer = navigation.projectLayer;
+
+    openDiffRoute({ branchId: 'b1', projectId: 'p1' });
+    openSettings();
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toBe(layer);
+    popDetailRoute();
+    popDetailRoute();
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toBe(layer);
+  });
+
+  it('releases the project layer only on home with a matching id', async () => {
+    const { restoreInitialRoute, selectProject, goHome, releaseProjectLayer, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+
+    // On the project itself, the layer is the view on screen.
+    releaseProjectLayer('p1');
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+
+    goHome();
+    releaseProjectLayer('p2');
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+    releaseProjectLayer('p1');
+    expect(navigation.projectLayer).toBeNull();
+
+    // Nothing to release: a no-op rather than a throw.
+    releaseProjectLayer('p1');
+    expect(navigation.projectLayer).toBeNull();
+  });
+});

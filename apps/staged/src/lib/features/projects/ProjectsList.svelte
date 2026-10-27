@@ -16,13 +16,8 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import {
-    navigation,
-    onWorkspaceParked,
-    openSettings,
-    selectProject,
-    showAllRepos,
-  } from '../layout/navigation.svelte';
+  import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
@@ -71,9 +66,19 @@
 
   let showNewProjectModal = $state(false);
 
-  // Parked under settings or the diff view, the modal would stay open above them.
-  onWorkspaceParked(() => {
-    showNewProjectModal = false;
+  // This view is the workspace's home layer: mounted on the first visit and
+  // then kept, covered, under the project view (App.svelte). Anything that
+  // used to follow from being mounted — the window shortcuts, the modal, the
+  // per-visit capture below — gates on the layer instead.
+  const layer = useWorkspaceLayer();
+
+  // Hidden under a project, or parked under settings or the diff view, the
+  // modal would stay open above the view on top.
+  $effect(() => {
+    if (layer.visible) return;
+    untrack(() => {
+      showNewProjectModal = false;
+    });
   });
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let searchInputEl = $state<HTMLInputElement | null>(null);
@@ -87,24 +92,35 @@
   // filters no longer match it: visiting a project marks it read, so with
   // Unread active the card returnTargetProjectId points at — the one the
   // scroll restore is aiming for — would otherwise be gone on arrival. Same
-  // exception the sidebar makes for the selected project. Captured at mount
-  // (this component is created fresh on every return to the landing page),
+  // exception the sidebar makes for the selected project. Captured on each
+  // visit — at mount, then before each render that brings the layer back —
   // but only while a restore is actually pending: returnTargetProjectId is
-  // never cleared, so an ordinary mount — landing → settings → back, where
+  // never cleared, so an ordinary visit — landing → settings → back, where
   // requestProjectsListRestore(null) early-returns — would otherwise pin a
   // project from a previous visit. restorePending is still true here; the
-  // effect that finishes the restore runs after mount.
-  const stickyProjectId = projectsListViewState.restorePending
-    ? projectsListViewState.returnTargetProjectId
-    : null;
+  // effect that finishes the restore runs after.
+  function pendingStickyProjectId(): string | null {
+    return projectsListViewState.restorePending
+      ? projectsListViewState.returnTargetProjectId
+      : null;
+  }
+  let stickyProjectId = $state(pendingStickyProjectId());
   // The exception lasts only until the first filter change, so a deliberate
   // re-filter hides the card. The store replaces the Set on every change, so
   // identity is the signal — derived rather than tracked in an effect, which
   // would paint the stale card once under the new filters before removing it.
-  const filtersAtMount = projectFiltersStore.activeFilters;
+  let filtersAtVisit = $state(projectFiltersStore.activeFilters);
+  $effect.pre(() => {
+    // The mount capture is the initialiser above; this re-captures per return.
+    if (layer.activations === 0) return;
+    untrack(() => {
+      stickyProjectId = pendingStickyProjectId();
+      filtersAtVisit = projectFiltersStore.activeFilters;
+    });
+  });
 
   let effectiveStickyId = $derived(
-    projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null
+    projectFiltersStore.activeFilters === filtersAtVisit ? stickyProjectId : null
   );
 
   // Chips → sticky card → search; see visibleProjects for the composition.
@@ -232,6 +248,8 @@
     void projectsDataStore.ensureHomeReposLoaded();
 
     const onNewProject = (event: Event) => {
+      // The project layer's view answers while this one is hidden under it.
+      if (!layer.visible) return;
       newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
       showNewProjectModal = true;
     };
@@ -289,8 +307,8 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    // Still mounted, parked, under settings or the diff view.
-    if (navigation.workspaceParked) return;
+    // Still mounted but hidden: under a project, settings or the diff view.
+    if (!layer.visible) return;
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
     // Typing in an input must not trigger shortcuts, but the natural flow for

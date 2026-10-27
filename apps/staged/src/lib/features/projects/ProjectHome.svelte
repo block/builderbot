@@ -24,6 +24,7 @@
   import { projectDisplayName } from '../../shared/utils';
   import { goHome, onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import ProjectSection from './ProjectSection.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import AddRepoModal from './AddRepoModal.svelte';
@@ -112,6 +113,10 @@
     showAddRepoModal = false;
     branchToDelete = null;
   });
+
+  // The workspace's project layer (App.svelte); the home grid stays mounted
+  // under it, so window-level requests need to know which view is on screen.
+  const layer = useWorkspaceLayer();
   // Guards the delete shortcut while the async safe-to-delete check is in flight,
   // before projectActions.pendingDelete/deletingProjectNames are set, so a held
   // key only deletes once.
@@ -136,7 +141,10 @@
     });
     checkStoreAndLoad();
 
-    const onNewProject = (event: Event) => handleNewProject(repoSeedFromNewProjectEvent(event));
+    const onNewProject = (event: Event) => {
+      if (!layer.visible) return;
+      handleNewProject(repoSeedFromNewProjectEvent(event));
+    };
     window.addEventListener('staged:new-project', onNewProject);
     const onDeleteCurrentProject = (event: Event) => handleDeleteCurrentProjectShortcut(event);
     window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);

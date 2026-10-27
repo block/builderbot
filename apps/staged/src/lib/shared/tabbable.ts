@@ -17,6 +17,23 @@ export function lastTabbableBefore(boundary: Element): HTMLElement | null {
 }
 
 /**
+ * The first element in document order that Tab would land on after
+ * `boundary` and its subtree — wrapping to the document's first tabbable
+ * outside the boundary when nothing follows it — or null when the boundary
+ * holds the only tabbable content.
+ */
+export function firstTabbableAfter(boundary: Element): HTMLElement | null {
+  let wrap: HTMLElement | null = null;
+  for (const el of document.querySelectorAll<HTMLElement>(TABBABLE_SELECTOR)) {
+    if (el === boundary || boundary.contains(el)) continue;
+    if (!isTabbable(el)) continue;
+    if (boundary.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) return el;
+    wrap ??= el;
+  }
+  return wrap;
+}
+
+/**
  * The first element in document order that Tab would land on inside `root`,
  * or null when it holds nothing tabbable.
  */
@@ -27,7 +44,17 @@ export function firstTabbableWithin(root: Element): HTMLElement | null {
   return null;
 }
 
+// `[aria-hidden="true"]` subtrees are the covered views (the parked workspace,
+// an inactive WorkspaceLayer); their controls are not tab stops to hand focus
+// to, even though — unlike `inert` — the attribute doesn't take them out of
+// the browser's tab order.
 function isTabbable(el: HTMLElement): boolean {
-  if (el.tabIndex < 0 || el.matches(':disabled') || el.closest('[inert]')) return false;
+  if (
+    el.tabIndex < 0 ||
+    el.matches(':disabled') ||
+    el.closest('[inert]') ||
+    el.closest('[aria-hidden="true"]')
+  )
+    return false;
   return el.checkVisibility?.() ?? true;
 }

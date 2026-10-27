@@ -12,6 +12,7 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import RepoCard from './RepoCard.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import SearchField from '../../shared/SearchField.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
@@ -31,6 +32,10 @@
   onWorkspaceParked(() => {
     showNewProjectModal = false;
   });
+
+  // The workspace's project layer (App.svelte); the home grid stays mounted
+  // under it, so window-level requests need to know which view is on screen.
+  const layer = useWorkspaceLayer();
 
   function repoKey(r: RepoHomeItem): string {
     return `${r.githubRepo}:${r.subpath}`;
@@ -53,9 +58,10 @@
   onMount(() => {
     void projectsDataStore.ensureHomeReposLoaded();
 
-    // This view replaces ProjectsList/ProjectHome (the other listeners for
-    // this event), so it must handle new-project requests itself.
+    // This view replaces ProjectHome (and covers ProjectsList, which stays
+    // mounted but hidden), so it must handle new-project requests itself.
     const onNewProject = (event: Event) => {
+      if (!layer.visible) return;
       newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
       showNewProjectModal = true;
     };

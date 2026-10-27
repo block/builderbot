@@ -82,6 +82,13 @@ const initialDetailStack: DetailRoute[] = initialProject
   ? [rootRoute(), { kind: 'project', projectId: initialProject }]
   : [rootRoute()];
 
+/**
+ * The non-home view the workspace's project layer holds: the last project or
+ * repos base route. It outlives the base route so the layer can stay mounted
+ * (covered or clipped) while home is shown.
+ */
+export type ProjectLayer = { kind: 'project'; projectId: string } | { kind: 'repos' };
+
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   // Web mode seeds synchronously from the localStorage mirror so <ProjectHome>
@@ -105,6 +112,23 @@ export const navigation = $state({
   // a cold start into a project never mounts (and fetches for) the home grid
   // only to replace it a moment later.
   initialRouteSettled: false,
+  // The workspace is two stacked layers (App.svelte): the home grid under the
+  // project view. These say which one the base route — the workspace route
+  // under any settings / diff on top — shows, and what each layer holds.
+  //
+  // homeActive: the base route is the projects grid.
+  homeActive: !initialProject,
+  // homeLayerRetained: sticky once home has been the base route of a rendered
+  // workspace; the grid stays mounted (covered) under later projects. Seeded
+  // false even when the stack starts at the root: under Tauri it sits there
+  // until restoreInitialRoute pushes the persisted project, and counting that
+  // would mount the grid under a project it was never shown before.
+  homeLayerRetained: false,
+  // projectLayer: the last project / repos base route, kept while home is
+  // active so the project layer can be retained rather than rebuilt.
+  projectLayer: (initialProject
+    ? { kind: 'project', projectId: initialProject }
+    : null) as ProjectLayer | null,
 });
 
 /**
@@ -163,6 +187,40 @@ function syncCompatibilityState(): void {
   // reference) still names its project through lastProjectRouteProjectId.
   navigation.selectedProjectId =
     base.kind === 'project' ? base.projectId : lastProjectRouteProjectId();
+
+  navigation.homeActive = base.kind === 'projects';
+  retainHomeLayerIfActive();
+  // Replace only when the view differs so the object's identity is stable:
+  // the layer's consumers key on it, and a settings / diff push over a project
+  // re-syncs without changing the base.
+  const layer = navigation.projectLayer;
+  if (base.kind === 'project') {
+    if (!(layer?.kind === 'project' && layer.projectId === base.projectId))
+      navigation.projectLayer = { kind: 'project', projectId: base.projectId };
+  } else if (base.kind === 'repos') {
+    if (layer?.kind !== 'repos') navigation.projectLayer = { kind: 'repos' };
+  }
+}
+
+/**
+ * Home becomes retained the first time it is the base route of a workspace
+ * that renders — i.e. once the initial route has settled (App.svelte gates
+ * <main> on that), so a root stack waiting on restoreInitialRoute doesn't count.
+ */
+function retainHomeLayerIfActive(): void {
+  if (navigation.homeActive && navigation.initialRouteSettled) navigation.homeLayerRetained = true;
+}
+
+/**
+ * Drop the retained project layer for `projectId` — because the project was
+ * deleted, say — so the layer unmounts rather than showing a missing project.
+ * Only while home is active: on a project the layer is the view on screen, and
+ * navigation owns what replaces it.
+ */
+export function releaseProjectLayer(projectId: string): void {
+  const layer = navigation.projectLayer;
+  if (!navigation.homeActive || layer?.kind !== 'project' || layer.projectId !== projectId) return;
+  navigation.projectLayer = null;
 }
 
 function setDetailStack(routes: DetailRoute[]): void {
@@ -251,6 +309,7 @@ export async function restoreInitialRoute(): Promise<void> {
     // Same synchronous step as the push above, so no render can observe the
     // settled flag with the stack still at the root.
     navigation.initialRouteSettled = true;
+    retainHomeLayerIfActive();
   }
 }
 

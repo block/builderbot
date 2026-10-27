@@ -97,6 +97,15 @@
     the just-dragged selection when that style changes — making dialog text
     unselectable in the Tauri app. The overlay already covers the page behind,
     so selection overflow has nothing visible to leak into.
+
+    preventScroll is off too: the app shell never scrolls <body> (app.css
+    sets html, body { overflow: hidden }), so bits-ui's body scroll lock has
+    nothing to lock and its only effect was writing `pointer-events: none` on
+    <body> at open and clearing it at close. pointer-events is inherited, so
+    each write restyles the whole document — ~65 ms per open and per close
+    with the home grid retained under a project (App.svelte's workspace
+    layers, ~7.5k nodes) — and the overlay already keeps the pointer off the
+    page behind.
   -->
   <DialogPrimitive.Content
     bind:ref
@@ -112,6 +121,7 @@
     onOpenAutoFocus={(e) => e.preventDefault()}
     onpointerdown={handlePointerDown}
     preventOverflowTextSelection={false}
+    preventScroll={false}
     {...restProps}
   >
     {@render children?.()}

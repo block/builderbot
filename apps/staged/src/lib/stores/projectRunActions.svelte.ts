@@ -29,6 +29,12 @@ interface ExecutionInfo {
 interface PendingSnapshotRequest {
   /** Settles when the query does, whether or not its result was applied. */
   promise: Promise<void>;
+  /**
+   * Executions the action_status listener removed while this request was in
+   * flight. The snapshot may predate those completions, so the apply loop
+   * must not re-add them: nothing will ever remove a finished execution again.
+   */
+  removedExecutionIds: Set<string>;
 }
 
 class ProjectRunActionsStore {
@@ -175,13 +181,18 @@ class ProjectRunActionsStore {
    * arrives applies it, so `stopListening` makes an older request a no-op. A
    * rejected request leaves the store unhydrated and clears the membership
    * signature so a later call retries.
+   *
+   * Events keep flowing while the request is out, and the snapshot may be
+   * older or newer than any of them, so applying it never overrides what the
+   * listeners have done: an execution they already track keeps its phase and
+   * one they removed stays removed.
    */
   private hydrateSnapshot(): Promise<void> {
     if (this.hydrated) return Promise.resolve();
     if (this.snapshotRequest) return this.snapshotRequest.promise;
     // `promise` is assigned synchronously below, before any caller can read
     // the entry; the object itself is the ownership token the fetch checks.
-    const request = {} as PendingSnapshotRequest;
+    const request = { removedExecutionIds: new Set<string>() } as PendingSnapshotRequest;
     this.snapshotRequest = request;
     request.promise = this.fetchSnapshot(request)
       .catch((error: unknown) => {
@@ -202,6 +213,15 @@ class ProjectRunActionsStore {
     this.hydrated = true;
     for (const snapshot of snapshots) {
       if (snapshot.actionType !== 'run') continue;
+      // Same guard as the action_status listener: a phase event that landed
+      // during the await must not regress to the snapshot's (possibly null)
+      // phase, and a completion must not come back as a permanent badge.
+      if (
+        this.executions.has(snapshot.executionId) ||
+        request.removedExecutionIds.has(snapshot.executionId)
+      ) {
+        continue;
+      }
       // A snapshot without a phase is an execution the backend has started
       // but not yet classified; it shows as building until a phase event.
       this.addExecution(
@@ -254,6 +274,9 @@ class ProjectRunActionsStore {
   }
 
   private removeExecution(executionId: string): void {
+    // Recorded whether or not the execution was tracked locally: the snapshot
+    // in flight may be the first this store hears of it.
+    this.snapshotRequest?.removedExecutionIds.add(executionId);
     if (this.executions.delete(executionId)) {
       this.version++;
     }

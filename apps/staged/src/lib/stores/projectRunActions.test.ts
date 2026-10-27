@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RunningActionSnapshot, RunPhase } from '../features/actions/actions';
+import type {
+  ActionStatusEvent,
+  RunningActionSnapshot,
+  RunPhase,
+  RunPhaseChangedEvent,
+} from '../features/actions/actions';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -36,6 +41,17 @@ const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 let invokeCommand: ReturnType<typeof vi.fn>;
 /** One deferred per `get_all_running_actions` wave, in call order. */
 let waves: Deferred<RunningActionSnapshot[]>[];
+/** The callbacks the store registered with the (mocked) event listeners. */
+let emitActionStatus: (event: ActionStatusEvent) => void;
+let emitRunPhaseChanged: (event: RunPhaseChangedEvent) => void;
+
+function statusEvent(
+  branchId: string,
+  executionId: string,
+  status: ActionStatusEvent['status']
+): ActionStatusEvent {
+  return { executionId, branchId, actionType: 'run', status } as ActionStatusEvent;
+}
 
 async function importStore() {
   const { projectRunActionsStore } = await import('./projectRunActions.svelte');
@@ -67,9 +83,20 @@ beforeEach(() => {
     return d.promise;
   });
   vi.doMock('../transport', () => ({ invokeCommand, isTauri: true }));
+  const notListening = () => {
+    throw new Error('store is not listening');
+  };
+  emitActionStatus = notListening;
+  emitRunPhaseChanged = notListening;
   vi.doMock('../features/actions/actions', () => ({
-    listenToActionStatus: vi.fn(() => () => {}),
-    listenToRunPhaseChanged: vi.fn(() => () => {}),
+    listenToActionStatus: vi.fn((callback: typeof emitActionStatus) => {
+      emitActionStatus = callback;
+      return () => {};
+    }),
+    listenToRunPhaseChanged: vi.fn((callback: typeof emitRunPhaseChanged) => {
+      emitRunPhaseChanged = callback;
+      return () => {};
+    }),
   }));
 });
 
@@ -240,6 +267,53 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
     // And a successful hydration is not retried.
     await hydrate(store, branches);
     expect(invokeCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a phase that advanced while the snapshot was in flight', async () => {
+    const store = await importStore();
+    store.startListening();
+    const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
+
+    const { done } = await hydrate(store, branches);
+    emitActionStatus(statusEvent('b1', 'e1', 'running'));
+    emitRunPhaseChanged({
+      executionId: 'e1',
+      branchId: 'b1',
+      actionName: 'dev',
+      phase: { type: 'running', endpoint: null },
+    });
+    expect(store.getRunActionPhase('p1')).toBe('running');
+
+    // The snapshot was taken before the backend classified the run.
+    waves[0].resolve([runAction('b1', 'e1', null)]);
+    await done;
+    expect(store.getRunActionPhase('p1')).toBe('running');
+  });
+
+  it('does not re-add an execution that completed while the snapshot was in flight', async () => {
+    const store = await importStore();
+    store.startListening();
+    const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
+
+    const { done } = await hydrate(store, branches);
+    // The run is the first the store hears of it, so there is nothing to
+    // delete locally — the completion still has to outlive the snapshot.
+    emitActionStatus(statusEvent('b1', 'e1', 'completed'));
+    // e2 was tracked from its own event before finishing.
+    emitActionStatus(statusEvent('b1', 'e2', 'running'));
+    emitActionStatus(statusEvent('b1', 'e2', 'completed'));
+    expect(store.getRunActionPhase('p1')).toBeNull();
+
+    waves[0].resolve([runAction('b1', 'e1'), runAction('b1', 'e2')]);
+    await done;
+    // No further event will ever arrive for a finished execution, so a
+    // re-add here would be a badge that never clears.
+    expect(store.getRunActionPhase('p1')).toBeNull();
+
+    // The tombstones are scoped to that request: a later run of the same
+    // execution id (a restart) is tracked normally.
+    emitActionStatus(statusEvent('b1', 'e1', 'running'));
+    expect(store.getRunActionPhase('p1')).toBe('building');
   });
 
   it('drops an in-flight answer after stopListening and re-requests next time', async () => {

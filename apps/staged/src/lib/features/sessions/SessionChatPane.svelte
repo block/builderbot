@@ -103,7 +103,7 @@
     statusEventSupersededLoad,
     type SessionBackgroundHold,
   } from './backgroundHold';
-  import { mergeSinceMessages, sessionPollRequest } from './messagePoll';
+  import { mergeSinceMessages, pollShouldStop, sessionPollRequest } from './messagePoll';
   import { retainInlineToolBodies } from './toolCallBodies';
   import {
     applyLatestWindow,
@@ -932,6 +932,12 @@
       ]);
       if (closed) return;
       if (!s) {
+        // On a reopen of a deleted session the stale `session` (kept above so
+        // the transcript stays put) still carries its last status, possibly
+        // `running`; the load effect would read that and start polling a
+        // session nothing will ever update. Drop it so this ends in the same
+        // state a fresh open of a deleted session does.
+        session = null;
         error = 'Session not found';
         return;
       }
@@ -1025,9 +1031,13 @@
         // rows, and WebKit has no scroll anchoring: dropping rows above the
         // viewport would shift it onto other rows and hand `handleScroll` a
         // spurious upward scroll. Hold the first visible group in place; when
-        // the trim removed it (the whole pre-delta window went, more than a
-        // page of new rows arrived in its place) follow the transcript to the
-        // bottom rather than land at the top and page the trimmed rows back.
+        // the trim removed it follow the transcript to the bottom rather than
+        // land at the top and page the trimmed rows back. In practice the
+        // bottom is the path taken: `trimLatestWindow` only trims when the
+        // delta alone exceeded a page and then keeps only the last page, so
+        // every pre-delta row — including whichever group `unpark` put in
+        // view — is gone. The hold branch is kept as the safety net for a
+        // trim rule that ever retains pre-delta rows, not as the common case.
         const el = messagesEl;
         const anchor = el && userScrolledUp ? captureScrollAnchor(el) : null;
         messages = bounded.messages;
@@ -1084,12 +1094,12 @@
         if (merged.appended) scrollToBottomIfNear(true);
       }
 
-      // Stop polling when session is done. Backend-owned queue drain may emit
-      // a fresh running event while this poll is in flight; that event is
-      // fresher than this status fetch and keeps polling alive. The snapshot
-      // that reports a terminal status already holds the rows written before
-      // the flip, so the last text is in `merged` above.
-      if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
+      // Stop polling when the session is done or gone (`pollShouldStop`). The
+      // snapshot that reports a terminal status already holds the rows written
+      // before the flip, so the last text is in `merged` above. A missing
+      // session ends the loop whatever the stale local status says: nothing
+      // will ever flip it back.
+      if (pollShouldStop(s, statusEventDuringFetch, session?.status)) {
         clearPollTimer();
       }
       return s ? 'applied' : 'missing';
@@ -1463,6 +1473,15 @@
    * where appends scroll the box twice a second).
    */
   let scrollAnchor: ScrollAnchor | null = null;
+  /** `scrollTop` when `scrollAnchor` was last captured. */
+  let anchorScrollTop = NaN;
+  /**
+   * Scrolls shorter than this keep the previous anchor. Recapturing walks the
+   * group list and probes layout offsets on every scroll event, the hottest
+   * path during wheel scrolling; a restore that is a few pixels off is
+   * invisible, so a trackpad's 1 px events are coalesced into one capture.
+   */
+  const ANCHOR_RECAPTURE_PX = 4;
 
   function handleScroll() {
     if (!messagesEl) return;
@@ -1486,7 +1505,10 @@
    *  `park` has an anchor to save. */
   function noteScrollPosition(el: HTMLElement) {
     lastScrollTop = el.scrollTop;
-    if (userScrolledUp) scrollAnchor = captureScrollAnchor(el);
+    if (!userScrolledUp) return;
+    if (scrollAnchor && Math.abs(el.scrollTop - anchorScrollTop) < ANCHOR_RECAPTURE_PX) return;
+    scrollAnchor = captureScrollAnchor(el);
+    anchorScrollTop = el.scrollTop;
   }
 
   /**
@@ -2048,6 +2070,7 @@
     );
     lastScrollTop = el.scrollTop;
     scrollAnchor = saved.anchor;
+    anchorScrollTop = el.scrollTop;
   }
 
   function selectorStateKey(

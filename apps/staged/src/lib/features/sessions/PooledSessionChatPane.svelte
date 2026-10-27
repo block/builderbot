@@ -13,6 +13,7 @@
   import type { Attachment } from 'svelte/attachments';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
   import type { HashtagItem, ProjectRepo, Session } from '../../types';
+  import { assertBitsConfigContext, bitsConfigContextEntries } from './bitsConfigContext';
   import { reuseHashtagItems } from './hashtagItemsIdentity';
   import type { LinkedNoteContext } from './noteFreshness';
   import type { DisplayRootInput } from './pathDisplayRoots';
@@ -59,22 +60,10 @@
   }: Props = $props();
 
   // Carries bits-ui's `defaultPortalTo="#portal-root"` from Root.svelte into
-  // the imperatively mounted pane. Without it, pickers and viewers portal to
-  // <body> and every open restyles the whole app again. Only that entry is
-  // copied: the pane outlives this dialog, and the full context map would
-  // keep the first adopter's `DialogRootState` (and the rest of its ancestry)
-  // reachable from a parked pane. `BitsConfigContext` is not exported, so the
-  // entry is found by the `opts` object `getBitsConfig()` resolves to.
-  const context = portalContext();
-
-  function portalContext(): Map<unknown, unknown> {
-    const config = getBitsConfig();
-    const only = new Map<unknown, unknown>();
-    for (const [key, value] of getAllContexts()) {
-      if ((value as { opts?: unknown } | null)?.opts === config) only.set(key, value);
-    }
-    return only;
-  }
+  // the imperatively mounted pane, and nothing else of this dialog's context
+  // (see bitsConfigContext.ts for why, and for the shape the match relies on).
+  const context = bitsConfigContextEntries(getAllContexts(), getBitsConfig());
+  assertBitsConfigContext(context, import.meta.env.DEV);
 
   let lease = $state.raw<PaneLease | null>(null);
 

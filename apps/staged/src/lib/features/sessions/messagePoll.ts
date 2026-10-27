@@ -147,3 +147,23 @@ function findIndexFromEnd(messages: readonly SessionMessage[], id: number): numb
   }
   return -1;
 }
+
+/**
+ * Whether the tick that fetched `fetched` should end the poll loop.
+ *
+ * A `null` session is terminal: the store no longer has it, so nothing will
+ * ever flip its status and the loop would run until the dialog closes. That
+ * is the reopen of a deleted session — the pane still holds the last status
+ * it saw, possibly `running`, and must not keep asking after it. Otherwise
+ * the loop ends on a terminal status unless a status event landed during the
+ * fetch (backend-owned queue drain can emit a fresh `running` while a tick is
+ * in flight; that event is fresher than this fetch and keeps polling alive).
+ */
+export function pollShouldStop(
+  fetched: { status: string } | null,
+  statusEventDuringFetch: boolean,
+  currentStatus: string | undefined
+): boolean {
+  if (!fetched) return true;
+  return fetched.status !== 'running' && !statusEventDuringFetch && currentStatus !== 'running';
+}

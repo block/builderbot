@@ -15,11 +15,13 @@ export const keyboard = $state({ inset: 0 });
 let trackedViewport: VisualViewport | null = null;
 let subscriberCount = 0;
 let initialSyncFrame = 0;
-// Last inset written to `:root`, or null when nothing has been written. Any
-// write to the root's `style` attribute fires the MutationObserver in
-// isDark.svelte.ts, so an unconditional write on every viewport resize would
-// trigger a whole-document style recalc for a value that never changed.
-let writtenInset: number | null = null;
+// Last inset written to `:root`. Starts at 0 because an absent property reads
+// as 0 through `var(--keyboard-inset, 0px)`, so a zero inset never needs
+// writing. Any write to the root's `style` attribute fires the
+// MutationObserver in isDark.svelte.ts, so an unconditional write on every
+// viewport resize would trigger a whole-document style recalc for a value
+// that never changed.
+let writtenInset = 0;
 
 function syncKeyboardInset() {
   const vv = trackedViewport;
@@ -62,14 +64,15 @@ export function watchKeyboardInset(): () => void {
       trackedViewport?.removeEventListener('resize', syncKeyboardInset);
       trackedViewport?.removeEventListener('scroll', syncKeyboardInset);
       trackedViewport = null;
-      // Drop the inset so a stale keyboard height can't linger on `:root`.
-      // Consumers fall back via `var(--keyboard-inset, 0px)`, so only write
-      // when a non-zero value is actually there to clear.
+      // Drop the inset so a stale keyboard height can't linger on `:root`,
+      // but only when a non-zero value is actually there to clear. The root
+      // then holds `0px` (or nothing, which consumers read the same), so the
+      // next subscriber's first sync at zero can skip its write too.
       keyboard.inset = 0;
-      if (writtenInset !== null && writtenInset !== 0) {
+      if (writtenInset !== 0) {
         document.documentElement.style.setProperty('--keyboard-inset', '0px');
       }
-      writtenInset = null;
+      writtenInset = 0;
     }
   };
 }

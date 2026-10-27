@@ -44,18 +44,17 @@ afterEach(() => {
 });
 
 describe('watchKeyboardInset', () => {
-  it('writes the inset on first sync and skips writes while it is unchanged', async () => {
+  it('does not write a zero inset, on first sync or while it stays zero', async () => {
     const { keyboard, watchKeyboardInset } = await importModule();
     watchKeyboardInset();
     flushFrames();
 
     expect(keyboard.inset).toBe(0);
-    expect(setProperty).toHaveBeenCalledTimes(1);
-    expect(setProperty).toHaveBeenCalledWith('--keyboard-inset', '0px');
+    expect(setProperty).not.toHaveBeenCalled();
 
     viewport.dispatchEvent(new Event('resize'));
     viewport.dispatchEvent(new Event('scroll'));
-    expect(setProperty).toHaveBeenCalledTimes(1);
+    expect(setProperty).not.toHaveBeenCalled();
   });
 
   it('writes again when the inset changes', async () => {
@@ -97,6 +96,22 @@ describe('watchKeyboardInset', () => {
     expect(keyboard.inset).toBe(0);
     expect(setProperty).toHaveBeenCalledTimes(1);
     expect(setProperty).toHaveBeenCalledWith('--keyboard-inset', '0px');
+  });
+
+  it('a later subscriber skips its first sync after cleanup wrote 0px', async () => {
+    const { watchKeyboardInset } = await importModule();
+    const unwatch = watchKeyboardInset();
+    flushFrames();
+    viewport.height = 500;
+    viewport.dispatchEvent(new Event('resize'));
+    unwatch();
+    expect(setProperty).toHaveBeenLastCalledWith('--keyboard-inset', '0px');
+    setProperty.mockClear();
+
+    viewport.height = 800;
+    watchKeyboardInset();
+    flushFrames();
+    expect(setProperty).not.toHaveBeenCalled();
   });
 
   it('cleanup does not write when the initial sync never ran', async () => {

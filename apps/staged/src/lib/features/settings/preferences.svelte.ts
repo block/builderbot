@@ -26,6 +26,7 @@ import {
 } from '../../shared/persistentStore';
 import { hydrateDialogWidths } from '../../components/ui/dialog/dialogWidth.svelte';
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
+import { darkMode } from '../../stores/isDark.svelte';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
 import type { AcpConfigValueSelection } from '../../types';
 import {
@@ -333,6 +334,12 @@ export async function initPreferences(): Promise<void> {
   }
   ensureSystemModeListener();
   applyChromeTheme();
+  // Start the dark-mode signal only now that `--theme-is-dark` is inline on
+  // the root: its first read is then a free attribute lookup rather than a
+  // forced whole-document style recalc. It must also run before `loaded`
+  // flips, since every consumer renders behind that flag and would otherwise
+  // paint with the light-mode default and re-render once the signal catches up.
+  darkMode.init();
 
   // Unblock the UI as soon as size + chrome theme are applied. Everything below
   // (diff/Shiki theme, recent agents) only feeds the diff viewer and settings,

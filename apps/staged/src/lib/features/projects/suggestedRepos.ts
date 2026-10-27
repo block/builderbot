@@ -29,5 +29,7 @@ export function attachedRepoKeys(
  * not when the map it was built from is reassigned.
  */
 export function attachedRepoSignature(keys: Iterable<string>): string {
-  return [...keys].sort().join('\n');
+  // NUL can't appear in a GitHub `owner/name` or a filesystem subpath, so two
+  // different key sets can never join to the same string.
+  return [...keys].sort().join('\0');
 }

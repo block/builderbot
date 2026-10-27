@@ -382,7 +382,6 @@
   }
 
   onMount(async () => {
-    darkMode.init();
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
@@ -436,6 +435,9 @@
       await initPreferences();
     } catch (e) {
       console.error('Failed to initialize preferences, rendering with defaults:', e);
+      // initPreferences normally starts darkMode once the chrome theme is on
+      // the root; without a theme it falls back to the stylesheet default.
+      darkMode.init();
       preferences.loaded = true;
     }
 

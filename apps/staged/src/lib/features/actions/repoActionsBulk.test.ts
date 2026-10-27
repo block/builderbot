@@ -118,4 +118,22 @@ describe('repo card bulk action hydration', () => {
     expect(branchRuns.map((s) => s.executionId)).toEqual(['branch-run']);
     expect(idleScope).toEqual([]);
   });
+
+  it('serves the whole running snapshot from the same wave as per-scope callers', async () => {
+    invokeCommand.mockResolvedValue([
+      execution('repo-run', 'repo:block/goose'),
+      execution('branch-run', 'branch-1'),
+    ]);
+
+    const { bulkRunningForScope, bulkRunningSnapshot } = await import('./repoActionsBulk');
+
+    const [all, branchRuns] = await Promise.all([
+      bulkRunningSnapshot(),
+      bulkRunningForScope('branch-1'),
+    ]);
+
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
+    expect(all.map((s) => s.executionId).sort()).toEqual(['branch-run', 'repo-run']);
+    expect(branchRuns.map((s) => s.executionId)).toEqual(['branch-run']);
+  });
 });

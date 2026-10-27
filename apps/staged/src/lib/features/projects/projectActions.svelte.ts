@@ -17,7 +17,12 @@ import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
 import type { Project } from '../../types';
 import { projectDisplayName } from '../../shared/utils';
-import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
+import {
+  goHome,
+  navigation,
+  releaseProjectLayer,
+  selectProject,
+} from '../layout/navigation.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
@@ -144,6 +149,11 @@ class ProjectActionsController {
     const id = project.id;
     const branchesToClear = projectsDataStore.branchesByProject.get(id) || [];
     projectsDataStore.projectDeleteStarted(id, projectDisplayName(project));
+
+    // A project retained under home (the layer the user would return to) is
+    // dropped as soon as the delete starts, so the layer unmounts now rather
+    // than show a "Deleting…" project when the backend echo lands.
+    releaseProjectLayer(id);
 
     // When the project on screen is being deleted, navigate away immediately
     // so the user doesn't have to wait for backend deletion. Deleting any

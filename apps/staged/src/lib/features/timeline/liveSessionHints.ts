@@ -196,6 +196,10 @@ export function createLiveSessionHints(
   let titles: Record<string, string> = {};
   let hintPollTimer: ReturnType<typeof setInterval> | null = null;
   let hintPollInFlight = false;
+  // Paused while the view holding this poller is mounted but off screen (its
+  // workspace layer is covered or parked). Trackers and hints are kept so the
+  // rows don't blank; only the interval stops.
+  let paused = false;
   let destroyed = false;
 
   function setHint(sessionId: string, hint: string) {
@@ -307,7 +311,7 @@ export function createLiveSessionHints(
   }
 
   function startPolling() {
-    if (destroyed) return;
+    if (destroyed || paused) return;
     if (hintPollTimer) return;
     hintPollTimer = setInterval(() => {
       void pollHints();
@@ -346,11 +350,27 @@ export function createLiveSessionHints(
         }
       }
 
-      if (hintTrackers.size > 0) {
+      if (hintTrackers.size === 0) {
+        stopPolling();
+      } else if (!paused) {
         startPolling();
         void pollHints();
-      } else {
+      }
+    },
+    /**
+     * Stop the interval without dropping trackers or hints, and pick up where
+     * it left off (polling at once) when unpaused. `syncRunningSessionIds([])`
+     * is not a substitute: it clears the hints and forgets `lastMessageId`,
+     * so every session would re-fetch its whole message list on return.
+     */
+    setPaused(next: boolean) {
+      if (destroyed || paused === next) return;
+      paused = next;
+      if (paused) {
         stopPolling();
+      } else if (hintTrackers.size > 0) {
+        startPolling();
+        void pollHints();
       }
     },
     destroy() {

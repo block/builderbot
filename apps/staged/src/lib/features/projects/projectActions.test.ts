@@ -77,6 +77,7 @@ let clearBranchState: ReturnType<typeof vi.fn>;
 let toastError: ReturnType<typeof vi.fn>;
 let selectProject: ReturnType<typeof vi.fn>;
 let goHome: ReturnType<typeof vi.fn>;
+let releaseProjectLayer: ReturnType<typeof vi.fn>;
 let navigationState: { selectedProjectId: string | null };
 let projectDeleteStarted: ReturnType<typeof vi.fn>;
 let projectDeleteFailed: ReturnType<typeof vi.fn>;
@@ -121,6 +122,7 @@ beforeEach(() => {
   toastError = vi.fn();
   selectProject = vi.fn();
   goHome = vi.fn();
+  releaseProjectLayer = vi.fn();
   navigationState = { selectedProjectId: null };
   projectDeleteStarted = vi.fn();
   projectDeleteFailed = vi.fn();
@@ -149,6 +151,7 @@ beforeEach(() => {
     navigation: navigationState,
     selectProject,
     goHome,
+    releaseProjectLayer,
   }));
   vi.doMock('../../stores/projectsData.svelte', () => ({
     projectsDataStore: {
@@ -689,5 +692,21 @@ describe('navigation on delete', () => {
     expect(selectProject).not.toHaveBeenCalled();
     expect(goHome).not.toHaveBeenCalled();
     expect(deleteProject).toHaveBeenCalledWith('p1');
+  });
+
+  it('releases the retained project layer as soon as the delete starts', async () => {
+    // Deleting from the home grid: nothing is selected, but the project may
+    // be the one retained under home. The release precedes the backend call.
+    navigationState.selectedProjectId = null;
+    let releasedBeforeDelete = false;
+    deleteProject.mockImplementation(async () => {
+      releasedBeforeDelete = releaseProjectLayer.mock.calls.length === 1;
+    });
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(releaseProjectLayer).toHaveBeenCalledWith('p1');
+    expect(releasedBeforeDelete).toBe(true);
   });
 });

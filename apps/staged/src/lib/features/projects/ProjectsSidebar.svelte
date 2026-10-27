@@ -70,12 +70,19 @@
   let pinnedCount = $derived(projectsDataStore.homeRepos.filter((r) => r.pinned).length);
   let sidebarRepos = $derived(visibleSidebarRepos(projectsDataStore.homeRepos, searchQuery));
 
+  // The view this sidebar sits beside is the workspace's project layer, not
+  // necessarily the route on screen: the layer stays mounted under home, where
+  // `selectedProjectId` is null, and the rows must keep highlighting the view
+  // the user comes back to.
+  let layerProjectId = $derived(
+    navigation.projectLayer?.kind === 'project' ? navigation.projectLayer.projectId : null
+  );
+  let layerShowsRepos = $derived(navigation.projectLayer?.kind === 'repos');
+
   // Any repo (pinned or not) earns the repos section and its All repos link;
   // keeping it while the repos view is active means the link highlighting
   // that view can't vanish out from under it.
-  let showReposSection = $derived(
-    projectsDataStore.homeRepos.length > 0 || navigation.showReposList
-  );
+  let showReposSection = $derived(projectsDataStore.homeRepos.length > 0 || layerShowsRepos);
 
   // Project rows follow the shared filter state, with one exception: the
   // selected project stays visible (appended if filtered out) so the row
@@ -85,7 +92,7 @@
   // landing page's visibleProjects makes the same call).
   let sidebarProjects = $derived.by(() => {
     const filtered = projectFiltersStore.filteredProjects;
-    const selectedId = navigation.selectedProjectId;
+    const selectedId = layerProjectId;
     let withSelected = filtered;
     if (selectedId && !filtered.some((p) => p.id === selectedId)) {
       const selected = projects.find((p) => p.id === selectedId);
@@ -380,7 +387,7 @@
                 <button
                   type="button"
                   class="all-repos-link"
-                  class:active={navigation.showReposList}
+                  class:active={layerShowsRepos}
                   onclick={showAllRepos}
                 >
                   <FolderGit2 size={12} />
@@ -416,7 +423,7 @@
             <SidebarSectionHead
               label={searching ? 'Projects' : 'All projects'}
               count={searching ? resultsLabel(sidebarProjects.length) : sidebarProjects.length}
-              active={navigation.selectedProjectId === null && !navigation.showReposList}
+              active={layerProjectId === null && !layerShowsRepos}
               onclick={openAllProjects}
             >
               {#snippet trailing()}
@@ -449,8 +456,8 @@
                 <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
                   <button
                     class="project-row project-item"
-                    use:scrollIfActive={navigation.selectedProjectId === project.id}
-                    class:active={navigation.selectedProjectId === project.id}
+                    use:scrollIfActive={layerProjectId === project.id}
+                    class:active={layerProjectId === project.id}
                     class:deleting={status.kind === 'deleting'}
                     onclick={() => openProject(project.id)}
                     disabled={status.kind === 'deleting'}

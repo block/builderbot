@@ -26,6 +26,7 @@ import type { CommitTimelineItem } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
+import { useWorkspaceLayer } from './workspaceLayer';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -132,16 +133,36 @@ export const navigation = $state({
 });
 
 /**
- * Run `close` when the workspace gets parked under settings or the diff view.
- * Its components stay mounted then (App.svelte), so a dialog, alert or
- * popover one of them owns would stay open above the view on top — before the
- * workspace was kept mounted, unmounting closed them. Call from component
- * setup with whatever unmounting used to close.
+ * Run `close` when the view calling this leaves the screen while it stays
+ * mounted: its workspace layer goes inactive (home shown over a retained
+ * project, or a project over the retained grid) or the workspace is parked
+ * under settings / the diff view. A dialog, alert or popover the view owns
+ * would otherwise stay open above what replaced it — before views were kept
+ * mounted, unmounting closed them. Call from component setup with whatever
+ * unmounting used to close.
  */
-export function onWorkspaceParked(close: () => void): void {
+export function onViewHidden(close: () => void): void {
+  const layer = useWorkspaceLayer();
   $effect(() => {
-    if (!navigation.workspaceParked) return;
+    if (layer.visible) return;
     untrack(close);
+  });
+}
+
+/**
+ * Run `refresh` each time the calling view's layer comes back on screen
+ * (inactive → active), for the work a remount used to redo per visit. Not run
+ * for the mount itself, even when the view mounts into a layer that has been
+ * re-activated before: the mount path already does its own loading.
+ */
+export function onLayerActivated(refresh: () => void): void {
+  const layer = useWorkspaceLayer();
+  let seen = untrack(() => layer.activations);
+  $effect(() => {
+    const activations = layer.activations;
+    if (activations === seen) return;
+    seen = activations;
+    untrack(refresh);
   });
 }
 

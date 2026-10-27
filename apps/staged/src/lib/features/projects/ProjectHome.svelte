@@ -22,7 +22,12 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
+  import {
+    goHome,
+    onViewHidden,
+    releaseProjectLayer,
+    selectProject,
+  } from '../layout/navigation.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import ProjectSection from './ProjectSection.svelte';
@@ -107,8 +112,9 @@
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
 
-  // Parked under settings or the diff view, these would stay open above them.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over this project, or parked under settings / the
+  // diff view), these would stay open on top.
+  onViewHidden(() => {
     showNewProjectModal = false;
     showAddRepoModal = false;
     branchToDelete = null;
@@ -121,6 +127,11 @@
   // before projectActions.pendingDelete/deletingProjectNames are set, so a held
   // key only deletes once.
   let deleteShortcutPending = $state(false);
+
+  // Set on unmount so checkStoreAndLoad's continuation can't hydrate a project
+  // this view no longer shows (the retained layer is released when its project
+  // is deleted, which can land mid-load).
+  let destroyed = false;
 
   // Setup errors come from the shared workspace lifecycle orchestrator.
   let worktreeErrors = $derived(workspaceLifecycle.getWorktreeErrors());
@@ -146,7 +157,10 @@
       handleNewProject(repoSeedFromNewProjectEvent(event));
     };
     window.addEventListener('staged:new-project', onNewProject);
-    const onDeleteCurrentProject = (event: Event) => handleDeleteCurrentProjectShortcut(event);
+    const onDeleteCurrentProject = (event: Event) => {
+      if (!layer.visible) return;
+      handleDeleteCurrentProjectShortcut(event);
+    };
     window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);
 
     const unlistenDetection = listenToRepoActionsDetection((event) => {
@@ -167,6 +181,7 @@
     });
 
     return () => {
+      destroyed = true;
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:delete-current-project', onDeleteCurrentProject);
       unlistenDetection();
@@ -177,6 +192,7 @@
   async function checkStoreAndLoad() {
     try {
       const status = await commands.getStoreStatus();
+      if (destroyed) return;
       if (status) {
         storeIncompat = status;
         return;
@@ -187,6 +203,7 @@
       const load = projectsDataStore.ensureLoaded();
       storeCheckPending = false;
       await load;
+      if (destroyed) return;
       lastSelectedProjectId = selectedProjectId;
       initialLoadComplete = true;
       if (selectedProjectId) {
@@ -463,9 +480,13 @@
     };
   });
 
+  // The project this view shows is gone (deleted here or elsewhere). On
+  // screen, leave for home; retained under home, just release the layer so it
+  // unmounts rather than show a missing project — navigation must not jump.
   $effect(() => {
     if (projectsDataStore.loaded && !loading && selectedProjectId && !selectedProject) {
-      goHome();
+      if (layer.active) goHome();
+      else releaseProjectLayer(selectedProjectId);
     }
   });
 

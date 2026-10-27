@@ -112,7 +112,12 @@
     onBranchSetupProgress,
     onSessionStatusChanged,
   } from '../../services/branchEventService';
-  import { navigation, onWorkspaceParked, openDiffRoute } from '../layout/navigation.svelte';
+  import {
+    navigation,
+    onLayerActivated,
+    onViewHidden,
+    openDiffRoute,
+  } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import {
@@ -567,9 +572,11 @@
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
 
-  // Parked under settings or the diff view, the card's dialogs would stay
-  // open above them. The composer hands its draft back on the way out.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over this project, or parked under settings / the
+  // diff view), the card's dialogs would stay open on top. The composer hands
+  // its draft back on the way out; closing the session and note dialogs
+  // releases their pooled chat panes.
+  onViewHidden(() => {
     openNote = null;
     openWriteNote = null;
     viewImageId = null;
@@ -672,28 +679,49 @@
     loadedTimelineKey = timelineKey;
     loading = false;
     prunePlaceholders(cached);
-    if (fresh) {
-      const version = ++revalidationVersion;
-      fresh
-        .then((next) => {
-          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
-            return;
-          }
-          error = null;
-          timeline = next;
-          loadedTimelineKey = timelineKey;
-          prunePlaceholders(next);
-        })
-        .catch((e) => {
-          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
-            return;
-          }
-          error = e instanceof Error ? e.message : String(e);
-        });
-    }
+    if (fresh) applyRevalidation(fresh, timelineKey);
 
     startGitStateRefresh();
   }
+
+  /**
+   * Show `fresh` when it lands, unless a newer load or revalidation has started
+   * since (`revalidationVersion`) or the branch's timeline key has moved on.
+   */
+  function applyRevalidation(fresh: Promise<BranchTimelineData>, timelineKey: string) {
+    const version = ++revalidationVersion;
+    fresh
+      .then((next) => {
+        if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+          return;
+        }
+        error = null;
+        timeline = next;
+        loadedTimelineKey = timelineKey;
+        prunePlaceholders(next);
+      })
+      .catch((e) => {
+        if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+          return;
+        }
+        error = e instanceof Error ? e.message : String(e);
+      });
+  }
+
+  // Back on screen after home covered this project. The remount this stands
+  // in for refetched the timeline and git state on every visit; here the
+  // timeline is only refetched when its cache entry is past TIMELINE_FRESH_MS
+  // (the same rule as the mount-time hydration above), and the git-state
+  // refresh is TTL-gated on the backend, so a commit made in the worktree
+  // while on home shows up on return. Only when the shown timeline is current:
+  // a load in flight for a new key owns the next render.
+  onLayerActivated(() => {
+    const key = branchTimelineReadyKey(branch);
+    if (!key || loadedTimelineKey !== key) return;
+    const { fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+    if (fresh) applyRevalidation(fresh, key);
+    startGitStateRefresh();
+  });
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
   // on remount (e.g. project switch). This prevents the loading flash and

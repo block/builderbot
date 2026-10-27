@@ -16,7 +16,7 @@
   import SearchField from '../../shared/SearchField.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
-  import { onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
+  import { onViewHidden, selectProject } from '../layout/navigation.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
 
   // Served from the shared home-repos cache: revisits paint instantly from
@@ -28,8 +28,9 @@
   let showNewProjectModal = $state(false);
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
 
-  // Parked under settings or the diff view, the modal would stay open above them.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over this view, or parked under settings / the
+  // diff view), the modal would stay open on top.
+  onViewHidden(() => {
     showNewProjectModal = false;
   });
 

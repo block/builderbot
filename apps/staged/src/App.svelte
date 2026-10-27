@@ -99,6 +99,7 @@
   // parked views would otherwise still answer are gated on this.
   let workspaceParked = $derived(navigation.workspaceParked);
   let workspaceEl = $state<HTMLDivElement | null>(null);
+  let projectLayerEl = $state<HTMLDivElement | null>(null);
   let detailHostEl = $state<HTMLDivElement | null>(null);
 
   // The parked workspace is covered, not inert (see the template for why), so
@@ -141,9 +142,12 @@
   });
 
   // Native drag-drop hit-tests subscribed elements, not the DOM, so the cover
-  // alone does not keep drops off the parked branch cards.
+  // alone does not keep drops off the parked branch cards, nor the clip off
+  // the retained project layer's cards while home is shown.
   $effect(() => {
-    setDragDropCoveredElement(workspaceParked ? workspaceEl : null);
+    setDragDropCoveredElement(
+      workspaceParked ? workspaceEl : navigation.homeActive ? projectLayerEl : null
+    );
     return () => setDragDropCoveredElement(null);
   });
 
@@ -769,21 +773,26 @@
           >
             <!-- Two stacked layers in one grid cell. The home grid mounts on
                  the first visit and then stays, covered by the project layer
-                 while a project is shown, so going home is a hide/show and
-                 not a 3k-node rebuild plus the home refetches. The project
-                 layer's view is still swapped per route for now. Both hosts
-                 are always present, like the detail host: inserting one as
-                 a sibling of the other's ~3k-node tree restyles that whole
-                 tree on WebKit (~55 ms), so views mount inside a host that
-                 is already there. The empty project host is clipped while
-                 inactive so it doesn't cover the grid. -->
+                 while a project is shown; the last project (or the repos
+                 view) stays mounted under home, clipped, until another one
+                 replaces it or it is released. Either direction is then a
+                 hide/show and not a 3k-node rebuild plus the refetches. Both
+                 hosts are always present, like the detail host: inserting
+                 one as a sibling of the other's ~3k-node tree restyles that
+                 whole tree on WebKit (~55 ms), so views mount inside a host
+                 that is already there. The project host is clipped while
+                 inactive (empty or not) so it doesn't cover the grid. -->
             <WorkspaceLayer active={navigation.homeActive}>
               {#if navigation.homeLayerRetained}
                 <ProjectsList />
               {/if}
             </WorkspaceLayer>
-            <WorkspaceLayer active={!navigation.homeActive} clipWhenInactive>
-              {#if navigation.projectLayer && !navigation.homeActive}
+            <WorkspaceLayer
+              active={!navigation.homeActive}
+              clipWhenInactive
+              bind:element={projectLayerEl}
+            >
+              {#if navigation.projectLayer}
                 {@const projectLayer = navigation.projectLayer}
                 <!-- Hoisted out of ProjectHome so it survives project↔repos
                      transitions. -->

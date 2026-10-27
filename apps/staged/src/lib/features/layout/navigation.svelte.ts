@@ -209,9 +209,14 @@ function persistLastProject(projectId: string | null): void {
  * seeded from the web snapshot is final; otherwise the persisted project is
  * read from the store (initialising it if initPreferences hasn't yet — the two
  * share one init) and pushed if the user hasn't navigated meanwhile. Settles
- * `navigation.initialRouteSettled` whatever happens, after at most
- * INITIAL_ROUTE_TIMEOUT_MS; a read that lands later is left to initNavigation,
- * which restores a pristine stack the slow way.
+ * `navigation.initialRouteSettled` whatever happens.
+ *
+ * Store init is awaited unbounded: `<main>` is also gated on
+ * `preferences.loaded`, which waits on the same init promise, so settling
+ * early during init would only revert to the home-grid flash without
+ * rendering anything sooner. Only the key read itself is bounded by
+ * INITIAL_ROUTE_TIMEOUT_MS; a read that lands later is left to
+ * initNavigation, which restores a pristine stack the slow way.
  */
 export async function restoreInitialRoute(): Promise<void> {
   if (navigation.initialRouteSettled) return;
@@ -223,11 +228,9 @@ export async function restoreInitialRoute(): Promise<void> {
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = Symbol('timeout');
-  const read = (async () => {
-    await initPersistentStore();
-    return await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
-  })();
   try {
+    await initPersistentStore();
+    const read = getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
     const lastProjectId = await Promise.race([
       read,
       new Promise<typeof timedOut>((resolve) => {

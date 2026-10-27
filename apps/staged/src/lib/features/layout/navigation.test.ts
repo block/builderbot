@@ -111,7 +111,7 @@ describe('restoreInitialRoute', () => {
     expect(navigation.initialRouteSettled).toBe(true);
   });
 
-  it('settles on timeout when the store read hangs', async () => {
+  it('settles on timeout when the store read hangs after init', async () => {
     vi.useFakeTimers();
     getStoreValue.mockReturnValueOnce(new Promise(() => {}));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -126,6 +126,41 @@ describe('restoreInitialRoute', () => {
     expect(navigation.initialRouteSettled).toBe(true);
     expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits out a slow store init and still restores the route', async () => {
+    // The realistic degradation: preferences_store_path + load() are slow
+    // (cold disk, remote web), but the key read is in-memory once init lands.
+    // `<main>` is gated on preferences.loaded, which waits on the same init,
+    // so the timeout must not start until init resolves.
+    vi.useFakeTimers();
+    let resolveInit!: () => void;
+    initPersistentStore.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveInit = resolve;
+      })
+    );
+    getStoreValue.mockResolvedValueOnce('p1');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreInitialRoute, navigation, INITIAL_ROUTE_TIMEOUT_MS } = await importNavigation();
+
+    const restore = restoreInitialRoute();
+    await vi.advanceTimersByTimeAsync(INITIAL_ROUTE_TIMEOUT_MS * 3);
+    // Init is still pending: nothing read, nothing settled, no timeout fired.
+    expect(getStoreValue).not.toHaveBeenCalled();
+    expect(navigation.initialRouteSettled).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+
+    resolveInit();
+    await restore;
+
+    expect(getStoreValue).toHaveBeenCalledWith('last-viewed-project');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('settles when the store read rejects', async () => {

@@ -185,6 +185,7 @@
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
   import { latestAcpConfigDiscoveryFromMetadata } from './acpConfigMetadata';
   import {
+    createDeferredRestore,
     reopenAfterRevalidate,
     reopenMode,
     restoredScrollTop,
@@ -731,10 +732,14 @@
       })
     );
     if (mode === 'revalidate') {
-      // The transcript and composer are already built and attached (the
-      // adopter unparks before it flips `active`), so focus now rather than
-      // after the round trip the full load waits for.
-      tick().then(() => {
+      // The transcript and composer are already built and attached, so focus
+      // on this open's first frame rather than after the round trip the full
+      // load waits for. A frame, not a microtask: `unpark` requested its
+      // scroll restore's frame before `active` flipped, so this callback runs
+      // after it, once the restore has already paid the frame's style and
+      // layout — a focus from `tick()` landed between the mount flush and
+      // that frame and forced a style pass of its own over the new dialog.
+      requestAnimationFrame(() => {
         if (!closed && active && sessionId === id) inputEl?.focus();
       });
     }
@@ -1017,6 +1022,10 @@
     try {
       const outcome = await poll();
       if (closed || sessionId !== id) return 'settled';
+      // The restore `unpark` deferred has normally run by now (the delta is a
+      // round trip, the frame is next in line), but a hidden window never
+      // fires frames: apply it before anything below measures the box.
+      deferredRestore.flush();
       const next = reopenAfterRevalidate(outcome);
       if (next === 'full') return next;
       if (session) statusLoadedForSessionId = session.id;
@@ -2020,6 +2029,21 @@
   /** Scroll state saved by `park` for the next `unpark`. */
   let parkedScroll: ParkedScroll | null = null;
 
+  /** Applies a saved position to the live box; `unpark` schedules it. */
+  const deferredRestore = createDeferredRestore((saved) => {
+    const el = messagesEl;
+    if (!el) return;
+    const anchorTop = saved.anchor && !saved.atBottom ? anchorTopIn(el, saved.anchor) : null;
+    el.scrollTop = restoredScrollTop(
+      saved,
+      { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
+      anchorTop
+    );
+    lastScrollTop = el.scrollTop;
+    scrollAnchor = saved.anchor;
+    anchorScrollTop = el.scrollTop;
+  });
+
   /**
    * Leave the document without being destroyed (`sessionPanePool`). The pool
    * calls this before it detaches the host, but the dialog above the host is
@@ -2027,14 +2051,19 @@
    * runs the teardowns inside it, and WebKit resets `scrollTop` to 0 on
    * detach. So the position is read from the box only while it is still in
    * the document, and otherwise from `lastScrollTop` and `scrollAnchor`, which
-   * `handleScroll` keeps current. Search highlights are DOM state the next
-   * open must not inherit, and the viewers portal to `#portal-root`, where
-   * nothing of a parked pane may remain. `close` stops polling; the
-   * `active`-gated effects (and PipelineSteps') drop the listeners once the
-   * pool clears `active`.
+   * `handleScroll` keeps current. A restore `unpark` scheduled but never got
+   * to apply (parked again within the frame, or a window that never painted)
+   * is the position to save: the box was never scrolled and the bookkeeping
+   * never caught up. Search highlights are DOM state the next open must not
+   * inherit, and the viewers portal to `#portal-root`, where nothing of a
+   * parked pane may remain. `close` stops polling; the `active`-gated effects
+   * (and PipelineSteps') drop the listeners once the pool clears `active`.
    */
   export function park() {
-    if (messagesEl) {
+    const unapplied = deferredRestore.take();
+    if (unapplied) {
+      parkedScroll = unapplied;
+    } else if (messagesEl) {
       const connected = messagesEl.isConnected;
       parkedScroll = {
         scrollTop: connected ? messagesEl.scrollTop : lastScrollTop,
@@ -2050,27 +2079,23 @@
 
   /**
    * Back in the document. Runs synchronously once the host is reattached
-   * inside the new dialog and before `active` flips, so the read and write
-   * below pay the reinsert's style and layout once, ahead of the first paint.
-   * The anchored group is looked up in this layout, so a box of another width
-   * (the NoteModal aside vs. the SessionModal, a resized dialog) puts the same
-   * group back at the same offset. `lastScrollTop` follows so `handleScroll`
-   * does not read the restore as the user scrolling up or ask for an older page.
+   * inside the new dialog and before `active` flips, but the restore itself
+   * waits for the next animation frame (see `createDeferredRestore`): read
+   * and written here it forced style and layout over a dialog whose mount
+   * flush was still adding DOM, and the frame paid them again. The frame
+   * callback runs before that frame's own style and layout, so the first
+   * paint shows the restored position and the forced layout is the one the
+   * frame was about to do anyway. The anchored group is looked up in that
+   * layout, so a box of another width (the NoteModal aside vs. the
+   * SessionModal, a resized dialog) puts the same group back at the same
+   * offset. `lastScrollTop` follows so `handleScroll` does not read the
+   * restore as the user scrolling up or ask for an older page.
    */
   export function unpark() {
     const saved = parkedScroll;
     parkedScroll = null;
-    const el = messagesEl;
-    if (!saved || !el) return;
-    const anchorTop = saved.anchor && !saved.atBottom ? anchorTopIn(el, saved.anchor) : null;
-    el.scrollTop = restoredScrollTop(
-      saved,
-      { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
-      anchorTop
-    );
-    lastScrollTop = el.scrollTop;
-    scrollAnchor = saved.anchor;
-    anchorScrollTop = el.scrollTop;
+    if (!saved || !messagesEl) return;
+    deferredRestore.schedule(saved);
   }
 
   function selectorStateKey(

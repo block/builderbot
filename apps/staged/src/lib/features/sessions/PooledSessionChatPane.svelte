@@ -103,9 +103,10 @@
         lease = next;
         syncProps(next.props);
         slot.appendChild(next.host);
-        // Attach → unpark → active: `unpark` reads and writes the transcript's
-        // scroll box, which needs the live layout, and the pane's load effect
-        // (which focuses the composer) runs only once `active` flips. On a hit
+        // Attach → unpark → active: `unpark` schedules the transcript's scroll
+        // restore for the next frame, which needs the host in the document,
+        // and the pane's load effect (which focuses the composer in a frame
+        // of its own, after that one) runs only once `active` flips. On a hit
         // this runs now; on a miss, after the pool's microtask mount.
         next.ready((pane) => {
           if (lease !== next) return;

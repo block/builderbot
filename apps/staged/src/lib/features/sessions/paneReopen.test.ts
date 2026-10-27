@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { reopenAfterRevalidate, reopenMode, restoredScrollTop } from './paneReopen';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createDeferredRestore,
+  reopenAfterRevalidate,
+  reopenMode,
+  restoredScrollTop,
+  type ParkedScroll,
+} from './paneReopen';
 
 describe('reopenMode', () => {
   const loaded = { loadedSessionId: 's1', sessionId: 's1', messageCount: 12, error: null };
@@ -99,5 +105,95 @@ describe('restoredScrollTop', () => {
         null
       )
     ).toBe(0);
+  });
+});
+
+describe('createDeferredRestore', () => {
+  function fakeFrames() {
+    const queue = new Map<number, () => void>();
+    let next = 1;
+    return {
+      scheduler: {
+        request: vi.fn((cb: () => void) => {
+          const handle = next++;
+          queue.set(handle, cb);
+          return handle;
+        }),
+        cancel: vi.fn((handle: number) => {
+          queue.delete(handle);
+        }),
+      },
+      fire() {
+        const callbacks = [...queue.values()];
+        queue.clear();
+        for (const cb of callbacks) cb();
+      },
+      get queued() {
+        return queue.size;
+      },
+    };
+  }
+  const saved = (scrollTop: number): ParkedScroll => ({ scrollTop, atBottom: false, anchor: null });
+
+  it('applies the saved position on the next frame, not when scheduled', () => {
+    const frames = fakeFrames();
+    const apply = vi.fn();
+    const restore = createDeferredRestore(apply, frames.scheduler);
+    restore.schedule(saved(120));
+    expect(apply).not.toHaveBeenCalled();
+    expect(restore.pending).toBe(true);
+    frames.fire();
+    expect(apply).toHaveBeenCalledExactlyOnceWith(saved(120));
+    expect(restore.pending).toBe(false);
+  });
+
+  it('keeps one frame request and applies the latest position when rescheduled', () => {
+    const frames = fakeFrames();
+    const apply = vi.fn();
+    const restore = createDeferredRestore(apply, frames.scheduler);
+    restore.schedule(saved(10));
+    restore.schedule(saved(20));
+    expect(frames.scheduler.request).toHaveBeenCalledTimes(1);
+    frames.fire();
+    expect(apply).toHaveBeenCalledExactlyOnceWith(saved(20));
+  });
+
+  it('flush applies now, cancels the frame and reports whether anything was pending', () => {
+    const frames = fakeFrames();
+    const apply = vi.fn();
+    const restore = createDeferredRestore(apply, frames.scheduler);
+    expect(restore.flush()).toBe(false);
+    restore.schedule(saved(5));
+    expect(restore.flush()).toBe(true);
+    expect(apply).toHaveBeenCalledExactlyOnceWith(saved(5));
+    expect(frames.scheduler.cancel).toHaveBeenCalledTimes(1);
+    expect(frames.queued).toBe(0);
+    frames.fire();
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+
+  it('take hands back an unapplied position without applying it', () => {
+    const frames = fakeFrames();
+    const apply = vi.fn();
+    const restore = createDeferredRestore(apply, frames.scheduler);
+    expect(restore.take()).toBeNull();
+    const parked = saved(77);
+    restore.schedule(parked);
+    expect(restore.take()).toBe(parked);
+    expect(restore.pending).toBe(false);
+    frames.fire();
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('can be scheduled again after the frame fired', () => {
+    const frames = fakeFrames();
+    const apply = vi.fn();
+    const restore = createDeferredRestore(apply, frames.scheduler);
+    restore.schedule(saved(1));
+    frames.fire();
+    restore.schedule(saved(2));
+    expect(frames.scheduler.request).toHaveBeenCalledTimes(2);
+    frames.fire();
+    expect(apply).toHaveBeenLastCalledWith(saved(2));
   });
 });

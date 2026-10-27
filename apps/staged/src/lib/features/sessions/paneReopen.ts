@@ -80,3 +80,77 @@ export function restoredScrollTop(
       : saved.scrollTop;
   return Math.min(Math.max(0, target), max);
 }
+
+/** `requestAnimationFrame` / `cancelAnimationFrame`, injectable for tests. */
+export interface FrameScheduler {
+  request(callback: () => void): number;
+  cancel(handle: number): void;
+}
+
+const animationFrames: FrameScheduler = {
+  request: (callback) => requestAnimationFrame(callback),
+  cancel: (handle) => cancelAnimationFrame(handle),
+};
+
+/**
+ * A scroll restore that waits for the next animation frame.
+ *
+ * `unpark` runs synchronously inside the adopter's attachment, in the middle
+ * of the dialog's mount flush: the host has just been reinserted and more
+ * DOM is still to come (the effects behind `active`). Reading `scrollHeight`
+ * and writing `scrollTop` there forced a style pass and a layout over the
+ * half-built dialog, and everything that mutated afterwards made the frame
+ * — and the composer focus before it — pay a second one. A frame callback
+ * runs after the flush and before the frame's own style and layout, so the
+ * restore's forced layout *is* the frame's and the first paint already shows
+ * the restored position.
+ *
+ * Only ever one restore is pending: a second `schedule` before the frame
+ * fires replaces the saved position. `take` hands it back untouched for a
+ * pane parked again before the frame (a hidden window never fires one), and
+ * `flush` applies it now for a caller that must measure the restored box.
+ */
+export function createDeferredRestore(
+  apply: (saved: ParkedScroll) => void,
+  frames: FrameScheduler = animationFrames
+) {
+  let pending: ParkedScroll | null = null;
+  let handle = 0;
+
+  function cancel(): ParkedScroll | null {
+    const saved = pending;
+    pending = null;
+    if (handle) frames.cancel(handle);
+    handle = 0;
+    return saved;
+  }
+
+  return {
+    get pending(): boolean {
+      return pending !== null;
+    },
+    schedule(saved: ParkedScroll): void {
+      pending = saved;
+      if (handle) return;
+      handle = frames.request(() => {
+        handle = 0;
+        const next = pending;
+        pending = null;
+        if (next) apply(next);
+      });
+    },
+    /** Apply the pending restore now; false when none was pending. */
+    flush(): boolean {
+      const saved = cancel();
+      if (!saved) return false;
+      apply(saved);
+      return true;
+    },
+    /** Drop the pending restore and return what it would have applied. */
+    take(): ParkedScroll | null {
+      return cancel();
+    },
+  };
+}
+
+export type DeferredRestore = ReturnType<typeof createDeferredRestore>;

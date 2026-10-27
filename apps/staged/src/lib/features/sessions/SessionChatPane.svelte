@@ -185,20 +185,15 @@
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
   import { latestAcpConfigDiscoveryFromMetadata } from './acpConfigMetadata';
   import {
+    applyParkedScroll,
     createDeferredRestore,
     reopenAfterRevalidate,
     reopenMode,
-    restoredScrollTop,
     type ParkedScroll,
     type PollOutcome,
     type ReopenMode,
   } from './paneReopen';
-  import {
-    captureScrollAnchor,
-    restoreScrollAnchor,
-    anchorTopIn,
-    type ScrollAnchor,
-  } from './scrollAnchor';
+  import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from './scrollAnchor';
   import { createIntroGate } from './transcriptIntro';
 
   interface Props {
@@ -697,6 +692,9 @@
 
   onDestroy(() => {
     closed = true;
+    // A restore still waiting on its frame has nothing to scroll once the pane
+    // is gone; cancel it here rather than rely on the pool parking first.
+    deferredRestore.take();
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
@@ -2031,17 +2029,11 @@
 
   /** Applies a saved position to the live box; `unpark` schedules it. */
   const deferredRestore = createDeferredRestore((saved) => {
-    const el = messagesEl;
-    if (!el) return;
-    const anchorTop = saved.anchor && !saved.atBottom ? anchorTopIn(el, saved.anchor) : null;
-    el.scrollTop = restoredScrollTop(
-      saved,
-      { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
-      anchorTop
-    );
-    lastScrollTop = el.scrollTop;
-    scrollAnchor = saved.anchor;
-    anchorScrollTop = el.scrollTop;
+    const restored = applyParkedScroll(messagesEl ?? null, saved);
+    if (!restored) return;
+    lastScrollTop = restored.scrollTop;
+    scrollAnchor = restored.anchor;
+    anchorScrollTop = restored.scrollTop;
   });
 
   /**

@@ -4,7 +4,7 @@
  * reopen can find the transcript already rendered.
  */
 
-import { anchoredScrollTop, type ScrollAnchor } from './scrollAnchor';
+import { anchoredScrollTop, anchorTopIn, type ScrollAnchor } from './scrollAnchor';
 
 export type ReopenMode = 'revalidate' | 'full';
 
@@ -79,6 +79,38 @@ export function restoredScrollTop(
       ? anchoredScrollTop(box.scrollTop, saved.anchor, anchorTop)
       : saved.scrollTop;
   return Math.min(Math.max(0, target), max);
+}
+
+/** What the pane's scroll bookkeeping should read after a restore. */
+export interface RestoredScroll {
+  /** The box's `scrollTop` after the write (clamped by the box itself). */
+  scrollTop: number;
+  /** The anchor the restore was made against, to carry forward as current. */
+  anchor: ScrollAnchor | null;
+}
+
+/**
+ * Scroll `el` to where `saved` says the transcript was, and report the
+ * position the caller's bookkeeping (`lastScrollTop`, `scrollAnchor` and its
+ * capture point) should take, so the scroll handler does not read the restore
+ * as the user scrolling up. The anchored group is looked up in the box as laid
+ * out now (`lookupAnchorTop`, injectable for tests), only when the pane was
+ * not following the bottom. A null `el` — the box is gone or was never bound —
+ * is a no-op and returns null: nothing was scrolled, so nothing is recorded.
+ */
+export function applyParkedScroll(
+  el: HTMLElement | null,
+  saved: ParkedScroll,
+  lookupAnchorTop: (box: HTMLElement, anchor: ScrollAnchor) => number | null = anchorTopIn
+): RestoredScroll | null {
+  if (!el) return null;
+  const anchorTop = saved.anchor && !saved.atBottom ? lookupAnchorTop(el, saved.anchor) : null;
+  el.scrollTop = restoredScrollTop(
+    saved,
+    { scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight },
+    anchorTop
+  );
+  return { scrollTop: el.scrollTop, anchor: saved.anchor };
 }
 
 /** `requestAnimationFrame` / `cancelAnimationFrame`, injectable for tests. */

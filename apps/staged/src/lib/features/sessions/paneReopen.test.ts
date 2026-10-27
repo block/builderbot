@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyParkedScroll,
   createDeferredRestore,
   reopenAfterRevalidate,
   reopenMode,
@@ -108,6 +109,67 @@ describe('restoredScrollTop', () => {
   });
 });
 
+describe('applyParkedScroll', () => {
+  /** A scrollable box that clamps assignments like a real element. */
+  function fakeBox(scrollHeight: number, clientHeight: number, scrollTop = 0): HTMLElement {
+    const box = {
+      scrollHeight,
+      clientHeight,
+      _scrollTop: scrollTop,
+      get scrollTop() {
+        return this._scrollTop;
+      },
+      set scrollTop(value: number) {
+        this._scrollTop = Math.min(Math.max(0, value), Math.max(0, scrollHeight - clientHeight));
+      },
+    };
+    return box as unknown as HTMLElement;
+  }
+
+  it('is a no-op with no element: nothing scrolled, nothing to record', () => {
+    const lookup = vi.fn(() => 0);
+    const saved: ParkedScroll = {
+      scrollTop: 300,
+      atBottom: false,
+      anchor: { key: 'g', offset: 12 },
+    };
+    expect(applyParkedScroll(null, saved, lookup)).toBeNull();
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('puts the anchored group back at its offset and reports the bookkeeping position', () => {
+    const box = fakeBox(2000, 500);
+    const anchor = { key: 'g', offset: 40 };
+    // After the restore's layout the group sits 640px below the box top at
+    // scrollTop 0; scrolling down 600 puts it back at 40.
+    const lookup = vi.fn((_box: HTMLElement, a: typeof anchor) => (a === anchor ? 640 : null));
+    const restored = applyParkedScroll(box, { scrollTop: 123, atBottom: false, anchor }, lookup);
+    expect(lookup).toHaveBeenCalledExactlyOnceWith(box, anchor);
+    expect(box.scrollTop).toBe(600);
+    expect(restored).toEqual({ scrollTop: 600, anchor });
+  });
+
+  it('pins to the bottom without looking the anchor up when the pane was following it', () => {
+    const box = fakeBox(2000, 500);
+    const lookup = vi.fn(() => 0);
+    const restored = applyParkedScroll(
+      box,
+      { scrollTop: 10, atBottom: true, anchor: { key: 'g', offset: 0 } },
+      lookup
+    );
+    expect(lookup).not.toHaveBeenCalled();
+    expect(box.scrollTop).toBe(1500);
+    expect(restored?.scrollTop).toBe(1500);
+  });
+
+  it('reports the clamped position the box actually took', () => {
+    const box = fakeBox(600, 500);
+    const restored = applyParkedScroll(box, { scrollTop: 900, atBottom: false, anchor: null });
+    expect(box.scrollTop).toBe(100);
+    expect(restored).toEqual({ scrollTop: 100, anchor: null });
+  });
+});
+
 describe('createDeferredRestore', () => {
   function fakeFrames() {
     const queue = new Map<number, () => void>();
@@ -183,6 +245,28 @@ describe('createDeferredRestore', () => {
     expect(restore.pending).toBe(false);
     frames.fire();
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('leaves nothing pending after schedule then take, and a late frame applies nothing', () => {
+    // The park / destroy shape: `take` runs before the frame; the frame
+    // request is cancelled, and even a scheduler that fires it anyway finds
+    // nothing to apply.
+    const frames = fakeFrames();
+    const apply = vi.fn();
+    const restore = createDeferredRestore(apply, frames.scheduler);
+    const parked = saved(42);
+    restore.schedule(parked);
+    expect(frames.queued).toBe(1);
+    expect(restore.take()).toBe(parked);
+    expect(restore.pending).toBe(false);
+    expect(frames.queued).toBe(0);
+    expect(restore.take()).toBeNull();
+    // Run the cancelled callback as if the scheduler fired it regardless.
+    const [callback] = frames.scheduler.request.mock.calls[0];
+    callback();
+    frames.fire();
+    expect(apply).not.toHaveBeenCalled();
+    expect(restore.pending).toBe(false);
   });
 
   it('can be scheduled again after the frame fired', () => {

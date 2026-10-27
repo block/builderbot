@@ -4,6 +4,7 @@
   import { cn } from '$lib/components/utils.js';
   import ContextMenuPortal from './context-menu-portal.svelte';
   import MenuSheet from '$lib/components/ui/menu-sheet/menu-sheet.svelte';
+  import { getMenuRoot } from '$lib/components/ui/menu-sheet/menu-close-context.js';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import type { ComponentProps } from 'svelte';
   import type { WithoutChildrenOrChild } from '$lib/components/utils.js';
@@ -34,13 +35,15 @@
 
   // Keep `viewport.sheetMenus` live even when the host screen never subscribed.
   onMount(() => watchViewport());
+
+  const root = getMenuRoot();
 </script>
 
 <ContextMenuPortal {...portalProps}>
   {#if viewport.sheetMenus}
     <ContextMenuPrimitive.ContentStatic bind:ref data-slot="context-menu-content" {...restProps}>
       {#snippet child({ props })}
-        <MenuSheet {props} class={className}>
+        <MenuSheet {props} class={className} onDismiss={() => root?.close()}>
           {@render children?.()}
           {#snippet cancel()}
             <ContextMenuPrimitive.Item

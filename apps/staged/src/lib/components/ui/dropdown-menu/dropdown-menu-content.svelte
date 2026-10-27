@@ -2,6 +2,7 @@
   import { cn, type WithoutChildrenOrChild } from '$lib/components/utils.js';
   import DropdownMenuPortal from './dropdown-menu-portal.svelte';
   import MenuSheet from '$lib/components/ui/menu-sheet/menu-sheet.svelte';
+  import { getMenuRoot } from '$lib/components/ui/menu-sheet/menu-close-context.js';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { DropdownMenu as DropdownMenuPrimitive } from 'bits-ui';
   import { onMount } from 'svelte';
@@ -33,13 +34,15 @@
 
   // Keep `viewport.sheetMenus` live even when the host screen never subscribed.
   onMount(() => watchViewport());
+
+  const root = getMenuRoot();
 </script>
 
 <DropdownMenuPortal {...portalProps}>
   {#if viewport.sheetMenus}
     <DropdownMenuPrimitive.ContentStatic bind:ref data-slot="dropdown-menu-content" {...restProps}>
       {#snippet child({ props })}
-        <MenuSheet {props} class={className}>
+        <MenuSheet {props} class={className} onDismiss={() => root?.close()}>
           {@render children?.()}
           {#snippet cancel()}
             <DropdownMenuPrimitive.Item

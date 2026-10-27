@@ -10,9 +10,6 @@
     disabled = false,
     oncontextmenu,
     ontouchstart,
-    ontouchmove,
-    ontouchend,
-    ontouchcancel,
     ...restProps
   }: ContextMenuPrimitive.TriggerProps = $props();
 
@@ -20,6 +17,8 @@
   // re-dispatched as a `contextmenu` at the touched element so consumer
   // handlers and bits-ui's own opener run exactly as for a right-click, and
   // the release that follows can no longer click the item under the finger.
+  // Only the touchstart is wired here; the controller follows the rest of the
+  // gesture on the document.
   const longPress = createLongPress({
     isDisabled: () => disabled,
     trigger: () => ref,
@@ -56,18 +55,6 @@
   ontouchstart={(e) => {
     ontouchstart?.(e);
     longPress.ontouchstart(e);
-  }}
-  ontouchmove={(e) => {
-    ontouchmove?.(e);
-    longPress.ontouchmove(e);
-  }}
-  ontouchend={(e) => {
-    ontouchend?.(e);
-    longPress.ontouchend(e);
-  }}
-  ontouchcancel={(e) => {
-    ontouchcancel?.(e);
-    longPress.ontouchcancel(e);
   }}
   {...restProps}
 />

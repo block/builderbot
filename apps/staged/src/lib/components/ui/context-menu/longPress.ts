@@ -11,14 +11,21 @@
  * - a single touch that stays within `moveThreshold` for `delay` ms fires
  *   `onLongPress`; the trigger turns that into a synthetic `contextmenu` so
  *   bits-ui opens through its normal path (positioning, focus, consumer
- *   `oncontextmenu` handlers);
+ *   `oncontextmenu` handlers). The event is dispatched at the touched element,
+ *   or at the trigger itself when that element left the DOM during the hold;
  * - once a long press fired — ours, or the browser's own `contextmenu` while
- *   the touch was down — the closing `touchend` is default-prevented (that is
- *   what suppresses the synthesized click on iOS and Chrome) and, belt and
- *   braces, the next `click` on the trigger is swallowed on the capture phase
- *   for a short window, so nothing under the finger activates. The swallow is
- *   scoped to the trigger: the menu that just opened lives in a portal, so a
- *   quick tap on one of its rows is never eaten;
+ *   the touch was down — the closing `touchend` is default-prevented. That is
+ *   the mechanism that suppresses the synthesized click on iOS and Chrome, in
+ *   every presentation: with a bottom sheet open the click would hit-test the
+ *   sheet layer, with a floating menu the trigger underneath. Belt and braces,
+ *   the next `click` anywhere in the document is swallowed on the capture
+ *   phase for a short window — unless a new touch has started since, which
+ *   marks it as the user's next tap rather than the release's leftover;
+ * - the gesture-wide events (`touchmove`, `touchend`, `touchcancel`) are
+ *   listened for on the document while a press is live, not on the trigger:
+ *   touch events are retargeted to the original `touchstart` target, so a
+ *   descendant replaced mid-hold (a keyed re-render) would otherwise take the
+ *   release with it and leave the press armed;
  * - a browser that raises its own trusted `contextmenu` for the hold a few
  *   milliseconds after ours already opened the menu (Android Chrome) has that
  *   duplicate eaten, so consumer handlers and bits-ui's opener run once;
@@ -31,9 +38,9 @@
 export const LONG_PRESS_DELAY_MS = 500;
 export const LONG_PRESS_MOVE_THRESHOLD_PX = 10;
 /**
- * How long after a long-press release a trailing click on the trigger is
- * still swallowed. The synthesized click arrives in the same task as
- * `touchend`; the rest is margin.
+ * How long after a long-press release a trailing click is still swallowed.
+ * The synthesized click arrives in the same task as `touchend`; the rest is
+ * margin.
  */
 export const CLICK_SWALLOW_WINDOW_MS = 100;
 
@@ -49,18 +56,20 @@ export interface LongPressOptions {
   delay?: number;
   moveThreshold?: number;
   /**
-   * The trigger element: a trailing click is swallowed only when it is
-   * dispatched to this element or something inside it, never to the menu.
-   * Defaults to the element the press started on.
+   * The trigger element. A press whose touched descendant is no longer in the
+   * DOM when the hold matures fires at the trigger instead, so the menu still
+   * opens for the element the user is holding.
    */
   trigger?: () => EventTarget | null;
+  /**
+   * Where the gesture-wide listeners live: the document. Defaults to the
+   * pressed element's owner document; tests supply a stand-in.
+   */
+  scope?: () => EventTarget | null;
 }
 
 export interface LongPressController {
   ontouchstart(event: TouchEvent): void;
-  ontouchmove(event: TouchEvent): void;
-  ontouchend(event: TouchEvent): void;
-  ontouchcancel(event: TouchEvent): void;
   /**
    * Returns `true` when the event was a duplicate of a press that already
    * opened the menu and has been eaten; the caller must then skip its own
@@ -70,6 +79,10 @@ export interface LongPressController {
   destroy(): void;
 }
 
+function isDetached(target: EventTarget): boolean {
+  return 'isConnected' in target && !(target as Node).isConnected;
+}
+
 export function createLongPress(options: LongPressOptions): LongPressController {
   const delay = options.delay ?? LONG_PRESS_DELAY_MS;
   const moveThreshold = options.moveThreshold ?? LONG_PRESS_MOVE_THRESHOLD_PX;
@@ -77,7 +90,16 @@ export function createLongPress(options: LongPressOptions): LongPressController 
   let start: LongPressPoint | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let fired = false;
+  let unlistenGesture: (() => void) | null = null;
   let unarmClickSwallow: (() => void) | null = null;
+
+  function scopeFor(target: EventTarget): EventTarget | null {
+    return (
+      options.scope?.() ??
+      (target as Node).ownerDocument ??
+      (typeof document === 'undefined' ? null : document)
+    );
+  }
 
   function clearTimer() {
     if (timer !== null) {
@@ -88,6 +110,7 @@ export function createLongPress(options: LongPressOptions): LongPressController 
 
   function reset() {
     clearTimer();
+    unlistenGesture?.();
     start = null;
     fired = false;
   }
@@ -98,17 +121,66 @@ export function createLongPress(options: LongPressOptions): LongPressController 
     unarmClickSwallow?.();
   }
 
-  // Capture-phase on the trigger itself: it runs ahead of the handlers on
-  // whatever descendant the click targets, and clicks elsewhere (the portalled
-  // menu included) never pass through here.
-  function armClickSwallow(node: EventTarget) {
+  // Capture phase on the document: it runs ahead of the handlers on whatever
+  // the synthesized click targets — the trigger's row, or the sheet layer that
+  // now covers it. A new touchstart means the next click belongs to a fresh
+  // tap (on a row of the menu that just opened, say), so it disarms the
+  // swallow instead of being eaten by it.
+  function armClickSwallow(scope: EventTarget) {
     unarmClickSwallow?.();
-    node.addEventListener('click', swallowClick, { capture: true });
-    const expiry = setTimeout(() => unarmClickSwallow?.(), CLICK_SWALLOW_WINDOW_MS);
+    const disarm = () => unarmClickSwallow?.();
+    scope.addEventListener('click', swallowClick, { capture: true });
+    scope.addEventListener('touchstart', disarm, { capture: true });
+    const expiry = setTimeout(disarm, CLICK_SWALLOW_WINDOW_MS);
     unarmClickSwallow = () => {
       clearTimeout(expiry);
-      node.removeEventListener('click', swallowClick, { capture: true });
+      scope.removeEventListener('click', swallowClick, { capture: true });
+      scope.removeEventListener('touchstart', disarm, { capture: true });
       unarmClickSwallow = null;
+    };
+  }
+
+  function ontouchmove(event: TouchEvent) {
+    if (!start) return;
+    if (event.touches.length !== 1) {
+      clearTimer();
+      return;
+    }
+    const touch = event.touches[0];
+    const dx = touch.clientX - start.clientX;
+    const dy = touch.clientY - start.clientY;
+    // Finger drift under the threshold is jitter, not intent. Past it the
+    // pending press is dropped; a press that already fired keeps its
+    // suppression so the release still cannot activate anything.
+    if (dx * dx + dy * dy > moveThreshold * moveThreshold) clearTimer();
+  }
+
+  function ontouchend(event: TouchEvent) {
+    if (fired && start) {
+      event.preventDefault();
+      const scope = scopeFor(start.target);
+      if (scope) armClickSwallow(scope);
+    }
+    reset();
+  }
+
+  function ontouchcancel() {
+    reset();
+  }
+
+  // The listeners live only for the duration of a press; `touchend` must not
+  // be passive so the release can be default-prevented.
+  function listenGesture(scope: EventTarget) {
+    unlistenGesture?.();
+    const opts = { capture: true, passive: false };
+    scope.addEventListener('touchmove', ontouchmove as EventListener, opts);
+    scope.addEventListener('touchend', ontouchend as EventListener, opts);
+    scope.addEventListener('touchcancel', ontouchcancel, opts);
+    unlistenGesture = () => {
+      scope.removeEventListener('touchmove', ontouchmove as EventListener, opts);
+      scope.removeEventListener('touchend', ontouchend as EventListener, opts);
+      scope.removeEventListener('touchcancel', ontouchcancel, opts);
+      unlistenGesture = null;
     };
   }
 
@@ -130,35 +202,16 @@ export function createLongPress(options: LongPressOptions): LongPressController 
         clientY: touch.clientY,
       };
       const point = start;
+      const scope = scopeFor(point.target);
+      if (scope) listenGesture(scope);
       timer = setTimeout(() => {
         timer = null;
         fired = true;
-        options.onLongPress(point);
+        const target = isDetached(point.target)
+          ? (options.trigger?.() ?? point.target)
+          : point.target;
+        options.onLongPress({ ...point, target });
       }, delay);
-    },
-    ontouchmove(event) {
-      if (!start) return;
-      if (event.touches.length !== 1) {
-        clearTimer();
-        return;
-      }
-      const touch = event.touches[0];
-      const dx = touch.clientX - start.clientX;
-      const dy = touch.clientY - start.clientY;
-      // Finger drift under the threshold is jitter, not intent. Past it the
-      // pending press is dropped; a press that already fired keeps its
-      // suppression so the release still cannot activate anything.
-      if (dx * dx + dy * dy > moveThreshold * moveThreshold) clearTimer();
-    },
-    ontouchend(event) {
-      if (fired && start) {
-        event.preventDefault();
-        armClickSwallow(options.trigger?.() ?? start.target);
-      }
-      reset();
-    },
-    ontouchcancel() {
-      reset();
     },
     oncontextmenu(event) {
       if (fired && event.isTrusted) {

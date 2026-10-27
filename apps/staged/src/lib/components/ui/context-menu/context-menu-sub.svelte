@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ContextMenu as ContextMenuPrimitive } from 'bits-ui';
-  import { setMenuSub } from '$lib/components/ui/menu-sheet/menu-sub-context.js';
+  import { setMenuSub } from '$lib/components/ui/menu-sheet/menu-close-context.js';
 
   let {
     open = $bindable(false),

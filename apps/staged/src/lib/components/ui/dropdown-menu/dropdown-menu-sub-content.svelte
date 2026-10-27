@@ -2,7 +2,10 @@
   import { DropdownMenu as DropdownMenuPrimitive } from 'bits-ui';
   import { cn } from '$lib/components/utils.js';
   import MenuSheet from '$lib/components/ui/menu-sheet/menu-sheet.svelte';
-  import { getMenuSub } from '$lib/components/ui/menu-sheet/menu-sub-context.js';
+  import {
+    focusMenuSubTrigger,
+    getMenuSub,
+  } from '$lib/components/ui/menu-sheet/menu-close-context.js';
   import { viewport } from '$lib/shared/viewport.svelte';
 
   let {
@@ -27,28 +30,40 @@
   }: DropdownMenuPrimitive.SubContentProps = $props();
 
   const sub = getMenuSub();
+
+  // Back (the row, or a tap on this sheet's scrim): hand focus to the
+  // sub-trigger first, so a keyboard user lands back on the parent sheet's
+  // row instead of `body` (see focusMenuSubTrigger).
+  function back() {
+    focusMenuSubTrigger(ref);
+    sub?.close();
+  }
 </script>
 
 {#if viewport.sheetMenus}
   <!-- A second sheet layered over the parent's. Portalled so it escapes the
        parent panel (scrolling, transformed while animating) and stacks above
-       it; bits-ui keeps the sub's own layer on top, so a tap on this sheet's
-       scrim closes only the sub-menu, as does the Back row. -->
+       it. Its scrim covers the parent sheet, so a tap there must close only
+       the sub-menu, like the Back row: bits-ui's default for a sub is to
+       defer outside interactions to the parent (right for a floating sub,
+       where a click beside it is a click outside the whole menu), which here
+       would dismiss both sheets, so the sub claims them as its own. -->
   <DropdownMenuPrimitive.Portal>
     <DropdownMenuPrimitive.SubContentStatic
       bind:ref
       data-slot="dropdown-menu-sub-content"
+      interactOutsideBehavior="close"
       {...restProps}
     >
       {#snippet child({ props })}
-        <MenuSheet {props} class={className}>
+        <MenuSheet {props} class={className} onDismiss={back}>
           {@render children?.()}
           {#snippet cancel()}
             <DropdownMenuPrimitive.Item
               data-slot="dropdown-menu-item"
               class="menu-sheet-cancel focus:bg-accent focus:text-accent-foreground relative flex cursor-default items-center outline-hidden select-none"
               closeOnSelect={false}
-              onSelect={() => sub?.close()}
+              onSelect={back}
             >
               Back
             </DropdownMenuPrimitive.Item>

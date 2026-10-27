@@ -276,14 +276,17 @@ fn new_login_run_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Environment snapshot for doctor checks and fixes. Shaped through
-/// `apply_managed_tools_env` so checks resolve binaries from the same PATH
-/// the agent spawn path uses — a bridge Staged manages must never be
+/// Environment snapshot for doctor checks and fixes — and for the managed
+/// bridge installs themselves (see
+/// [`crate::managed_acp_tools::install_managed_tool`]), so the registry npm
+/// resolves is the same for a check, its fix, and the reconciler. Shaped
+/// through `apply_managed_tools_env` so checks resolve binaries from the same
+/// PATH the agent spawn path uses — a bridge Staged manages must never be
 /// reported missing (or prompt an install) just because the user has no
 /// global copy. The managed npm env is overlaid on top, so checks probe npm
 /// state (`npm prefix -g`, version lookups) with the same private-prefix view
 /// the fixes install into — a check never contradicts the fix that just ran.
-async fn doctor_env_vars() -> Vec<(String, String)> {
+pub(crate) async fn doctor_env_vars() -> Vec<(String, String)> {
     let mut env_vars = crate::shell_env::home_env_vars_with_extended_path(
         crate::session_runner::shell_env_cache().as_ref(),
     )
@@ -322,6 +325,20 @@ fn execute_fix_options(
     command_override: Option<String>,
     env_vars: Vec<(String, String)>,
 ) -> ExecuteFixOptions {
+    execute_fix_options_through(
+        command_override,
+        crate::managed_acp_tools::npm_registry_override(),
+        env_vars,
+    )
+}
+
+/// [`execute_fix_options`] with the registry chosen by the caller — the
+/// gateway-blocked retry passes the compiled-in fallback here.
+fn execute_fix_options_through(
+    command_override: Option<String>,
+    npm_registry: Option<String>,
+    env_vars: Vec<(String, String)>,
+) -> ExecuteFixOptions {
     // Everything else stays at doctor's defaults: the fixes that reach this
     // builder are the non-interactive ones (installs and updates), so nothing
     // here feeds a prompt and the child keeps inheriting stdin rather than
@@ -334,10 +351,58 @@ fn execute_fix_options(
     // compiles but `staged-ci.yml` does.
     ExecuteFixOptions {
         command_override,
-        npm_registry: crate::managed_acp_tools::npm_registry_override(),
+        npm_registry,
         ..Default::default()
     }
     .with_env_snapshot(env_vars)
+}
+
+/// Run a doctor fix through the crate's executor with the registry precedence
+/// the managed installer applies: npm's own config (or the explicit
+/// `STAGED_NPM_REGISTRY`) first, and — only for an npm-backed command that
+/// failed as a gateway block of `registry.npmjs.org`, with no override set
+/// and a fallback compiled in — one retry with `--registry <fallback>`. The
+/// executor surfaces the failed command's stderr as its error string, which
+/// is exactly what the classifier reads; when the retry fails too, the
+/// surfaced error keeps the original diagnosis in front of the retry's.
+async fn execute_fix_with_gateway_fallback(
+    check_id: String,
+    fix_type: FixType,
+    command_override: Option<String>,
+    npm_backed: bool,
+    env_vars: Vec<(String, String)>,
+) -> Result<(), String> {
+    let first = doctor::execute_fix_with_env_options(
+        check_id.clone(),
+        fix_type.clone(),
+        execute_fix_options(command_override.clone(), env_vars.clone()),
+    )
+    .await;
+    let Err(error) = first else {
+        return Ok(());
+    };
+    if !npm_backed {
+        return Err(error);
+    }
+    let Some(fallback) = crate::managed_acp_tools::gateway_fallback_registry(
+        crate::managed_acp_tools::npm_registry_override().as_deref(),
+        crate::managed_acp_tools::fallback_npm_registry(),
+        &error,
+    ) else {
+        return Err(error);
+    };
+    log::info!(
+        "[doctor fix {check_id}] npm could not reach registry.npmjs.org (network gateway block page); retrying through {fallback}"
+    );
+    doctor::execute_fix_with_env_options(
+        check_id,
+        fix_type,
+        execute_fix_options_through(command_override, Some(fallback.to_string()), env_vars),
+    )
+    .await
+    .map_err(|retry_error| {
+        crate::managed_acp_tools::gateway_retry_failed_message(fallback, &retry_error)
+    })
 }
 
 /// Run all health checks and return the report.
@@ -714,14 +779,13 @@ pub async fn run_doctor_fix(
         }
     }
     let env_vars = doctor_env_vars().await;
-    if doctor::agents::lookup_fix_command(&check_id, &fix_type)
+    let npm_backed = doctor::agents::lookup_fix_command(&check_id, &fix_type)
         .as_deref()
-        .is_some_and(crate::managed_acp_tools::is_npm_backed_command)
-    {
+        .is_some_and(crate::managed_acp_tools::is_npm_backed_command);
+    if npm_backed {
         ensure_managed_node_runtime_for_fix().await?;
     }
-    doctor::execute_fix_with_env_options(check_id, fix_type, execute_fix_options(None, env_vars))
-        .await
+    execute_fix_with_gateway_fallback(check_id, fix_type, None, npm_backed, env_vars).await
 }
 
 /// The install id of the ACP bridge a doctor check fronts, for the two checks
@@ -776,7 +840,8 @@ fn managed_update_target(check_id: &str, fix_type: &FixType) -> Option<&'static 
 /// only a button spinner.
 async fn install_managed_tool_logged(tool_id: &str, check_id: &str) -> Result<(), String> {
     let log_prefix = format!("[doctor fix {check_id}]");
-    crate::managed_acp_tools::install_managed_tool(tool_id, &|line| {
+    let env_vars = doctor_env_vars().await;
+    crate::managed_acp_tools::install_managed_tool(tool_id, &env_vars, &|line| {
         log::info!("{log_prefix} {line}");
     })
     .await
@@ -840,19 +905,16 @@ pub async fn run_doctor_update(
     }
     // npm-backed updates run the managed npm into the private prefix, so the
     // managed runtime must exist before the command does.
-    if crate::managed_acp_tools::is_npm_backed_command(&expected) {
+    let npm_backed = crate::managed_acp_tools::is_npm_backed_command(&expected);
+    if npm_backed {
         ensure_managed_node_runtime_for_fix().await?;
     }
     // Run the backend-derived `expected`, not the frontend-supplied `command`.
     // They are equal past the guard above, but executing `expected` makes the
     // command that runs provably the one the backend derived — no dependence on
     // the equality check surviving future edits.
-    doctor::execute_fix_with_env_options(
-        check_id,
-        fix_type,
-        execute_fix_options(Some(expected), env_vars),
-    )
-    .await
+    execute_fix_with_gateway_fallback(check_id, fix_type, Some(expected), npm_backed, env_vars)
+        .await
 }
 
 /// Re-run freshness and return the authoritative update command for the given

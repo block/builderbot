@@ -99,9 +99,11 @@ A build can additionally compile in fallbacks for networks where the above
 fail: `STAGED_FALLBACK_NPM_REGISTRY` is retried once when npm's configured
 registry turns out to be `registry.npmjs.org` behind a network gateway that
 answers with a block page (and no `STAGED_NPM_REGISTRY` was set), and
-`STAGED_FALLBACK_NODE_DIST_URL` is retried once when the runtime download
-fails to reach its host. Both are read at *compile time* and are unset for
-from-source builds. Block's release workflow passes them from the
+`STAGED_FALLBACK_NODE_DIST_URL` is retried once when the download from
+`nodejs.org` fails to reach the host (and no `STAGED_NODE_DIST_URL` was set —
+an explicit override is never second-guessed, for either). Both are read at
+*compile time* and are unset for from-source builds. Block's release workflow
+passes them from the
 `STAGED_FALLBACK_NPM_REGISTRY` / `STAGED_FALLBACK_NODE_DIST_URL` repository
 variables, which must be set for Block builds to keep working on managed
 laptops that have no `~/.npmrc`.

@@ -7,8 +7,10 @@
 //! `https://nodejs.org/dist` unless `STAGED_NODE_DIST_URL` names a mirror
 //! with the same path shape; the lock's hash pin is the trust root, not the
 //! host. A build may compile in a second host via
-//! `STAGED_FALLBACK_NODE_DIST_URL`, tried once when the first download fails
-//! at the network level (never for a bad checksum or archive).
+//! `STAGED_FALLBACK_NODE_DIST_URL`, tried once when the download from
+//! `nodejs.org` fails at the network level (never for a bad checksum or
+//! archive, and never when `STAGED_NODE_DIST_URL` is set — an explicit
+//! override is not second-guessed).
 //!
 //! `~/.staged/packages` is shared by every running Staged instance (several
 //! worktree `just dev` processes routinely run alongside the installed app),
@@ -91,10 +93,13 @@ pub(crate) fn current_target_triple() -> Option<&'static str> {
     }
 }
 
-/// Where the pinned runtime is downloaded from: the trimmed, non-empty
-/// `STAGED_NODE_DIST_URL` override, else upstream `nodejs.org`.
-fn node_dist_base_url() -> String {
-    node_dist_base_url_from(std::env::var(NODE_DIST_URL_ENV).ok().as_deref())
+/// The `STAGED_NODE_DIST_URL` override, trimmed, when set and non-empty.
+/// `None` means upstream `nodejs.org` (see [`node_dist_base_url_from`]).
+fn node_dist_override() -> Option<String> {
+    std::env::var(NODE_DIST_URL_ENV)
+        .ok()
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
 }
 
 fn node_dist_base_url_from(override_url: Option<&str>) -> String {
@@ -103,6 +108,21 @@ fn node_dist_base_url_from(override_url: Option<&str>) -> String {
         .filter(|url| !url.is_empty())
         .unwrap_or(UPSTREAM_NODE_DIST_BASE_URL)
         .to_string()
+}
+
+/// The fallback host to retry from, if any: only when the user gave no
+/// `STAGED_NODE_DIST_URL`. An explicit override is never second-guessed — the
+/// same rule `STAGED_NPM_REGISTRY` follows — so a private mirror that is
+/// briefly down fails as such instead of silently downloading from a host the
+/// user never configured.
+fn fallback_for(
+    override_url: Option<&str>,
+    fallback: Option<&'static str>,
+) -> Option<&'static str> {
+    if override_url.is_some() {
+        return None;
+    }
+    fallback
 }
 
 /// A second dist host compiled in through `STAGED_FALLBACK_NODE_DIST_URL` at
@@ -220,10 +240,11 @@ fn install_dir(node_root: &Path, version: &str, platform: &str) -> PathBuf {
 pub async fn ensure_managed_node_runtime() -> Result<(), ManagedNodeError> {
     let packages_root = crate::paths::packages_dir()
         .ok_or_else(|| ManagedNodeError::DataDir("home directory is unavailable".to_string()))?;
+    let override_url = node_dist_override();
     ensure_managed_node_runtime_with_fallback(
         &packages_root,
-        &node_dist_base_url(),
-        fallback_node_dist_base_url(),
+        &node_dist_base_url_from(override_url.as_deref()),
+        fallback_for(override_url.as_deref(), fallback_node_dist_base_url()),
         node_runtime_lock(),
         MAX_ARCHIVE_BYTES,
     )
@@ -232,10 +253,12 @@ pub async fn ensure_managed_node_runtime() -> Result<(), ManagedNodeError> {
 
 /// [`ensure_managed_node_runtime_at`] from `base_url`, retried once from
 /// `fallback_url` when — and only when — the first attempt failed at the
-/// network level (unreachable host, refused connection, TLS). A bad
-/// checksum, an oversized or unsafe archive, or an HTTP error status is a
-/// problem with what the host served, not with reaching it, so those fail
-/// as they are rather than being papered over by a second host.
+/// network level (unreachable host, refused connection, TLS, a connection
+/// dropped mid-download). A bad checksum, an oversized or unsafe archive, or
+/// an HTTP error status is a problem with what the host served, not with
+/// reaching it, so those fail as they are rather than being papered over by
+/// a second host. The caller passes `fallback_url` only when `base_url` is
+/// not a user override (see [`fallback_for`]).
 async fn ensure_managed_node_runtime_with_fallback(
     packages_root: &Path,
     base_url: &str,
@@ -567,7 +590,7 @@ async fn stream_archive(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| ManagedNodeError::Network(error.to_string()))?
+        .map_err(|error| ManagedNodeError::Network(format!("{url}: {error}")))?
     {
         received_bytes += chunk.len() as u64;
         if received_bytes > max_bytes {
@@ -882,9 +905,26 @@ mod tests {
             "https://mirror.example.test/nodejs"
         );
         assert_eq!(
-            node_dist_base_url(),
-            node_dist_base_url_from(std::env::var(NODE_DIST_URL_ENV).ok().as_deref())
+            node_dist_override(),
+            std::env::var(NODE_DIST_URL_ENV)
+                .ok()
+                .map(|url| url.trim().to_string())
+                .filter(|url| !url.is_empty())
         );
+    }
+
+    /// An explicit `STAGED_NODE_DIST_URL` is never second-guessed: the
+    /// compiled-in fallback is only offered when the primary is upstream
+    /// `nodejs.org` by default.
+    #[test]
+    fn an_explicit_dist_override_suppresses_the_fallback() {
+        let fallback = Some("https://fallback.example.test/nodejs");
+        assert_eq!(fallback_for(None, fallback), fallback);
+        assert_eq!(
+            fallback_for(Some("https://mirror.example.test/nodejs"), fallback),
+            None
+        );
+        assert_eq!(fallback_for(None, None), None);
     }
 
     /// The fallback host is whatever the build injected — never a URL from

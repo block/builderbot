@@ -113,20 +113,43 @@ fn registry_label(registry: Option<&str>) -> String {
 /// What a failed npm command's stderr says about why it failed, as far as
 /// the registry retry needs to know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NpmFailure {
+pub(crate) enum NpmFailure {
     /// A network gateway answered for `registry.npmjs.org` with a block page
     /// instead of registry JSON — Cloudflare Gateway on managed Block laptops
     /// redirects to `blocked.teams.cloudflare.com`, and npm surfaces the HTML
-    /// as `FETCH_ERROR` or a JSON parse error naming the public registry.
+    /// as `FETCH_ERROR` or a JSON parse error for a request it made to the
+    /// public registry.
     GatewayBlocked,
     Other,
 }
 
-fn classify_npm_failure(stderr: &str) -> NpmFailure {
+/// How npm names `registry.npmjs.org` as the host it *requested* — minipass-
+/// fetch's `request to <url>` / `invalid json response body at <url>` and
+/// npm's `registry: <url>` detail line. A bare `registry.npmjs.org` anywhere
+/// in stderr is not enough: a mirror's own error body mentions its upstream
+/// ("failed to fetch from registry.npmjs.org") when *it* could not reach it,
+/// and that is the mirror failing, not a gateway blocking the public registry.
+const NPMJS_REQUEST_MARKERS: [&str; 3] = [
+    "request to https://registry.npmjs.org/",
+    "response body at https://registry.npmjs.org/",
+    "registry: https://registry.npmjs.org",
+];
+
+/// Gateway-blocked iff stderr names the block page itself, or a non-JSON /
+/// fetch-level failure (`FETCH_ERROR`, `EJSONPARSE`, "invalid json",
+/// "Unexpected token") happened on a request npm made to
+/// `registry.npmjs.org`. `FETCH_ERROR` is minipass-fetch's catch-all for a
+/// fetch that died without a system errno, so a truncated body from the
+/// public registry classifies as blocked too — that costs one cheap extra
+/// attempt through the fallback, which then reports its own error.
+pub(crate) fn classify_npm_failure(stderr: &str) -> NpmFailure {
     if stderr.contains("blocked.teams.cloudflare.com") {
         return NpmFailure::GatewayBlocked;
     }
-    if stderr.contains("registry.npmjs.org") {
+    let requested_npmjs = NPMJS_REQUEST_MARKERS
+        .iter()
+        .any(|marker| stderr.contains(marker));
+    if requested_npmjs {
         let lower = stderr.to_ascii_lowercase();
         if stderr.contains("FETCH_ERROR")
             || stderr.contains("EJSONPARSE")
@@ -142,7 +165,7 @@ fn classify_npm_failure(stderr: &str) -> NpmFailure {
 /// The registry to retry a failed npm command through, if any: only when no
 /// explicit override was given, a build-time fallback exists, and `stderr`
 /// reads as a gateway block of `registry.npmjs.org`.
-fn gateway_fallback_registry<'a>(
+pub(crate) fn gateway_fallback_registry<'a>(
     override_registry: Option<&str>,
     fallback: Option<&'a str>,
     stderr: &str,
@@ -152,6 +175,17 @@ fn gateway_fallback_registry<'a>(
     }
     let fallback = fallback?;
     (classify_npm_failure(stderr) == NpmFailure::GatewayBlocked).then_some(fallback)
+}
+
+/// The error to surface when the retry through `fallback` failed as well:
+/// keeps the original diagnosis (npm's default registry was gateway-blocked)
+/// in front of the retry's own error, so the surfaced message explains why a
+/// registry the user never configured was contacted at all.
+pub(crate) fn gateway_retry_failed_message(fallback: &str, retry_error: &str) -> String {
+    format!(
+        "npm default registry (registry.npmjs.org) was blocked by a network gateway; \
+         fallback {fallback} also failed: {retry_error}"
+    )
 }
 
 /// The `STAGED_ACP_TOOLS_DIR` override dir, when set and non-empty.
@@ -482,8 +516,14 @@ fn tool_install_lock() -> &'static tokio::sync::Mutex<()> {
 /// verified staging tree; the Node runtime its shim execs is likewise kept,
 /// as superseded runtimes are pruned only after a fully-successful reconcile.
 /// So an offline or partial launch never removes a working bridge.
+///
+/// `env_vars` is the sanitized login-shell snapshot doctor's checks and the
+/// freshness probe run under ([`crate::doctor::doctor_env_vars`]); npm runs
+/// under exactly that, so the registry config it resolves (`~/.npmrc`,
+/// `NPM_CONFIG_REGISTRY` from the shell rc) is the one the probe saw.
 pub async fn install_managed_tool(
     id: &str,
+    env_vars: &[(String, String)],
     on_line: &InstallLineFn<'_>,
 ) -> Result<(), ManagedToolError> {
     let tool = managed_tool(id).ok_or_else(|| {
@@ -513,6 +553,7 @@ pub async fn install_managed_tool(
         &node_install_dir,
         &managed_node::node_runtime_lock().version,
         &tool,
+        env_vars,
         npm_registry_override().as_deref(),
         fallback_npm_registry(),
         validation::VALIDATION_TIMEOUT,
@@ -523,15 +564,17 @@ pub async fn install_managed_tool(
 
 /// The install body, path-parameterized so tests drive it with a fixture
 /// `npm`. Caller holds the install mutex + packages flock and has ensured
-/// the runtime. `registry` is the explicit override (or `None` for npm's own
-/// config) and `fallback_registry` the build-time fallback tried once if the
-/// first attempt fails as gateway-blocked (see the registry policy note).
+/// the runtime. npm runs under the `env_vars` snapshot; `registry` is the
+/// explicit override (or `None` for npm's own config) and `fallback_registry`
+/// the build-time fallback tried once if the first attempt fails as
+/// gateway-blocked (see the registry policy note).
 #[allow(clippy::too_many_arguments)]
 async fn install_npm_tool(
     packages_root: &Path,
     node_install_dir: &Path,
     node_version: &str,
     tool: &ManagedTool,
+    env_vars: &[(String, String)],
     registry: Option<&str>,
     fallback_registry: Option<&str>,
     validation_timeout: Duration,
@@ -558,6 +601,7 @@ async fn install_npm_tool(
         node_install_dir,
         &staging_dir,
         tool,
+        env_vars,
         registry,
         on_line,
     )
@@ -585,13 +629,23 @@ async fn install_npm_tool(
             node_install_dir,
             &staging_dir,
             tool,
+            env_vars,
             Some(fallback),
             on_line,
         )
         .await
         {
             let _ = std::fs::remove_dir_all(&staging_dir);
-            return Err(failure.error);
+            // The retry's own error is an `NpmInstall` too; its bare message
+            // goes inside so the prefix is not doubled.
+            let retry_error = match &failure.error {
+                ManagedToolError::NpmInstall(message) => message.clone(),
+                other => other.to_string(),
+            };
+            return Err(ManagedToolError::NpmInstall(gateway_retry_failed_message(
+                fallback,
+                &retry_error,
+            )));
         }
     }
 
@@ -725,15 +779,41 @@ struct NpmInstallFailure {
     stderr: String,
 }
 
-/// npm's error block fits comfortably in this; the retry classifier only
-/// needs the first lines, not a full debug log.
+/// How much of npm's stderr is kept for the retry classifier. npm writes its
+/// `npm error code …` block *last*, after any deprecation and peer warnings,
+/// so the capture keeps the newest lines (see [`push_captured_line`]) — a
+/// warning-heavy install must not push the error block out of view.
 const NPM_STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
 
+/// Append `line` to the capture, dropping whole lines from the *front* once
+/// it outgrows [`NPM_STDERR_CAPTURE_LIMIT`] (a single oversized line keeps
+/// its tail).
+fn push_captured_line(capture: &mut String, line: &str) {
+    capture.push_str(line);
+    capture.push('\n');
+    while capture.len() > NPM_STDERR_CAPTURE_LIMIT {
+        match capture.find('\n') {
+            Some(end) if end + 1 < capture.len() => {
+                capture.drain(..=end);
+            }
+            _ => {
+                let mut cut = capture.len() - NPM_STDERR_CAPTURE_LIMIT;
+                while !capture.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                capture.drain(..cut);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_floating_npm_install(
     packages_root: &Path,
     node_install_dir: &Path,
     install_dir: &Path,
     tool: &ManagedTool,
+    env_vars: &[(String, String)],
     registry: Option<&str>,
     on_line: &InstallLineFn<'_>,
 ) -> Result<(), NpmInstallFailure> {
@@ -743,6 +823,7 @@ async fn run_floating_npm_install(
         node_install_dir,
         install_dir,
         tool,
+        env_vars,
         registry,
         on_line,
         &mut stderr_capture,
@@ -760,6 +841,7 @@ async fn run_floating_npm_install_capturing(
     node_install_dir: &Path,
     install_dir: &Path,
     tool: &ManagedTool,
+    env_vars: &[(String, String)],
     registry: Option<&str>,
     on_line: &InstallLineFn<'_>,
     stderr_capture: &mut String,
@@ -785,11 +867,24 @@ async fn run_floating_npm_install_capturing(
     // running machine on its own, so no `--os`/`--cpu` pinning is needed.
     command.arg(format!("{}@latest", tool.package));
 
-    // npm's own `#!/usr/bin/env node` shebang must resolve the managed node.
+    // Exactly the snapshot, not the Tauri process env: launched from Finder
+    // the process carries none of the user's shell rc, so an
+    // `NPM_CONFIG_REGISTRY`/`npm_config_registry` exported there would steer
+    // the freshness probe and doctor's fixes but not this install. The
+    // snapshot is what all of those run under.
+    command.env_clear();
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+    // npm's own `#!/usr/bin/env node` shebang must resolve the managed node:
+    // its bin dir goes first on the snapshot's PATH (the process PATH when
+    // the snapshot carries none).
+    let inherited_path = snapshot_var(env_vars, "PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
     let mut paths = vec![node_bin_dir.clone()];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
+    paths.extend(std::env::split_paths(&inherited_path));
     if let Ok(path_value) = std::env::join_paths(paths) {
         command.env("PATH", path_value);
     }
@@ -823,10 +918,7 @@ async fn run_floating_npm_install_capturing(
             let mut lines = tokio::io::BufReader::new(stream).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 on_line(&line);
-                if stderr_capture.len() < NPM_STDERR_CAPTURE_LIMIT {
-                    stderr_capture.push_str(&line);
-                    stderr_capture.push('\n');
-                }
+                push_captured_line(stderr_capture, &line);
             }
         }
     };
@@ -941,10 +1033,12 @@ fn latest_version_cache() -> &'static Mutex<LatestVersionCache> {
 /// unreachable, no `npm` to run, or the probe timed out. The caller must keep
 /// `None` as *unknown*, never read it as "up to date".
 ///
-/// Runs `npm view <pkg> version` through the same env snapshot doctor's own
-/// probes use, so the managed runtime's `npm` is preferred and the lookup sees
-/// the registry/config the install itself will — the same override → npm
-/// config → gateway-blocked fallback precedence as the install. Bounded by
+/// Runs `npm view <pkg> version` under the same env snapshot doctor's own
+/// probes and the managed install itself run under (see
+/// [`install_managed_tool`]), so the managed runtime's `npm` is preferred and
+/// the lookup resolves the registry the install will — `~/.npmrc` and any
+/// `NPM_CONFIG_REGISTRY` the user's shell rc exports alike — with the same
+/// override → npm config → gateway-blocked fallback precedence. Bounded by
 /// [`LATEST_VERSION_PROBE_TIMEOUT`] and cached for [`LATEST_VERSION_CACHE_TTL`].
 pub async fn latest_published_version(
     tool: &ManagedTool,
@@ -1014,10 +1108,19 @@ async fn probe_latest_version(
 /// process's PATH, not the snapshot's, and the snapshot is what puts the
 /// managed runtime's bin dir first.
 fn find_on_env_path(env_vars: &[(String, String)], name: &str) -> Option<PathBuf> {
-    let (_, path) = env_vars.iter().rev().find(|(key, _)| key == "PATH")?;
-    std::env::split_paths(path)
+    std::env::split_paths(snapshot_var(env_vars, "PATH")?)
         .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
+}
+
+/// The last value of `key` in an env snapshot — the one a `Command` applying
+/// the snapshot in order would end up with.
+fn snapshot_var<'a>(env_vars: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env_vars
+        .iter()
+        .rev()
+        .find(|(existing, _)| existing == key)
+        .map(|(_, value)| value.as_str())
 }
 
 /// Why an `npm view` probe produced no version.
@@ -1244,14 +1347,24 @@ mod tests {
         assert_eq!(registry_label(None), "npm default (per npm config)");
     }
 
+    /// Gateway-blocked only for the block page itself, or a fetch/JSON failure
+    /// on a request npm made *to* `registry.npmjs.org`. The public registry's
+    /// hostname appearing elsewhere in stderr proves nothing — mirrors name
+    /// their upstream in their own error bodies.
     #[test]
     fn classify_npm_failure_spots_gateway_block_pages_only() {
         let blocked = [
-            // The redirect target itself shows up in npm's error output.
-            "npm error request to https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp failed: https://blocked.teams.cloudflare.com?block_reason=...",
-            "npm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error invalid json response body at https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp reason: Unexpected token '<'",
-            "npm error code EJSONPARSE\nnpm error JSON.parse Unexpected token < in JSON at position 0 while parsing near '<!DOCTYPE html>' from https://registry.npmjs.org/x",
-            "npm error Invalid JSON response from https://registry.npmjs.org/foo",
+            // The real thing: Cloudflare Gateway redirects the packument fetch
+            // to its block page, and npm reports the redirect target.
+            "npm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error request to https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp failed: https://blocked.teams.cloudflare.com?block_reason=...",
+            // The block page served inline as the response body.
+            "npm warn deprecated foo@1.0.0: use bar\nnpm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error invalid json response body at https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp reason: Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON",
+            // The `registry:` detail line npm prints for some fetch errors.
+            "npm error code EJSONPARSE\nnpm error Unexpected token < in JSON at position 0\nnpm error registry: https://registry.npmjs.org/",
+            // A truncated body from the public registry is also FETCH_ERROR
+            // (minipass-fetch's catch-all); it is accepted as blocked because
+            // the only cost is one extra attempt through the fallback.
+            "npm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error request to https://registry.npmjs.org/foo/-/foo-1.0.0.tgz failed, reason: aborted",
         ];
         for stderr in blocked {
             assert_eq!(
@@ -1262,15 +1375,66 @@ mod tests {
         }
         let other = [
             "",
+            // A 404 from the public registry: the package is not there.
             "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp - Not found",
             "npm error code ETARGET\nnpm error notarget No matching version found for foo@latest",
-            // A dead *mirror* is not a gateway block of the public registry.
+            // A dead custom mirror from `~/.npmrc`: ENOTFOUND, not a block.
+            "npm error code ENOTFOUND\nnpm error syscall getaddrinfo\nnpm error errno ENOTFOUND\nnpm error network request to https://mirror.example.test/npm/foo failed, reason: getaddrinfo ENOTFOUND mirror.example.test",
             "npm error code FETCH_ERROR\nnpm error request to https://mirror.example.test/npm/foo failed, reason: getaddrinfo ENOTFOUND mirror.example.test",
+            // An Artifactory error body naming *its* upstream: the request npm
+            // made went to the mirror, so this is the mirror failing.
+            "npm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error invalid json response body at https://artifactory.example.test/api/npm/npm/foo reason: Unexpected token '<', \"<html><body>Failed to fetch from registry.npmjs.org (https://registry.npmjs.org/foo)\"... is not valid JSON",
+            // The public registry itself unreachable (offline): a network
+            // error, not a block page.
             "npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/foo failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org",
         ];
         for stderr in other {
             assert_eq!(classify_npm_failure(stderr), NpmFailure::Other, "{stderr}");
         }
+    }
+
+    #[test]
+    fn gateway_retry_failed_message_keeps_the_original_diagnosis() {
+        let message = gateway_retry_failed_message(
+            "https://fallback.example.test/npm/",
+            "npm install exited with exit status: 1 (registry: https://fallback.example.test/npm/)",
+        );
+        assert_eq!(
+            message,
+            "npm default registry (registry.npmjs.org) was blocked by a network gateway; \
+             fallback https://fallback.example.test/npm/ also failed: npm install exited with \
+             exit status: 1 (registry: https://fallback.example.test/npm/)"
+        );
+    }
+
+    /// The capture keeps the *newest* lines: npm's `npm error code …` block
+    /// comes last, after however many warnings preceded it.
+    #[test]
+    fn stderr_capture_keeps_the_tail() {
+        let mut capture = String::new();
+        let warning = format!("npm warn deprecated {}", "x".repeat(1000));
+        for _ in 0..(NPM_STDERR_CAPTURE_LIMIT / warning.len() + 5) {
+            push_captured_line(&mut capture, &warning);
+        }
+        push_captured_line(&mut capture, "npm error code FETCH_ERROR");
+        push_captured_line(
+            &mut capture,
+            "npm error request to https://registry.npmjs.org/x failed: https://blocked.teams.cloudflare.com",
+        );
+        assert!(capture.len() <= NPM_STDERR_CAPTURE_LIMIT);
+        assert!(capture.starts_with("npm warn"), "drops whole lines only");
+        assert!(capture.ends_with("blocked.teams.cloudflare.com\n"));
+        assert_eq!(classify_npm_failure(&capture), NpmFailure::GatewayBlocked);
+
+        // A single line larger than the whole budget keeps its tail, cut on a
+        // char boundary.
+        let mut capture = String::new();
+        push_captured_line(
+            &mut capture,
+            &format!("{}é end", "a".repeat(NPM_STDERR_CAPTURE_LIMIT)),
+        );
+        assert_eq!(capture.len(), NPM_STDERR_CAPTURE_LIMIT);
+        assert!(capture.ends_with("é end\n"));
     }
 
     /// The fallback is consulted only with no override, a compiled-in
@@ -1448,6 +1612,15 @@ mod tests {
 
     const TEST_NODE_VERSION: &str = "v9.9.9";
 
+    /// The env snapshot the fixture installs run under: enough of the test
+    /// process env for a `#!/bin/sh` fake npm to find `cp` and its home.
+    fn install_env() -> Vec<(String, String)> {
+        ["PATH", "HOME"]
+            .into_iter()
+            .filter_map(|key| Some((key.to_string(), std::env::var(key).ok()?)))
+            .collect()
+    }
+
     fn write_json(path: &Path, value: &serde_json::Value) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
@@ -1581,6 +1754,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             None,
             super::validation::VALIDATION_TIMEOUT,
@@ -1630,6 +1804,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             None,
             super::validation::VALIDATION_TIMEOUT,
@@ -1660,6 +1835,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             None,
             super::validation::VALIDATION_TIMEOUT,
@@ -1695,6 +1871,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             None,
             super::validation::VALIDATION_TIMEOUT,
@@ -1747,6 +1924,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             None,
             super::validation::VALIDATION_TIMEOUT,
@@ -1835,6 +2013,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             Some("https://fallback.example.test/npm/"),
             super::validation::VALIDATION_TIMEOUT,
@@ -1865,6 +2044,149 @@ mod tests {
         assert!(!staging_install_dir(&packages_root, tool.id).exists());
     }
 
+    /// When the fallback attempt fails too, the surfaced error still says why
+    /// the fallback was contacted: the default registry was gateway-blocked.
+    #[tokio::test]
+    async fn gateway_blocked_install_names_both_failures_when_the_fallback_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        let node_install_dir = packages_root.join("node").join("v9.9.9").join("plat");
+        let tool = test_tool();
+        // Fails whatever registry it is given: a block page without one, a
+        // plain exit 7 with one.
+        let bin = node_install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_executable(&bin.join("node"), "#!/bin/sh\necho v9.9.9\n");
+        write_executable(
+            &bin.join("npm"),
+            &format!(
+                "#!/bin/sh\ncase \" $* \" in\n  *\" --registry \"*) echo 'npm error code E500' >&2; exit 7 ;;\nesac\nprintf '%s\\n' '{}' >&2\nexit 1\n",
+                GATEWAY_BLOCK_STDERR.replace('\'', "'\\''")
+            ),
+        );
+
+        let error = install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            &install_env(),
+            None,
+            Some("https://fallback.example.test/npm/"),
+            super::validation::VALIDATION_TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ManagedToolError::NpmInstall(_)), "{error}");
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "npm install failed: npm default registry (registry.npmjs.org) was blocked by a \
+             network gateway; fallback https://fallback.example.test/npm/ also failed: \
+             npm install exited with exit status: 7 (registry: https://fallback.example.test/npm/)"
+        );
+        assert!(
+            message.contains(
+                "fallback https://fallback.example.test/npm/ also failed: npm install exited with"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("(registry: https://fallback.example.test/npm/)"),
+            "{message}"
+        );
+        assert!(!staging_install_dir(&packages_root, tool.id).exists());
+    }
+
+    /// npm runs under the env snapshot, not the Tauri process env: a registry
+    /// the user's shell rc exports reaches the install exactly as it reaches
+    /// the freshness probe, while the managed node bin leads PATH and the
+    /// private cache outranks whatever cache the snapshot named.
+    #[tokio::test]
+    async fn install_runs_npm_under_the_env_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        let node_install_dir = packages_root.join("node").join("v9.9.9").join("plat");
+        let tool = test_tool();
+        let template = dir.path().join("template");
+        std::fs::create_dir_all(&template).unwrap();
+        write_fixture_install(&template, &tool, "1.2.3");
+        write_fake_node_with_npm(&node_install_dir, &template, 0);
+        // The fake npm also dumps the env it saw.
+        let env_log = dir.path().join("npm-env.log");
+        let npm = node_install_dir.join("bin").join("npm");
+        let script = std::fs::read_to_string(&npm).unwrap();
+        write_executable(
+            &npm,
+            &script.replacen(
+                "#!/bin/sh\n",
+                &format!("#!/bin/sh\nenv > '{}'\n", env_log.display()),
+                1,
+            ),
+        );
+
+        let mut env_vars = install_env();
+        env_vars.push((
+            "NPM_CONFIG_REGISTRY".to_string(),
+            "https://mine.example.test/npm/".to_string(),
+        ));
+        env_vars.push((
+            "npm_config_registry".to_string(),
+            "https://mine.example.test/npm/".to_string(),
+        ));
+        env_vars.push((
+            "NPM_CONFIG_CACHE".to_string(),
+            "/somewhere/else/cache".to_string(),
+        ));
+        env_vars.push(("STAGED_TEST_SNAPSHOT_ONLY".to_string(), "1".to_string()));
+        install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            &env_vars,
+            None,
+            None,
+            super::validation::VALIDATION_TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+
+        let seen: std::collections::HashMap<String, String> = std::fs::read_to_string(&env_log)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        assert_eq!(
+            seen.get("NPM_CONFIG_REGISTRY").map(String::as_str),
+            Some("https://mine.example.test/npm/")
+        );
+        assert_eq!(
+            seen.get("npm_config_registry").map(String::as_str),
+            Some("https://mine.example.test/npm/")
+        );
+        assert_eq!(
+            seen.get("STAGED_TEST_SNAPSHOT_ONLY").map(String::as_str),
+            Some("1"),
+            "snapshot-only vars reach npm"
+        );
+        let expected_cache = packages_root.join("npm-prefix").join("cache");
+        assert_eq!(
+            seen.get("NPM_CONFIG_CACHE").map(Path::new),
+            Some(expected_cache.as_path()),
+            "the managed cache overlay wins over the snapshot's"
+        );
+        let first_on_path = std::env::split_paths(seen.get("PATH").unwrap()).next();
+        assert_eq!(
+            first_on_path.as_deref(),
+            Some(node_install_dir.join("bin").as_path())
+        );
+    }
+
     /// An explicit `STAGED_NPM_REGISTRY` is never second-guessed, and a
     /// failure that is not a gateway block page is not retried either; both
     /// surface the first failure, naming the registry npm used.
@@ -1892,6 +2214,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             None,
             super::validation::VALIDATION_TIMEOUT,
@@ -1922,6 +2245,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             None,
             fallback,
             super::validation::VALIDATION_TIMEOUT,
@@ -1946,6 +2270,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            &install_env(),
             Some("https://mine.example.test/npm/"),
             fallback,
             super::validation::VALIDATION_TIMEOUT,

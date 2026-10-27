@@ -675,8 +675,10 @@
     z-index: var(--z-index-floating);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     padding: 4px;
-    /* bits-ui sets `body { pointer-events: none }` while a dialog is open. The
-       dropdown portals out of the dialog, so re-enable pointer events on it explicitly. */
+    /* Dialogs no longer lock body scroll (dialog-content.svelte), but a bits-ui
+       popper that does — a menu or select left open — still sets
+       `body { pointer-events: none }`. The dropdown portals out of its host, so
+       re-enable pointer events on it explicitly. */
     pointer-events: auto;
   }
 

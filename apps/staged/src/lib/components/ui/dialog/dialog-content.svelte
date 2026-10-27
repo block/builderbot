@@ -106,6 +106,11 @@
     with the home grid retained under a project (App.svelte's workspace
     layers, ~7.5k nodes) — and the overlay already keeps the pointer off the
     page behind.
+
+    Do not extend this to menus, popovers or selects: in this codebase they
+    still lock (PopperLayer resolves `preventScroll ?? true`, select-content
+    defaults it on). They have no overlay, so that body `pointer-events: none`
+    is what swallows the outside click that dismisses them.
   -->
   <DialogPrimitive.Content
     bind:ref

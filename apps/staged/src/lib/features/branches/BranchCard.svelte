@@ -99,6 +99,7 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
+  import { shouldRefreshGitStateOnActivation } from './gitStateRefreshGate';
   import { toast } from 'svelte-sonner';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
@@ -634,6 +635,9 @@
   let latestTimelineLoad: Promise<void> = Promise.resolve();
   let revalidationVersion = 0;
   let gitRefreshVersion = 0;
+  // When this card last started a git-state refresh or merged a
+  // `git-state-updated` event; gates the layer-activation refresh below.
+  let lastGitStateRefreshAt: number | null = null;
 
   /**
    * Kick off a background git-state refresh (TTL-gated fetch). Fresh state
@@ -647,6 +651,7 @@
    */
   function startGitStateRefresh() {
     const version = ++gitRefreshVersion;
+    lastGitStateRefreshAt = Date.now();
     refreshingGitState = true;
     commands
       .refreshBranchGitState(branch.id)
@@ -712,15 +717,20 @@
   // in for refetched the timeline and git state on every visit; here the
   // timeline is only refetched when its cache entry is past TIMELINE_FRESH_MS
   // (the same rule as the mount-time hydration above), and the git-state
-  // refresh is TTL-gated on the backend, so a commit made in the worktree
-  // while on home shows up on return. Only when the shown timeline is current:
-  // a load in flight for a new key owns the next render.
+  // refresh is gated on the backend's fetch TTL client-side too: within it
+  // the command would skip its fetch anyway, and issuing it per card on
+  // every return made a project with 30–40 branches pay as many synchronous
+  // Tauri commands. Past the TTL a commit made in the worktree while on home
+  // shows up on return. Only when the shown timeline is current: a load in
+  // flight for a new key owns the next render.
   onLayerActivated(() => {
     const key = branchTimelineReadyKey(branch);
     if (!key || loadedTimelineKey !== key) return;
     const { fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
     if (fresh) applyRevalidation(fresh, key);
-    startGitStateRefresh();
+    if (shouldRefreshGitStateOnActivation(lastGitStateRefreshAt, Date.now())) {
+      startGitStateRefresh();
+    }
   });
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
@@ -838,6 +848,10 @@
       if (timeline) {
         timeline = { ...timeline, gitState: payload.gitState };
       }
+      // The backend just computed this branch's state (possibly for another
+      // caller, e.g. the bulk refresh on project open or a forced post-push
+      // refresh), so its fetch TTL is at least this fresh.
+      lastGitStateRefreshAt = Date.now();
       // `refreshingGitState` is cleared by startGitStateRefresh's settle
       // handler, not here: an event from an external refresh (e.g. the bulk
       // refresh on project open) must not end the spinner while this card's

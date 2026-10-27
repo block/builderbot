@@ -304,11 +304,10 @@ fn run_checks_options(
     RunChecksOptions {
         check_freshness,
         offline: false,
-        // npm-backed checks and fixes route through Block's Artifactory
-        // square-npm proxy (registry.npmjs.org is blocked on managed
-        // devices); `no-block-npm-registry` builds fall back to npm's
-        // default public registry.
-        npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
+        // npm-backed checks and fixes pass a `--registry` only when the user
+        // set `STAGED_NPM_REGISTRY`; otherwise npm resolves its own config
+        // (see the registry policy note in `managed_acp_tools`).
+        npm_registry: crate::managed_acp_tools::npm_registry_override(),
         env: None,
         // Doctor labels binaries resolved from this dir as bundled (install
         // source + readout flag) and suppresses registry update fixes for
@@ -335,7 +334,7 @@ fn execute_fix_options(
     // compiles but `staged-ci.yml` does.
     ExecuteFixOptions {
         command_override,
-        npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
+        npm_registry: crate::managed_acp_tools::npm_registry_override(),
         ..Default::default()
     }
     .with_env_snapshot(env_vars)
@@ -2218,18 +2217,17 @@ mod tests {
     }
 
     /// Checks and fixes must agree on the registry: both option builders take
-    /// it from the same `managed_acp_tools::npm_registry()` gate.
+    /// it from the same `managed_acp_tools::npm_registry_override()` — the
+    /// explicit `STAGED_NPM_REGISTRY`, or `None` so npm resolves its own
+    /// config.
     #[test]
-    fn doctor_options_route_npm_through_the_managed_registry() {
-        let expected = crate::managed_acp_tools::npm_registry().map(str::to_string);
+    fn doctor_options_route_npm_through_the_registry_override() {
+        let expected = crate::managed_acp_tools::npm_registry_override();
         assert_eq!(
             run_checks_options(false, Vec::new(), None).npm_registry,
             expected
         );
         assert_eq!(execute_fix_options(None, Vec::new()).npm_registry, expected);
-        if !cfg!(feature = "no-block-npm-registry") {
-            assert!(expected.is_some());
-        }
     }
 
     /// The tail numbers every line from zero and keeps only the newest

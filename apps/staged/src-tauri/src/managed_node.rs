@@ -4,9 +4,11 @@
 //! root, embedded at compile time; refresh with `just bump-node-runtime`),
 //! verifies it against the lock's SHA-256, and atomically installs it under
 //! `~/.staged/packages/node/<version>/<platform>/`. The tarball comes from
-//! Block's Artifactory `nodejs` repo — a read-through mirror of
-//! `https://nodejs.org/dist` — so the lock's hash pin is the trust root, not
-//! the mirror; `no-block-npm-registry` builds fetch from nodejs.org directly.
+//! `https://nodejs.org/dist` unless `STAGED_NODE_DIST_URL` names a mirror
+//! with the same path shape; the lock's hash pin is the trust root, not the
+//! host. A build may compile in a second host via
+//! `STAGED_FALLBACK_NODE_DIST_URL`, tried once when the first download fails
+//! at the network level (never for a bad checksum or archive).
 //!
 //! `~/.staged/packages` is shared by every running Staged instance (several
 //! worktree `just dev` processes routinely run alongside the installed app),
@@ -24,8 +26,11 @@ use tokio::io::AsyncWriteExt;
 
 const NODE_RUNTIME_LOCK_JSON: &str = include_str!("../../node-runtime.lock.json");
 
-const BLOCK_NODE_DIST_BASE_URL: &str = "https://global.block-artifacts.com/artifactory/nodejs";
 const UPSTREAM_NODE_DIST_BASE_URL: &str = "https://nodejs.org/dist";
+
+/// Explicit Node.js dist mirror override: a base URL laid out like
+/// `https://nodejs.org/dist` (`<base>/<version>/<tarball>`).
+pub const NODE_DIST_URL_ENV: &str = "STAGED_NODE_DIST_URL";
 
 const PACKAGES_LOCK_FILENAME: &str = ".lock";
 
@@ -86,12 +91,27 @@ pub(crate) fn current_target_triple() -> Option<&'static str> {
     }
 }
 
-fn node_dist_base_url() -> &'static str {
-    if cfg!(feature = "no-block-npm-registry") {
-        UPSTREAM_NODE_DIST_BASE_URL
-    } else {
-        BLOCK_NODE_DIST_BASE_URL
-    }
+/// Where the pinned runtime is downloaded from: the trimmed, non-empty
+/// `STAGED_NODE_DIST_URL` override, else upstream `nodejs.org`.
+fn node_dist_base_url() -> String {
+    node_dist_base_url_from(std::env::var(NODE_DIST_URL_ENV).ok().as_deref())
+}
+
+fn node_dist_base_url_from(override_url: Option<&str>) -> String {
+    override_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(UPSTREAM_NODE_DIST_BASE_URL)
+        .to_string()
+}
+
+/// A second dist host compiled in through `STAGED_FALLBACK_NODE_DIST_URL` at
+/// build time (no URL lives in source), for networks where the primary host
+/// cannot be reached. `None` for builds that set no such variable.
+fn fallback_node_dist_base_url() -> Option<&'static str> {
+    option_env!("STAGED_FALLBACK_NODE_DIST_URL")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
 }
 
 #[derive(Debug)]
@@ -200,13 +220,43 @@ fn install_dir(node_root: &Path, version: &str, platform: &str) -> PathBuf {
 pub async fn ensure_managed_node_runtime() -> Result<(), ManagedNodeError> {
     let packages_root = crate::paths::packages_dir()
         .ok_or_else(|| ManagedNodeError::DataDir("home directory is unavailable".to_string()))?;
-    ensure_managed_node_runtime_at(
+    ensure_managed_node_runtime_with_fallback(
         &packages_root,
-        node_dist_base_url(),
+        &node_dist_base_url(),
+        fallback_node_dist_base_url(),
         node_runtime_lock(),
         MAX_ARCHIVE_BYTES,
     )
     .await
+}
+
+/// [`ensure_managed_node_runtime_at`] from `base_url`, retried once from
+/// `fallback_url` when — and only when — the first attempt failed at the
+/// network level (unreachable host, refused connection, TLS). A bad
+/// checksum, an oversized or unsafe archive, or an HTTP error status is a
+/// problem with what the host served, not with reaching it, so those fail
+/// as they are rather than being papered over by a second host.
+async fn ensure_managed_node_runtime_with_fallback(
+    packages_root: &Path,
+    base_url: &str,
+    fallback_url: Option<&str>,
+    lock: &NodeRuntimeLock,
+    max_archive_bytes: u64,
+) -> Result<(), ManagedNodeError> {
+    let result =
+        ensure_managed_node_runtime_at(packages_root, base_url, lock, max_archive_bytes).await;
+    let Err(ManagedNodeError::Network(message)) = &result else {
+        return result;
+    };
+    let Some(fallback_url) =
+        fallback_url.filter(|url| url.trim_end_matches('/') != base_url.trim_end_matches('/'))
+    else {
+        return result;
+    };
+    log::warn!(
+        "Managed Node.js download from {base_url} failed ({message}); retrying from {fallback_url}"
+    );
+    ensure_managed_node_runtime_at(packages_root, fallback_url, lock, max_archive_bytes).await
 }
 
 async fn ensure_managed_node_runtime_at(
@@ -494,7 +544,7 @@ async fn stream_archive(
         .get(url)
         .send()
         .await
-        .map_err(|error| ManagedNodeError::Network(error.to_string()))?;
+        .map_err(|error| ManagedNodeError::Network(format!("{url}: {error}")))?;
     let status = response.status();
     if !status.is_success() {
         return Err(ManagedNodeError::HttpStatus(status.as_u16()));
@@ -728,6 +778,45 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// A server that counts the connections it accepts and answers each with
+    /// `body`; lets a test prove a host was (or was not) contacted.
+    async fn serve_counting(
+        body: Vec<u8>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    /// A `http://127.0.0.1:<port>` nothing listens on: binding then dropping
+    /// a listener yields a port that refuses connections.
+    async fn refusing_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    }
+
     fn test_node_root(packages_root: &Path) -> PathBuf {
         node_root_under(packages_root)
     }
@@ -775,12 +864,39 @@ mod tests {
         assert_eq!(artifact.platform("v24.12.0"), None);
     }
 
+    /// `STAGED_NODE_DIST_URL` wins when it carries a value; unset, empty, or
+    /// whitespace all mean upstream `nodejs.org`.
     #[test]
-    fn base_url_follows_registry_feature() {
-        if cfg!(feature = "no-block-npm-registry") {
-            assert_eq!(node_dist_base_url(), UPSTREAM_NODE_DIST_BASE_URL);
-        } else {
-            assert_eq!(node_dist_base_url(), BLOCK_NODE_DIST_BASE_URL);
+    fn base_url_is_the_override_else_upstream() {
+        assert_eq!(node_dist_base_url_from(None), UPSTREAM_NODE_DIST_BASE_URL);
+        assert_eq!(
+            node_dist_base_url_from(Some("")),
+            UPSTREAM_NODE_DIST_BASE_URL
+        );
+        assert_eq!(
+            node_dist_base_url_from(Some("  \t")),
+            UPSTREAM_NODE_DIST_BASE_URL
+        );
+        assert_eq!(
+            node_dist_base_url_from(Some(" https://mirror.example.test/nodejs ")),
+            "https://mirror.example.test/nodejs"
+        );
+        assert_eq!(
+            node_dist_base_url(),
+            node_dist_base_url_from(std::env::var(NODE_DIST_URL_ENV).ok().as_deref())
+        );
+    }
+
+    /// The fallback host is whatever the build injected — never a URL from
+    /// source, never blank.
+    #[test]
+    fn fallback_base_url_is_build_time_only() {
+        let expected = option_env!("STAGED_FALLBACK_NODE_DIST_URL")
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        assert_eq!(fallback_node_dist_base_url(), expected);
+        if let Some(url) = fallback_node_dist_base_url() {
+            assert_eq!(url, url.trim());
         }
     }
 
@@ -870,6 +986,84 @@ mod tests {
         assert!(bin.join("node").is_file());
         assert!(!node_root.join("v9.9.8").exists());
         assert!(!node_root.join("node-v9.9.8-old.tar.gz.download").exists());
+    }
+
+    /// The primary host refuses connections; the compiled-in fallback serves
+    /// the pinned tarball and the install completes from it.
+    #[tokio::test]
+    async fn network_failure_on_the_primary_host_retries_the_fallback_host() {
+        let packages_dir = tempfile::tempdir().unwrap();
+        let archive = node_tarball(TEST_VERSION);
+        let lock = test_lock(&sha256_hex(&archive));
+        let primary = refusing_url().await;
+        let (fallback, fallback_hits) = serve_counting(archive).await;
+
+        ensure_managed_node_runtime_with_fallback(
+            packages_dir.path(),
+            &primary,
+            Some(&fallback),
+            &lock,
+            MAX_ARCHIVE_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fallback_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let bin = install_dir(
+            &test_node_root(packages_dir.path()),
+            TEST_VERSION,
+            TEST_PLATFORM,
+        )
+        .join("bin");
+        assert!(bin.join("node").is_file());
+        assert!(bin.join("npm").is_file());
+    }
+
+    /// Without a fallback the network error surfaces as-is, naming the URL.
+    #[tokio::test]
+    async fn network_failure_without_a_fallback_names_the_url() {
+        let packages_dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(&"0".repeat(64));
+        let primary = refusing_url().await;
+
+        let error = ensure_managed_node_runtime_with_fallback(
+            packages_dir.path(),
+            &primary,
+            None,
+            &lock,
+            MAX_ARCHIVE_BYTES,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ManagedNodeError::Network(_)), "{error}");
+        assert!(error.to_string().contains(&primary), "{error}");
+    }
+
+    /// A checksum mismatch is the host serving the wrong bytes, not the host
+    /// being unreachable: the fallback is never contacted.
+    #[tokio::test]
+    async fn checksum_failure_does_not_retry_the_fallback_host() {
+        let packages_dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(&sha256_hex(b"something else entirely"));
+        let primary = serve_once(node_tarball(TEST_VERSION), true).await;
+        let (fallback, fallback_hits) = serve_counting(node_tarball(TEST_VERSION)).await;
+
+        let error = ensure_managed_node_runtime_with_fallback(
+            packages_dir.path(),
+            &primary,
+            Some(&fallback),
+            &lock,
+            MAX_ARCHIVE_BYTES,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ManagedNodeError::Sha256Mismatch { .. }),
+            "{error}"
+        );
+        assert_eq!(fallback_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

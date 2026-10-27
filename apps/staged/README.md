@@ -79,6 +79,33 @@ To develop against a local bridge checkout, export `STAGED_ACP_TOOLS_DIR`
 pointing at a directory with the bridge binaries — this disables the managed
 installs and resolves bridges from that directory instead.
 
+#### npm registry and Node.js download sources
+
+Staged does not hardcode where packages come from:
+
+- **npm registry.** Staged passes no `--registry` of its own, so npm uses
+  its normal configuration (`NPM_CONFIG_REGISTRY`, `~/.npmrc` including
+  scoped `@scope:registry` entries and auth tokens, then
+  `registry.npmjs.org`). A corporate laptop whose `~/.npmrc` already points
+  at an internal mirror keeps using it. Set `STAGED_NPM_REGISTRY` to force a
+  registry for every Staged-run npm command (bridge installs, Doctor's
+  npm-based installs, and update checks).
+- **Node.js runtime.** The pinned runtime (`node-runtime.lock.json`) is
+  downloaded from `https://nodejs.org/dist` and verified against the lock's
+  SHA-256. Set `STAGED_NODE_DIST_URL` to a mirror with the same path layout
+  (`<base>/<version>/<tarball>`) if your network blocks `nodejs.org`.
+
+A build can additionally compile in fallbacks for networks where the above
+fail: `STAGED_FALLBACK_NPM_REGISTRY` is retried once when npm's configured
+registry turns out to be `registry.npmjs.org` behind a network gateway that
+answers with a block page (and no `STAGED_NPM_REGISTRY` was set), and
+`STAGED_FALLBACK_NODE_DIST_URL` is retried once when the runtime download
+fails to reach its host. Both are read at *compile time* and are unset for
+from-source builds. Block's release workflow passes them from the
+`STAGED_FALLBACK_NPM_REGISTRY` / `STAGED_FALLBACK_NODE_DIST_URL` repository
+variables, which must be set for Block builds to keep working on managed
+laptops that have no `~/.npmrc`.
+
 ## Development
 
 ### Prerequisites

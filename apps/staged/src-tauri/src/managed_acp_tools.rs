@@ -53,22 +53,105 @@ mod validation;
 /// replaces managed bridge resolution.
 pub const ACP_TOOLS_DIR_ENV: &str = "STAGED_ACP_TOOLS_DIR";
 
-/// Block's internal Artifactory npm registry. Direct access to
-/// `registry.npmjs.org` is blocked by Cloudflare WARP on managed devices, so
-/// npm-backed agent installs must route through this proxy. The doctor crate
-/// exposes an optional `npm_registry` param but bakes in no registry of its
-/// own, so Staged supplies this URL at every fix/run call site.
-pub const BLOCK_NPM_REGISTRY_URL: &str =
-    "https://global.block-artifacts.com/artifactory/api/npm/square-npm/";
+// -----------------------------------------------------------------------------
+// npm registry policy
+//
+// Staged passes no `--registry` of its own: npm resolves the registry from
+// its normal config chain (`NPM_CONFIG_REGISTRY`, `~/.npmrc` including
+// `@scope:registry` entries, then `registry.npmjs.org`). That keeps a
+// corporate laptop whose `~/.npmrc` already points at an internal mirror —
+// with whatever auth token it needs — on that mirror, and gives everyone
+// else their own registry; a hardcoded URL served exactly one network and
+// could not even override a scoped `~/.npmrc` entry.
+//
+// Two escape hatches sit around that default. `STAGED_NPM_REGISTRY` is an
+// explicit override passed as `--registry` to every Staged-run npm command.
+// `STAGED_FALLBACK_NPM_REGISTRY` is a *build-time* registry (compiled in via
+// `option_env!`, never written into source) for the one population npm's own
+// config fails: Block laptops with no `~/.npmrc` behind the Cloudflare
+// Gateway, where `registry.npmjs.org` answers with a redirect to an HTML
+// block page and npm reports `FETCH_ERROR`/invalid JSON. Only a failure that
+// reads as that block page is retried through the fallback — a 404 from a
+// mirror, a dead host, or an unresolvable version is not a registry problem a
+// different registry can fix, and an explicit override is never second-
+// guessed.
+// -----------------------------------------------------------------------------
 
-/// The npm registry every Staged-run npm command routes through, or `None`
-/// (npm's default public registry) for `no-block-npm-registry` builds.
-pub fn npm_registry() -> Option<&'static str> {
-    if cfg!(feature = "no-block-npm-registry") {
-        None
-    } else {
-        Some(BLOCK_NPM_REGISTRY_URL)
+/// Explicit npm registry override, passed as `--registry` when set.
+pub const NPM_REGISTRY_ENV: &str = "STAGED_NPM_REGISTRY";
+
+/// The `STAGED_NPM_REGISTRY` override, trimmed, when set and non-empty.
+/// `None` means npm decides from its own config.
+pub fn npm_registry_override() -> Option<String> {
+    registry_from_env_value(std::env::var(NPM_REGISTRY_ENV).ok().as_deref())
+}
+
+fn registry_from_env_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// The registry compiled in through `STAGED_FALLBACK_NPM_REGISTRY` at build
+/// time, retried once when npm's configured registry turns out to be
+/// gateway-blocked (see the policy note above). `None` for builds that set
+/// no such variable.
+pub fn fallback_npm_registry() -> Option<&'static str> {
+    option_env!("STAGED_FALLBACK_NPM_REGISTRY")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// How an npm command names its registry in errors and progress lines.
+fn registry_label(registry: Option<&str>) -> String {
+    registry
+        .map(str::to_string)
+        .unwrap_or_else(|| "npm default (per npm config)".to_string())
+}
+
+/// What a failed npm command's stderr says about why it failed, as far as
+/// the registry retry needs to know.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NpmFailure {
+    /// A network gateway answered for `registry.npmjs.org` with a block page
+    /// instead of registry JSON — Cloudflare Gateway on managed Block laptops
+    /// redirects to `blocked.teams.cloudflare.com`, and npm surfaces the HTML
+    /// as `FETCH_ERROR` or a JSON parse error naming the public registry.
+    GatewayBlocked,
+    Other,
+}
+
+fn classify_npm_failure(stderr: &str) -> NpmFailure {
+    if stderr.contains("blocked.teams.cloudflare.com") {
+        return NpmFailure::GatewayBlocked;
     }
+    if stderr.contains("registry.npmjs.org") {
+        let lower = stderr.to_ascii_lowercase();
+        if stderr.contains("FETCH_ERROR")
+            || stderr.contains("EJSONPARSE")
+            || lower.contains("unexpected token")
+            || lower.contains("invalid json")
+        {
+            return NpmFailure::GatewayBlocked;
+        }
+    }
+    NpmFailure::Other
+}
+
+/// The registry to retry a failed npm command through, if any: only when no
+/// explicit override was given, a build-time fallback exists, and `stderr`
+/// reads as a gateway block of `registry.npmjs.org`.
+fn gateway_fallback_registry<'a>(
+    override_registry: Option<&str>,
+    fallback: Option<&'a str>,
+    stderr: &str,
+) -> Option<&'a str> {
+    if override_registry.is_some() {
+        return None;
+    }
+    let fallback = fallback?;
+    (classify_npm_failure(stderr) == NpmFailure::GatewayBlocked).then_some(fallback)
 }
 
 /// The `STAGED_ACP_TOOLS_DIR` override dir, when set and non-empty.
@@ -430,7 +513,8 @@ pub async fn install_managed_tool(
         &node_install_dir,
         &managed_node::node_runtime_lock().version,
         &tool,
-        npm_registry(),
+        npm_registry_override().as_deref(),
+        fallback_npm_registry(),
         validation::VALIDATION_TIMEOUT,
         on_line,
     )
@@ -439,13 +523,17 @@ pub async fn install_managed_tool(
 
 /// The install body, path-parameterized so tests drive it with a fixture
 /// `npm`. Caller holds the install mutex + packages flock and has ensured
-/// the runtime.
+/// the runtime. `registry` is the explicit override (or `None` for npm's own
+/// config) and `fallback_registry` the build-time fallback tried once if the
+/// first attempt fails as gateway-blocked (see the registry policy note).
+#[allow(clippy::too_many_arguments)]
 async fn install_npm_tool(
     packages_root: &Path,
     node_install_dir: &Path,
     node_version: &str,
     tool: &ManagedTool,
     registry: Option<&str>,
+    fallback_registry: Option<&str>,
     validation_timeout: Duration,
     on_line: &InstallLineFn<'_>,
 ) -> Result<(), ManagedToolError> {
@@ -465,7 +553,7 @@ async fn install_npm_tool(
         "Installing {}@latest into ~/.staged/packages",
         tool.package
     ));
-    if let Err(error) = run_floating_npm_install(
+    if let Err(failure) = run_floating_npm_install(
         packages_root,
         node_install_dir,
         &staging_dir,
@@ -475,8 +563,36 @@ async fn install_npm_tool(
     )
     .await
     {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        return Err(error);
+        let Some(fallback) =
+            gateway_fallback_registry(registry, fallback_registry, &failure.stderr)
+        else {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(failure.error);
+        };
+        on_line(&format!(
+            "npm could not reach registry.npmjs.org (network gateway block page); retrying through {fallback}"
+        ));
+        // A fresh scratch prefix: whatever the blocked attempt reified must
+        // not seed the retry.
+        if let Err(error) = reset_dir(&staging_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(ManagedToolError::Io(format!(
+                "prepare staging dir for registry retry: {error}"
+            )));
+        }
+        if let Err(failure) = run_floating_npm_install(
+            packages_root,
+            node_install_dir,
+            &staging_dir,
+            tool,
+            Some(fallback),
+            on_line,
+        )
+        .await
+        {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(failure.error);
+        }
     }
 
     let staged_entrypoint = npm_entrypoint(&staging_dir, tool.package);
@@ -602,6 +718,17 @@ fn installed_version(install_dir: &Path, package: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A failed floating install: the error to surface plus what npm wrote to
+/// stderr, kept so the caller can classify the failure for a registry retry.
+struct NpmInstallFailure {
+    error: ManagedToolError,
+    stderr: String,
+}
+
+/// npm's error block fits comfortably in this; the retry classifier only
+/// needs the first lines, not a full debug log.
+const NPM_STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
+
 async fn run_floating_npm_install(
     packages_root: &Path,
     node_install_dir: &Path,
@@ -609,6 +736,33 @@ async fn run_floating_npm_install(
     tool: &ManagedTool,
     registry: Option<&str>,
     on_line: &InstallLineFn<'_>,
+) -> Result<(), NpmInstallFailure> {
+    let mut stderr_capture = String::new();
+    run_floating_npm_install_capturing(
+        packages_root,
+        node_install_dir,
+        install_dir,
+        tool,
+        registry,
+        on_line,
+        &mut stderr_capture,
+    )
+    .await
+    .map_err(|error| NpmInstallFailure {
+        error,
+        stderr: stderr_capture,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_floating_npm_install_capturing(
+    packages_root: &Path,
+    node_install_dir: &Path,
+    install_dir: &Path,
+    tool: &ManagedTool,
+    registry: Option<&str>,
+    on_line: &InstallLineFn<'_>,
+    stderr_capture: &mut String,
 ) -> Result<(), ManagedToolError> {
     let node_bin_dir = node_install_dir.join("bin");
     let mut command = tokio::process::Command::new(node_bin_dir.join("npm"));
@@ -669,9 +823,14 @@ async fn run_floating_npm_install(
             let mut lines = tokio::io::BufReader::new(stream).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 on_line(&line);
+                if stderr_capture.len() < NPM_STDERR_CAPTURE_LIMIT {
+                    stderr_capture.push_str(&line);
+                    stderr_capture.push('\n');
+                }
             }
         }
     };
+    let label = registry_label(registry);
     let wait = async {
         match tokio::time::timeout(NPM_INSTALL_TIMEOUT, child.wait()).await {
             Ok(result) => result
@@ -679,7 +838,7 @@ async fn run_floating_npm_install(
             Err(_) => {
                 let _ = child.kill().await;
                 Err(ManagedToolError::NpmInstall(format!(
-                    "timed out after {} seconds",
+                    "timed out after {} seconds (registry: {label})",
                     NPM_INSTALL_TIMEOUT.as_secs()
                 )))
             }
@@ -691,7 +850,7 @@ async fn run_floating_npm_install(
         Ok(())
     } else {
         Err(ManagedToolError::NpmInstall(format!(
-            "npm install exited with {status}"
+            "npm install exited with {status} (registry: {label})"
         )))
     }
 }
@@ -784,7 +943,8 @@ fn latest_version_cache() -> &'static Mutex<LatestVersionCache> {
 ///
 /// Runs `npm view <pkg> version` through the same env snapshot doctor's own
 /// probes use, so the managed runtime's `npm` is preferred and the lookup sees
-/// the registry/config the install itself will. Bounded by
+/// the registry/config the install itself will — the same override → npm
+/// config → gateway-blocked fallback precedence as the install. Bounded by
 /// [`LATEST_VERSION_PROBE_TIMEOUT`] and cached for [`LATEST_VERSION_CACHE_TTL`].
 pub async fn latest_published_version(
     tool: &ManagedTool,
@@ -799,10 +959,11 @@ pub async fn latest_published_version(
         return cached;
     }
     let npm = find_on_env_path(env_vars, "npm")?;
-    let version = npm_view_version(
+    let version = probe_latest_version(
         &npm,
         tool.package,
-        npm_registry(),
+        npm_registry_override().as_deref(),
+        fallback_npm_registry(),
         env_vars,
         LATEST_VERSION_PROBE_TIMEOUT,
     )
@@ -812,6 +973,40 @@ pub async fn latest_published_version(
         .unwrap_or_else(|e| e.into_inner())
         .insert(tool.package, version.clone(), now);
     Some(version)
+}
+
+/// One uncached latest-version lookup with the registry precedence applied:
+/// `override_registry` if given, else npm's own config, and — only when that
+/// fails as a gateway block of `registry.npmjs.org` and no override was
+/// given — one retry through `fallback_registry` within whatever is left of
+/// `timeout`.
+async fn probe_latest_version(
+    npm_path: &Path,
+    package: &str,
+    override_registry: Option<&str>,
+    fallback_registry: Option<&str>,
+    env_vars: &[(String, String)],
+    timeout: Duration,
+) -> Option<String> {
+    let started = Instant::now();
+    let failure =
+        match npm_view_version(npm_path, package, override_registry, env_vars, timeout).await {
+            Ok(version) => return Some(version),
+            Err(failure) => failure,
+        };
+    let NpmViewFailure::Exit { stderr } = failure else {
+        return None;
+    };
+    let fallback = gateway_fallback_registry(override_registry, fallback_registry, &stderr)?;
+    let remaining = timeout
+        .checked_sub(started.elapsed())
+        .filter(|remaining| !remaining.is_zero())?;
+    log::info!(
+        "npm view {package} version: registry.npmjs.org is gateway-blocked; retrying through {fallback}"
+    );
+    npm_view_version(npm_path, package, Some(fallback), env_vars, remaining)
+        .await
+        .ok()
 }
 
 /// The first `<dir>/<name>` that is a file along the snapshot's `PATH` —
@@ -825,18 +1020,34 @@ fn find_on_env_path(env_vars: &[(String, String)], name: &str) -> Option<PathBuf
         .find(|candidate| candidate.is_file())
 }
 
+/// Why an `npm view` probe produced no version.
+#[derive(Debug)]
+enum NpmViewFailure {
+    /// npm ran and exited non-zero; its stderr is kept for classification.
+    Exit { stderr: String },
+    /// npm could not be started, timed out, or printed something that is
+    /// not a version.
+    Other,
+}
+
 /// `npm view <package> version [--registry <url>]` with `npm` at `npm_path`,
-/// under exactly the `env_vars` snapshot, killed at `timeout`. `Some` only for
+/// under exactly the `env_vars` snapshot, killed at `timeout`. `Ok` only for
 /// a clean exit whose stdout is a version-shaped token.
+///
+/// npm's own retry/timeout defaults (`fetch-retries=2`, backoff up to 60 s)
+/// would let a dead registry host run ~70 s; a probe is not worth that, so
+/// retries are off and npm's fetch timeout is pinned to the probe budget.
+/// Installs keep npm's defaults.
 async fn npm_view_version(
     npm_path: &Path,
     package: &str,
     registry: Option<&str>,
     env_vars: &[(String, String)],
     timeout: Duration,
-) -> Option<String> {
+) -> Result<String, NpmViewFailure> {
     let mut command = tokio::process::Command::new(npm_path);
-    command.args(["view", package, "version"]);
+    command.args(["view", package, "version", "--fetch-retries=0"]);
+    command.arg(format!("--fetch-timeout={}", timeout.as_millis()));
     if let Some(registry) = registry {
         command.args(["--registry", registry]);
     }
@@ -853,23 +1064,25 @@ async fn npm_view_version(
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             log::debug!("npm view {package} version failed to run: {error}");
-            return None;
+            return Err(NpmViewFailure::Other);
         }
         Err(_) => {
             log::debug!(
-                "npm view {package} version timed out after {}s",
-                timeout.as_secs()
+                "npm view {package} version timed out after {}s (registry: {})",
+                timeout.as_secs(),
+                registry_label(registry)
             );
-            return None;
+            return Err(NpmViewFailure::Other);
         }
     };
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         log::debug!(
-            "npm view {package} version exited with {}: {}",
+            "npm view {package} version exited with {} (registry: {}): {stderr}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            registry_label(registry)
         );
-        return None;
+        return Err(NpmViewFailure::Exit { stderr });
     }
     let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
     version
@@ -877,6 +1090,7 @@ async fn npm_view_version(
         .next()
         .is_some_and(|first| first.is_ascii_digit())
         .then_some(version)
+        .ok_or(NpmViewFailure::Other)
 }
 
 // =============================================================================
@@ -988,13 +1202,103 @@ mod tests {
     mod validation;
     use super::*;
 
+    // -- registry policy -----------------------------------------------------
+
+    /// `STAGED_NPM_REGISTRY` is honored only when it carries a value; unset,
+    /// empty, or whitespace all mean "npm decides".
     #[test]
-    fn npm_registry_follows_registry_feature() {
-        if cfg!(feature = "no-block-npm-registry") {
-            assert_eq!(npm_registry(), None);
-        } else {
-            assert_eq!(npm_registry(), Some(BLOCK_NPM_REGISTRY_URL));
+    fn npm_registry_override_is_the_trimmed_non_empty_env_value() {
+        assert_eq!(registry_from_env_value(None), None);
+        assert_eq!(registry_from_env_value(Some("")), None);
+        assert_eq!(registry_from_env_value(Some("   \n")), None);
+        assert_eq!(
+            registry_from_env_value(Some("  https://registry.example.test/npm/ ")),
+            Some("https://registry.example.test/npm/".to_string())
+        );
+        assert_eq!(
+            npm_registry_override(),
+            registry_from_env_value(std::env::var(NPM_REGISTRY_ENV).ok().as_deref())
+        );
+    }
+
+    /// The fallback is whatever the build injected — no URL lives in source,
+    /// so a from-source build has none and a value is never blank.
+    #[test]
+    fn fallback_npm_registry_is_build_time_only() {
+        let expected = option_env!("STAGED_FALLBACK_NPM_REGISTRY")
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        assert_eq!(fallback_npm_registry(), expected);
+        if let Some(fallback) = fallback_npm_registry() {
+            assert!(!fallback.is_empty());
+            assert_eq!(fallback, fallback.trim());
         }
+    }
+
+    #[test]
+    fn registry_label_names_npm_config_when_no_registry_is_passed() {
+        assert_eq!(
+            registry_label(Some("https://registry.example.test/npm/")),
+            "https://registry.example.test/npm/"
+        );
+        assert_eq!(registry_label(None), "npm default (per npm config)");
+    }
+
+    #[test]
+    fn classify_npm_failure_spots_gateway_block_pages_only() {
+        let blocked = [
+            // The redirect target itself shows up in npm's error output.
+            "npm error request to https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp failed: https://blocked.teams.cloudflare.com?block_reason=...",
+            "npm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error invalid json response body at https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp reason: Unexpected token '<'",
+            "npm error code EJSONPARSE\nnpm error JSON.parse Unexpected token < in JSON at position 0 while parsing near '<!DOCTYPE html>' from https://registry.npmjs.org/x",
+            "npm error Invalid JSON response from https://registry.npmjs.org/foo",
+        ];
+        for stderr in blocked {
+            assert_eq!(
+                classify_npm_failure(stderr),
+                NpmFailure::GatewayBlocked,
+                "{stderr}"
+            );
+        }
+        let other = [
+            "",
+            "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp - Not found",
+            "npm error code ETARGET\nnpm error notarget No matching version found for foo@latest",
+            // A dead *mirror* is not a gateway block of the public registry.
+            "npm error code FETCH_ERROR\nnpm error request to https://mirror.example.test/npm/foo failed, reason: getaddrinfo ENOTFOUND mirror.example.test",
+            "npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/foo failed, reason: getaddrinfo ENOTFOUND registry.npmjs.org",
+        ];
+        for stderr in other {
+            assert_eq!(classify_npm_failure(stderr), NpmFailure::Other, "{stderr}");
+        }
+    }
+
+    /// The fallback is consulted only with no override, a compiled-in
+    /// fallback, and a gateway-shaped failure — all three at once.
+    #[test]
+    fn gateway_fallback_registry_requires_no_override_a_fallback_and_a_block_page() {
+        let blocked = "npm error code FETCH_ERROR request to https://registry.npmjs.org/x failed";
+        let fallback = Some("https://fallback.example.test/npm/");
+        assert_eq!(
+            gateway_fallback_registry(None, fallback, blocked),
+            fallback,
+            "no override + fallback + block page retries"
+        );
+        assert_eq!(
+            gateway_fallback_registry(Some("https://mine.example.test/"), fallback, blocked),
+            None,
+            "an explicit override is never second-guessed"
+        );
+        assert_eq!(
+            gateway_fallback_registry(None, None, blocked),
+            None,
+            "nothing to retry through"
+        );
+        assert_eq!(
+            gateway_fallback_registry(None, fallback, "npm error code E404"),
+            None,
+            "a 404 is not a gateway block"
+        );
     }
 
     #[test]
@@ -1278,6 +1582,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            None,
             super::validation::VALIDATION_TIMEOUT,
             &on_line,
         )
@@ -1326,6 +1631,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            None,
             super::validation::VALIDATION_TIMEOUT,
             &|_| {},
         )
@@ -1354,6 +1660,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            None,
             None,
             super::validation::VALIDATION_TIMEOUT,
             &|_| {},
@@ -1388,6 +1695,7 @@ mod tests {
             &node_install_dir,
             TEST_NODE_VERSION,
             &tool,
+            None,
             None,
             super::validation::VALIDATION_TIMEOUT,
             &|_| {},
@@ -1440,6 +1748,7 @@ mod tests {
             TEST_NODE_VERSION,
             &tool,
             None,
+            None,
             super::validation::VALIDATION_TIMEOUT,
             &|_| {},
         )
@@ -1457,6 +1766,199 @@ mod tests {
         assert_eq!(
             installed_tool_version(&packages_root, &tool).as_deref(),
             Some("1.2.4")
+        );
+    }
+
+    // -- install flow: registry fallback -------------------------------------
+
+    /// A fake managed-node `npm` standing in for a laptop whose network
+    /// gateway blocks `registry.npmjs.org`: without `--registry` it prints
+    /// npm's block-page failure and exits 1; with one it performs the install
+    /// from `template`. Every invocation's argv is appended to `argv_log`.
+    fn write_fake_node_with_gateway_blocked_npm(
+        node_install_dir: &Path,
+        template: &Path,
+        argv_log: &Path,
+        stderr_without_registry: &str,
+    ) {
+        let bin = node_install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("node"), "#!/bin/sh\necho v9.9.9\n").unwrap();
+        let npm = format!(
+            "#!/bin/sh\necho \"$*\" >> '{log}'\nprefix=\"\"\nregistry=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--prefix\" ]; then prefix=\"$arg\"; fi\n  if [ \"$prev\" = \"--registry\" ]; then registry=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -z \"$registry\" ]; then\n  printf '%s\\n' '{stderr}' >&2\n  exit 1\nfi\ncp -R '{template}/.' \"$prefix/\"\necho \"added 3 packages\"\nexit 0\n",
+            log = argv_log.display(),
+            stderr = stderr_without_registry.replace('\'', "'\\''"),
+            template = template.display(),
+        );
+        std::fs::write(bin.join("npm"), npm).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["node", "npm"] {
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+    }
+
+    const GATEWAY_BLOCK_STDERR: &str = "npm error code FETCH_ERROR\nnpm error errno FETCH_ERROR\nnpm error invalid json response body at https://registry.npmjs.org/@agentclientprotocol%2fclaude-agent-acp reason: Unexpected token < in JSON at position 0";
+
+    fn logged_argv(argv_log: &Path) -> Vec<String> {
+        std::fs::read_to_string(argv_log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// No override, a compiled-in fallback, and npm failing on a gateway
+    /// block page: the install is retried once through the fallback from a
+    /// fresh staging prefix, and succeeds.
+    #[tokio::test]
+    async fn gateway_blocked_install_retries_once_through_the_fallback_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        let node_install_dir = packages_root.join("node").join("v9.9.9").join("plat");
+        let tool = test_tool();
+        let template = dir.path().join("template");
+        std::fs::create_dir_all(&template).unwrap();
+        write_fixture_install(&template, &tool, "1.2.5");
+        let argv_log = dir.path().join("npm-argv.log");
+        write_fake_node_with_gateway_blocked_npm(
+            &node_install_dir,
+            &template,
+            &argv_log,
+            GATEWAY_BLOCK_STDERR,
+        );
+
+        let lines = std::sync::Mutex::new(Vec::new());
+        let on_line = |line: &str| lines.lock().unwrap().push(line.to_string());
+        install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            None,
+            Some("https://fallback.example.test/npm/"),
+            super::validation::VALIDATION_TIMEOUT,
+            &on_line,
+        )
+        .await
+        .unwrap();
+
+        let argv = logged_argv(&argv_log);
+        assert_eq!(argv.len(), 2, "{argv:?}");
+        assert!(!argv[0].contains("--registry"), "{}", argv[0]);
+        assert!(
+            argv[1].contains("--registry https://fallback.example.test/npm/"),
+            "{}",
+            argv[1]
+        );
+        assert_eq!(
+            installed_tool_version(&packages_root, &tool).as_deref(),
+            Some("1.2.5")
+        );
+        let recorded = lines.lock().unwrap().clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|line| line.contains("retrying through https://fallback.example.test/npm/")),
+            "{recorded:?}"
+        );
+        assert!(!staging_install_dir(&packages_root, tool.id).exists());
+    }
+
+    /// An explicit `STAGED_NPM_REGISTRY` is never second-guessed, and a
+    /// failure that is not a gateway block page is not retried either; both
+    /// surface the first failure, naming the registry npm used.
+    #[tokio::test]
+    async fn install_does_not_retry_with_an_override_or_for_other_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        let node_install_dir = packages_root.join("node").join("v9.9.9").join("plat");
+        let tool = test_tool();
+        let template = dir.path().join("template");
+        std::fs::create_dir_all(&template).unwrap();
+        write_fixture_install(&template, &tool, "1.2.5");
+        let fallback = Some("https://fallback.example.test/npm/");
+
+        // A gateway block page, but no fallback compiled in: plain failure.
+        let argv_log = dir.path().join("no-fallback.log");
+        write_fake_node_with_gateway_blocked_npm(
+            &node_install_dir,
+            &template,
+            &argv_log,
+            GATEWAY_BLOCK_STDERR,
+        );
+        let error = install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            None,
+            None,
+            super::validation::VALIDATION_TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ManagedToolError::NpmInstall(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("(registry: npm default (per npm config))"),
+            "{error}"
+        );
+        assert_eq!(logged_argv(&argv_log).len(), 1);
+
+        // A 404 from whichever registry npm used: a different registry cannot
+        // fix that, so no retry even with a fallback available.
+        let argv_log = dir.path().join("not-found.log");
+        write_fake_node_with_gateway_blocked_npm(
+            &node_install_dir,
+            &template,
+            &argv_log,
+            "npm error code E404\nnpm error 404 Not Found - GET https://mirror.example.test/npm/@agentclientprotocol%2fclaude-agent-acp",
+        );
+        let error = install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            None,
+            fallback,
+            super::validation::VALIDATION_TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, ManagedToolError::NpmInstall(_)), "{error}");
+        assert_eq!(logged_argv(&argv_log).len(), 1);
+
+        // An explicit override: the one and only call carries it (the fake
+        // succeeds on any `--registry`), and the fallback is never consulted.
+        let argv_log = dir.path().join("override.log");
+        write_fake_node_with_gateway_blocked_npm(
+            &node_install_dir,
+            &template,
+            &argv_log,
+            GATEWAY_BLOCK_STDERR,
+        );
+        install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            Some("https://mine.example.test/npm/"),
+            fallback,
+            super::validation::VALIDATION_TIMEOUT,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        let argv = logged_argv(&argv_log);
+        assert_eq!(argv.len(), 1, "{argv:?}");
+        assert!(
+            argv[0].contains("--registry https://mine.example.test/npm/"),
+            "{}",
+            argv[0]
         );
     }
 
@@ -1583,7 +2085,8 @@ mod tests {
             &env,
             Duration::from_secs(10),
         )
-        .await;
+        .await
+        .ok();
         assert_eq!(version.as_deref(), Some("4.5.6"));
     }
 
@@ -1601,8 +2104,127 @@ mod tests {
             &env,
             Duration::from_secs(10),
         )
-        .await;
+        .await
+        .ok();
         assert_eq!(version.as_deref(), Some("4.5.6"));
+    }
+
+    /// Probes must not inherit npm's ~70 s dead-host retry schedule: retries
+    /// are off and npm's own fetch timeout is pinned to the probe budget.
+    #[tokio::test]
+    async fn npm_view_version_bounds_npm_fetch_retries_and_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let argv_log = dir.path().join("argv.log");
+        write_executable(
+            &bin.join("npm"),
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\necho 1.0.0\n",
+                argv_log.display()
+            ),
+        );
+        let env = path_env(&bin);
+        npm_view_version(
+            &bin.join("npm"),
+            "@agentclientprotocol/codex-acp",
+            None,
+            &env,
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert!(argv.contains(" --fetch-retries=0"), "{argv}");
+        assert!(argv.contains(" --fetch-timeout=15000"), "{argv}");
+    }
+
+    /// A fake `npm view` that reports a gateway block page unless `--registry`
+    /// is passed, logging each invocation's argv.
+    fn write_fake_gateway_blocked_npm_view(bin_dir: &Path, argv_log: &Path) {
+        std::fs::create_dir_all(bin_dir).unwrap();
+        write_executable(
+            &bin_dir.join("npm"),
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \" $* \" in *\" --registry \"*) echo 7.8.9; exit 0;; esac\necho 'npm error code FETCH_ERROR' >&2\necho 'npm error request to https://registry.npmjs.org/x failed: https://blocked.teams.cloudflare.com?block_reason=x' >&2\nexit 1\n",
+                argv_log.display()
+            ),
+        );
+    }
+
+    /// The freshness probe follows the install's precedence: npm's own config
+    /// first, then — for a gateway block with no override — one retry through
+    /// the fallback.
+    #[tokio::test]
+    async fn probe_latest_version_retries_a_gateway_block_through_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let argv_log = dir.path().join("argv.log");
+        write_fake_gateway_blocked_npm_view(&bin, &argv_log);
+        let env = path_env(&bin);
+        let package = "@agentclientprotocol/claude-agent-acp";
+        let fallback = Some("https://fallback.example.test/npm/");
+
+        let version = probe_latest_version(
+            &bin.join("npm"),
+            package,
+            None,
+            fallback,
+            &env,
+            Duration::from_secs(15),
+        )
+        .await;
+        assert_eq!(version.as_deref(), Some("7.8.9"));
+        let argv: Vec<String> = std::fs::read_to_string(&argv_log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(argv.len(), 2, "{argv:?}");
+        assert!(!argv[0].contains("--registry"), "{}", argv[0]);
+        assert!(
+            argv[1].contains("--registry https://fallback.example.test/npm/"),
+            "{}",
+            argv[1]
+        );
+
+        // No fallback compiled in: the block page is simply unknown.
+        std::fs::remove_file(&argv_log).unwrap();
+        assert_eq!(
+            probe_latest_version(
+                &bin.join("npm"),
+                package,
+                None,
+                None,
+                &env,
+                Duration::from_secs(15)
+            )
+            .await,
+            None
+        );
+        assert_eq!(
+            std::fs::read_to_string(&argv_log).unwrap().lines().count(),
+            1
+        );
+
+        // An override is used as-is and never falls back.
+        std::fs::remove_file(&argv_log).unwrap();
+        assert_eq!(
+            probe_latest_version(
+                &bin.join("npm"),
+                package,
+                Some("https://mine.example.test/npm/"),
+                fallback,
+                &env,
+                Duration::from_secs(15)
+            )
+            .await
+            .as_deref(),
+            Some("7.8.9")
+        );
+        let argv = std::fs::read_to_string(&argv_log).unwrap();
+        assert_eq!(argv.lines().count(), 1, "{argv}");
+        assert!(argv.contains("--registry https://mine.example.test/npm/"));
     }
 
     /// Every failure mode reads as unknown — never as a version.
@@ -1623,7 +2245,8 @@ mod tests {
                 &env,
                 Duration::from_secs(10)
             )
-            .await,
+            .await
+            .ok(),
             None
         );
 
@@ -1637,7 +2260,8 @@ mod tests {
                 &env,
                 Duration::from_secs(10)
             )
-            .await,
+            .await
+            .ok(),
             None
         );
 
@@ -1652,7 +2276,8 @@ mod tests {
                 &env,
                 Duration::from_millis(200)
             )
-            .await,
+            .await
+            .ok(),
             None
         );
         assert!(started.elapsed() < Duration::from_secs(10));

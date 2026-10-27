@@ -81,6 +81,13 @@ jobs:
         working-directory: apps/staged
         env:
           VITE_UPDATER_ENABLED: 'true'
+          # Optional build-time network fallbacks (see apps/staged/README.md,
+          # "npm registry and Node.js download sources"). Repository
+          # variables, not literals, so no internal URL lives in the tree;
+          # unset means the build has no fallback and relies on npm's own
+          # config and nodejs.org.
+          STAGED_FALLBACK_NPM_REGISTRY: ${{ vars.STAGED_FALLBACK_NPM_REGISTRY }}
+          STAGED_FALLBACK_NODE_DIST_URL: ${{ vars.STAGED_FALLBACK_NODE_DIST_URL }}
         run: pnpm tauri build --no-sign --target "$TAURI_TARGET" --config src-tauri/tauri.release.conf.json
 
       - name: Codesign and Notarize

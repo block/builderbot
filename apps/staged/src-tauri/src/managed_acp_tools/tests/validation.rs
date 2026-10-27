@@ -315,19 +315,22 @@ async fn assert_probe_tree_stopped(pids: &[i32]) {
 async fn timeout_preserves_install_and_kills_tree(bridge_exit: &str) {
     for tool in MANAGED_TOOLS {
         let started = Instant::now();
+        // The timeout only has to fire after the fixture has spawned its
+        // native child. Under parallel-suite load, exec'ing the node shim and
+        // `sh` alone can eat a 1 s budget before the script runs a line.
         let (dir, error) = rejected_upgrade(
             tool,
             &format!("{HANGING_NATIVE}{bridge_exit}\n"),
-            Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .await;
         let pids = probe_pids(&dir.path().join("packages"))
             .await
             .unwrap_or_else(|| panic!("probe did not spawn its native child: {error}"));
         assert_probe_tree_stopped(&pids).await;
-        assert!(error.contains("timed out after 1 seconds"), "{error}");
+        assert!(error.contains("timed out after 5 seconds"), "{error}");
         assert!(error.contains("waiting for native CLI"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 }
 

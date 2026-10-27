@@ -6,6 +6,12 @@ export const viewport = $state({
   canSplit: false,
   // Visual shortcut affordances only; not a hardware keyboard capability check.
   showShortcutHints: true,
+  hasCoarsePointer: false,
+  // Dropdown and context menus render as a bottom sheet (large touch rows)
+  // instead of a floating popover: a phone-sized viewport driven by touch.
+  // Both conditions, so a narrow desktop window keeps its popovers and a
+  // tablet in landscape keeps menus anchored to what was pressed.
+  sheetMenus: false,
 });
 
 let mediaQuery: MediaQueryList | null = null;
@@ -17,10 +23,9 @@ let subscriberCount = 0;
 function syncViewport() {
   viewport.isMobile = mediaQuery?.matches ?? false;
   viewport.canSplit = splitMediaQuery?.matches ?? false;
-  viewport.showShortcutHints = !(
-    (coarsePointerQuery?.matches ?? false) ||
-    (noHoverQuery?.matches ?? false)
-  );
+  viewport.hasCoarsePointer = coarsePointerQuery?.matches ?? false;
+  viewport.showShortcutHints = !(viewport.hasCoarsePointer || (noHoverQuery?.matches ?? false));
+  viewport.sheetMenus = viewport.isMobile && viewport.hasCoarsePointer;
 }
 
 export function watchViewport(): () => void {

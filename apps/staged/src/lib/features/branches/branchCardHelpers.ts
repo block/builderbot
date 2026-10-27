@@ -206,6 +206,24 @@ export function formatBaseBranch(baseBranch: string): string {
   return baseBranch.replace(/^origin\//, '');
 }
 
+/**
+ * The name the branch card header shows for a branch. The local name is an
+ * implementation detail Staged manages (a de-duplicated `feature-x-2`
+ * tracking `origin/feature-x`); the user thinks in terms of the branch on
+ * origin, so when the push target diverges the header shows that branch's
+ * name, without the `origin/` prefix like every other remote ref in the UI.
+ * The local name stays discoverable via `headerBranchTitle`.
+ */
+export function headerBranchLabel(branchName: string, remoteRef: string | null): string {
+  return remoteRef ? formatBaseBranch(remoteRef) : branchName;
+}
+
+/** The tooltip for `headerBranchLabel`: spells out the local → remote
+ *  mapping a diverged header otherwise hides. */
+export function headerBranchTitle(branchName: string, remoteRef: string | null): string {
+  return remoteRef ? `${branchName} → ${remoteRef} (pushes to ${remoteRef})` : branchName;
+}
+
 function normalizePrUrl(candidate: string): string | null {
   const trimmed = candidate.trim().replace(/^[<`'"\[(]+|[>`'"\]),.?!;:]+$/g, '');
   const match = trimmed.match(

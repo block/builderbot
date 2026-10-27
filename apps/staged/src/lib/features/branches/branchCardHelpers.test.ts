@@ -7,6 +7,8 @@ import {
   createPollFailureTracker,
   createQueuedSessionCanceller,
   divergedPushTargetRef,
+  headerBranchLabel,
+  headerBranchTitle,
   pushTargetBranchName,
   pushTargetRef,
   renamePushTargetRef,
@@ -423,6 +425,26 @@ describe('pushTargetRef / divergedPushTargetRef', () => {
     const branch = { branchName: 'feature' };
     expect(pushTargetRef(branch, gitState('origin/feature'))).toBe('origin/feature');
     expect(divergedPushTargetRef(branch, gitState('origin/feature'))).toBeNull();
+  });
+});
+
+describe('headerBranchLabel / headerBranchTitle', () => {
+  it('shows the local name when the push target is not diverged', () => {
+    expect(headerBranchLabel('feature', null)).toBe('feature');
+    expect(headerBranchTitle('feature', null)).toBe('feature');
+  });
+
+  it('shows only the remote branch name for a diverged push target', () => {
+    // Local `feature-x-2` is Staged's de-duplicated checkout of
+    // origin/feature-x; the user knows the branch as `feature-x`.
+    expect(headerBranchLabel('feature-x-2', 'origin/feature-x')).toBe('feature-x');
+    expect(headerBranchLabel('feature-x-2', 'origin/feature-x')).not.toContain('feature-x-2');
+  });
+
+  it('keeps the local → remote mapping in the tooltip', () => {
+    expect(headerBranchTitle('feature-x-2', 'origin/feature-x')).toBe(
+      'feature-x-2 → origin/feature-x (pushes to origin/feature-x)'
+    );
   });
 });
 

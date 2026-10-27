@@ -6,11 +6,11 @@ import process from "node:process";
 const appRoot = path.resolve(import.meta.dirname, "..");
 const defaultLockFile = path.join(appRoot, "node-runtime.lock.json");
 
-// Block's Artifactory `nodejs` repo is a read-through mirror of
-// https://nodejs.org/dist with an identical path shape, so SHASUMS256.txt is
-// the official Node.js checksum file either way.
-const DEFAULT_BASE_URL =
-  "https://global.block-artifacts.com/artifactory/nodejs";
+// Upstream Node.js releases — the same host the app downloads the runtime
+// from by default. `--base-url` accepts any mirror with an identical path
+// shape (`<base>/<version>/SHASUMS256.txt`); the checksums it serves must be
+// byte-identical to upstream's, since they become the app's trust root.
+const DEFAULT_BASE_URL = "https://nodejs.org/dist";
 
 // The rust target triples Staged builds for (macOS release targets plus
 // Linux local builds), mapped to the platform component of Node's release

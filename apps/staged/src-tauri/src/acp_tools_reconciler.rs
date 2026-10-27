@@ -84,11 +84,15 @@ async fn reconcile(app: AppHandle) {
         return;
     }
 
+    // The same login-shell snapshot doctor's checks and fixes use, so the
+    // reconciler's npm resolves the user's registry config (`~/.npmrc`, an
+    // `NPM_CONFIG_REGISTRY` from the shell rc) exactly as a doctor fix would.
+    let env_vars = crate::doctor::doctor_env_vars().await;
     let mut errors = Vec::new();
     for tool in &tools {
         let log_prefix = format!("[acp-tools reconcile {}]", tool.id);
         let on_line = |line: &str| log::info!("{log_prefix} {line}");
-        match managed_acp_tools::install_managed_tool(tool.id, &on_line).await {
+        match managed_acp_tools::install_managed_tool(tool.id, &env_vars, &on_line).await {
             Ok(()) => log::info!("{log_prefix} {} is up to date", tool.package),
             Err(error) => {
                 log::warn!("{log_prefix} install failed (will retry next launch): {error}");

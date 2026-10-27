@@ -7,7 +7,12 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
-use super::{node_binary, npm_entrypoint, ManagedTool, ManagedToolError};
+use super::install::{node_binary, npm_entrypoint};
+use super::{ManagedTool, ManagedToolError};
+
+#[cfg(test)]
+#[path = "tests/validation.rs"]
+mod tests;
 
 pub(super) const VALIDATION_TIMEOUT: Duration = Duration::from_secs(30);
 const OUTPUT_LIMIT: usize = 2048;

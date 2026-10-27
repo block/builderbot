@@ -1,6 +1,13 @@
-use super::*;
+use std::sync::Mutex;
+use std::time::Instant;
 
-const TIMEOUT: Duration = super::super::validation::VALIDATION_TIMEOUT;
+use super::*;
+use crate::managed_acp_tools::install::{install_npm_tool, shim_contents, write_shim};
+use crate::managed_acp_tools::reconcile::finish_reconcile_at;
+use crate::managed_acp_tools::test_support::*;
+use crate::managed_acp_tools::*;
+
+const TIMEOUT: Duration = VALIDATION_TIMEOUT;
 const MISSING_NATIVE: &str = "echo 'native binary not found for this platform' >&2\nexit 1\n";
 
 /// Installs `contents` as the fake `node` under `bin_dir`, through the
@@ -8,7 +15,7 @@ const MISSING_NATIVE: &str = "echo 'native binary not found for this platform' >
 /// validation probe execs it. A busy exec would otherwise fail validation
 /// with `could not start: Text file busy`.
 fn write_node_shim(bin_dir: &Path, contents: &str) {
-    write_shim(bin_dir, "node", contents).unwrap();
+    write_shim(bin_dir, "node", &with_exec_probe_guard(contents)).unwrap();
     wait_until_executable(&bin_dir.join("node"));
 }
 
@@ -51,6 +58,8 @@ async fn every_managed_tool_promotes_the_validated_staging_tree() {
             &node,
             TEST_NODE_VERSION,
             tool,
+            &install_env(),
+            None,
             None,
             TIMEOUT,
             &|_| {},
@@ -92,6 +101,8 @@ async fn incomplete_first_install_creates_no_live_tree_shim_or_state() {
             &node,
             TEST_NODE_VERSION,
             tool,
+            &install_env(),
+            None,
             None,
             TIMEOUT,
             &|_| {},
@@ -133,6 +144,8 @@ async fn rejected_upgrade(
         &node,
         TEST_NODE_VERSION,
         tool,
+        &install_env(),
+        None,
         None,
         timeout,
         &|line| lines.lock().unwrap().push(line.to_string()),
@@ -177,6 +190,8 @@ async fn missing_native_binary_preserves_live_install_and_partial_reconcile_runt
                 &node,
                 TEST_NODE_VERSION,
                 other,
+                &install_env(),
+                None,
                 None,
                 TIMEOUT,
                 &|_| {},
@@ -211,7 +226,7 @@ async fn personal_overrides_cannot_mask_missing_native_binary() {
     const MARKER: &str = "STAGED_TEST_ACP_VALIDATION";
     if std::env::var_os(MARKER).is_none() {
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "managed_acp_tools::tests::validation::personal_overrides_cannot_mask_missing_native_binary", "--nocapture"])
+            .args(["--exact", "managed_acp_tools::validation::tests::personal_overrides_cannot_mask_missing_native_binary", "--nocapture"])
             .env(MARKER, "1")
             .env("CLAUDE_CODE_EXECUTABLE", "/bin/true")
             .env("CODEX_PATH", "/bin/true")
@@ -300,19 +315,22 @@ async fn assert_probe_tree_stopped(pids: &[i32]) {
 async fn timeout_preserves_install_and_kills_tree(bridge_exit: &str) {
     for tool in MANAGED_TOOLS {
         let started = Instant::now();
+        // The timeout only has to fire after the fixture has spawned its
+        // native child. Under parallel-suite load, exec'ing the node shim and
+        // `sh` alone can eat a 1 s budget before the script runs a line.
         let (dir, error) = rejected_upgrade(
             tool,
             &format!("{HANGING_NATIVE}{bridge_exit}\n"),
-            Duration::from_secs(1),
+            Duration::from_secs(5),
         )
         .await;
         let pids = probe_pids(&dir.path().join("packages"))
             .await
             .unwrap_or_else(|| panic!("probe did not spawn its native child: {error}"));
         assert_probe_tree_stopped(&pids).await;
-        assert!(error.contains("timed out after 1 seconds"), "{error}");
+        assert!(error.contains("timed out after 5 seconds"), "{error}");
         assert!(error.contains("waiting for native CLI"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 }
 
@@ -334,9 +352,10 @@ async fn cancellation_kills_bridge_and_native_child() {
         let node = root.join("node");
         let staging = staging_install_dir(&root, tool.id);
         write_probe(&node, &staging, &tool, &format!("{HANGING_NATIVE}wait\n"));
-        let mut probe = tokio::spawn(async move {
-            super::super::validation::validate_staged_tool(&node, &staging, &tool, TIMEOUT).await
-        });
+        let mut probe =
+            tokio::spawn(
+                async move { validate_staged_tool(&node, &staging, &tool, TIMEOUT).await },
+            );
         // Validation should hang until aborted. If it returns first (say, the
         // node shim failed to start), report why instead of a bare timeout.
         let pids = tokio::select! {
@@ -386,6 +405,8 @@ async fn new_managed_tool_cannot_silently_skip_validation() {
         &node,
         TEST_NODE_VERSION,
         &tool,
+        &install_env(),
+        None,
         None,
         TIMEOUT,
         &|_| {},

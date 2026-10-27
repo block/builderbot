@@ -7,6 +7,7 @@
   hidden state across app launches.
 -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Plus from '@lucide/svelte/icons/plus';
   import X from '@lucide/svelte/icons/x';
   import type { Project, ProjectRepo, SuggestedRepo } from '../../types';
@@ -18,6 +19,7 @@
   import * as badge from '../../shared/badgeColors';
   import Spinner from '../../shared/Spinner.svelte';
   import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+  import { attachedRepoKeys, attachedRepoSignature } from './suggestedRepos';
   import { Button } from '$lib/components/ui/button';
 
   interface Props {
@@ -49,16 +51,12 @@
   });
 
   // Build a set of already-attached repo keys for filtering (current project only).
-  let attachedKeys = $derived(
-    new Set(
-      [...reposById.values()]
-        .filter((r) => r.projectId === project.id)
-        .map((r) => {
-          const sub = r.subpath?.trim();
-          return sub ? `${r.githubRepo}::${sub}` : r.githubRepo;
-        })
-    )
-  );
+  let attachedKeys = $derived(attachedRepoKeys(project.id, reposById));
+  // `reposById` is rebuilt whenever any project's repos hydrate, which gives
+  // `attachedKeys` a new Set identity each time. Svelte compares primitive
+  // deriveds by value, so keying the fetch on this string means only a change
+  // to *this* project's attached repos re-fires it.
+  let attachedSignature = $derived(attachedRepoSignature(attachedKeys));
 
   async function fetchSuggestions(currentAttachedKeys: Set<string>) {
     const gen = ++fetchGeneration;
@@ -82,12 +80,12 @@
     }
   }
 
-  // Re-fetch when the set of attached repos changes.
-  // Reading `attachedKeys` directly (not just `.size`) ensures Svelte tracks
-  // the full derived value, so swapping one repo for another still re-fires.
+  // Re-fetch when the set of attached repos changes. The signature covers the
+  // full key set, so swapping one repo for another still re-fires; the fetch
+  // itself is untracked so its reads don't widen the dependency set.
   $effect(() => {
-    const keys = attachedKeys;
-    void fetchSuggestions(keys);
+    void attachedSignature;
+    untrack(() => void fetchSuggestions(attachedKeys));
   });
 
   function suggestionKey(s: SuggestedRepo): string {

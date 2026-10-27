@@ -4,7 +4,7 @@
   Clicking a project navigates to its project page.
 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
@@ -245,10 +245,13 @@
   // Pull every project's branches and repos forward off the store's idle drip
   // — the grid renders all of them. An effect rather than onMount so a list
   // change or a cache-stale reload re-kicks the sweep and the loading gate
-  // heals itself; the store dedupes projects it has already fetched.
+  // heals itself; the store dedupes projects it has already fetched. Track
+  // only `loaded` and `projects`: the sweep reads the hydrated-project map
+  // synchronously, so tracking it too would re-run this once per project.
   $effect(() => {
     if (!projectsDataStore.loaded) return;
-    void projectsDataStore.ensureProjectsHydrated();
+    void projectsDataStore.projects;
+    untrack(() => void projectsDataStore.ensureProjectsHydrated());
   });
 
   // Keep run-action state hydrated for the status badges; the store call

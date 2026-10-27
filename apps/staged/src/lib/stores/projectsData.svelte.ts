@@ -154,6 +154,11 @@ class ProjectsDataStore {
   private branchChangedFlushCancel: (() => void) | null = null;
   private branchRefetchInFlight = new Set<string>();
   private branchRefetchQueued = new Set<string>();
+  private repoCountsMemo: {
+    projects: Project[];
+    reposByProject: Map<string, ProjectRepo[]>;
+    counts: Map<string, number>;
+  } | null = null;
 
   // ── Reactive reads ──
 
@@ -172,14 +177,28 @@ class ProjectsDataStore {
   /**
    * Repo count per project. Falls back to 1 for un-hydrated single-repo
    * projects (githubRepo set) so counts render sensibly before repos load.
+   *
+   * Memoised on the identity of the two maps it reads: every sidebar row
+   * derives from this, and each per-project hydration reassigns
+   * `_reposByProject`, so rebuilding on every read was O(projects²) per
+   * startup. Both inputs are only ever reassigned (never mutated in place),
+   * so identity is a complete change signal.
    */
   get repoCountsByProject(): Map<string, number> {
-    return new Map(
-      this._projects.map((project) => {
-        const repos = this._reposByProject.get(project.id);
+    const projects = this._projects;
+    const reposByProject = this._reposByProject;
+    const memo = this.repoCountsMemo;
+    if (memo && memo.projects === projects && memo.reposByProject === reposByProject) {
+      return memo.counts;
+    }
+    const counts = new Map(
+      projects.map((project) => {
+        const repos = reposByProject.get(project.id);
         return [project.id, repos ? repos.length : project.githubRepo ? 1 : 0] as const;
       })
     );
+    this.repoCountsMemo = { projects, reposByProject, counts };
+    return counts;
   }
 
   get loading(): boolean {

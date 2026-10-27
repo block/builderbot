@@ -1451,4 +1451,51 @@ describe('repoCountsByProject', () => {
     await hydrating;
     expect(store.repoCountsByProject.get('p1')).toBe(2);
   });
+
+  it('returns the same Map across reads when nothing has changed', async () => {
+    freezeBackgroundHydration();
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const first = store.repoCountsByProject;
+    expect(store.repoCountsByProject).toBe(first);
+    expect(store.repoCountsByProject).toBe(first);
+  });
+
+  it("rebuilds the Map with the new count once a project's repos land", async () => {
+    let resolveRepos!: (value: SwrResult<ProjectRepo[]>) => void;
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    listProjectRepos.mockReturnValue(
+      new Promise<SwrResult<ProjectRepo[]>>((resolve) => {
+        resolveRepos = resolve;
+      })
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+    const hydrating = store.ensureProjectsHydrated();
+
+    const before = store.repoCountsByProject;
+    expect(before.get('p1')).toBe(1);
+    expect(before.get('p2')).toBe(1);
+
+    resolveRepos(
+      swr([projectRepo(), projectRepo({ id: 'r2', githubRepo: 'org/other', subpath: 'pkg' })])
+    );
+    await hydrating;
+
+    const after = store.repoCountsByProject;
+    expect(after).not.toBe(before);
+    expect(after.get('p1')).toBe(2);
+    expect(after.get('p2')).toBe(2);
+    expect(store.repoCountsByProject).toBe(after);
+  });
+
+  it('falls back to 1 for an un-hydrated githubRepo project', async () => {
+    freezeBackgroundHydration();
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    expect(listProjectRepos).not.toHaveBeenCalled();
+    expect(store.repoCountsByProject.get('p1')).toBe(1);
+  });
 });

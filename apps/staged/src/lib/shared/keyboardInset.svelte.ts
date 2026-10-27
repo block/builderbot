@@ -15,6 +15,11 @@ export const keyboard = $state({ inset: 0 });
 let trackedViewport: VisualViewport | null = null;
 let subscriberCount = 0;
 let initialSyncFrame = 0;
+// Last inset written to `:root`, or null when nothing has been written. Any
+// write to the root's `style` attribute fires the MutationObserver in
+// isDark.svelte.ts, so an unconditional write on every viewport resize would
+// trigger a whole-document style recalc for a value that never changed.
+let writtenInset: number | null = null;
 
 function syncKeyboardInset() {
   const vv = trackedViewport;
@@ -23,6 +28,8 @@ function syncKeyboardInset() {
   // visual viewport's bottom (its height plus however far it has scrolled down).
   const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
   keyboard.inset = inset;
+  if (inset === writtenInset) return;
+  writtenInset = inset;
   document.documentElement.style.setProperty('--keyboard-inset', `${inset}px`);
 }
 
@@ -56,8 +63,13 @@ export function watchKeyboardInset(): () => void {
       trackedViewport?.removeEventListener('scroll', syncKeyboardInset);
       trackedViewport = null;
       // Drop the inset so a stale keyboard height can't linger on `:root`.
+      // Consumers fall back via `var(--keyboard-inset, 0px)`, so only write
+      // when a non-zero value is actually there to clear.
       keyboard.inset = 0;
-      document.documentElement.style.setProperty('--keyboard-inset', '0px');
+      if (writtenInset !== null && writtenInset !== 0) {
+        document.documentElement.style.setProperty('--keyboard-inset', '0px');
+      }
+      writtenInset = null;
     }
   };
 }

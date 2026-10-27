@@ -55,7 +55,7 @@
 >
   <!-- Decorative: the Cancel/Back row is the accessible dismissal. -->
   <div
-    class="menu-sheet-scrim pointer-events-auto data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 absolute inset-0 bg-black/40 duration-200"
+    class="menu-sheet-scrim pointer-events-auto data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 absolute inset-0 bg-[var(--shadow-overlay)] duration-200"
     data-state={state}
     aria-hidden="true"
     onclick={onDismiss}

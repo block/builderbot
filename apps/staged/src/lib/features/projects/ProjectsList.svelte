@@ -735,6 +735,17 @@
     color: inherit;
     cursor: pointer;
     transition: background-color 0.15s ease;
+    /* Skip style, layout and paint for cards outside the viewport: the grid
+       mounts every project at once and most sit below the fold. This goes on
+       the button rather than the wrapper because the paint containment it
+       implies clips descendants, and on the wrapper that clipped the button's
+       focus ring. The placeholder is the content-box height (68px + 32px
+       padding = 100px) of the mean three-column card on a large real data set
+       (81–123px, median 102); `auto` keeps each card's own height once it has
+       rendered, so the scrollbar and scroll restore only estimate until then.
+       Older WebKit ignores the property. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 68px;
   }
 
   .project-card:hover {

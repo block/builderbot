@@ -173,6 +173,7 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
         handler.transition_to_background_holding().await;
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let child_exited = CancellationToken::new();
         let active = AtomicBool::new(false);
         let (observer, reported) = recording_hold_observer();
@@ -184,6 +185,7 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
             &child_exited,
             &mut prompt_rx,
             &mut control_rx,
+            &mut turn_control_rx,
             &active,
             &|_| {},
             "sess-1",
@@ -251,6 +253,7 @@ async fn idle_without_a_new_artifact_keeps_waiting() {
     idle(&handler).await;
     let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
     let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+    let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
     let child_exited = CancellationToken::new();
     let active = AtomicBool::new(false);
     let mut hold = std::pin::pin!(hold_for_background_quiescence(
@@ -261,6 +264,7 @@ async fn idle_without_a_new_artifact_keeps_waiting() {
         &child_exited,
         &mut prompt_rx,
         &mut control_rx,
+        &mut turn_control_rx,
         &active,
         &|_| {},
         "sess-1",
@@ -373,12 +377,14 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
             let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
             let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
             let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+            let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
             let (reply, _reply_rx) = oneshot::channel();
             prompt_tx
                 .send(QueuedSessionTurn {
                     prompt: "write".into(),
                     images: vec![],
-                    reply,
+                    reply: Some(reply),
+                    control: None,
                 })
                 .unwrap();
             let child_exited = CancellationToken::new();
@@ -430,6 +436,8 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     &child_exited,
                     &mut prompt_rx,
                     &mut control_rx,
+
+                    &mut turn_control_rx,
                     &active,
                     &pending_reply,
                 );

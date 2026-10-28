@@ -177,6 +177,7 @@ async fn holding_wait_survives_the_old_cap_after_a_coalesced_settlement() {
     let handler = hold_test_handler();
     let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
     let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+    let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let child_exited = CancellationToken::new();
     let hold_active = AtomicBool::new(false);
@@ -191,6 +192,7 @@ async fn holding_wait_survives_the_old_cap_after_a_coalesced_settlement() {
         &child_exited,
         &mut prompt_rx,
         &mut control_rx,
+        &mut turn_control_rx,
         &hold_active,
         &|_| {},
         "sess-1",

@@ -67,7 +67,12 @@ export interface PaneLease {
   readonly props: PaneProps;
   /** The session was already leased, so this pane is unmounted on release. */
   readonly transient: boolean;
-  /** Run `cb` with the pane: now on a hit, after the microtask mount on a miss. */
+  /**
+   * Run `cb` with the pane: now on a hit, after the microtask mount on a miss.
+   * Only the hit path orders `cb` before the adopter's effects; on a miss the
+   * adopter's prop sync (including `active`) has already run by the time the
+   * pane mounts, so `cb` sees a pane that mounted with those props.
+   */
   ready(cb: (pane: SessionPaneExports) => void): void;
   release(): void;
 }

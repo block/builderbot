@@ -111,7 +111,10 @@
   // would paint the stale card once under the new filters before removing it.
   let filtersAtVisit = $state(projectFiltersStore.activeFilters);
   $effect.pre(() => {
-    // The mount capture is the initialiser above; this re-captures per return.
+    // The initialisers capture at mount; this re-captures per activation. That
+    // includes the mount when the layer is already activated — a cold start
+    // into a project, then the first goHome, flips homeLayerRetained after the
+    // layer counted that activation — where it repeats the initialisers' values.
     if (layer.activations === 0) return;
     untrack(() => {
       stickyProjectId = pendingStickyProjectId();

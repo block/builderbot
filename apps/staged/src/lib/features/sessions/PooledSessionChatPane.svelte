@@ -82,9 +82,11 @@
     props.onSearchStateChange = onSearchStateChange;
     // The pane resets its markdown cache whenever this identity changes, so a
     // list that reads the same (a hit adopted by the other dialog, which built
-    // its own copy) keeps the array the pane already holds.
+    // its own copy) keeps the array the pane already holds. The previous value
+    // is untracked: it is the one signal here read before it is written, and
+    // a tracked read-then-write would re-run the calling effect once more.
     const next = hashtagItems;
-    const prev = props.hashtagItems;
+    const prev = untrack(() => props.hashtagItems);
     if (next && prev) {
       props.hashtagItems = reuseHashtagItems(prev, next);
     } else {
@@ -103,11 +105,14 @@
         lease = next;
         syncProps(next.props);
         slot.appendChild(next.host);
-        // Attach → unpark → active: `unpark` schedules the transcript's scroll
-        // restore for the next frame, which needs the host in the document,
-        // and the pane's load effect (which focuses the composer in a frame
-        // of its own, after that one) runs only once `active` flips. On a hit
-        // this runs now; on a miss, after the pool's microtask mount.
+        // On a hit `ready` runs now, so the order is attach → unpark → active:
+        // `unpark` schedules the transcript's scroll restore for the next
+        // frame, which needs the host in the document, and the pane's load
+        // effect (which focuses the composer in a frame of its own, after that
+        // one) runs only once `active` flips. On a miss `ready` runs after the
+        // pool's microtask mount, by which time the $effect below has already
+        // written `active`, so the pane mounts with it on and the write here
+        // is a no-op — fine, since a fresh mount has nothing to unpark.
         next.ready((pane) => {
           if (lease !== next) return;
           pane.unpark();

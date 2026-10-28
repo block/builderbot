@@ -150,11 +150,6 @@ class ProjectActionsController {
     const branchesToClear = projectsDataStore.branchesByProject.get(id) || [];
     projectsDataStore.projectDeleteStarted(id, projectDisplayName(project));
 
-    // A project retained under home (the layer the user would return to) is
-    // dropped as soon as the delete starts, so the layer unmounts now rather
-    // than show a "Deleting…" project when the backend echo lands.
-    releaseProjectLayer(id);
-
     // When the project on screen is being deleted, navigate away immediately
     // so the user doesn't have to wait for backend deletion. Deleting any
     // other project (sidebar/landing-grid context menu) keeps the current view.
@@ -173,6 +168,15 @@ class ProjectActionsController {
         goHome();
       }
     }
+
+    // Drop the project's layer as soon as the delete starts, so it unmounts
+    // now rather than sit clipped under home showing "Deleting…" until the
+    // backend echo prunes the project. releaseProjectLayer only acts while
+    // home is active, so this runs after the navigation above: a project
+    // retained under home is released as is, the on-screen project whose
+    // goHome() just made home active is released too, and after
+    // selectProject(next) the layer already names `next`, so it is a no-op.
+    releaseProjectLayer(id);
 
     try {
       await commands.deleteProject(id);

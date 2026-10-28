@@ -4,8 +4,8 @@
   Renders the given repos as full RepoCards (Add project, action pills, the ⋮
   menu with pin/unpin). While `reorderable`, cards are drag handles and a drop
   reorders optimistically before the persisted pin order round-trips; the
-  sidebar turns this off while a search is showing a mixed pinned/unpinned
-  subset, where "reorder" has no meaning.
+  sidebar turns this off while a search is showing only some of the pinned
+  repos, where a drop would persist the subset as the whole pin order.
 -->
 <script lang="ts">
   import type { RepoHomeItem } from '../../types';
@@ -47,7 +47,7 @@
   function handleDrop(target: RepoHomeItem) {
     return async (_e: DragEvent) => {
       // Only a pinned-only list may be persisted as the pin order; the parent
-      // turns reorderable off while a search shows a mixed subset.
+      // turns reorderable off while a search shows a filtered subset.
       if (!reorderable) return;
       const sourceKey = dragSourceKey;
       dragSourceKey = null;

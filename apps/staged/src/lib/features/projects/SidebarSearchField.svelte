@@ -1,9 +1,10 @@
 <!--
   SidebarSearchField.svelte - Hairline search field for the projects sidebar.
 
-  One field for both sidebar segments (repos and projects); the owner binds
-  `value` and does the filtering. ✕ and Escape clear the query; the field
-  itself holds no other state.
+  One field for both sidebar segments (pinned repos and projects); the owner
+  binds `value` (the grid's shared projectsListViewState.searchQuery) and does
+  the filtering. ✕ and Escape clear the query; the field itself holds no other
+  state.
 -->
 <script lang="ts">
   import Search from '@lucide/svelte/icons/search';

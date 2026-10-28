@@ -34,13 +34,15 @@
   import { projectFiltersStore } from './projectFilters.svelte';
   import { searchProjects } from './projectSearch';
   import { resultsLabel, visibleSidebarRepos } from './sidebarSearch';
+  import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
-  // All rendered data comes from the shared projectsData store; only UI
-  // state (width, scroll, search) lives here or in projectsSidebarState.
+  // All rendered data comes from the shared projectsData store; UI state
+  // (width, scroll) lives here or in projectsSidebarState, and the search
+  // query in projectsListViewState so the landing-page grid shares it.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
@@ -55,14 +57,16 @@
   let trackedSidebarBodyEl: HTMLDivElement | null = null;
 
   // ── Search ──
-  // One field narrows both segments. Session-local like the landing page's
-  // query: it resets with the sidebar and is deliberately not persisted.
-  let searchQuery = $state('');
+  // One field narrows both segments. The query is the landing-page grid's
+  // (projectsListViewState.searchQuery), not a local copy: typing in either
+  // field narrows both surfaces, so the sidebar list and the grid never
+  // disagree about which projects are showing.
+  let searchQuery = $derived(projectsListViewState.searchQuery);
   let searching = $derived(searchQuery.trim().length > 0);
 
   // ── Repos segment ──
-  // Pinned repos at rest; while searching, every home repo that matches, so
-  // the field is a way to reach any repo (pinned or not).
+  // The pinned shelf, narrowed by the query. Unpinned repos are reached via
+  // All repos, never surfaced here.
   let pinnedCount = $derived(projectsDataStore.homeRepos.filter((r) => r.pinned).length);
   let sidebarRepos = $derived(visibleSidebarRepos(projectsDataStore.homeRepos, searchQuery));
 
@@ -357,7 +361,7 @@
         <Plus size={14} strokeWidth={2.4} />
         <span class="new-project-label">New project</span>
       </button>
-      <SidebarSearchField bind:value={searchQuery} />
+      <SidebarSearchField bind:value={projectsListViewState.searchQuery} />
     </div>
 
     <div class="sidebar-body" use:trackSidebarBody onscroll={handleSidebarScroll}>

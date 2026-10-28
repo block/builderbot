@@ -1,6 +1,7 @@
 /**
  * Search rules for the projects sidebar's single "Search repos & projects"
- * field.
+ * field. The query itself is projectsListViewState.searchQuery, shared with
+ * the landing-page grid, so the two surfaces always narrow together.
  *
  * Plain module (no runes, no store imports) like projectSearch.ts, so the
  * matching stays unit-testable. Projects reuse searchProjects; this file owns
@@ -30,14 +31,18 @@ export function searchRepos(repos: RepoHomeItem[], query: string): RepoHomeItem[
 }
 
 /**
- * The repos the sidebar's repos segment shows. With no query it is the pinned
- * set, in pin order; with a query it is every home repo that matches, pinned
- * or not, so the one field is a way to reach any repo. `homeRepos` is already
- * pinned-first (store.list_repos_for_home), so matches keep that order.
+ * The repos the sidebar's repos segment shows: the pinned set in pin order,
+ * narrowed by the query when there is one. Unpinned repos never appear here —
+ * the segment is the pinned shelf, and All repos is the place to find the
+ * rest — so a search can only ever hide pinned cards, not add others.
+ * `homeRepos` is already pinned-first (store.list_repos_for_home), so the
+ * pin order survives the filter.
  */
 export function visibleSidebarRepos(homeRepos: RepoHomeItem[], query: string): RepoHomeItem[] {
-  if (!normalizeQuery(query)) return homeRepos.filter((r) => r.pinned);
-  return searchRepos(homeRepos, query);
+  return searchRepos(
+    homeRepos.filter((r) => r.pinned),
+    query
+  );
 }
 
 /** "1 result" / "n results" — the count a section header shows while searching. */

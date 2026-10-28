@@ -86,9 +86,15 @@ describe('visibleSidebarRepos', () => {
     expect(visibleSidebarRepos(all, '')).toEqual([staged, g2, cashIos]);
   });
 
-  it('surfaces unpinned repos that match a query, after the pinned matches', () => {
-    expect(visibleSidebarRepos(all, 'squareup')).toEqual([g2, dashboard]);
-    expect(visibleSidebarRepos(all, 'differ')).toEqual([differ]);
+  it('narrows the pinned repos by the query, keeping pin order', () => {
+    expect(visibleSidebarRepos(all, 'builderbot')).toEqual([staged]);
+    expect(visibleSidebarRepos(all, 'squareup')).toEqual([g2]);
+    expect(visibleSidebarRepos(all, 's')).toEqual([staged, g2, cashIos]);
+  });
+
+  it('never surfaces unpinned repos, even when only they match', () => {
+    expect(visibleSidebarRepos(all, 'differ')).toEqual([]);
+    expect(visibleSidebarRepos(all, 'dashboard')).toEqual([]);
   });
 
   it('returns no repos when nothing matches', () => {

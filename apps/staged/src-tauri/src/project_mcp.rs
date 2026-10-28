@@ -1,5 +1,6 @@
 //! MCP server for project sessions.
-//! Exposes `start_repo_session` and `add_project_repo` tools to the agent.
+//! Exposes the repo-session tools (`start_repo_session`, `wait_for_repo_session`,
+//! `cancel_repo_session`, `continue_repo_session`) and `add_project_repo` to the agent.
 
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -17,6 +18,7 @@ use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::mcp_progress::send_progress_keepalives;
+use crate::session_commands::ContinueOutcome;
 use crate::session_runner::SessionRegistry;
 use crate::store::{
     AcpConfigSelection, Branch, CompletionReason, MessageRole, ProjectRepo, Session,
@@ -125,6 +127,16 @@ struct CancelRepoSessionParams {
     pub repo_session_id: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ContinueRepoSessionParams {
+    /// Opaque handle returned by `start_repo_session`.
+    pub repo_session_id: String,
+    /// The follow-up for the repo session's agent: a correction, the answer to
+    /// a question it raised, or its next step. Written as an instruction to
+    /// that agent, not as a report to the user.
+    pub message: String,
+}
+
 fn default_wait_for_completion_seconds() -> u64 {
     240
 }
@@ -134,6 +146,10 @@ const REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS: usize = 240;
 #[derive(Debug, Default, serde::Serialize)]
 struct RepoSessionActivity {
     last_activity_at: Option<i64>,
+    /// When the session's agent last received a user message — the original
+    /// instructions or a `continue_repo_session` follow-up — so a parent that
+    /// continued the session can confirm the message landed in its transcript.
+    last_user_message_at: Option<i64>,
     last_message: Option<RepoSessionActivityEntry>,
     last_tool_call: Option<RepoSessionActivityEntry>,
     last_tool_result: Option<RepoSessionActivityEntry>,
@@ -380,7 +396,9 @@ impl ProjectToolsHandler {
                     activity.counts.tool_results += 1;
                     activity.last_tool_result = Some(entry);
                 }
-                MessageRole::User => {}
+                MessageRole::User => {
+                    activity.last_user_message_at = Some(message.created_at);
+                }
             }
         }
 
@@ -501,6 +519,22 @@ impl ProjectToolsHandler {
                 serde_json::Value::String(Self::last_assistant_output(store, &handle.session_id));
         }
 
+        Ok(payload)
+    }
+
+    /// The `continue_repo_session` reply: the session payload with how the
+    /// message was delivered and, when it was not, why.
+    fn continue_repo_session_payload(
+        store: &Store,
+        repo_session_id: &str,
+        handle: &RepoSessionHandle,
+        outcome: &ContinueOutcome,
+    ) -> Result<serde_json::Value, String> {
+        let mut payload = Self::repo_session_payload(store, repo_session_id, handle)?;
+        payload["delivery"] = serde_json::Value::String(outcome.delivery().to_string());
+        if let Some(reason) = outcome.reason() {
+            payload["reason"] = serde_json::Value::String(reason.to_string());
+        }
         Ok(payload)
     }
 
@@ -870,6 +904,60 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
+        description = "Send a follow-up message to a repo session started by `start_repo_session`: a correction, the answer to a question it raised, or its next step. A running session receives the message within seconds without being stopped, so its work so far is kept; a completed, cancelled, or failed session is resumed with the message as its next instruction. A session that has not started yet cannot take a message — wait for it to run, or cancel it and start a new one. Prefer this over cancelling and starting over whenever the session's work so far is still wanted. Returns the session's current state together with how the message was delivered, or why it was not."
+    )]
+    async fn continue_repo_session(
+        &self,
+        Parameters(p): Parameters<ContinueRepoSessionParams>,
+    ) -> String {
+        let handle = match Self::decode_repo_session_handle(&p.repo_session_id) {
+            Ok(handle) => handle,
+            Err(e) => return e,
+        };
+        log::debug!(
+            "[project_mcp] continue_repo_session called: session={} message_chars={}",
+            handle.session_id,
+            p.message.chars().count()
+        );
+
+        // Repo sessions are not project sessions, so the resume never hands
+        // these to the run; `resume_session_for_store` just needs values.
+        let action_executor = self
+            .action_executor
+            .clone()
+            .unwrap_or_else(|| Arc::new(ActionExecutor::new()));
+        let action_registry = self
+            .action_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(ActionRegistry::new()));
+        let outcome = match crate::session_commands::continue_session_for_store(
+            Arc::clone(&self.store),
+            Arc::clone(&self.registry),
+            action_executor,
+            action_registry,
+            self.app_handle.clone(),
+            handle.session_id.clone(),
+            p.message,
+            Vec::new(),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(e) => return format!("Error continuing repo session: {e}"),
+        };
+
+        match Self::continue_repo_session_payload(
+            &self.store,
+            &p.repo_session_id,
+            &handle,
+            &outcome,
+        ) {
+            Ok(payload) => payload.to_string(),
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
         description = "Add a GitHub repository to the current project. Use this when the task requires a repository that isn't yet in the project. Returns once the repository worktree is ready; any setup actions then run in the background."
     )]
     async fn add_project_repo(&self, Parameters(p): Parameters<AddProjectRepoParams>) -> String {
@@ -1182,11 +1270,14 @@ mod tests {
         REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
     use crate::git::Span;
+    use crate::session_runner::SessionRegistry;
     use crate::store::{
         AcpConfigSelection, AcpConfigValueSelection, Branch, MessageRole, Project, ProjectNote,
-        Session, SessionMessage, Store,
+        Session, SessionMessage, SessionStatus, Store,
     };
+    use acp_client::{SteerOutcome, TurnControlHandle};
     use std::path::Path;
+    use std::sync::Arc;
 
     #[test]
     fn comment_line_range_reports_one_indexed_inclusive_lines() {
@@ -1407,6 +1498,7 @@ mod tests {
         let activity = ProjectToolsHandler::summarize_session_activity(&session, &messages);
 
         assert_eq!(activity.last_activity_at, Some(109));
+        assert_eq!(activity.last_user_message_at, Some(106));
         assert_eq!(activity.counts.assistant_messages, 1);
         assert_eq!(activity.counts.tool_calls, 1);
         assert_eq!(activity.counts.tool_results, 1);
@@ -1516,6 +1608,180 @@ mod tests {
         assert!(cancel_description.contains("surprised at how long the session is taking"));
         assert!(!cancel_description.contains("strong evidence"));
         assert!(!cancel_description.contains("taking a long time"));
+    }
+
+    /// The continue tool's description has to carry the routing the parent
+    /// agent must know to choose it over cancel-and-restart: a running
+    /// session keeps its work, a stopped one is resumed, a queued one cannot
+    /// take a message — in words, not payload field names.
+    #[test]
+    fn continue_repo_session_description_explains_delivery_without_field_names() {
+        let router = ProjectToolsHandler::tool_router();
+        let description = router
+            .get("continue_repo_session")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("continue tool description");
+
+        assert!(description.contains("Send a follow-up message"));
+        assert!(description.contains("without being stopped"));
+        assert!(description.contains("resumed with the message"));
+        assert!(description.contains("has not started yet cannot take a message"));
+        assert!(description.contains("Prefer this over cancelling"));
+        assert!(!description.contains("`delivery`"));
+        assert!(!description.contains("injected"));
+        assert!(!description.contains("interrupt"));
+        assert!(!description.contains("steer"));
+    }
+
+    /// Fixture for the continue round trips: a `running` repo session with
+    /// its note artifact, registered as a live session so the registry can
+    /// carry a turn-control handle for it.
+    struct ContinueFixture {
+        store: Arc<Store>,
+        registry: Arc<SessionRegistry>,
+        _registration: crate::session_runner::ExternalSessionRegistration,
+        session: Session,
+        repo_session_id: String,
+        handle: RepoSessionHandle,
+    }
+
+    impl ContinueFixture {
+        fn running_note_session() -> Self {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let project = Project::new("owner/repo");
+            store.create_project(&project).unwrap();
+            let branch = Branch::new(&project.id, "feature", "main");
+            store.create_branch(&branch).unwrap();
+            let session =
+                Session::new_running("investigate", Path::new("/tmp")).with_branch(&branch.id);
+            store.create_session(&session).unwrap();
+            let note = crate::store::Note::new(&branch.id, "", "").with_session(&session.id);
+            store.create_note(&note).unwrap();
+
+            let registry = Arc::new(SessionRegistry::new());
+            let registration = registry.register_external(&session.id);
+            let repo_session_id = ProjectToolsHandler::encode_repo_session_handle(
+                &session.id,
+                RepoArtifactKind::Note,
+                &note.id,
+            )
+            .unwrap();
+            let handle = ProjectToolsHandler::decode_repo_session_handle(&repo_session_id).unwrap();
+            Self {
+                store,
+                registry,
+                _registration: registration,
+                session,
+                repo_session_id,
+                handle,
+            }
+        }
+
+        /// What the `continue_repo_session` tool does between decoding the
+        /// handle and serialising the reply, with the resume step left out:
+        /// a resume needs the app handle the tool carries, which tests cannot
+        /// build, and every case here stays on the live connection anyway.
+        async fn continue_with(&self, message: &str) -> serde_json::Value {
+            let route = crate::session_commands::route_continue_session(
+                &self.store,
+                &self.registry,
+                &self.session.id,
+                message,
+                &[],
+                std::time::Duration::from_millis(200),
+            )
+            .await
+            .unwrap();
+            let outcome = match route {
+                crate::session_commands::ContinueRoute::Delivered(outcome) => outcome,
+                other => panic!("a running session is reached live, got {other:?}"),
+            };
+            ProjectToolsHandler::continue_repo_session_payload(
+                &self.store,
+                &self.repo_session_id,
+                &self.handle,
+                &outcome,
+            )
+            .unwrap()
+        }
+
+        fn status(&self) -> SessionStatus {
+            self.store
+                .get_session(&self.session.id)
+                .unwrap()
+                .unwrap()
+                .status
+        }
+    }
+
+    /// A steered message leaves the row `running`: a parent that calls
+    /// `wait_for_repo_session` next must not see a spurious terminal state
+    /// (and the tool reply itself still says `running`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_running_session_by_steering_never_leaves_running() {
+        let f = ContinueFixture::running_note_session();
+        let (turn_control, served) =
+            TurnControlHandle::scripted(Ok(SteerOutcome::Injected), Ok(()));
+        f.registry
+            .set_turn_control_handle(&f.session.id, turn_control);
+
+        let payload = f.continue_with("also check the tests").await;
+
+        assert_eq!(payload["delivery"], "injected");
+        assert_eq!(payload["state"], "running");
+        assert!(payload.get("reason").is_none());
+        assert_eq!(payload["session_id"], f.session.id);
+        assert_eq!(f.status(), SessionStatus::Running);
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec!["steer:also check the tests".to_string()]
+        );
+    }
+
+    /// Same when the agent refused the steer and the turn was interrupted and
+    /// re-prompted on the same connection: the cancel is the turn's, not the
+    /// session's, so the row stays `running`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_running_session_by_interrupting_never_leaves_running() {
+        let f = ContinueFixture::running_note_session();
+        let (turn_control, served) = TurnControlHandle::scripted(
+            Err("agent does not advertise steering".to_string()),
+            Ok(()),
+        );
+        f.registry
+            .set_turn_control_handle(&f.session.id, turn_control);
+
+        let payload = f.continue_with("stop, different approach").await;
+
+        assert_eq!(payload["delivery"], "interrupted_and_reprompted");
+        assert_eq!(payload["state"], "running");
+        assert!(payload.get("reason").is_none());
+        assert_eq!(f.status(), SessionStatus::Running);
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec![
+                "steer:stop, different approach".to_string(),
+                "interrupt:stop, different approach".to_string(),
+            ]
+        );
+    }
+
+    /// A session in its startup window (row `running`, no connection yet)
+    /// that stays that way past the wait is reported blocked with a reason,
+    /// still `running`, so the parent retries rather than restarting it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_starting_session_reports_blocked_with_a_reason() {
+        let f = ContinueFixture::running_note_session();
+
+        let payload = f.continue_with("hello?").await;
+
+        assert_eq!(payload["delivery"], "blocked");
+        assert_eq!(payload["state"], "running");
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("still starting"));
+        assert_eq!(f.status(), SessionStatus::Running);
     }
 
     /// A parent project agent reads a child's note through this payload, so

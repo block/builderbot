@@ -36,7 +36,7 @@
 //! - All write paths in the background thread use `let _ =` or
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
-mod attachments;
+pub(crate) mod attachments;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -799,7 +799,11 @@ impl SessionRegistry {
     /// Store the turn-control handle for `session_id`'s current ACP
     /// connection, replacing the previous connection's handle (a Pikchr
     /// correction re-connects on the same session).
-    fn set_turn_control_handle(&self, session_id: &str, handle: acp_client::TurnControlHandle) {
+    pub(crate) fn set_turn_control_handle(
+        &self,
+        session_id: &str,
+        handle: acp_client::TurnControlHandle,
+    ) {
         if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
             *running.turn_control.lock().unwrap() = Some(handle);
         }
@@ -1282,6 +1286,48 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
     transitioned
 }
 
+/// Read the attachments for a prompt's content blocks: images as they are,
+/// PDFs rendered page by page (see `attachments`). An id that cannot be read
+/// is logged and skipped, so a bad attachment never blocks the message.
+pub(crate) fn load_prompt_attachments(
+    store: &Store,
+    image_ids: &[String],
+) -> attachments::PromptAttachments {
+    let mut attachments = attachments::PromptAttachments::default();
+    for image_id in image_ids {
+        match store.get_image(image_id) {
+            Ok(Some(image)) => {
+                match crate::store::images::image_file_path(
+                    &image.project_id,
+                    &image.id,
+                    &image.filename,
+                ) {
+                    Ok(path) => {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            attachments.add(&image, &bytes);
+                        } else {
+                            log::warn!(
+                                "Failed to read image file for image {image_id}: {}",
+                                path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to resolve file path for image {image_id}: {e}");
+                    }
+                }
+            }
+            Ok(None) => {
+                log::warn!("Image {image_id} not found in store, skipping");
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch image {image_id} from store: {e}");
+            }
+        }
+    }
+    attachments
+}
+
 /// Start a session: persist the user message, spawn the agent, stream to DB.
 ///
 /// Returns immediately — the actual agent work happens on a background task.
@@ -1670,40 +1716,7 @@ pub fn start_session(
                 driver.with_mcp_servers(required_mcp_servers)
             };
 
-            // Read the attachments for the prompt content blocks: images as
-            // they are, PDFs rendered page by page (see `attachments`).
-            let mut attachments = attachments::PromptAttachments::default();
-            for image_id in &config.image_ids {
-                match store.get_image(image_id) {
-                    Ok(Some(image)) => {
-                        match crate::store::images::image_file_path(
-                            &image.project_id,
-                            &image.id,
-                            &image.filename,
-                        ) {
-                            Ok(path) => {
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    attachments.add(&image, &bytes);
-                                } else {
-                                    log::warn!(
-                                        "Failed to read image file for image {image_id}: {}",
-                                        path.display()
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to resolve file path for image {image_id}: {e}");
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        log::warn!("Image {image_id} not found in store, skipping");
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to fetch image {image_id} from store: {e}");
-                    }
-                }
-            }
+            let attachments = load_prompt_attachments(&store, &config.image_ids);
 
             let mut prompt = attachments.prompt(&config.prompt);
             let mut agent_session_id = config.agent_session_id.clone();

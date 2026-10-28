@@ -1670,6 +1670,43 @@ impl TurnControlHandle {
         }
     }
 
+    /// A handle to a stand-in connection that answers every steer with
+    /// `steer` and every interrupt with `interrupt`, and appends
+    /// `"steer:<prompt>"` / `"interrupt:<prompt>"` to the returned log as the
+    /// requests arrive. For tests of the routing around a handle (steer first,
+    /// interrupt on refusal) that must not stand up a real agent. Needs a
+    /// tokio runtime: the stand-in is a task.
+    #[doc(hidden)]
+    pub fn scripted(
+        steer: Result<SteerOutcome, String>,
+        interrupt: Result<(), String>,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let served = Arc::clone(&log);
+        tokio::spawn(async move {
+            while let Some(request) = turn_control_rx.recv().await {
+                match request {
+                    TurnControlRequest::Steer { prompt, reply, .. } => {
+                        served.lock().unwrap().push(format!("steer:{prompt}"));
+                        let _ = reply.send(steer.clone());
+                    }
+                    TurnControlRequest::Interrupt { prompt, reply, .. } => {
+                        served.lock().unwrap().push(format!("interrupt:{prompt}"));
+                        let _ = reply.send(interrupt.clone());
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                turn_control_tx,
+                connection_alive: Arc::new(AtomicBool::new(true)),
+            },
+            log,
+        )
+    }
+
     fn send(&self, request: TurnControlRequest) -> Result<(), String> {
         if !self.connection_alive.load(Ordering::Relaxed) {
             return Err("ACP connection is no longer running".to_string());

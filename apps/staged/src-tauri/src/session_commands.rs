@@ -1534,7 +1534,7 @@ pub(crate) async fn resume_session_for_store(
         .transition_to_running_clearing_agent_id(&session_id, pending_start_agent_id.as_deref())
         .map_err(|e| e.to_string())?;
     if !transitioned {
-        return Err("Session is already running".to_string());
+        return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
     }
 
     let config_branch_id = event_branch_id.clone();
@@ -1629,6 +1629,367 @@ pub(crate) async fn resume_session_for_store(
     )?;
 
     Ok(())
+}
+
+/// The refusal `resume_session_for_store` returns when the row is already
+/// `running` — `continue_session_for_store` reads it back as a blocked
+/// delivery rather than an error.
+pub(crate) const SESSION_ALREADY_RUNNING_ERROR: &str = "Session is already running";
+
+/// How long `continue_session_for_store` waits for a `running` session that
+/// has no turn-control handle yet — the startup window between the `running`
+/// write and the runner's `connect` — before answering `Blocked`.
+pub(crate) const CONTINUE_SESSION_STARTUP_WAIT: Duration = Duration::from_secs(10);
+
+/// How a message handed to `continue_session_for_store` reached (or failed to
+/// reach) the session's agent. The wire spelling is `delivery()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ContinueOutcome {
+    /// Steered into the running turn (`_session/steering`); the agent's
+    /// in-flight tool calls survived.
+    Injected,
+    /// The running turn was cancelled and the message sent as the next
+    /// prompt on the same connection.
+    InterruptedAndReprompted,
+    /// Nothing was in flight to steer (the connection was holding for
+    /// background work or idle), so the message went out as a fresh turn on
+    /// the same connection.
+    StartedNewTurn,
+    /// The session was stopped; it was resumed with the message as its next
+    /// prompt (`resume_session_for_store`).
+    Resumed,
+    /// The session has not started yet; delivering would claim it out of
+    /// FIFO order, so the message was refused.
+    RejectedQueued,
+    /// Not delivered now, but a retry may succeed: the session is still
+    /// starting, its connection went away under the request, the branch is
+    /// busy, or another start won the race.
+    Blocked { reason: String },
+    /// A stopped session that cannot be resumed: no agent conversation to
+    /// load, or its worktree is gone. The caller should start a new session.
+    NotResumable { reason: String },
+}
+
+impl ContinueOutcome {
+    pub(crate) fn delivery(&self) -> &'static str {
+        match self {
+            ContinueOutcome::Injected => "injected",
+            ContinueOutcome::InterruptedAndReprompted => "interrupted_and_reprompted",
+            ContinueOutcome::StartedNewTurn => "started_new_turn",
+            ContinueOutcome::Resumed => "resumed",
+            ContinueOutcome::RejectedQueued => "rejected_queued",
+            ContinueOutcome::Blocked { .. } => "blocked",
+            ContinueOutcome::NotResumable { .. } => "not_resumable",
+        }
+    }
+
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match self {
+            ContinueOutcome::Blocked { reason } | ContinueOutcome::NotResumable { reason } => {
+                Some(reason)
+            }
+            _ => None,
+        }
+    }
+
+    fn blocked(reason: impl Into<String>) -> Self {
+        ContinueOutcome::Blocked {
+            reason: reason.into(),
+        }
+    }
+
+    fn not_resumable(reason: impl Into<String>) -> Self {
+        ContinueOutcome::NotResumable {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Where `route_continue_session` sent the message.
+#[derive(Debug)]
+pub(crate) enum ContinueRoute {
+    /// Delivered, refused, or blocked without touching the row.
+    Delivered(ContinueOutcome),
+    /// A stopped session that passed the resume gate: the caller resumes it
+    /// with the message as the next prompt.
+    Resume(Box<store::Session>),
+}
+
+/// Deliver `message` to a session now, whatever state it is in.
+///
+/// The Tauri/web `send_session_message_now` command and the project MCP
+/// server's `continue_repo_session` tool share this body. A `running`
+/// session is reached over its live ACP connection — steering first,
+/// interrupt-and-reprompt when the agent refuses — so the row never leaves
+/// `running` and the runner never sees a turn boundary; a stopped session is
+/// resumed; a `queued` one is refused. The user row is written by whoever
+/// delivers: acp-client for the live paths (only once the agent took the
+/// message), `start_session` for the resume, so nothing here persists it.
+///
+/// Resume failures other than the already-running race are returned as
+/// `Err`, as `resume_session_for_store` reports them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn continue_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    message: String,
+    image_ids: Vec<String>,
+) -> Result<ContinueOutcome, String> {
+    let route = route_continue_session(
+        &store,
+        &registry,
+        &session_id,
+        &message,
+        &image_ids,
+        CONTINUE_SESSION_STARTUP_WAIT,
+    )
+    .await?;
+    let session = match route {
+        ContinueRoute::Delivered(outcome) => return Ok(outcome),
+        ContinueRoute::Resume(session) => *session,
+    };
+
+    // No `branch_id` override: the resume resolves the branch from the
+    // session's artifact, or from the row itself for pipeline sessions.
+    match resume_session_for_store(
+        store,
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        session.id,
+        message,
+        Some(image_ids),
+        None,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(()) => Ok(ContinueOutcome::Resumed),
+        Err(e) if e == SESSION_ALREADY_RUNNING_ERROR => Ok(ContinueOutcome::blocked(
+            "the session started running again under this request; retry to reach it live",
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Everything `continue_session_for_store` does short of the resume itself,
+/// which needs the app handle. Loops because the status can move under the
+/// request: a `running` session whose connection ends while this waits for
+/// its handle is routed again on the status it ended with.
+pub(crate) async fn route_continue_session(
+    store: &Store,
+    registry: &session_runner::SessionRegistry,
+    session_id: &str,
+    message: &str,
+    image_ids: &[String],
+    startup_wait: Duration,
+) -> Result<ContinueRoute, String> {
+    let deadline = Instant::now() + startup_wait;
+    // A handle whose connection went away under this request; the wait below
+    // skips it so only a re-connect's handle (or a status change) ends it.
+    let mut dead_handle: Option<acp_client::TurnControlHandle> = None;
+    loop {
+        let session = store
+            .get_session(session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+        match session.status {
+            store::SessionStatus::Queued => {
+                return Ok(ContinueRoute::Delivered(ContinueOutcome::RejectedQueued));
+            }
+            store::SessionStatus::Running => {
+                let handle = match wait_for_turn_control_handle(
+                    store,
+                    registry,
+                    session_id,
+                    deadline,
+                    dead_handle.as_ref(),
+                )
+                .await
+                {
+                    HandleWait::Ready(handle) => handle,
+                    HandleWait::LeftRunning => continue,
+                    HandleWait::TimedOut => {
+                        return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(
+                            "the session is still starting; retry in a few seconds",
+                        )));
+                    }
+                };
+                match deliver_to_running_session(store, &handle, message, image_ids).await {
+                    Ok(outcome) => return Ok(ContinueRoute::Delivered(outcome)),
+                    Err(reason) if !handle.is_connection_alive() => {
+                        // The connection settled under the request. The row
+                        // goes terminal moments later (or a re-connect hands
+                        // out a new handle); route on whichever comes first.
+                        log::info!(
+                            "continue_session: connection for {session_id} ended under the \
+                             request ({reason}); waiting for the row to settle"
+                        );
+                        dead_handle = Some(handle);
+                        continue;
+                    }
+                    Err(reason) => {
+                        return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(reason)));
+                    }
+                }
+            }
+            store::SessionStatus::Completed
+            | store::SessionStatus::Cancelled
+            | store::SessionStatus::Error => {
+                return Ok(match continue_resume_gate(store, &session)? {
+                    Some(refused) => ContinueRoute::Delivered(refused),
+                    None => ContinueRoute::Resume(Box::new(session)),
+                });
+            }
+        }
+    }
+}
+
+enum HandleWait {
+    Ready(acp_client::TurnControlHandle),
+    /// The row is no longer `running`; route on its new status.
+    LeftRunning,
+    TimedOut,
+}
+
+/// Poll the registry for `session_id`'s live turn-control handle until
+/// `deadline`. A handle equal to `skip` (the one whose connection just died)
+/// does not count; neither does one that already reports its connection gone.
+async fn wait_for_turn_control_handle(
+    store: &Store,
+    registry: &session_runner::SessionRegistry,
+    session_id: &str,
+    deadline: Instant,
+    skip: Option<&acp_client::TurnControlHandle>,
+) -> HandleWait {
+    const POLL: Duration = Duration::from_millis(100);
+    loop {
+        if let Some(handle) = registry.turn_control_handle(session_id) {
+            let is_skipped = skip.is_some_and(|dead| dead.same_connection(&handle));
+            if !is_skipped && handle.is_connection_alive() {
+                return HandleWait::Ready(handle);
+            }
+        }
+        match store.get_session(session_id) {
+            Ok(Some(session)) if session.status == store::SessionStatus::Running => {}
+            _ => return HandleWait::LeftRunning,
+        }
+        if Instant::now() >= deadline {
+            return HandleWait::TimedOut;
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Reach a running session's agent over its connection: steer, and when the
+/// agent refuses (no steering advertised, `promptRequired` because the turn
+/// ended under the request, `failed`), interrupt the turn and re-prompt.
+/// `Err` only when the interrupt fails too — the caller decides whether that
+/// is a dead connection or a blocked delivery.
+async fn deliver_to_running_session(
+    store: &Store,
+    handle: &acp_client::TurnControlHandle,
+    message: &str,
+    image_ids: &[String],
+) -> Result<ContinueOutcome, String> {
+    let attachments = session_runner::load_prompt_attachments(store, image_ids);
+    let prompt = attachments.prompt(message);
+    let steer_refusal = match handle.steer(&prompt, &attachments.images).await {
+        Ok(acp_client::SteerOutcome::Injected) => return Ok(ContinueOutcome::Injected),
+        Ok(acp_client::SteerOutcome::NewTurnStarted) => return Ok(ContinueOutcome::StartedNewTurn),
+        Err(reason) => reason,
+    };
+    log::info!("continue_session: steer refused ({steer_refusal}); interrupting the turn instead");
+    handle
+        .interrupt_and_reprompt(&prompt, &attachments.images)
+        .await
+        .map(|()| ContinueOutcome::InterruptedAndReprompted)
+        .map_err(|reason| format!("could not reach the running session: {reason}"))
+}
+
+/// Whether a stopped session may be resumed with a new message: it needs an
+/// agent conversation to load and, for a local branch, its worktree on disk;
+/// on a branch, the start must also be allowed by the branch schedule (no
+/// provisioning in progress, nothing queued ahead of it, no conflicting
+/// running session). `Some` is the refusal; `None` lets the resume proceed.
+///
+/// The schedule check runs under the branch's launch lock like the branch
+/// session starts do, but the lock is not held into the resume's `running`
+/// write (that write is itself atomic on the status), so two continues on
+/// one branch can both pass the gate; the second then finds the first's row
+/// running and is reported blocked.
+pub(crate) fn continue_resume_gate(
+    store: &Store,
+    session: &store::Session,
+) -> Result<Option<ContinueOutcome>, String> {
+    if resumable_agent_session_id(session.agent_id.as_deref()).is_none() {
+        return Ok(Some(ContinueOutcome::not_resumable(
+            "the session has no agent conversation to resume; start a new session instead",
+        )));
+    }
+
+    let (branch, session_type) = continue_branch_and_type(store, session)?;
+    let is_remote = branch
+        .as_ref()
+        .is_some_and(|branch| branch.branch_type == store::BranchType::Remote);
+    if !is_remote && !Path::new(&session.working_dir).is_dir() {
+        return Ok(Some(ContinueOutcome::not_resumable(format!(
+            "the session's working directory is gone ({}); start a new session instead",
+            session.working_dir
+        ))));
+    }
+
+    if let (Some(branch), Some(session_type)) = (branch, session_type) {
+        let launch_lock = branch_session_launch_lock_for(&branch.id);
+        let _guard = launch_lock.lock().unwrap();
+        if should_queue_branch_session_start(store, &branch.id, &session_type)? {
+            return Ok(Some(ContinueOutcome::blocked(
+                "the branch is provisioning or busy with another session; retry once it is idle",
+            )));
+        }
+    }
+
+    Ok(None)
+}
+
+/// The branch a session runs on and the schedule kind it counts as, from its
+/// artifact (commit, note, review). A session with no artifact (a pipeline
+/// pr/push session) carries its branch on the row but no kind the branch
+/// schedule gates on, so the resume gate does not queue it behind anything.
+fn continue_branch_and_type(
+    store: &Store,
+    session: &store::Session,
+) -> Result<(Option<store::Branch>, Option<BranchSessionType>), String> {
+    let lookup = |branch_id: &str| store.get_branch(branch_id).map_err(|e| e.to_string());
+    if let Some(commit) = store
+        .get_commit_by_session(&session.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok((lookup(&commit.branch_id)?, Some(BranchSessionType::Commit)));
+    }
+    if let Some(note) = store
+        .get_note_by_session(&session.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok((lookup(&note.branch_id)?, Some(BranchSessionType::Note)));
+    }
+    if let Some(review) = store
+        .get_review_by_session(&session.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok((lookup(&review.branch_id)?, Some(BranchSessionType::Review)));
+    }
+    let Some(branch_id) = session.branch_id.as_deref() else {
+        return Ok((None, None));
+    };
+    Ok((lookup(branch_id)?, None))
 }
 
 #[tauri::command]
@@ -3159,7 +3520,13 @@ or `failed`), any available artifacts, and activity details. Prefer another \
 `wait_for_repo_session` call when the returned activity shows recent progress.\n\
 - cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
 when the user wants the session stopped. Cancellation is best used when the user wants to go \
-down a different path rather than when you are surprised at how long the session is taking."
+down a different path rather than when you are surprised at how long the session is taking.\n\
+- continue_repo_session: Use this to send a follow-up message to a repo session by \
+`repo_session_id` — a correction, an answer to a question it raised, or a next step. A running \
+session receives it within seconds without being stopped and keeps its work; a completed, \
+cancelled, or failed session is resumed with it as the next instruction. A session that has not \
+started yet cannot take a message; wait for it to run or cancel it and start a new one. Prefer \
+this over cancelling and starting over when the session's work so far is still wanted."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. For notes, prefer \
@@ -3178,7 +3545,13 @@ or `failed`), any available artifacts, and activity details. Prefer another \
 `wait_for_repo_session` call when the returned activity shows recent progress.\n\
 - cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
 when the user wants the session stopped. Cancellation is best used when the user wants to go \
-down a different path rather than when you are surprised at how long the session is taking."
+down a different path rather than when you are surprised at how long the session is taking.\n\
+- continue_repo_session: Use this to send a follow-up message to a repo session by \
+`repo_session_id` — a correction, an answer to a question it raised, or a next step. A running \
+session receives it within seconds without being stopped and keeps its work; a completed, \
+cancelled, or failed session is resumed with it as the next instruction. A session that has not \
+started yet cannot take a message; wait for it to run or cancel it and start a new one. Prefer \
+this over cancelling and starting over when the session's work so far is still wanted."
     };
 
     let coordinator_reminder = if is_remote {
@@ -7481,6 +7854,419 @@ mod tests {
             row.completion_reason,
             Some(store::CompletionReason::TurnComplete)
         );
+    }
+
+    /// `continue_session_for_store` short of the resume itself (which needs
+    /// the app handle): the routing on status, the live-connection delivery,
+    /// and the resume gate, with a short startup wait so the blocked cases
+    /// run in milliseconds.
+    async fn continue_through_shared_body(
+        registry: &session_runner::SessionRegistry,
+        store: &Arc<Store>,
+        session_id: &str,
+        message: &str,
+    ) -> ContinueRoute {
+        route_continue_session(
+            store,
+            registry,
+            session_id,
+            message,
+            &[],
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn delivered(route: ContinueRoute) -> ContinueOutcome {
+        match route {
+            ContinueRoute::Delivered(outcome) => outcome,
+            ContinueRoute::Resume(session) => {
+                panic!("expected a delivery, got a resume of {}", session.id)
+            }
+        }
+    }
+
+    /// A commit session ended `completed` with the agent conversation id a
+    /// resume needs, on `branch`.
+    fn completed_commit_session_with_agent_id(
+        store: &Arc<Store>,
+        branch_id: &str,
+    ) -> store::Session {
+        let session = create_branch_commit_session(store, branch_id, store::SessionStatus::Running);
+        store
+            .update_session_status(
+                &session.id,
+                store::SessionStatus::Completed,
+                None,
+                Some(&store::CompletionReason::TurnComplete),
+            )
+            .unwrap();
+        store
+            .set_agent_session_id(&session.id, "acp-session-1")
+            .unwrap();
+        session
+    }
+
+    /// A `queued` row is never claimed out of FIFO order by a message: the
+    /// drain owns its start.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_queued_session_is_rejected() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Queued);
+
+        let outcome = delivered(
+            continue_through_shared_body(&test_registry(), &store, &session.id, "hi").await,
+        );
+
+        assert_eq!(outcome, ContinueOutcome::RejectedQueued);
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Queued
+        );
+    }
+
+    /// A running session with a connection is steered first; the agent took
+    /// the message into its turn, so nothing else is sent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_running_session_steers_the_live_turn() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, served) =
+            acp_client::TurnControlHandle::scripted(Ok(acp_client::SteerOutcome::Injected), Ok(()));
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "also X").await);
+
+        assert_eq!(outcome, ContinueOutcome::Injected);
+        assert_eq!(*served.lock().unwrap(), vec!["steer:also X".to_string()]);
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
+    /// A steer served while the connection was holding (or idle) went out as
+    /// a fresh turn on the same connection; the caller learns which.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_holding_session_reports_the_new_turn() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, _) = acp_client::TurnControlHandle::scripted(
+            Ok(acp_client::SteerOutcome::NewTurnStarted),
+            Ok(()),
+        );
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "next").await);
+
+        assert_eq!(outcome, ContinueOutcome::StartedNewTurn);
+    }
+
+    /// When the agent refuses the steer — no steering advertised, or the turn
+    /// ended under the request — the fallback interrupts the turn and
+    /// re-prompts on the same connection, in that order.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_falls_back_to_interrupt_when_the_steer_is_refused() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, served) = acp_client::TurnControlHandle::scripted(
+            Err("steer not injected: promptRequired".to_string()),
+            Ok(()),
+        );
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "redo").await);
+
+        assert_eq!(outcome, ContinueOutcome::InterruptedAndReprompted);
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec!["steer:redo".to_string(), "interrupt:redo".to_string()]
+        );
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
+    /// Both deliveries refused on a connection that is still up (a bridge
+    /// that never acknowledged the cancel): blocked with the agent's reason,
+    /// the row untouched.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_is_blocked_when_the_interrupt_fails_on_a_live_connection() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, _) = acp_client::TurnControlHandle::scripted(
+            Err("agent does not advertise steering".to_string()),
+            Err("agent did not acknowledge the cancel".to_string()),
+        );
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "x").await);
+
+        match outcome {
+            ContinueOutcome::Blocked { reason } => {
+                assert!(reason.contains("did not acknowledge"), "{reason}")
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
+    /// The startup window: the row is `running` but the runner has not
+    /// connected, so there is no handle. The body waits for one and, when it
+    /// never comes, answers blocked — never an error, never a status write.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_session_without_a_connection_waits_then_blocks() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+
+        let started = Instant::now();
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "x").await);
+
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        match outcome {
+            ContinueOutcome::Blocked { reason } => {
+                assert!(reason.contains("still starting"), "{reason}")
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
+    /// A handle registered while the body is waiting (the runner's `connect`
+    /// landing) is picked up and the message delivered through it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_starting_session_delivers_once_it_connects() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, served) =
+            acp_client::TurnControlHandle::scripted(Ok(acp_client::SteerOutcome::Injected), Ok(()));
+        let connect = {
+            let registry = Arc::clone(&registry);
+            let session_id = session.id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                registry.set_turn_control_handle(&session_id, handle);
+            })
+        };
+
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "late").await);
+
+        connect.await.unwrap();
+        assert_eq!(outcome, ContinueOutcome::Injected);
+        assert_eq!(*served.lock().unwrap(), vec!["steer:late".to_string()]);
+    }
+
+    /// A session that stops while the body waits for its connection is
+    /// routed on the status it ended with, not left to time out.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_reroutes_when_the_session_stops_during_the_wait() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let settle = {
+            let store = Arc::clone(&store);
+            let session_id = session.id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                store
+                    .update_session_status(
+                        &session_id,
+                        store::SessionStatus::Completed,
+                        None,
+                        Some(&store::CompletionReason::TurnComplete),
+                    )
+                    .unwrap();
+                store.set_agent_session_id(&session_id, "acp-1").unwrap();
+            })
+        };
+
+        let route = continue_through_shared_body(&registry, &store, &session.id, "x").await;
+
+        settle.await.unwrap();
+        match route {
+            ContinueRoute::Resume(resumed) => assert_eq!(resumed.id, session.id),
+            other => panic!("expected a resume, got {other:?}"),
+        }
+    }
+
+    /// A stopped session with nothing to load (the agent never returned a
+    /// conversation id, or the start was still pending) cannot take a
+    /// message; the caller is told to start a new session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_stopped_session_without_an_agent_id_is_not_resumable() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+        store
+            .update_session_status(
+                &session.id,
+                store::SessionStatus::Error,
+                Some("boom"),
+                Some(&store::CompletionReason::Crashed),
+            )
+            .unwrap();
+
+        let outcome = delivered(
+            continue_through_shared_body(&test_registry(), &store, &session.id, "x").await,
+        );
+
+        match outcome {
+            ContinueOutcome::NotResumable { reason } => {
+                assert!(reason.contains("no agent conversation"), "{reason}")
+            }
+            other => panic!("expected not resumable, got {other:?}"),
+        }
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Error
+        );
+    }
+
+    /// Same when the worktree the session ran in is gone.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_stopped_session_whose_worktree_is_gone_is_not_resumable() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let missing = std::env::temp_dir().join(format!("staged-gone-{}", uuid::Uuid::new_v4()));
+        let session = store::Session::new_running("commit", &missing).with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+        let commit = store::Commit::new_pending(&branch.id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+        store
+            .update_session_status(
+                &session.id,
+                store::SessionStatus::Completed,
+                None,
+                Some(&store::CompletionReason::TurnComplete),
+            )
+            .unwrap();
+        store.set_agent_session_id(&session.id, "acp-1").unwrap();
+
+        let outcome = delivered(
+            continue_through_shared_body(&test_registry(), &store, &session.id, "x").await,
+        );
+
+        match outcome {
+            ContinueOutcome::NotResumable { reason } => {
+                assert!(reason.contains("working directory is gone"), "{reason}")
+            }
+            other => panic!("expected not resumable, got {other:?}"),
+        }
+    }
+
+    /// The resume takes the branch gate the branch session starts take: a
+    /// branch with another commit session running cannot take a second one,
+    /// so the message is blocked (a retry, not a new session).
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_stopped_session_on_a_busy_branch_is_blocked() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session = completed_commit_session_with_agent_id(&store, &branch.id);
+        let _other =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let outcome = delivered(
+            continue_through_shared_body(&test_registry(), &store, &session.id, "x").await,
+        );
+
+        match outcome {
+            ContinueOutcome::Blocked { reason } => assert!(reason.contains("busy"), "{reason}"),
+            other => panic!("expected blocked, got {other:?}"),
+        }
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Completed
+        );
+    }
+
+    /// A branch still provisioning (no worktree) is the other half of the
+    /// gate: the resume would have nowhere to run.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_stopped_session_on_a_provisioning_branch_is_blocked() {
+        let (store, branch) = setup_branch_store();
+        let session = completed_commit_session_with_agent_id(&store, &branch.id);
+
+        let outcome = delivered(
+            continue_through_shared_body(&test_registry(), &store, &session.id, "x").await,
+        );
+
+        assert!(
+            matches!(outcome, ContinueOutcome::Blocked { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    /// A stopped session with a conversation to load, its worktree on disk
+    /// and an idle branch goes to the resume, which `start_session` then
+    /// persists the message for.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_resumable_stopped_session_routes_to_the_resume() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session = completed_commit_session_with_agent_id(&store, &branch.id);
+
+        let route = continue_through_shared_body(&test_registry(), &store, &session.id, "x").await;
+
+        match route {
+            ContinueRoute::Resume(resumed) => assert_eq!(resumed.id, session.id),
+            other => panic!("expected a resume, got {other:?}"),
+        }
+        // The gate decides; it does not write.
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Completed
+        );
+    }
+
+    /// The wire spellings the MCP reply and the UI route on.
+    #[test]
+    fn continue_outcome_delivery_spellings_and_reasons() {
+        assert_eq!(ContinueOutcome::Injected.delivery(), "injected");
+        assert_eq!(
+            ContinueOutcome::InterruptedAndReprompted.delivery(),
+            "interrupted_and_reprompted"
+        );
+        assert_eq!(
+            ContinueOutcome::StartedNewTurn.delivery(),
+            "started_new_turn"
+        );
+        assert_eq!(ContinueOutcome::Resumed.delivery(), "resumed");
+        assert_eq!(
+            ContinueOutcome::RejectedQueued.delivery(),
+            "rejected_queued"
+        );
+        let blocked = ContinueOutcome::blocked("busy");
+        assert_eq!(blocked.delivery(), "blocked");
+        assert_eq!(blocked.reason(), Some("busy"));
+        let not_resumable = ContinueOutcome::not_resumable("gone");
+        assert_eq!(not_resumable.delivery(), "not_resumable");
+        assert_eq!(not_resumable.reason(), Some("gone"));
+        assert_eq!(ContinueOutcome::Injected.reason(), None);
     }
 
     #[test]

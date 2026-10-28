@@ -5,9 +5,10 @@ export const projectsListViewState = $state({
   scrollTop: 0,
   returnTargetProjectId: null as string | null,
   restorePending: false,
-  // Unlike the chip filters this is not mirrored by the sidebar, but it does
-  // outlive the component: narrowing to a few candidates and opening them one
-  // by one would otherwise reset the query on every round trip.
+  // Shared with the sidebar's search field, like the chip filters: the grid
+  // and the sidebar list narrow together. It also outlives the component:
+  // narrowing to a few candidates and opening them one by one would otherwise
+  // reset the query on every round trip.
   searchQuery: '',
 });
 

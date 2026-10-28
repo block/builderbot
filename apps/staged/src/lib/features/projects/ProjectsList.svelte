@@ -55,10 +55,10 @@
 
   // Data comes from the shared projectsData store — returning to the landing
   // page paints instantly from memory while the store revalidates in the
-  // background. Filters live in the shared projectFiltersStore so the sidebar
-  // sees the same selection; scroll restore and the search query are
-  // view-local but persist across visits via projectsListViewState; modal
-  // state stays in the component.
+  // background. Filters live in the shared projectFiltersStore and the
+  // search query in projectsListViewState, so the sidebar sees the same
+  // selection and query; scroll restore is view-local but persists across
+  // visits via that same state; modal state stays in the component.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);

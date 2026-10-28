@@ -205,12 +205,15 @@ class ProjectFiltersStore {
     return this._activeFilters.has(filterKey(filter));
   }
 
-  toggleFilter(filter: FilterKind, event?: MouseEvent): void {
-    this._activeFilters = toggleFilterKey(
-      this._activeFilters,
-      filterKey(filter),
-      event?.shiftKey ?? false
-    );
+  /**
+   * Chips pass their click event (shift = additive); callers without a
+   * click convention, like the sidebar's filter menu, state the intent
+   * directly with `{ additive }`. No argument means an exclusive select.
+   */
+  toggleFilter(filter: FilterKind, intent?: MouseEvent | { additive: boolean }): void {
+    const additive =
+      intent === undefined ? false : 'additive' in intent ? intent.additive : intent.shiftKey;
+    this._activeFilters = toggleFilterKey(this._activeFilters, filterKey(filter), additive);
   }
 
   clearFilters(): void {

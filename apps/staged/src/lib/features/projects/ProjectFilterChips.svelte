@@ -2,8 +2,8 @@
   ProjectFilterChips.svelte - Shared project-filter chip bar.
 
   Unread/running status chips plus one chip per repo, reading and toggling
-  projectFiltersStore directly so the landing page and the sidebar's filter
-  row can never drift. `compact` shrinks the chips for the narrow sidebar.
+  projectFiltersStore directly so the landing page and the sidebar's Filter
+  menu can never drift.
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -12,16 +12,9 @@
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
-
-  interface Props {
-    /** Smaller chips, tighter gaps for the narrow sidebar. */
-    compact?: boolean;
-  }
-
-  let { compact = false }: Props = $props();
 </script>
 
-<div class="filter-bar" class:compact>
+<div class="filter-bar">
   <button
     class="filter-chip"
     class:active={projectFiltersStore.isFilterActive('unread')}
@@ -63,7 +56,8 @@
     the bar itself: repo chips only exist for repos computeRepoFilters still
     sees (delete the last project using one and its filter stays active with
     no chip to click), and both status chips go disabled when their counts hit
-    0. The sidebar's ✕ covers desktop, but the sidebar is hidden on mobile.
+    0. The sidebar's Filter menu has its own Clear filters item, but the
+    sidebar is hidden on mobile.
   -->
   {#if projectFiltersStore.hasActiveFilters}
     <button
@@ -71,7 +65,7 @@
       title="Clear filters"
       onclick={() => projectFiltersStore.clearFilters()}
     >
-      <X size={compact ? 11 : 12} />
+      <X size={12} />
       Clear
     </button>
   {/if}
@@ -186,32 +180,9 @@
     color: inherit;
   }
 
-  .filter-bar.compact {
-    gap: 4px;
-    margin-bottom: 0;
-  }
-
-  .filter-bar.compact .filter-chip {
-    gap: 5px;
-    padding: 2px 8px;
-    font-size: var(--size-xs);
-  }
-
-  .filter-bar.compact .filter-chip.repo-filter {
-    font-size: 10px;
-  }
-
-  .filter-bar.compact .filter-count {
-    min-width: 15px;
-    height: 15px;
-    padding: 0 4px;
-    font-size: 10px;
-  }
-
-  /* The sidebar (compact) never renders on mobile, so only the landing-page
-     bar needs the swipeable single-row treatment. */
+  /* Swipeable single row on mobile. */
   @media (max-width: 640px) {
-    .filter-bar:not(.compact) {
+    .filter-bar {
       flex-wrap: nowrap;
       gap: 8px;
       overflow-x: auto;
@@ -219,7 +190,7 @@
       padding: 0 16px 4px;
     }
 
-    .filter-bar:not(.compact) .filter-chip {
+    .filter-bar .filter-chip {
       min-height: 36px;
     }
   }

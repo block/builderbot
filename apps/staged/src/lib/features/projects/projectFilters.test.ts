@@ -313,3 +313,37 @@ describe('hasRepoFilterKeys', () => {
     );
   });
 });
+
+describe('projectFiltersStore.toggleFilter', () => {
+  async function importStore() {
+    const { projectFiltersStore } = await importHelpers();
+    return projectFiltersStore;
+  }
+
+  it('selects exclusively with no intent', async () => {
+    const store = await importStore();
+    store.toggleFilter('unread');
+    store.toggleFilter('running');
+    expect(store.activeFilters).toEqual(new Set(['running']));
+  });
+
+  it('reads additive intent from a shift-click event (chip bar)', async () => {
+    const store = await importStore();
+    store.toggleFilter('unread', { shiftKey: false } as MouseEvent);
+    store.toggleFilter('running', { shiftKey: true } as MouseEvent);
+    expect(store.activeFilters).toEqual(new Set(['unread', 'running']));
+    store.toggleFilter({ repo: 'org/alpha', subpath: '' }, { shiftKey: false } as MouseEvent);
+    expect(store.activeFilters).toEqual(new Set(['repo:org/alpha:']));
+  });
+
+  it('takes an explicit { additive } option (filter menu)', async () => {
+    const store = await importStore();
+    store.toggleFilter('unread', { additive: true });
+    store.toggleFilter('running', { additive: true });
+    expect(store.activeFilters).toEqual(new Set(['unread', 'running']));
+    store.toggleFilter('unread', { additive: true });
+    expect(store.activeFilters).toEqual(new Set(['running']));
+    store.toggleFilter('unread', { additive: false });
+    expect(store.activeFilters).toEqual(new Set(['unread']));
+  });
+});

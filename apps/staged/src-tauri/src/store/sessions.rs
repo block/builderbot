@@ -372,11 +372,12 @@ impl Store {
     /// first, projected to the repo they are working in.
     ///
     /// Children are found through their artifact (commit / note / review)
-    /// rather than `sessions.branch_id`, which `start_repo_session` leaves
-    /// unstamped on the queued row. That artifact join is also what resolves
-    /// the child's kind, so a `child_note` (a note carrying
-    /// `parent_project_note_id`) reports as a plain `"note"` here — the badge
-    /// only needs to say what kind of work is in flight and where.
+    /// rather than `sessions.branch_id`. Both are stamped on the queued row
+    /// now, but the artifact join is what resolves the child's kind, so it is
+    /// also the branch link — one join, one source of truth for the badge. A
+    /// `child_note` (a note carrying `parent_project_note_id`) reports as a
+    /// plain `"note"` here — the badge only needs to say what kind of work is
+    /// in flight and where.
     ///
     /// Queued children are excluded: nothing is happening for them yet, so
     /// showing them under a spinner would misreport the parent's progress.

@@ -47,6 +47,20 @@ impl ResponseState {
         self.interrupted = false;
     }
 
+    /// The writer closed the streamed message mid-turn, with the turn going
+    /// on — a steered user row went in after it. Unlike [`Self::close_message`]
+    /// the streamed text is kept: the bridge aborts the generation a steer
+    /// pre-empts and still emits that cycle's `result`, whose final text is
+    /// the message just closed. With the buffer intact [`Self::accept_result`]
+    /// recognises it as already streamed instead of re-injecting the whole
+    /// message as a chunk after the user row. Only the id is dropped, so a
+    /// later chunk of the same message opens a row of its own rather than
+    /// resuming the closed one.
+    pub(super) fn detach_message(&mut self) {
+        self.message_id = None;
+        self.interrupted = false;
+    }
+
     pub(super) fn suppress_fallback(&mut self, text: &str) -> bool {
         if !self.fallback.is_empty() && self.fallback.starts_with(text) {
             self.fallback.drain(..text.len());

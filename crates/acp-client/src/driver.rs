@@ -1106,6 +1106,11 @@ pub struct AcpDriver {
     /// hold, so the client can present the wait. Only ever called with a
     /// `background_hold` configured.
     background_hold_observer: Option<BackgroundHoldObserver>,
+    /// Treat the agent as not advertising steering even when it does, so
+    /// every [`TurnControlHandle::steer`] is refused locally and callers take
+    /// the interrupt-and-reprompt path. See
+    /// [`AcpDriver::with_steering_disabled`].
+    steering_disabled: bool,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -1130,6 +1135,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                steering_disabled: false,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -1149,6 +1155,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                steering_disabled: false,
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -1169,6 +1176,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
     }
 
@@ -1193,6 +1201,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         })
     }
 
@@ -1272,6 +1281,18 @@ impl AcpDriver {
         observer: Option<BackgroundHoldObserver>,
     ) -> Self {
         self.background_hold_observer = observer;
+        self
+    }
+
+    /// Ignore the agent's steering advertisement: every
+    /// [`TurnControlHandle::steer`] on connections from this driver is refused
+    /// as if the agent lacked the extension, so a caller's fallback
+    /// ([`TurnControlHandle::interrupt_and_reprompt`]) is what delivers the
+    /// message. A diagnostics knob: it exercises the interrupt path against an
+    /// agent that would otherwise take the steer, which every supported agent
+    /// now does.
+    pub fn with_steering_disabled(mut self, disabled: bool) -> Self {
+        self.steering_disabled = disabled;
         self
     }
 }
@@ -2158,6 +2179,7 @@ impl AcpDriver {
         let auth_selection = auth_selection.cloned();
         let mcp_servers = self.mcp_servers.clone();
         let agent_label = self.agent_label.clone();
+        let steering_disabled = self.steering_disabled;
         let is_remote = self.is_remote;
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
@@ -2248,6 +2270,7 @@ impl AcpDriver {
                         auth_selection.as_ref(),
                         background_hold.as_ref(),
                         background_hold_observer.as_ref(),
+                        steering_disabled,
                         &child_exited,
                         &mut prompt_rx,
                         &mut hold_control_rx,
@@ -3103,8 +3126,8 @@ fn task_tracking_mode_from_initialize(meta: Option<&Meta>) -> TaskTrackingMode {
 /// `agentCapabilities`, not inside it): `_meta.steering.supported`.
 const STEERING_META_KEY: &str = "steering";
 
-/// Whether the agent advertised steering at initialize (claude-agent-acp
-/// ≥ 0.98, codex-acp ≥ 2.2). Anything missing or malformed is an agent without
+/// Whether the agent advertised steering at initialize (seen from
+/// claude-agent-acp 0.95 and codex-acp 2.2.2; absent from the 0.53 line). Anything missing or malformed is an agent without
 /// it, which [`TurnControlHandle::steer`] answers with an error so callers
 /// interrupt instead — the only safe gate with managed bridge versions that
 /// float.
@@ -4987,7 +5010,7 @@ fn serve_steer(
                     Ok(outcome) => {
                         log::info!("ACP session {session_id}: steer answered {outcome:?}");
                         handler.writer.finalize().await;
-                        handler.response.lock().await.close_message();
+                        handler.response.lock().await.detach_message();
                         handler.writer.record_user_message(&prompt, &images).await;
                     }
                     Err(e) => log::warn!("ACP session {session_id}: steer not injected: {e}"),
@@ -5010,8 +5033,14 @@ fn serve_steer(
 /// `session/prompt` after `session/cancel` before giving up on the re-prompt:
 /// a bridge that cannot acknowledge a cancel should not be handed a second
 /// prompt, so the turn then settles cancelled, as a plain cancel would.
-/// Mirrors the in-turn cancel's bound on the same response.
-const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Longer than the in-turn cancel's 5 s bound on the same response because
+/// the cost of expiring is different: a plain cancel that times out loses
+/// nothing the user wanted, an interrupt that times out drops the message it
+/// was made for. claude-agent-acp 0.95 answered the cancel of a turn with a
+/// `sleep 1` shell call in flight only after ~4 s — it lets the tool wind
+/// down first — and real tool calls run longer than that.
+const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the holding wait gives the bridge to process a `session/cancel`
 /// before teardown. Out-of-turn there is no prompt response to await, so this
@@ -5495,6 +5524,7 @@ async fn run_acp_session(
     auth_selection: Option<&AcpAuthenticationSelection>,
     background_hold: Option<&BackgroundHoldConfig>,
     background_hold_observer: Option<&BackgroundHoldObserver>,
+    steering_disabled: bool,
     child_exited: &CancellationToken,
     prompt_rx: &mut mpsc::UnboundedReceiver<QueuedSessionTurn>,
     hold_control_rx: &mut mpsc::UnboundedReceiver<StopAsyncTaskRequest>,
@@ -5517,7 +5547,7 @@ async fn run_acp_session(
             auth_selection,
         }),
     );
-    let setup = tokio::select! {
+    let mut setup = tokio::select! {
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
             return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
@@ -5532,6 +5562,12 @@ async fn run_acp_session(
                 })??
         }
     };
+    if steering_disabled && setup.steering_supported {
+        log::info!(
+            "ACP session {our_session_id}: steering disabled by the driver; steers will be refused"
+        );
+        setup.steering_supported = false;
+    }
 
     // If resuming, wait for replay to complete (content match OR idle timeout).
     // An absolute 10s timeout prevents a hang if the server sends zero replay
@@ -5580,7 +5616,11 @@ async fn run_acp_session(
             // already-established session.
             Some(turn) => turn,
             None => loop {
+                // Biased: a prompt already queued when nothing is in flight
+                // goes first; a control request that landed next to it has
+                // nothing to steer yet and becomes the turn after.
                 tokio::select! {
+                    biased;
                     _ = cancel_token.cancelled() => {
                         handler.cancel_pending_permissions();
                         return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
@@ -6785,8 +6825,14 @@ fn log_initialize_response(agent_label: &str, init_response: &InitializeResponse
         .unwrap_or_else(|_| "<unserializable>".to_string());
     let auth_methods = describe_auth_methods(&init_response.auth_methods);
 
+    let meta = init_response
+        .meta
+        .as_ref()
+        .map(|meta| serde_json::to_string(meta).unwrap_or_else(|_| "<unserializable>".to_string()))
+        .unwrap_or_else(|| "null".to_string());
+
     log::debug!(
-        "ACP initialized provider={agent_label} agent={agent_name} version={agent_version} protocol={} capabilities={} auth_methods=[{}]",
+        "ACP initialized provider={agent_label} agent={agent_name} version={agent_version} protocol={} capabilities={} auth_methods=[{}] _meta={meta}",
         init_response.protocol_version,
         capabilities,
         auth_methods
@@ -7077,6 +7123,7 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod real_bridge;
     mod response_completion;
     mod settlement;
     mod turn_control;
@@ -8749,6 +8796,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -8763,6 +8811,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_env_snapshot(snapshot);
 
@@ -8788,6 +8837,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_interpreter_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -8802,6 +8852,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_interpreter_env_snapshot(snapshot);
 

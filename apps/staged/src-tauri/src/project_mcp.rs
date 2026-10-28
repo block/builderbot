@@ -1766,6 +1766,174 @@ mod tests {
         );
     }
 
+    /// The tool's live half against the bridge Staged actually runs: the
+    /// session's real `MessageWriter` and `Store` behind an installed
+    /// `claude-agent-acp` (or `codex-acp`), its turn-control handle in the
+    /// registry the way the runner registers it, and
+    /// `continue_repo_session`'s routing and reply on top. Ignored by default
+    /// — it spawns the bridge as the local user and calls the model.
+    ///
+    /// ```sh
+    /// cargo test -p staged --lib continue_repo_session_live -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// `ACP_REAL_BRIDGE` picks the provider id (`claude` by default) and
+    /// `ACP_REAL_BRIDGE_DIR` the install dir (`~/.staged/packages/bin`). The
+    /// resume (`resumed`) and `queued` paths are not covered here: a resume
+    /// needs the app handle the tool carries, which tests cannot build.
+    async fn continue_repo_session_live(steering_disabled: bool, expected_delivery: &str) {
+        const LONG_TURN: &str = "Count from 1 to 40 slowly. For EACH number: first run the \
+            shell command `sleep 1` with your shell tool as its own separate tool call (never a \
+            loop, never a script), then write that number on its own line. Keep going until 40. \
+            Do not explain what you are doing.";
+        const FOLLOW_UP: &str = "Stop counting right now. Run the shell command `pwd` with your \
+            shell tool, then reply with exactly one line: FOLLOW-UP-DONE";
+
+        if let Some(dir) = std::env::var_os("ACP_REAL_BRIDGE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join(".staged/packages/bin"))
+            })
+            .filter(|dir| dir.is_dir())
+        {
+            acp_client::set_bundled_tools_dir(dir);
+        }
+        let provider = std::env::var("ACP_REAL_BRIDGE").unwrap_or_else(|_| "claude".to_string());
+        let driver = acp_client::AcpDriver::new(&provider)
+            .expect("the bridge must be installed (see the test docs)")
+            .with_env_snapshot(std::env::vars().collect())
+            .with_background_hold(crate::session_commands::default_background_hold())
+            .with_steering_disabled(steering_disabled);
+        let dir = std::env::temp_dir().join(format!(
+            "staged-continue-live-{}-{steering_disabled}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let f = ContinueFixture::running_note_session();
+        let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(
+            crate::agent::writer::MessageWriter::new(f.session.id.clone(), Arc::clone(&f.store)),
+        );
+        let acp_store: Arc<dyn acp_client::Store> = f.store.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let messages = || f.store.get_session_messages(&f.session.id).unwrap();
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut connection = driver
+                    .connect(
+                        &f.session.id,
+                        &dir,
+                        &acp_store,
+                        &writer,
+                        &cancel,
+                        None,
+                        &[],
+                        None,
+                    )
+                    .await
+                    .expect("bridge should spawn");
+                // What the turn loop does right after `connect`.
+                f.registry
+                    .set_turn_control_handle(&f.session.id, connection.turn_control_handle());
+                let settled_rx = connection.take_settled_receiver().unwrap();
+                let turn =
+                    tokio::task::spawn_local(
+                        async move { connection.prompt(LONG_TURN, &[]).await },
+                    );
+
+                // Into the turn: wait for its first transcript row, then a
+                // little longer so the agent is mid-work.
+                let started = std::time::Instant::now();
+                while messages().is_empty() {
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(90),
+                        "the agent never started working"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let rows_before = messages().len();
+
+                let payload = f.continue_with(FOLLOW_UP).await;
+                eprintln!("continue_repo_session reply: {payload:#}");
+                assert_eq!(payload["delivery"], expected_delivery);
+                assert_eq!(payload["state"], "running");
+                assert!(payload.get("reason").is_none());
+                assert_eq!(f.status(), SessionStatus::Running);
+                // The row the connection persisted is what the parent sees as
+                // the message having landed.
+                let user_rows: Vec<SessionMessage> = messages()
+                    .into_iter()
+                    .filter(|m| m.role == MessageRole::User)
+                    .collect();
+                assert_eq!(user_rows.len(), 1, "{user_rows:#?}");
+                assert_eq!(user_rows[0].content, FOLLOW_UP);
+                assert_eq!(
+                    payload["activity"]["last_user_message_at"],
+                    serde_json::json!(user_rows[0].created_at)
+                );
+
+                let outcome = tokio::time::timeout(std::time::Duration::from_secs(240), turn)
+                    .await
+                    .expect("the continued turn should end")
+                    .unwrap();
+                assert_eq!(outcome, Ok(acp_client::AgentRunOutcome::Completed));
+                // Still exactly one user row, after the interrupted work and
+                // before the reply to it; the row never left `running`.
+                let all = messages();
+                let user_at = all
+                    .iter()
+                    .position(|m| m.role == MessageRole::User)
+                    .unwrap();
+                assert_eq!(
+                    all.iter().filter(|m| m.role == MessageRole::User).count(),
+                    1
+                );
+                assert!(user_at >= rows_before.min(1), "{all:#?}");
+                let reply: String = all[user_at + 1..]
+                    .iter()
+                    .filter(|m| m.role == MessageRole::Assistant)
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    reply.contains("FOLLOW-UP-DONE"),
+                    "reply after the user row: {reply:?}"
+                );
+                assert_eq!(f.status(), SessionStatus::Running);
+                for m in &all {
+                    eprintln!(
+                        "  {:<10} | {}",
+                        m.role.as_str(),
+                        m.content.replace('\n', "⏎")
+                    );
+                }
+
+                cancel.cancel();
+                let settled = tokio::time::timeout(std::time::Duration::from_secs(30), settled_rx)
+                    .await
+                    .expect("teardown after cancel")
+                    .unwrap();
+                eprintln!("settled: {:?} / {:?}", settled.outcome, settled.reason);
+            })
+            .await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "spawns the installed ACP bridge and calls the model"]
+    async fn continue_repo_session_live_steers_a_running_session() {
+        continue_repo_session_live(false, "injected").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "spawns the installed ACP bridge and calls the model"]
+    async fn continue_repo_session_live_interrupts_when_steering_is_unavailable() {
+        continue_repo_session_live(true, "interrupted_and_reprompted").await;
+    }
+
     /// A session in its startup window (row `running`, no connection yet)
     /// that stays that way past the wait is reported blocked with a reason,
     /// still `running`, so the parent retries rather than restarting it.

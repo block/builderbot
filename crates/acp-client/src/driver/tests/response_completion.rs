@@ -433,6 +433,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     None,
                     if scenario == 7 { None } else { Some(&QUIESCENCE_PROBE) },
                     Some(&observer),
+                    false,
                     &child_exited,
                     &mut prompt_rx,
                     &mut control_rx,
@@ -612,6 +613,40 @@ async fn result_after_a_tool_call_ended_the_message_lands_in_a_new_row() {
     );
     assert!(writer.recorded_result());
     assert!(finish_requested(&handler));
+}
+
+/// A steer pre-empts the generation in flight: the bridge aborts that cycle
+/// and still emits its `result`, whose final text is the message the steer
+/// callback just closed (seen against claude-agent-acp 0.95, which then
+/// re-echoed the whole message as a new row after the user row). Detaching
+/// keeps the streamed text, so the result certifies it instead of
+/// re-injecting it, and the steered reply opens its own row.
+#[tokio::test]
+async fn result_of_a_cycle_a_steer_aborted_does_not_echo_the_closed_message() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "pong")).await;
+    // What `serve_steer`'s response callback does once the agent answers
+    // `injected`: close the row, detach it, record the user row.
+    handler.writer.finalize().await;
+    handler.response.lock().await.detach_message();
+    feed_sdk_frame(&handler, successful_result("aborted", "pong")).await;
+    feed(&handler, agent_text(Some("msg-2"), "RACE-DONE")).await;
+    feed_sdk_frame(&handler, successful_result("steered", "RACE-DONE")).await;
+
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("pong".into()),
+            RowFlow::Finalize,
+            // No second "pong": the aborted cycle's result matched the text
+            // already streamed. The steered reply starts a row of its own.
+            RowFlow::Finalize,
+            RowFlow::Append("RACE-DONE".into()),
+        ]
+    );
+    assert!(writer.recorded_result());
 }
 
 #[tokio::test]

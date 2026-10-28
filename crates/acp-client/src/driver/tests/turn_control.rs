@@ -633,6 +633,7 @@ where
                     None,
                     background_hold,
                     None,
+                    false,
                     &child_exited,
                     &mut prompt_rx,
                     &mut hold_control_rx,
@@ -740,6 +741,57 @@ async fn interrupt_cancels_the_turn_and_reprompts_on_the_same_connection() {
         matches!(outcomes[0], RequestPermissionOutcome::Selected(_)),
         "got: {:?}",
         outcomes[0]
+    );
+}
+
+/// A control request queued next to an already-queued `prompt()` (both land
+/// while setup is still running, say) does not jump it: the prompt is the
+/// turn, and the request is served inside it — here an interrupt, which
+/// cancels that turn and follows it. Seen against a real bridge, where the
+/// unbiased select sometimes made the message the first turn and the
+/// prompt the second.
+#[tokio::test(flavor = "current_thread")]
+async fn a_prompt_queued_before_a_control_request_goes_first() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        ..FakeAgent::default()
+    });
+
+    let (result, _reply_rx, stashed_reply, writer, _handler) = session_with(
+        &agent,
+        None,
+        |handle, agent, _writer, _handler| async move {
+            // No await before this: it is queued while setup is in flight,
+            // behind the prompt `session_with` queued before connecting.
+            let outcome = handle.interrupt_and_reprompt("second", &[]).await;
+            assert_eq!(outcome, Ok(()));
+            wait_until("both prompts", || agent.prompts().len() == 2).await;
+            assert_eq!(agent.prompts(), ["first", "second"]);
+            assert_eq!(
+                agent.cancels(),
+                1,
+                "the interrupt cancelled the queued prompt's turn"
+            );
+            agent.finish_prompt(StopReason::EndTurn);
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Ok((AgentRunOutcome::Completed, SessionSettleReason::Immediate))
+    );
+    assert_eq!(
+        writer
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, WriterCall::UserMessage(_)))
+            .count(),
+        1
+    );
+    assert!(
+        stashed_reply.is_some(),
+        "the prompt() for the first turn is still pending"
     );
 }
 

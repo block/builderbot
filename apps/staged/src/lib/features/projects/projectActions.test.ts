@@ -77,7 +77,12 @@ let clearBranchState: ReturnType<typeof vi.fn>;
 let toastError: ReturnType<typeof vi.fn>;
 let selectProject: ReturnType<typeof vi.fn>;
 let goHome: ReturnType<typeof vi.fn>;
-let navigationState: { selectedProjectId: string | null };
+let releaseProjectLayer: ReturnType<typeof vi.fn>;
+let navigationState: {
+  selectedProjectId: string | null;
+  homeActive: boolean;
+  projectLayer: { kind: 'project'; projectId: string } | null;
+};
 let projectDeleteStarted: ReturnType<typeof vi.fn>;
 let projectDeleteFailed: ReturnType<typeof vi.fn>;
 let ensureProjectHydrated: ReturnType<typeof vi.fn>;
@@ -121,7 +126,8 @@ beforeEach(() => {
   toastError = vi.fn();
   selectProject = vi.fn();
   goHome = vi.fn();
-  navigationState = { selectedProjectId: null };
+  releaseProjectLayer = vi.fn();
+  navigationState = { selectedProjectId: null, homeActive: true, projectLayer: null };
   projectDeleteStarted = vi.fn();
   projectDeleteFailed = vi.fn();
   // Default: the project is already hydrated, so ensuring it is a no-op.
@@ -149,6 +155,7 @@ beforeEach(() => {
     navigation: navigationState,
     selectProject,
     goHome,
+    releaseProjectLayer,
   }));
   vi.doMock('../../stores/projectsData.svelte', () => ({
     projectsDataStore: {
@@ -689,5 +696,54 @@ describe('navigation on delete', () => {
     expect(selectProject).not.toHaveBeenCalled();
     expect(goHome).not.toHaveBeenCalled();
     expect(deleteProject).toHaveBeenCalledWith('p1');
+  });
+
+  it('releases the retained project layer as soon as the delete starts', async () => {
+    // Deleting from the home grid: nothing is selected, but the project may
+    // be the one retained under home. The release precedes the backend call.
+    navigationState.selectedProjectId = null;
+    let releasedBeforeDelete = false;
+    deleteProject.mockImplementation(async () => {
+      releasedBeforeDelete = releaseProjectLayer.mock.calls.length === 1;
+    });
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(releaseProjectLayer).toHaveBeenCalledWith('p1');
+    expect(releasedBeforeDelete).toBe(true);
+  });
+
+  it('releases the layer of the on-screen project after going home', async () => {
+    // Deleting the last project while it is on screen: goHome() leaves the
+    // layer naming the deleted project, and the real releaseProjectLayer only
+    // acts once home is active, so the release has to follow the navigation.
+    // The mock mirrors that guard so the end state is what the app would see.
+    navigationState.selectedProjectId = 'p1';
+    navigationState.homeActive = false;
+    navigationState.projectLayer = { kind: 'project', projectId: 'p1' };
+    goHome.mockImplementation(() => {
+      navigationState.homeActive = true;
+      navigationState.selectedProjectId = null;
+    });
+    releaseProjectLayer.mockImplementation((projectId: string) => {
+      const layer = navigationState.projectLayer;
+      if (!navigationState.homeActive || layer?.projectId !== projectId) return;
+      navigationState.projectLayer = null;
+    });
+    // Starts undefined so a delete that never ran fails the null check too.
+    let layerAtDelete: { kind: 'project'; projectId: string } | null | undefined;
+    deleteProject.mockImplementation(async () => {
+      layerAtDelete = navigationState.projectLayer;
+    });
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(project());
+
+    expect(goHome.mock.invocationCallOrder[0]).toBeLessThan(
+      releaseProjectLayer.mock.invocationCallOrder[0]
+    );
+    expect(layerAtDelete).toBeNull();
+    expect(navigationState.homeActive).toBe(true);
   });
 });

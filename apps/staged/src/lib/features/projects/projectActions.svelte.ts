@@ -17,7 +17,12 @@ import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
 import type { Project } from '../../types';
 import { projectDisplayName } from '../../shared/utils';
-import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
+import {
+  goHome,
+  navigation,
+  releaseProjectLayer,
+  selectProject,
+} from '../layout/navigation.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
@@ -163,6 +168,15 @@ class ProjectActionsController {
         goHome();
       }
     }
+
+    // Drop the project's layer as soon as the delete starts, so it unmounts
+    // now rather than sit clipped under home showing "Deleting…" until the
+    // backend echo prunes the project. releaseProjectLayer only acts while
+    // home is active, so this runs after the navigation above: a project
+    // retained under home is released as is, the on-screen project whose
+    // goHome() just made home active is released too, and after
+    // selectProject(next) the layer already names `next`, so it is a no-op.
+    releaseProjectLayer(id);
 
     try {
       await commands.deleteProject(id);

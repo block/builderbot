@@ -22,7 +22,8 @@
   import type { HashtagItem, ProjectRepo, Session } from '../../types';
   import type { LinkedNoteContext } from './noteFreshness';
   import type { DisplayRootInput } from './pathDisplayRoots';
-  import SessionChatPane from './SessionChatPane.svelte';
+  import PooledSessionChatPane from './PooledSessionChatPane.svelte';
+  import type { SessionPaneExports } from './sessionPanePool.svelte';
   import { stripXmlTags } from './sessionModalHelpers';
 
   interface Props {
@@ -47,14 +48,6 @@
     onHashtagClick?: (click: HashtagClickInfo) => void;
   }
 
-  type SearchablePane = {
-    performSearch: (query: string) => void;
-    nextMatch: () => void;
-    previousMatch: () => void;
-    clearSearch: () => void;
-    close: () => void;
-  };
-
   let {
     open,
     sessionId,
@@ -71,7 +64,9 @@
     onHashtagClick,
   }: Props = $props();
 
-  let pane = $state<SearchablePane | null>(null);
+  // The adopted pane while it is attached; null before the first attach and
+  // once the pool has it back.
+  let pane = $state<SessionPaneExports | null>(null);
   let session = $state<Session | null>(null);
   let searchVisible = $state(false);
   let matchCount = $state(0);
@@ -182,8 +177,8 @@
       </div>
     </header>
 
-    <SessionChatPane
-      bind:this={pane}
+    <PooledSessionChatPane
+      onPane={(next) => (pane = next)}
       active={open}
       {sessionId}
       {repoDir}

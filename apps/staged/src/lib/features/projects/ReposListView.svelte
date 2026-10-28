@@ -12,10 +12,11 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import RepoCard from './RepoCard.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import SearchField from '../../shared/SearchField.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
-  import { onWorkspaceParked, selectProject } from '../layout/navigation.svelte';
+  import { onViewHidden, selectProject } from '../layout/navigation.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
 
   // Served from the shared home-repos cache: revisits paint instantly from
@@ -27,10 +28,15 @@
   let showNewProjectModal = $state(false);
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
 
-  // Parked under settings or the diff view, the modal would stay open above them.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over this view, or parked under settings / the
+  // diff view), the modal would stay open on top.
+  onViewHidden(() => {
     showNewProjectModal = false;
   });
+
+  // The workspace's project layer (App.svelte); the home grid stays mounted
+  // under it, so window-level requests need to know which view is on screen.
+  const layer = useWorkspaceLayer();
 
   function repoKey(r: RepoHomeItem): string {
     return `${r.githubRepo}:${r.subpath}`;
@@ -53,9 +59,10 @@
   onMount(() => {
     void projectsDataStore.ensureHomeReposLoaded();
 
-    // This view replaces ProjectsList/ProjectHome (the other listeners for
-    // this event), so it must handle new-project requests itself.
+    // This view replaces ProjectHome (and covers ProjectsList, which stays
+    // mounted but hidden), so it must handle new-project requests itself.
     const onNewProject = (event: Event) => {
+      if (!layer.visible) return;
       newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
       showNewProjectModal = true;
     };

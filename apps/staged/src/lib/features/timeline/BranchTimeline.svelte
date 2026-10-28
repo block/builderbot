@@ -53,6 +53,7 @@
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
 
   type PendingItem = {
     key: string;
@@ -382,6 +383,15 @@
 
   $effect(() => {
     liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
+  });
+
+  // The card stays mounted while home covers its project (and while the
+  // workspace is parked under settings / the diff view); the hint poller's
+  // get_session* round trips are for rows nobody can see, so pause it there
+  // and resume — polling at once — on return.
+  const layer = useWorkspaceLayer();
+  $effect(() => {
+    liveSessionHintPoller.setPaused(!layer.visible);
   });
 
   onDestroy(() => {

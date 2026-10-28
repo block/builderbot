@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { useWorkspaceLayer } from '../features/layout/workspaceLayer';
+
   interface Props {
     size?: number;
     color?: string;
@@ -9,11 +11,17 @@
   let phase = $state(0);
   let svgEl: SVGSVGElement;
 
+  // The home grid stays mounted, covered, under a project (App.svelte); the
+  // intersection observer below still sees its waves as in the viewport.
+  const layer = useWorkspaceLayer();
+
   // The wave only needs to animate while it's actually on screen. Gating the
-  // rAF loop on document visibility and viewport intersection stops it from
-  // keeping the compositor warm when the tab is backgrounded or the element is
-  // scrolled out of view.
+  // rAF loop on document visibility, viewport intersection and the layer
+  // stops it from keeping the compositor warm when the tab is backgrounded,
+  // the element is scrolled out of view or its layer is hidden. Reading
+  // `layer.visible` here re-runs the effect — stop, then start — on a flip.
   $effect(() => {
+    const layerVisible = layer.visible;
     let id: number | undefined;
     let t0: number | undefined;
     let documentVisible = document.visibilityState !== 'hidden';
@@ -26,7 +34,7 @@
     }
 
     function start() {
-      if (id === undefined && documentVisible && inViewport) {
+      if (id === undefined && layerVisible && documentVisible && inViewport) {
         t0 = undefined;
         id = requestAnimationFrame(tick);
       }

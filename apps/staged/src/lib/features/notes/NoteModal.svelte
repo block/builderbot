@@ -39,7 +39,7 @@
   import { listenToEvent } from '../../transport';
   import { notesChangeAffectsNote } from './noteRefresh';
   import { formatChatButtonLabel, type LinkedNoteContext } from '../sessions/noteFreshness';
-  import SessionChatPane from '../sessions/SessionChatPane.svelte';
+  import PooledSessionChatPane from '../sessions/PooledSessionChatPane.svelte';
   import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
@@ -793,7 +793,7 @@
 
       {#if sessionId && chatOpen}
         <aside id="note-modal-chat-pane" class="chat-pane" aria-label="Chat">
-          <SessionChatPane
+          <PooledSessionChatPane
             compact
             active={chatOpen}
             {sessionId}

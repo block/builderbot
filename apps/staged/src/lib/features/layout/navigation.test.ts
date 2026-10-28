@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 let windowLabel: string | null;
 let getStoreValue: ReturnType<typeof vi.fn>;
+let initPersistentStore: ReturnType<typeof vi.fn>;
 let setStoreValue: ReturnType<typeof vi.fn>;
 let writeSnapshot: ReturnType<typeof vi.fn>;
 let clearSnapshot: ReturnType<typeof vi.fn>;
@@ -29,6 +30,7 @@ beforeEach(() => {
 
   windowLabel = 'main';
   getStoreValue = vi.fn().mockResolvedValue(null);
+  initPersistentStore = vi.fn().mockResolvedValue(undefined);
   setStoreValue = vi.fn().mockResolvedValue(undefined);
   writeSnapshot = vi.fn();
   clearSnapshot = vi.fn();
@@ -47,6 +49,7 @@ beforeEach(() => {
   }));
   vi.doMock('../../shared/persistentStore', () => ({
     getStoreValue,
+    initPersistentStore,
     setStoreValue,
   }));
   vi.doMock('../../shared/webSnapshot', () => ({
@@ -72,8 +75,200 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.resetAllMocks();
+});
+
+describe('restoreInitialRoute', () => {
+  it('pushes the stored project before settling on an untouched Tauri stack', async () => {
+    windowLabel = 'main';
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, navigation } = await importNavigation();
+    expect(navigation.initialRouteSettled).toBe(false);
+
+    await restoreInitialRoute();
+
+    expect(initPersistentStore).toHaveBeenCalledTimes(1);
+    expect(getStoreValue).toHaveBeenCalledWith('last-viewed-project');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.selectedProjectId).toBe('p1');
+    expect(navigation.canGoBack).toBe(true);
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('settles at the root when the stored value is null', async () => {
+    getStoreValue.mockResolvedValueOnce(null);
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(navigation.selectedProjectId).toBeNull();
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('settles on timeout when the store read hangs after init', async () => {
+    vi.useFakeTimers();
+    getStoreValue.mockReturnValueOnce(new Promise(() => {}));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreInitialRoute, navigation, INITIAL_ROUTE_TIMEOUT_MS } = await importNavigation();
+
+    const restore = restoreInitialRoute();
+    await vi.advanceTimersByTimeAsync(INITIAL_ROUTE_TIMEOUT_MS - 1);
+    expect(navigation.initialRouteSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await restore;
+
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits out a slow store init and still restores the route', async () => {
+    // The realistic degradation: preferences_store_path + load() are slow
+    // (cold disk, remote web), but the key read is in-memory once init lands.
+    // `<main>` is gated on preferences.loaded, which waits on the same init,
+    // so the timeout must not start until init resolves.
+    vi.useFakeTimers();
+    let resolveInit!: () => void;
+    initPersistentStore.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveInit = resolve;
+      })
+    );
+    getStoreValue.mockResolvedValueOnce('p1');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreInitialRoute, navigation, INITIAL_ROUTE_TIMEOUT_MS } = await importNavigation();
+
+    const restore = restoreInitialRoute();
+    await vi.advanceTimersByTimeAsync(INITIAL_ROUTE_TIMEOUT_MS * 3);
+    // Init is still pending: nothing read, nothing settled, no timeout fired.
+    expect(getStoreValue).not.toHaveBeenCalled();
+    expect(navigation.initialRouteSettled).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+
+    resolveInit();
+    await restore;
+
+    expect(getStoreValue).toHaveBeenCalledWith('last-viewed-project');
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('settles when the store read rejects', async () => {
+    getStoreValue.mockRejectedValueOnce(new Error('store down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a web-snapshot-seeded stack alone', async () => {
+    snapshotProjectId = 'p1';
+    windowLabel = null;
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(initPersistentStore).not.toHaveBeenCalled();
+    expect(getStoreValue).not.toHaveBeenCalled();
+    expect(navigation.detailStack).toEqual([
+      { kind: 'projects' },
+      { kind: 'project', projectId: 'p1' },
+    ]);
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('leaves secondary windows unchanged', async () => {
+    windowLabel = 'win-2';
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(initPersistentStore).not.toHaveBeenCalled();
+    expect(getStoreValue).not.toHaveBeenCalled();
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(navigation.initialRouteSettled).toBe(true);
+    // The grid is this window's base route until a seed lands, so it must be
+    // retained here or a window with no seed renders two empty layers.
+    expect(navigation.homeLayerRetained).toBe(true);
+  });
+
+  // A secondary window settles at the root before initNavigation reads its
+  // seed. If the seed never lands the grid is all the window has, so the
+  // settle must have retained it: there is no Back affordance at the root to
+  // trigger a goHome that would.
+  it.each([
+    ['rejects', () => takeWindowSeed.mockRejectedValueOnce(new Error('no seed'))],
+    ['is null', () => takeWindowSeed.mockResolvedValueOnce(null)],
+    [
+      'names a deleted project',
+      () => {
+        takeWindowSeed.mockResolvedValueOnce('gone');
+        projectsStoreMock.loaded = true;
+        projectsStoreMock.projects = [{ id: 'p1' }];
+      },
+    ],
+  ])('keeps the grid for a secondary window whose seed %s', async (_, arrange) => {
+    windowLabel = 'win-2';
+    arrange();
+    const { restoreInitialRoute, initNavigation, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+    await initNavigation();
+
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.initialRouteSettled).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
+  });
+
+  it('does not override navigation that happened while the store was read', async () => {
+    let resolveRead!: (value: string) => void;
+    getStoreValue.mockReturnValueOnce(
+      new Promise<string>((resolve) => {
+        resolveRead = resolve;
+      })
+    );
+    const { restoreInitialRoute, selectProject, navigation } = await importNavigation();
+
+    const restore = restoreInitialRoute();
+    selectProject('p2');
+    resolveRead('p1');
+    await restore;
+
+    expect(navigation.selectedProjectId).toBe('p2');
+    expect(navigation.initialRouteSettled).toBe(true);
+  });
+
+  it('hands a restored project to initNavigation as a seeded stack', async () => {
+    getStoreValue.mockResolvedValueOnce('p1');
+    projectsStoreMock.loaded = true;
+    projectsStoreMock.projects = [{ id: 'p2' }];
+    const { restoreInitialRoute, initNavigation, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+    await initNavigation();
+
+    // Validation reused the pushed route rather than re-reading the store,
+    // and backed out because the project is gone.
+    expect(getStoreValue).toHaveBeenCalledTimes(1);
+    expect(navigation.detailStack).toEqual([{ kind: 'projects' }]);
+    expect(setStoreValue).toHaveBeenCalledWith('last-viewed-project', null);
+  });
 });
 
 describe('initial project restore', () => {
@@ -315,5 +510,170 @@ describe('parked workspace', () => {
     popDetailRoute();
     expect(navigation.currentRoute).toEqual({ kind: 'project', projectId: 'p1' });
     expect(navigation.workspaceParked).toBe(false);
+  });
+});
+
+describe('workspace layers', () => {
+  // The workspace is two stacked layers (App.svelte): the home grid, mounted
+  // once `homeLayerRetained` and active while `homeActive`, and the project
+  // layer, holding the last project / repos base route in `projectLayer`.
+
+  it('seeds a cold Tauri start at the root with nothing retained until the route settles', async () => {
+    getStoreValue.mockResolvedValueOnce('p1');
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(false);
+    expect(navigation.projectLayer).toBeNull();
+
+    await restoreInitialRoute();
+
+    // Restored into a project: the grid was never shown, so it isn't retained.
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.homeLayerRetained).toBe(false);
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+  });
+
+  it('retains home once a start without a persisted project settles at the root', async () => {
+    getStoreValue.mockResolvedValueOnce(null);
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    await restoreInitialRoute();
+
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
+    expect(navigation.projectLayer).toBeNull();
+  });
+
+  it('seeds the project layer from the web snapshot without retaining home', async () => {
+    snapshotProjectId = 'p1';
+    windowLabel = null;
+    const { restoreInitialRoute, navigation } = await importNavigation();
+
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+
+    await restoreInitialRoute();
+    expect(navigation.homeLayerRetained).toBe(false);
+  });
+
+  it('goHome keeps the project layer and activates and retains home', async () => {
+    const { restoreInitialRoute, selectProject, goHome, navigation } = await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+    const layer = navigation.projectLayer;
+
+    goHome();
+
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.homeLayerRetained).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    expect(navigation.selectedProjectId).toBeNull();
+  });
+
+  it('keeps the layer object identity while the project is unchanged and replaces it otherwise', async () => {
+    const { restoreInitialRoute, selectProject, goHome, showAllRepos, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+
+    selectProject('p1');
+    const p1 = navigation.projectLayer;
+    expect(p1).toEqual({ kind: 'project', projectId: 'p1' });
+    goHome();
+    selectProject('p1');
+    expect(navigation.projectLayer).toBe(p1);
+
+    goHome();
+    selectProject('p2');
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p2' });
+    expect(navigation.homeActive).toBe(false);
+
+    showAllRepos();
+    const repos = navigation.projectLayer;
+    expect(repos).toEqual({ kind: 'repos' });
+    goHome();
+    showAllRepos();
+    expect(navigation.projectLayer).toBe(repos);
+  });
+
+  it('keeps both layers through settings and a diff over home', async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const {
+      restoreInitialRoute,
+      selectProject,
+      goHome,
+      openSettings,
+      openDiffRoute,
+      popDetailRoute,
+      navigation,
+    } = await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+    goHome();
+    const layer = navigation.projectLayer;
+
+    openSettings();
+    expect(navigation.workspaceParked).toBe(true);
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    popDetailRoute();
+
+    // A diff that names a project no longer mounts that project's view under
+    // it: the layers follow the base route, which is still home.
+    openDiffRoute({ branchId: 'b1' });
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    openDiffRoute({ branchId: 'b2', projectId: 'p2' });
+    expect(navigation.currentRoute.kind).toBe('diff');
+    expect(navigation.selectedProjectId).toBe('p2');
+    expect(navigation.homeActive).toBe(true);
+    expect(navigation.projectLayer).toBe(layer);
+    popDetailRoute();
+    expect(navigation.homeActive).toBe(true);
+  });
+
+  it('keeps home inactive and unparks back to the project under settings and a diff', async () => {
+    vi.stubGlobal('window', { dispatchEvent: vi.fn() });
+    const {
+      restoreInitialRoute,
+      selectProject,
+      openSettings,
+      openDiffRoute,
+      popDetailRoute,
+      navigation,
+    } = await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+    const layer = navigation.projectLayer;
+
+    openDiffRoute({ branchId: 'b1', projectId: 'p1' });
+    openSettings();
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toBe(layer);
+    popDetailRoute();
+    popDetailRoute();
+    expect(navigation.homeActive).toBe(false);
+    expect(navigation.projectLayer).toBe(layer);
+  });
+
+  it('releases the project layer only on home with a matching id', async () => {
+    const { restoreInitialRoute, selectProject, goHome, releaseProjectLayer, navigation } =
+      await importNavigation();
+    await restoreInitialRoute();
+    selectProject('p1');
+
+    // On the project itself, the layer is the view on screen.
+    releaseProjectLayer('p1');
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+
+    goHome();
+    releaseProjectLayer('p2');
+    expect(navigation.projectLayer).toEqual({ kind: 'project', projectId: 'p1' });
+    releaseProjectLayer('p1');
+    expect(navigation.projectLayer).toBeNull();
+
+    // Nothing to release: a no-op rather than a throw.
+    releaseProjectLayer('p1');
+    expect(navigation.projectLayer).toBeNull();
   });
 });

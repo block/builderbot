@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RunningActionInfo } from '../features/actions/actions';
+import type {
+  ActionStatusEvent,
+  RunningActionSnapshot,
+  RunPhase,
+  RunPhaseChangedEvent,
+} from '../features/actions/actions';
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -17,8 +22,12 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function runAction(branchId: string, executionId: string): RunningActionInfo {
-  return { executionId, actionType: 'run', branchId } as RunningActionInfo;
+function runAction(
+  branchId: string,
+  executionId: string,
+  phase: RunPhase | null = { type: 'running', endpoint: null }
+): RunningActionSnapshot {
+  return { executionId, actionType: 'run', branchId, phase } as RunningActionSnapshot;
 }
 
 /** Flush enough microtasks for the store's chained awaits to settle. */
@@ -26,12 +35,22 @@ async function settle(): Promise<void> {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-let getRunningBranchActions: ReturnType<typeof vi.fn>;
-let getRunPhase: ReturnType<typeof vi.fn>;
-let requests: Map<string, Deferred<RunningActionInfo[]>[]>;
+/** Yield a macrotask, the way one project's branch response follows another. */
+const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-function requestsFor(branchId: string): Deferred<RunningActionInfo[]>[] {
-  return requests.get(branchId) ?? [];
+let invokeCommand: ReturnType<typeof vi.fn>;
+/** One deferred per `get_all_running_actions` wave, in call order. */
+let waves: Deferred<RunningActionSnapshot[]>[];
+/** The callbacks the store registered with the (mocked) event listeners. */
+let emitActionStatus: (event: ActionStatusEvent) => void;
+let emitRunPhaseChanged: (event: RunPhaseChangedEvent) => void;
+
+function statusEvent(
+  branchId: string,
+  executionId: string,
+  status: ActionStatusEvent['status']
+): ActionStatusEvent {
+  return { executionId, branchId, actionType: 'run', status } as ActionStatusEvent;
 }
 
 async function importStore() {
@@ -39,31 +58,56 @@ async function importStore() {
   return projectRunActionsStore;
 }
 
+/**
+ * Hydrate and flush the microtask the bulk helper defers before invoking.
+ * Wrapped in an object so the still-pending hydration isn't flattened into
+ * the returned promise.
+ */
+async function hydrate(
+  store: Awaited<ReturnType<typeof importStore>>,
+  branches: Map<string, never>
+): Promise<{ done: Promise<void> }> {
+  const done = store.hydrateFromProjectBranches(branches);
+  await settle();
+  return { done };
+}
+
 beforeEach(() => {
   vi.resetModules();
   vi.stubGlobal('$state', (initial: unknown) => initial);
-  requests = new Map();
-  getRunningBranchActions = vi.fn((branchId: string) => {
-    const d = deferred<RunningActionInfo[]>();
-    requests.set(branchId, [...requestsFor(branchId), d]);
+  waves = [];
+  invokeCommand = vi.fn((command: string) => {
+    if (command !== 'get_all_running_actions') throw new Error(`unexpected command ${command}`);
+    const d = deferred<RunningActionSnapshot[]>();
+    waves.push(d);
     return d.promise;
   });
-  getRunPhase = vi.fn().mockResolvedValue({ type: 'running' });
+  vi.doMock('../transport', () => ({ invokeCommand, isTauri: true }));
+  const notListening = () => {
+    throw new Error('store is not listening');
+  };
+  emitActionStatus = notListening;
+  emitRunPhaseChanged = notListening;
   vi.doMock('../features/actions/actions', () => ({
-    getRunningBranchActions,
-    getRunPhase,
-    listenToActionStatus: vi.fn(() => () => {}),
-    listenToRunPhaseChanged: vi.fn(() => () => {}),
+    listenToActionStatus: vi.fn((callback: typeof emitActionStatus) => {
+      emitActionStatus = callback;
+      return () => {};
+    }),
+    listenToRunPhaseChanged: vi.fn((callback: typeof emitRunPhaseChanged) => {
+      emitRunPhaseChanged = callback;
+      return () => {};
+    }),
   }));
 });
 
 afterEach(() => {
+  vi.doUnmock('../transport');
   vi.doUnmock('../features/actions/actions');
   vi.unstubAllGlobals();
 });
 
 describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
-  it('issues one request per branch across overlapping calls', async () => {
+  it('issues one snapshot request across overlapping calls', async () => {
     const store = await importStore();
     const branches = new Map([
       ['p1', [{ id: 'b1' }, { id: 'b2' }] as never],
@@ -71,23 +115,75 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
     ]);
 
     const first = store.hydrateFromProjectBranches(branches);
-    // Second call arrives while every request from the first is still in flight.
+    // Second call arrives while the first's request is still in flight.
     const second = store.hydrateFromProjectBranches(
       new Map([...branches, ['p3', [{ id: 'b4' }] as never]])
     );
+    await settle();
 
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(4);
-    for (const id of ['b1', 'b2', 'b3', 'b4']) expect(requestsFor(id)).toHaveLength(1);
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
+    expect(invokeCommand).toHaveBeenCalledWith('get_all_running_actions');
 
-    requestsFor('b1')[0].resolve([runAction('b1', 'e1')]);
-    for (const id of ['b2', 'b3', 'b4']) requestsFor(id)[0].resolve([]);
+    waves[0].resolve([runAction('b1', 'e1')]);
     await Promise.all([first, second]);
 
-    // Once settled, the same branches are not requested again.
-    await store.hydrateFromProjectBranches(branches);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(4);
+    // Once settled, nothing is requested again.
+    await hydrate(store, branches);
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
     expect(store.getRunActionPhase('p1')).toBe('running');
     expect(store.getRunActionPhase('p2')).toBeNull();
+    expect(store.getRunActionPhase('p3')).toBeNull();
+  });
+
+  it('hydrates 103 branches arriving project by project with a single invoke', async () => {
+    const store = await importStore();
+    // Startup shape: the data store reassigns branchesByProject once per
+    // project response, each in its own task, growing the membership every
+    // time. The snapshot resolves part-way through.
+    const branches = new Map<string, never>();
+    let total = 0;
+    for (let p = 0; p < 50; p++) {
+      const ids = p < 3 ? [`b${p}-0`, `b${p}-1`, `b${p}-2`] : [`b${p}-0`, `b${p}-1`];
+      total += ids.length;
+      branches.set(`p${p}`, ids.map((id) => ({ id })) as never);
+      void store.hydrateFromProjectBranches(new Map(branches));
+      if (p === 10) {
+        await settle();
+        waves[0].resolve([runAction('b7-1', 'e1'), runAction('b40-0', 'e2', { type: 'building' })]);
+      }
+      await nextTask();
+    }
+    expect(total).toBe(103);
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
+    expect(store.getRunActionPhase('p7')).toBe('running');
+    // p40 loaded after the snapshot had been applied; its execution was in
+    // the snapshot all along and surfaces now that the map knows the branch.
+    expect(store.getRunActionPhase('p40')).toBe('building');
+    expect(store.getRunActionPhase('p8')).toBeNull();
+  });
+
+  it('takes the phase from the snapshot and treats a null phase as building', async () => {
+    const store = await importStore();
+    const { done } = await hydrate(
+      store,
+      new Map([
+        ['p1', [{ id: 'b1' }] as never],
+        ['p2', [{ id: 'b2' }] as never],
+        ['p3', [{ id: 'b3' }] as never],
+      ])
+    );
+    waves[0].resolve([
+      runAction('b1', 'e1', { type: 'building' }),
+      runAction('b2', 'e2', null),
+      // Non-run actions on a branch never surface as a run badge.
+      { ...runAction('b3', 'e3'), actionType: 'test' } as RunningActionSnapshot,
+    ]);
+    await done;
+    expect(store.getRunActionPhase('p1')).toBe('building');
+    expect(store.getRunActionPhase('p2')).toBe('building');
+    expect(store.getRunActionPhase('p3')).toBeNull();
+    // The snapshot carried every phase inline: no per-execution follow-up.
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
   });
 
   it('awaits the in-flight request instead of resolving early for a concurrent caller', async () => {
@@ -101,12 +197,11 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
       .then(() => {
         secondDone = true;
       });
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
-    requestsFor('b2')[0].resolve([]);
     await settle();
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
     expect(secondDone).toBe(false);
 
-    requestsFor('b1')[0].resolve([runAction('b1', 'e1')]);
+    waves[0].resolve([runAction('b1', 'e1')]);
     await second;
     expect(store.getRunActionPhase('p1')).toBe('running');
   });
@@ -114,80 +209,127 @@ describe('projectRunActionsStore.hydrateFromProjectBranches', () => {
   it('skips the call entirely when the project/branch membership is unchanged', async () => {
     const store = await importStore();
     const updateBranchProjectMap = vi.spyOn(store, 'updateBranchProjectMap');
-    const first = store.hydrateFromProjectBranches(
+    const { done: first } = await hydrate(
+      store,
       new Map([
         ['p1', [{ id: 'b1', name: 'main' }] as never],
         ['p2', [{ id: 'b2' }] as never],
       ])
     );
     expect(updateBranchProjectMap).toHaveBeenCalledTimes(1);
-    requestsFor('b1')[0].resolve([runAction('b1', 'e1')]);
-    requestsFor('b2')[0].resolve([]);
+    waves[0].resolve([runAction('b1', 'e1')]);
     await first;
 
     // The data store hands over a fresh Map (new Branch objects, different
     // project order) on every reassignment; same membership, so no work.
-    await store.hydrateFromProjectBranches(
+    await hydrate(
+      store,
       new Map([
         ['p2', [{ id: 'b2' }] as never],
         ['p1', [{ id: 'b1', name: 'main*' }] as never],
       ])
     );
     expect(updateBranchProjectMap).toHaveBeenCalledTimes(1);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
     expect(store.getRunActionPhase('p1')).toBe('running');
 
-    // A membership change re-enters: the map is rebuilt and only the new
-    // branch is requested.
-    const grown = store.hydrateFromProjectBranches(
+    // A membership change re-enters and rebuilds the map; the snapshot has
+    // already been applied, so no request is needed for the new branch.
+    await hydrate(
+      store,
       new Map([
         ['p1', [{ id: 'b1' }] as never],
         ['p2', [{ id: 'b2' }, { id: 'b3' }] as never],
       ])
     );
     expect(updateBranchProjectMap).toHaveBeenCalledTimes(2);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(3);
-    requestsFor('b3')[0].resolve([runAction('b3', 'e3')]);
-    await grown;
-    expect(store.getRunActionPhase('p2')).toBe('running');
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
+    expect(store.getRunActionPhase('p2')).toBeNull();
   });
 
-  it('retries a branch whose request was rejected', async () => {
+  it('retries after a rejected request', async () => {
     const store = await importStore();
     const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
 
-    const first = store.hydrateFromProjectBranches(branches);
-    requestsFor('b1')[0].reject(new Error('backend down'));
+    const { done: first } = await hydrate(store, branches);
+    waves[0].reject(new Error('backend down'));
     await first;
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(1);
+    expect(invokeCommand).toHaveBeenCalledTimes(1);
 
     // Same membership as the failed call: the rejection must have invalidated
-    // the early-out so this one re-requests the branch.
-    const retry = store.hydrateFromProjectBranches(branches);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
-    requestsFor('b1')[1].resolve([runAction('b1', 'e1')]);
+    // the early-out so this one re-requests.
+    const { done: retry } = await hydrate(store, branches);
+    expect(invokeCommand).toHaveBeenCalledTimes(2);
+    waves[1].resolve([runAction('b1', 'e1')]);
     await retry;
     expect(store.getRunActionPhase('p1')).toBe('running');
 
     // And a successful hydration is not retried.
-    await store.hydrateFromProjectBranches(branches);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
+    await hydrate(store, branches);
+    expect(invokeCommand).toHaveBeenCalledTimes(2);
   });
 
-  it('drops an in-flight answer after stopListening and re-requests the branch next time', async () => {
+  it('keeps a phase that advanced while the snapshot was in flight', async () => {
+    const store = await importStore();
+    store.startListening();
+    const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
+
+    const { done } = await hydrate(store, branches);
+    emitActionStatus(statusEvent('b1', 'e1', 'running'));
+    emitRunPhaseChanged({
+      executionId: 'e1',
+      branchId: 'b1',
+      actionName: 'dev',
+      phase: { type: 'running', endpoint: null },
+    });
+    expect(store.getRunActionPhase('p1')).toBe('running');
+
+    // The snapshot was taken before the backend classified the run.
+    waves[0].resolve([runAction('b1', 'e1', null)]);
+    await done;
+    expect(store.getRunActionPhase('p1')).toBe('running');
+  });
+
+  it('does not re-add an execution that completed while the snapshot was in flight', async () => {
+    const store = await importStore();
+    store.startListening();
+    const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
+
+    const { done } = await hydrate(store, branches);
+    // The run is the first the store hears of it, so there is nothing to
+    // delete locally — the completion still has to outlive the snapshot.
+    emitActionStatus(statusEvent('b1', 'e1', 'completed'));
+    // e2 was tracked from its own event before finishing.
+    emitActionStatus(statusEvent('b1', 'e2', 'running'));
+    emitActionStatus(statusEvent('b1', 'e2', 'completed'));
+    expect(store.getRunActionPhase('p1')).toBeNull();
+
+    waves[0].resolve([runAction('b1', 'e1'), runAction('b1', 'e2')]);
+    await done;
+    // No further event will ever arrive for a finished execution, so a
+    // re-add here would be a badge that never clears.
+    expect(store.getRunActionPhase('p1')).toBeNull();
+
+    // The tombstones are scoped to that request: a later run of the same
+    // execution id (a restart) is tracked normally.
+    emitActionStatus(statusEvent('b1', 'e1', 'running'));
+    expect(store.getRunActionPhase('p1')).toBe('building');
+  });
+
+  it('drops an in-flight answer after stopListening and re-requests next time', async () => {
     const store = await importStore();
     const branches = new Map([['p1', [{ id: 'b1' }] as never]]);
 
-    const stale = store.hydrateFromProjectBranches(branches);
+    const { done: stale } = await hydrate(store, branches);
     store.stopListening();
     // The stale answer arrives claiming an action is running; it must be
     // dropped rather than applied to the reset store.
-    requestsFor('b1')[0].resolve([runAction('b1', 'e-stale')]);
+    waves[0].resolve([runAction('b1', 'e-stale')]);
     await stale;
 
-    const fresh = store.hydrateFromProjectBranches(branches);
-    expect(getRunningBranchActions).toHaveBeenCalledTimes(2);
-    requestsFor('b1')[1].resolve([]);
+    const { done: fresh } = await hydrate(store, branches);
+    expect(invokeCommand).toHaveBeenCalledTimes(2);
+    waves[1].resolve([]);
     await fresh;
     // Had the stale answer been applied, the rebuilt branch→project map would
     // now surface its execution as running.

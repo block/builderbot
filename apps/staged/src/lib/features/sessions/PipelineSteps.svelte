@@ -3,10 +3,11 @@
 
   Shows a compact vertical list of steps with status icons, labels, and
   expandable output. Subscribes to `pipeline-step-changed` events for
-  live updates.
+  live updates while `active`; a parked pane (sessionPanePool) clears it so
+  the parked subtree holds no listener and no timer.
 -->
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import Bot from '@lucide/svelte/icons/bot';
   import Check from '@lucide/svelte/icons/check';
   import X from '@lucide/svelte/icons/x';
@@ -21,9 +22,11 @@
   interface Props {
     sessionId: string;
     pipeline: PipelineExecution;
+    /** Listen for step events and tick running durations. */
+    active?: boolean;
   }
 
-  let { sessionId, pipeline }: Props = $props();
+  let { sessionId, pipeline, active = true }: Props = $props();
 
   let steps = $state<PipelineStepStatus[]>([]);
   let expandedSteps = $state<Set<number>>(new Set());
@@ -51,6 +54,7 @@
   });
 
   $effect(() => {
+    if (!active) return;
     const hasRunningStep = steps.some(
       (step) => step.status === 'running' && step.startedAt !== null && step.completedAt === null
     );
@@ -64,36 +68,38 @@
     return () => clearInterval(interval);
   });
 
-  let unlisten: UnlistenFn | null = null;
-
-  onMount(() => {
-    unlisten = listenToEvent<PipelineStepPayload>('pipeline-step-changed', (payload) => {
-      if (payload.sessionId !== sessionId) return;
-      const { stepIndex, status, output, error, startedAt, completedAt } = payload;
-      if (stepIndex < steps.length) {
-        steps[stepIndex] = {
-          ...steps[stepIndex],
-          status,
-          output: output ?? steps[stepIndex].output,
-          error: error ?? steps[stepIndex].error,
-          startedAt: startedAt ?? steps[stepIndex].startedAt,
-          completedAt: completedAt ?? steps[stepIndex].completedAt,
-        };
-        // Auto-expand failed steps, except AI handoff boundary rows with no details.
-        if (
-          status === 'failed' &&
-          (steps[stepIndex].stepType !== 'ai_handoff' ||
-            steps[stepIndex].output ||
-            steps[stepIndex].error)
-        ) {
-          expandedSteps = new Set([...expandedSteps, stepIndex]);
+  // The pane's own session props are already re-synced on a reopen, so the
+  // steps missed while inactive arrive through the `pipeline` prop effect.
+  $effect(() => {
+    if (!active) return;
+    const id = sessionId;
+    const unlisten: UnlistenFn = listenToEvent<PipelineStepPayload>(
+      'pipeline-step-changed',
+      (payload) => {
+        if (payload.sessionId !== id) return;
+        const { stepIndex, status, output, error, startedAt, completedAt } = payload;
+        if (stepIndex < steps.length) {
+          steps[stepIndex] = {
+            ...steps[stepIndex],
+            status,
+            output: output ?? steps[stepIndex].output,
+            error: error ?? steps[stepIndex].error,
+            startedAt: startedAt ?? steps[stepIndex].startedAt,
+            completedAt: completedAt ?? steps[stepIndex].completedAt,
+          };
+          // Auto-expand failed steps, except AI handoff boundary rows with no details.
+          if (
+            status === 'failed' &&
+            (steps[stepIndex].stepType !== 'ai_handoff' ||
+              steps[stepIndex].output ||
+              steps[stepIndex].error)
+          ) {
+            expandedSteps = new Set([...expandedSteps, stepIndex]);
+          }
         }
       }
-    });
-  });
-
-  onDestroy(() => {
-    unlisten?.();
+    );
+    return () => unlisten();
   });
 
   function toggleStep(index: number) {

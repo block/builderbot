@@ -25,6 +25,8 @@
   import DiffModal from './lib/features/diff/DiffModal.svelte';
   import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
+  import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
+  import { tabDirection } from './lib/shared/tabDirection';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
@@ -41,6 +43,7 @@
   import {
     navigation,
     initNavigation,
+    restoreInitialRoute,
     closeDiffRouteIfCurrent,
     openSettings,
     popDetailRoute,
@@ -96,6 +99,7 @@
   // parked views would otherwise still answer are gated on this.
   let workspaceParked = $derived(navigation.workspaceParked);
   let workspaceEl = $state<HTMLDivElement | null>(null);
+  let projectLayerEl = $state<HTMLDivElement | null>(null);
   let detailHostEl = $state<HTMLDivElement | null>(null);
 
   // The parked workspace is covered, not inert (see the template for why), so
@@ -110,18 +114,17 @@
   // otherwise be unreachable backwards. When parking happens with focus
   // inside, move it out.
   let lastHostFocus: HTMLElement | null = null;
-  let tabInFlight: 'forward' | 'backward' | null = null;
   function handleHostFocusIn(e: FocusEvent) {
     if (e.target instanceof HTMLElement && e.target !== detailHostEl) lastHostFocus = e.target;
   }
   function handleWorkspaceFocusIn() {
     if (!workspaceParked) return;
-    if (tabInFlight === 'backward') {
+    if (tabDirection.inFlight === 'backward') {
       const before = workspaceEl ? lastTabbableBefore(workspaceEl) : null;
       (before ?? detailHostEl)?.focus({ preventScroll: true });
       return;
     }
-    if (tabInFlight === 'forward') {
+    if (tabDirection.inFlight === 'forward') {
       const first = detailHostEl ? firstTabbableWithin(detailHostEl) : null;
       (first ?? detailHostEl)?.focus({ preventScroll: true });
       return;
@@ -139,9 +142,12 @@
   });
 
   // Native drag-drop hit-tests subscribed elements, not the DOM, so the cover
-  // alone does not keep drops off the parked branch cards.
+  // alone does not keep drops off the parked branch cards, nor the clip off
+  // the retained project layer's cards while home is shown.
   $effect(() => {
-    setDragDropCoveredElement(workspaceParked ? workspaceEl : null);
+    setDragDropCoveredElement(
+      workspaceParked ? workspaceEl : navigation.homeActive ? projectLayerEl : null
+    );
     return () => setDragDropCoveredElement(null);
   });
 
@@ -382,7 +388,6 @@
   }
 
   onMount(async () => {
-    darkMode.init();
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
@@ -432,14 +437,23 @@
     // used to own it is mounted.
     projectRunActionsStore.startListening();
 
+    // Read the persisted route alongside initPreferences' own store round
+    // trips, so the first workspace render is already the last project rather
+    // than the home grid (plus its per-project fan-out) replaced a beat later.
+    // Never rejects, and settles within INITIAL_ROUTE_TIMEOUT_MS.
+    const initialRoute = restoreInitialRoute();
     try {
       await initPreferences();
     } catch (e) {
       console.error('Failed to initialize preferences, rendering with defaults:', e);
+      // initPreferences normally starts darkMode once the chrome theme is on
+      // the root; without a theme it falls back to the stylesheet default.
+      darkMode.init();
       preferences.loaded = true;
     }
 
-    // Restore the last viewed project (persistent store is now ready).
+    // Validate the restored project (persistent store is now ready).
+    await initialRoute;
     try {
       await initNavigation();
     } catch (e) {
@@ -667,16 +681,17 @@
   }
 </script>
 
-<!-- The blur reset covers a Tab keyup the webview never sees (the window
-     deactivating or a native menu taking over mid-press). -->
+<!-- Tab direction for the covered-view focus guards (here and in
+     WorkspaceLayer). The blur reset covers a Tab keyup the webview never sees
+     (the window deactivating or a native menu taking over mid-press). -->
 <svelte:window
   onkeydowncapture={(e) => {
-    tabInFlight = e.key === 'Tab' ? (e.shiftKey ? 'backward' : 'forward') : null;
+    tabDirection.inFlight = e.key === 'Tab' ? (e.shiftKey ? 'backward' : 'forward') : null;
   }}
   onkeyupcapture={(e) => {
-    if (e.key === 'Tab') tabInFlight = null;
+    if (e.key === 'Tab') tabDirection.inFlight = null;
   }}
-  onblur={() => (tabInFlight = null)}
+  onblur={() => (tabDirection.inFlight = null)}
 />
 
 {#if preferences.loaded}
@@ -728,7 +743,10 @@
         </div>
       </div>
     </main>
-  {:else}
+  {:else if navigation.initialRouteSettled}
+    <!-- Held back until the persisted route is in place (bounded by
+         INITIAL_ROUTE_TIMEOUT_MS): the whole main, not just the workspace,
+         so the top bar's Back affordance doesn't flip in either. -->
     <main>
       <TopBar />
       <div class="content">
@@ -753,18 +771,39 @@
             bind:this={workspaceEl}
             onfocusin={handleWorkspaceFocusIn}
           >
-            <!-- Hoisted out of ProjectHome so it survives project↔repos
-                 transitions; hidden on the landing page. -->
-            {#if navigation.selectedProjectId || navigation.showReposList}
-              <ProjectsSidebar />
-            {/if}
-            {#if navigation.showReposList}
-              <ReposListView />
-            {:else if navigation.selectedProjectId}
-              <ProjectHome selectedProjectId={navigation.selectedProjectId} />
-            {:else}
-              <ProjectsList />
-            {/if}
+            <!-- Two stacked layers in one grid cell. The home grid mounts on
+                 the first visit and then stays, covered by the project layer
+                 while a project is shown; the last project (or the repos
+                 view) stays mounted under home, clipped, until another one
+                 replaces it or it is released. Either direction is then a
+                 hide/show and not a 3k-node rebuild plus the refetches. Both
+                 hosts are always present, like the detail host: inserting
+                 one as a sibling of the other's ~3k-node tree restyles that
+                 whole tree on WebKit (~55 ms), so views mount inside a host
+                 that is already there. The project host is clipped while
+                 inactive (empty or not) so it doesn't cover the grid. -->
+            <WorkspaceLayer active={navigation.homeActive}>
+              {#if navigation.homeLayerRetained}
+                <ProjectsList />
+              {/if}
+            </WorkspaceLayer>
+            <WorkspaceLayer
+              active={!navigation.homeActive}
+              clipWhenInactive
+              bind:element={projectLayerEl}
+            >
+              {#if navigation.projectLayer}
+                {@const projectLayer = navigation.projectLayer}
+                <!-- Hoisted out of ProjectHome so it survives project↔repos
+                     transitions. -->
+                <ProjectsSidebar />
+                {#if projectLayer.kind === 'repos'}
+                  <ReposListView />
+                {:else}
+                  <ProjectHome selectedProjectId={projectLayer.projectId} />
+                {/if}
+              {/if}
+            </WorkspaceLayer>
           </div>
           <div
             class="detail-host"
@@ -841,14 +880,16 @@
     grid-template-rows: minmax(0, 1fr);
   }
 
-  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper).
-     Its own stacking context, so the host's z-index wins over the sticky and
-     positioned descendants in here. */
+  /* One grid cell shared by the home and project layers (WorkspaceLayer),
+     each a flex row of sidebar + view. Its own stacking context, so the
+     host's z-index wins over the sticky and positioned descendants in here. */
   .workspace {
     grid-area: 1 / 1;
     min-width: 0;
     min-height: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     background-color: var(--bg-chrome);
     overflow: hidden;
     isolation: isolate;

@@ -50,7 +50,7 @@
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import { pushStateStore, type PushState } from '../../stores/pushState.svelte';
   import * as prPollingService from '../../services/prPollingService';
-  import { onWorkspaceParked } from '../layout/navigation.svelte';
+  import { onViewHidden } from '../layout/navigation.svelte';
   import {
     onBranchPrStatusChanged,
     onBranchPrStatusCleared,
@@ -182,10 +182,10 @@
   let showPushErrorDialog = $state(false);
   let showForcePushDialog = $state(false);
 
-  // Parked under settings or the diff view, these alerts would stay open above
-  // them. Only the dialogs close; the push / PR error state they describe is
+  // Off screen (home shown over the project, or parked under settings / the
+  // diff view), these alerts would stay open on top. Only the dialogs close; the push / PR error state they describe is
   // kept, so the button still offers to reopen them.
-  onWorkspaceParked(() => {
+  onViewHidden(() => {
     showPrErrorDialog = false;
     showPushErrorDialog = false;
     showForcePushDialog = false;

@@ -45,6 +45,9 @@ beforeEach(() => {
     matchMedia: () => ({ matches: false, addEventListener: vi.fn() }),
   });
   vi.stubGlobal('document', { documentElement: { style: { setProperty: vi.fn() } } });
+  // initPreferences starts the dark-mode signal, which wants a MutationObserver
+  // and a readable root style; neither is part of this module's contract.
+  vi.doMock('../../stores/isDark.svelte', () => ({ darkMode: { init: vi.fn() } }));
   values = new Map();
   listeners = [];
   get = vi.fn(async (key: string) => structuredClone(values.get(key)));

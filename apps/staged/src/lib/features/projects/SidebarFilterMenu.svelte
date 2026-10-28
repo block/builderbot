@@ -20,12 +20,13 @@
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectFiltersStore, type FilterKind } from './projectFilters.svelte';
-  import { onWorkspaceParked } from '../layout/navigation.svelte';
+  import { onViewHidden } from '../layout/navigation.svelte';
 
   let open = $state(false);
 
-  // Parked under settings or the diff view, the menu would stay open above them.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over the project layer, or parked under settings /
+  // the diff view), the menu would stay open on top.
+  onViewHidden(() => {
     open = false;
   });
 

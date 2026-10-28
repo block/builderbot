@@ -22,7 +22,10 @@
   <!--
     preventOverflowTextSelection is off for the same reason as dialog-content:
     WKWebView collapses the selection when bits-ui restores user-select styles
-    on pointerup, leaving dialog text unselectable.
+    on pointerup, leaving dialog text unselectable. preventScroll is off for
+    the same reason as there: <body> never scrolls and the lock's
+    `pointer-events: none` write on it restyles the whole document. Menus,
+    popovers and selects are deliberately left locking (see dialog-content).
   -->
   <AlertDialogPrimitive.Content
     bind:ref
@@ -33,6 +36,7 @@
       className
     )}
     preventOverflowTextSelection={false}
+    preventScroll={false}
     {...restProps}
   />
 </AlertDialogPortal>

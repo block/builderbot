@@ -24,8 +24,16 @@ class DarkModeState {
   }
 
   private update(): void {
-    this.value =
-      getComputedStyle(document.documentElement).getPropertyValue('--theme-is-dark').trim() === '1';
+    const root = document.documentElement;
+    // applyChromeTheme writes the variable inline on <html>, so the inline
+    // value is authoritative whenever present. Reading it is free, whereas
+    // getComputedStyle forces a whole-document style recalc (~70-90 ms on a
+    // large tree) every time anything touches the root's style attribute.
+    // Fall back to the computed value only when no inline theme is set, e.g.
+    // a theme applied purely through a stylesheet.
+    const inline = root.style.getPropertyValue('--theme-is-dark').trim();
+    const value = inline || getComputedStyle(root).getPropertyValue('--theme-is-dark').trim();
+    this.value = value === '1';
   }
 }
 

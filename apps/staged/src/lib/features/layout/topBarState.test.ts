@@ -72,3 +72,78 @@ describe('registerTopBar', () => {
     expect(topBar.title).toBe('');
   });
 });
+
+describe('registerTopBar with inactive layers', () => {
+  // The home grid and the project view are stacked layers that stay mounted,
+  // so a registration carries whether its layer is active; the most recent
+  // active one owns the bar (see WorkspaceLayer.svelte / TopBarPortal).
+
+  it('skips inactive registrations and hands the bar over as `active` flips', async () => {
+    const { registerTopBar, topBar } = await importTopBarState();
+
+    const home = registerTopBar({ title: 'Projects' });
+    expect(topBar.title).toBe('Projects');
+
+    // Opening a project: home's layer goes inactive before the project view
+    // mounts, so for a moment nothing active is registered.
+    home.update({ title: 'Projects' }, false);
+    expect(topBar.title).toBe('');
+    const project = registerTopBar({ title: 'Onboarding flow' });
+    expect(topBar.title).toBe('Onboarding flow');
+
+    // Going home: the project view unmounts and home's layer is active again.
+    project.release();
+    home.update({ title: 'Projects' }, true);
+    expect(topBar.title).toBe('Projects');
+  });
+
+  it('lets a lower active registration show over a later inactive one', async () => {
+    const { registerTopBar, topBar } = await importTopBarState();
+
+    const project = registerTopBar({ title: 'Onboarding flow' });
+    const home = registerTopBar({ title: 'Projects' }, false);
+    expect(topBar.title).toBe('Onboarding flow');
+
+    // Returning to the project with home mounted later: flipping flags, not
+    // mount order, decides.
+    home.update({ title: 'Projects' }, true);
+    project.update({ title: 'Onboarding flow' }, false);
+    expect(topBar.title).toBe('Projects');
+    home.update({ title: 'Projects' }, false);
+    project.update({ title: 'Onboarding flow' }, true);
+    expect(topBar.title).toBe('Onboarding flow');
+  });
+
+  it('ignores content updates from an inactive registration', async () => {
+    const { registerTopBar, topBar } = await importTopBarState();
+
+    const project = registerTopBar({ title: 'Onboarding flow' });
+    const home = registerTopBar({ title: 'Projects' }, false);
+
+    home.update({ title: 'Projects (2 unread)' });
+    expect(topBar.title).toBe('Onboarding flow');
+
+    // ...but that content is what shows once it is active.
+    project.update({ title: 'Onboarding flow' }, false);
+    home.update({ title: 'Projects (2 unread)' }, true);
+    expect(topBar.title).toBe('Projects (2 unread)');
+  });
+
+  it('lets settings registered last win whatever the layer flags say', async () => {
+    const { registerTopBar, topBar } = await importTopBarState();
+
+    const home = registerTopBar({ title: 'Projects' }, false);
+    const project = registerTopBar({ title: 'Onboarding flow' });
+    const settings = registerTopBar({ title: 'Settings' });
+    expect(topBar.title).toBe('Settings');
+
+    // Layer flags flipping under settings don't hijack the bar...
+    home.update({ title: 'Projects' }, true);
+    project.update({ title: 'Onboarding flow' }, false);
+    expect(topBar.title).toBe('Settings');
+
+    // ...and releasing settings hands it to whichever layer is active now.
+    settings.release();
+    expect(topBar.title).toBe('Projects');
+  });
+});

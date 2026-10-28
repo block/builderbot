@@ -12,7 +12,7 @@
  */
 
 import { untrack } from 'svelte';
-import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import { getStoreValue, initPersistentStore, setStoreValue } from '../../shared/persistentStore';
 import { getWindowLabel } from '../../transport';
 import { takeWindowSeed } from '../../commands';
 import {
@@ -26,8 +26,16 @@ import type { CommitTimelineItem } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
+import { useWorkspaceLayer } from './workspaceLayer';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
+
+/**
+ * How long the first workspace render waits for the persisted route. The
+ * store read runs alongside initPreferences' own sequential store round trips,
+ * so it normally settles first; the bound only matters if the store hangs.
+ */
+export const INITIAL_ROUTE_TIMEOUT_MS = 300;
 
 export type SettingsSection = 'general' | 'repo' | 'keyboard' | 'doctor';
 
@@ -75,11 +83,20 @@ const initialDetailStack: DetailRoute[] = initialProject
   ? [rootRoute(), { kind: 'project', projectId: initialProject }]
   : [rootRoute()];
 
+/**
+ * The non-home view the workspace's project layer holds: the last project or
+ * repos base route. It outlives the base route so the layer can stay mounted
+ * (covered or clipped) while home is shown.
+ */
+export type ProjectLayer = { kind: 'project'; projectId: string } | { kind: 'repos' };
+
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
-  // Web and the first Tauri window seed synchronously from the localStorage
-  // mirror so <ProjectHome> and the Back affordance can paint before the async
-  // persistent store and `listProjects()` validation resolve (see initNavigation).
+  // Web mode seeds synchronously from the localStorage mirror so <ProjectHome>
+  // and the Back affordance can paint on the first frame. The snapshot is a
+  // no-op under Tauri (webSnapshot.ts), where the stack starts at the root and
+  // restoreInitialRoute pushes the persisted project before the workspace
+  // renders; `listProjects()` validation follows in initNavigation.
   selectedProjectId: initialProject,
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
@@ -91,19 +108,61 @@ export const navigation = $state({
   // window-level requests the parked views would otherwise still answer can't
   // drift apart.
   workspaceParked: false,
+  // Flips once restoreInitialRoute has either pushed the persisted project or
+  // decided there is none. App.svelte holds the workspace back until then, so
+  // a cold start into a project never mounts (and fetches for) the home grid
+  // only to replace it a moment later.
+  initialRouteSettled: false,
+  // The workspace is two stacked layers (App.svelte): the home grid under the
+  // project view. These say which one the base route — the workspace route
+  // under any settings / diff on top — shows, and what each layer holds.
+  //
+  // homeActive: the base route is the projects grid.
+  homeActive: !initialProject,
+  // homeLayerRetained: sticky once home has been the base route of a rendered
+  // workspace; the grid stays mounted (covered) under later projects. Seeded
+  // false even when the stack starts at the root: under Tauri it sits there
+  // until restoreInitialRoute pushes the persisted project, and counting that
+  // would mount the grid under a project it was never shown before.
+  homeLayerRetained: false,
+  // projectLayer: the last project / repos base route, kept while home is
+  // active so the project layer can be retained rather than rebuilt.
+  projectLayer: (initialProject
+    ? { kind: 'project', projectId: initialProject }
+    : null) as ProjectLayer | null,
 });
 
 /**
- * Run `close` when the workspace gets parked under settings or the diff view.
- * Its components stay mounted then (App.svelte), so a dialog, alert or
- * popover one of them owns would stay open above the view on top — before the
- * workspace was kept mounted, unmounting closed them. Call from component
- * setup with whatever unmounting used to close.
+ * Run `close` when the view calling this leaves the screen while it stays
+ * mounted: its workspace layer goes inactive (home shown over a retained
+ * project, or a project over the retained grid) or the workspace is parked
+ * under settings / the diff view. A dialog, alert or popover the view owns
+ * would otherwise stay open above what replaced it — before views were kept
+ * mounted, unmounting closed them. Call from component setup with whatever
+ * unmounting used to close.
  */
-export function onWorkspaceParked(close: () => void): void {
+export function onViewHidden(close: () => void): void {
+  const layer = useWorkspaceLayer();
   $effect(() => {
-    if (!navigation.workspaceParked) return;
+    if (layer.visible) return;
     untrack(close);
+  });
+}
+
+/**
+ * Run `refresh` each time the calling view's layer comes back on screen
+ * (inactive → active), for the work a remount used to redo per visit. Not run
+ * for the mount itself, even when the view mounts into a layer that has been
+ * re-activated before: the mount path already does its own loading.
+ */
+export function onLayerActivated(refresh: () => void): void {
+  const layer = useWorkspaceLayer();
+  let seen = untrack(() => layer.activations);
+  $effect(() => {
+    const activations = layer.activations;
+    if (activations === seen) return;
+    seen = activations;
+    untrack(refresh);
   });
 }
 
@@ -149,6 +208,52 @@ function syncCompatibilityState(): void {
   // reference) still names its project through lastProjectRouteProjectId.
   navigation.selectedProjectId =
     base.kind === 'project' ? base.projectId : lastProjectRouteProjectId();
+
+  navigation.homeActive = base.kind === 'projects';
+  retainHomeLayerIfActive();
+  // Replace only when the view differs so the object's identity is stable:
+  // the layer's consumers key on it, and a settings / diff push over a project
+  // re-syncs without changing the base.
+  const layer = navigation.projectLayer;
+  if (base.kind === 'project') {
+    if (!(layer?.kind === 'project' && layer.projectId === base.projectId))
+      navigation.projectLayer = { kind: 'project', projectId: base.projectId };
+  } else if (base.kind === 'repos') {
+    if (layer?.kind !== 'repos') navigation.projectLayer = { kind: 'repos' };
+  }
+}
+
+/**
+ * Home becomes retained the first time it is the base route of a workspace
+ * that renders — i.e. once the initial route has settled (App.svelte gates
+ * <main> on that), so a root stack waiting on restoreInitialRoute doesn't count.
+ */
+function retainHomeLayerIfActive(): void {
+  if (navigation.homeActive && navigation.initialRouteSettled) navigation.homeLayerRetained = true;
+}
+
+/**
+ * Mark the initial route settled and retain the home layer if the grid is the
+ * base route at that point. Every settle path must go through here: a window
+ * that settles at the root without retaining the grid — e.g. a secondary
+ * window whose seed never lands — renders two empty layers and stays blank,
+ * with no Back affordance at the root to trigger the goHome that would.
+ */
+function settleInitialRoute(): void {
+  navigation.initialRouteSettled = true;
+  retainHomeLayerIfActive();
+}
+
+/**
+ * Drop the retained project layer for `projectId` — because the project was
+ * deleted, say — so the layer unmounts rather than showing a missing project.
+ * Only while home is active: on a project the layer is the view on screen, and
+ * navigation owns what replaces it.
+ */
+export function releaseProjectLayer(projectId: string): void {
+  const layer = navigation.projectLayer;
+  if (!navigation.homeActive || layer?.kind !== 'project' || layer.projectId !== projectId) return;
+  navigation.projectLayer = null;
 }
 
 function setDetailStack(routes: DetailRoute[]): void {
@@ -189,11 +294,64 @@ function persistLastProject(projectId: string | null): void {
 }
 
 /**
+ * Put the persisted route in place before the first workspace render.
+ *
+ * Only the first window (label `main`) and web mode restore. A stack already
+ * seeded from the web snapshot is final; otherwise the persisted project is
+ * read from the store (initialising it if initPreferences hasn't yet — the two
+ * share one init) and pushed if the user hasn't navigated meanwhile. Settles
+ * `navigation.initialRouteSettled` whatever happens.
+ *
+ * Store init is awaited unbounded: `<main>` is also gated on
+ * `preferences.loaded`, which waits on the same init promise, so settling
+ * early during init would only revert to the home-grid flash without
+ * rendering anything sooner. Only the key read itself is bounded by
+ * INITIAL_ROUTE_TIMEOUT_MS; a read that lands later is left to
+ * initNavigation, which restores a pristine stack the slow way.
+ */
+export async function restoreInitialRoute(): Promise<void> {
+  if (navigation.initialRouteSettled) return;
+  const label = getWindowLabel();
+  if ((label && label !== 'main') || navigation.detailStack.length > 1) {
+    settleInitialRoute();
+    return;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = Symbol('timeout');
+  try {
+    await initPersistentStore();
+    const read = getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
+    const lastProjectId = await Promise.race([
+      read,
+      new Promise<typeof timedOut>((resolve) => {
+        timer = setTimeout(() => resolve(timedOut), INITIAL_ROUTE_TIMEOUT_MS);
+      }),
+    ]);
+    if (lastProjectId === timedOut) {
+      console.warn('[Navigation] Persisted route not read in time, rendering the first route');
+      // Swallow the late result; initNavigation re-reads it.
+      read.catch(() => {});
+    } else if (lastProjectId && navigation.detailStack.length === 1) {
+      setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
+    }
+  } catch (e) {
+    console.warn('[Navigation] Could not read the persisted route:', e);
+  } finally {
+    clearTimeout(timer);
+    // Same synchronous step as the push above, so no render can observe the
+    // settled flag with the stack still at the root.
+    settleInitialRoute();
+  }
+}
+
+/**
  * Restore the last viewed project on app launch.
  *
  * Must be called after `initPersistentStore()` (which is done inside
- * `initPreferences()`). If the stored project no longer exists the
- * user is sent to the home screen instead.
+ * `initPreferences()`) and after `restoreInitialRoute()`, which normally has
+ * already pushed the persisted project so this only validates it. If the
+ * stored project no longer exists the user is sent to the home screen instead.
  *
  * Only the first window (label `main`) restores the persisted route on cold
  * start; a secondary window opens on the project its opener seeded it with.
@@ -213,10 +371,11 @@ export async function initNavigation(): Promise<void> {
   }
 
   const seeded = navigation.detailStack.length > 1;
-  // `selectedProjectId` may already be set synchronously from the localStorage
-  // mirror (web cold boot). Fall back to the async persistent store otherwise —
-  // it is the source of truth in Tauri mode. Either way we render immediately
-  // and only *correct* the route here if the project turns out to be gone.
+  // `selectedProjectId` is normally already set, from the localStorage mirror
+  // (web cold boot) or by restoreInitialRoute. Fall back to the async persistent
+  // store otherwise (it is the source of truth) — e.g. the restore timed out.
+  // Either way the first route has rendered and this only *corrects* it if the
+  // project turns out to be gone.
   const lastProjectId =
     navigation.selectedProjectId ?? (await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY));
   if (!lastProjectId) return;

@@ -41,7 +41,13 @@
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
-  import { navigation, onWorkspaceParked, openDiffRoute } from '../layout/navigation.svelte';
+  import {
+    navigation,
+    onLayerActivated,
+    onViewHidden,
+    openDiffRoute,
+  } from '../layout/navigation.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import {
     disabledReferenceNav,
     pushReferenceEntry,
@@ -139,6 +145,15 @@
 
   $effect(() => {
     liveSessionHintPoller.syncRunningSessionIds(runningNoteSessionIds);
+  });
+
+  // This section stays mounted while home covers its project (and while the
+  // workspace is parked under settings / the diff view); the hint poller's
+  // get_session* round trips are for rows nobody can see, so pause it there
+  // and resume — polling at once — on return.
+  const layer = useWorkspaceLayer();
+  $effect(() => {
+    liveSessionHintPoller.setPaused(!layer.visible);
   });
 
   onDestroy(() => {
@@ -258,6 +273,13 @@
     }
   }
 
+  // Back on screen after home covered this project: the remount this stands
+  // in for reloaded the notes on every visit, and this is the one list here
+  // that isn't store- or event-backed while mounted.
+  onLayerActivated(() => {
+    void loadProjectNotes();
+  });
+
   async function handleDeleteNote(noteId: string) {
     const note = projectNotes.find((n) => n.id === noteId);
     const sessionId = note?.sessionId ?? undefined;
@@ -313,9 +335,11 @@
   let childHashtagLoadGeneration = 0;
   let noteModalHashtagItems = $derived([...hashtagItems, ...childHashtagItems]);
 
-  // Parked under settings or the diff view, this section's dialogs would stay
-  // open above them. The composer hands its draft back on the way out.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over this project, or parked under settings / the
+  // diff view), this section's dialogs would stay open on top. The composer
+  // hands its draft back on the way out; closing the note releases its pooled
+  // chat pane.
+  onViewHidden(() => {
     showProjectSessionModal = false;
     if (openNote) {
       closeOpenNote();

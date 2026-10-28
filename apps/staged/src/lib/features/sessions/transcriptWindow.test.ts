@@ -6,6 +6,7 @@ import {
   pageRequestLimit,
   prependOlderMessages,
   transcriptPageFromRows,
+  trimLatestWindow,
 } from './transcriptWindow';
 
 function message(
@@ -95,6 +96,30 @@ describe('applyLatestWindow', () => {
       messages: [],
       hasMore: false,
     });
+  });
+});
+
+describe('trimLatestWindow', () => {
+  const rows = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => message(from + i));
+
+  it('leaves a window the delta grew by up to a page alone, identity included', () => {
+    const current = { messages: rows(1, 6), hasMore: false };
+    expect(trimLatestWindow(current, 3, 3)).toBe(current);
+    expect(trimLatestWindow(current, 3, 6)).toBe(current);
+  });
+
+  it('keeps rows the user paged back into, however many pages they are', () => {
+    // Three pages loaded before the park, one new row since: nothing to trim.
+    const current = { messages: rows(1, 10), hasMore: true };
+    expect(trimLatestWindow(current, 3, 9)).toBe(current);
+  });
+
+  it('keeps only the newest page once a catch-up delta has grown it by more than a page', () => {
+    const trimmed = trimLatestWindow({ messages: rows(1, 7), hasMore: false }, 3, 3);
+    expect(ids(trimmed.messages)).toEqual([5, 6, 7]);
+    // The dropped rows are older rows the server has, so paging back works.
+    expect(trimmed.hasMore).toBe(true);
   });
 });
 

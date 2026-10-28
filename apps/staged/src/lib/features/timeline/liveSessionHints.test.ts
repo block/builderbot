@@ -170,3 +170,117 @@ describe('createLiveSessionHints titles', () => {
     expect(latestTitles).toEqual({ s2: 'Update docs' });
   });
 });
+
+describe('createLiveSessionHints setPaused', () => {
+  let getSession: ReturnType<typeof vi.fn>;
+  let getSessionMessages: ReturnType<typeof vi.fn>;
+  let getSessionMessagesSince: ReturnType<typeof vi.fn>;
+  let createLiveSessionHints: LiveSessionHintsModule['createLiveSessionHints'];
+  let poller: LiveSessionHintPoller | null;
+  let latestHints: Record<string, string>;
+  let hintChanges: number;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    getSession = vi.fn().mockResolvedValue(session());
+    getSessionMessages = vi.fn().mockResolvedValue({
+      data: [{ id: 1, role: 'assistant', content: 'Reading the config', createdAt: 1 }],
+    });
+    getSessionMessagesSince = vi.fn().mockResolvedValue([]);
+    vi.doMock('../../api/commands', () => ({
+      getSession,
+      getSessionMessages,
+      getSessionMessagesSince,
+      resolvePathAliases: vi.fn().mockResolvedValue([]),
+    }));
+    ({ createLiveSessionHints } = await import('./liveSessionHints'));
+    poller = null;
+    latestHints = {};
+    hintChanges = 0;
+  });
+
+  afterEach(() => {
+    poller?.destroy();
+    vi.doUnmock('../../api/commands');
+    vi.useRealTimers();
+  });
+
+  function createPoller(): LiveSessionHintPoller {
+    poller = createLiveSessionHints((hints) => {
+      latestHints = hints;
+      hintChanges++;
+    });
+    return poller;
+  }
+
+  /** Flush the mocked commands' microtasks without advancing the interval. */
+  const flush = () => vi.advanceTimersByTimeAsync(0);
+
+  it('stops the interval while paused and keeps the hints it had', async () => {
+    const p = createPoller();
+    p.syncRunningSessionIds(['s1']);
+    await flush();
+    expect(latestHints).toEqual({ s1: 'Reading the config' });
+    const callsBefore = getSession.mock.calls.length;
+
+    p.setPaused(true);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(getSession.mock.calls.length).toBe(callsBefore);
+    expect(latestHints).toEqual({ s1: 'Reading the config' });
+  });
+
+  it('polls at once on unpause, continuing from the last message instead of refetching', async () => {
+    const p = createPoller();
+    p.syncRunningSessionIds(['s1']);
+    await flush();
+    p.setPaused(true);
+    await vi.advanceTimersByTimeAsync(5000);
+    const sessionCalls = getSession.mock.calls.length;
+    const sinceCalls = getSessionMessagesSince.mock.calls.length;
+    const changesBefore = hintChanges;
+
+    p.setPaused(false);
+    await flush();
+
+    expect(getSession.mock.calls.length).toBe(sessionCalls + 1);
+    expect(getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(getSessionMessagesSince.mock.calls.length).toBe(sinceCalls + 1);
+    expect(getSessionMessagesSince).toHaveBeenLastCalledWith('s1', 1);
+    // Nothing new arrived, so the hint stays as it was without a re-emit.
+    expect(hintChanges).toBe(changesBefore);
+
+    // And the interval is running again.
+    await vi.advanceTimersByTimeAsync(750);
+    expect(getSession.mock.calls.length).toBe(sessionCalls + 2);
+  });
+
+  it('does not start polling for sessions that arrive while paused', async () => {
+    const p = createPoller();
+    p.setPaused(true);
+    p.syncRunningSessionIds(['s1']);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(getSession).not.toHaveBeenCalled();
+
+    p.setPaused(false);
+    await flush();
+    expect(getSession).toHaveBeenCalledTimes(1);
+    expect(latestHints).toEqual({ s1: 'Reading the config' });
+  });
+
+  it('is a no-op after destroy', async () => {
+    const p = createPoller();
+    p.syncRunningSessionIds(['s1']);
+    await flush();
+    p.destroy();
+    const calls = getSession.mock.calls.length;
+
+    p.setPaused(true);
+    p.setPaused(false);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(getSession.mock.calls.length).toBe(calls);
+  });
+});

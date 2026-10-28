@@ -4,7 +4,7 @@
   Clicking a project navigates to its project page.
 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { fade } from 'svelte/transition';
   import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
@@ -16,13 +16,8 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import {
-    navigation,
-    onWorkspaceParked,
-    openSettings,
-    selectProject,
-    showAllRepos,
-  } from '../layout/navigation.svelte';
+  import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
@@ -71,9 +66,19 @@
 
   let showNewProjectModal = $state(false);
 
-  // Parked under settings or the diff view, the modal would stay open above them.
-  onWorkspaceParked(() => {
-    showNewProjectModal = false;
+  // This view is the workspace's home layer: mounted on the first visit and
+  // then kept, covered, under the project view (App.svelte). Anything that
+  // used to follow from being mounted — the window shortcuts, the modal, the
+  // per-visit capture below — gates on the layer instead.
+  const layer = useWorkspaceLayer();
+
+  // Hidden under a project, or parked under settings or the diff view, the
+  // modal would stay open above the view on top.
+  $effect(() => {
+    if (layer.visible) return;
+    untrack(() => {
+      showNewProjectModal = false;
+    });
   });
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let searchInputEl = $state<HTMLInputElement | null>(null);
@@ -87,24 +92,38 @@
   // filters no longer match it: visiting a project marks it read, so with
   // Unread active the card returnTargetProjectId points at — the one the
   // scroll restore is aiming for — would otherwise be gone on arrival. Same
-  // exception the sidebar makes for the selected project. Captured at mount
-  // (this component is created fresh on every return to the landing page),
+  // exception the sidebar makes for the selected project. Captured on each
+  // visit — at mount, then before each render that brings the layer back —
   // but only while a restore is actually pending: returnTargetProjectId is
-  // never cleared, so an ordinary mount — landing → settings → back, where
+  // never cleared, so an ordinary visit — landing → settings → back, where
   // requestProjectsListRestore(null) early-returns — would otherwise pin a
   // project from a previous visit. restorePending is still true here; the
-  // effect that finishes the restore runs after mount.
-  const stickyProjectId = projectsListViewState.restorePending
-    ? projectsListViewState.returnTargetProjectId
-    : null;
+  // effect that finishes the restore runs after.
+  function pendingStickyProjectId(): string | null {
+    return projectsListViewState.restorePending
+      ? projectsListViewState.returnTargetProjectId
+      : null;
+  }
+  let stickyProjectId = $state(pendingStickyProjectId());
   // The exception lasts only until the first filter change, so a deliberate
   // re-filter hides the card. The store replaces the Set on every change, so
   // identity is the signal — derived rather than tracked in an effect, which
   // would paint the stale card once under the new filters before removing it.
-  const filtersAtMount = projectFiltersStore.activeFilters;
+  let filtersAtVisit = $state(projectFiltersStore.activeFilters);
+  $effect.pre(() => {
+    // The initialisers capture at mount; this re-captures per activation. That
+    // includes the mount when the layer is already activated — a cold start
+    // into a project, then the first goHome, flips homeLayerRetained after the
+    // layer counted that activation — where it repeats the initialisers' values.
+    if (layer.activations === 0) return;
+    untrack(() => {
+      stickyProjectId = pendingStickyProjectId();
+      filtersAtVisit = projectFiltersStore.activeFilters;
+    });
+  });
 
   let effectiveStickyId = $derived(
-    projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null
+    projectFiltersStore.activeFilters === filtersAtVisit ? stickyProjectId : null
   );
 
   // Chips → sticky card → search; see visibleProjects for the composition.
@@ -232,6 +251,8 @@
     void projectsDataStore.ensureHomeReposLoaded();
 
     const onNewProject = (event: Event) => {
+      // The project layer's view answers while this one is hidden under it.
+      if (!layer.visible) return;
       newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
       showNewProjectModal = true;
     };
@@ -245,10 +266,13 @@
   // Pull every project's branches and repos forward off the store's idle drip
   // — the grid renders all of them. An effect rather than onMount so a list
   // change or a cache-stale reload re-kicks the sweep and the loading gate
-  // heals itself; the store dedupes projects it has already fetched.
+  // heals itself; the store dedupes projects it has already fetched. Track
+  // only `loaded` and `projects`: the sweep reads the hydrated-project map
+  // synchronously, so tracking it too would re-run this once per project.
   $effect(() => {
     if (!projectsDataStore.loaded) return;
-    void projectsDataStore.ensureProjectsHydrated();
+    void projectsDataStore.projects;
+    untrack(() => void projectsDataStore.ensureProjectsHydrated());
   });
 
   // Keep run-action state hydrated for the status badges; the store call
@@ -286,8 +310,8 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    // Still mounted, parked, under settings or the diff view.
-    if (navigation.workspaceParked) return;
+    // Still mounted but hidden: under a project, settings or the diff view.
+    if (!layer.visible) return;
     const target = e.target as HTMLElement;
     const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
     // Typing in an input must not trigger shortcuts, but the natural flow for
@@ -732,6 +756,17 @@
     color: inherit;
     cursor: pointer;
     transition: background-color 0.15s ease;
+    /* Skip style, layout and paint for cards outside the viewport: the grid
+       mounts every project at once and most sit below the fold. This goes on
+       the button rather than the wrapper because the paint containment it
+       implies clips descendants, and on the wrapper that clipped the button's
+       focus ring. The placeholder is the content-box height (68px + 32px
+       padding = 100px) of the mean three-column card on a large real data set
+       (81–123px, median 102); `auto` keeps each card's own height once it has
+       rendered, so the scrollbar and scroll restore only estimate until then.
+       Older WebKit ignores the property. */
+    content-visibility: auto;
+    contain-intrinsic-size: auto 68px;
   }
 
   .project-card:hover {
@@ -879,6 +914,14 @@
     .projects-grid {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
+
+    /* Two-column cards are shorter (median 81px wrapper on the same data set):
+       49px + 32px padding. WebKit has no scroll anchoring, so a placeholder
+       that is consistently too tall drifts the viewport when skipped rows
+       above it render while scrolling back up. */
+    .project-card {
+      contain-intrinsic-size: auto 49px;
+    }
   }
 
   @media (max-width: 640px) {
@@ -893,6 +936,8 @@
 
     .project-card {
       padding: 14px;
+      /* Median one-column wrapper is 75px: 47px + 28px padding. */
+      contain-intrinsic-size: auto 47px;
     }
 
     .card-header {

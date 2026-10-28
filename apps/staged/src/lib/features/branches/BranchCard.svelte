@@ -99,9 +99,11 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
+  import { shouldRefreshGitStateOnActivation } from './gitStateRefreshGate';
   import { toast } from 'svelte-sonner';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
+  import { reuseHashtagItems } from '../sessions/hashtagItemsIdentity';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { pullStateStore } from '../../stores/pullState.svelte';
@@ -111,7 +113,12 @@
     onBranchSetupProgress,
     onSessionStatusChanged,
   } from '../../services/branchEventService';
-  import { navigation, onWorkspaceParked, openDiffRoute } from '../layout/navigation.svelte';
+  import {
+    navigation,
+    onLayerActivated,
+    onViewHidden,
+    openDiffRoute,
+  } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import {
@@ -230,7 +237,23 @@
       stale = true;
     };
   });
-  let hashtagItems = $derived([...timelineHashtagItems, ...projectNoteHashtagItems]);
+  // Project notes first, matching buildBranchHashtagItems: its comparator
+  // orders by section before anything else and each sub-list is already
+  // sorted by it, so this concatenation is the same order the session pane
+  // would compute for itself.
+  //
+  // SessionChatPane keys its markdown cache on this array's identity, and
+  // `timeline` is reassigned far more often than its items change (every
+  // git-state merge, the cached→fresh reload), so hand out the previous
+  // array whenever the items are the same.
+  let lastHashtagItems: HashtagItem[] = [];
+  let hashtagItems = $derived.by(() => {
+    lastHashtagItems = reuseHashtagItems(lastHashtagItems, [
+      ...projectNoteHashtagItems,
+      ...timelineHashtagItems,
+    ]);
+    return lastHashtagItems;
+  });
   let referenceDiffContext = $derived<ReferenceDiffContext>({
     branchId: branch.id,
     projectId: branch.projectId,
@@ -550,9 +573,11 @@
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
 
-  // Parked under settings or the diff view, the card's dialogs would stay
-  // open above them. The composer hands its draft back on the way out.
-  onWorkspaceParked(() => {
+  // Off screen (home shown over this project, or parked under settings / the
+  // diff view), the card's dialogs would stay open on top. The composer hands
+  // its draft back on the way out; closing the session and note dialogs
+  // releases their pooled chat panes.
+  onViewHidden(() => {
     openNote = null;
     openWriteNote = null;
     viewImageId = null;
@@ -610,6 +635,9 @@
   let latestTimelineLoad: Promise<void> = Promise.resolve();
   let revalidationVersion = 0;
   let gitRefreshVersion = 0;
+  // When this card last started a git-state refresh or merged a
+  // `git-state-updated` event; gates the layer-activation refresh below.
+  let lastGitStateRefreshAt: number | null = null;
 
   /**
    * Kick off a background git-state refresh (TTL-gated fetch). Fresh state
@@ -623,6 +651,7 @@
    */
   function startGitStateRefresh() {
     const version = ++gitRefreshVersion;
+    lastGitStateRefreshAt = Date.now();
     refreshingGitState = true;
     commands
       .refreshBranchGitState(branch.id)
@@ -655,28 +684,54 @@
     loadedTimelineKey = timelineKey;
     loading = false;
     prunePlaceholders(cached);
-    if (fresh) {
-      const version = ++revalidationVersion;
-      fresh
-        .then((next) => {
-          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
-            return;
-          }
-          error = null;
-          timeline = next;
-          loadedTimelineKey = timelineKey;
-          prunePlaceholders(next);
-        })
-        .catch((e) => {
-          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
-            return;
-          }
-          error = e instanceof Error ? e.message : String(e);
-        });
-    }
+    if (fresh) applyRevalidation(fresh, timelineKey);
 
     startGitStateRefresh();
   }
+
+  /**
+   * Show `fresh` when it lands, unless a newer load or revalidation has started
+   * since (`revalidationVersion`) or the branch's timeline key has moved on.
+   */
+  function applyRevalidation(fresh: Promise<BranchTimelineData>, timelineKey: string) {
+    const version = ++revalidationVersion;
+    fresh
+      .then((next) => {
+        if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+          return;
+        }
+        error = null;
+        timeline = next;
+        loadedTimelineKey = timelineKey;
+        prunePlaceholders(next);
+      })
+      .catch((e) => {
+        if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+          return;
+        }
+        error = e instanceof Error ? e.message : String(e);
+      });
+  }
+
+  // Back on screen after home covered this project. The remount this stands
+  // in for refetched the timeline and git state on every visit; here the
+  // timeline is only refetched when its cache entry is past TIMELINE_FRESH_MS
+  // (the same rule as the mount-time hydration above), and the git-state
+  // refresh is gated on the backend's fetch TTL client-side too: within it
+  // the command would skip its fetch anyway, and issuing it per card on
+  // every return made a project with 30–40 branches pay as many synchronous
+  // Tauri commands. Past the TTL a commit made in the worktree while on home
+  // shows up on return. Only when the shown timeline is current: a load in
+  // flight for a new key owns the next render.
+  onLayerActivated(() => {
+    const key = branchTimelineReadyKey(branch);
+    if (!key || loadedTimelineKey !== key) return;
+    const { fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+    if (fresh) applyRevalidation(fresh, key);
+    if (shouldRefreshGitStateOnActivation(lastGitStateRefreshAt, Date.now())) {
+      startGitStateRefresh();
+    }
+  });
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
   // on remount (e.g. project switch). This prevents the loading flash and
@@ -793,6 +848,10 @@
       if (timeline) {
         timeline = { ...timeline, gitState: payload.gitState };
       }
+      // The backend just computed this branch's state (possibly for another
+      // caller, e.g. the bulk refresh on project open or a forced post-push
+      // refresh), so its fetch TTL is at least this fresh.
+      lastGitStateRefreshAt = Date.now();
       // `refreshingGitState` is cleared by startGitStateRefresh's settle
       // handler, not here: an event from an external refresh (e.g. the bulk
       // refresh on project open) must not end the spinner while this card's
@@ -2321,6 +2380,7 @@
     branchId={branch.id}
     projectId={branch.projectId}
     {repoLabel}
+    {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={handleSessionModalClose}
     onOpenSession={handleOpenInnerSession}

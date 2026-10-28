@@ -86,3 +86,13 @@ export function bulkRunningForScope(scopeId: string): Promise<RunningActionSnaps
   runningWave ??= loadRunningWave();
   return runningWave.then((byScope) => byScope.get(scopeId) ?? []);
 }
+
+/**
+ * Every live execution across all scopes, from the same wave the per-scope
+ * callers join. For a consumer that tracks all branches at once (the
+ * project run-action store), one snapshot is the whole answer.
+ */
+export function bulkRunningSnapshot(): Promise<RunningActionSnapshot[]> {
+  runningWave ??= loadRunningWave();
+  return runningWave.then((byScope) => [...byScope.values()].flat());
+}

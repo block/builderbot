@@ -13,11 +13,10 @@ import {
   type ActionStatusEvent,
   type RunPhase,
   type RunPhaseChangedEvent,
-  getRunningBranchActions,
-  getRunPhase,
   listenToActionStatus,
   listenToRunPhaseChanged,
 } from '../features/actions/actions';
+import { bulkRunningSnapshot } from '../features/actions/repoActionsBulk';
 
 export type RunActionPhase = 'building' | 'running' | null;
 
@@ -26,10 +25,16 @@ interface ExecutionInfo {
   phase: RunPhase;
 }
 
-/** One in-flight per-branch query; the object's identity is its ownership token. */
-interface PendingBranchRequest {
+/** The in-flight snapshot query; the object's identity is its ownership token. */
+interface PendingSnapshotRequest {
   /** Settles when the query does, whether or not its result was applied. */
   promise: Promise<void>;
+  /**
+   * Executions the action_status listener removed while this request was in
+   * flight. The snapshot may predate those completions, so the apply loop
+   * must not re-add them: nothing will ever remove a finished execution again.
+   */
+  removedExecutionIds: Set<string>;
 }
 
 class ProjectRunActionsStore {
@@ -42,16 +47,23 @@ class ProjectRunActionsStore {
   /** Manual reactivity version counter */
   private version = $state(0);
 
-  /** Branches whose current running-action state has already been queried. */
-  private hydratedBranchIds = new Set<string>();
+  /**
+   * Whether a running-actions snapshot has been applied since the last
+   * (re)start. `get_all_running_actions` covers every scope, so one snapshot
+   * hydrates every branch for the store's lifetime: a run that starts after
+   * it arrives through the action_status listener, and a run already live on
+   * a branch whose project loads later is in the snapshot already, keyed by
+   * branch id, and surfaces once the branch→project map learns the branch.
+   */
+  private hydrated = false;
 
   /**
-   * branchId → the request currently fetching that branch's state. Recorded
-   * before the request is awaited so that overlapping hydrate calls (every
-   * project's branch fetch reassigns the branch map during startup) await the
-   * outstanding request instead of issuing another one for the same branch.
+   * The snapshot request in flight, if any. Recorded before the request is
+   * awaited so overlapping hydrate calls (every project's branch fetch
+   * reassigns the branch map during startup) await the outstanding request
+   * instead of issuing another one.
    */
-  private pendingBranchRequests = new Map<string, PendingBranchRequest>();
+  private snapshotRequest: PendingSnapshotRequest | null = null;
 
   /**
    * Sorted `projectId/branchId` signature of the last map handed to
@@ -110,10 +122,10 @@ class ProjectRunActionsStore {
     this.unlisteners = [];
     this.executions = new Map();
     this.branchToProject = new Map();
-    this.hydratedBranchIds.clear();
-    // Requests still in flight no longer match their map entry and discard
-    // their results on arrival.
-    this.pendingBranchRequests.clear();
+    this.hydrated = false;
+    // A request still in flight no longer matches the token and discards its
+    // result on arrival.
+    this.snapshotRequest = null;
     this.lastMembershipSignature = null;
     this.initialized = false;
     this.version++;
@@ -138,8 +150,8 @@ class ProjectRunActionsStore {
    * project→branches map. Convenience wrapper the project surfaces
    * (ProjectsList, ProjectHome, ProjectsSidebar) run against the shared
    * branch data. A call whose project/branch membership matches the previous
-   * one returns immediately; otherwise it resolves once every branch not yet
-   * hydrated has been queried (already-queried branches are skipped).
+   * one returns immediately; otherwise it resolves once the running-actions
+   * snapshot has been applied (at most one request, shared by every caller).
    */
   async hydrateFromProjectBranches(branchesByProject: Map<string, Branch[]>): Promise<void> {
     const branchProjectMap = new Map<string, string[]>();
@@ -157,78 +169,69 @@ class ProjectRunActionsStore {
     if (signature === this.lastMembershipSignature) return;
     this.lastMembershipSignature = signature;
     this.updateBranchProjectMap(branchProjectMap);
-    await this.hydrateFromBranches(branchProjectMap);
+    // A failed request has already cleared the membership signature so the
+    // next call retries; callers only need to know the attempt has settled.
+    await this.hydrateSnapshot().catch(() => {});
   }
 
   /**
-   * Hydrate state by querying running actions for the given branches, one
-   * request per branch. Branches already hydrated are skipped and branches
-   * with a request in flight are awaited rather than re-requested.
+   * Fetch the running-actions snapshot once and apply it. The entry is
+   * recorded in `snapshotRequest` before the fetch starts and stays until it
+   * settles; only the request that still owns the entry when its data
+   * arrives applies it, so `stopListening` makes an older request a no-op. A
+   * rejected request leaves the store unhydrated and clears the membership
+   * signature so a later call retries.
+   *
+   * Events keep flowing while the request is out, and the snapshot may be
+   * older or newer than any of them, so applying it never overrides what the
+   * listeners have done: an execution they already track keeps its phase and
+   * one they removed stays removed.
    */
-  private async hydrateFromBranches(branchProjectMap: Map<string, string[]>): Promise<void> {
-    const requests: Promise<void>[] = [];
-    for (const branchIds of branchProjectMap.values()) {
-      for (const branchId of branchIds) {
-        if (this.hydratedBranchIds.has(branchId)) continue;
-        const pending = this.pendingBranchRequests.get(branchId);
-        requests.push(pending ? pending.promise : this.hydrateBranch(branchId));
-      }
-    }
-    if (requests.length === 0) return;
-    await Promise.allSettled(requests);
-  }
-
-  /**
-   * Fetch one branch's running actions and their run phases, then apply them.
-   * The entry is recorded in `pendingBranchRequests` before the fetch starts
-   * and stays until it settles; only the request that still owns the entry
-   * when its data arrives applies it, so `stopListening` makes an older
-   * request a no-op. A rejected request leaves the branch unhydrated and
-   * clears the membership signature so a later call retries it.
-   */
-  private hydrateBranch(branchId: string): Promise<void> {
+  private hydrateSnapshot(): Promise<void> {
+    if (this.hydrated) return Promise.resolve();
+    if (this.snapshotRequest) return this.snapshotRequest.promise;
     // `promise` is assigned synchronously below, before any caller can read
     // the entry; the object itself is the ownership token the fetch checks.
-    const request = {} as PendingBranchRequest;
-    this.pendingBranchRequests.set(branchId, request);
-    request.promise = this.fetchBranchState(branchId, request)
+    const request = { removedExecutionIds: new Set<string>() } as PendingSnapshotRequest;
+    this.snapshotRequest = request;
+    request.promise = this.fetchSnapshot(request)
       .catch((error: unknown) => {
         this.lastMembershipSignature = null;
         throw error;
       })
       .finally(() => {
-        if (this.pendingBranchRequests.get(branchId) === request) {
-          this.pendingBranchRequests.delete(branchId);
+        if (this.snapshotRequest === request) {
+          this.snapshotRequest = null;
         }
       });
     return request.promise;
   }
 
-  private async fetchBranchState(branchId: string, request: PendingBranchRequest): Promise<void> {
-    const actions = await getRunningBranchActions(branchId);
-    const runActions = actions.filter((action) => action.actionType === 'run');
-    const phases = await Promise.all(
-      runActions.map(async (action) => ({
-        executionId: action.executionId,
-        branchId: action.branchId,
-        phase: await this.fetchRunPhase(action.executionId),
-      }))
-    );
-    if (this.pendingBranchRequests.get(branchId) !== request) return;
-    this.hydratedBranchIds.add(branchId);
-    for (const { executionId, branchId: actionBranchId, phase } of phases) {
-      this.addExecution(executionId, actionBranchId, phase);
+  private async fetchSnapshot(request: PendingSnapshotRequest): Promise<void> {
+    const snapshots = await bulkRunningSnapshot();
+    if (this.snapshotRequest !== request) return;
+    this.hydrated = true;
+    for (const snapshot of snapshots) {
+      if (snapshot.actionType !== 'run') continue;
+      // Same guard as the action_status listener: a phase event that landed
+      // during the await must not regress to the snapshot's (possibly null)
+      // phase, and a completion must not come back as a permanent badge.
+      if (
+        this.executions.has(snapshot.executionId) ||
+        request.removedExecutionIds.has(snapshot.executionId)
+      ) {
+        continue;
+      }
+      // A snapshot without a phase is an execution the backend has started
+      // but not yet classified; it shows as building until a phase event.
+      this.addExecution(
+        snapshot.executionId,
+        snapshot.branchId,
+        snapshot.phase ?? {
+          type: 'building',
+        }
+      );
     }
-  }
-
-  private async fetchRunPhase(executionId: string): Promise<RunPhase> {
-    try {
-      const currentPhase = await getRunPhase(executionId);
-      if (currentPhase) return currentPhase;
-    } catch {
-      // Fall through to the default building phase
-    }
-    return { type: 'building' };
   }
 
   /**
@@ -271,6 +274,9 @@ class ProjectRunActionsStore {
   }
 
   private removeExecution(executionId: string): void {
+    // Recorded whether or not the execution was tracked locally: the snapshot
+    // in flight may be the first this store hears of it.
+    this.snapshotRequest?.removedExecutionIds.add(executionId);
     if (this.executions.delete(executionId)) {
       this.version++;
     }

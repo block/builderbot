@@ -127,8 +127,14 @@ pub struct SessionStatusEvent {
     pub status: String,
     pub error_message: Option<String>,
     pub completion_reason: Option<String>,
-    /// Set on `"running"` events emitted when an MCP tool starts a repo session,
-    /// so the frontend can register the session and refresh the branch timeline.
+    /// The branch the session runs on. Invariant the frontend load-bears on:
+    /// *every* repo-session event carries this — queue-drain, immediate launch,
+    /// resume, and terminal emits alike — and a project-session event never
+    /// does, because project sessions don't run on a branch.
+    /// `activeSessionIds.ts` keys the child-badge query set on its presence, so
+    /// a repo-session emit site that omits it silently regresses to a
+    /// per-child, always-empty `listChildSessions` round-trip. Also what lets
+    /// the frontend register the session and refresh the branch timeline.
     pub branch_id: Option<String>,
     pub project_id: Option<String>,
     pub session_type: Option<String>,

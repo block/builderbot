@@ -36,7 +36,8 @@ pub use driver::{
     AgentRunOutcome, AsyncTaskStopHandle, BackgroundHoldConfig, BackgroundHoldObserver,
     BackgroundHoldStatus, BackgroundHoldTask, BasicMessageWriter, MessageWriter,
     OutOfTurnPermissionPolicy, PromptImage, ReplayBoundary, SessionConnection, SessionLifetime,
-    SessionSettleReason, SessionSettled, Store, BACKGROUND_CONTINUATION_ORIGIN,
+    SessionSettleReason, SessionSettled, SteerOutcome, Store, TurnControlHandle,
+    BACKGROUND_CONTINUATION_ORIGIN,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

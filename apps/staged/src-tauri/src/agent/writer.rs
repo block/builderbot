@@ -20,7 +20,7 @@ use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
 use acp_client::{
     autoapprove_permission_decision, strip_code_fences, AcpEventMetadata, AcpInitializeMetadata,
-    AcpPermissionDecision, AcpPermissionRequest, AcpToolCallMetadata,
+    AcpPermissionDecision, AcpPermissionRequest, AcpToolCallMetadata, PromptImage,
 };
 use agent_client_protocol::schema::MaybeUndefined;
 
@@ -162,6 +162,42 @@ impl MessageWriter {
     /// of starting a new one on the next append.
     pub async fn resume_interrupted_text(&self) {
         *self.text_interrupted.lock().await = false;
+    }
+
+    /// Persist a user message the ACP connection delivered itself — steered
+    /// into the turn in flight, or sent as the prompt after an interrupt —
+    /// as an ordinary `user` row, and return its id.
+    ///
+    /// Finalizes first so the row lands after whatever the assistant had
+    /// streamed so far and the next [`append_text`](Self::append_text) opens
+    /// a fresh assistant row: the transcript reads assistant → user →
+    /// assistant. The connection finalizes before calling too; doing it here
+    /// as well costs nothing (finalize is idempotent) and keeps the ordering
+    /// a property of this method rather than of its caller.
+    ///
+    /// The `images` are the blocks the connection sent, not stored images —
+    /// acp-client has no image ids — so the row carries no `image_ids`. A
+    /// caller that owns stored images attaches them to the row it gets back.
+    pub async fn record_user_message(&self, text: &str, images: &[PromptImage]) -> Option<i64> {
+        self.finalize().await;
+        if !images.is_empty() {
+            log::debug!(
+                "Session {}: user message delivered mid-turn with {} image block(s); the \
+                 persisted row records the text only",
+                self.session_id,
+                images.len()
+            );
+        }
+        match self
+            .store
+            .add_session_message(&self.session_id, MessageRole::User, text)
+        {
+            Ok(id) => Some(id),
+            Err(e) => {
+                log::error!("Failed to insert delivered user message: {e}");
+                None
+            }
+        }
     }
 
     // =====================================================================
@@ -308,6 +344,10 @@ impl acp_client::MessageWriter for MessageWriter {
 
     async fn finalize(&self) {
         self.finalize().await
+    }
+
+    async fn record_user_message(&self, text: &str, images: &[PromptImage]) {
+        self.record_user_message(text, images).await;
     }
 
     async fn should_finish_after_response(&self) -> bool {
@@ -568,6 +608,71 @@ mod tests {
             // Closing a response prevents it from satisfying a later boundary.
             assert!(!writer.should_finish_after_response().await);
         }
+    }
+
+    /// A message the connection delivers mid-session (steer or interrupt) is
+    /// persisted between the assistant text before it and the reply after it,
+    /// as three rows in transcript order, and the reply does not extend the
+    /// row that was open when the message arrived.
+    #[tokio::test]
+    async fn record_user_message_lands_between_assistant_rows() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.append_text("Working on the first ").await;
+        writer.append_text("instruction.").await;
+        writer.finalize().await;
+        let user_row = writer
+            .record_user_message("Actually, do the second thing instead.", &[])
+            .await
+            .expect("user row inserted");
+        writer.append_text("Switching to the second thing.").await;
+        writer.finalize().await;
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        let rows: Vec<(MessageRole, &str)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "Working on the first instruction."),
+                (MessageRole::User, "Actually, do the second thing instead."),
+                (MessageRole::Assistant, "Switching to the second thing."),
+            ]
+        );
+        assert_eq!(messages[1].id, user_row);
+        assert!(messages[1].image_ids.is_empty());
+        assert!(messages[1].acp.acp_event_kind.is_none());
+    }
+
+    /// The trait entry point (what the connection task calls) closes any
+    /// still-open assistant text itself, so a caller that skipped the
+    /// finalize still gets the row order right; image blocks are accepted
+    /// and the text is what gets persisted.
+    #[tokio::test]
+    async fn record_user_message_closes_open_assistant_text_first() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.append_text("Unflushed partial text").await;
+        let image = acp_client::PromptImage::new("AAAA", "image/png");
+        acp_client::MessageWriter::record_user_message(&writer, "Look at this.", &[image]).await;
+        writer.append_text("Reply.").await;
+        writer.finalize().await;
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        let rows: Vec<(MessageRole, &str)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "Unflushed partial text"),
+                (MessageRole::User, "Look at this."),
+                (MessageRole::Assistant, "Reply."),
+            ]
+        );
     }
 
     #[tokio::test]

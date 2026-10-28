@@ -1644,6 +1644,32 @@ impl TurnControlHandle {
             .map_err(|_| "ACP connection closed before the interrupt resolved".to_string())?
     }
 
+    /// Whether the connection behind this handle is still running. A request
+    /// made while this is `false` fails fast; `true` is advisory — the
+    /// connection can settle between the check and the request.
+    pub fn is_connection_alive(&self) -> bool {
+        self.connection_alive.load(Ordering::Relaxed)
+    }
+
+    /// Whether `other` reaches the same connection as this handle (clones of
+    /// one connection's handle do; a re-connect on the same session hands out
+    /// a different one).
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.turn_control_tx.same_channel(&other.turn_control_tx)
+    }
+
+    /// A handle to no connection: every request fails fast with the
+    /// connection-gone error. For registries that need a placeholder and for
+    /// tests of the plumbing around a handle.
+    #[doc(hidden)]
+    pub fn detached() -> Self {
+        let (turn_control_tx, _) = mpsc::unbounded_channel();
+        Self {
+            turn_control_tx,
+            connection_alive: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     fn send(&self, request: TurnControlRequest) -> Result<(), String> {
         if !self.connection_alive.load(Ordering::Relaxed) {
             return Err("ACP connection is no longer running".to_string());

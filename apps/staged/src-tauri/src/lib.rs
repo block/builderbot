@@ -1492,12 +1492,20 @@ fn list_repo_actions(
 
 /// Every action context's actions in one read-only call — the bulk hydration
 /// path for surfaces that render one card per repo.
+///
+/// Async and off to a blocking thread: a sync command runs on the main
+/// thread, where waiting for the store's connection lock behind a busy writer
+/// froze the whole window every time a wave of repo cards mounted.
 #[tauri::command]
-fn list_all_repo_actions(
+async fn list_all_repo_actions(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<store::models::RepoContextActions>, String> {
     let store = get_store(&store)?;
-    store.list_all_repo_actions().map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        store.list_all_repo_actions().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("list_all_repo_actions task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

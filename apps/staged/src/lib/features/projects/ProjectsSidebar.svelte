@@ -32,8 +32,12 @@
   import SidebarSearchField from './SidebarSearchField.svelte';
   import SidebarSectionHead from './SidebarSectionHead.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
-  import { searchProjects } from './projectSearch';
-  import { resultsLabel, visibleSidebarRepos } from './sidebarSearch';
+  import {
+    matchingProjectIds,
+    matchingRepoKeys,
+    resultsLabel,
+    sidebarPinnedRepos,
+  } from './sidebarSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -61,14 +65,19 @@
   // (projectsListViewState.searchQuery), not a local copy: typing in either
   // field narrows both surfaces, so the sidebar list and the grid never
   // disagree about which projects are showing.
+  //
+  // Both segments render their whole list and the query only hides what it
+  // rules out (see sidebarSearch.ts): rendering the narrowed lists rebuilt
+  // every row and repo card a keystroke filtered out and back in.
   let searchQuery = $derived(projectsListViewState.searchQuery);
   let searching = $derived(searchQuery.trim().length > 0);
 
   // ── Repos segment ──
   // The pinned shelf, narrowed by the query. Unpinned repos are reached via
   // All repos, never surfaced here.
-  let pinnedCount = $derived(projectsDataStore.homeRepos.filter((r) => r.pinned).length);
-  let sidebarRepos = $derived(visibleSidebarRepos(projectsDataStore.homeRepos, searchQuery));
+  let pinnedRepos = $derived(sidebarPinnedRepos(projectsDataStore.homeRepos));
+  let matchingRepos = $derived(matchingRepoKeys(pinnedRepos, searchQuery));
+  let visibleRepoCount = $derived(matchingRepos?.size ?? pinnedRepos.length);
 
   // The view this sidebar sits beside is the workspace's project layer, not
   // necessarily the route on screen: the layer stays mounted under home, where
@@ -93,13 +102,14 @@
   let sidebarProjects = $derived.by(() => {
     const filtered = projectFiltersStore.filteredProjects;
     const selectedId = layerProjectId;
-    let withSelected = filtered;
     if (selectedId && !filtered.some((p) => p.id === selectedId)) {
       const selected = projects.find((p) => p.id === selectedId);
-      if (selected) withSelected = [...filtered, selected];
+      if (selected) return [...filtered, selected];
     }
-    return searchProjects(withSelected, searchQuery);
+    return filtered;
   });
+  let matchingProjects = $derived(matchingProjectIds(sidebarProjects, searchQuery));
+  let visibleProjectCount = $derived(matchingProjects?.size ?? sidebarProjects.length);
 
   // Keep run-action state hydrated for the row status dots and the Running
   // filter — on the repos route this is the only mounted surface that can
@@ -381,7 +391,7 @@
           {#if showReposSection}
             <SidebarSectionHead
               label={searching ? 'Repos' : 'Pinned repos'}
-              count={searching ? resultsLabel(sidebarRepos.length) : pinnedCount}
+              count={searching ? resultsLabel(visibleRepoCount) : pinnedRepos.length}
             >
               {#snippet trailing()}
                 <button
@@ -397,11 +407,18 @@
               {/snippet}
             </SidebarSectionHead>
 
-            {#if sidebarRepos.length > 0}
-              <PinnedRepoCards repos={sidebarRepos} reorderable={!searching} />
-            {:else if searching}
+            <!-- Mounted whenever anything is pinned, even while the query hides
+                 every card, so clearing it doesn't rebuild them. -->
+            {#if pinnedRepos.length > 0}
+              <PinnedRepoCards
+                repos={pinnedRepos}
+                visibleKeys={matchingRepos}
+                reorderable={!searching}
+              />
+            {/if}
+            {#if searching && visibleRepoCount === 0}
               <div class="state no-matches">No repos match "{searchQuery.trim()}"</div>
-            {:else if projectsDataStore.homeRepos.length > 0}
+            {:else if !searching && pinnedRepos.length === 0 && projectsDataStore.homeRepos.length > 0}
               <!-- Repos exist but none are pinned: point at where pinning lives
                    so the "Pinned repos 0" header isn't the only affordance.
                    With no repos at all (only reachable on the All repos view,
@@ -422,7 +439,7 @@
           {:else}
             <SidebarSectionHead
               label={searching ? 'Projects' : 'All projects'}
-              count={searching ? resultsLabel(sidebarProjects.length) : sidebarProjects.length}
+              count={searching ? resultsLabel(visibleProjectCount) : visibleProjectCount}
               active={layerProjectId === null && !layerShowsRepos}
               onclick={openAllProjects}
             >
@@ -430,7 +447,7 @@
                 <SidebarFilterMenu />
               {/snippet}
             </SidebarSectionHead>
-            {#if sidebarProjects.length === 0}
+            {#if visibleProjectCount === 0}
               <div class="state no-matches">
                 {#if searching}
                   <span>No projects match "{searchQuery.trim()}"</span>
@@ -453,7 +470,14 @@
               {@const busyTitle =
                 status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
               <ContextMenu.Root>
-                <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
+                <!-- Hidden here, on the display: contents wrapper, not on the
+                     row inside it: WebKit re-shows children of a contents
+                     element superlinearly (100 rows ~550 ms vs ~27 ms). -->
+                <ContextMenu.Trigger
+                  class="contents"
+                  disabled={status.kind === 'deleting'}
+                  hidden={matchingProjects !== null && !matchingProjects.has(project.id)}
+                >
                   <button
                     class="project-row project-item"
                     use:scrollIfActive={layerProjectId === project.id}

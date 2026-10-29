@@ -126,17 +126,23 @@
     projectFiltersStore.activeFilters === filtersAtVisit ? stickyProjectId : null
   );
 
+  // The query the grid applies: the shared one, but only while the grid is on
+  // screen. Covered by a project, the query changing is the sidebar's search
+  // being typed into, and following it there mounted and destroyed cards in a
+  // grid nobody could see on every keystroke. The grid catches up in the
+  // flush that brings the layer back, before that frame paints.
+  let gridQuery = $state(projectsListViewState.searchQuery);
+  $effect.pre(() => {
+    const query = projectsListViewState.searchQuery;
+    if (layer.visible) gridQuery = query;
+  });
+
   // Chips → sticky card → search; see visibleProjects for the composition.
   let filteredProjects = $derived(
-    visibleProjects(
-      projects,
-      projectFiltersStore.filteredProjects,
-      effectiveStickyId,
-      projectsListViewState.searchQuery
-    )
+    visibleProjects(projects, projectFiltersStore.filteredProjects, effectiveStickyId, gridQuery)
   );
 
-  let searchActive = $derived(projectsListViewState.searchQuery.trim().length > 0);
+  let searchActive = $derived(gridQuery.trim().length > 0);
   // Decides the empty-state copy: blame the query only when the grid would
   // have shown something without it. Judged against the sticky-adjusted base,
   // not the raw chip result, so a sticky card the chips excluded but the query
@@ -446,7 +452,7 @@
           {#if filteredProjects.length === 0}
             {#if searchExcludedEverything}
               <div class="state">
-                No projects match "{projectsListViewState.searchQuery.trim()}"
+                No projects match "{gridQuery.trim()}"
               </div>
             {:else}
               <div class="state">No projects match filters</div>

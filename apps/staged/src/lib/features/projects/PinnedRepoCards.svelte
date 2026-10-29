@@ -6,6 +6,11 @@
   reorders optimistically before the persisted pin order round-trips; the
   sidebar turns this off while a search is showing only some of the pinned
   repos, where a drop would persist the subset as the whole pin order.
+
+  A search hides cards (`visibleKeys`) rather than dropping them from
+  `repos`: each RepoCard hydrates its actions over IPC and subscribes to
+  backend events on mount, so a card that left the list and came back on
+  every keystroke re-ran all of that each time.
 -->
 <script lang="ts">
   import type { RepoHomeItem } from '../../types';
@@ -16,10 +21,12 @@
 
   interface Props {
     repos: RepoHomeItem[];
+    /** repoKeys of the cards to show; null shows every card. */
+    visibleKeys?: ReadonlySet<string> | null;
     reorderable?: boolean;
   }
 
-  let { repos, reorderable = false }: Props = $props();
+  let { repos, visibleKeys = null, reorderable = false }: Props = $props();
 
   // Tracks the input list, but a drop reassigns it so the reorder applies
   // optimistically (derived override); the next `repos` change re-syncs.
@@ -77,18 +84,21 @@
 
 <!-- Unlabelled on purpose: the SidebarSectionHead directly above already
      announces "Pinned repos" or "Repos · N results" for the current contents. -->
-<div class="pinned-repos-list" role="list">
+<div class="pinned-repos-list" role="list" hidden={visibleKeys?.size === 0}>
   {#each ordered as repo (repoKey(repo))}
-    <RepoCard
-      {repo}
-      hidePinButton
-      {reorderable}
-      onReorderStart={handleDragStart(repo)}
-      onReorderOver={handleDragOver}
-      onReorderDrop={handleDrop(repo)}
-      onReorderEnd={handleDragEnd}
-      onChange={() => projectsDataStore.refreshHomeRepos()}
-    />
+    <!-- display: contents, so the wrapper only carries `hidden`. -->
+    <div class="contents" hidden={visibleKeys !== null && !visibleKeys.has(repoKey(repo))}>
+      <RepoCard
+        {repo}
+        hidePinButton
+        {reorderable}
+        onReorderStart={handleDragStart(repo)}
+        onReorderOver={handleDragOver}
+        onReorderDrop={handleDrop(repo)}
+        onReorderEnd={handleDragEnd}
+        onChange={() => projectsDataStore.refreshHomeRepos()}
+      />
+    </div>
   {/each}
 </div>
 

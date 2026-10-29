@@ -721,7 +721,7 @@ async fn real_bridge_steer_mid_turn_redirects_the_live_turn() {
                 );
                 assert!(outcome
                     .as_ref()
-                    .is_err_and(|e| e.contains("does not advertise steering")));
+                    .is_err_and(|e| e.to_string().contains("does not advertise steering")));
                 assert_eq!(user_rows(&session.trace), 0);
                 session.finish().await;
                 return;
@@ -832,7 +832,7 @@ async fn real_bridge_steer_while_the_bridge_holds_the_turn_for_a_subagent() {
                 );
                 match &outcome {
                     Ok(SteerOutcome::NewTurnStarted) => {}
-                    Err(e) if e.contains("no longer running") => {
+                    Err(e) if e.to_string().contains("no longer running") => {
                         assert_eq!(user_rows(&session.trace), 0);
                         session.finish().await;
                         return;
@@ -882,7 +882,7 @@ async fn real_bridge_interrupt_reprompts_on_the_same_child() {
                 eprintln!("[interrupt] steer refused as expected: {steer:?}");
                 assert!(steer
                     .as_ref()
-                    .is_err_and(|e| e.contains("does not advertise steering")));
+                    .is_err_and(|e| e.to_string().contains("does not advertise steering")));
                 assert_eq!(user_rows(&trace), 0, "a refused steer leaves no row");
                 let sent_at = trace.elapsed();
                 let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[], &[]).await;

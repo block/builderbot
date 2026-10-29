@@ -6,7 +6,7 @@ use super::*;
 use crate::driver::{
     reject_queued_turn_control_requests, run_acp_session, steer_outcome, steering_message,
     steering_supported_from_initialize, HandlerPhase, IncomingSessionUpdate, SessionTurnResult,
-    SteerOutcome, TurnControlHandle, TurnControlReply, TurnControlRequest, TurnStep,
+    SteerError, SteerOutcome, TurnControlHandle, TurnControlReply, TurnControlRequest, TurnStep,
     STEERING_META_KEY, STEERING_METHOD, STEER_ACK_TIMEOUT,
 };
 use agent_client_protocol::schema::v1::{
@@ -376,11 +376,17 @@ fn steer_outcome_only_counts_injected_as_delivered() {
         (serde_json::json!({}), "malformed"),
     ] {
         let error = steer_outcome(Ok(response)).expect_err("not a delivery");
-        assert!(error.contains(needle), "got: {error}");
+        assert!(
+            matches!(&error, SteerError::Refused(reason) if reason.contains(needle)),
+            "got: {error}"
+        );
     }
     let error = steer_outcome(Err(agent_client_protocol::Error::method_not_found()))
         .expect_err("an agent without the extension is not a delivery");
-    assert!(error.contains("Steering request failed"), "got: {error}");
+    assert!(
+        matches!(&error, SteerError::Refused(reason) if reason.contains("Steering request failed")),
+        "got: {error}"
+    );
 }
 
 // =============================================================================
@@ -521,8 +527,11 @@ async fn steer_answered_prompt_required_is_an_error_without_a_user_row() {
             .steer("too late", &[], &[])
             .await
             .expect_err("promptRequired is not a delivery");
-        assert!(error.contains("promptRequired"), "got: {error}");
-        assert!(error.contains("noRunningTurn"), "got: {error}");
+        let SteerError::Refused(reason) = &error else {
+            panic!("a bridge answer is a refusal, not a timeout: {error:?}");
+        };
+        assert!(reason.contains("promptRequired"), "got: {error}");
+        assert!(reason.contains("noRunningTurn"), "got: {error}");
         agent.finish_prompt(StopReason::EndTurn);
     })
     .await;
@@ -553,7 +562,10 @@ async fn steer_to_an_agent_without_the_method_is_an_error() {
             .steer("hello?", &[], &[])
             .await
             .expect_err("method-not-found is not a delivery");
-        assert!(error.contains("Steering request failed"), "got: {error}");
+        assert!(
+            matches!(&error, SteerError::Refused(reason) if reason.contains("Steering request failed")),
+            "got: {error}"
+        );
         agent.finish_prompt(StopReason::EndTurn);
     })
     .await;
@@ -580,7 +592,7 @@ async fn steer_is_refused_locally_when_the_agent_did_not_advertise_it() {
             .await
             .expect_err("no capability, no steer");
         assert!(
-            error.contains("does not advertise steering"),
+            matches!(&error, SteerError::Refused(reason) if reason.contains("does not advertise steering")),
             "got: {error}"
         );
         agent.finish_prompt(StopReason::EndTurn);
@@ -1049,7 +1061,17 @@ async fn steer_unanswered_within_the_timeout_fails_and_a_late_answer_persists_no
             .steer("also run the linter", &[], &[])
             .await
             .expect_err("an unanswered steer times out");
-        assert!(error.contains("did not answer the steer"), "got: {error}");
+        // Distinct from a refusal: the caller must not re-send the text.
+        assert_eq!(
+            error,
+            SteerError::Unacknowledged {
+                timeout: STEER_ACK_TIMEOUT
+            }
+        );
+        assert!(
+            error.to_string().contains("did not answer the steer"),
+            "got: {error}"
+        );
         assert!(
             started.elapsed() >= STEER_ACK_TIMEOUT,
             "failed before the timeout: {:?}",
@@ -1334,9 +1356,9 @@ async fn teardown_answers_every_queued_message_and_the_handle_fails_fast_after()
         .await
         .expect("every queued request is answered");
     assert!(
-        steer
-            .as_ref()
-            .is_err_and(|e| e.contains("connection closed")),
+        steer.as_ref().is_err_and(
+            |e| matches!(e, SteerError::Refused(reason) if reason.contains("connection closed"))
+        ),
         "got: {steer:?}"
     );
     let interrupt = interrupt_reply_rx
@@ -1358,7 +1380,10 @@ async fn teardown_answers_every_queued_message_and_the_handle_fails_fast_after()
         .steer("c", &[], &[])
         .await
         .expect_err("connection is gone");
-    assert!(error.contains("no longer running"), "got: {error}");
+    assert!(
+        matches!(&error, SteerError::Refused(reason) if reason.contains("no longer running")),
+        "got: {error}"
+    );
     let error = handle
         .interrupt_and_reprompt("d", &[], &[])
         .await
@@ -1380,7 +1405,10 @@ async fn a_turn_control_handle_maps_channel_failures_to_connection_state() {
     };
     let (steered, ()) = tokio::join!(handle.steer("a", &[], &[]), drop_unanswered);
     let error = steered.expect_err("a dropped reply is not an answer");
-    assert!(error.contains("closed before"), "got: {error}");
+    assert!(
+        matches!(&error, SteerError::Refused(reason) if reason.contains("closed before")),
+        "got: {error}"
+    );
 
     // With the receiver gone the connection itself is gone, whatever the
     // alive flag still says.

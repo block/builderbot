@@ -1482,6 +1482,40 @@ pub enum SteerOutcome {
     NewTurnStarted,
 }
 
+/// Why [`TurnControlHandle::steer`] did not deliver the message. The split
+/// matters to the caller's fallback: a `Refused` steer is known not to have
+/// reached the agent, so sending the same text again by another route cannot
+/// double-deliver it; an `Unacknowledged` one may have — the bridge took the
+/// frame and never answered — so the caller must not re-send blindly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerError {
+    /// The agent did not answer the `_session/steering` request within
+    /// `timeout` ([`STEER_ACK_TIMEOUT`]). Whether the message was injected is
+    /// unknown; no user row was persisted for it, and an answer landing after
+    /// this persists nothing either.
+    Unacknowledged { timeout: Duration },
+    /// The steer did not reach the agent's turn and the message was not
+    /// delivered: the agent does not advertise steering, it answered anything
+    /// but `injected` (`promptRequired`, `failed`, `startedNewTurn`), the
+    /// request could not be built or sent, or the connection is gone.
+    Refused(String),
+}
+
+impl std::fmt::Display for SteerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unacknowledged { timeout } => write!(
+                f,
+                "Agent did not answer the steer within {}s",
+                timeout.as_secs()
+            ),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for SteerError {}
+
 /// A request queued onto a [`SessionConnection`]'s turn-control channel by a
 /// [`TurnControlHandle`]: a message that must reach the agent now, not after
 /// the turn in flight ends.
@@ -1491,7 +1525,7 @@ enum TurnControlRequest {
         prompt: String,
         images: Vec<PromptImage>,
         attachment_ids: Vec<String>,
-        reply: oneshot::Sender<Result<SteerOutcome, String>>,
+        reply: oneshot::Sender<Result<SteerOutcome, SteerError>>,
     },
     /// `session/cancel` the in-flight turn, then send the message as the next
     /// `session/prompt` on the same connection.
@@ -1545,7 +1579,7 @@ impl TurnControlRequest {
     fn reject(self, reason: String) {
         match self {
             Self::Steer { reply, .. } => {
-                let _ = reply.send(Err(reason));
+                let _ = reply.send(Err(SteerError::Refused(reason)));
             }
             Self::Interrupt { reply, .. } => {
                 let _ = reply.send(Err(reason));
@@ -1557,7 +1591,7 @@ impl TurnControlRequest {
 /// The reply half of a [`TurnControlRequest`] whose message became a
 /// [`QueuedSessionTurn`] of its own.
 enum TurnControlReply {
-    Steer(oneshot::Sender<Result<SteerOutcome, String>>),
+    Steer(oneshot::Sender<Result<SteerOutcome, SteerError>>),
     Interrupt(oneshot::Sender<Result<(), String>>),
 }
 
@@ -1578,7 +1612,7 @@ impl TurnControlReply {
     fn reject(self, reason: String) {
         match self {
             Self::Steer(reply) => {
-                let _ = reply.send(Err(reason));
+                let _ = reply.send(Err(SteerError::Refused(reason)));
             }
             Self::Interrupt(reply) => {
                 let _ = reply.send(Err(reason));
@@ -1655,30 +1689,35 @@ impl TurnControlHandle {
     /// `Ok(Injected)` means the agent took it into the live turn. With no turn
     /// in flight (the connection holding for background work, or idle) the
     /// message is sent as a fresh `session/prompt` on the same connection and
-    /// the answer is `Ok(NewTurnStarted)`. `Err` when the agent does not
-    /// advertise steering, answered anything but `injected` (`promptRequired`
-    /// when the turn ended under the request, `failed`, `startedNewTurn`),
-    /// did not answer within `STEER_ACK_TIMEOUT`, or the connection is gone;
-    /// callers then fall back to [`TurnControlHandle::interrupt_and_reprompt`].
-    /// The user message is persisted (see
-    /// [`MessageWriter::record_user_message`], with `attachment_ids`) only on
-    /// `Ok` — an answer that arrives after the timeout persists nothing.
+    /// the answer is `Ok(NewTurnStarted)`. [`SteerError::Refused`] when the
+    /// agent does not advertise steering, answered anything but `injected`
+    /// (`promptRequired` when the turn ended under the request, `failed`,
+    /// `startedNewTurn`), or the connection is gone — the message did not
+    /// reach the agent, and callers fall back to
+    /// [`TurnControlHandle::interrupt_and_reprompt`] with the same text.
+    /// [`SteerError::Unacknowledged`] when the agent did not answer within
+    /// `STEER_ACK_TIMEOUT`: the bridge may still have injected the message,
+    /// so callers must not re-send it by another route. The user message is
+    /// persisted (see [`MessageWriter::record_user_message`], with
+    /// `attachment_ids`) only on `Ok` — an answer that arrives after the
+    /// timeout persists nothing.
     pub async fn steer(
         &self,
         prompt: &str,
         images: &[PromptImage],
         attachment_ids: &[String],
-    ) -> Result<SteerOutcome, String> {
+    ) -> Result<SteerOutcome, SteerError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.send(TurnControlRequest::Steer {
             prompt: prompt.to_string(),
             images: images.to_vec(),
             attachment_ids: attachment_ids.to_vec(),
             reply: reply_tx,
-        })?;
-        reply_rx
-            .await
-            .map_err(|_| "ACP connection closed before the steer resolved".to_string())?
+        })
+        .map_err(SteerError::Refused)?;
+        reply_rx.await.map_err(|_| {
+            SteerError::Refused("ACP connection closed before the steer resolved".to_string())
+        })?
     }
 
     /// Cancel the agent's in-flight turn (`session/cancel`) and send the
@@ -1748,7 +1787,7 @@ impl TurnControlHandle {
     /// agent. Needs a tokio runtime: the stand-in is a task.
     #[doc(hidden)]
     pub fn scripted(
-        steer: Result<SteerOutcome, String>,
+        steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
         Self::scripted_connection(steer, interrupt, false)
@@ -1761,14 +1800,14 @@ impl TurnControlHandle {
     /// `false` from the first answer on.
     #[doc(hidden)]
     pub fn scripted_then_gone(
-        steer: Result<SteerOutcome, String>,
+        steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
         Self::scripted_connection(steer, interrupt, true)
     }
 
     fn scripted_connection(
-        steer: Result<SteerOutcome, String>,
+        steer: Result<SteerOutcome, SteerError>,
         interrupt: Result<(), String>,
         gone_after_first_answer: bool,
     ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
@@ -3321,8 +3360,9 @@ fn steering_message(
 /// extension) surfaces as such.
 fn steer_outcome(
     result: Result<serde_json::Value, agent_client_protocol::Error>,
-) -> Result<SteerOutcome, String> {
-    let response = result.map_err(|e| format!("Steering request failed: {e:?}"))?;
+) -> Result<SteerOutcome, SteerError> {
+    let response =
+        result.map_err(|e| SteerError::Refused(format!("Steering request failed: {e:?}")))?;
     match response.get("outcome").and_then(serde_json::Value::as_str) {
         Some("injected") => Ok(SteerOutcome::Injected),
         Some(outcome) => {
@@ -3331,13 +3371,13 @@ fn steer_outcome(
                 .and_then(serde_json::Value::as_str)
                 .map(|reason| format!(" ({reason})"))
                 .unwrap_or_default();
-            Err(format!(
+            Err(SteerError::Refused(format!(
                 "Steering not injected: agent answered '{outcome}'{reason}"
-            ))
+            )))
         }
-        None => Err(format!(
+        None => Err(SteerError::Refused(format!(
             "Steering not injected: malformed response {response}"
-        )),
+        ))),
     }
 }
 
@@ -5108,10 +5148,13 @@ fn serve_async_task_stop(
 ///
 /// The answer is bounded by [`STEER_ACK_TIMEOUT`]: the caller's reply sender
 /// sits in a slot that the response callback and a timer race for, and only
-/// the one that takes it answers. A `_session/steering` answer that lands
-/// after the timer has answered `Err` is logged and otherwise ignored — in
-/// particular it persists no user row, because the caller has by then fallen
-/// back to an interrupt that persists the message itself.
+/// the one that takes it answers. The timer answers
+/// [`SteerError::Unacknowledged`] — the one steer failure that does not mean
+/// "not delivered", so the caller knows not to re-send the text by another
+/// route. A `_session/steering` answer that lands after the timer has
+/// answered is logged and otherwise ignored — in particular it persists no
+/// user row, because the caller has by then reported the message as possibly
+/// delivered and left the transcript to the user to check.
 #[allow(clippy::too_many_arguments)]
 fn serve_steer(
     connection: &ConnectionTo<Agent>,
@@ -5121,12 +5164,12 @@ fn serve_steer(
     prompt: String,
     images: Vec<PromptImage>,
     attachment_ids: Vec<String>,
-    reply: oneshot::Sender<Result<SteerOutcome, String>>,
+    reply: oneshot::Sender<Result<SteerOutcome, SteerError>>,
 ) {
     if !setup.steering_supported {
-        let _ = reply.send(Err(
+        let _ = reply.send(Err(SteerError::Refused(
             "Steering not available: agent does not advertise steering".to_string(),
-        ));
+        )));
         return;
     }
     log::info!("ACP session {our_session_id}: steering the turn in flight");
@@ -5135,7 +5178,9 @@ fn serve_steer(
     let message = match steering_message(&setup.agent_session_id, content_blocks) {
         Ok(message) => message,
         Err(e) => {
-            let _ = reply.send(Err(format!("Failed to build steering request: {e:?}")));
+            let _ = reply.send(Err(SteerError::Refused(format!(
+                "Failed to build steering request: {e:?}"
+            ))));
             return;
         }
     };
@@ -5188,10 +5233,9 @@ fn serve_steer(
                 "ACP session {timed_out_session_id}: agent did not answer the steer within {}s",
                 STEER_ACK_TIMEOUT.as_secs()
             );
-            let _ = reply.send(Err(format!(
-                "Agent did not answer the steer within {}s",
-                STEER_ACK_TIMEOUT.as_secs()
-            )));
+            let _ = reply.send(Err(SteerError::Unacknowledged {
+                timeout: STEER_ACK_TIMEOUT,
+            }));
         }
         Ok(())
     });
@@ -5218,10 +5262,12 @@ fn serve_steer(
 const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a steer waits for the agent's `_session/steering` answer before
-/// the request fails and the caller falls back to an interrupt. The same
-/// bound as [`INTERRUPT_ACK_TIMEOUT`], for the same reason: a bridge that
-/// takes the frame and never answers while the turn runs on must not wedge
-/// the caller's tool call (which has no keepalive of its own).
+/// the request fails as [`SteerError::Unacknowledged`]. The same bound as
+/// [`INTERRUPT_ACK_TIMEOUT`], for the same reason: a bridge that takes the
+/// frame and never answers while the turn runs on must not wedge the caller's
+/// tool call (which has no keepalive of its own). Expiring is not a licence
+/// to re-send — the bridge may have injected the message anyway — which is
+/// why the caller gets a distinct error rather than a refusal.
 const STEER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the holding wait gives the bridge to process a `session/cancel`

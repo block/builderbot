@@ -175,9 +175,14 @@ impl MessageWriter {
     /// as well costs nothing (finalize is idempotent) and keeps the ordering
     /// a property of this method rather than of its caller.
     ///
-    /// The `images` are the blocks the connection sent, not stored images —
-    /// acp-client has no image ids — so the row carries no `image_ids`. A
-    /// caller that owns stored images attaches them to the row it gets back.
+    /// The `images` are the blocks the connection sent; `image_ids` are the
+    /// stored attachments they were built from, threaded through the
+    /// connection's `TurnControlRequest` by the caller that loaded them. They
+    /// are persisted on the row as its `image_ids` and the images are
+    /// re-associated with this session (`set_images_session_id`), as
+    /// `start_session` does for a first prompt. The two lists normally pair
+    /// up one to one; a shortfall (an attachment whose file could not be
+    /// read still keeps its id) is logged and otherwise harmless.
     pub async fn record_user_message(
         &self,
         text: &str,

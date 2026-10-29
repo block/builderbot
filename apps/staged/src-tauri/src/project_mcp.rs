@@ -1277,7 +1277,7 @@ mod tests {
         AcpConfigSelection, AcpConfigValueSelection, Branch, MessageRole, Project, ProjectNote,
         Session, SessionMessage, SessionStatus, Store,
     };
-    use acp_client::{SteerOutcome, TurnControlHandle};
+    use acp_client::{SteerError, SteerOutcome, TurnControlHandle};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -1751,7 +1751,9 @@ mod tests {
     async fn continuing_a_running_session_by_interrupting_never_leaves_running() {
         let f = ContinueFixture::running_note_session();
         let (turn_control, served) = TurnControlHandle::scripted(
-            Err("agent does not advertise steering".to_string()),
+            Err(SteerError::Refused(
+                "agent does not advertise steering".to_string(),
+            )),
             Ok(()),
         );
         f.registry

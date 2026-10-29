@@ -2121,11 +2121,18 @@ async fn wait_for_turn_control_handle(
 
 /// Reach a running session's agent over its connection: steer, and when the
 /// agent refuses (no steering advertised, `promptRequired` because the turn
-/// ended under the request, `failed`, no answer in time), interrupt the turn
-/// and re-prompt. `Err` only when the interrupt fails too — the caller
-/// decides whether that is a dead connection or a blocked delivery. The
-/// `image_ids` ride along as the row's attachment ids, like `start_session`
-/// records them, whether or not every file could be read.
+/// ended under the request, `failed`), interrupt the turn and re-prompt. A
+/// refusal is the only failure that falls back: it means the message did not
+/// reach the agent, so sending the same text again cannot double-deliver it.
+/// A steer the agent never answered (`SteerError::Unacknowledged`) is
+/// different — the bridge may have injected the message and simply not said
+/// so — and is reported `Blocked` with the ambiguity spelled out, rather
+/// than re-sent as an interrupt that would have the agent read the same
+/// instruction twice (and the caller wait out a second ack timeout). `Err`
+/// only when the interrupt fails too — the caller decides whether that is a
+/// dead connection or a blocked delivery. The `image_ids` ride along as the
+/// row's attachment ids, like `start_session` records them, whether or not
+/// every file could be read.
 async fn deliver_to_running_session(
     store: &Arc<Store>,
     handle: &acp_client::TurnControlHandle,
@@ -2147,7 +2154,19 @@ async fn deliver_to_running_session(
     let steer_refusal = match handle.steer(&prompt, &attachments.images, image_ids).await {
         Ok(acp_client::SteerOutcome::Injected) => return Ok(ContinueOutcome::Injected),
         Ok(acp_client::SteerOutcome::NewTurnStarted) => return Ok(ContinueOutcome::StartedNewTurn),
-        Err(reason) => reason,
+        Err(acp_client::SteerError::Unacknowledged { timeout }) => {
+            log::warn!(
+                "continue_session: steer not acknowledged within {}s; not interrupting, the \
+                 message may already have been delivered",
+                timeout.as_secs()
+            );
+            return Ok(ContinueOutcome::blocked(format!(
+                "steer not acknowledged within {}s; the message may still have been delivered \
+                 — check the transcript before retrying",
+                timeout.as_secs()
+            )));
+        }
+        Err(acp_client::SteerError::Refused(reason)) => reason,
     };
     log::info!("continue_session: steer refused ({steer_refusal}); interrupting the turn instead");
     handle
@@ -8260,7 +8279,9 @@ mod tests {
         let registry = test_registry();
         let _registration = registry.register_external(&session.id);
         let (handle, served) = acp_client::TurnControlHandle::scripted(
-            Err("steer not injected: promptRequired".to_string()),
+            Err(acp_client::SteerError::Refused(
+                "steer not injected: promptRequired".to_string(),
+            )),
             Ok(()),
         );
         registry.set_turn_control_handle(&session.id, handle);
@@ -8279,6 +8300,46 @@ mod tests {
         );
     }
 
+    /// A steer the agent never answered is not a refusal: the bridge may have
+    /// injected the message and just not said so, so the body must not
+    /// re-send the same text as an interrupt (the agent would read it twice,
+    /// and the caller would wait out a second ack timeout). It answers
+    /// blocked, says the message may have landed, and sends nothing else.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_does_not_interrupt_after_an_unacknowledged_steer() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, served) = acp_client::TurnControlHandle::scripted(
+            Err(acp_client::SteerError::Unacknowledged {
+                timeout: Duration::from_secs(30),
+            }),
+            Ok(()),
+        );
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let outcome =
+            delivered(continue_through_shared_body(&registry, &store, &session.id, "redo").await);
+
+        match outcome {
+            ContinueOutcome::Blocked { reason } => {
+                assert!(reason.contains("not acknowledged within 30s"), "{reason}");
+                assert!(reason.contains("may still have been delivered"), "{reason}");
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec!["steer:redo".to_string()],
+            "an unacknowledged steer must not be followed by an interrupt"
+        );
+        assert_eq!(
+            store.get_session(&session.id).unwrap().unwrap().status,
+            store::SessionStatus::Running
+        );
+    }
+
     /// Both deliveries refused on a connection that is still up (a bridge
     /// that never acknowledged the cancel): blocked with the agent's reason,
     /// the row untouched.
@@ -8289,7 +8350,9 @@ mod tests {
         let registry = test_registry();
         let _registration = registry.register_external(&session.id);
         let (handle, _) = acp_client::TurnControlHandle::scripted(
-            Err("agent does not advertise steering".to_string()),
+            Err(acp_client::SteerError::Refused(
+                "agent does not advertise steering".to_string(),
+            )),
             Err("agent did not acknowledge the cancel".to_string()),
         );
         registry.set_turn_control_handle(&session.id, handle);
@@ -8678,7 +8741,9 @@ mod tests {
         let registry = test_registry();
         let _registration = registry.register_external(&session.id);
         let (handle, served) = acp_client::TurnControlHandle::scripted_then_gone(
-            Err("connection closed".to_string()),
+            Err(acp_client::SteerError::Refused(
+                "connection closed".to_string(),
+            )),
             Err("ACP connection is no longer running".to_string()),
         );
         let script = {
@@ -8727,7 +8792,9 @@ mod tests {
         let registry = test_registry();
         let _registration = registry.register_external(&session.id);
         let (handle, served) = acp_client::TurnControlHandle::scripted(
-            Err("agent does not advertise steering".to_string()),
+            Err(acp_client::SteerError::Refused(
+                "agent does not advertise steering".to_string(),
+            )),
             Ok(()),
         );
         registry.set_turn_control_handle(&session.id, handle);

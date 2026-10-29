@@ -147,8 +147,10 @@ const REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS: usize = 240;
 struct RepoSessionActivity {
     last_activity_at: Option<i64>,
     /// When the session's agent last received a user message — the original
-    /// instructions or a `continue_repo_session` follow-up — so a parent that
-    /// continued the session can confirm the message landed in its transcript.
+    /// instructions or a `continue_repo_session` follow-up, whichever is
+    /// latest — so a parent that continued the session can confirm the
+    /// message landed in its transcript by comparing this with the time of
+    /// its own call (the tool description says so).
     last_user_message_at: Option<i64>,
     last_message: Option<RepoSessionActivityEntry>,
     last_tool_call: Option<RepoSessionActivityEntry>,
@@ -904,7 +906,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Send a follow-up message to a repo session started by `start_repo_session`: a correction, the answer to a question it raised, or its next step. A running session receives the message within seconds without being stopped, so its work so far is kept; a completed, cancelled, or failed session is resumed with the message as its next instruction. A session that has not started yet cannot take a message — wait for it to run, or cancel it and start a new one. Prefer this over cancelling and starting over whenever the session's work so far is still wanted. Returns the session's current state together with how the message was delivered, or why it was not."
+        description = "Send a follow-up message to a repo session started by `start_repo_session`: a correction, the answer to a question it raised, or its next step. A running session receives the message within seconds without being stopped, so its work so far is kept; a completed, cancelled, or failed session is resumed with the message as its next instruction. A session that has not started yet cannot take a message — wait for it to run, or cancel it and start a new one. Prefer this over cancelling and starting over whenever the session's work so far is still wanted. Returns the session's current state together with how the message was delivered, or why it was not. The activity's last user-message time is when the session's agent most recently received any user message — the original instructions included, not only this one — so to confirm this message landed, compare it with the time you made this call."
     )]
     async fn continue_repo_session(
         &self,
@@ -1627,7 +1629,9 @@ mod tests {
         assert!(description.contains("resumed with the message"));
         assert!(description.contains("has not started yet cannot take a message"));
         assert!(description.contains("Prefer this over cancelling"));
+        assert!(description.contains("compare it with the time you made this call"));
         assert!(!description.contains("`delivery`"));
+        assert!(!description.contains("last_user_message_at"));
         assert!(!description.contains("injected"));
         assert!(!description.contains("interrupt"));
         assert!(!description.contains("steer"));
@@ -1688,7 +1692,9 @@ mod tests {
                 &self.session.id,
                 message,
                 &[],
-                std::time::Duration::from_millis(200),
+                crate::session_commands::ContinueWaits::uniform(std::time::Duration::from_millis(
+                    200,
+                )),
             )
             .await
             .unwrap();
@@ -1863,6 +1869,8 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Captured right before the continue: every row streamed so
+                // far precedes the user row the connection persists.
                 let rows_before = messages().len();
 
                 let payload = f.continue_with(FOLLOW_UP).await;
@@ -1900,7 +1908,10 @@ mod tests {
                     all.iter().filter(|m| m.role == MessageRole::User).count(),
                     1
                 );
-                assert!(user_at >= rows_before.min(1), "{all:#?}");
+                assert!(
+                    user_at >= rows_before,
+                    "user row at {user_at}, {rows_before} rows preceded the continue: {all:#?}"
+                );
                 let reply: String = all[user_at + 1..]
                     .iter()
                     .filter(|m| m.role == MessageRole::Assistant)

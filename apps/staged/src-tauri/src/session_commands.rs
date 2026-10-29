@@ -1410,6 +1410,67 @@ pub(crate) async fn resume_session_for_store(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
+    let plan = prepare_resume(&store, &session, branch_id, acp_config_selection).await?;
+
+    // Live from before the `running` write until the runner has registered
+    // (see `SessionRegistry::hold`); released when this function returns.
+    let _liveness = registry.hold(&session_id);
+    let transitioned = store
+        .transition_to_running_clearing_agent_id(
+            &session_id,
+            plan.pending_start_agent_id.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+    if !transitioned {
+        return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
+    }
+
+    launch_resume(
+        plan,
+        store,
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        &session,
+        prompt,
+        image_ids,
+        queued_message_id,
+    )
+    .await
+}
+
+/// Everything a resume reads before the row is claimed: the session's
+/// artifact and branch, the provider and config selection, the workspace
+/// path and the pre-run HEAD. None of it needs the row to be `running`, so
+/// `resume_session_for_store` reads it all first and the claim is a single
+/// statement; the continue path, which claims under the branch launch lock
+/// before it can read any of this, runs the same preparation afterwards.
+struct ResumePlan {
+    provider: Option<String>,
+    pending_start_agent_id: Option<String>,
+    agent_session_id: Option<String>,
+    working_dir: PathBuf,
+    effective_acp_config_selection: Option<store::AcpConfigSelection>,
+    parent_project_note_id: Option<String>,
+    mcp_project_id: Option<String>,
+    linked_commit: bool,
+    linked_note: bool,
+    session_type: Option<String>,
+    event_branch_id: Option<String>,
+    event_project_id: Option<String>,
+    pre_head_sha: Option<String>,
+    workspace_name: Option<String>,
+    remote_working_dir: Option<PathBuf>,
+}
+
+async fn prepare_resume(
+    store: &Arc<Store>,
+    session: &store::Session,
+    branch_id: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
+) -> Result<ResumePlan, String> {
+    let session_id = session.id.clone();
     // Use the provider that originally created this session so the
     // agent's conversation history can be restored correctly.
     let provider = session.provider.clone();
@@ -1418,8 +1479,7 @@ pub(crate) async fn resume_session_for_store(
     let agent_session_id = resumable_agent_session_id(session.agent_id.as_deref());
     let working_dir = PathBuf::from(&session.working_dir);
     let effective_acp_config_selection =
-        resolve_resume_acp_config_selection(&store, &session, acp_config_selection);
-    let acp_config_selection_to_persist = effective_acp_config_selection.clone();
+        resolve_resume_acp_config_selection(store, session, acp_config_selection);
 
     // Check if this session is linked to a project note — if so, we need
     // to start the MCP server so the agent has access to project tools.
@@ -1485,7 +1545,7 @@ pub(crate) async fn resume_session_for_store(
         if let Some(ref branch) = linked_branch {
             let ws_name = branch.workspace_name.clone();
             let head = if linked_commit.is_some() {
-                crate::branches::branch_head_sha(&store, branch, &working_dir)
+                crate::branches::branch_head_sha(store, branch, &working_dir)
                     .await
                     .ok()
             } else {
@@ -1502,7 +1562,7 @@ pub(crate) async fn resume_session_for_store(
     let remote_working_dir = if let Some(ref branch) = linked_branch {
         if branch.workspace_name.is_some() {
             let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
-            let store_for_resolve = Arc::clone(&store);
+            let store_for_resolve = Arc::clone(store);
             let branch_for_resolve = branch.clone();
             match tauri::async_runtime::spawn_blocking(move || {
                 crate::branches::resolve_branch_workspace_subpath(
@@ -1527,22 +1587,69 @@ pub(crate) async fn resume_session_for_store(
         None
     };
 
-    // Live from before the `running` write until the runner has registered
-    // (see `SessionRegistry::hold`); released when this function returns.
-    let _liveness = registry.hold(&session_id);
-    let transitioned = store
-        .transition_to_running_clearing_agent_id(&session_id, pending_start_agent_id.as_deref())
-        .map_err(|e| e.to_string())?;
-    if !transitioned {
-        return Err(SESSION_ALREADY_RUNNING_ERROR.to_string());
-    }
+    Ok(ResumePlan {
+        provider,
+        pending_start_agent_id,
+        agent_session_id,
+        working_dir,
+        effective_acp_config_selection,
+        parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+        mcp_project_id,
+        linked_commit: linked_commit.is_some(),
+        linked_note: linked_note.is_some(),
+        session_type,
+        event_branch_id,
+        event_project_id,
+        pre_head_sha,
+        workspace_name,
+        remote_working_dir,
+    })
+}
+
+/// The second half of a resume, after the row has been claimed `running`
+/// (and with the caller's liveness hold still in place): announce the
+/// status, persist the config selection and hand the row to the runner. A
+/// failure from here on is recorded on the row, which is already `running`
+/// and announced.
+#[allow(clippy::too_many_arguments)]
+async fn launch_resume(
+    plan: ResumePlan,
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    session: &store::Session,
+    prompt: String,
+    image_ids: Option<Vec<String>>,
+    queued_message_id: Option<String>,
+) -> Result<(), String> {
+    let session_id = session.id.clone();
+    let ResumePlan {
+        provider,
+        pending_start_agent_id: _,
+        agent_session_id,
+        working_dir,
+        effective_acp_config_selection,
+        parent_project_note_id,
+        mcp_project_id,
+        linked_commit,
+        linked_note,
+        session_type,
+        event_branch_id,
+        event_project_id,
+        pre_head_sha,
+        workspace_name,
+        remote_working_dir,
+    } = plan;
+    let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
     let config_branch_id = event_branch_id.clone();
     let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
     // Note follow-ups (project notes or local branch notes) get the pikchr
     // tool; remote branch notes can't reach localhost.
     let expose_pikchr_tools = local_note_pikchr_tools_available(
-        project_note.is_some() || linked_note.is_some(),
+        parent_project_note_id.is_some() || linked_note,
         workspace_name.as_deref(),
     );
 
@@ -1584,7 +1691,7 @@ pub(crate) async fn resume_session_for_store(
                 pre_head_sha,
                 provider,
                 workspace_name,
-                extra_env: if linked_commit.is_some() {
+                extra_env: if linked_commit {
                     session_runner::git_identity_env_from_global_config()
                 } else {
                     vec![]
@@ -1609,7 +1716,7 @@ pub(crate) async fn resume_session_for_store(
                 expose_pikchr_tools,
                 // When resuming a project session, keep its parent project note in
                 // scope so `child_note` repo sessions still attach to it.
-                parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
+                parent_project_note_id,
                 background_hold: default_background_hold(),
             },
             Arc::clone(&store),
@@ -1636,10 +1743,43 @@ pub(crate) async fn resume_session_for_store(
 /// delivery rather than an error.
 pub(crate) const SESSION_ALREADY_RUNNING_ERROR: &str = "Session is already running";
 
-/// How long `continue_session_for_store` waits for a `running` session that
-/// has no turn-control handle yet — the startup window between the `running`
-/// write and the runner's `connect` — before answering `Blocked`.
-pub(crate) const CONTINUE_SESSION_STARTUP_WAIT: Duration = Duration::from_secs(10);
+/// How long each wait inside `route_continue_session` may take. Each has its
+/// own budget: a startup wait that ran long must not eat into the wait for a
+/// row to settle after its connection ended under the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContinueWaits {
+    /// A `running` session with no turn-control handle yet, on a local
+    /// branch (or no branch): the window between the `running` write and the
+    /// runner's `connect`.
+    pub(crate) startup: Duration,
+    /// The same window on a `Remote` branch, where the connect goes over SSH
+    /// to the workspace and takes correspondingly longer.
+    pub(crate) remote_startup: Duration,
+    /// After a delivery failed because the connection went away under it:
+    /// how long to wait for the row to leave `running` (or a re-connect to
+    /// hand out a new handle) before answering blocked.
+    pub(crate) settle: Duration,
+}
+
+impl ContinueWaits {
+    /// The production budgets.
+    pub(crate) const DEFAULT: ContinueWaits = ContinueWaits {
+        startup: Duration::from_secs(10),
+        remote_startup: Duration::from_secs(30),
+        settle: Duration::from_secs(10),
+    };
+
+    /// Every budget the same — for tests that need the blocked cases to run
+    /// in milliseconds.
+    #[cfg(test)]
+    pub(crate) fn uniform(wait: Duration) -> Self {
+        Self {
+            startup: wait,
+            remote_startup: wait,
+            settle: wait,
+        }
+    }
+}
 
 /// How a message handed to `continue_session_for_store` reached (or failed to
 /// reach) the session's agent. The wire spelling is `delivery()`.
@@ -1663,7 +1803,8 @@ pub(crate) enum ContinueOutcome {
     RejectedQueued,
     /// Not delivered now, but a retry may succeed: the session is still
     /// starting, its connection went away under the request, the branch is
-    /// busy, or another start won the race.
+    /// busy, another start won the race, or the session runs in another
+    /// Staged instance that shares this database.
     Blocked { reason: String },
     /// A stopped session that cannot be resumed: no agent conversation to
     /// load, or its worktree is gone. The caller should start a new session.
@@ -1705,14 +1846,36 @@ impl ContinueOutcome {
     }
 }
 
+/// A stopped session `continue_resume_gate` claimed for a resume. Its row is
+/// already `running` under this process (the claim is the gate's schedule
+/// check and the status write in one step under the branch's launch lock,
+/// so two continues on one branch cannot both pass); the caller must now
+/// finish the resume with `resume_claimed_session_for_store`, or the row
+/// stays `running` until the stranded-session sweep ends it.
+pub(crate) struct ClaimedResume {
+    pub(crate) session: store::Session,
+    /// Live from the claim until the runner has registered the session (see
+    /// `SessionRegistry::hold`); released when the claim is dropped.
+    _liveness: session_runner::LivenessHold,
+}
+
+impl std::fmt::Debug for ClaimedResume {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimedResume")
+            .field("session", &self.session.id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Where `route_continue_session` sent the message.
 #[derive(Debug)]
 pub(crate) enum ContinueRoute {
     /// Delivered, refused, or blocked without touching the row.
     Delivered(ContinueOutcome),
-    /// A stopped session that passed the resume gate: the caller resumes it
-    /// with the message as the next prompt.
-    Resume(Box<store::Session>),
+    /// A stopped session that passed the resume gate and was claimed
+    /// `running` for it: the caller resumes it with the message as the next
+    /// prompt.
+    Resume(Box<ClaimedResume>),
 }
 
 /// Deliver `message` to a session now, whatever state it is in.
@@ -1724,10 +1887,11 @@ pub(crate) enum ContinueRoute {
 /// `running` and the runner never sees a turn boundary; a stopped session is
 /// resumed; a `queued` one is refused. The user row is written by whoever
 /// delivers: acp-client for the live paths (only once the agent took the
-/// message), `start_session` for the resume, so nothing here persists it.
+/// message, with `image_ids` on the row), `start_session` for the resume, so
+/// nothing here persists it.
 ///
-/// Resume failures other than the already-running race are returned as
-/// `Err`, as `resume_session_for_store` reports them.
+/// Resume failures are returned as `Err`, as `resume_session_for_store`
+/// reports them; the row is then recorded failed by the resume itself.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn continue_session_for_store(
     store: Arc<Store>,
@@ -1745,52 +1909,91 @@ pub(crate) async fn continue_session_for_store(
         &session_id,
         &message,
         &image_ids,
-        CONTINUE_SESSION_STARTUP_WAIT,
+        ContinueWaits::DEFAULT,
     )
     .await?;
-    let session = match route {
+    let claim = match route {
         ContinueRoute::Delivered(outcome) => return Ok(outcome),
-        ContinueRoute::Resume(session) => *session,
+        ContinueRoute::Resume(claim) => *claim,
     };
 
-    // No `branch_id` override: the resume resolves the branch from the
-    // session's artifact, or from the row itself for pipeline sessions.
-    match resume_session_for_store(
+    resume_claimed_session_for_store(
         store,
         registry,
         action_executor,
         action_registry,
         app_handle,
-        session.id,
+        claim,
+        message,
+        image_ids,
+    )
+    .await
+    .map(|()| ContinueOutcome::Resumed)
+}
+
+/// Finish the resume of a session `continue_resume_gate` claimed: the same
+/// preparation and launch as `resume_session_for_store`, without the claim
+/// it already made. No `branch_id` override and no config selection: the
+/// resume resolves the branch from the session's artifact (or from the row
+/// itself for pipeline sessions) and keeps the session's selection. A
+/// preparation failure is recorded on the row like a launch failure — the
+/// row is `running` and ours from the claim on.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resume_claimed_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    claim: ClaimedResume,
+    message: String,
+    image_ids: Vec<String>,
+) -> Result<(), String> {
+    let ClaimedResume { session, _liveness } = claim;
+    let plan = match prepare_resume(&store, &session, None, None).await {
+        Ok(plan) => plan,
+        Err(e) => {
+            let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+            let project_id = store.get_project_id_for_session(&session.id).ok().flatten();
+            return fail_session_start_on_error(
+                &store,
+                &registry,
+                &app_handle,
+                &session.id,
+                branch_id,
+                project_id,
+                Err(e),
+            );
+        }
+    };
+    launch_resume(
+        plan,
+        store,
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        &session,
         message,
         Some(image_ids),
         None,
-        None,
-        None,
     )
     .await
-    {
-        Ok(()) => Ok(ContinueOutcome::Resumed),
-        Err(e) if e == SESSION_ALREADY_RUNNING_ERROR => Ok(ContinueOutcome::blocked(
-            "the session started running again under this request; retry to reach it live",
-        )),
-        Err(e) => Err(e),
-    }
 }
 
-/// Everything `continue_session_for_store` does short of the resume itself,
-/// which needs the app handle. Loops because the status can move under the
-/// request: a `running` session whose connection ends while this waits for
-/// its handle is routed again on the status it ended with.
+/// Everything `continue_session_for_store` does short of the resume's
+/// preparation and launch, which need the app handle. Loops because the
+/// status can move under the request: a `running` session whose connection
+/// ends while this waits for its handle is routed again on the status it
+/// ended with. Each wait takes its own budget from `waits`.
 pub(crate) async fn route_continue_session(
-    store: &Store,
-    registry: &session_runner::SessionRegistry,
+    store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
     session_id: &str,
     message: &str,
     image_ids: &[String],
-    startup_wait: Duration,
+    waits: ContinueWaits,
 ) -> Result<ContinueRoute, String> {
-    let deadline = Instant::now() + startup_wait;
     // A handle whose connection went away under this request; the wait below
     // skips it so only a re-connect's handle (or a status change) ends it.
     let mut dead_handle: Option<acp_client::TurnControlHandle> = None;
@@ -1805,17 +2008,45 @@ pub(crate) async fn route_continue_session(
                 return Ok(ContinueRoute::Delivered(ContinueOutcome::RejectedQueued));
             }
             store::SessionStatus::Running => {
+                // A `running` row this process does not own is not starting
+                // up: another Staged instance sharing this database runs it
+                // (the dead-session sweep leaves such rows alone while that
+                // process lives), and its connection is in that process.
+                // Waiting for a handle here would never end in one.
+                if let Some(owner_pid) = session.owner_pid.filter(|pid| *pid != std::process::id())
+                {
+                    return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(format!(
+                        "the session is owned by another Staged instance (pid {owner_pid}); it \
+                         can only be reached from that instance"
+                    ))));
+                }
+                let budget = if dead_handle.is_some() {
+                    waits.settle
+                } else if continue_branch_and_type(store, &session)?
+                    .0
+                    .is_some_and(|branch| branch.branch_type == store::BranchType::Remote)
+                {
+                    waits.remote_startup
+                } else {
+                    waits.startup
+                };
                 let handle = match wait_for_turn_control_handle(
                     store,
                     registry,
                     session_id,
-                    deadline,
+                    Instant::now() + budget,
                     dead_handle.as_ref(),
                 )
                 .await
                 {
                     HandleWait::Ready(handle) => handle,
                     HandleWait::LeftRunning => continue,
+                    HandleWait::TimedOut if dead_handle.is_some() => {
+                        return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(
+                            "the session's connection ended under the request and the session \
+                             has not settled yet; retry in a few seconds",
+                        )));
+                    }
                     HandleWait::TimedOut => {
                         return Ok(ContinueRoute::Delivered(ContinueOutcome::blocked(
                             "the session is still starting; retry in a few seconds",
@@ -1843,9 +2074,9 @@ pub(crate) async fn route_continue_session(
             store::SessionStatus::Completed
             | store::SessionStatus::Cancelled
             | store::SessionStatus::Error => {
-                return Ok(match continue_resume_gate(store, &session)? {
-                    Some(refused) => ContinueRoute::Delivered(refused),
-                    None => ContinueRoute::Resume(Box::new(session)),
+                return Ok(match continue_resume_gate(store, registry, session)? {
+                    Ok(claim) => ContinueRoute::Resume(Box::new(claim)),
+                    Err(refused) => ContinueRoute::Delivered(refused),
                 });
             }
         }
@@ -1890,73 +2121,113 @@ async fn wait_for_turn_control_handle(
 
 /// Reach a running session's agent over its connection: steer, and when the
 /// agent refuses (no steering advertised, `promptRequired` because the turn
-/// ended under the request, `failed`), interrupt the turn and re-prompt.
-/// `Err` only when the interrupt fails too — the caller decides whether that
-/// is a dead connection or a blocked delivery.
+/// ended under the request, `failed`, no answer in time), interrupt the turn
+/// and re-prompt. `Err` only when the interrupt fails too — the caller
+/// decides whether that is a dead connection or a blocked delivery. The
+/// `image_ids` ride along as the row's attachment ids, like `start_session`
+/// records them, whether or not every file could be read.
 async fn deliver_to_running_session(
-    store: &Store,
+    store: &Arc<Store>,
     handle: &acp_client::TurnControlHandle,
     message: &str,
     image_ids: &[String],
 ) -> Result<ContinueOutcome, String> {
-    let attachments = session_runner::load_prompt_attachments(store, image_ids);
+    // File reads and, for PDFs, page rendering: off the async runtime that
+    // serves the MCP server and the Tauri commands.
+    let attachments = {
+        let store = Arc::clone(store);
+        let image_ids = image_ids.to_vec();
+        tokio::task::spawn_blocking(move || {
+            session_runner::load_prompt_attachments(&store, &image_ids)
+        })
+        .await
+        .map_err(|e| format!("could not load the message's attachments: {e}"))?
+    };
     let prompt = attachments.prompt(message);
-    let steer_refusal = match handle.steer(&prompt, &attachments.images).await {
+    let steer_refusal = match handle.steer(&prompt, &attachments.images, image_ids).await {
         Ok(acp_client::SteerOutcome::Injected) => return Ok(ContinueOutcome::Injected),
         Ok(acp_client::SteerOutcome::NewTurnStarted) => return Ok(ContinueOutcome::StartedNewTurn),
         Err(reason) => reason,
     };
     log::info!("continue_session: steer refused ({steer_refusal}); interrupting the turn instead");
     handle
-        .interrupt_and_reprompt(&prompt, &attachments.images)
+        .interrupt_and_reprompt(&prompt, &attachments.images, image_ids)
         .await
         .map(|()| ContinueOutcome::InterruptedAndReprompted)
         .map_err(|reason| format!("could not reach the running session: {reason}"))
 }
 
-/// Whether a stopped session may be resumed with a new message: it needs an
-/// agent conversation to load and, for a local branch, its worktree on disk;
-/// on a branch, the start must also be allowed by the branch schedule (no
-/// provisioning in progress, nothing queued ahead of it, no conflicting
-/// running session). `Some` is the refusal; `None` lets the resume proceed.
+/// Whether a stopped session may be resumed with a new message — and if so,
+/// claim it. It needs an agent conversation to load and, for a local branch,
+/// its worktree on disk; on a branch, the start must also be allowed by the
+/// branch schedule (no provisioning in progress, nothing queued ahead of it,
+/// no conflicting running session). `Err` is the refusal; `Ok` is the claim:
+/// the row is `running` under this process.
 ///
-/// The schedule check runs under the branch's launch lock like the branch
-/// session starts do, but the lock is not held into the resume's `running`
-/// write (that write is itself atomic on the status), so two continues on
-/// one branch can both pass the gate; the second then finds the first's row
-/// running and is reported blocked.
+/// The schedule check and the `running` write happen together under the
+/// branch's launch lock with no await between them, as every branch session
+/// start claims (see `QueuedSessionClaim::claim`). Checked and written apart,
+/// two different stopped exclusive sessions on one branch continued at once
+/// both pass the check and both resume; held together, the second finds the
+/// first's row running and is blocked. A session off any branch is claimed
+/// without the lock — nothing schedules against it — and the status CAS
+/// alone refuses a concurrent claim of the same row.
 pub(crate) fn continue_resume_gate(
-    store: &Store,
-    session: &store::Session,
-) -> Result<Option<ContinueOutcome>, String> {
+    store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
+    session: store::Session,
+) -> Result<Result<ClaimedResume, ContinueOutcome>, String> {
     if resumable_agent_session_id(session.agent_id.as_deref()).is_none() {
-        return Ok(Some(ContinueOutcome::not_resumable(
+        return Ok(Err(ContinueOutcome::not_resumable(
             "the session has no agent conversation to resume; start a new session instead",
         )));
     }
 
-    let (branch, session_type) = continue_branch_and_type(store, session)?;
+    let (branch, session_type) = continue_branch_and_type(store, &session)?;
     let is_remote = branch
         .as_ref()
         .is_some_and(|branch| branch.branch_type == store::BranchType::Remote);
     if !is_remote && !Path::new(&session.working_dir).is_dir() {
-        return Ok(Some(ContinueOutcome::not_resumable(format!(
+        return Ok(Err(ContinueOutcome::not_resumable(format!(
             "the session's working directory is gone ({}); start a new session instead",
             session.working_dir
         ))));
     }
 
-    if let (Some(branch), Some(session_type)) = (branch, session_type) {
-        let launch_lock = branch_session_launch_lock_for(&branch.id);
-        let _guard = launch_lock.lock().unwrap();
-        if should_queue_branch_session_start(store, &branch.id, &session_type)? {
-            return Ok(Some(ContinueOutcome::blocked(
-                "the branch is provisioning or busy with another session; retry once it is idle",
-            )));
+    let pending_start_agent_id =
+        pending_branch_start_agent_id(session.agent_id.as_deref()).map(ToString::to_string);
+    // The status CAS, with the liveness hold taken first (see
+    // `SessionRegistry::hold`): `Some` holds the claimed row live, `None`
+    // (the row is already `running`) releases the hold again.
+    let claim = || -> Result<Option<session_runner::LivenessHold>, String> {
+        let liveness = registry.hold(&session.id);
+        let claimed = store
+            .transition_to_running_clearing_agent_id(&session.id, pending_start_agent_id.as_deref())
+            .map_err(|e| e.to_string())?;
+        Ok(claimed.then_some(liveness))
+    };
+    let liveness = match (branch, session_type) {
+        (Some(branch), Some(session_type)) => {
+            let launch_lock = branch_session_launch_lock_for(&branch.id);
+            let _guard = launch_lock.lock().unwrap();
+            if should_queue_branch_session_start(store, &branch.id, &session_type)? {
+                return Ok(Err(ContinueOutcome::blocked(
+                    "the branch is provisioning or busy with another session; retry once it is idle",
+                )));
+            }
+            claim()?
         }
-    }
-
-    Ok(None)
+        _ => claim()?,
+    };
+    let Some(liveness) = liveness else {
+        return Ok(Err(ContinueOutcome::blocked(
+            "the session started running again under this request; retry to reach it live",
+        )));
+    };
+    Ok(Ok(ClaimedResume {
+        session,
+        _liveness: liveness,
+    }))
 }
 
 /// The branch a session runs on and the schedule kind it counts as, from its
@@ -7861,18 +8132,28 @@ mod tests {
     /// and the resume gate, with a short startup wait so the blocked cases
     /// run in milliseconds.
     async fn continue_through_shared_body(
-        registry: &session_runner::SessionRegistry,
+        registry: &Arc<session_runner::SessionRegistry>,
         store: &Arc<Store>,
         session_id: &str,
         message: &str,
+    ) -> ContinueRoute {
+        continue_with_images(registry, store, session_id, message, &[]).await
+    }
+
+    async fn continue_with_images(
+        registry: &Arc<session_runner::SessionRegistry>,
+        store: &Arc<Store>,
+        session_id: &str,
+        message: &str,
+        image_ids: &[String],
     ) -> ContinueRoute {
         route_continue_session(
             store,
             registry,
             session_id,
             message,
-            &[],
-            Duration::from_millis(300),
+            image_ids,
+            ContinueWaits::uniform(Duration::from_millis(300)),
         )
         .await
         .unwrap()
@@ -7881,8 +8162,8 @@ mod tests {
     fn delivered(route: ContinueRoute) -> ContinueOutcome {
         match route {
             ContinueRoute::Delivered(outcome) => outcome,
-            ContinueRoute::Resume(session) => {
-                panic!("expected a delivery, got a resume of {}", session.id)
+            ContinueRoute::Resume(claim) => {
+                panic!("expected a delivery, got a resume of {}", claim.session.id)
             }
         }
     }
@@ -8112,7 +8393,7 @@ mod tests {
 
         settle.await.unwrap();
         match route {
-            ContinueRoute::Resume(resumed) => assert_eq!(resumed.id, session.id),
+            ContinueRoute::Resume(resumed) => assert_eq!(resumed.session.id, session.id),
             other => panic!("expected a resume, got {other:?}"),
         }
     }
@@ -8224,22 +8505,253 @@ mod tests {
 
     /// A stopped session with a conversation to load, its worktree on disk
     /// and an idle branch goes to the resume, which `start_session` then
-    /// persists the message for.
+    /// persists the message for. The gate claims the row: it is `running`
+    /// under this process from here, held live until the runner registers.
     #[tokio::test(flavor = "current_thread")]
     async fn continuing_a_resumable_stopped_session_routes_to_the_resume() {
         let (store, branch) = setup_branch_store_with_workdir();
         let session = completed_commit_session_with_agent_id(&store, &branch.id);
+        let registry = test_registry();
 
-        let route = continue_through_shared_body(&test_registry(), &store, &session.id, "x").await;
+        let route = continue_through_shared_body(&registry, &store, &session.id, "x").await;
 
+        let claim = match route {
+            ContinueRoute::Resume(claim) => claim,
+            other => panic!("expected a resume, got {other:?}"),
+        };
+        assert_eq!(claim.session.id, session.id);
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, store::SessionStatus::Running);
+        assert_eq!(row.owner_pid, Some(std::process::id()));
+        assert_eq!(
+            row.agent_id.as_deref(),
+            Some("acp-session-1"),
+            "the conversation id the resume loads is kept"
+        );
+        assert!(registry.is_live(&session.id), "held live by the claim");
+        drop(claim);
+        assert!(!registry.is_live(&session.id));
+    }
+
+    /// The race the claim exists for: two *different* stopped exclusive
+    /// sessions on one branch continued at the same time. The schedule check
+    /// and the `running` write are one step under the branch launch lock, so
+    /// exactly one is claimed and the other sees the first's row running and
+    /// is blocked — never two running commit sessions on one branch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_continues_of_two_stopped_sessions_on_one_branch_claim_only_one() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let first = completed_commit_session_with_agent_id(&store, &branch.id);
+        let second = completed_commit_session_with_agent_id(&store, &branch.id);
+        let registry = test_registry();
+
+        let spawn_continue = |session_id: String| {
+            let store = Arc::clone(&store);
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                route_continue_session(
+                    &store,
+                    &registry,
+                    &session_id,
+                    "x",
+                    &[],
+                    ContinueWaits::uniform(Duration::from_millis(300)),
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let (first_route, second_route) = tokio::join!(
+            spawn_continue(first.id.clone()),
+            spawn_continue(second.id.clone())
+        );
+
+        let mut claimed = Vec::new();
+        let mut blocked = Vec::new();
+        for route in [first_route, second_route] {
+            match route.unwrap() {
+                ContinueRoute::Resume(claim) => claimed.push(claim),
+                ContinueRoute::Delivered(ContinueOutcome::Blocked { reason }) => {
+                    blocked.push(reason)
+                }
+                other => panic!("unexpected route {other:?}"),
+            }
+        }
+        assert_eq!(claimed.len(), 1, "exactly one resume: {blocked:?}");
+        assert_eq!(blocked.len(), 1);
+        assert!(blocked[0].contains("busy"), "{}", blocked[0]);
+        let running: Vec<String> = store
+            .get_running_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+        assert_eq!(running, vec![claimed[0].session.id.clone()]);
+    }
+
+    /// A `running` row owned by another Staged instance (two dev builds on
+    /// one `~/.staged/data.db`) is not in its startup window: its connection
+    /// lives in that process and no handle will ever appear here. Answered
+    /// blocked at once, with the owner named, instead of after the full
+    /// startup wait on every retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_session_owned_by_another_instance_is_blocked_without_waiting() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut session = store::Session::new_running("prompt", Path::new("/tmp"));
+        let other_pid = std::process::id() + 1;
+        session.owner_pid = Some(other_pid);
+        store.create_session(&session).unwrap();
+        let registry = test_registry();
+
+        let started = Instant::now();
+        let route = route_continue_session(
+            &store,
+            &registry,
+            &session.id,
+            "x",
+            &[],
+            ContinueWaits::uniform(Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        match delivered(route) {
+            ContinueOutcome::Blocked { reason } => {
+                assert!(reason.contains("another Staged instance"), "{reason}");
+                assert!(reason.contains(&other_pid.to_string()), "{reason}");
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+    }
+
+    /// The startup window on a `Remote` branch gets the longer budget: the
+    /// runner connects over SSH to the workspace before it can register a
+    /// handle.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_starting_remote_session_waits_the_remote_budget() {
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Running);
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+
+        let started = Instant::now();
+        let route = route_continue_session(
+            &store,
+            &registry,
+            &session.id,
+            "x",
+            &[],
+            ContinueWaits {
+                startup: Duration::from_millis(100),
+                remote_startup: Duration::from_millis(500),
+                settle: Duration::from_millis(100),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "waited only {:?}",
+            started.elapsed()
+        );
+        match delivered(route) {
+            ContinueOutcome::Blocked { reason } => {
+                assert!(reason.contains("still starting"), "{reason}")
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+    }
+
+    /// The wait for a row to settle after its connection ended under the
+    /// request has its own budget: here the handle lands late in the
+    /// startup window, the delivery finds the connection gone, and the row
+    /// settles after the startup budget would have run out — on the settle
+    /// budget the message is routed to the resume rather than blocked.
+    #[tokio::test(flavor = "current_thread")]
+    async fn settle_wait_after_a_dead_connection_has_its_own_budget() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, served) = acp_client::TurnControlHandle::scripted_then_gone(
+            Err("connection closed".to_string()),
+            Err("ACP connection is no longer running".to_string()),
+        );
+        let script = {
+            let registry = Arc::clone(&registry);
+            let store = Arc::clone(&store);
+            let session_id = session.id.clone();
+            tokio::spawn(async move {
+                // Most of a 300 ms startup budget goes by before the connect.
+                tokio::time::sleep(Duration::from_millis(220)).await;
+                registry.set_turn_control_handle(&session_id, handle);
+                // The row settles 250 ms later: past the startup budget,
+                // inside the settle budget.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                store
+                    .update_session_status(
+                        &session_id,
+                        store::SessionStatus::Completed,
+                        None,
+                        Some(&store::CompletionReason::TurnComplete),
+                    )
+                    .unwrap();
+                store.set_agent_session_id(&session_id, "acp-1").unwrap();
+            })
+        };
+
+        let route = continue_through_shared_body(&registry, &store, &session.id, "x").await;
+
+        script.await.unwrap();
         match route {
-            ContinueRoute::Resume(resumed) => assert_eq!(resumed.id, session.id),
+            ContinueRoute::Resume(claim) => assert_eq!(claim.session.id, session.id),
             other => panic!("expected a resume, got {other:?}"),
         }
-        // The gate decides; it does not write.
+        // The steer's answer came with the connection already gone, so the
+        // interrupt failed fast at the handle and never reached the agent.
+        assert_eq!(*served.lock().unwrap(), vec!["steer:x".to_string()]);
+    }
+
+    /// The message's image ids go to the connection with the prompt and come
+    /// back on the persisted user row (acp-client hands them to the writer),
+    /// on the steer and on the interrupt alike; the resume path records them
+    /// through `start_session` as before.
+    #[tokio::test(flavor = "current_thread")]
+    async fn image_ids_travel_with_the_message_on_the_live_path() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, served) = acp_client::TurnControlHandle::scripted(
+            Err("agent does not advertise steering".to_string()),
+            Ok(()),
+        );
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let outcome = delivered(
+            continue_with_images(
+                &registry,
+                &store,
+                &session.id,
+                "see attached",
+                &ids(&["img-1", "img-2"]),
+            )
+            .await,
+        );
+
+        assert_eq!(outcome, ContinueOutcome::InterruptedAndReprompted);
         assert_eq!(
-            store.get_session(&session.id).unwrap().unwrap().status,
-            store::SessionStatus::Completed
+            *served.lock().unwrap(),
+            vec![
+                "steer:see attached".to_string(),
+                "attachments:img-1,img-2".to_string(),
+                "interrupt:see attached".to_string(),
+                "attachments:img-1,img-2".to_string(),
+            ]
         );
     }
 

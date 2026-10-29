@@ -280,7 +280,12 @@ impl MessageWriter for Trace {
         self.push(Ev::Finalize);
     }
 
-    async fn record_user_message(&self, text: &str, _images: &[PromptImage]) {
+    async fn record_user_message(
+        &self,
+        text: &str,
+        _images: &[PromptImage],
+        _attachment_ids: &[String],
+    ) {
         self.push(Ev::User(text.to_string()));
     }
 
@@ -686,7 +691,7 @@ async fn real_bridge_steer_mid_turn_redirects_the_live_turn() {
                     .await;
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let sent_at = trace.elapsed();
-                let outcome = handle.steer(STEER_MESSAGE, &[]).await;
+                let outcome = handle.steer(STEER_MESSAGE, &[], &[]).await;
                 let answered_at = trace.elapsed();
                 let turn_still_live = !prompt_done_for_steer.get();
                 eprintln!(
@@ -801,7 +806,7 @@ async fn real_bridge_steer_while_the_bridge_holds_the_turn_for_a_subagent() {
                 tokio::time::sleep(Duration::from_secs(3)).await;
                 let held = !prompt_done_for_steer.get();
                 eprintln!("[steer-held] bridge still holding the turn 3s after LAUNCHED: {held}");
-                let outcome = handle.steer(HELD_STEER_MESSAGE, &[]).await;
+                let outcome = handle.steer(HELD_STEER_MESSAGE, &[], &[]).await;
                 eprintln!("[steer-held] steer answered {outcome:?} at {:.2}s", trace.elapsed().as_secs_f64());
                 (held, outcome)
             });
@@ -873,14 +878,14 @@ async fn real_bridge_interrupt_reprompts_on_the_same_child() {
                     .await;
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 // The caller's routing: steer first, interrupt on refusal.
-                let steer = handle.steer(INTERRUPT_MESSAGE, &[]).await;
+                let steer = handle.steer(INTERRUPT_MESSAGE, &[], &[]).await;
                 eprintln!("[interrupt] steer refused as expected: {steer:?}");
                 assert!(steer
                     .as_ref()
                     .is_err_and(|e| e.contains("does not advertise steering")));
                 assert_eq!(user_rows(&trace), 0, "a refused steer leaves no row");
                 let sent_at = trace.elapsed();
-                let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[]).await;
+                let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[], &[]).await;
                 let answered_at = trace.elapsed();
                 // The re-prompt is live now: the child it runs on. (Read
                 // here, not after the turn — a bridge with no observable
@@ -985,7 +990,7 @@ async fn race_steer(label: &str, steer_after_first_chunk: bool) {
                 .await;
         }
         let sent_at = trace.elapsed();
-        let outcome = tokio::time::timeout(REPLY_TIMEOUT, handle.steer(RACE_MESSAGE, &[]))
+        let outcome = tokio::time::timeout(REPLY_TIMEOUT, handle.steer(RACE_MESSAGE, &[], &[]))
             .await
             .expect("a steer at the turn boundary must not hang");
         eprintln!(
@@ -1002,7 +1007,7 @@ async fn race_steer(label: &str, steer_after_first_chunk: bool) {
                 // the caller to route as a resume.
                 let fallback = tokio::time::timeout(
                     REPLY_TIMEOUT,
-                    handle.interrupt_and_reprompt(RACE_MESSAGE, &[]),
+                    handle.interrupt_and_reprompt(RACE_MESSAGE, &[], &[]),
                 )
                 .await
                 .expect("the fallback must not hang");
@@ -1128,7 +1133,7 @@ async fn real_bridge_interrupt_while_a_permission_request_is_pending() {
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 let sent_at = trace.elapsed();
-                let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[]).await;
+                let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[], &[]).await;
                 let answered_at = trace.elapsed();
                 let pids_during_reprompt = bridge_pids();
                 eprintln!(
@@ -1231,7 +1236,7 @@ async fn race_interrupt(label: &str, after_first_chunk: bool) {
         let sent_at = trace.elapsed();
         let outcome = tokio::time::timeout(
             REPLY_TIMEOUT,
-            handle.interrupt_and_reprompt(RACE_MESSAGE, &[]),
+            handle.interrupt_and_reprompt(RACE_MESSAGE, &[], &[]),
         )
         .await
         .expect("an interrupt at the turn boundary must not hang");

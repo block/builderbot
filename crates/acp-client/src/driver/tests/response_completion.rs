@@ -31,11 +31,23 @@ impl ArtifactWriter {
     }
 
     fn recorded_result(&self) -> bool {
+        self.recorded_results() > 0
+    }
+
+    fn recorded_results(&self) -> usize {
         self.metadata
             .lock()
             .unwrap()
             .iter()
-            .any(|event| event.event_kind.as_deref() == Some("response_result"))
+            .filter(|event| event.event_kind.as_deref() == Some("response_result"))
+            .count()
+    }
+
+    /// How many results reached the completion boundary (the writer's
+    /// `should_finish_after_response`).
+    fn completion_checks(&self) -> usize {
+        self.acceptance_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -383,6 +395,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                 .send(QueuedSessionTurn {
                     prompt: "write".into(),
                     images: vec![],
+                    attachment_ids: vec![],
                     reply: Some(reply),
                     control: None,
                 })
@@ -641,12 +654,54 @@ async fn result_of_a_cycle_a_steer_aborted_does_not_echo_the_closed_message() {
             RowFlow::Append("pong".into()),
             RowFlow::Finalize,
             // No second "pong": the aborted cycle's result matched the text
-            // already streamed. The steered reply starts a row of its own.
-            RowFlow::Finalize,
+            // the steer detached. The steered reply starts a row of its own
+            // (the steer's finalize already closed the previous one).
             RowFlow::Append("RACE-DONE".into()),
         ]
     );
-    assert!(writer.recorded_result());
+    // Both results are recorded (the aborted cycle's usage is real), but only
+    // the steered reply's reaches the completion boundary: the aborted cycle
+    // is not a response of its own.
+    assert_eq!(writer.recorded_results(), 2);
+    assert_eq!(writer.completion_checks(), 1);
+}
+
+/// The other order: the steered reply's first chunk lands *before* the
+/// aborted cycle's `result`. The detached text is kept apart from the live
+/// buffer, so the aborted result still matches it rather than retiring a
+/// buffer that now holds the reply's first chunk — which would split the
+/// reply into a second row at its next chunk and leave the turn's final
+/// result unrecorded.
+#[tokio::test]
+async fn aborted_cycle_result_arriving_after_the_steered_reply_began_does_not_split_it() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "pong")).await;
+    handler.writer.finalize().await;
+    handler.response.lock().await.detach_message();
+    feed(&handler, agent_text(Some("msg-2"), "RACE-")).await;
+    feed_sdk_frame(&handler, successful_result("aborted", "pong")).await;
+    feed(&handler, agent_text(Some("msg-2"), "DONE")).await;
+    feed_sdk_frame(&handler, successful_result("steered", "RACE-DONE")).await;
+
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("pong".into()),
+            RowFlow::Finalize,
+            // One row for the reply, no boundary between its two chunks and
+            // no echoed "pong".
+            RowFlow::Append("RACE-".into()),
+            RowFlow::Append("DONE".into()),
+        ]
+    );
+    assert_eq!(handler.response.lock().await.text, "RACE-DONE");
+    // The final result is still honoured: recorded, and the one that
+    // completes the response.
+    assert_eq!(writer.recorded_results(), 2);
+    assert_eq!(writer.completion_checks(), 1);
+    assert!(handler.response.lock().await.completed);
 }
 
 #[tokio::test]

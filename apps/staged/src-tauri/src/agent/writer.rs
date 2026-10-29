@@ -178,26 +178,48 @@ impl MessageWriter {
     /// The `images` are the blocks the connection sent, not stored images —
     /// acp-client has no image ids — so the row carries no `image_ids`. A
     /// caller that owns stored images attaches them to the row it gets back.
-    pub async fn record_user_message(&self, text: &str, images: &[PromptImage]) -> Option<i64> {
+    pub async fn record_user_message(
+        &self,
+        text: &str,
+        images: &[PromptImage],
+        image_ids: &[String],
+    ) -> Option<i64> {
         self.finalize().await;
-        if !images.is_empty() {
+        if images.len() != image_ids.len() {
             log::debug!(
-                "Session {}: user message delivered mid-turn with {} image block(s); the \
-                 persisted row records the text only",
+                "Session {}: user message delivered mid-turn with {} image block(s) and {} \
+                 stored attachment id(s)",
                 self.session_id,
-                images.len()
+                images.len(),
+                image_ids.len()
             );
         }
-        match self
-            .store
-            .add_session_message(&self.session_id, MessageRole::User, text)
-        {
-            Ok(id) => Some(id),
+        let id = match self.store.add_session_message_with_images(
+            &self.session_id,
+            MessageRole::User,
+            text,
+            image_ids,
+        ) {
+            Ok(id) => id,
             Err(e) => {
                 log::error!("Failed to insert delivered user message: {e}");
-                None
+                return None;
+            }
+        };
+        // Same association `start_session` makes for the prompt's images, so
+        // the attachments show under this session in the branch timeline.
+        if !image_ids.is_empty() {
+            if let Err(e) = self
+                .store
+                .set_images_session_id(image_ids, &self.session_id)
+            {
+                log::warn!(
+                    "Failed to associate images {image_ids:?} with session {}: {e}",
+                    self.session_id
+                );
             }
         }
+        Some(id)
     }
 
     // =====================================================================
@@ -346,8 +368,13 @@ impl acp_client::MessageWriter for MessageWriter {
         self.finalize().await
     }
 
-    async fn record_user_message(&self, text: &str, images: &[PromptImage]) {
-        self.record_user_message(text, images).await;
+    async fn record_user_message(
+        &self,
+        text: &str,
+        images: &[PromptImage],
+        attachment_ids: &[String],
+    ) {
+        self.record_user_message(text, images, attachment_ids).await;
     }
 
     async fn should_finish_after_response(&self) -> bool {
@@ -622,7 +649,7 @@ mod tests {
         writer.append_text("instruction.").await;
         writer.finalize().await;
         let user_row = writer
-            .record_user_message("Actually, do the second thing instead.", &[])
+            .record_user_message("Actually, do the second thing instead.", &[], &[])
             .await
             .expect("user row inserted");
         writer.append_text("Switching to the second thing.").await;
@@ -656,7 +683,8 @@ mod tests {
 
         writer.append_text("Unflushed partial text").await;
         let image = acp_client::PromptImage::new("AAAA", "image/png");
-        acp_client::MessageWriter::record_user_message(&writer, "Look at this.", &[image]).await;
+        acp_client::MessageWriter::record_user_message(&writer, "Look at this.", &[image], &[])
+            .await;
         writer.append_text("Reply.").await;
         writer.finalize().await;
 
@@ -672,6 +700,44 @@ mod tests {
                 (MessageRole::User, "Look at this."),
                 (MessageRole::Assistant, "Reply."),
             ]
+        );
+    }
+
+    /// The attachment ids the connection hands back land on the user row as
+    /// its `image_ids`, and the stored images are associated with the session
+    /// — what `start_session` does for a prompt's images, so a message with
+    /// attachments reads the same whether it was delivered live or on a
+    /// resume.
+    #[tokio::test]
+    async fn record_user_message_persists_attachment_ids_and_associates_the_images() {
+        use crate::store::{Image, Project};
+        let (store, session_id, writer) = setup_writer();
+        let project = Project::new("owner/repo");
+        store.create_project(&project).unwrap();
+        let image = Image::new(None, &project.id, "shot.png", "image/png", 3, true);
+        store.create_image(&image).unwrap();
+        assert_ne!(
+            store.get_image(&image.id).unwrap().unwrap().session_id,
+            Some(session_id.clone())
+        );
+
+        let user_row = writer
+            .record_user_message(
+                "See attached.",
+                &[acp_client::PromptImage::new("AAAA", "image/png")],
+                std::slice::from_ref(&image.id),
+            )
+            .await
+            .expect("user row inserted");
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, user_row);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].image_ids, vec![image.id.clone()]);
+        assert_eq!(
+            store.get_image(&image.id).unwrap().unwrap().session_id,
+            Some(session_id)
         );
     }
 

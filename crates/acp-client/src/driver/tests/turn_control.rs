@@ -7,7 +7,7 @@ use crate::driver::{
     reject_queued_turn_control_requests, run_acp_session, steer_outcome, steering_message,
     steering_supported_from_initialize, HandlerPhase, IncomingSessionUpdate, SessionTurnResult,
     SteerOutcome, TurnControlHandle, TurnControlReply, TurnControlRequest, TurnStep,
-    STEERING_META_KEY, STEERING_METHOD,
+    STEERING_META_KEY, STEERING_METHOD, STEER_ACK_TIMEOUT,
 };
 use agent_client_protocol::schema::v1::{
     CancelNotification, InitializeRequest, InitializeResponse, Meta, PromptResponse,
@@ -44,6 +44,17 @@ struct FakeAgent {
     stream_after_permission: Option<&'static str>,
     permission_outcomes: Mutex<Vec<RequestPermissionOutcome>>,
     permission_answered: tokio::sync::Notify,
+    /// Record `session/cancel` without answering the prompt it cancels: the
+    /// bridge that takes its time acknowledging (the test answers it).
+    hold_cancel_ack: bool,
+    /// Cancel this token right after acknowledging a `session/cancel`: the
+    /// user's Stop landing together with the ack.
+    stop_on_cancel: Option<CancellationToken>,
+    /// Hold the `_session/steering` responder instead of answering it; the
+    /// test answers it with [`FakeAgent::finish_steer`].
+    hold_steer: bool,
+    pending_steer: Mutex<Option<Responder>>,
+    steer_arrived: tokio::sync::Notify,
 }
 
 impl FakeAgent {
@@ -63,6 +74,25 @@ impl FakeAgent {
         tokio::time::timeout(SETTLE_TIMEOUT, self.prompt_arrived.notified())
             .await
             .expect("agent should receive a prompt");
+    }
+
+    async fn await_steer(&self) {
+        tokio::time::timeout(SETTLE_TIMEOUT, self.steer_arrived.notified())
+            .await
+            .expect("agent should receive a steer");
+    }
+
+    /// Answer the `_session/steering` request the agent is holding back.
+    fn finish_steer(&self, response: serde_json::Value) {
+        let responder = self
+            .pending_steer
+            .lock()
+            .unwrap()
+            .take()
+            .expect("a steer should be pending");
+        responder
+            .respond(response)
+            .expect("steer response should send");
     }
 
     /// Answer the prompt the agent is holding back.
@@ -159,8 +189,14 @@ impl FakeAgent {
             .on_receive_notification(
                 async move |_notification: CancelNotification, _cx| {
                     *cancel_agent.cancels.lock().unwrap() += 1;
+                    if cancel_agent.hold_cancel_ack {
+                        return Ok(());
+                    }
                     // The bridge aborts the turn and answers its prompt.
                     cancel_agent.finish_prompt(StopReason::Cancelled);
+                    if let Some(stop) = &cancel_agent.stop_on_cancel {
+                        stop.cancel();
+                    }
                     Ok(())
                 },
                 agent_client_protocol::on_receive_notification!(),
@@ -176,6 +212,11 @@ impl FakeAgent {
                     .lock()
                     .unwrap()
                     .push(request.params().clone());
+                if steer_agent.hold_steer {
+                    *steer_agent.pending_steer.lock().unwrap() = Some(responder);
+                    steer_agent.steer_arrived.notify_one();
+                    return Ok(());
+                }
                 match &steer_response {
                     Some(response) => responder.respond(response.clone()),
                     None => responder
@@ -415,6 +456,7 @@ async fn steer_in_a_live_turn_sends_the_extension_request_and_persists_the_user_
             .steer(
                 "also run the linter",
                 &[PromptImage::new("aGk=", "image/png")],
+                &[],
             )
             .await;
         assert_eq!(outcome, Ok(SteerOutcome::Injected));
@@ -476,7 +518,7 @@ async fn steer_answered_prompt_required_is_an_error_without_a_user_row() {
     let (step, writer) = live_turn_with(&agent, true, |handle, agent, _writer| async move {
         agent.await_prompt().await;
         let error = handle
-            .steer("too late", &[])
+            .steer("too late", &[], &[])
             .await
             .expect_err("promptRequired is not a delivery");
         assert!(error.contains("promptRequired"), "got: {error}");
@@ -508,7 +550,7 @@ async fn steer_to_an_agent_without_the_method_is_an_error() {
     let (step, writer) = live_turn_with(&agent, true, |handle, agent, _writer| async move {
         agent.await_prompt().await;
         let error = handle
-            .steer("hello?", &[])
+            .steer("hello?", &[], &[])
             .await
             .expect_err("method-not-found is not a delivery");
         assert!(error.contains("Steering request failed"), "got: {error}");
@@ -534,7 +576,7 @@ async fn steer_is_refused_locally_when_the_agent_did_not_advertise_it() {
     let (step, _writer) = live_turn_with(&agent, false, |handle, agent, _writer| async move {
         agent.await_prompt().await;
         let error = handle
-            .steer("hello?", &[])
+            .steer("hello?", &[], &[])
             .await
             .expect_err("no capability, no steer");
         assert!(
@@ -586,10 +628,36 @@ where
     ) -> Fut,
     Fut: Future<Output = ()>,
 {
+    session_with_cancel(agent, background_hold, CancellationToken::new(), drive).await
+}
+
+/// [`session_with`] on a session cancel token the test holds — the user's
+/// Stop.
+#[allow(clippy::type_complexity)]
+async fn session_with_cancel<F, Fut>(
+    agent: &Arc<FakeAgent>,
+    background_hold: Option<&BackgroundHoldConfig>,
+    cancel: CancellationToken,
+    drive: F,
+) -> (
+    Result<(AgentRunOutcome, SessionSettleReason), String>,
+    oneshot::Receiver<SessionTurnResult>,
+    Option<oneshot::Sender<SessionTurnResult>>,
+    Arc<TranscriptWriter>,
+    Arc<AcpNotificationHandler>,
+)
+where
+    F: FnOnce(
+        TurnControlHandle,
+        Arc<FakeAgent>,
+        Arc<TranscriptWriter>,
+        Arc<AcpNotificationHandler>,
+    ) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let writer = Arc::new(TranscriptWriter::default());
     let handler = Arc::new(transcript_handler(&writer));
     let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
-    let cancel = CancellationToken::new();
     let child_exited = CancellationToken::new();
     let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
     let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
@@ -604,6 +672,7 @@ where
         .send(QueuedSessionTurn {
             prompt: "first".to_string(),
             images: vec![],
+            attachment_ids: vec![],
             reply: Some(reply_tx),
             control: None,
         })
@@ -693,7 +762,7 @@ async fn interrupt_cancels_the_turn_and_reprompts_on_the_same_connection() {
             // The agent's cancel handler answers the pending prompt
             // `cancelled`; the interrupt then sends the new message.
             handle
-                .interrupt_and_reprompt("actually, do this instead", &[])
+                .interrupt_and_reprompt("actually, do this instead", &[], &[])
                 .await
                 .expect("the agent acknowledged the cancel");
             agent.await_prompt().await;
@@ -757,6 +826,267 @@ async fn interrupt_cancels_the_turn_and_reprompts_on_the_same_connection() {
     );
 }
 
+/// The user's Stop lands while the interrupt is waiting for the bridge to
+/// acknowledge the cancel. The stop wins: the interrupt fails, the message is
+/// not re-prompted and no row is written for it, and the turn settles
+/// cancelled as a plain Stop would — instead of a prompt going out that the
+/// next select cancels at once, with the caller told it was delivered.
+#[tokio::test(flavor = "current_thread")]
+async fn stop_during_the_interrupt_ack_wait_fails_the_interrupt_without_a_reprompt() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        stream_on_prompt: vec!["half an answer"],
+        hold_cancel_ack: true,
+        ..FakeAgent::default()
+    });
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+
+    let (result, _reply_rx, stashed_reply, writer, _handler) = session_with_cancel(
+        &agent,
+        None,
+        cancel,
+        |handle, agent, writer, _handler| async move {
+            agent.await_prompt().await;
+            wait_until("the first chunk", || {
+                writer
+                    .text_flow()
+                    .contains(&WriterCall::Append("half an answer".to_string()))
+            })
+            .await;
+
+            let interrupt = tokio::spawn(async move {
+                handle
+                    .interrupt_and_reprompt("actually, do this instead", &[], &[])
+                    .await
+            });
+            // The cancel is on the wire and unacknowledged when the Stop lands.
+            wait_until("the cancel", || agent.cancels() == 1).await;
+            stop.cancel();
+            let outcome = interrupt.await.unwrap();
+            let error = outcome.expect_err("the stop pre-empts the interrupt");
+            assert!(error.contains("stopped"), "got: {error}");
+
+            // The bridge gets around to acknowledging; nothing follows it.
+            agent.finish_prompt(StopReason::Cancelled);
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
+    );
+    assert_eq!(
+        agent.prompts(),
+        ["first"],
+        "the message was not re-prompted"
+    );
+    assert_eq!(
+        writer.text_flow(),
+        vec![WriterCall::Append("half an answer".to_string())],
+        "no user row for an undelivered message"
+    );
+    assert!(stashed_reply.is_some());
+}
+
+/// The Stop lands together with the acknowledgment: whichever of the two
+/// checks sees it first (the ack wait, or the session loop before it serves
+/// the re-prompt), the answer is the same — the message is refused and the
+/// session settles cancelled. The fake agent cancels the session token the
+/// moment it acknowledges, so the ack and the stop are ready together.
+#[tokio::test(flavor = "current_thread")]
+async fn stop_landing_with_the_cancel_ack_refuses_the_reprompt() {
+    let cancel = CancellationToken::new();
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        stream_on_prompt: vec!["half an answer"],
+        stop_on_cancel: Some(cancel.clone()),
+        ..FakeAgent::default()
+    });
+
+    let (result, _reply_rx, _stashed_reply, writer, _handler) = session_with_cancel(
+        &agent,
+        None,
+        cancel,
+        |handle, agent, writer, _handler| async move {
+            agent.await_prompt().await;
+            wait_until("the first chunk", || {
+                writer
+                    .text_flow()
+                    .contains(&WriterCall::Append("half an answer".to_string()))
+            })
+            .await;
+
+            let error = handle
+                .interrupt_and_reprompt("actually, do this instead", &[], &[])
+                .await
+                .expect_err("the stop pre-empts the interrupt");
+            assert!(error.contains("stopped"), "got: {error}");
+            assert_eq!(agent.cancels(), 1);
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
+    );
+    assert_eq!(
+        agent.prompts(),
+        ["first"],
+        "the message was not re-prompted"
+    );
+    assert!(
+        !writer
+            .calls()
+            .iter()
+            .any(|call| matches!(call, WriterCall::UserMessage(_))),
+        "no user row for an undelivered message: {:?}",
+        writer.calls()
+    );
+}
+
+/// The caller's attachment ids ride along with the message and come back to
+/// the writer with the user row it persists — on the steer, and on the
+/// interrupt's re-prompt. This crate sends image bytes, so without the ids
+/// the row could never reference the stored attachments.
+#[tokio::test(flavor = "current_thread")]
+async fn attachment_ids_reach_the_writer_with_the_user_row_on_both_live_paths() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: true,
+        steer_response: Some(serde_json::json!({ "outcome": "injected" })),
+        stream_on_prompt: vec!["working", "redoing"],
+        ..FakeAgent::default()
+    });
+    let image = PromptImage::new("aGk=", "image/png");
+
+    let (result, _reply_rx, _stashed_reply, writer, _handler) =
+        session_with(&agent, None, |handle, agent, writer, _handler| async move {
+            agent.await_prompt().await;
+            wait_until("the first chunk", || {
+                writer
+                    .text_flow()
+                    .contains(&WriterCall::Append("working".to_string()))
+            })
+            .await;
+
+            let outcome = handle
+                .steer(
+                    "look at this",
+                    std::slice::from_ref(&image),
+                    &["img-1".to_string()],
+                )
+                .await;
+            assert_eq!(outcome, Ok(SteerOutcome::Injected));
+
+            handle
+                .interrupt_and_reprompt(
+                    "and this instead",
+                    std::slice::from_ref(&image),
+                    &["img-2".to_string(), "img-3".to_string()],
+                )
+                .await
+                .expect("the cancel is acknowledged");
+            wait_until("the re-prompt", || agent.prompts().len() == 2).await;
+            agent.finish_prompt(StopReason::EndTurn);
+        })
+        .await;
+
+    assert_eq!(
+        result,
+        Ok((AgentRunOutcome::Completed, SessionSettleReason::Immediate))
+    );
+    let user_rows: Vec<WriterCall> = writer
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call,
+                WriterCall::UserMessage(_) | WriterCall::UserAttachments(_)
+            )
+        })
+        .collect();
+    assert_eq!(
+        user_rows,
+        vec![
+            WriterCall::UserMessage("look at this".to_string()),
+            WriterCall::UserAttachments(vec!["img-1".to_string()]),
+            WriterCall::UserMessage("and this instead".to_string()),
+            WriterCall::UserAttachments(vec!["img-2".to_string(), "img-3".to_string()]),
+        ]
+    );
+}
+
+/// A bridge that takes the `_session/steering` frame and never answers while
+/// the turn runs on must not wedge the caller: the steer fails after
+/// `STEER_ACK_TIMEOUT` so the caller can fall back to an interrupt. An answer
+/// that arrives after that — `injected`, even — persists no user row: the
+/// caller's fallback has by then persisted the message itself, and a second
+/// row would duplicate it. Runs on tokio's paused clock: the fake agent is
+/// in-process, so the 30 s elapse the moment nothing else can run.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn steer_unanswered_within_the_timeout_fails_and_a_late_answer_persists_nothing() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: true,
+        steer_response: Some(serde_json::json!({ "outcome": "injected" })),
+        hold_steer: true,
+        stream_on_prompt: vec!["working on it"],
+        ..FakeAgent::default()
+    });
+
+    let (step, _writer) = live_turn_with(&agent, true, |handle, agent, writer| async move {
+        agent.await_prompt().await;
+        wait_until("the first chunk", || {
+            writer
+                .text_flow()
+                .contains(&WriterCall::Append("working on it".to_string()))
+        })
+        .await;
+
+        let started = tokio::time::Instant::now();
+        let error = handle
+            .steer("also run the linter", &[], &[])
+            .await
+            .expect_err("an unanswered steer times out");
+        assert!(error.contains("did not answer the steer"), "got: {error}");
+        assert!(
+            started.elapsed() >= STEER_ACK_TIMEOUT,
+            "failed before the timeout: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            agent.pending_prompt.lock().unwrap().is_some(),
+            "the turn is still live"
+        );
+        assert_eq!(
+            writer.text_flow(),
+            vec![WriterCall::Append("working on it".to_string())],
+            "a failed steer leaves no user row"
+        );
+
+        // The bridge finally answers `injected`. Too late: the caller has
+        // moved on, so nothing is persisted and nothing is replied to.
+        agent.await_steer().await;
+        agent.finish_steer(serde_json::json!({ "outcome": "injected" }));
+        // Let the late answer's callback run.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            writer.text_flow(),
+            vec![WriterCall::Append("working on it".to_string())],
+            "a late answer persists nothing"
+        );
+        agent.finish_prompt(StopReason::EndTurn);
+    })
+    .await;
+
+    assert!(matches!(
+        step,
+        Ok(TurnStep::Settled(AgentRunOutcome::Completed))
+    ));
+    assert_eq!(agent.steers().len(), 1);
+}
+
 /// A control request queued next to an already-queued `prompt()` (both land
 /// while setup is still running, say) does not jump it: the prompt is the
 /// turn, and the request is served inside it — here an interrupt, which
@@ -776,7 +1106,7 @@ async fn a_prompt_queued_before_a_control_request_goes_first() {
         |handle, agent, _writer, _handler| async move {
             // No await before this: it is queued while setup is in flight,
             // behind the prompt `session_with` queued before connecting.
-            let outcome = handle.interrupt_and_reprompt("second", &[]).await;
+            let outcome = handle.interrupt_and_reprompt("second", &[], &[]).await;
             assert_eq!(outcome, Ok(()));
             wait_until("both prompts", || agent.prompts().len() == 2).await;
             assert_eq!(agent.prompts(), ["first", "second"]);
@@ -828,7 +1158,7 @@ async fn interrupt_during_a_hold_is_served_as_a_new_turn_without_a_cancel() {
 
             // Nothing is in flight to steer: the message becomes a turn of
             // its own, with no `_session/steering` frame on the wire.
-            let outcome = handle.steer("while you wait", &[]).await;
+            let outcome = handle.steer("while you wait", &[], &[]).await;
             assert_eq!(outcome, Ok(SteerOutcome::NewTurnStarted));
             agent.await_prompt().await;
             assert_eq!(agent.prompts(), ["first", "while you wait"]);
@@ -845,7 +1175,7 @@ async fn interrupt_during_a_hold_is_served_as_a_new_turn_without_a_cancel() {
             // And an interrupt with nothing to interrupt is the same.
             wait_until("the second hold", || holding(&handler)).await;
             handle
-                .interrupt_and_reprompt("and this", &[])
+                .interrupt_and_reprompt("and this", &[], &[])
                 .await
                 .expect("nothing to cancel, served as a turn");
             agent.await_prompt().await;
@@ -894,6 +1224,7 @@ async fn holding_wait_turns_a_steer_into_a_new_turn_without_rejecting_it_at_boun
         .send(TurnControlRequest::Steer {
             prompt: "queued early".to_string(),
             images: vec![],
+            attachment_ids: vec![],
             reply: early_reply_tx,
         })
         .expect("queue should accept");
@@ -958,7 +1289,7 @@ async fn holding_wait_turns_a_steer_into_a_new_turn_without_rejecting_it_at_boun
         turn.control.expect("control reply").turn_started();
         turn.prompt
     };
-    let (prompt, answer) = tokio::join!(served, handle.interrupt_and_reprompt("now", &[]));
+    let (prompt, answer) = tokio::join!(served, handle.interrupt_and_reprompt("now", &[], &[]));
     assert_eq!(prompt, "now");
     assert_eq!(answer, Ok(()));
 }
@@ -982,6 +1313,7 @@ async fn teardown_answers_every_queued_message_and_the_handle_fails_fast_after()
         .send(TurnControlRequest::Steer {
             prompt: "a".to_string(),
             images: vec![],
+            attachment_ids: vec![],
             reply: steer_reply_tx,
         })
         .expect("queue should accept");
@@ -989,6 +1321,7 @@ async fn teardown_answers_every_queued_message_and_the_handle_fails_fast_after()
         .send(TurnControlRequest::Interrupt {
             prompt: "b".to_string(),
             images: vec![],
+            attachment_ids: vec![],
             reply: interrupt_reply_tx,
         })
         .expect("queue should accept");
@@ -1022,12 +1355,12 @@ async fn teardown_answers_every_queued_message_and_the_handle_fails_fast_after()
 
     // After settle the handle refuses without queueing.
     let error = handle
-        .steer("c", &[])
+        .steer("c", &[], &[])
         .await
         .expect_err("connection is gone");
     assert!(error.contains("no longer running"), "got: {error}");
     let error = handle
-        .interrupt_and_reprompt("d", &[])
+        .interrupt_and_reprompt("d", &[], &[])
         .await
         .expect_err("connection is gone");
     assert!(error.contains("no longer running"), "got: {error}");
@@ -1045,7 +1378,7 @@ async fn a_turn_control_handle_maps_channel_failures_to_connection_state() {
         let request = turn_control_rx.recv().await.expect("request should arrive");
         drop(request);
     };
-    let (steered, ()) = tokio::join!(handle.steer("a", &[]), drop_unanswered);
+    let (steered, ()) = tokio::join!(handle.steer("a", &[], &[]), drop_unanswered);
     let error = steered.expect_err("a dropped reply is not an answer");
     assert!(error.contains("closed before"), "got: {error}");
 
@@ -1053,7 +1386,7 @@ async fn a_turn_control_handle_maps_channel_failures_to_connection_state() {
     // alive flag still says.
     drop(turn_control_rx);
     let error = handle
-        .interrupt_and_reprompt("b", &[])
+        .interrupt_and_reprompt("b", &[], &[])
         .await
         .expect_err("no connection to serve the message");
     assert!(error.contains("no longer running"), "got: {error}");
@@ -1090,7 +1423,7 @@ async fn interrupt_resolves_the_turns_pending_permission_request_before_reprompt
 
             let started = tokio::time::Instant::now();
             handle
-                .interrupt_and_reprompt("actually, do this instead", &[])
+                .interrupt_and_reprompt("actually, do this instead", &[], &[])
                 .await
                 .expect("the cancel is acknowledged with the permission request pending");
             assert!(

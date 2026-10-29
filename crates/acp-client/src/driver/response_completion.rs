@@ -15,6 +15,10 @@ pub(super) struct ResponseState {
     pub(super) completed: bool,
     fallback: String,
     seen_results: HashSet<String>,
+    /// Text of messages a steer closed mid-turn (see [`Self::detach_message`]),
+    /// each awaiting the `result` of the cycle the steer aborted. Several
+    /// steers can land before any such result arrives, so this is a list.
+    detached: Vec<String>,
 }
 
 fn successful_result(message: &serde_json::Value) -> bool {
@@ -38,6 +42,7 @@ impl ResponseState {
         self.close_message();
         self.completed = false;
         self.fallback.clear();
+        self.detached.clear();
     }
 
     /// Forget the streamed message: the writer has closed (or will close) it.
@@ -49,16 +54,44 @@ impl ResponseState {
 
     /// The writer closed the streamed message mid-turn, with the turn going
     /// on — a steered user row went in after it. Unlike [`Self::close_message`]
-    /// the streamed text is kept: the bridge aborts the generation a steer
-    /// pre-empts and still emits that cycle's `result`, whose final text is
-    /// the message just closed. With the buffer intact [`Self::accept_result`]
-    /// recognises it as already streamed instead of re-injecting the whole
-    /// message as a chunk after the user row. Only the id is dropped, so a
-    /// later chunk of the same message opens a row of its own rather than
-    /// resuming the closed one.
+    /// the streamed text is remembered, in `detached`: the bridge aborts the
+    /// generation a steer pre-empts and still emits that cycle's `result`,
+    /// whose final text is the message just closed, and
+    /// [`Self::accept_result`] matches that result against the detached text
+    /// instead of re-injecting the whole message as a chunk after the user
+    /// row. The text is moved out of the live buffer rather than kept in it
+    /// so the steered reply's own chunks — which may arrive *before* the
+    /// aborted cycle's result — start a clean buffer: with the two
+    /// concatenated the aborted result matched nothing, retired the buffer,
+    /// and the reply was split into a second row at its next chunk.
     pub(super) fn detach_message(&mut self) {
+        let text = std::mem::take(&mut self.text);
+        if !text.is_empty() {
+            self.detached.push(text);
+        }
         self.message_id = None;
         self.interrupted = false;
+    }
+
+    /// Whether `final_text` is the final text of a cycle a steer aborted
+    /// (see [`Self::detach_message`]); consumes the match. The bridge's
+    /// result carries that cycle's last assistant message, which is the
+    /// detached text or its tail.
+    fn take_detached_match(&mut self, final_text: &str) -> bool {
+        if final_text.is_empty() {
+            return false;
+        }
+        match self
+            .detached
+            .iter()
+            .position(|text| text.ends_with(final_text))
+        {
+            Some(index) => {
+                self.detached.remove(index);
+                true
+            }
+            None => false,
+        }
     }
 
     pub(super) fn suppress_fallback(&mut self, text: &str) -> bool {
@@ -97,6 +130,25 @@ impl ResponseState {
         }
         let successful = successful_result(message);
         let final_text = message["result"].as_str().unwrap_or_default();
+        // The result of a cycle a steer aborted: its text was streamed and
+        // closed before the steered user row, so there is nothing to inject
+        // and nothing to certify — the turn goes on with the steered reply.
+        // Recorded, so the transcript keeps the cycle's usage, but not a
+        // response boundary: `completed` stays as it is and the live buffer
+        // (possibly already holding the reply's first chunk) is untouched.
+        if self.take_detached_match(final_text) {
+            handler
+                .writer
+                .record_acp_event_metadata(AcpEventMetadata {
+                    event_kind: Some("response_result".into()),
+                    usage: message.get("usage").cloned(),
+                    content: Some(message.clone()),
+                    origin: handler.out_of_turn_origin().await,
+                    ..Default::default()
+                })
+                .await;
+            return Ok(());
+        }
         // A result is the final assistant text, not necessarily all text in the
         // turn. Require agreement with streamed output before accepting it.
         let (missing, extends_buffer) = if final_text.is_empty() || self.text.ends_with(final_text)

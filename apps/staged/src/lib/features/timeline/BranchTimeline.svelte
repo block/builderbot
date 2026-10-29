@@ -1034,6 +1034,7 @@
       kind,
       commitSessionRunning: hasActiveCommitSession,
       gitActionRunning,
+      worktreeOperationRunning: resettingToOrigin || discardingWorktreeChanges,
       provisioning: !!provisioningLabel,
     });
   }

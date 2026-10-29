@@ -4,7 +4,15 @@ import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessio
 const allKinds: QueuedSessionKind[] = ['commit', 'note', 'review'];
 const readOnlyKinds: QueuedSessionKind[] = ['note', 'review'];
 
-const idle = { commitSessionRunning: false, gitActionRunning: false, provisioning: false };
+const idle = {
+  commitSessionRunning: false,
+  gitActionRunning: false,
+  worktreeOperationRunning: false,
+  provisioning: false,
+};
+
+/** A reset-to-origin or discard sets both flags, as `BranchTimeline` derives them. */
+const worktreeOperation = { gitActionRunning: true, worktreeOperationRunning: true };
 
 describe('canStartQueuedSessionNow', () => {
   it('offers Start now for every kind on an idle branch', () => {
@@ -25,20 +33,45 @@ describe('canStartQueuedSessionNow', () => {
     );
   });
 
-  it('withholds Start now for every kind while a git action rewrites the worktree', () => {
-    for (const kind of allKinds) {
-      expect(canStartQueuedSessionNow({ kind, ...idle, gitActionRunning: true })).toBe(false);
+  it('offers Start now for notes and reviews while a push or pull is in flight', () => {
+    for (const kind of readOnlyKinds) {
+      expect(canStartQueuedSessionNow({ kind, ...idle, gitActionRunning: true })).toBe(true);
     }
   });
 
-  it('withholds Start now for every kind while a git action runs beside a commit session', () => {
-    for (const kind of allKinds) {
+  it('withholds Start now for a commit while a push or pull is in flight', () => {
+    expect(canStartQueuedSessionNow({ kind: 'commit', ...idle, gitActionRunning: true })).toBe(
+      false
+    );
+  });
+
+  it('offers Start now for notes and reviews while a push or pull runs beside a commit session', () => {
+    for (const kind of readOnlyKinds) {
       expect(
         canStartQueuedSessionNow({
           kind,
           ...idle,
           commitSessionRunning: true,
           gitActionRunning: true,
+        })
+      ).toBe(true);
+    }
+  });
+
+  it('withholds Start now for every kind while a reset-to-origin or discard is in flight', () => {
+    for (const kind of allKinds) {
+      expect(canStartQueuedSessionNow({ kind, ...idle, ...worktreeOperation })).toBe(false);
+    }
+  });
+
+  it('withholds Start now for every kind while a reset-to-origin or discard runs beside a commit session', () => {
+    for (const kind of allKinds) {
+      expect(
+        canStartQueuedSessionNow({
+          kind,
+          ...idle,
+          ...worktreeOperation,
+          commitSessionRunning: true,
         })
       ).toBe(false);
     }

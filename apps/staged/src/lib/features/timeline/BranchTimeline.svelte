@@ -368,8 +368,9 @@
    * A commit session owns the worktree for writing. Covers running rebase and
    * squash pipelines too: each owns the pending-commit row it is rewriting.
    *
-   * Kept apart from `gitActionRunning` because "Start now" treats them
-   * differently — see `canStartQueuedSessionNow`.
+   * Kept apart from `gitActionRunning` because the worktree status rows key
+   * off commit sessions alone; "Start now" reads both — see
+   * `canStartQueuedSessionNow`.
    */
   let hasActiveCommitSession = $derived.by(() => {
     for (const commit of timeline.commits) {
@@ -1033,6 +1034,7 @@
       kind,
       commitSessionRunning: hasActiveCommitSession,
       gitActionRunning,
+      worktreeOperationRunning: resettingToOrigin || discardingWorktreeChanges,
       provisioning: !!provisioningLabel,
     });
   }

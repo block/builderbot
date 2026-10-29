@@ -12,17 +12,23 @@
 //! managed install (`~/.staged/packages/bin`) — pinned explicitly because
 //! plain resolution goes through the login shell's `PATH`, where a stale
 //! Homebrew `claude-agent-acp` can shadow it. `ACP_REAL_BRIDGE=<provider id>`
-//! picks the bridge (`claude`, the default, or `codex`). Every writer event and every `log` line is printed to stderr
-//! with its offset from connect, so under `--nocapture` the output is the
-//! record of what the bridge did; `ACP_REAL_BRIDGE_LOG=debug` raises the
-//! `log` level. The checks are the invariants, not the agent's wording: one
-//! user row, in transcript order, the turn resolving once, the same child
-//! across an interrupt, no hang.
+//! picks the bridge (`claude`, the default, `codex`, or `goose`). Goose is not
+//! a managed bridge: it resolves from the login shell's `PATH` and runs as
+//! `goose acp`, and under a headless runner it needs `GOOSE_DISABLE_KEYRING=1`
+//! — otherwise the CLI blocks in `SecKeychainFindGenericPassword` on a Keychain
+//! prompt nobody can click, and never answers `session/new`. Every writer
+//! event and every `log` line is printed to stderr with its offset from
+//! connect, so under `--nocapture` the output is the record of what the bridge
+//! did; `ACP_REAL_BRIDGE_LOG=debug` raises the printed `log` level (debug
+//! lines are always captured for assertions). The checks are the invariants,
+//! not the agent's wording: one user row, in transcript order, the turn
+//! resolving once, the same child across an interrupt, no hang.
 
 use super::*;
 use crate::driver::{SessionConnection, SessionSettled, SteerOutcome, TurnControlHandle};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -48,9 +54,23 @@ const HELD_TURN_PROMPT: &str = "Use your Agent (subagent) tool with run_in_backg
     reply done. As soon as it is launched — without waiting for it — reply with exactly the single \
     word: LAUNCHED";
 const HELD_STEER_MESSAGE: &str = "New instruction: reply with exactly one line: HELD-DONE";
+const REMEMBER_PROMPT: &str = "Remember this code word: PELICAN-7342. Do not use any tools. Reply \
+    with exactly the single word: REMEMBERED";
+const RECALL_PROMPT: &str = "What was the code word I asked you to remember earlier in this \
+    conversation? Do not use any tools. Reply with exactly one line: CODEWORD <the code word>";
+/// How long a held permission request stays open before the writer gives up
+/// waiting for the connection to resolve it.
+const PERMISSION_HOLD: Duration = Duration::from_secs(45);
 
 fn provider_id() -> String {
     std::env::var("ACP_REAL_BRIDGE").unwrap_or_else(|_| "claude".to_string())
+}
+
+/// Goose is the installed bridge that genuinely does not advertise steering;
+/// against the others the interrupt path has to be forced with
+/// `with_steering_disabled`.
+fn bridge_advertises_steering() -> bool {
+    provider_id() != "goose"
 }
 
 /// Pin bridge lookup to the managed install dir (process-wide, once).
@@ -84,9 +104,20 @@ enum Ev {
     Append(String),
     Finalize,
     User(String),
-    ToolCall { id: String, title: String },
-    ToolResult { id: String },
-    Permission { title: String },
+    ToolCall {
+        id: String,
+        title: String,
+    },
+    ToolResult {
+        id: String,
+    },
+    Permission {
+        title: String,
+    },
+    /// A held permission request resolved by the connection cancelling it.
+    PermissionCancelled {
+        title: String,
+    },
     Event(String),
 }
 
@@ -115,6 +146,11 @@ struct Trace {
     label: String,
     started: Instant,
     events: std::sync::Mutex<Vec<(Duration, Ev)>>,
+    /// Hold the next permission request open — the way a dialog nobody has
+    /// answered yet does — until the connection cancels it, the test releases
+    /// it, or [`PERMISSION_HOLD`] passes.
+    hold_next_permission: AtomicBool,
+    release_permission: tokio::sync::Notify,
 }
 
 impl Trace {
@@ -123,6 +159,8 @@ impl Trace {
             label: label.to_string(),
             started: Instant::now(),
             events: std::sync::Mutex::new(Vec::new()),
+            hold_next_permission: AtomicBool::new(false),
+            release_permission: tokio::sync::Notify::new(),
         }
     }
 
@@ -191,7 +229,10 @@ impl Trace {
                     flush(&mut open, &mut rows);
                     rows.push(Row::Tool(title));
                 }
-                Ev::ToolResult { .. } | Ev::Permission { .. } | Ev::Event(_) => {}
+                Ev::ToolResult { .. }
+                | Ev::Permission { .. }
+                | Ev::PermissionCancelled { .. }
+                | Ev::Event(_) => {}
             }
         }
         flush(&mut open, &mut rows);
@@ -280,14 +321,28 @@ impl MessageWriter for Trace {
         request: AcpPermissionRequest,
         cancel_token: CancellationToken,
     ) -> AcpPermissionDecision {
+        let title = request.tool_title.clone().unwrap_or_default();
         self.push(Ev::Permission {
-            title: request.tool_title.clone().unwrap_or_default(),
+            title: title.clone(),
         });
         if cancel_token.is_cancelled() {
-            AcpPermissionDecision::Cancelled
-        } else {
-            autoapprove_permission_decision(&request)
+            return AcpPermissionDecision::Cancelled;
         }
+        if self.hold_next_permission.swap(false, Ordering::SeqCst) {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    self.push(Ev::PermissionCancelled { title });
+                    return AcpPermissionDecision::Cancelled;
+                }
+                _ = self.release_permission.notified() => {
+                    self.push(Ev::Event("permission-hold-released".to_string()));
+                }
+                _ = tokio::time::sleep(PERMISSION_HOLD) => {
+                    self.push(Ev::Event("permission-hold-expired".to_string()));
+                }
+            }
+        }
+        autoapprove_permission_decision(&request)
     }
 }
 
@@ -297,6 +352,9 @@ impl MessageWriter for Trace {
 
 struct StderrLogger {
     started: Instant,
+    /// Lines at or above this level are printed; every line is captured.
+    print_level: log::LevelFilter,
+    lines: std::sync::Mutex<Vec<String>>,
 }
 
 impl log::Log for StderrLogger {
@@ -306,42 +364,98 @@ impl log::Log for StderrLogger {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            eprintln!(
-                "[log {:>7.2}s] {} {}",
-                self.started.elapsed().as_secs_f64(),
-                record.level(),
-                record.args()
-            );
+            let line = format!("{} {}", record.level(), record.args());
+            if record.level() <= self.print_level {
+                eprintln!(
+                    "[log {:>7.2}s] {line}",
+                    self.started.elapsed().as_secs_f64()
+                );
+            }
+            self.lines.lock().unwrap().push(line);
         }
     }
 
     fn flush(&self) {}
 }
 
+static LOGGER: OnceLock<StderrLogger> = OnceLock::new();
+
 fn install_logger() {
-    static LOGGER: OnceLock<StderrLogger> = OnceLock::new();
     let logger = LOGGER.get_or_init(|| StderrLogger {
         started: Instant::now(),
-    });
-    if log::set_logger(logger).is_ok() {
-        let level = match std::env::var("ACP_REAL_BRIDGE_LOG").as_deref() {
+        print_level: match std::env::var("ACP_REAL_BRIDGE_LOG").as_deref() {
             Ok("debug") => log::LevelFilter::Debug,
             Ok("trace") => log::LevelFilter::Trace,
             _ => log::LevelFilter::Info,
-        };
-        log::set_max_level(level);
+        },
+        lines: std::sync::Mutex::new(Vec::new()),
+    });
+    if log::set_logger(logger).is_ok() {
+        log::set_max_level(log::LevelFilter::Debug);
     }
+}
+
+/// Whether the driver logged a line containing `needle` (any level).
+fn logged(needle: &str) -> bool {
+    LOGGER.get().is_some_and(|logger| {
+        logger
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
+    })
 }
 
 // -----------------------------------------------------------------------------
 // Session: one real connection
 // -----------------------------------------------------------------------------
 
+/// The store as the app would hold it: the agent's session id, and the
+/// transcript rows the replay matcher is handed on a resume.
+#[derive(Default)]
+struct BridgeStore {
+    agent_session_ids: std::sync::Mutex<Vec<(String, String)>>,
+    messages: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl Store for BridgeStore {
+    fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String> {
+        self.agent_session_ids
+            .lock()
+            .unwrap()
+            .push((session_id.to_string(), agent_session_id.to_string()));
+        Ok(())
+    }
+
+    fn get_session_messages(&self, _session_id: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(self.messages.lock().unwrap().clone())
+    }
+}
+
+/// An earlier connection's session to load instead of creating a new one.
+struct Resume {
+    agent_session_id: String,
+    /// That connection's transcript as `(role, content)` rows.
+    messages: Vec<(String, String)>,
+    /// Its working dir — a load happens where the session was created.
+    dir: PathBuf,
+}
+
+#[derive(Default)]
+struct ConnectOptions {
+    steering_disabled: bool,
+    /// Environment set over the process's own for the bridge.
+    env: Vec<(&'static str, &'static str)>,
+    resume: Option<Resume>,
+}
+
 struct Session {
     connection: SessionConnection,
     handle: TurnControlHandle,
     trace: Arc<Trace>,
-    store: Arc<RecordingStore>,
+    store: Arc<BridgeStore>,
     cancel: CancellationToken,
     settled_rx: Option<oneshot::Receiver<SessionSettled>>,
     dir: PathBuf,
@@ -352,29 +466,54 @@ impl Session {
     /// environment as the snapshot (so the shim and its Node resolve the way
     /// they do under Staged) and, like the app, a post-turn background hold.
     async fn connect(label: &str, steering_disabled: bool) -> Self {
+        Self::connect_with(
+            label,
+            ConnectOptions {
+                steering_disabled,
+                ..ConnectOptions::default()
+            },
+        )
+        .await
+    }
+
+    async fn connect_with(label: &str, options: ConnectOptions) -> Self {
         install_logger();
         pin_bridge_dir();
         let provider = provider_id();
+        let mut env: Vec<(String, String)> = std::env::vars().collect();
+        for (key, value) in &options.env {
+            env.retain(|(name, _)| name != key);
+            env.push((key.to_string(), value.to_string()));
+        }
         let driver = AcpDriver::new(&provider)
             .unwrap_or_else(|e| panic!("{e}: put the bridge on PATH (see the module docs)"))
-            .with_env_snapshot(std::env::vars().collect())
+            .with_env_snapshot(env)
             .with_background_hold(Some(BackgroundHoldConfig::default()))
-            .with_steering_disabled(steering_disabled);
-        let dir = std::env::temp_dir().join(format!(
-            "acp-real-bridge-{label}-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+            .with_steering_disabled(options.steering_disabled);
+        let dir = match &options.resume {
+            Some(resume) => resume.dir.clone(),
+            None => std::env::temp_dir().join(format!(
+                "acp-real-bridge-{label}-{}-{}",
+                std::process::id(),
+                Instant::now().elapsed().as_nanos()
+            )),
+        };
         std::fs::create_dir_all(&dir).expect("temp working dir");
         let trace = Arc::new(Trace::new(label));
         let writer: Arc<dyn MessageWriter> = Arc::clone(&trace) as Arc<dyn MessageWriter>;
-        let store = Arc::new(RecordingStore::default());
+        let store = Arc::new(BridgeStore::default());
+        if let Some(resume) = &options.resume {
+            *store.messages.lock().unwrap() = resume.messages.clone();
+        }
         let dyn_store: Arc<dyn Store> = Arc::clone(&store) as Arc<dyn Store>;
         let cancel = CancellationToken::new();
         eprintln!(
-            "[{label}] connecting {provider} ({}) in {} (steering_disabled={steering_disabled})",
+            "[{label}] connecting {provider} ({}) in {} (steering_disabled={}, env={:?}, resume={:?})",
             driver.binary_path.display(),
-            dir.display()
+            dir.display(),
+            options.steering_disabled,
+            options.env,
+            options.resume.as_ref().map(|resume| &resume.agent_session_id)
         );
         let mut connection = driver
             .connect(
@@ -383,7 +522,10 @@ impl Session {
                 &dyn_store,
                 &writer,
                 &cancel,
-                None,
+                options
+                    .resume
+                    .as_ref()
+                    .map(|resume| resume.agent_session_id.as_str()),
                 &[],
                 None,
             )
@@ -406,32 +548,43 @@ impl Session {
         self.dir.file_name().unwrap().to_string_lossy().into_owned()
     }
 
-    /// The bridge processes this test spawned: direct children whose command
-    /// line names the bridge.
-    fn bridge_pids(&self) -> Vec<u32> {
-        let out = std::process::Command::new("pgrep")
-            .args(["-P", &std::process::id().to_string()])
-            .output()
-            .expect("pgrep");
-        let mut pids = Vec::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Ok(pid) = line.trim().parse::<u32>() else {
-                continue;
-            };
-            let ps = std::process::Command::new("ps")
-                .args(["-o", "command=", "-p", &pid.to_string()])
-                .output()
-                .expect("ps");
-            let command = String::from_utf8_lossy(&ps.stdout);
-            if command.contains("-acp") {
-                pids.push(pid);
+    /// The agent's id for this session, as the store recorded it at setup.
+    fn agent_session_id(&self) -> String {
+        self.store
+            .agent_session_ids
+            .lock()
+            .unwrap()
+            .first()
+            .map(|(_, id)| id.clone())
+            .expect("the store should have the agent's session id")
+    }
+
+    /// This session's transcript as the app's store would replay it: the
+    /// prompt as the first user row, then the recorded assistant and user
+    /// rows.
+    fn legacy_messages(&self, prompt: &str) -> Vec<(String, String)> {
+        let mut messages = vec![("user".to_string(), prompt.to_string())];
+        for row in self.trace.rows() {
+            match row {
+                Row::Assistant(text) => messages.push(("assistant".to_string(), text)),
+                Row::User(text) => messages.push(("user".to_string(), text)),
+                Row::Tool(_) => {}
             }
         }
-        pids
+        messages
     }
 
     /// Cancel the session (ending the hold) and wait for teardown.
-    async fn finish(mut self) {
+    async fn finish(self) {
+        self.finish_inner(true).await;
+    }
+
+    /// [`Self::finish`], keeping the working dir for a later resume.
+    async fn finish_keeping_dir(self) {
+        self.finish_inner(false).await;
+    }
+
+    async fn finish_inner(mut self, remove_dir: bool) {
         self.trace.dump_rows();
         self.cancel.cancel();
         if let Some(rx) = self.settled_rx.take() {
@@ -444,8 +597,59 @@ impl Session {
                 Err(_) => panic!("[{}] teardown hung after cancel", self.trace.label),
             }
         }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if remove_dir {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
+}
+
+/// The bridge processes this test spawned: direct children whose command
+/// line names the bridge.
+fn bridge_pids() -> Vec<u32> {
+    let out = std::process::Command::new("pgrep")
+        .args(["-P", &std::process::id().to_string()])
+        .output()
+        .expect("pgrep");
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Ok(pid) = line.trim().parse::<u32>() else {
+            continue;
+        };
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        let command = String::from_utf8_lossy(&ps.stdout);
+        // `claude-agent-acp` / `codex-acp` by name, `goose acp` by subcommand.
+        if command.contains("-acp") || command.contains(" acp") {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Wait for every bridge child of this process to be gone.
+async fn wait_for_bridge_exit(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !bridge_pids().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "bridge children still running after {timeout:?}: {:?}",
+            bridge_pids()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Assistant rows before the user row that reappear after it.
+fn echoed_rows(rows: &[Row]) -> Vec<&Row> {
+    let Some(user) = rows.iter().position(Row::is_user) else {
+        return Vec::new();
+    };
+    rows[..user]
+        .iter()
+        .filter(|row| matches!(row, Row::Assistant(_)) && rows[user + 1..].contains(row))
+        .collect()
 }
 
 fn activity(ev: &Ev) -> bool {
@@ -471,6 +675,7 @@ async fn real_bridge_steer_mid_turn_redirects_the_live_turn() {
             let mut session = Session::connect("steer-live", false).await;
             let trace = Arc::clone(&session.trace);
             let handle = session.handle.clone();
+            let cancel = session.cancel.clone();
             let prompt_done = Rc::new(Cell::new(false));
             let prompt_done_for_steer = Rc::clone(&prompt_done);
             let steer = tokio::task::spawn_local(async move {
@@ -489,6 +694,10 @@ async fn real_bridge_steer_mid_turn_redirects_the_live_turn() {
                     sent_at.as_secs_f64(),
                     answered_at.as_secs_f64()
                 );
+                if outcome.is_err() {
+                    // Nothing more to learn from the long turn.
+                    cancel.cancel();
+                }
                 (turn_still_live, answered_at, outcome)
             });
 
@@ -499,6 +708,19 @@ async fn real_bridge_steer_mid_turn_redirects_the_live_turn() {
             let resolved_at = session.trace.elapsed();
             eprintln!("[steer-live] prompt() resolved {turn:?} at {:.2}s", resolved_at.as_secs_f64());
             let (turn_still_live, answered_at, outcome) = steer.await.expect("steer task");
+            if !bridge_advertises_steering() {
+                eprintln!(
+                    "SCENARIO 1: N/A — {} does not advertise steering; the steer was refused \
+                     locally ({outcome:?}) and nothing was written",
+                    provider_id()
+                );
+                assert!(outcome
+                    .as_ref()
+                    .is_err_and(|e| e.contains("does not advertise steering")));
+                assert_eq!(user_rows(&session.trace), 0);
+                session.finish().await;
+                return;
+            }
             assert!(turn_still_live, "the steer must land inside the live turn, not after it");
 
             assert_eq!(outcome, Ok(SteerOutcome::Injected));
@@ -556,6 +778,13 @@ async fn real_bridge_steer_mid_turn_redirects_the_live_turn() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "spawns the installed ACP bridge and calls the model"]
 async fn real_bridge_steer_while_the_bridge_holds_the_turn_for_a_subagent() {
+    if !bridge_advertises_steering() {
+        eprintln!(
+            "SCENARIO 2: N/A — {} does not advertise steering (and has no background subagent tool)",
+            provider_id()
+        );
+        return;
+    }
     tokio::task::LocalSet::new()
         .run_until(async {
             let mut session = Session::connect("steer-held", false).await;
@@ -619,7 +848,8 @@ async fn real_bridge_steer_while_the_bridge_holds_the_turn_for_a_subagent() {
 }
 
 // -----------------------------------------------------------------------------
-// Scenario 3: interrupt-and-reprompt (steering disabled on the driver)
+// Scenario 3: interrupt-and-reprompt (steering unavailable: not advertised by
+// the bridge, or disabled on the driver for one that does)
 // -----------------------------------------------------------------------------
 
 #[tokio::test(flavor = "current_thread")]
@@ -627,8 +857,9 @@ async fn real_bridge_steer_while_the_bridge_holds_the_turn_for_a_subagent() {
 async fn real_bridge_interrupt_reprompts_on_the_same_child() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let mut session = Session::connect("interrupt", true).await;
-            let pids_before = session.bridge_pids();
+            let advertises = bridge_advertises_steering();
+            let mut session = Session::connect("interrupt", advertises).await;
+            let pids_before = bridge_pids();
             assert_eq!(pids_before.len(), 1, "one bridge child: {pids_before:?}");
             let trace = Arc::clone(&session.trace);
             let handle = session.handle.clone();
@@ -651,15 +882,21 @@ async fn real_bridge_interrupt_reprompts_on_the_same_child() {
                 let sent_at = trace.elapsed();
                 let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[]).await;
                 let answered_at = trace.elapsed();
+                // The re-prompt is live now: the child it runs on. (Read
+                // here, not after the turn — a bridge with no observable
+                // background work gets no post-turn hold, so the child is
+                // gone the moment prompt() resolves.)
+                let pids_during_reprompt = bridge_pids();
                 // No terminal state mid-way: the interrupted prompt() is
                 // still pending (and so, under the hold, is teardown).
                 let prompt_still_pending = !prompt_done_for_interrupt.get();
                 eprintln!(
-                    "[interrupt] interrupt sent at {:.2}s, answered {outcome:?} at {:.2}s (prompt still pending: {prompt_still_pending})",
+                    "[interrupt] interrupt sent at {:.2}s, answered {outcome:?} at {:.2}s — cancel acked after {:.3}s (prompt still pending: {prompt_still_pending}, child: {pids_during_reprompt:?})",
                     sent_at.as_secs_f64(),
-                    answered_at.as_secs_f64()
+                    answered_at.as_secs_f64(),
+                    (answered_at - sent_at).as_secs_f64()
                 );
-                (prompt_still_pending, outcome)
+                (prompt_still_pending, outcome, pids_during_reprompt)
             });
 
             let turn = tokio::time::timeout(TURN_TIMEOUT, session.connection.prompt(COUNT_PROMPT, &[]))
@@ -668,16 +905,24 @@ async fn real_bridge_interrupt_reprompts_on_the_same_child() {
             prompt_done.set(true);
             let resolved_at = session.trace.elapsed();
             eprintln!("[interrupt] prompt() resolved {turn:?} at {:.2}s", resolved_at.as_secs_f64());
-            let (prompt_still_pending, outcome) = interrupt.await.expect("interrupt task");
-            let pids_after = session.bridge_pids();
+            let (prompt_still_pending, outcome, pids_during_reprompt) =
+                interrupt.await.expect("interrupt task");
 
+            // What initialize said, before any forcing (logged by the
+            // connection task during setup, so read after the turn).
+            let advertised = format!("steering advertised: {advertises}");
+            assert!(logged(&advertised), "driver did not log {advertised:?}");
+            eprintln!("[interrupt] {advertised} (forced off on the driver: {advertises})");
             assert_eq!(outcome, Ok(()));
             assert!(
                 prompt_still_pending,
                 "the interrupted prompt() resolves with the final turn, not at the cancel"
             );
             assert_eq!(turn, Ok(AgentRunOutcome::Completed));
-            assert_eq!(pids_after, pids_before, "the re-prompt runs on the same child");
+            assert_eq!(
+                pids_during_reprompt, pids_before,
+                "the re-prompt runs on the same child"
+            );
             assert_eq!(session.store.agent_session_ids.lock().unwrap().len(), 1);
             let rows = session.trace.rows();
             let users: Vec<usize> = rows
@@ -749,10 +994,12 @@ async fn race_steer(label: &str, steer_after_first_chunk: bool) {
             trace.elapsed().as_secs_f64()
         );
         let delivered = match &outcome {
-            Ok(_) => true,
+            Ok(_) => Some(true),
             Err(e) => {
                 // The caller's fallback: the connection is holding, so this
-                // is served as a plain new turn.
+                // is served as a plain new turn — or, on a hold-less bridge
+                // whose connection tore down at turn end, fails fast for
+                // the caller to route as a resume.
                 let fallback = tokio::time::timeout(
                     REPLY_TIMEOUT,
                     handle.interrupt_and_reprompt(RACE_MESSAGE, &[]),
@@ -760,7 +1007,11 @@ async fn race_steer(label: &str, steer_after_first_chunk: bool) {
                 .await
                 .expect("the fallback must not hang");
                 eprintln!("[{label_owned}] steer failed ({e}); fallback answered {fallback:?}");
-                fallback.is_ok()
+                match &fallback {
+                    Ok(()) => Some(true),
+                    Err(e) if e.contains("no longer running") => None,
+                    Err(_) => Some(false),
+                }
             }
         };
         (outcome, delivered)
@@ -775,6 +1026,15 @@ async fn race_steer(label: &str, steer_after_first_chunk: bool) {
     );
     let (outcome, delivered) = steer.await.expect("steer task");
     assert_eq!(turn, Ok(AgentRunOutcome::Completed));
+    let Some(delivered) = delivered else {
+        eprintln!(
+            "SCENARIO 4 ({label}): the turn ended and the connection tore down before the \
+             message arrived; the caller routes that as a resume"
+        );
+        assert_eq!(user_rows(&session.trace), 0);
+        session.finish().await;
+        return;
+    };
     assert!(
         delivered,
         "neither the steer nor the fallback delivered: {outcome:?}"
@@ -796,16 +1056,10 @@ async fn race_steer(label: &str, steer_after_first_chunk: bool) {
     // The aborted cycle's result must not re-echo the pre-steer message as a
     // row after the user row (claude-agent-acp emits that result; the client
     // has to recognise its text as already streamed).
-    let user = rows.iter().position(Row::is_user).unwrap();
-    for before in rows[..user]
-        .iter()
-        .filter(|row| matches!(row, Row::Assistant(_)))
-    {
-        assert!(
-            !rows[user + 1..].contains(before),
-            "pre-steer assistant row echoed after the user row: {rows:#?}"
-        );
-    }
+    assert!(
+        echoed_rows(&rows).is_empty(),
+        "pre-steer assistant row echoed after the user row: {rows:#?}"
+    );
     session.finish().await;
 }
 
@@ -822,5 +1076,303 @@ async fn real_bridge_steer_sent_with_the_prompt_lands_once() {
 async fn real_bridge_steer_sent_at_the_first_chunk_lands_once() {
     tokio::task::LocalSet::new()
         .run_until(race_steer("race-at-chunk", true))
+        .await;
+}
+
+// -----------------------------------------------------------------------------
+// Scenario 5: interrupt while the bridge waits on a permission decision
+// -----------------------------------------------------------------------------
+
+/// The first permission request is held open (a dialog nobody has answered)
+/// when the interrupt arrives. The cancel must still be acknowledged, the
+/// held request resolved rather than left dangling, and the next turn's own
+/// permission request must reach the handler. Skipped when the bridge asks
+/// for nothing: `GOOSE_MODE=approve` makes Goose ask for every tool call;
+/// the managed bridges ignore the variable and approve their shell calls
+/// themselves.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "spawns the installed ACP bridge and calls the model"]
+async fn real_bridge_interrupt_while_a_permission_request_is_pending() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut session = Session::connect_with(
+                "interrupt-perm",
+                ConnectOptions {
+                    steering_disabled: bridge_advertises_steering(),
+                    env: vec![("GOOSE_MODE", "approve")],
+                    ..ConnectOptions::default()
+                },
+            )
+            .await;
+            session
+                .trace
+                .hold_next_permission
+                .store(true, Ordering::SeqCst);
+            let pids_before = bridge_pids();
+            let trace = Arc::clone(&session.trace);
+            let handle = session.handle.clone();
+            let interrupt = tokio::task::spawn_local(async move {
+                let deadline = Instant::now() + TURN_START_TIMEOUT;
+                loop {
+                    if trace.count(|ev| matches!(ev, Ev::Permission { .. })) > 0 {
+                        break;
+                    }
+                    // A tool call that completed without asking: this bridge
+                    // does not request permission for shell calls.
+                    if trace.count(|ev| matches!(ev, Ev::ToolResult { .. })) > 0
+                        || Instant::now() > deadline
+                    {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let sent_at = trace.elapsed();
+                let outcome = handle.interrupt_and_reprompt(INTERRUPT_MESSAGE, &[]).await;
+                let answered_at = trace.elapsed();
+                let pids_during_reprompt = bridge_pids();
+                eprintln!(
+                    "[interrupt-perm] interrupt sent at {:.2}s with a permission request pending, answered {outcome:?} at {:.2}s — cancel acked after {:.3}s (child: {pids_during_reprompt:?})",
+                    sent_at.as_secs_f64(),
+                    answered_at.as_secs_f64(),
+                    (answered_at - sent_at).as_secs_f64()
+                );
+                Some((sent_at, answered_at, outcome, pids_during_reprompt))
+            });
+
+            let turn = tokio::time::timeout(TURN_TIMEOUT, session.connection.prompt(COUNT_PROMPT, &[]))
+                .await
+                .expect("the turn should end");
+            eprintln!(
+                "[interrupt-perm] prompt() resolved {turn:?} at {:.2}s",
+                session.trace.elapsed().as_secs_f64()
+            );
+            let Some((sent_at, answered_at, outcome, pids_during_reprompt)) =
+                interrupt.await.expect("interrupt task")
+            else {
+                eprintln!(
+                    "SCENARIO 5: SKIPPED — the bridge issued no session/request_permission for its shell calls"
+                );
+                session.finish().await;
+                return;
+            };
+
+            let events = session.trace.events();
+            let user_at = events
+                .iter()
+                .find(|(_, ev)| matches!(ev, Ev::User(_)))
+                .map(|(at, _)| *at);
+            let cancelled_at = events
+                .iter()
+                .find(|(_, ev)| matches!(ev, Ev::PermissionCancelled { .. }))
+                .map(|(at, _)| *at);
+            let hold_ended_otherwise = events.iter().any(|(_, ev)| {
+                matches!(ev, Ev::Event(kind) if kind.starts_with("permission-hold-"))
+            });
+            eprintln!(
+                "SCENARIO 5: cancel acked after {:.3}s; held permission cancelled at {:?} (hold ended another way: {hold_ended_otherwise}); user row at {:?}",
+                (answered_at - sent_at).as_secs_f64(),
+                cancelled_at.map(|at| at.as_secs_f64()),
+                user_at.map(|at| at.as_secs_f64())
+            );
+            assert_eq!(
+                outcome,
+                Ok(()),
+                "the interrupt must be acknowledged while a permission request is pending"
+            );
+            assert_eq!(turn, Ok(AgentRunOutcome::Completed));
+            assert_eq!(pids_during_reprompt, pids_before, "same child");
+            let rows = session.trace.rows();
+            assert_eq!(user_rows(&session.trace), 1, "exactly one user row: {rows:#?}");
+            let user_at = user_at.unwrap();
+            // The held request was resolved by the interrupt, before the
+            // next turn, not left for someone to answer later.
+            assert!(
+                cancelled_at.is_some_and(|at| at <= user_at),
+                "the pending permission request was not resolved by the interrupt: {events:#?}"
+            );
+            let after = session.trace.assistant_text_after_user();
+            assert!(after.contains("INTERRUPTED-DONE"), "text after the user row: {after:?}");
+            // Turn 2's own request (the `pwd`) reached the handler and was
+            // answered: the turn could not have completed otherwise.
+            let permissions_after = events
+                .iter()
+                .filter(|(at, ev)| *at > user_at && matches!(ev, Ev::Permission { .. }))
+                .count();
+            eprintln!("[interrupt-perm] permission requests in the second turn: {permissions_after}");
+            assert!(permissions_after > 0, "turn 2's permission request never reached the handler");
+            session.finish().await;
+        })
+        .await;
+}
+
+// -----------------------------------------------------------------------------
+// Scenario 6: interrupt racing the end of the turn
+// -----------------------------------------------------------------------------
+
+/// Send an interrupt `when` the short turn is at (or past) its end. Whatever
+/// the timing, nothing hangs and the message lands at most once: as an
+/// interrupt of the live turn, as a new turn on the held connection, or —
+/// once a hold-less connection has torn down — as a fast failure the caller
+/// routes to a resume.
+async fn race_interrupt(label: &str, after_first_chunk: bool) {
+    let mut session = Session::connect(label, bridge_advertises_steering()).await;
+    let trace = Arc::clone(&session.trace);
+    let handle = session.handle.clone();
+    let label_owned = label.to_string();
+    let interrupt = tokio::task::spawn_local(async move {
+        if after_first_chunk {
+            trace
+                .wait_for("the first chunk", TURN_START_TIMEOUT, |evs| {
+                    evs.iter().any(|ev| matches!(ev, Ev::Append(_)))
+                })
+                .await;
+        }
+        let sent_at = trace.elapsed();
+        let outcome = tokio::time::timeout(
+            REPLY_TIMEOUT,
+            handle.interrupt_and_reprompt(RACE_MESSAGE, &[]),
+        )
+        .await
+        .expect("an interrupt at the turn boundary must not hang");
+        eprintln!(
+            "[{label_owned}] interrupt sent at {:.2}s answered {outcome:?} at {:.2}s",
+            sent_at.as_secs_f64(),
+            trace.elapsed().as_secs_f64()
+        );
+        outcome
+    });
+
+    let turn = tokio::time::timeout(TURN_TIMEOUT, session.connection.prompt(RACE_PROMPT, &[]))
+        .await
+        .expect("the short turn should end");
+    eprintln!(
+        "[{label}] prompt() resolved {turn:?} at {:.2}s",
+        session.trace.elapsed().as_secs_f64()
+    );
+    let outcome = interrupt.await.expect("interrupt task");
+    assert_eq!(turn, Ok(AgentRunOutcome::Completed));
+    match &outcome {
+        Ok(()) => {
+            session
+                .trace
+                .wait_for("the reply to the interrupt", REPLY_TIMEOUT, |evs| {
+                    streamed_text(evs).contains("RACE-DONE")
+                })
+                .await;
+            // Let any trailing frames land before counting rows.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let rows = session.trace.rows();
+            eprintln!(
+                "SCENARIO 6 ({label}): delivered; user rows {}",
+                user_rows(&session.trace)
+            );
+            assert_eq!(user_rows(&session.trace), 1, "{rows:#?}");
+            assert!(
+                echoed_rows(&rows).is_empty(),
+                "pre-interrupt assistant row echoed after the user row: {rows:#?}"
+            );
+        }
+        Err(e) if e.contains("no longer running") => {
+            eprintln!(
+                "SCENARIO 6 ({label}): the turn ended and the connection tore down before the \
+                 interrupt arrived ({e}); the caller routes that as a resume"
+            );
+            assert_eq!(user_rows(&session.trace), 0);
+        }
+        other => panic!("unexpected interrupt outcome at the turn boundary: {other:?}"),
+    }
+    session.finish().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "spawns the installed ACP bridge and calls the model"]
+async fn real_bridge_interrupt_sent_with_the_prompt_lands_once() {
+    tokio::task::LocalSet::new()
+        .run_until(race_interrupt("irace-at-send", false))
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "spawns the installed ACP bridge and calls the model"]
+async fn real_bridge_interrupt_sent_at_the_first_chunk_lands_once() {
+    tokio::task::LocalSet::new()
+        .run_until(race_interrupt("irace-at-chunk", true))
+        .await;
+}
+
+// -----------------------------------------------------------------------------
+// Scenario 7: resume a settled session with session/load
+// -----------------------------------------------------------------------------
+
+/// One connection teaches the agent a code word and settles; a second,
+/// on a new child, loads the agent's session in the same dir and asks for
+/// it back. The replayed history must be matched or dropped, never recorded
+/// as fresh rows.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "spawns the installed ACP bridge and calls the model"]
+async fn real_bridge_resume_loads_the_session_on_a_new_child() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut first = Session::connect("resume-1", bridge_advertises_steering()).await;
+            let pids_first = bridge_pids();
+            let turn = tokio::time::timeout(TURN_TIMEOUT, first.connection.prompt(REMEMBER_PROMPT, &[]))
+                .await
+                .expect("the first turn should end");
+            assert_eq!(turn, Ok(AgentRunOutcome::Completed));
+            let first_text = streamed_text(
+                &first.trace.events().into_iter().map(|(_, ev)| ev).collect::<Vec<_>>(),
+            );
+            assert!(first_text.contains("REMEMBERED"), "first turn: {first_text:?}");
+            let agent_session_id = first.agent_session_id();
+            let messages = first.legacy_messages(REMEMBER_PROMPT);
+            let dir = first.dir.clone();
+            first.finish_keeping_dir().await;
+            wait_for_bridge_exit(SETTLE_WAIT).await;
+
+            let mut second = Session::connect_with(
+                "resume-2",
+                ConnectOptions {
+                    steering_disabled: bridge_advertises_steering(),
+                    resume: Some(Resume {
+                        agent_session_id: agent_session_id.clone(),
+                        messages,
+                        dir: dir.clone(),
+                    }),
+                    ..ConnectOptions::default()
+                },
+            )
+            .await;
+            let pids_second = bridge_pids();
+            assert_eq!(pids_second.len(), 1, "one new child: {pids_second:?}");
+            assert_ne!(pids_second, pids_first, "the resume runs on a new child");
+            let turn = tokio::time::timeout(TURN_TIMEOUT, second.connection.prompt(RECALL_PROMPT, &[]))
+                .await
+                .expect("the resumed turn should end");
+            eprintln!(
+                "[resume-2] prompt() resolved {turn:?} at {:.2}s",
+                second.trace.elapsed().as_secs_f64()
+            );
+            assert_eq!(turn, Ok(AgentRunOutcome::Completed));
+            let rows = second.trace.rows();
+            let text = streamed_text(
+                &second.trace.events().into_iter().map(|(_, ev)| ev).collect::<Vec<_>>(),
+            );
+            eprintln!(
+                "SCENARIO 7: loaded {agent_session_id} on {pids_second:?}; store ids {:?}; reply {text:?}",
+                second.store.agent_session_ids.lock().unwrap()
+            );
+            assert_eq!(user_rows(&second.trace), 0, "{rows:#?}");
+            assert!(
+                !rows.iter().any(|row| row.text().contains("REMEMBERED")),
+                "replayed history recorded as new rows: {rows:#?}"
+            );
+            assert!(
+                text.contains("PELICAN-7342"),
+                "the loaded session should remember the code word: {text:?}"
+            );
+            second.finish().await;
+            let _ = std::fs::remove_dir_all(&dir);
+        })
         .await;
 }

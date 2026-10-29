@@ -2198,9 +2198,17 @@ impl AcpDriver {
                 .builder()
                 .name("staged-acp-client")
                 .on_receive_request(
-                    async move |args: RequestPermissionRequest, responder, _connection| {
-                        let response = permission_handler.request_permission(args).await?;
-                        responder.respond(response)
+                    async move |args: RequestPermissionRequest, responder, connection| {
+                        // The decision may wait on a person. Handlers run on
+                        // the connection's single dispatch task, so awaiting
+                        // it here would stall every other frame — the prompt
+                        // response that acknowledges a cancel, a steer's
+                        // answer — until someone clicks.
+                        let handler = Arc::clone(&permission_handler);
+                        connection.spawn(async move {
+                            let response = handler.request_permission(args).await?;
+                            responder.respond(response)
+                        })
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -3691,7 +3699,15 @@ struct AcpNotificationHandler {
     phase: Mutex<HandlerPhase>,
     /// Signalled when replay matching determines all DB messages have been replayed.
     replay_done: tokio::sync::Notify,
+    /// Connection-wide: cancelled once, at a user cancel or teardown, after
+    /// which every permission request is answered `Cancelled`.
     permission_cancel_token: CancellationToken,
+    /// The turn in flight's child of `permission_cancel_token` — what pending
+    /// requests actually wait on, so an interrupt can resolve *this* turn's
+    /// requests `Cancelled` (ACP's rule for a client that cancels) without
+    /// burning the connection's token for the turns that follow. Rotated by
+    /// [`Self::begin_turn_permissions`] at every prompt.
+    turn_permission_token: std::sync::Mutex<CancellationToken>,
     /// This connection's task-tracking mode, fixed by [`setup_acp_session`]
     /// right after the initialize response — race-free, because `session/new`
     /// (and hence any update) only happens after initialize resolves. Unset
@@ -3745,12 +3761,14 @@ impl AcpNotificationHandler {
             }
         };
 
+        let turn_permission_token = std::sync::Mutex::new(permission_cancel_token.child_token());
         Self {
             writer,
             response: Mutex::new(response_completion::ResponseState::default()),
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
             permission_cancel_token,
+            turn_permission_token,
             task_tracking_mode: OnceLock::new(),
             background_tasks: Mutex::new(BackgroundTaskSet::default()),
             typed_tasks: Mutex::new(TypedAsyncTaskSet::default()),
@@ -3920,6 +3938,24 @@ impl AcpNotificationHandler {
         self.permission_cancel_token.cancel();
     }
 
+    /// A turn is about to be prompted: permission requests from here on wait
+    /// on a fresh token of its own.
+    fn begin_turn_permissions(&self) {
+        *self.turn_permission_token.lock().unwrap() = self.permission_cancel_token.child_token();
+    }
+
+    /// Resolve the turn in flight's pending permission requests `Cancelled`,
+    /// leaving the connection's token — and so the next turn's requests —
+    /// untouched. Until [`Self::begin_turn_permissions`] rotates the token, a
+    /// late request from the cancelled turn is answered `Cancelled` too.
+    fn cancel_turn_permissions(&self) {
+        self.turn_permission_token.lock().unwrap().cancel();
+    }
+
+    fn turn_permission_token(&self) -> CancellationToken {
+        self.turn_permission_token.lock().unwrap().clone()
+    }
+
     async fn is_replay_complete(&self) -> bool {
         let phase = self.phase.lock().await;
         match &*phase {
@@ -3957,7 +3993,8 @@ impl AcpNotificationHandler {
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        if self.permission_cancel_token.is_cancelled() {
+        let turn_token = self.turn_permission_token();
+        if turn_token.is_cancelled() {
             return Ok(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Cancelled,
             ));
@@ -3985,7 +4022,7 @@ impl AcpNotificationHandler {
             ));
         }
 
-        let response = self.resolve_permission(request.clone()).await;
+        let response = self.resolve_permission(request.clone(), turn_token).await;
         self.pending_permissions
             .lock()
             .await
@@ -3993,7 +4030,11 @@ impl AcpNotificationHandler {
         Ok(response)
     }
 
-    async fn resolve_permission(&self, request: AcpPermissionRequest) -> RequestPermissionResponse {
+    async fn resolve_permission(
+        &self,
+        request: AcpPermissionRequest,
+        turn_token: CancellationToken,
+    ) -> RequestPermissionResponse {
         if let Some(origin) = request.origin.clone() {
             // Out-of-turn: the tool call must be one this connection actually
             // saw announced, or there is nothing to correlate the request to.
@@ -4036,10 +4077,7 @@ impl AcpNotificationHandler {
             );
         }
 
-        let decision = self
-            .writer
-            .request_permission(request, self.permission_cancel_token.clone())
-            .await;
+        let decision = self.writer.request_permission(request, turn_token).await;
         permission_response_for_decision(decision)
     }
 
@@ -5908,6 +5946,7 @@ async fn run_prompt_turn(
     let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
     let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
+    handler.begin_turn_permissions();
     handler.transition_to_live().await;
     handler
         .response
@@ -5951,12 +5990,16 @@ async fn run_prompt_turn(
                     log::info!(
                         "ACP session {our_session_id}: interrupting the turn in flight for a new message"
                     );
-                    // Same wire sequence as the user-cancel arm above, minus
-                    // `cancel_pending_permissions()`: that token is created
-                    // once per connection and, once cancelled, auto-answers
-                    // every later permission request — which would silently
-                    // break the next turn. The agent resolves its own pending
-                    // permission requests on `session/cancel`.
+                    // Same wire sequence as the user-cancel arm above, but
+                    // only *this turn's* pending permission requests are
+                    // resolved `Cancelled` — the connection-wide token would
+                    // auto-answer every later request and silently break the
+                    // next turn. Resolving them is not optional: with a
+                    // request nobody had answered still pending, the cancel
+                    // went unacknowledged for the full timeout and the
+                    // message was dropped (seen against Goose) — and once
+                    // the turn is gone the dialog is stale anyway.
+                    handler.cancel_turn_permissions();
                     if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
                         let _ = reply.send(Err(e.clone()));
                         return Err(e);
@@ -12207,11 +12250,19 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         Event(RecordedMetadata),
         ToolCall(String),
         ToolCallMetadata(RecordedMetadata),
+        /// A permission request reached the writer (by tool-call id).
+        Permission(String),
+        /// A held permission request was resolved by its token cancelling.
+        PermissionCancelled(String),
     }
 
     #[derive(Default)]
     struct TranscriptWriter {
         calls: Mutex<Vec<WriterCall>>,
+        /// Hold the next permission request open — a dialog nobody has
+        /// answered — until its cancel token fires or the test releases it.
+        hold_next_permission: AtomicBool,
+        release_permission: tokio::sync::Notify,
     }
 
     impl TranscriptWriter {
@@ -12241,7 +12292,13 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             self.calls()
                 .into_iter()
                 .filter(|call| {
-                    !matches!(call, WriterCall::Event(_) | WriterCall::ToolCallMetadata(_))
+                    !matches!(
+                        call,
+                        WriterCall::Event(_)
+                            | WriterCall::ToolCallMetadata(_)
+                            | WriterCall::Permission(_)
+                            | WriterCall::PermissionCancelled(_)
+                    )
                 })
                 .collect()
         }
@@ -12306,6 +12363,36 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         }
 
         async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
+
+        async fn request_permission(
+            &self,
+            request: AcpPermissionRequest,
+            cancel_token: CancellationToken,
+        ) -> AcpPermissionDecision {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(WriterCall::Permission(request.tool_call_id.clone()));
+            if cancel_token.is_cancelled() {
+                return AcpPermissionDecision::Cancelled;
+            }
+            if self
+                .hold_next_permission
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        self.calls
+                            .lock()
+                            .unwrap()
+                            .push(WriterCall::PermissionCancelled(request.tool_call_id.clone()));
+                        return AcpPermissionDecision::Cancelled;
+                    }
+                    _ = self.release_permission.notified() => {}
+                }
+            }
+            autoapprove_permission_decision(&request)
+        }
 
         async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
             self.calls

@@ -1777,11 +1777,13 @@ mod tests {
     /// cargo test -p staged --lib continue_repo_session_live -- --ignored --nocapture --test-threads=1
     /// ```
     ///
-    /// `ACP_REAL_BRIDGE` picks the provider id (`claude` by default) and
+    /// `ACP_REAL_BRIDGE` picks the provider id (`claude` by default; `goose`
+    /// resolves from the login shell's `PATH` and, headless, needs
+    /// `GOOSE_DISABLE_KEYRING=1` or it blocks on a Keychain prompt) and
     /// `ACP_REAL_BRIDGE_DIR` the install dir (`~/.staged/packages/bin`). The
     /// resume (`resumed`) and `queued` paths are not covered here: a resume
     /// needs the app handle the tool carries, which tests cannot build.
-    async fn continue_repo_session_live(steering_disabled: bool, expected_delivery: &str) {
+    async fn continue_repo_session_live(steering_disabled: bool) {
         const LONG_TURN: &str = "Count from 1 to 40 slowly. For EACH number: first run the \
             shell command `sleep 1` with your shell tool as its own separate tool call (never a \
             loop, never a script), then write that number on its own line. Keep going until 40. \
@@ -1800,6 +1802,13 @@ mod tests {
             acp_client::set_bundled_tools_dir(dir);
         }
         let provider = std::env::var("ACP_REAL_BRIDGE").unwrap_or_else(|_| "claude".to_string());
+        // Goose does not advertise steering, so the route falls through to
+        // the interrupt whether or not it is forced off.
+        let expected_delivery = if steering_disabled || provider == "goose" {
+            "interrupted_and_reprompted"
+        } else {
+            "injected"
+        };
         let driver = acp_client::AcpDriver::new(&provider)
             .expect("the bridge must be installed (see the test docs)")
             .with_env_snapshot(std::env::vars().collect())
@@ -1925,13 +1934,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "spawns the installed ACP bridge and calls the model"]
     async fn continue_repo_session_live_steers_a_running_session() {
-        continue_repo_session_live(false, "injected").await;
+        continue_repo_session_live(false).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
     #[ignore = "spawns the installed ACP bridge and calls the model"]
     async fn continue_repo_session_live_interrupts_when_steering_is_unavailable() {
-        continue_repo_session_live(true, "interrupted_and_reprompted").await;
+        continue_repo_session_live(true).await;
     }
 
     /// A session in its startup window (row `running`, no connection yet)

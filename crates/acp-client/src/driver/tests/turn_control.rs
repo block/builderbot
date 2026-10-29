@@ -36,9 +36,12 @@ struct FakeAgent {
     advertise_steering: bool,
     /// Text the agent streams at the start of each prompt, in order.
     stream_on_prompt: Vec<&'static str>,
-    /// Ask permission for a tool call during the Nth (1-based) prompt, and
-    /// record the client's answer.
-    permission_on_prompt: Option<usize>,
+    /// Ask permission for a tool call during these (1-based) prompts, and
+    /// record the client's answers in order.
+    permission_on_prompts: Vec<usize>,
+    /// Text streamed right behind a permission request, while the client
+    /// has not answered it.
+    stream_after_permission: Option<&'static str>,
     permission_outcomes: Mutex<Vec<RequestPermissionOutcome>>,
     permission_answered: tokio::sync::Notify,
 }
@@ -125,7 +128,7 @@ impl FakeAgent {
                     if let Some(chunk) = prompt_agent.stream_on_prompt.get(ordinal - 1) {
                         cx.send_notification(agent_text(Some(&format!("msg-{ordinal}")), chunk))?;
                     }
-                    if prompt_agent.permission_on_prompt == Some(ordinal) {
+                    if prompt_agent.permission_on_prompts.contains(&ordinal) {
                         let tool_call_id = format!("tc-{ordinal}");
                         cx.send_notification(tool_call_notification(&tool_call_id))?;
                         let agent = Arc::clone(&prompt_agent);
@@ -140,6 +143,12 @@ impl FakeAgent {
                                 agent.permission_answered.notify_one();
                                 Ok(())
                             })?;
+                        if let Some(chunk) = prompt_agent.stream_after_permission {
+                            cx.send_notification(agent_text(
+                                Some(&format!("msg-{ordinal}")),
+                                chunk,
+                            ))?;
+                        }
                     }
                     *prompt_agent.pending_prompt.lock().unwrap() = Some(responder);
                     prompt_agent.prompt_arrived.notify_one();
@@ -605,9 +614,13 @@ where
     let result = agent_client_protocol::Client
         .builder()
         .on_receive_request(
-            async move |args: RequestPermissionRequest, responder, _connection| {
-                let response = permission_handler.request_permission(args).await?;
-                responder.respond(response)
+            // Off the dispatch task, as `connect` registers it.
+            async move |args: RequestPermissionRequest, responder, connection| {
+                let handler = Arc::clone(&permission_handler);
+                connection.spawn(async move {
+                    let response = handler.request_permission(args).await?;
+                    responder.respond(response)
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -663,7 +676,7 @@ async fn interrupt_cancels_the_turn_and_reprompts_on_the_same_connection() {
         stream_on_prompt: vec!["half an answer", "the new answer"],
         // Turn 2 asks permission: the connection-wide permission token must
         // have survived the interrupt for the handler to answer it.
-        permission_on_prompt: Some(2),
+        permission_on_prompts: vec![2],
         ..FakeAgent::default()
     });
 
@@ -1044,4 +1057,158 @@ async fn a_turn_control_handle_maps_channel_failures_to_connection_state() {
         .await
         .expect_err("no connection to serve the message");
     assert!(error.contains("no longer running"), "got: {error}");
+}
+
+/// The interrupt arrives while the turn's permission request is still
+/// unanswered — a dialog nobody has clicked. The interrupt resolves it
+/// `Cancelled` (ACP's rule for a client that cancels the turn), so the cancel
+/// is acknowledged at once instead of waiting on the dialog, and the next
+/// turn's own request is still presented and answered: the token cancelled
+/// was the turn's, not the connection's. Seen against Goose, where the
+/// pending request left the cancel unacknowledged for the full 30 s and the
+/// message was dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn interrupt_resolves_the_turns_pending_permission_request_before_reprompting() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        stream_on_prompt: vec!["half an answer", "the new answer"],
+        permission_on_prompts: vec![1, 2],
+        ..FakeAgent::default()
+    });
+
+    let (result, _reply_rx, stashed_reply, writer, handler) =
+        session_with(&agent, None, |handle, agent, writer, _handler| async move {
+            writer.hold_next_permission.store(true, Ordering::SeqCst);
+            agent.await_prompt().await;
+            wait_until("turn 1's permission request to reach the writer", || {
+                writer
+                    .calls()
+                    .contains(&WriterCall::Permission("tc-1".to_string()))
+            })
+            .await;
+            assert!(agent.permission_outcomes.lock().unwrap().is_empty());
+
+            let started = tokio::time::Instant::now();
+            handle
+                .interrupt_and_reprompt("actually, do this instead", &[])
+                .await
+                .expect("the cancel is acknowledged with the permission request pending");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the interrupt waited on the dialog"
+            );
+            agent.await_prompt().await;
+            assert_eq!(agent.prompts(), ["first", "actually, do this instead"]);
+            assert_eq!(agent.cancels(), 1);
+
+            wait_until("both permission requests to be answered", || {
+                agent.permission_outcomes.lock().unwrap().len() == 2
+            })
+            .await;
+            wait_until("the second chunk", || {
+                writer
+                    .text_flow()
+                    .contains(&WriterCall::Append("the new answer".to_string()))
+            })
+            .await;
+            agent.finish_prompt(StopReason::EndTurn);
+        })
+        .await;
+
+    assert_eq!(
+        result,
+        Ok((AgentRunOutcome::Completed, SessionSettleReason::Immediate))
+    );
+    let outcomes = agent.permission_outcomes.lock().unwrap().clone();
+    assert!(
+        matches!(outcomes[0], RequestPermissionOutcome::Cancelled),
+        "turn 1's request: {:?}",
+        outcomes[0]
+    );
+    assert!(
+        matches!(outcomes[1], RequestPermissionOutcome::Selected(_)),
+        "turn 2's request: {:?}",
+        outcomes[1]
+    );
+    let calls = writer.calls();
+    assert!(
+        calls.contains(&WriterCall::PermissionCancelled("tc-1".to_string())),
+        "{calls:#?}"
+    );
+    assert!(
+        calls.contains(&WriterCall::Permission("tc-2".to_string())),
+        "{calls:#?}"
+    );
+    assert_eq!(
+        writer.text_flow(),
+        vec![
+            WriterCall::Append("half an answer".to_string()),
+            WriterCall::Finalize,
+            WriterCall::UserMessage("actually, do this instead".to_string()),
+            WriterCall::Append("the new answer".to_string()),
+        ]
+    );
+    assert!(!handler.permission_cancel_token.is_cancelled());
+    if let Some(reply) = stashed_reply {
+        let _ = reply.send(result.map(|(outcome, _)| outcome));
+    }
+}
+
+/// A permission decision nobody has made yet does not stall the connection:
+/// the frames behind the request keep being dispatched while the dialog is
+/// up. (The SDK runs handlers on one task; the decision is awaited off it.)
+#[tokio::test(flavor = "current_thread")]
+async fn a_pending_permission_decision_does_not_stall_the_connection() {
+    let agent = Arc::new(FakeAgent {
+        advertise_steering: false,
+        stream_on_prompt: vec!["half an answer"],
+        permission_on_prompts: vec![1],
+        stream_after_permission: Some("still streaming"),
+        ..FakeAgent::default()
+    });
+
+    let (result, _reply_rx, stashed_reply, _writer, _handler) = session_with(
+        &agent,
+        None,
+        |_handle, agent, writer, _handler| async move {
+            writer.hold_next_permission.store(true, Ordering::SeqCst);
+            agent.await_prompt().await;
+            wait_until(
+                "the chunk sent behind the pending permission request",
+                || {
+                    writer
+                        .text_flow()
+                        .contains(&WriterCall::Append("still streaming".to_string()))
+                },
+            )
+            .await;
+            assert!(writer
+                .calls()
+                .contains(&WriterCall::Permission("tc-1".to_string())));
+            assert!(
+                agent.permission_outcomes.lock().unwrap().is_empty(),
+                "the decision is still pending"
+            );
+            writer.release_permission.notify_one();
+            wait_until("the released request to be answered", || {
+                agent.permission_outcomes.lock().unwrap().len() == 1
+            })
+            .await;
+            agent.finish_prompt(StopReason::EndTurn);
+        },
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        Ok((AgentRunOutcome::Completed, SessionSettleReason::Immediate))
+    );
+    let outcomes = agent.permission_outcomes.lock().unwrap().clone();
+    assert!(
+        matches!(outcomes[0], RequestPermissionOutcome::Selected(_)),
+        "{outcomes:?}"
+    );
+    if let Some(reply) = stashed_reply {
+        let _ = reply.send(result.map(|(outcome, _)| outcome));
+    }
 }

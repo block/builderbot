@@ -137,3 +137,52 @@ describe('pushStateStore force flag', () => {
     expect(store.getPushState('other')?.force).toBe(false);
   });
 });
+
+describe('pushStateStore noVerify flag', () => {
+  it('keeps a no-verify push from launch through queue drain to failure', async () => {
+    const store = await importStore();
+
+    store.setPushing('branch', '__pending__', false, true);
+    store.setPushLaunch('branch', { sessionId: 'push', sessionStatus: 'queued' }, false, true);
+    expect(store.getPushState('branch')).toMatchObject({ state: 'queued', noVerify: true });
+
+    store.markQueuedPushStarted('branch', 'push');
+    expect(store.getPushState('branch')).toMatchObject({ state: 'pushing', noVerify: true });
+
+    // Retry and the rejection dialog read this to skip the hook again.
+    store.setPushError('branch', '', true);
+    expect(store.getPushState('branch')).toMatchObject({
+      state: 'error',
+      rejectedNonFastForward: true,
+      force: false,
+      noVerify: true,
+    });
+  });
+
+  it('records it on a running launch and an adopted push', async () => {
+    const store = await importStore();
+
+    store.setPushLaunch('branch', { sessionId: 'push', sessionStatus: 'running' }, true, true);
+    expect(store.getPushState('branch')).toMatchObject({
+      state: 'pushing',
+      force: true,
+      noVerify: true,
+    });
+
+    store.trackPushIfIdle('other', 'adopted', 'queued', false, true);
+    expect(store.getPushState('other')).toMatchObject({ state: 'queued', noVerify: true });
+  });
+
+  it('defaults to verifying, and a finished push forgets the flag', async () => {
+    const store = await importStore();
+
+    store.setPushing('branch', '__pending__', true);
+    expect(store.getPushState('branch')?.noVerify).toBe(false);
+    store.trackPushIfIdle('adopted', 'gated-push', 'queued', true);
+    expect(store.getPushState('adopted')?.noVerify).toBe(false);
+
+    store.setPushing('done', 'push', false, true);
+    store.setPushDone('done');
+    expect(store.getPushState('done')?.noVerify).toBe(false);
+  });
+});

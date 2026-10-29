@@ -787,6 +787,9 @@ export interface PipelineExecution {
   kind?: PipelineKind | null;
   /** Whether a `push` pipeline force-pushes. Absent for the other kinds. */
   pushForce?: boolean;
+  /** Whether a `push` pipeline skips the pre-push hook (`--no-verify`). Absent
+   *  for the other kinds. */
+  pushNoVerify?: boolean;
   steps: PipelineStepStatus[];
   currentStep: number;
   completedWithoutAi: boolean;

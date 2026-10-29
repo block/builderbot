@@ -1182,8 +1182,12 @@ describe('sessionStatusListener busy-state hydration', () => {
       return { sessionId, projectId: 'project-1', branchId, sessionType: 'push', status };
     }
 
-    function pushSession(id: string, status: string, pushForce: boolean) {
-      return { id, status, pipeline: { kind: 'push', pushForce, steps: [], currentStep: 0 } };
+    function pushSession(id: string, status: string, pushForce: boolean, pushNoVerify?: boolean) {
+      return {
+        id,
+        status,
+        pipeline: { kind: 'push', pushForce, pushNoVerify, steps: [], currentStep: 0 },
+      };
     }
 
     async function hydrate() {
@@ -1202,6 +1206,36 @@ describe('sessionStatusListener busy-state hydration', () => {
         'branch-1',
         'gated-push',
         'queued',
+        true,
+        false
+      );
+    });
+
+    it('adopts a no-verify push with its flag, so Retry skips the hook too', async () => {
+      getActiveSessions.mockResolvedValue([
+        activePush('no-verify-push', 'queued'),
+        activePush('no-verify-force', 'running', 'branch-2'),
+      ]);
+      getSession.mockImplementation(async (id: string) =>
+        id === 'no-verify-push'
+          ? pushSession(id, 'queued', false, true)
+          : pushSession(id, 'running', true, true)
+      );
+
+      await hydrate();
+
+      expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledWith(
+        'branch-1',
+        'no-verify-push',
+        'queued',
+        false,
+        true
+      );
+      expect(pushStateStore.trackPushIfIdle).toHaveBeenCalledWith(
+        'branch-2',
+        'no-verify-force',
+        'pushing',
+        true,
         true
       );
     });
@@ -1216,6 +1250,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         'branch-1',
         'push-1',
         'pushing',
+        false,
         false
       );
       expect(sessionRegistry.register).toHaveBeenCalledWith(
@@ -1330,7 +1365,8 @@ describe('sessionStatusListener busy-state hydration', () => {
         'branch-1',
         'gated-push',
         'pushing',
-        true
+        true,
+        false
       );
     });
 
@@ -1353,7 +1389,8 @@ describe('sessionStatusListener busy-state hydration', () => {
           'branch-1',
           'gated-push',
           'pushing',
-          true
+          true,
+          false
         )
       );
     });

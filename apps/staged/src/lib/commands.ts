@@ -2080,18 +2080,22 @@ export function hasUnpushedCommits(branchId: string): Promise<boolean> {
 }
 
 /** Push a branch to its remote via an agent session.
- *  The agent runs git push and can fix pre-push hook failures.
+ *  The agent runs git push and can fix pre-push hook failures; `noVerify`
+ *  ("Push without verifying") skips the pre-push hook instead, on the agent's
+ *  retries too.
  *  Queues behind in-flight branch sessions, so the response reports whether the
  *  returned session is pushing now or waiting on the branch queue. */
 export function pushBranch(
   branchId: string,
   provider?: string,
-  force?: boolean
+  force?: boolean,
+  noVerify?: boolean
 ): Promise<BranchPipelineResponse> {
   return invokeCommand('push_branch', {
     branchId,
     provider: provider ?? null,
     force: force ?? null,
+    noVerify: noVerify ?? null,
   });
 }
 

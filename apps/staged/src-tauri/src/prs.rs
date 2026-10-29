@@ -256,23 +256,74 @@ fn rebase_ref_for_target(
     }
 }
 
+// Every push prompt must contain "Push the current branch to the remote" or
+// "Force push the current branch to the remote":
+// `infer_branch_resume_session_type` matches on those to recognise a push
+// session, and without a match no `push-completed` event fires.
 const PUSH_PROMPT: &str = "Push the current branch to the remote with a normal push. If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push. Do not force push.";
 const FORCE_PUSH_PROMPT: &str = "Force push the current branch to the remote";
+const NO_VERIFY_PUSH_PROMPT: &str = "Push the current branch to the remote with a normal push, skipping the pre-push hook (`--no-verify`). If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push that keeps `--no-verify`. Do not force push.";
+const NO_VERIFY_FORCE_PUSH_PROMPT: &str =
+    "Force push the current branch to the remote, skipping the pre-push hook (`--no-verify`)";
 /// A pull never hands off to an agent (every step aborts), so this is purely the
 /// session's label.
 const PULL_PROMPT: &str = "Pull from origin";
 
+/// What a push pipeline does: whether it force-pushes (`--force-with-lease`),
+/// and whether it skips git's `pre-push` hook (`--no-verify`).
+///
+/// Persisted on the pipeline as `push_force` / `push_no_verify`, so a queued
+/// push re-derives the same command on dequeue. Every combination is its own
+/// operation: the queue never folds one variant into another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PushVariant {
+    pub force: bool,
+    pub no_verify: bool,
+}
+
+impl PushVariant {
+    /// The variant a persisted pipeline records. Non-push pipelines record
+    /// neither flag, so they read as the default.
+    fn of(pipeline: &PipelineExecution) -> Self {
+        Self {
+            force: pipeline.push_force,
+            no_verify: pipeline.push_no_verify,
+        }
+    }
+
+    /// The variant a `push_branch` request asks for; an omitted flag is off.
+    pub(crate) fn from_request(force: Option<bool>, no_verify: Option<bool>) -> Self {
+        Self {
+            force: force.unwrap_or(false),
+            no_verify: no_verify.unwrap_or(false),
+        }
+    }
+
+    /// Flags shared by both halves of [`git_push_with_fallback`].
+    fn git_flags(self) -> &'static str {
+        if self.no_verify {
+            "--no-verify "
+        } else {
+            ""
+        }
+    }
+}
+
 /// Prompt for a pipeline session, which doubles as its timeline label.
 ///
-/// `push_force` only matters for [`PipelineKind::Push`]; the other kinds ignore
-/// it. Queued and running paths share this so a session's label doesn't change
+/// `push` only matters for [`PipelineKind::Push`]; the other kinds ignore it.
+/// Queued and running paths share this so a session's label doesn't change
 /// when it is drained.
-fn pipeline_prompt(kind: &PipelineKind, push_force: bool) -> &'static str {
+fn pipeline_prompt(kind: &PipelineKind, push: PushVariant) -> &'static str {
     match kind {
         PipelineKind::Rebase => "Rebase branch",
         PipelineKind::Squash => "Squash commits",
-        PipelineKind::Push if push_force => FORCE_PUSH_PROMPT,
-        PipelineKind::Push => PUSH_PROMPT,
+        PipelineKind::Push => match (push.force, push.no_verify) {
+            (false, false) => PUSH_PROMPT,
+            (true, false) => FORCE_PUSH_PROMPT,
+            (false, true) => NO_VERIFY_PUSH_PROMPT,
+            (true, true) => NO_VERIFY_FORCE_PUSH_PROMPT,
+        },
         PipelineKind::Pull => PULL_PROMPT,
     }
 }
@@ -467,33 +518,40 @@ Here is the context from the prior steps:
 
 /// Build the single step that pushes the branch to its remote.
 ///
-/// Rebuilt from the persisted `push_force` flag on dequeue rather than replayed
-/// from the queued pipeline, so a queued push always pushes the branch's current
-/// name with the command the user asked for.
+/// Rebuilt from the persisted `push_force` / `push_no_verify` flags on dequeue
+/// rather than replayed from the queued pipeline, so a queued push always
+/// pushes the branch's current name with the command the user asked for.
 ///
 /// The refspec is always explicit (`local:remote`) so a de-duplicated local
 /// name (`feature-x-2`) still lands on the PR's branch (`feature-x`) instead of
 /// creating a new remote branch; `-u` then tracks `origin/{remote}`.
+///
+/// `--no-verify` skips only git's `pre-push` hook; server-side checks still
+/// apply. It goes into both halves of the HTTPS fallback, so the retry doesn't
+/// run the hook either.
 pub(crate) fn build_push_pipeline_steps(
     local_branch: &str,
     remote_branch: &str,
-    force: bool,
+    variant: PushVariant,
 ) -> Vec<PipelineStep> {
     let refspec = push_refspec(local_branch, remote_branch);
-    let push_command = if force {
-        git_push_with_fallback(&format!("-u origin {refspec} --force-with-lease"))
+    let flags = variant.git_flags();
+    let push_command = if variant.force {
+        git_push_with_fallback(&format!("{flags}-u origin {refspec} --force-with-lease"))
     } else {
-        git_push_with_fallback(&format!("-u origin {refspec}"))
+        git_push_with_fallback(&format!("{flags}-u origin {refspec}"))
     };
 
-    let on_failure = if force {
+    let on_failure = if variant.force {
         // Spell the refspec out: with the upstream on `origin/{remote}` a
         // bare `git push` is refused under `push.default=simple` when the
         // names differ, and the obvious fallback `git push origin {local}`
-        // would recreate the stray remote branch the refspec avoids.
+        // would recreate the stray remote branch the refspec avoids. The
+        // flags are spelled out too, or the agent's retry runs the hook the
+        // user asked to skip.
         FailureStrategy::HandoffToAi {
             prompt_template: format!(
-                "The force push failed. Diagnose and fix the issue, then retry the force push with exactly `git push -u origin {refspec} --force-with-lease`. Do not push `{local_branch}` under any other remote name.\n\n{{step_outputs}}"
+                "The force push failed. Diagnose and fix the issue, then retry the force push with exactly `git push {flags}-u origin {refspec} --force-with-lease`. Do not push `{local_branch}` under any other remote name.\n\n{{step_outputs}}"
             ),
         }
     } else {
@@ -572,7 +630,7 @@ fn insert_running_commit_pipeline_session(
     rebase_target: Option<String>,
     provider: Option<&str>,
 ) -> Result<RunningPipelineSession, String> {
-    let prompt = pipeline_prompt(&kind, false);
+    let prompt = pipeline_prompt(&kind, PushVariant::default());
     let mut pipeline = PipelineExecution::from_steps(steps).with_kind(kind);
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
@@ -831,8 +889,8 @@ fn queue_commit_pipeline_locked(
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
     }
-    let mut session =
-        store::Session::new_queued(pipeline_prompt(kind, false)).with_branch(branch_id);
+    let mut session = store::Session::new_queued(pipeline_prompt(kind, PushVariant::default()))
+        .with_branch(branch_id);
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
@@ -984,7 +1042,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     let rebase_ref = rebase_ref_for_target(&ctx.branch, &remote_branch, target);
     let rebase_target = persisted_rebase_target(target, &rebase_ref);
     let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref)?;
-    let prompt = pipeline_prompt(&kind, false);
+    let prompt = pipeline_prompt(&kind, PushVariant::default());
     let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
@@ -1070,14 +1128,15 @@ fn insert_running_push_pipeline_session(
     store: &Arc<Store>,
     registry: &Arc<session_runner::SessionRegistry>,
     ctx: &BranchPipelineContext,
-    force: bool,
+    variant: PushVariant,
     steps: &[PipelineStep],
     provider: Option<&str>,
 ) -> Result<RunningPipelineSession, String> {
-    let prompt = pipeline_prompt(&PipelineKind::Push, force);
+    let prompt = pipeline_prompt(&PipelineKind::Push, variant);
     let pipeline = PipelineExecution::from_steps(steps)
         .with_kind(PipelineKind::Push)
-        .with_push_force(force);
+        .with_push_force(variant.force)
+        .with_push_no_verify(variant.no_verify);
 
     let mut session =
         store::Session::new_running(prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
@@ -1104,18 +1163,20 @@ fn insert_running_push_pipeline_session(
 ///
 /// Mirrors [`queue_commit_pipeline_if_branch_busy`]: the busy check, the dedupe
 /// scan, and the insert all run under the branch launch lock, and stay
-/// synchronous because the lock must not be held across an await. A push and a
-/// force push dedupe separately — they are different operations, so a queued
-/// normal push must not swallow a force push request.
+/// synchronous because the lock must not be held across an await. Each
+/// [`PushVariant`] dedupes separately — they are different operations, so a
+/// queued normal push must not swallow a force push request, and a push that
+/// runs the `pre-push` hook must not swallow one that skips it (or the
+/// reverse).
 fn queue_push_pipeline_if_branch_busy(
     store: &Arc<Store>,
     branch_id: &str,
     provider: Option<&str>,
-    force: bool,
+    variant: PushVariant,
 ) -> Result<Option<String>, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
     let _guard = launch_lock.lock().unwrap();
-    queue_push_pipeline_locked(store, branch_id, provider, force)
+    queue_push_pipeline_locked(store, branch_id, provider, variant)
 }
 
 /// The body of [`queue_push_pipeline_if_branch_busy`], for the run-now path,
@@ -1124,7 +1185,7 @@ fn queue_push_pipeline_locked(
     store: &Arc<Store>,
     branch_id: &str,
     provider: Option<&str>,
-    force: bool,
+    variant: PushVariant,
 ) -> Result<Option<String>, String> {
     crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     if !branch_has_work_in_flight(store, branch_id)? {
@@ -1136,14 +1197,21 @@ fn queue_push_pipeline_locked(
     // rebase they didn't ask about.
     if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
         pipeline.kind.as_ref() == Some(&PipelineKind::Push)
-            && pipeline.push_force == force
+            && PushVariant::of(pipeline) == variant
             && pipeline.depends_on_session_id.is_none()
     })? {
         return Ok(Some(existing));
     }
 
-    insert_queued_push_session(store, branch_id, provider, force, None).map(Some)
+    insert_queued_push_session(store, branch_id, provider, variant, None).map(Some)
 }
+
+/// The push "Rebase and force push" queues behind its rebase. It always runs
+/// the `pre-push` hook: the menu offers no variant that skips it.
+const FOLLOW_UP_FORCE_PUSH: PushVariant = PushVariant {
+    force: true,
+    no_verify: false,
+};
 
 /// Queue the force push that runs after `dependency_id` — the rebase of a
 /// "Rebase and force push" — and only if that rebase succeeds.
@@ -1162,13 +1230,19 @@ fn queue_force_push_after_locked(
 ) -> Result<String, String> {
     if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
         pipeline.kind.as_ref() == Some(&PipelineKind::Push)
-            && pipeline.push_force
+            && PushVariant::of(pipeline) == FOLLOW_UP_FORCE_PUSH
             && pipeline.depends_on_session_id.as_deref() == Some(dependency_id)
     })? {
         return Ok(existing);
     }
 
-    insert_queued_push_session(store, branch_id, provider, true, Some(dependency_id))
+    insert_queued_push_session(
+        store,
+        branch_id,
+        provider,
+        FOLLOW_UP_FORCE_PUSH,
+        Some(dependency_id),
+    )
 }
 
 /// Insert a queued push row, optionally gated on another session.
@@ -1176,7 +1250,7 @@ fn insert_queued_push_session(
     store: &Arc<Store>,
     branch_id: &str,
     provider: Option<&str>,
-    force: bool,
+    variant: PushVariant,
     depends_on: Option<&str>,
 ) -> Result<String, String> {
     let branch = store
@@ -1187,15 +1261,16 @@ fn insert_queued_push_session(
     // A queue marker only: the steps are rebuilt with a full resolution on
     // dequeue, so the branch on origin is not looked up here — that would be
     // a git subprocess under the branch launch lock.
-    let steps = build_push_pipeline_steps(&branch.branch_name, &branch.branch_name, force);
+    let steps = build_push_pipeline_steps(&branch.branch_name, &branch.branch_name, variant);
     let pipeline = PipelineExecution::from_steps(&steps)
         .with_kind(PipelineKind::Push)
-        .with_push_force(force)
+        .with_push_force(variant.force)
+        .with_push_no_verify(variant.no_verify)
         .with_depends_on_session_id(depends_on.map(str::to_string));
     // No artifact row: a push produces no commit, and a pending-commit stub
     // would render as a failed commit once the push finishes without a new sha.
     // `branch_id` is what keeps this session on the branch queue instead.
-    let mut session = store::Session::new_queued(pipeline_prompt(&PipelineKind::Push, force))
+    let mut session = store::Session::new_queued(pipeline_prompt(&PipelineKind::Push, variant))
         .with_branch(branch_id);
     if let Some(dependency_id) = depends_on {
         // Sort strictly after the dependency. The two rows are created in the
@@ -1220,11 +1295,64 @@ fn insert_queued_push_session(
     Ok(session.id)
 }
 
+/// A queued push or pull, rebuilt for the run that is about to start.
+struct RebuiltGitPipeline {
+    steps: Vec<PipelineStep>,
+    pipeline: PipelineExecution,
+    prompt: &'static str,
+    session_type: &'static str,
+}
+
+/// Rebuild a queued push or pull from its persisted flags and the branch's
+/// current names.
+///
+/// The [`PushVariant`] carries over and is persisted again on the running
+/// pipeline, so a no-verify push that waited in the queue still skips the
+/// `pre-push` hook. `depends_on_session_id` carries over too, so the push still
+/// records what it waited on.
+fn rebuild_queued_git_pipeline(
+    session_id: &str,
+    queued: &PipelineExecution,
+    local_branch: &str,
+    remote_branch: &str,
+) -> Result<RebuiltGitPipeline, String> {
+    let kind = queued
+        .kind
+        .clone()
+        .ok_or_else(|| format!("Queued session {session_id} has no pipeline kind"))?;
+    let variant = PushVariant::of(queued);
+    let (steps, session_type) = match kind {
+        PipelineKind::Push => (
+            build_push_pipeline_steps(local_branch, remote_branch, variant),
+            "push",
+        ),
+        PipelineKind::Pull => (build_pull_pipeline_steps(remote_branch), "pull"),
+        PipelineKind::Rebase | PipelineKind::Squash => {
+            return Err(format!(
+                "Queued git pipeline session {session_id} has non-git kind {kind:?}"
+            ));
+        }
+    };
+    let prompt = pipeline_prompt(&kind, variant);
+    let pipeline = PipelineExecution::from_steps(&steps)
+        .with_kind(kind)
+        .with_push_force(variant.force)
+        .with_push_no_verify(variant.no_verify)
+        .with_depends_on_session_id(queued.depends_on_session_id.clone());
+    Ok(RebuiltGitPipeline {
+        steps,
+        pipeline,
+        prompt,
+        session_type,
+    })
+}
+
 /// Start a queued push or pull pipeline that reached the front of the branch
 /// queue.
 ///
-/// Steps are rebuilt from the branch's current name and the persisted
-/// `push_force` flag rather than replayed from the queued pipeline, matching
+/// Steps are rebuilt from the branch's current name and the persisted push
+/// flags rather than replayed from the queued pipeline (see
+/// [`rebuild_queued_git_pipeline`]), matching
 /// [`start_queued_commit_pipeline_for_branch`] so a branch renamed while the work
 /// waited still acts on the right ref. `claim` takes the row the same way too.
 pub(crate) async fn start_queued_git_pipeline_for_branch(
@@ -1240,34 +1368,20 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         .pipeline
         .as_ref()
         .ok_or_else(|| format!("Queued session {} has no pipeline", session.id))?;
-    let kind = queued_pipeline
-        .kind
-        .clone()
-        .ok_or_else(|| format!("Queued session {} has no pipeline kind", session.id))?;
-    let force = queued_pipeline.push_force;
-    // Kept on the running row so the push still records what it waited on.
-    let depends_on = queued_pipeline.depends_on_session_id.clone();
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
-    let (steps, session_type) = match kind {
-        PipelineKind::Push => (
-            build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, force),
-            "push",
-        ),
-        PipelineKind::Pull => (build_pull_pipeline_steps(&remote_branch), "pull"),
-        PipelineKind::Rebase | PipelineKind::Squash => {
-            return Err(format!(
-                "Queued git pipeline session {} has non-git kind {kind:?}",
-                session.id
-            ));
-        }
-    };
-    let prompt = pipeline_prompt(&kind, force);
-    let pipeline = PipelineExecution::from_steps(&steps)
-        .with_kind(kind)
-        .with_push_force(force)
-        .with_depends_on_session_id(depends_on);
+    let RebuiltGitPipeline {
+        steps,
+        pipeline,
+        prompt,
+        session_type,
+    } = rebuild_queued_git_pipeline(
+        &session.id,
+        queued_pipeline,
+        &ctx.branch.branch_name,
+        &remote_branch,
+    )?;
     let effective_provider = session.provider.clone().or(provider);
 
     // Live from before the claim flips the row to `running` until
@@ -2223,28 +2337,26 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
-    force: Option<bool>,
+    variant: PushVariant,
 ) -> Result<BranchPipelineResponse, String> {
-    let force = force.unwrap_or(false);
-
     // Pre-flight check, then a re-check at insert time — see
     // `start_or_queue_commit_pipeline_for_branch` for why both are needed.
     if let Some(session_id) =
-        queue_push_pipeline_if_branch_busy(&store, &branch_id, provider.as_deref(), force)?
+        queue_push_pipeline_if_branch_busy(&store, &branch_id, provider.as_deref(), variant)?
     {
         return Ok(BranchPipelineResponse::queued(session_id));
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let remote_branch = crate::branches::resolve_remote_branch(&store, &ctx.branch).await;
-    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, force);
+    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, &remote_branch, variant);
 
     let running = {
         let launch_lock = crate::session_commands::branch_session_launch_lock_for(&branch_id);
         let _guard = launch_lock.lock().unwrap();
 
         if let Some(session_id) =
-            queue_push_pipeline_locked(&store, &branch_id, provider.as_deref(), force)?
+            queue_push_pipeline_locked(&store, &branch_id, provider.as_deref(), variant)?
         {
             return Ok(BranchPipelineResponse::queued(session_id));
         }
@@ -2253,7 +2365,7 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
             &store,
             &registry,
             &ctx,
-            force,
+            variant,
             &steps,
             provider.as_deref(),
         )?
@@ -2277,6 +2389,8 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
 ///
 /// Queues behind in-flight branch work instead of failing, so the response
 /// reports whether the push started or is waiting on the branch queue.
+///
+/// `no_verify` ("Push without verifying") skips git's `pre-push` hook.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn push_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2285,6 +2399,7 @@ pub async fn push_branch(
     branch_id: String,
     provider: Option<String>,
     force: Option<bool>,
+    no_verify: Option<bool>,
 ) -> Result<BranchPipelineResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_push_pipeline_for_branch(
@@ -2293,7 +2408,7 @@ pub async fn push_branch(
         app_handle,
         branch_id,
         provider,
-        force,
+        PushVariant::from_request(force, no_verify),
     )
     .await
 }
@@ -2645,15 +2760,32 @@ mod tests {
         assert!(queue_pipeline(&store, &branch.id, PipelineKind::Squash, None).is_some());
     }
 
-    fn queue_push(store: &Arc<Store>, branch_id: &str, force: bool) -> Option<String> {
-        queue_push_pipeline_if_branch_busy(store, branch_id, None, force).unwrap()
+    const PUSH: PushVariant = PushVariant {
+        force: false,
+        no_verify: false,
+    };
+    const FORCE_PUSH: PushVariant = PushVariant {
+        force: true,
+        no_verify: false,
+    };
+    const NO_VERIFY_PUSH: PushVariant = PushVariant {
+        force: false,
+        no_verify: true,
+    };
+    const NO_VERIFY_FORCE_PUSH: PushVariant = PushVariant {
+        force: true,
+        no_verify: true,
+    };
+
+    fn queue_push(store: &Arc<Store>, branch_id: &str, variant: PushVariant) -> Option<String> {
+        queue_push_pipeline_if_branch_busy(store, branch_id, None, variant).unwrap()
     }
 
     #[test]
     fn idle_branch_pushes_immediately_instead_of_queueing() {
         let (store, branch) = setup_branch_store();
 
-        assert_eq!(queue_push(&store, &branch.id, false), None);
+        assert_eq!(queue_push(&store, &branch.id, PUSH), None);
         assert!(store
             .get_queued_sessions_for_branch(&branch.id)
             .unwrap()
@@ -2665,7 +2797,7 @@ mod tests {
         let (store, branch) = setup_branch_store();
         start_running_note_session(&store, &branch.id);
 
-        let session_id = queue_push(&store, &branch.id, false)
+        let session_id = queue_push(&store, &branch.id, PUSH)
             .expect("push should queue behind the running note session");
 
         let session = store.get_session(&session_id).unwrap().unwrap();
@@ -2689,8 +2821,8 @@ mod tests {
         let (store, branch) = setup_branch_store();
         start_running_note_session(&store, &branch.id);
 
-        let first = queue_push(&store, &branch.id, false).unwrap();
-        let second = queue_push(&store, &branch.id, false).unwrap();
+        let first = queue_push(&store, &branch.id, PUSH).unwrap();
+        let second = queue_push(&store, &branch.id, PUSH).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(
@@ -2707,8 +2839,8 @@ mod tests {
         let (store, branch) = setup_branch_store();
         start_running_note_session(&store, &branch.id);
 
-        let push = queue_push(&store, &branch.id, false).unwrap();
-        let force_push = queue_push(&store, &branch.id, true).unwrap();
+        let push = queue_push(&store, &branch.id, PUSH).unwrap();
+        let force_push = queue_push(&store, &branch.id, FORCE_PUSH).unwrap();
 
         assert_ne!(push, force_push);
         let forced = store.get_session(&force_push).unwrap().unwrap();
@@ -2723,14 +2855,128 @@ mod tests {
         );
 
         // Clicking force push again still dedupes.
-        assert_eq!(queue_push(&store, &branch.id, true), Some(force_push));
+        assert_eq!(queue_push(&store, &branch.id, FORCE_PUSH), Some(force_push));
+    }
+
+    #[test]
+    fn no_verify_and_verifying_pushes_do_not_dedupe_into_each_other() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let variants = [PUSH, NO_VERIFY_PUSH, FORCE_PUSH, NO_VERIFY_FORCE_PUSH];
+        let ids: Vec<String> = variants
+            .iter()
+            .map(|&variant| queue_push(&store, &branch.id, variant).unwrap())
+            .collect();
+
+        let mut distinct = ids.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), variants.len(), "{ids:?}");
+        for (variant, id) in variants.iter().zip(&ids) {
+            let session = store.get_session(id).unwrap().unwrap();
+            assert_eq!(
+                session.prompt,
+                pipeline_prompt(&PipelineKind::Push, *variant)
+            );
+            assert_eq!(PushVariant::of(&session.pipeline.unwrap()), *variant);
+            // A repeat request for the same variant still dedupes.
+            assert_eq!(queue_push(&store, &branch.id, *variant).as_ref(), Some(id));
+        }
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            variants.len()
+        );
+    }
+
+    /// A no-verify push that waited behind other work must still skip the
+    /// hook once the queue drains it, and the running row must still say so.
+    #[test]
+    fn queued_no_verify_push_is_rebuilt_with_the_flag_on_dequeue() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        for variant in [NO_VERIFY_PUSH, NO_VERIFY_FORCE_PUSH, PUSH] {
+            let id = queue_push(&store, &branch.id, variant).unwrap();
+            let queued = store.get_session(&id).unwrap().unwrap();
+
+            let rebuilt = rebuild_queued_git_pipeline(
+                &id,
+                queued.pipeline.as_ref().unwrap(),
+                "feature-renamed",
+                "feature",
+            )
+            .unwrap();
+
+            assert_eq!(rebuilt.session_type, "push");
+            assert_eq!(rebuilt.prompt, queued.prompt);
+            assert_eq!(PushVariant::of(&rebuilt.pipeline), variant);
+            let (_, command, _) = command_at(&rebuilt.steps, 0);
+            assert!(
+                command.contains("origin feature-renamed:feature"),
+                "{command}"
+            );
+            assert_eq!(
+                command.contains("--no-verify"),
+                variant.no_verify,
+                "{command}"
+            );
+            assert_eq!(
+                command.contains("--force-with-lease"),
+                variant.force,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn rebuilt_pipeline_keeps_the_push_dependency_and_rejects_commit_kinds() {
+        let queued = PipelineExecution::from_steps(&[])
+            .with_kind(PipelineKind::Push)
+            .with_push_force(true)
+            .with_depends_on_session_id(Some("rebase-1".to_string()));
+        let rebuilt = rebuild_queued_git_pipeline("push-1", &queued, "feature", "feature").unwrap();
+        assert_eq!(
+            rebuilt.pipeline.depends_on_session_id.as_deref(),
+            Some("rebase-1")
+        );
+        assert_eq!(PushVariant::of(&rebuilt.pipeline), FORCE_PUSH);
+
+        let pull = PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Pull);
+        let rebuilt = rebuild_queued_git_pipeline("pull-1", &pull, "feature", "feature").unwrap();
+        assert_eq!(rebuilt.session_type, "pull");
+        assert_eq!(rebuilt.prompt, PULL_PROMPT);
+
+        let rebase = PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase);
+        assert!(rebuild_queued_git_pipeline("rebase-1", &rebase, "feature", "feature").is_err());
+    }
+
+    /// The prompt is how a push session is recognised once it ends:
+    /// `session_completion` keys the `push-completed` event (and clearing the
+    /// stale PR status) on it.
+    #[test]
+    fn every_push_prompt_is_recognised_as_a_push() {
+        for variant in [PUSH, NO_VERIFY_PUSH, FORCE_PUSH, NO_VERIFY_FORCE_PUSH] {
+            let prompt = pipeline_prompt(&PipelineKind::Push, variant);
+            assert_eq!(
+                crate::session_commands::infer_branch_resume_session_type(prompt),
+                Some("push"),
+                "{variant:?}: {prompt}"
+            );
+        }
+        assert!(NO_VERIFY_PUSH_PROMPT.contains("--no-verify"));
+        assert!(NO_VERIFY_PUSH_PROMPT.contains("Do not force push."));
+        assert!(NO_VERIFY_FORCE_PUSH_PROMPT.contains("--no-verify"));
     }
 
     #[test]
     fn queued_push_alone_keeps_the_branch_busy() {
         let (store, branch) = setup_branch_store();
         start_running_note_session(&store, &branch.id);
-        queue_push(&store, &branch.id, false).unwrap();
+        queue_push(&store, &branch.id, PUSH).unwrap();
 
         // The note session finishes, but the still-queued push must keep a newly
         // requested squash on the queue rather than running it now.
@@ -2755,7 +3001,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(queue_push(&store, &branch.id, false).is_some());
+        assert!(queue_push(&store, &branch.id, PUSH).is_some());
     }
 
     fn queue_rebase_then_force_push(store: &Arc<Store>, branch_id: &str) -> BranchPipelineResponse {
@@ -2832,7 +3078,7 @@ mod tests {
         let gated = queue_rebase_then_force_push(&store, &branch.id)
             .follow_up_session_id
             .unwrap();
-        let plain = queue_push(&store, &branch.id, true).unwrap();
+        let plain = queue_push(&store, &branch.id, FORCE_PUSH).unwrap();
 
         assert_ne!(gated, plain);
         let plain = store.get_session(&plain).unwrap().unwrap();
@@ -3045,28 +3291,30 @@ mod tests {
         )
         .unwrap()
         .is_some());
-        assert!(queue_push(&store, &branch.id, false).is_some());
+        assert!(queue_push(&store, &branch.id, PUSH).is_some());
     }
 
     #[test]
     fn inserting_a_running_push_is_what_makes_the_branch_busy() {
         let (store, branch) = setup_branch_store();
-        let steps = build_push_pipeline_steps(&branch.branch_name, &branch.branch_name, false);
+        let steps = build_push_pipeline_steps(&branch.branch_name, &branch.branch_name, PUSH);
 
         insert_running_push_pipeline_session(
             &store,
             &test_registry(),
             &pipeline_context(&branch),
-            false,
+            PUSH,
             &steps,
             None,
         )
         .unwrap();
 
         // A push has no artifact, so `branch_id` is what the re-check keys on.
-        assert!(queue_push_pipeline_locked(&store, &branch.id, None, true)
-            .unwrap()
-            .is_some());
+        assert!(
+            queue_push_pipeline_locked(&store, &branch.id, None, FORCE_PUSH)
+                .unwrap()
+                .is_some()
+        );
         assert!(queue_commit_pipeline_locked(
             &store,
             &branch.id,
@@ -3081,7 +3329,7 @@ mod tests {
     #[test]
     fn push_steps_are_rebuilt_from_the_current_branch_name_and_force_flag() {
         // Same local and remote name: the refspec is still explicit.
-        let normal = build_push_pipeline_steps("feature", "feature", false);
+        let normal = build_push_pipeline_steps("feature", "feature", PUSH);
         let (label, command, on_failure) = command_at(&normal, 0);
         assert_eq!(label, "Push to remote");
         assert!(command.contains("-u origin feature:feature"));
@@ -3093,7 +3341,7 @@ mod tests {
 
         // The drain path re-derives the refspec, so a branch renamed while the
         // push waited pushes the new local name rather than the queued one.
-        let forced = build_push_pipeline_steps("feature-renamed", "feature", true);
+        let forced = build_push_pipeline_steps("feature-renamed", "feature", FORCE_PUSH);
         let (_, forced_command, forced_on_failure) = command_at(&forced, 0);
         assert!(forced_command.contains("-u origin feature-renamed:feature --force-with-lease"));
         // The handoff spells the refspec out so an agent doesn't retry with
@@ -3117,8 +3365,53 @@ mod tests {
     /// Pushing must still land on the PR's branch, not create
     /// `origin/feature-x-2`.
     #[test]
+    fn no_verify_push_steps_skip_the_hook_in_both_fallback_halves() {
+        let plain = build_push_pipeline_steps("feature", "feature", PUSH);
+        let (_, command, _) = command_at(&plain, 0);
+        assert!(!command.contains("--no-verify"), "{command}");
+
+        let no_verify = build_push_pipeline_steps("feature", "feature", NO_VERIFY_PUSH);
+        let (_, command, on_failure) = command_at(&no_verify, 0);
+        // Once for the SSH attempt, once for the HTTPS retry.
+        assert_eq!(
+            command
+                .matches("push --no-verify -u origin feature:feature")
+                .count(),
+            2,
+            "{command}"
+        );
+        assert!(!command.contains("--force-with-lease"), "{command}");
+        // Still aborts on a rejection, so the force-push dialog can offer the
+        // no-verify force push.
+        assert!(matches!(
+            on_failure,
+            FailureStrategy::Abort { marker } if marker.as_deref() == Some("non-fast-forward")
+        ));
+
+        let forced = build_push_pipeline_steps("feature-renamed", "feature", NO_VERIFY_FORCE_PUSH);
+        let (_, command, on_failure) = command_at(&forced, 0);
+        assert_eq!(
+            command
+                .matches("push --no-verify -u origin feature-renamed:feature --force-with-lease")
+                .count(),
+            2,
+            "{command}"
+        );
+        // The agent's retry must skip the hook too.
+        let FailureStrategy::HandoffToAi { prompt_template } = on_failure else {
+            panic!("expected force push to hand off to an agent");
+        };
+        assert!(
+            prompt_template.contains(
+                "`git push --no-verify -u origin feature-renamed:feature --force-with-lease`"
+            ),
+            "{prompt_template}"
+        );
+    }
+
+    #[test]
     fn deduplicated_pr_branch_pushes_to_the_pr_head_not_its_local_name() {
-        let steps = build_push_pipeline_steps("feature-x-2", "feature-x", false);
+        let steps = build_push_pipeline_steps("feature-x-2", "feature-x", PUSH);
         let (_, command, _) = command_at(&steps, 0);
         assert!(command.contains("git push -u origin feature-x-2:feature-x"));
         assert!(!command.contains("origin feature-x-2 "));
@@ -3295,7 +3588,7 @@ mod tests {
         // A commit pipeline or a second git action requested mid-pull has to wait
         // rather than race the fast-forward in the same worktree.
         assert!(queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).is_some());
-        assert!(queue_push(&store, &branch.id, false).is_some());
+        assert!(queue_push(&store, &branch.id, PUSH).is_some());
         assert!(queue_pull(&store, &branch.id).is_some());
     }
 
@@ -3372,7 +3665,7 @@ mod tests {
         start_running_note_session(&store, &branch.id);
 
         let pull = queue_pull(&store, &branch.id).unwrap();
-        let push = queue_push(&store, &branch.id, false).unwrap();
+        let push = queue_push(&store, &branch.id, PUSH).unwrap();
 
         assert_ne!(pull, push);
         assert_eq!(
@@ -3398,7 +3691,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(queue_push(&store, &branch.id, false).is_some());
+        assert!(queue_push(&store, &branch.id, PUSH).is_some());
     }
 
     #[test]

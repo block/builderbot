@@ -1740,6 +1740,14 @@ pub struct PipelineExecution {
     /// `false` for non-push pipelines.
     #[serde(default, skip_serializing_if = "is_false")]
     pub push_force: bool,
+    /// Whether the push variant skips git's `pre-push` hook (`--no-verify`).
+    ///
+    /// Recorded for the same reasons as `push_force`: a queued "Push without
+    /// verifying" must still skip the hook once it is drained, and must not
+    /// dedupe into a queued push that runs it. Always `false` for non-push
+    /// pipelines.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub push_no_verify: bool,
     /// Session this queued pipeline may only run after, and only if it
     /// succeeded.
     ///
@@ -1801,6 +1809,7 @@ impl PipelineExecution {
             kind: None,
             rebase_target: None,
             push_force: false,
+            push_no_verify: false,
             depends_on_session_id: None,
             steps: step_statuses,
             current_step: 0,
@@ -1820,6 +1829,11 @@ impl PipelineExecution {
 
     pub fn with_push_force(mut self, force: bool) -> Self {
         self.push_force = force;
+        self
+    }
+
+    pub fn with_push_no_verify(mut self, no_verify: bool) -> Self {
+        self.push_no_verify = no_verify;
         self
     }
 
@@ -1913,6 +1927,27 @@ mod pipeline_tests {
         assert!(!serde_json::to_string(&rebase)
             .unwrap()
             .contains("pushForce"));
+    }
+
+    #[test]
+    fn pipeline_push_no_verify_round_trips_and_is_optional_for_legacy_json() {
+        let legacy: PipelineExecution = serde_json::from_str(
+            r#"{"kind":"push","pushForce":true,"steps":[],"currentStep":0,"completedWithoutAi":false}"#,
+        )
+        .unwrap();
+        assert!(!legacy.push_no_verify);
+        assert!(!serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("pushNoVerify"));
+
+        let no_verify = PipelineExecution::from_steps(&[])
+            .with_kind(PipelineKind::Push)
+            .with_push_no_verify(true);
+        let json = serde_json::to_string(&no_verify).unwrap();
+        assert!(json.contains("\"pushNoVerify\":true"), "{json}");
+        let read_back = serde_json::from_str::<PipelineExecution>(&json).unwrap();
+        assert!(read_back.push_no_verify);
+        assert!(!read_back.push_force);
     }
 
     #[test]

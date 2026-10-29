@@ -33,6 +33,12 @@ interface BranchPushState {
    * queued → pushing → error so "Retry" re-runs the same operation.
    */
   force: boolean;
+  /**
+   * Whether that push skips the pre-push hook ("Push without verifying"). Kept
+   * alongside `force`, so Retry and the rejection dialog's force push skip it
+   * too.
+   */
+  noVerify: boolean;
   timestamp: number; // Track when state was last updated
 }
 
@@ -66,7 +72,7 @@ class PushStateStore {
     }
   }
 
-  setPushing(branchId: string, sessionId: string, force: boolean): void {
+  setPushing(branchId: string, sessionId: string, force: boolean, noVerify = false): void {
     this.maybeCleanup();
     this.states.set(branchId, {
       state: 'pushing',
@@ -74,12 +80,13 @@ class PushStateStore {
       error: null,
       rejectedNonFastForward: false,
       force,
+      noVerify,
       timestamp: Date.now(),
     });
     this.version++;
   }
 
-  setPushQueued(branchId: string, sessionId: string, force: boolean): void {
+  setPushQueued(branchId: string, sessionId: string, force: boolean, noVerify = false): void {
     this.maybeCleanup();
     this.states.set(branchId, {
       state: 'queued',
@@ -87,6 +94,7 @@ class PushStateStore {
       error: null,
       rejectedNonFastForward: false,
       force,
+      noVerify,
       timestamp: Date.now(),
     });
     this.version++;
@@ -111,15 +119,16 @@ class PushStateStore {
     branchId: string,
     sessionId: string,
     state: 'queued' | 'pushing',
-    force: boolean
+    force: boolean,
+    noVerify = false
   ): void {
     if (this.isPushInFlight(branchId)) {
       return;
     }
     if (state === 'queued') {
-      this.setPushQueued(branchId, sessionId, force);
+      this.setPushQueued(branchId, sessionId, force, noVerify);
     } else {
-      this.setPushing(branchId, sessionId, force);
+      this.setPushing(branchId, sessionId, force, noVerify);
     }
   }
 
@@ -136,11 +145,16 @@ class PushStateStore {
    * push entry points route their response through here rather than predicting
    * it from the timeline.
    */
-  setPushLaunch(branchId: string, response: BranchPipelineResponse, force: boolean): void {
+  setPushLaunch(
+    branchId: string,
+    response: BranchPipelineResponse,
+    force: boolean,
+    noVerify = false
+  ): void {
     if (response.sessionStatus === 'queued') {
-      this.setPushQueued(branchId, response.sessionId, force);
+      this.setPushQueued(branchId, response.sessionId, force, noVerify);
     } else {
-      this.setPushing(branchId, response.sessionId, force);
+      this.setPushing(branchId, response.sessionId, force, noVerify);
     }
   }
 
@@ -155,7 +169,7 @@ class PushStateStore {
     if (existing?.state !== 'queued' || existing.sessionId !== sessionId) {
       return;
     }
-    this.setPushing(branchId, sessionId, existing.force);
+    this.setPushing(branchId, sessionId, existing.force, existing.noVerify);
   }
 
   setPushDone(branchId: string): void {
@@ -166,12 +180,13 @@ class PushStateStore {
       error: null,
       rejectedNonFastForward: false,
       force: false,
+      noVerify: false,
       timestamp: Date.now(),
     });
     this.version++;
   }
 
-  /** Keeps the failed push's `force`, so a retry repeats it. */
+  /** Keeps the failed push's `force` and `noVerify`, so a retry repeats it. */
   setPushError(branchId: string, error: string, rejectedNonFastForward = false): void {
     this.maybeCleanup();
     const existing = this.states.get(branchId);
@@ -181,6 +196,7 @@ class PushStateStore {
       error,
       rejectedNonFastForward,
       force: existing?.force ?? false,
+      noVerify: existing?.noVerify ?? false,
       timestamp: Date.now(),
     });
     this.version++;

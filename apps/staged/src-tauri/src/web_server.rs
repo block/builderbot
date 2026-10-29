@@ -3903,13 +3903,14 @@ pub(crate) async fn dispatch(
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
             let force: Option<bool> = opt_arg(&args, "force")?;
+            let no_verify: Option<bool> = opt_arg(&args, "noVerify")?;
             let response = detached(crate::prs::start_or_queue_push_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
                 provider,
-                force,
+                crate::prs::PushVariant::from_request(force, no_verify),
             ))
             .await?;
             Ok(serde_json::to_value(response).unwrap())

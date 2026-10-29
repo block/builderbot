@@ -5,7 +5,7 @@
   error/confirmation dialogs.
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount } from 'svelte';
   import { toast } from 'svelte-sonner';
   import GitPullRequestCreateArrow from '@lucide/svelte/icons/git-pull-request-create-arrow';
   import GitPullRequestArrow from '@lucide/svelte/icons/git-pull-request-arrow';
@@ -14,7 +14,10 @@
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Clock from '@lucide/svelte/icons/clock';
+  import Copy from '@lucide/svelte/icons/copy';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
   import Search from '@lucide/svelte/icons/search';
+  import ShieldOff from '@lucide/svelte/icons/shield-off';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -30,6 +33,7 @@
     Session,
   } from '../../types';
   import * as commands from '../../api/commands';
+  import { writeClipboardText } from '../../transport';
   import {
     classifyCompletedPushSession,
     classifyPipelinePushCompletion,
@@ -44,6 +48,9 @@
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
   import { derivePrPushAction } from './prButtonGitState';
+  import { buildPrMenu, type PrMenuItem, type PrMenuItemId } from './prButtonMenu';
+  import { altKey, trackAltKey } from '../actions/altKey.svelte';
+  import type { IconComponent } from '../actions/lucideIcons';
   import { describePrRejectionReason } from './prDetection';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
@@ -77,18 +84,6 @@
   }: Props = $props();
 
   export { renderButton };
-
-  // =========================================================================
-  // Option-key tracking (for draft PR creation)
-  // =========================================================================
-  let optionHeld = $state(false);
-
-  function handleOptionDown(e: KeyboardEvent) {
-    if (e.key === 'Alt') optionHeld = true;
-  }
-  function handleOptionUp(e: KeyboardEvent) {
-    if (e.key === 'Alt') optionHeld = false;
-  }
 
   // =========================================================================
   // PR button state — derived directly from the global prStateStore
@@ -179,8 +174,11 @@
   let pushError = $derived(storePushState?.error ?? null);
   let pushRejectedNonFastForward = $derived(storePushState?.rejectedNonFastForward ?? false);
   let pushForce = $derived(storePushState?.force ?? false);
+  let pushNoVerify = $derived(storePushState?.noVerify ?? false);
   let showPushErrorDialog = $state(false);
   let showForcePushDialog = $state(false);
+  // Whether the force push the dialog confirms skips the pre-push hook.
+  let forcePushNoVerify = $state(false);
 
   // Off screen (home shown over the project, or parked under settings / the
   // diff view), these alerts would stay open on top. Only the dialogs close; the push / PR error state they describe is
@@ -375,8 +373,9 @@
   });
 
   onMount(() => {
-    window.addEventListener('keydown', handleOptionDown);
-    window.addEventListener('keyup', handleOptionUp);
+    // Option turns "Create PR" into "Create draft PR" and pushes into force
+    // pushes, here and in the menu.
+    const stopTrackingAlt = trackAltKey();
 
     // PR recovery: if the branch has been pushed but has no PR number,
     // check GitHub for an open PR that passes the same checks as detection.
@@ -397,11 +396,8 @@
           prPollingService.clearRecoveryAttempt(branch.id);
         });
     }
-  });
 
-  onDestroy(() => {
-    window.removeEventListener('keydown', handleOptionDown);
-    window.removeEventListener('keyup', handleOptionUp);
+    return stopTrackingAlt;
   });
 
   // =========================================================================
@@ -462,7 +458,7 @@
     if (pushState === 'pushing') return 'Pushing… (click to view)';
     if (pushState === 'error') return 'Push failed — click for details';
     if (prState === 'created' && hasUnpushed) {
-      return pushAction === 'forcePush' || optionHeld
+      return pushAction === 'forcePush' || altKey.held
         ? 'Force push to remote'
         : 'Push changes to remote';
     }
@@ -478,7 +474,7 @@
     }
     if (prState === 'error') return 'PR creation failed — click for details';
     if (prState === 'creating') return 'Creating PR… (click to view)';
-    return optionHeld ? 'Create draft PR' : 'Create PR';
+    return altKey.held ? 'Create draft PR' : 'Create PR';
   }
 
   let prButtonTitleNowMs = $derived.by(() => {
@@ -555,9 +551,6 @@
   let showPrDetectionDialog = $derived(prDetectionFailure !== null);
   let linkingPrNumber = $state<number | null>(null);
   let prLinkError = $state<string | null>(null);
-
-  // The secondary menu only joins the button while it still reads "Create PR".
-  let showCreatePrMenu = $derived(prState === 'idle' && pushState === 'idle');
 
   // Mirror what the backend persisted, as handlePrSessionComplete does.
   function adoptLinkedPr(prNumber: number, prUrl: string) {
@@ -660,22 +653,23 @@
   // Push
   // =========================================================================
 
-  function handlePush(force = false) {
+  // `noVerify` ("Push without verifying") skips the pre-push hook.
+  function handlePush(force = false, noVerify = false) {
     if (pushState === 'pushing' || pushState === 'queued') return;
 
-    pushStateStore.setPushing(branch.id, '__pending__', force);
+    pushStateStore.setPushing(branch.id, '__pending__', force, noVerify);
 
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
 
     commands
-      .pushBranch(branch.id, provider, force)
+      .pushBranch(branch.id, provider, force, noVerify)
       .then((response) => {
         // A running session is already registered by the global listener via
         // the backend's "running" event — this just records the real session ID
         // (and whether the push is waiting on the branch queue) so the fallback
         // poller can track it.
-        pushStateStore.setPushLaunch(branch.id, response, force);
+        pushStateStore.setPushLaunch(branch.id, response, force, noVerify);
       })
       .catch((e) => {
         pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
@@ -786,9 +780,14 @@
     }
   }
 
+  function openForcePushDialog(noVerify: boolean) {
+    forcePushNoVerify = noVerify;
+    showForcePushDialog = true;
+  }
+
   function handleForcePushConfirm() {
     showForcePushDialog = false;
-    handlePush(true);
+    handlePush(true, forcePushNoVerify);
   }
 
   function handleForcePushCancel() {
@@ -797,10 +796,11 @@
   }
 
   // Retry repeats the failed push as it was asked for: a force push that
-  // errored must not come back as a plain push the diverged remote rejects.
+  // errored must not come back as a plain push the diverged remote rejects,
+  // and a push that skipped the pre-push hook must skip it again.
   function handlePushErrorRetry() {
     showPushErrorDialog = false;
-    handlePush(pushForce);
+    handlePush(pushForce, pushNoVerify);
   }
 
   function handlePushErrorClose() {
@@ -811,7 +811,8 @@
   function handlePrButtonClick() {
     if (pushState === 'error') {
       if (pushRejectedNonFastForward) {
-        showForcePushDialog = true;
+        // The force push keeps whether the rejected push skipped the hook.
+        openForcePushDialog(pushNoVerify);
       } else {
         showPushErrorDialog = true;
       }
@@ -826,30 +827,19 @@
       return;
     }
     if (prState === 'created' && hasUnpushed && pushState === 'idle') {
-      const wantsForcePush = pushAction === 'forcePush' || optionHeld;
-      if (wantsForcePush && !optionHeld) {
+      const wantsForcePush = pushAction === 'forcePush' || altKey.held;
+      if (wantsForcePush && !altKey.held) {
         // Force push without an explicit alt override — confirm first.
-        showForcePushDialog = true;
+        openForcePushDialog(false);
       } else {
         handlePush(wantsForcePush);
       }
     } else if (prState === 'created') {
-      const url = prUrl ?? cachedPrUrl;
-      if (url) {
-        commands.openUrl(url).catch((e) => console.error('Failed to open PR URL:', e));
-      } else if (branch.prNumber) {
-        commands
-          .getPrUrl(branch.id, branch.prNumber)
-          .then((fetchedUrl) => {
-            cachedPrUrl = fetchedUrl;
-            commands.openUrl(fetchedUrl);
-          })
-          .catch((e) => console.error('Failed to get PR URL:', e));
-      }
+      openPr();
     } else if (prState === 'error') {
       showPrErrorDialog = true;
     } else if (prState === 'idle') {
-      handleCreatePr(optionHeld);
+      handleCreatePr(altKey.held);
     } else if (prState === 'creating' && prSessionId) {
       onOpenSession?.(prSessionId);
     }
@@ -858,13 +848,96 @@
   function handlePrErrorRetry() {
     showPrErrorDialog = false;
     prStateStore.clearPrState(branch.id);
-    handleCreatePr(optionHeld);
+    handleCreatePr(altKey.held);
   }
 
   function handlePrErrorClose() {
     showPrErrorDialog = false;
     prStateStore.clearPrState(branch.id);
   }
+
+  // =========================================================================
+  // PR URL
+  // =========================================================================
+
+  // The store's URL (a PR this client created or linked), then the persisted
+  // one, then one looked up earlier; GitHub is only asked when none is known.
+  async function resolvePrUrl(): Promise<string> {
+    const known = prUrl ?? branch.prUrl ?? cachedPrUrl;
+    if (known) return known;
+    if (!branch.prNumber) throw new Error('This branch has no PR number.');
+    cachedPrUrl = await commands.getPrUrl(branch.id, branch.prNumber);
+    return cachedPrUrl;
+  }
+
+  function openPr() {
+    resolvePrUrl()
+      .then((url) => commands.openUrl(url))
+      .catch((e) => console.error('Failed to open PR URL:', e));
+  }
+
+  function copyPrUrl() {
+    resolvePrUrl()
+      .then((url) => writeClipboardText(url))
+      .then(() => toast.success('Copied PR URL'))
+      .catch((e) =>
+        toast.error('Could not copy PR URL', {
+          description: e instanceof Error ? e.message : String(e),
+        })
+      );
+  }
+
+  // =========================================================================
+  // Split menu
+  // =========================================================================
+
+  // The dialogs this button opens, while any of them is up, disable both
+  // halves of the split button.
+  let prButtonDisabled = $derived(
+    showPushErrorDialog ||
+      showForcePushDialog ||
+      showPrErrorDialog ||
+      showPrDetectionDialog ||
+      detectingPr
+  );
+
+  // Labels follow Option live while the menu is open (see `trackAltKey`), so a
+  // selected item already says whether Option was held.
+  let prMenuEntries = $derived(
+    buildPrMenu({
+      prState,
+      prStatusState,
+      pushState,
+      pushAction,
+      prNumber: branch.prNumber,
+      altHeld: altKey.held,
+    })
+  );
+  let showPrMenu = $derived(prMenuEntries.length > 0);
+
+  const prMenuActions: Record<
+    PrMenuItemId,
+    { icon: IconComponent; title?: string; run: (item: PrMenuItem) => void }
+  > = {
+    createDraftPr: { icon: GitPullRequestDraft, run: () => handleCreatePr(true) },
+    detectExistingPr: {
+      icon: Search,
+      title: 'Look up GitHub for a pull request already opened from this branch and link it here.',
+      run: handleDetectExistingPr,
+    },
+    pushNoVerify: {
+      icon: ShieldOff,
+      title: 'Push without running the pre-push hook (git push --no-verify).',
+      run: () => handlePush(false, true),
+    },
+    forcePushNoVerify: {
+      icon: ShieldOff,
+      title: 'Force push without running the pre-push hook (git push --no-verify).',
+      run: (item) => (item.confirm ? openForcePushDialog(true) : handlePush(true, true)),
+    },
+    viewPr: { icon: ExternalLink, run: openPr },
+    copyPrUrl: { icon: Copy, run: copyPrUrl },
+  };
 
   // Expose session IDs and state for parent coordination
   export function getPrSessionId(): string | null {
@@ -901,15 +974,11 @@
         pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
         pushState === 'queued' && 'border-[var(--border-muted)]',
         prState === 'created' && prStatusState === 'MERGED' && '[&_svg]:text-[var(--status-added)]',
-        showCreatePrMenu && 'rounded-r-none',
+        showPrMenu && 'rounded-r-none',
         detectingPr && 'cursor-default border-[var(--border-muted)]',
       ]}
       onclick={handlePrButtonClick}
-      disabled={showPushErrorDialog ||
-        showForcePushDialog ||
-        showPrErrorDialog ||
-        showPrDetectionDialog ||
-        detectingPr}
+      disabled={prButtonDisabled}
     >
       {#if pushState === 'queued'}
         <Clock size={13} />
@@ -940,7 +1009,7 @@
         {:else if pushState === 'error'}
           Push failed
         {:else if prState === 'created' && hasUnpushed}
-          {pushAction === 'forcePush' || optionHeld ? 'Force push' : 'Push changes'}
+          {pushAction === 'forcePush' || altKey.held ? 'Force push' : 'Push changes'}
         {:else if prState === 'created'}
           {#if prStatusText}
             {prStatusText}
@@ -954,7 +1023,7 @@
         {:else if detectingPr}
           Detecting PR…
         {:else}
-          {optionHeld ? 'Create draft PR' : 'Create PR'}
+          {altKey.held ? 'Create draft PR' : 'Create PR'}
         {/if}
       </span>
       {#if prStatusStale}
@@ -963,8 +1032,8 @@
         <span class="pr-status-indicator {prStatusIndicator}"></span>
       {/if}
     </Button>
-    {#if showCreatePrMenu}
-      <!-- Joined to the Create PR button, as the rebase chevron is in
+    {#if showPrMenu}
+      <!-- Joined to the PR button, as the rebase chevron is in
            BranchCardHeaderInfo: same outline and height, touching corners
            squared, border overlapped so the pair reads as one control.
            The tooltip lives on a wrapping span, as it does there, because
@@ -977,22 +1046,24 @@
               'touch-hit w-6 rounded-l-none px-0 [&_svg]:!size-3.5',
               detectingPr && 'border-[var(--border-muted)]'
             )}
-            disabled={showPrDetectionDialog || detectingPr}
+            disabled={prButtonDisabled}
             aria-label="More PR options"
           >
             <ChevronDown size={13} />
           </DropdownMenu.Trigger>
         </span>
         <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[200px]">
-          <DropdownMenu.Item onSelect={() => handleCreatePr(true)}>
-            <GitPullRequestDraft size={14} /> Create draft PR
-          </DropdownMenu.Item>
-          <DropdownMenu.Item
-            title="Look up GitHub for a pull request already opened from this branch and link it here."
-            onSelect={handleDetectExistingPr}
-          >
-            <Search size={14} /> Detect existing PR
-          </DropdownMenu.Item>
+          {#each prMenuEntries as entry, i (entry.id === 'separator' ? `separator-${i}` : entry.id)}
+            {#if entry.id === 'separator'}
+              <DropdownMenu.Separator />
+            {:else}
+              {@const action = prMenuActions[entry.id]}
+              <DropdownMenu.Item title={action.title} onSelect={() => action.run(entry)}>
+                <action.icon size={14} />
+                {entry.label}
+              </DropdownMenu.Item>
+            {/if}
+          {/each}
         </DropdownMenu.Content>
       </DropdownMenu.Root>
     {/if}
@@ -1160,16 +1231,21 @@
   <AlertDialog.Root bind:open={showForcePushDialog}>
     <AlertDialog.Content>
       <AlertDialog.Header>
-        <AlertDialog.Title>Push Rejected</AlertDialog.Title>
+        <!-- "Rejected" only once a push has actually been rejected: the
+             diverged-branch button and the menu open this before any push. -->
+        <AlertDialog.Title
+          >{pushState === 'error' ? 'Push Rejected' : 'Force Push'}</AlertDialog.Title
+        >
         <AlertDialog.Description>
           {pushTargetRef(branch, timeline?.gitState)} has commits that would be lost. Do you want to force
-          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version.
+          push? This will overwrite {pushTargetRef(branch, timeline?.gitState)} with your local version.{#if forcePushNoVerify}
+            The pre-push hook won't run.{/if}
         </AlertDialog.Description>
       </AlertDialog.Header>
       <AlertDialog.Footer>
         <AlertDialog.Cancel onclick={handleForcePushCancel}>Cancel</AlertDialog.Cancel>
         <AlertDialog.Action variant="destructive" onclick={handleForcePushConfirm}>
-          Force Push
+          {forcePushNoVerify ? 'Force Push Without Verifying' : 'Force Push'}
         </AlertDialog.Action>
       </AlertDialog.Footer>
     </AlertDialog.Content>

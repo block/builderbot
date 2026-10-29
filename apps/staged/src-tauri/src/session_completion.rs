@@ -447,6 +447,7 @@ mod tests {
             kind: None,
             rebase_target: None,
             push_force: false,
+            push_no_verify: false,
             depends_on_session_id: None,
             steps,
             current_step: 0,

@@ -13266,6 +13266,19 @@ mod tests {
             infer_branch_resume_session_type("Force push the current branch to the remote"),
             Some("push")
         );
+        // The "without verifying" (`--no-verify`) variants.
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Push the current branch to the remote with a normal push, skipping the pre-push hook (`--no-verify`). If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push that keeps `--no-verify`. Do not force push."
+            ),
+            Some("push")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Force push the current branch to the remote, skipping the pre-push hook (`--no-verify`)"
+            ),
+            Some("push")
+        );
     }
 
     #[test]

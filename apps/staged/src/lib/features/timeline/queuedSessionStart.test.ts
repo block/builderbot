@@ -25,14 +25,20 @@ describe('canStartQueuedSessionNow', () => {
     );
   });
 
-  it('withholds Start now for every kind while a git action rewrites the worktree', () => {
-    for (const kind of allKinds) {
-      expect(canStartQueuedSessionNow({ kind, ...idle, gitActionRunning: true })).toBe(false);
+  it('offers Start now for notes and reviews while a git action is in flight', () => {
+    for (const kind of readOnlyKinds) {
+      expect(canStartQueuedSessionNow({ kind, ...idle, gitActionRunning: true })).toBe(true);
     }
   });
 
-  it('withholds Start now for every kind while a git action runs beside a commit session', () => {
-    for (const kind of allKinds) {
+  it('withholds Start now for a commit while a git action is in flight', () => {
+    expect(canStartQueuedSessionNow({ kind: 'commit', ...idle, gitActionRunning: true })).toBe(
+      false
+    );
+  });
+
+  it('offers Start now for notes and reviews while a git action runs beside a commit session', () => {
+    for (const kind of readOnlyKinds) {
       expect(
         canStartQueuedSessionNow({
           kind,
@@ -40,7 +46,7 @@ describe('canStartQueuedSessionNow', () => {
           commitSessionRunning: true,
           gitActionRunning: true,
         })
-      ).toBe(false);
+      ).toBe(true);
     }
   });
 

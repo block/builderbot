@@ -2344,8 +2344,9 @@ enum BranchSessionScheduleKind {
     CommitPipeline,
     /// A git command pipeline that mutates the branch without producing a
     /// commit (push / force push / pull). Exclusive: it rewrites the remote from
-    /// the current worktree, or moves the worktree's HEAD, so nothing else may
-    /// touch the branch while it runs.
+    /// the current worktree, or moves the worktree's HEAD, so the queue starts
+    /// nothing beside it (a forced start may still run a note or review; see
+    /// `can_force_start_with_active`).
     GitPipeline,
 }
 
@@ -2399,45 +2400,49 @@ fn can_start_with_active_branch_sessions(
 /// Whether a forced start ("Start now") may run `candidate` beside the kinds
 /// already active on the branch.
 ///
-/// This deliberately drops two of the rules
+/// This deliberately drops three of the rules
 /// `can_start_with_active_branch_sessions` enforces, because jumping them is the
-/// whole point of the action: queue order, and the one-instance-per-kind rule
-/// that keeps a second review or commit from starting beside a running one.
-/// Running a queued note or review beside a commit session is the main use case,
-/// and neither writes to the worktree.
+/// whole point of the action: queue order, the one-instance-per-kind rule that
+/// keeps a second review or commit from starting beside a running one, and
+/// waiting out exclusive work before a note or review starts. Running a queued
+/// note or review beside a commit session or a push is the main use case, and
+/// neither writes to the worktree.
 ///
-/// Two rules stay. A git pipeline (push / pull) refuses every candidate: it is
-/// over in seconds, and a pull moves the worktree's HEAD under a review that
-/// has already recorded the tip SHA it will store as reviewed, so what it
-/// stores may not be what it read. Beside a commit session or commit pipeline
-/// only an exclusive candidate is refused, since two of those would have two
-/// agents editing the same tree. Reset-to-origin and discard move the tree the
-/// way a pull does but run outside the session queue, so the active set read
-/// here cannot carry them; they mark the branch instead (see
-/// [`BranchWorktreeOperationGuard`]) and the pre-check and claim refuse every
-/// candidate while the marker is set, alongside this function's rules.
+/// One rule stays: beside exclusive work only an exclusive candidate is
+/// refused, since two of those would have two writers in the same tree. A
+/// commit session or commit pipeline edits it; a pull moves it; a push only
+/// reads it, but most push failures (a pre-push hook checking the very tree a
+/// commit would be editing, say) hand off to an agent told to fix the tree and
+/// push again. A note or review beside any of them may read a tree mid-edit or
+/// mid-move — a review stores the tip SHA it recorded at start as reviewed —
+/// which is the trade the action makes. Reset-to-origin and discard move the
+/// tree the way a pull does but run outside the session queue, so the active
+/// set read here cannot carry them; they mark the branch instead (see
+/// [`BranchWorktreeOperationGuard`]) and
+/// [`worktree_operation_refuses_force_start`] holds them to the same rule.
 fn can_force_start_with_active(
     candidate: BranchSessionScheduleKind,
     active: &HashSet<BranchSessionScheduleKind>,
 ) -> bool {
-    if active.contains(&BranchSessionScheduleKind::GitPipeline) {
-        return false;
-    }
     !candidate.is_exclusive() || !active.iter().any(|kind| kind.is_exclusive())
 }
 
-/// The refusal a forced start reports when `can_force_start_with_active` or
-/// the worktree-operation marker would not let `candidate` run. A note or
-/// review can only be blocked by a git action — a push/pull pipeline or an
-/// in-flight reset/discard — all of which finish on their own; a commit may be
-/// waiting on a commit session the user would have to stop.
-fn force_start_blocked_message(candidate: BranchSessionScheduleKind) -> &'static str {
-    if candidate.is_exclusive() {
-        "A commit or git action is running on this branch. Stop it first."
-    } else {
-        "A git action is running on this branch. Try again once it finishes."
-    }
+/// Whether an in-flight reset-to-origin or discard refuses a forced start of
+/// `candidate`: the marker counterpart of `can_force_start_with_active`'s
+/// exclusive rule, consulted beside it by the pre-check and the claim.
+fn worktree_operation_refuses_force_start(
+    branch_id: &str,
+    candidate: BranchSessionScheduleKind,
+) -> bool {
+    candidate.is_exclusive() && branch_worktree_operation_in_flight(branch_id)
 }
+
+/// The refusal a forced start reports when `can_force_start_with_active` or
+/// `worktree_operation_refuses_force_start` would not let its row run. Only a
+/// commit, rebase, or squash can be refused, and only by a commit session or a
+/// git action.
+const FORCE_START_BLOCKED_MESSAGE: &str =
+    "A commit or git action is running on this branch. Stop it first.";
 
 /// Which gate a queued row's claim must pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2445,8 +2450,8 @@ pub(crate) enum QueuedSessionStartMode {
     /// The branch drain: queue order, the worktree rule, and one instance per
     /// kind (`can_start_with_active_branch_sessions`).
     Drain,
-    /// "Start now": the worktree rules alone (`can_force_start_with_active`
-    /// plus the reset/discard marker, `branch_worktree_operation_in_flight`).
+    /// "Start now": the worktree rule alone (`can_force_start_with_active`
+    /// plus the reset/discard marker, `worktree_operation_refuses_force_start`).
     Force,
 }
 
@@ -2566,7 +2571,7 @@ impl QueuedSessionClaim {
                 can_start_with_active_branch_sessions(self.kind, &active)
             }
             QueuedSessionStartMode::Force => {
-                !branch_worktree_operation_in_flight(&self.branch_id)
+                !worktree_operation_refuses_force_start(&self.branch_id, self.kind)
                     && can_force_start_with_active(self.kind, &active)
             }
         };
@@ -2967,7 +2972,7 @@ fn branch_worktree_operations() -> &'static Mutex<HashMap<String, usize>> {
 ///
 /// RAII so every way out of the operation — the validation refusals, a git
 /// failure, a panic — clears the marker; one left behind would withhold
-/// "Start now" on the branch until the app restarts.
+/// "Start now" from the branch's queued commits until the app restarts.
 pub(crate) struct BranchWorktreeOperationGuard {
     branch_id: String,
 }
@@ -4757,7 +4762,6 @@ async fn force_start_queued_session(
         ForcedStartPrecheck::Proceed { session, schedule } => (*session, schedule),
         ForcedStartPrecheck::AlreadyRunning => return Ok(false),
     };
-    let kind = schedule.kind;
 
     // "Start now" jumps queue order, not a dependency: a force push waiting on
     // its rebase must not run ahead of it, or after it failed.
@@ -4790,7 +4794,7 @@ async fn force_start_queued_session(
         QueuedSessionStart::Skipped => Ok(false),
         // The row is still queued; what changed is the branch. Same refusal as
         // the snapshot would have given had it seen the session that landed.
-        QueuedSessionStart::Blocked => Err(force_start_blocked_message(kind).to_string()),
+        QueuedSessionStart::Blocked => Err(FORCE_START_BLOCKED_MESSAGE.to_string()),
     }
 }
 
@@ -4863,10 +4867,10 @@ fn forced_start_precheck(
     };
 
     let active = running_branch_session_kinds(store, branch_id)?;
-    if branch_worktree_operation_in_flight(branch_id)
+    if worktree_operation_refuses_force_start(branch_id, schedule.kind)
         || !can_force_start_with_active(schedule.kind, &active)
     {
-        return Err(force_start_blocked_message(schedule.kind).to_string());
+        return Err(FORCE_START_BLOCKED_MESSAGE.to_string());
     }
 
     Ok(ForcedStartPrecheck::Proceed {
@@ -7797,58 +7801,26 @@ mod tests {
         ));
     }
 
+    /// A push can run for minutes behind a pre-push hook; the queued note or
+    /// review the user picked should not wait it out.
     #[test]
-    fn force_start_refuses_every_kind_beside_a_git_pipeline() {
-        let active = HashSet::from([BranchSessionScheduleKind::GitPipeline]);
-
-        for kind in [
-            BranchSessionScheduleKind::Commit,
-            BranchSessionScheduleKind::CommitPipeline,
-            BranchSessionScheduleKind::Note,
-            BranchSessionScheduleKind::Review,
+    fn force_start_runs_note_or_review_beside_a_git_pipeline() {
+        for active in [
+            HashSet::from([BranchSessionScheduleKind::GitPipeline]),
+            HashSet::from([
+                BranchSessionScheduleKind::Commit,
+                BranchSessionScheduleKind::GitPipeline,
+            ]),
         ] {
-            assert!(
-                !can_force_start_with_active(kind, &active),
-                "{kind:?} should be refused while a git pipeline runs"
-            );
-        }
-    }
-
-    #[test]
-    fn force_start_refuses_every_kind_when_a_git_pipeline_runs_beside_a_commit() {
-        let active = HashSet::from([
-            BranchSessionScheduleKind::Commit,
-            BranchSessionScheduleKind::GitPipeline,
-        ]);
-
-        for kind in [
-            BranchSessionScheduleKind::Note,
-            BranchSessionScheduleKind::Review,
-        ] {
-            assert!(
-                !can_force_start_with_active(kind, &active),
-                "{kind:?} should be refused while a git pipeline runs, even beside a commit"
-            );
-        }
-    }
-
-    #[test]
-    fn force_start_refusal_names_only_what_can_block_the_row() {
-        assert!(force_start_blocked_message(BranchSessionScheduleKind::Commit).contains("commit"));
-        assert!(
-            force_start_blocked_message(BranchSessionScheduleKind::CommitPipeline)
-                .contains("commit")
-        );
-        for kind in [
-            BranchSessionScheduleKind::Note,
-            BranchSessionScheduleKind::Review,
-        ] {
-            let message = force_start_blocked_message(kind);
-            assert!(
-                !message.contains("commit"),
-                "{kind:?} cannot be blocked by a commit, got: {message}"
-            );
-            assert!(message.contains("git action"));
+            for kind in [
+                BranchSessionScheduleKind::Note,
+                BranchSessionScheduleKind::Review,
+            ] {
+                assert!(
+                    can_force_start_with_active(kind, &active),
+                    "{kind:?} should start beside {active:?}"
+                );
+            }
         }
     }
 
@@ -8050,8 +8022,8 @@ mod tests {
         assert_eq!(claim.claim(&store).unwrap(), QueuedSessionStart::Skipped);
     }
 
-    /// The row above is a note, which the gate lets through beside anything but
-    /// a git pipeline — so it never showed the order the claim checks in. An
+    /// The row above is a note, which the gate lets through beside anything —
+    /// so it never showed the order the claim checks in. An
     /// exclusive row a concurrent drain already claimed is *itself* the
     /// exclusive kind now running on the branch. Gated before the row's status
     /// is read, it is refused because of itself and reported `Blocked`: the
@@ -8153,11 +8125,11 @@ mod tests {
 
     /// Reset-to-origin and discard have no session row, so the running-kinds
     /// read cannot see them; their guard marks the branch and the forced claim
-    /// refuses every candidate while it is set — the same treatment a running
-    /// git pipeline gets, because all of them move the tree under anything
-    /// that starts beside them.
+    /// refuses a commit while it is set — the same treatment a running git
+    /// pipeline gets, because a commit beside either would be a second writer
+    /// in the tree. Notes and reviews only read it, so they still start.
     #[test]
-    fn force_claim_refuses_every_kind_while_a_worktree_operation_is_in_flight() {
+    fn force_claim_refuses_only_a_commit_while_a_worktree_operation_is_in_flight() {
         let (store, branch) = setup_branch_store();
         let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
         let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
@@ -8165,10 +8137,25 @@ mod tests {
 
         let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
 
-        for (session_id, kind) in [
-            (&commit.id, BranchSessionScheduleKind::Commit),
-            (&note.id, BranchSessionScheduleKind::Note),
-            (&review.id, BranchSessionScheduleKind::Review),
+        for (session_id, kind, expected, status) in [
+            (
+                &commit.id,
+                BranchSessionScheduleKind::Commit,
+                QueuedSessionStart::Blocked,
+                store::SessionStatus::Queued,
+            ),
+            (
+                &note.id,
+                BranchSessionScheduleKind::Note,
+                QueuedSessionStart::Started,
+                store::SessionStatus::Running,
+            ),
+            (
+                &review.id,
+                BranchSessionScheduleKind::Review,
+                QueuedSessionStart::Started,
+                store::SessionStatus::Running,
+            ),
         ] {
             let claim = QueuedSessionClaim::new(
                 &branch.id,
@@ -8176,16 +8163,55 @@ mod tests {
                 kind,
                 QueuedSessionStartMode::Force,
             );
-            assert_eq!(
-                claim.claim(&store).unwrap(),
+            assert_eq!(claim.claim(&store).unwrap(), expected, "{kind:?}");
+            assert_eq!(session_status(&store, session_id), status, "{kind:?}");
+        }
+    }
+
+    /// The claim's re-read of the running kinds gives the same split beside a
+    /// running push as the marker does: a commit is refused, a note or review
+    /// starts.
+    #[test]
+    fn force_claim_refuses_only_a_commit_beside_a_running_push() {
+        let (store, branch) = setup_branch_store();
+        let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let review = create_branch_review_session(&store, &branch.id, store::SessionStatus::Queued);
+        create_branch_git_pipeline_session(
+            &store,
+            &branch.id,
+            store::SessionStatus::Running,
+            store::PipelineKind::Push,
+        );
+
+        for (session_id, kind, expected, status) in [
+            (
+                &commit.id,
+                BranchSessionScheduleKind::Commit,
                 QueuedSessionStart::Blocked,
-                "{kind:?}"
-            );
-            assert_eq!(
-                session_status(&store, session_id),
                 store::SessionStatus::Queued,
-                "{kind:?}"
+            ),
+            (
+                &note.id,
+                BranchSessionScheduleKind::Note,
+                QueuedSessionStart::Started,
+                store::SessionStatus::Running,
+            ),
+            (
+                &review.id,
+                BranchSessionScheduleKind::Review,
+                QueuedSessionStart::Started,
+                store::SessionStatus::Running,
+            ),
+        ] {
+            let claim = QueuedSessionClaim::new(
+                &branch.id,
+                session_id,
+                kind,
+                QueuedSessionStartMode::Force,
             );
+            assert_eq!(claim.claim(&store).unwrap(), expected, "{kind:?}");
+            assert_eq!(session_status(&store, session_id), status, "{kind:?}");
         }
     }
 
@@ -8305,39 +8331,57 @@ mod tests {
         create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
 
         let err = forced_start_precheck(&store, &branch.id, &queued.id).unwrap_err();
-        assert_eq!(
-            err,
-            force_start_blocked_message(BranchSessionScheduleKind::Commit)
-        );
+        assert_eq!(err, FORCE_START_BLOCKED_MESSAGE);
         assert_eq!(
             session_status(&store, &queued.id),
             store::SessionStatus::Queued
         );
     }
 
-    /// The early refusal consults the reset/discard marker too, and a note or
-    /// review blocked by one gets the git-action wording — try again once it
-    /// finishes — not a pointer at a commit that was never the blocker.
+    /// The early refusal consults the reset/discard marker too, holding it to
+    /// the same rule as a running git pipeline: the commit is refused, the note
+    /// is handed on.
     #[test]
-    fn forced_start_precheck_refuses_every_kind_during_a_worktree_operation() {
+    fn forced_start_precheck_refuses_only_a_commit_during_a_worktree_operation() {
         let (store, branch) = setup_branch_store_with_workdir();
         let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
         let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
 
         let _operation = BranchWorktreeOperationGuard::acquire(&branch.id);
 
-        let err = forced_start_precheck(&store, &branch.id, &note.id).unwrap_err();
-        assert_eq!(
-            err,
-            force_start_blocked_message(BranchSessionScheduleKind::Note)
-        );
-        assert!(err.contains("Try again once it finishes"), "{err}");
+        assert!(matches!(
+            forced_start_precheck(&store, &branch.id, &note.id).unwrap(),
+            ForcedStartPrecheck::Proceed { .. }
+        ));
 
         let err = forced_start_precheck(&store, &branch.id, &commit.id).unwrap_err();
-        assert_eq!(
-            err,
-            force_start_blocked_message(BranchSessionScheduleKind::Commit)
+        assert_eq!(err, FORCE_START_BLOCKED_MESSAGE);
+    }
+
+    /// A running push or pull is a session row, so the early refusal reads it
+    /// from the running kinds: the same split as the marker above.
+    #[test]
+    fn forced_start_precheck_refuses_only_a_commit_beside_a_running_git_pipeline() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        let note = create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let review = create_branch_review_session(&store, &branch.id, store::SessionStatus::Queued);
+        let commit = create_branch_commit_session(&store, &branch.id, store::SessionStatus::Queued);
+        create_branch_git_pipeline_session(
+            &store,
+            &branch.id,
+            store::SessionStatus::Running,
+            store::PipelineKind::Push,
         );
+
+        for session_id in [&note.id, &review.id] {
+            assert!(matches!(
+                forced_start_precheck(&store, &branch.id, session_id).unwrap(),
+                ForcedStartPrecheck::Proceed { .. }
+            ));
+        }
+
+        let err = forced_start_precheck(&store, &branch.id, &commit.id).unwrap_err();
+        assert_eq!(err, FORCE_START_BLOCKED_MESSAGE);
     }
 
     #[test]

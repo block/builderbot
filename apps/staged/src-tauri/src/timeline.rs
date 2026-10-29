@@ -1018,8 +1018,9 @@ pub(crate) fn reset_branch_to_remote_impl(
     branch_id: &str,
 ) -> Result<(), String> {
     // Reset runs outside the session queue, so this marker is what lets the
-    // forced-start gate refuse "Start now" — from any connected client, not
-    // just the one whose flags withheld the menu item — while HEAD is moving.
+    // forced-start gate refuse "Start now" on a queued commit — from any
+    // connected client, not just the one whose flags withheld the menu item —
+    // while HEAD is moving.
     // Acquired here rather than in the entry points so the Tauri command and
     // the web-server arm are covered alike, and RAII so every refusal below
     // clears it.
@@ -1757,8 +1758,8 @@ mod tests {
 
     /// The marker the impl sets for the forced-start gate is RAII: a reset
     /// refused by validation — deep in, after the git state was computed —
-    /// must clear it, or "Start now" would stay withheld on the branch until
-    /// the app restarts.
+    /// must clear it, or "Start now" would stay withheld from queued commits
+    /// on the branch until the app restarts.
     #[test]
     fn failed_reset_clears_the_worktree_operation_marker() {
         let (_origin, clone) = remote_backed_feature();

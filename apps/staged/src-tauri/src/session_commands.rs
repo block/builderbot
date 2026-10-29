@@ -2425,7 +2425,11 @@ fn can_start_with_active_branch_sessions(
 /// the new one, but a reset throws away the local commits whose tip a review
 /// started beside it would record, and the timeline hides a review whose tip
 /// is no longer on the branch. Reset and discard take seconds; waiting them
-/// out costs little.
+/// out costs little. They are not the only rewrites with this effect: a review
+/// forced beside a running squash or rebase (a commit pipeline) can likewise
+/// record a tip the rewrite removes, after which
+/// `review_is_visible_in_timeline` hides it. That trade is accepted, since
+/// those runs are long and hiding reviews of squashed commits is by design.
 fn can_force_start_with_active(
     candidate: BranchSessionScheduleKind,
     active: &HashSet<BranchSessionScheduleKind>,

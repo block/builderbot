@@ -39,6 +39,7 @@
     sidebarPinnedRepos,
   } from './sidebarSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
+  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
@@ -62,14 +63,25 @@
 
   // ── Search ──
   // One field narrows both segments. The query is the landing-page grid's
-  // (projectsListViewState.searchQuery), not a local copy: typing in either
-  // field narrows both surfaces, so the sidebar list and the grid never
-  // disagree about which projects are showing.
+  // (projectsListViewState.searchQuery): typing in either field narrows both
+  // surfaces, so the sidebar list and the grid never disagree about which
+  // projects are showing.
   //
   // Both segments render their whole list and the query only hides what it
   // rules out (see sidebarSearch.ts): rendering the narrowed lists rebuilt
   // every row and repo card a keystroke filtered out and back in.
-  let searchQuery = $derived(projectsListViewState.searchQuery);
+  //
+  // Applied only while this layer is on screen, like the grid's (see
+  // ProjectsList): under home, the query changing is the grid's search being
+  // typed into, and following it there re-hid rows and cards nobody could
+  // see on every keystroke. The rows catch up in the flush that brings the
+  // layer back, before that frame paints.
+  const layer = useWorkspaceLayer();
+  let searchQuery = $state(projectsListViewState.searchQuery);
+  $effect.pre(() => {
+    const query = projectsListViewState.searchQuery;
+    if (layer.visible) searchQuery = query;
+  });
   let searching = $derived(searchQuery.trim().length > 0);
 
   // ── Repos segment ──
@@ -684,6 +696,14 @@
     flex-direction: column;
     gap: 4px;
     padding: 10px var(--project-row-bleed);
+  }
+
+  /* The search hides project rows by their `display: contents` context-menu
+     trigger. The `.contents` utility outranks the UA's [hidden] rule, so
+     restate display: none here rather than lean on Tailwind preflight's
+     `[hidden] { display: none !important }`. */
+  .projects-list :global(.contents[hidden]) {
+    display: none;
   }
 
   .project-row {

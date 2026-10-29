@@ -3,9 +3,11 @@
 
   Renders the given repos as full RepoCards (Add project, action pills, the ⋮
   menu with pin/unpin). While `reorderable`, cards are drag handles and a drop
-  reorders optimistically before the persisted pin order round-trips; the
-  sidebar turns this off while a search is showing only some of the pinned
-  repos, where a drop would persist the subset as the whole pin order.
+  reorders optimistically before the persisted pin order round-trips. The
+  sidebar turns this off while searching. `repos` is the whole pinned list
+  even then, so a drop would persist a complete order, but it would carry the
+  card past every card the query hid between it and the target: a reorder the
+  user can't see.
 
   A search hides cards (`visibleKeys`) rather than dropping them from
   `repos`: each RepoCard hydrates its actions over IPC and subscribes to
@@ -53,8 +55,8 @@
 
   function handleDrop(target: RepoHomeItem) {
     return async (_e: DragEvent) => {
-      // Only a pinned-only list may be persisted as the pin order; the parent
-      // turns reorderable off while a search shows a filtered subset.
+      // Off while a search hides cards: the move would carry the card past
+      // hidden ones the user can't see.
       if (!reorderable) return;
       const sourceKey = dragSourceKey;
       dragSourceKey = null;
@@ -87,7 +89,7 @@
 <div class="pinned-repos-list" role="list" hidden={visibleKeys?.size === 0}>
   {#each ordered as repo (repoKey(repo))}
     <!-- display: contents, so the wrapper only carries `hidden`. -->
-    <div class="contents" hidden={visibleKeys !== null && !visibleKeys.has(repoKey(repo))}>
+    <div class="card-slot" hidden={visibleKeys !== null && !visibleKeys.has(repoKey(repo))}>
       <RepoCard
         {repo}
         hidePinButton
@@ -108,5 +110,17 @@
     flex-direction: column;
     gap: 6px;
     padding: 2px 0;
+  }
+
+  .card-slot {
+    display: contents;
+  }
+
+  /* Both displays above outrank the UA's [hidden] rule, so `hidden` restates
+     display: none rather than lean on Tailwind preflight's
+     `[hidden] { display: none !important }`. */
+  .pinned-repos-list[hidden],
+  .card-slot[hidden] {
+    display: none;
   }
 </style>

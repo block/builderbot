@@ -7,7 +7,13 @@
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import { goHome, navigation, selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import {
+    followWhileVisible,
+    goHome,
+    navigation,
+    selectProject,
+    showAllRepos,
+  } from '../layout/navigation.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -39,7 +45,6 @@
     sidebarPinnedRepos,
   } from './sidebarSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
-  import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
@@ -71,24 +76,18 @@
   // rules out (see sidebarSearch.ts): rendering the narrowed lists rebuilt
   // every row and repo card a keystroke filtered out and back in.
   //
-  // Applied only while this layer is on screen, like the grid's (see
-  // ProjectsList): under home, the query changing is the grid's search being
-  // typed into, and following it there re-hid rows and cards nobody could
-  // see on every keystroke. The rows catch up in the flush that brings the
-  // layer back, before that frame paints.
-  const layer = useWorkspaceLayer();
-  let searchQuery = $state(projectsListViewState.searchQuery);
-  $effect.pre(() => {
-    const query = projectsListViewState.searchQuery;
-    if (layer.visible) searchQuery = query;
-  });
-  let searching = $derived(searchQuery.trim().length > 0);
+  // Followed key by key only while this layer is on screen, like the grid's
+  // (see ProjectsList). Under home, the query changing is the grid's search
+  // being typed into. Following each keystroke there re-hid rows and cards
+  // nobody could see, so the sidebar catches up once typing pauses instead.
+  const searchQuery = followWhileVisible(() => projectsListViewState.searchQuery);
+  let searching = $derived(searchQuery.current.trim().length > 0);
 
   // ── Repos segment ──
   // The pinned shelf, narrowed by the query. Unpinned repos are reached via
   // All repos, never surfaced here.
   let pinnedRepos = $derived(sidebarPinnedRepos(projectsDataStore.homeRepos));
-  let matchingRepos = $derived(matchingRepoKeys(pinnedRepos, searchQuery));
+  let matchingRepos = $derived(matchingRepoKeys(pinnedRepos, searchQuery.current));
   let visibleRepoCount = $derived(matchingRepos?.size ?? pinnedRepos.length);
 
   // The view this sidebar sits beside is the workspace's project layer, not
@@ -120,7 +119,7 @@
     }
     return filtered;
   });
-  let matchingProjects = $derived(matchingProjectIds(sidebarProjects, searchQuery));
+  let matchingProjects = $derived(matchingProjectIds(sidebarProjects, searchQuery.current));
   let visibleProjectCount = $derived(matchingProjects?.size ?? sidebarProjects.length);
 
   // Keep run-action state hydrated for the row status dots and the Running
@@ -429,7 +428,7 @@
               />
             {/if}
             {#if searching && visibleRepoCount === 0}
-              <div class="state no-matches">No repos match "{searchQuery.trim()}"</div>
+              <div class="state no-matches">No repos match "{searchQuery.current.trim()}"</div>
             {:else if !searching && pinnedRepos.length === 0 && projectsDataStore.homeRepos.length > 0}
               <!-- Repos exist but none are pinned: point at where pinning lives
                    so the "Pinned repos 0" header isn't the only affordance.
@@ -462,7 +461,7 @@
             {#if visibleProjectCount === 0}
               <div class="state no-matches">
                 {#if searching}
-                  <span>No projects match "{searchQuery.trim()}"</span>
+                  <span>No projects match "{searchQuery.current.trim()}"</span>
                 {:else}
                   <span>No projects match filters</span>
                   <button class="state-link" onclick={() => projectFiltersStore.clearFilters()}
@@ -701,8 +700,9 @@
   /* The search hides project rows by their `display: contents` context-menu
      trigger. The `.contents` utility outranks the UA's [hidden] rule, so
      restate display: none here rather than lean on Tailwind preflight's
-     `[hidden] { display: none !important }`. */
-  .projects-list :global(.contents[hidden]) {
+     `[hidden] { display: none !important }`. Matched by the slot the shadcn
+     wrapper sets, not the class string passed to it. */
+  .projects-list :global([data-slot='context-menu-trigger'][hidden]) {
     display: none;
   }
 

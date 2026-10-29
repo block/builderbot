@@ -16,7 +16,12 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import {
+    followWhileVisible,
+    openSettings,
+    selectProject,
+    showAllRepos,
+  } from '../layout/navigation.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
@@ -126,16 +131,12 @@
     projectFiltersStore.activeFilters === filtersAtVisit ? stickyProjectId : null
   );
 
-  // The query the grid applies: the shared one, but only while the grid is on
-  // screen. Covered by a project, the query changing is the sidebar's search
-  // being typed into, and following it there would restyle and lay out a grid
-  // nobody can see on every keystroke. The grid catches up in the flush that
-  // brings the layer back, before that frame paints.
-  let gridQuery = $state(projectsListViewState.searchQuery);
-  $effect.pre(() => {
-    const query = projectsListViewState.searchQuery;
-    if (layer.visible) gridQuery = query;
-  });
+  // The query the grid applies: the shared one, followed key by key only
+  // while the grid is on screen. Covered by a project, the query changing is
+  // the sidebar's search being typed into. Following each keystroke there
+  // would restyle and lay out a grid nobody can see, so the grid catches up
+  // once typing pauses instead.
+  const gridQuery = followWhileVisible(() => projectsListViewState.searchQuery);
 
   // Chips → sticky card: the cards the grid renders. The query doesn't remove
   // any of them, it hides the ones it rules out. Rendering only the matches
@@ -147,14 +148,19 @@
   // The cards left on screen, in grid order: what ⌘1–9, the scroll restore
   // and the empty state go by. See visibleProjects for the composition.
   let filteredProjects = $derived(
-    visibleProjects(projects, projectFiltersStore.filteredProjects, effectiveStickyId, gridQuery)
+    visibleProjects(
+      projects,
+      projectFiltersStore.filteredProjects,
+      effectiveStickyId,
+      gridQuery.current
+    )
   );
   let shownProjectIds = $derived(new Set(filteredProjects.map((p) => p.id)));
   // Hidden cards keep their {#each} slot, so the overlay numbers come from
   // the position on screen instead.
   let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
 
-  let searchActive = $derived(gridQuery.trim().length > 0);
+  let searchActive = $derived(gridQuery.current.trim().length > 0);
   // Decides the empty-state copy: blame the query only when the grid would
   // have shown something without it. Judged against the sticky-adjusted base,
   // not the raw chip result, so a sticky card the chips excluded but the query
@@ -460,7 +466,7 @@
           {#if filteredProjects.length === 0}
             {#if searchExcludedEverything}
               <div class="state">
-                No projects match "{gridQuery.trim()}"
+                No projects match "{gridQuery.current.trim()}"
               </div>
             {:else}
               <div class="state">No projects match filters</div>

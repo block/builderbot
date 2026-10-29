@@ -677,3 +677,96 @@ describe('workspace layers', () => {
     expect(navigation.projectLayer).toBeNull();
   });
 });
+
+describe('followWhileVisible', () => {
+  // Under vitest $state.raw is a plain variable. $effect.pre runs once when it
+  // is set up, like at mount, and `flush` reruns it after a change, after its
+  // cleanup, the way Svelte would.
+  let effects: Array<{ run: () => void | (() => void); cleanup?: void | (() => void) }>;
+  let layerVisible: boolean;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    effects = [];
+    layerVisible = true;
+    const identity = (value: unknown) => value;
+    const track = (run: () => void | (() => void)) => effects.push({ run, cleanup: run() });
+    vi.stubGlobal('$state', Object.assign(identity, { raw: identity }));
+    vi.stubGlobal('$effect', Object.assign(track, { pre: track }));
+    vi.doMock('./workspaceLayer', () => ({
+      useWorkspaceLayer: () => ({
+        get visible() {
+          return layerVisible;
+        },
+      }),
+    }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('./workspaceLayer');
+  });
+
+  function flush() {
+    for (const effect of effects) {
+      effect.cleanup?.();
+      effect.cleanup = effect.run();
+    }
+  }
+
+  it('follows the source in the same flush while the layer is visible', async () => {
+    const { followWhileVisible } = await importNavigation();
+    let source = 'a';
+    const followed = followWhileVisible(() => source);
+    expect(followed.current).toBe('a');
+
+    source = 'b';
+    flush();
+    expect(followed.current).toBe('b');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('follows the source in a hidden layer once it stops changing', async () => {
+    const { followWhileVisible, HIDDEN_FOLLOW_DELAY_MS } = await importNavigation();
+    let source = '';
+    const followed = followWhileVisible(() => source);
+    layerVisible = false;
+    flush();
+
+    source = 's';
+    flush();
+    await vi.advanceTimersByTimeAsync(HIDDEN_FOLLOW_DELAY_MS - 1);
+    source = 'sl';
+    flush();
+    // The second keystroke restarted the wait.
+    await vi.advanceTimersByTimeAsync(HIDDEN_FOLLOW_DELAY_MS - 1);
+    expect(followed.current).toBe('');
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(followed.current).toBe('sl');
+  });
+
+  it('catches up in the flush that shows the layer without waiting', async () => {
+    const { followWhileVisible } = await importNavigation();
+    let source = 'slow';
+    const followed = followWhileVisible(() => source);
+    layerVisible = false;
+    flush();
+
+    source = '';
+    flush();
+    layerVisible = true;
+    flush();
+
+    expect(followed.current).toBe('');
+    // The hidden wait was cancelled rather than left to fire later.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('seeds from the source when set up in a hidden layer', async () => {
+    layerVisible = false;
+    const { followWhileVisible } = await importNavigation();
+    const followed = followWhileVisible(() => 'seed');
+
+    expect(followed.current).toBe('seed');
+  });
+});

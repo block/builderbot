@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { RepoHomeItem } from '../../types';
-import { normalizeQuery, resultsLabel, searchRepos, visibleSidebarRepos } from './sidebarSearch';
+import type { Project, RepoHomeItem } from '../../types';
+import { repoKey } from './repoReorder';
+import {
+  matchingProjectIds,
+  matchingRepoKeys,
+  normalizeQuery,
+  resultsLabel,
+  searchRepos,
+  sidebarPinnedRepos,
+} from './sidebarSearch';
 
 // ── Fixtures ──
 
@@ -48,6 +56,20 @@ const differ = repo({
 const dashboard = repo({ githubRepo: 'squareup/dashboard', shortName: 'dashboard' });
 const all = [staged, g2, cashIos, differ, dashboard];
 
+function project(overrides: Partial<Project> = {}): Project {
+  return {
+    id: 'p1',
+    name: 'Alpha',
+    githubRepo: 'org/alpha',
+    location: 'local',
+    subpath: null,
+    createdAt: 0,
+    updatedAt: 0,
+    statusOverride: null,
+    ...overrides,
+  };
+}
+
 describe('normalizeQuery', () => {
   it('trims and lower-cases, treating whitespace as empty', () => {
     expect(normalizeQuery('  Cash ')).toBe('cash');
@@ -81,24 +103,62 @@ describe('searchRepos', () => {
   });
 });
 
-describe('visibleSidebarRepos', () => {
-  it('shows only pinned repos when not searching, in input order', () => {
-    expect(visibleSidebarRepos(all, '')).toEqual([staged, g2, cashIos]);
+describe('sidebarPinnedRepos', () => {
+  it('keeps only pinned repos, in input (pin) order', () => {
+    expect(sidebarPinnedRepos(all)).toEqual([staged, g2, cashIos]);
   });
 
-  it('narrows the pinned repos by the query, keeping pin order', () => {
-    expect(visibleSidebarRepos(all, 'builderbot')).toEqual([staged]);
-    expect(visibleSidebarRepos(all, 'squareup')).toEqual([g2]);
-    expect(visibleSidebarRepos(all, 's')).toEqual([staged, g2, cashIos]);
+  it('is empty when nothing is pinned', () => {
+    expect(sidebarPinnedRepos([differ, dashboard])).toEqual([]);
+  });
+});
+
+describe('matchingRepoKeys', () => {
+  const pinned = sidebarPinnedRepos(all);
+  const keys = (...repos: RepoHomeItem[]) => new Set(repos.map(repoKey));
+
+  it('is null for an empty or whitespace query, so every card shows', () => {
+    expect(matchingRepoKeys(pinned, '')).toBeNull();
+    expect(matchingRepoKeys(pinned, '   ')).toBeNull();
   });
 
-  it('never surfaces unpinned repos, even when only they match', () => {
-    expect(visibleSidebarRepos(all, 'differ')).toEqual([]);
-    expect(visibleSidebarRepos(all, 'dashboard')).toEqual([]);
+  it('keys the repos searchRepos keeps', () => {
+    expect(matchingRepoKeys(pinned, 'builderbot')).toEqual(keys(staged));
+    expect(matchingRepoKeys(pinned, 'squareup')).toEqual(keys(g2));
+    expect(matchingRepoKeys(pinned, 's')).toEqual(keys(staged, g2, cashIos));
   });
 
-  it('returns no repos when nothing matches', () => {
-    expect(visibleSidebarRepos(all, 'zzz')).toEqual([]);
+  it('only ever matches the pinned repos it is given', () => {
+    expect(matchingRepoKeys(pinned, 'differ')).toEqual(new Set());
+    expect(matchingRepoKeys(pinned, 'dashboard')).toEqual(new Set());
+  });
+
+  it('is an empty set, not null, when a query matches nothing', () => {
+    expect(matchingRepoKeys(pinned, 'zzz')).toEqual(new Set());
+  });
+
+  it('tells apart two subpaths of one repo', () => {
+    expect(matchingRepoKeys([staged, differ], 'apps/differ')).toEqual(keys(differ));
+  });
+});
+
+describe('matchingProjectIds', () => {
+  const alpha = project({ id: 'p1', name: 'Alpha Service' });
+  const beta = project({ id: 'p2', name: 'beta-tools' });
+  const projects = [alpha, beta];
+
+  it('is null for an empty or whitespace query, so every row shows', () => {
+    expect(matchingProjectIds(projects, '')).toBeNull();
+    expect(matchingProjectIds(projects, '  ')).toBeNull();
+  });
+
+  it('holds the ids searchProjects keeps', () => {
+    expect(matchingProjectIds(projects, 'ALPHA')).toEqual(new Set(['p1']));
+    expect(matchingProjectIds(projects, 'a')).toEqual(new Set(['p1', 'p2']));
+  });
+
+  it('is an empty set, not null, when a query matches nothing', () => {
+    expect(matchingProjectIds(projects, 'zzz')).toEqual(new Set());
   });
 });
 

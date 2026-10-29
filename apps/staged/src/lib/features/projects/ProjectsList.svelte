@@ -16,7 +16,12 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import {
+    followWhileVisible,
+    openSettings,
+    selectProject,
+    showAllRepos,
+  } from '../layout/navigation.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
@@ -42,7 +47,7 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { visibleProjects, withStickyProject } from './projectSearch';
+  import { projectShortcutNumbers, visibleProjects, withStickyProject } from './projectSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -126,26 +131,41 @@
     projectFiltersStore.activeFilters === filtersAtVisit ? stickyProjectId : null
   );
 
-  // Chips → sticky card → search; see visibleProjects for the composition.
+  // The query the grid applies: the shared one, followed key by key only
+  // while the grid is on screen. Covered by a project, the query changing is
+  // the sidebar's search being typed into. Following each keystroke there
+  // would restyle and lay out a grid nobody can see, so the grid catches up
+  // once typing pauses instead.
+  const gridQuery = followWhileVisible(() => projectsListViewState.searchQuery);
+
+  // Chips → sticky card: the cards the grid renders. The query doesn't remove
+  // any of them, it hides the ones it rules out. Rendering only the matches
+  // destroyed every card a keystroke filtered out (context menu, status icon,
+  // repo labels) and rebuilt it on the next backspace.
+  let gridProjects = $derived(
+    withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId)
+  );
+  // The cards left on screen, in grid order: what ⌘1–9, the scroll restore
+  // and the empty state go by. See visibleProjects for the composition.
   let filteredProjects = $derived(
     visibleProjects(
       projects,
       projectFiltersStore.filteredProjects,
       effectiveStickyId,
-      projectsListViewState.searchQuery
+      gridQuery.current
     )
   );
+  let shownProjectIds = $derived(new Set(filteredProjects.map((p) => p.id)));
+  // Hidden cards keep their {#each} slot, so the overlay numbers come from
+  // the position on screen instead.
+  let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
 
-  let searchActive = $derived(projectsListViewState.searchQuery.trim().length > 0);
+  let searchActive = $derived(gridQuery.current.trim().length > 0);
   // Decides the empty-state copy: blame the query only when the grid would
   // have shown something without it. Judged against the sticky-adjusted base,
   // not the raw chip result, so a sticky card the chips excluded but the query
   // hid is attributed to the query.
-  let searchExcludedEverything = $derived(
-    searchActive &&
-      withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId).length >
-        0
-  );
+  let searchExcludedEverything = $derived(searchActive && gridProjects.length > 0);
 
   function trackProjectCard(node: HTMLElement, projectId: string) {
     let currentProjectId = projectId;
@@ -446,7 +466,7 @@
           {#if filteredProjects.length === 0}
             {#if searchExcludedEverything}
               <div class="state">
-                No projects match "{projectsListViewState.searchQuery.trim()}"
+                No projects match "{gridQuery.current.trim()}"
               </div>
             {:else}
               <div class="state">No projects match filters</div>
@@ -461,7 +481,7 @@
           {/if}
         </div>
         <div class="projects-grid">
-          {#each filteredProjects as project, index (project.id)}
+          {#each gridProjects as project (project.id)}
             {@const status = getProjectStatus(
               project.id,
               deletingProjectNames,
@@ -475,7 +495,12 @@
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
-            <div class="project-card-wrapper" use:trackProjectCard={project.id}>
+            {@const shortcut = shortcutNumbers.get(project.id)}
+            <div
+              class="project-card-wrapper"
+              hidden={!shownProjectIds.has(project.id)}
+              use:trackProjectCard={project.id}
+            >
               <ContextMenu.Root>
                 <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
                   <button
@@ -485,10 +510,10 @@
                     disabled={status.kind === 'deleting'}
                     title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
                   >
-                    {#if viewport.showShortcutHints && isCommandKeyHeld && index < 9}
+                    {#if viewport.showShortcutHints && isCommandKeyHeld && shortcut !== undefined}
                       <div class="keyboard-shortcut-overlay">
                         <span class="command-icon">⌘</span>
-                        <span class="number">{index + 1}</span>
+                        <span class="number">{shortcut}</span>
                       </div>
                     {/if}
                     {#if status.runActionPhase === 'running' && busy}
@@ -732,6 +757,13 @@
   .project-card-wrapper {
     display: flex;
     flex-direction: column;
+  }
+
+  /* The display above outranks the UA's [hidden] rule, so the search's
+     `hidden` restates display: none here rather than lean on Tailwind
+     preflight's `[hidden] { display: none !important }`. */
+  .project-card-wrapper[hidden] {
+    display: none;
   }
 
   .project-card-wrapper .project-card {

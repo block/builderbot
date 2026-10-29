@@ -166,6 +166,47 @@ export function onLayerActivated(refresh: () => void): void {
   });
 }
 
+/**
+ * How long a source has to stay unchanged before a view in a hidden layer
+ * follows it (followWhileVisible). It's longer than the gap between
+ * keystrokes and shorter than the trip from a search field to the card or row
+ * that brings the hidden layer back.
+ */
+export const HIDDEN_FOLLOW_DELAY_MS = 300;
+
+/**
+ * `read()`, for a view whose layer can be hidden. While the layer is visible,
+ * `current` follows the source in the same flush. While it's hidden, `current`
+ * follows only after the source has stayed unchanged for HIDDEN_FOLLOW_DELAY_MS.
+ * The shared search query is the case in point. Following each keystroke
+ * typed into the other layer's field would re-filter the hidden view per key.
+ * Following none of them would leave all of that work for the flush that
+ * brings the layer back: re-showing a hundred sidebar rows there added ~50 ms
+ * to the navigation frame.
+ *
+ * A change still waiting when the layer becomes visible again is applied by
+ * the `$effect.pre` in that flush, before the frame paints, so a view that
+ * renders from `current` never shows a stale value. Call from component setup.
+ */
+export function followWhileVisible<T>(read: () => T): { readonly current: T } {
+  const layer = useWorkspaceLayer();
+  let value = $state.raw(untrack(read));
+  $effect.pre(() => {
+    const next = read();
+    if (layer.visible) {
+      value = next;
+      return;
+    }
+    const timer = setTimeout(() => (value = next), HIDDEN_FOLLOW_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
+  return {
+    get current() {
+      return value;
+    },
+  };
+}
+
 function currentRoute(): DetailRoute {
   return navigation.detailStack[navigation.detailStack.length - 1] ?? rootRoute();
 }

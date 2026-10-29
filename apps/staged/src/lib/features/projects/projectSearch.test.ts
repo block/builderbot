@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { Project } from '../../types';
-import { searchProjects, visibleProjects, withStickyProject } from './projectSearch';
+import {
+  projectShortcutNumbers,
+  searchProjects,
+  visibleProjects,
+  withStickyProject,
+} from './projectSearch';
 
 // ── Fixtures ──
 
@@ -141,5 +146,43 @@ describe('visibleProjects', () => {
       // A deleted return target: nothing to re-insert.
       expect(visibleProjects(all, chipsWithoutBeta, 'gone', '')).toEqual(chipsWithoutBeta);
     });
+  });
+});
+
+// The ⌘1–9 overlay numbers: the grid renders hidden cards too, so they count
+// the cards left on screen, not the rendered list.
+describe('projectShortcutNumbers', () => {
+  it('numbers the shown cards from 1 in grid order', () => {
+    expect(projectShortcutNumbers(all)).toEqual(
+      new Map([
+        [alpha.id, 1],
+        [beta.id, 2],
+        [gamma.id, 3],
+      ])
+    );
+  });
+
+  it('skips cards the query hid, so the numbers match what ⌘N opens', () => {
+    // alpha, first in the grid, is hidden: beta is the first card on screen.
+    const shown = visibleProjects(all, all, null, 'b');
+    expect(shown).toEqual([beta, gamma]);
+    expect(projectShortcutNumbers(shown)).toEqual(
+      new Map([
+        [beta.id, 1],
+        [gamma.id, 2],
+      ])
+    );
+  });
+
+  it('numbers only the first nine', () => {
+    const many = Array.from({ length: 12 }, (_, i) => project({ id: `p${i}`, name: `P${i}` }));
+    const numbers = projectShortcutNumbers(many);
+    expect(numbers.size).toBe(9);
+    expect(numbers.get('p8')).toBe(9);
+    expect(numbers.has('p9')).toBe(false);
+  });
+
+  it('is empty when nothing is shown', () => {
+    expect(projectShortcutNumbers([]).size).toBe(0);
   });
 });

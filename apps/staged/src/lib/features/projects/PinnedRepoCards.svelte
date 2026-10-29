@@ -3,9 +3,16 @@
 
   Renders the given repos as full RepoCards (Add project, action pills, the ⋮
   menu with pin/unpin). While `reorderable`, cards are drag handles and a drop
-  reorders optimistically before the persisted pin order round-trips; the
-  sidebar turns this off while a search is showing only some of the pinned
-  repos, where a drop would persist the subset as the whole pin order.
+  reorders optimistically before the persisted pin order round-trips. The
+  sidebar turns this off while searching. `repos` is the whole pinned list
+  even then, so a drop would persist a complete order, but it would carry the
+  card past every card the query hid between it and the target: a reorder the
+  user can't see.
+
+  A search hides cards (`visibleKeys`) rather than dropping them from
+  `repos`: each RepoCard hydrates its actions over IPC and subscribes to
+  backend events on mount, so a card that left the list and came back on
+  every keystroke re-ran all of that each time.
 -->
 <script lang="ts">
   import type { RepoHomeItem } from '../../types';
@@ -16,10 +23,12 @@
 
   interface Props {
     repos: RepoHomeItem[];
+    /** repoKeys of the cards to show; null shows every card. */
+    visibleKeys?: ReadonlySet<string> | null;
     reorderable?: boolean;
   }
 
-  let { repos, reorderable = false }: Props = $props();
+  let { repos, visibleKeys = null, reorderable = false }: Props = $props();
 
   // Tracks the input list, but a drop reassigns it so the reorder applies
   // optimistically (derived override); the next `repos` change re-syncs.
@@ -46,8 +55,8 @@
 
   function handleDrop(target: RepoHomeItem) {
     return async (_e: DragEvent) => {
-      // Only a pinned-only list may be persisted as the pin order; the parent
-      // turns reorderable off while a search shows a filtered subset.
+      // Off while a search hides cards: the move would carry the card past
+      // hidden ones the user can't see.
       if (!reorderable) return;
       const sourceKey = dragSourceKey;
       dragSourceKey = null;
@@ -77,18 +86,21 @@
 
 <!-- Unlabelled on purpose: the SidebarSectionHead directly above already
      announces "Pinned repos" or "Repos · N results" for the current contents. -->
-<div class="pinned-repos-list" role="list">
+<div class="pinned-repos-list" role="list" hidden={visibleKeys?.size === 0}>
   {#each ordered as repo (repoKey(repo))}
-    <RepoCard
-      {repo}
-      hidePinButton
-      {reorderable}
-      onReorderStart={handleDragStart(repo)}
-      onReorderOver={handleDragOver}
-      onReorderDrop={handleDrop(repo)}
-      onReorderEnd={handleDragEnd}
-      onChange={() => projectsDataStore.refreshHomeRepos()}
-    />
+    <!-- display: contents, so the wrapper only carries `hidden`. -->
+    <div class="card-slot" hidden={visibleKeys !== null && !visibleKeys.has(repoKey(repo))}>
+      <RepoCard
+        {repo}
+        hidePinButton
+        {reorderable}
+        onReorderStart={handleDragStart(repo)}
+        onReorderOver={handleDragOver}
+        onReorderDrop={handleDrop(repo)}
+        onReorderEnd={handleDragEnd}
+        onChange={() => projectsDataStore.refreshHomeRepos()}
+      />
+    </div>
   {/each}
 </div>
 
@@ -98,5 +110,17 @@
     flex-direction: column;
     gap: 6px;
     padding: 2px 0;
+  }
+
+  .card-slot {
+    display: contents;
+  }
+
+  /* Both displays above outrank the UA's [hidden] rule, so `hidden` restates
+     display: none rather than lean on Tailwind preflight's
+     `[hidden] { display: none !important }`. */
+  .pinned-repos-list[hidden],
+  .card-slot[hidden] {
+    display: none;
   }
 </style>

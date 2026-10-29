@@ -5,9 +5,11 @@
  * trivially unit-testable. Projects carry no description, so only the display
  * name is searched. Applied after the chip filters in ProjectsList.
  *
- * `visibleProjects` is the whole composition the grid renders — chip filters,
+ * `visibleProjects` is the whole composition the grid shows — chip filters,
  * sticky return-target card, then the query — lifted out of the component so
- * the wiring between the three is testable without a Svelte runtime.
+ * the wiring between the three is testable without a Svelte runtime. The grid
+ * renders `withStickyProject` and hides the cards the query rules out, so
+ * `visibleProjects` is the cards left on screen, not the ones mounted.
  */
 
 import type { Project } from '../../types';
@@ -63,4 +65,15 @@ export function visibleProjects(
   query: string
 ): Project[] {
   return searchProjects(withStickyProject(projects, chipFiltered, stickyId), query);
+}
+
+/**
+ * The ⌘1–9 number of each card on screen, by project id: the first nine of
+ * `shown` (visibleProjects' result) in grid order. The grid keeps cards the
+ * query hides mounted, so a card's place in the rendered list is not its
+ * place on screen; ⌘N opens `shown[N - 1]`, and these are the numbers the
+ * overlay has to show for that.
+ */
+export function projectShortcutNumbers(shown: Project[]): Map<string, number> {
+  return new Map(shown.slice(0, 9).map((p, i) => [p.id, i + 1]));
 }

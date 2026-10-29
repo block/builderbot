@@ -679,47 +679,114 @@ describe('workspace layers', () => {
 });
 
 describe('followWhileVisible', () => {
-  // Under vitest $state.raw is a plain variable. $effect.pre runs once when it
-  // is set up, like at mount, and `flush` reruns it after a change, after its
-  // cleanup, the way Svelte would.
-  let effects: Array<{ run: () => void | (() => void); cleanup?: void | (() => void) }>;
-  let layerVisible: boolean;
+  // Under vitest $state.raw is a plain variable and Svelte tracks nothing, so
+  // the source and the layer's `visible` are small signals here. Each effect
+  // run records the signals it reads outside `untrack`. $effect.pre runs once
+  // when it is set up, like at mount, and `flush` reruns, after its cleanup,
+  // only the effects whose recorded reads have changed since, the way Svelte
+  // would. A read the effect stops tracking then fails a test.
+  type Signal<T> = { value: T; readonly version: number };
+  type Effect = {
+    run: () => void | (() => void);
+    cleanup?: void | (() => void);
+    reads: Map<Signal<unknown>, number>;
+  };
+  let effects: Effect[];
+  let reads: Map<Signal<unknown>, number> | null;
+  let layerVisible: Signal<boolean>;
+
+  function signal<T>(initial: T): Signal<T> {
+    let stored = initial;
+    let version = 0;
+    const self: Signal<T> = {
+      get value() {
+        reads?.set(self, version);
+        return stored;
+      },
+      set value(next) {
+        if (Object.is(next, stored)) return;
+        stored = next;
+        version++;
+      },
+      get version() {
+        return version;
+      },
+    };
+    return self;
+  }
+
+  function untracked<T>(fn: () => T): T {
+    const outer = reads;
+    reads = null;
+    try {
+      return fn();
+    } finally {
+      reads = outer;
+    }
+  }
+
+  function execute(effect: Effect) {
+    const outer = reads;
+    reads = effect.reads = new Map();
+    try {
+      effect.cleanup = effect.run();
+    } finally {
+      reads = outer;
+    }
+  }
 
   beforeEach(() => {
     vi.useFakeTimers();
     effects = [];
-    layerVisible = true;
+    reads = null;
+    layerVisible = signal(true);
     const identity = (value: unknown) => value;
-    const track = (run: () => void | (() => void)) => effects.push({ run, cleanup: run() });
+    const track = (run: Effect['run']) => {
+      const effect: Effect = { run, reads: new Map() };
+      effects.push(effect);
+      execute(effect);
+    };
     vi.stubGlobal('$state', Object.assign(identity, { raw: identity }));
     vi.stubGlobal('$effect', Object.assign(track, { pre: track }));
+    vi.doMock('svelte', async (importOriginal) => ({
+      ...(await importOriginal<typeof import('svelte')>()),
+      untrack: untracked,
+    }));
     vi.doMock('./workspaceLayer', () => ({
       useWorkspaceLayer: () => ({
         get visible() {
-          return layerVisible;
+          return layerVisible.value;
         },
       }),
     }));
   });
 
   afterEach(() => {
+    vi.doUnmock('svelte');
     vi.doUnmock('./workspaceLayer');
   });
 
   function flush() {
     for (const effect of effects) {
-      effect.cleanup?.();
-      effect.cleanup = effect.run();
+      const changed = [...effect.reads].some(([read, version]) => read.version !== version);
+      if (!changed) continue;
+      untracked(() => effect.cleanup?.());
+      execute(effect);
     }
+  }
+
+  function unmount() {
+    for (const effect of effects) untracked(() => effect.cleanup?.());
+    effects = [];
   }
 
   it('follows the source in the same flush while the layer is visible', async () => {
     const { followWhileVisible } = await importNavigation();
-    let source = 'a';
-    const followed = followWhileVisible(() => source);
+    const source = signal('a');
+    const followed = followWhileVisible(() => source.value);
     expect(followed.current).toBe('a');
 
-    source = 'b';
+    source.value = 'b';
     flush();
     expect(followed.current).toBe('b');
     expect(vi.getTimerCount()).toBe(0);
@@ -727,15 +794,15 @@ describe('followWhileVisible', () => {
 
   it('follows the source in a hidden layer once it stops changing', async () => {
     const { followWhileVisible, HIDDEN_FOLLOW_DELAY_MS } = await importNavigation();
-    let source = '';
-    const followed = followWhileVisible(() => source);
-    layerVisible = false;
+    const source = signal('');
+    const followed = followWhileVisible(() => source.value);
+    layerVisible.value = false;
     flush();
 
-    source = 's';
+    source.value = 's';
     flush();
     await vi.advanceTimersByTimeAsync(HIDDEN_FOLLOW_DELAY_MS - 1);
-    source = 'sl';
+    source.value = 'sl';
     flush();
     // The second keystroke restarted the wait.
     await vi.advanceTimersByTimeAsync(HIDDEN_FOLLOW_DELAY_MS - 1);
@@ -747,14 +814,14 @@ describe('followWhileVisible', () => {
 
   it('catches up in the flush that shows the layer without waiting', async () => {
     const { followWhileVisible } = await importNavigation();
-    let source = 'slow';
-    const followed = followWhileVisible(() => source);
-    layerVisible = false;
+    const source = signal('slow');
+    const followed = followWhileVisible(() => source.value);
+    layerVisible.value = false;
     flush();
 
-    source = '';
+    source.value = '';
     flush();
-    layerVisible = true;
+    layerVisible.value = true;
     flush();
 
     expect(followed.current).toBe('');
@@ -763,10 +830,27 @@ describe('followWhileVisible', () => {
   });
 
   it('seeds from the source when set up in a hidden layer', async () => {
-    layerVisible = false;
+    layerVisible.value = false;
     const { followWhileVisible } = await importNavigation();
     const followed = followWhileVisible(() => 'seed');
 
     expect(followed.current).toBe('seed');
+  });
+
+  it('cancels a pending hidden wait when the view unmounts', async () => {
+    const { followWhileVisible, HIDDEN_FOLLOW_DELAY_MS } = await importNavigation();
+    const source = signal('');
+    const followed = followWhileVisible(() => source.value);
+    layerVisible.value = false;
+    flush();
+    source.value = 's';
+    flush();
+    expect(vi.getTimerCount()).toBe(1);
+
+    unmount();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(HIDDEN_FOLLOW_DELAY_MS);
+    expect(followed.current).toBe('');
   });
 });

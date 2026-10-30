@@ -599,8 +599,12 @@ impl Store {
 
     /// Record that the user has read this session's chat up to now.
     ///
-    /// Writes only when the chat has a reply newer than the last read, so
-    /// reopening a chat with nothing new neither writes nor reloads anything.
+    /// Writes only when the chat has a reply newer than both the last read and
+    /// the note the session wrote, so reopening a chat with nothing new, or
+    /// one whose replies all predate its note, neither writes nor reloads
+    /// anything. Skipping the latter is safe: the chat button ignores the read
+    /// time until a reply passes the note, and that reply still reads as
+    /// unread against the older read time.
     /// Unlike other session writes this publishes a notes change: the read
     /// state shows on the chat button of the note the session wrote.
     pub fn mark_session_chat_read(&self, session_id: &str) -> Result<(), StoreError> {
@@ -611,7 +615,14 @@ impl Store {
                  WHERE id = ?1
                    AND (SELECT MAX(created_at) FROM session_messages
                         WHERE session_id = ?1 AND {VISIBLE_ASSISTANT_FILTER})
-                       > COALESCE(chat_read_at, 0)"
+                       > MAX(
+                           COALESCE(chat_read_at, 0),
+                           COALESCE(
+                             (SELECT updated_at FROM notes WHERE session_id = ?1),
+                             (SELECT updated_at FROM project_notes WHERE session_id = ?1),
+                             0
+                           )
+                         )"
             ),
             params![session_id, now_timestamp()],
         )?;

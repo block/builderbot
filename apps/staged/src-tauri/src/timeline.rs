@@ -519,15 +519,16 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .into_iter()
         .map(|n| {
             let resolved = store.resolve_session_status(n.session_id.as_deref());
-            let (last_chat_message_at, chat_read_at) = match n.session_id.as_deref() {
-                Some(session_id) => store
-                    .session_chat_activity(session_id)
-                    .map_err(|e| e.to_string())?,
-                None => (None, None),
-            };
+            // Best-effort, like the status above: a lookup miss leaves the chat
+            // button in its plain state rather than failing the timeline.
+            let (last_chat_message_at, chat_read_at) = n
+                .session_id
+                .as_deref()
+                .and_then(|session_id| store.session_chat_activity(session_id).ok())
+                .unwrap_or_default();
             // Session titles are temporary labels and may contain the full prompt.
             // Keep the stored document title, including when a session resumes.
-            Ok(NoteTimelineItem {
+            NoteTimelineItem {
                 id: n.id,
                 title: n.title,
                 content: n.content,
@@ -542,9 +543,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 subtype: n.subtype,
                 last_chat_message_at,
                 chat_read_at,
-            })
+            }
         })
-        .collect::<Result<_, String>>()?;
+        .collect();
 
     let db_reviews = store
         .list_reviews_for_branch(branch_id)
@@ -2009,7 +2010,11 @@ mod tests {
         let (store, branch) = store_with_branch(&repo);
 
         let session = running_session(&store, "write up the plan", None);
-        let session_note = Note::new(&branch.id, "Plan", "body").with_session(&session.id);
+        // Written well before its reply: a read only counts replies past the note.
+        let session_note = Note {
+            updated_at: 0,
+            ..Note::new(&branch.id, "Plan", "body").with_session(&session.id)
+        };
         store.create_note(&session_note).unwrap();
         let written_note =
             Note::new(&branch.id, "Draft", "body").with_subtype(Note::SUBTYPE_WRITTEN);

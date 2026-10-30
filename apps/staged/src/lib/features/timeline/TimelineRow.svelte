@@ -897,11 +897,13 @@
     opacity: 1;
   }
 
-  /* The project unread dot, smaller, on the chat icon's corner. */
+  /* The project unread dot, smaller, on the chat icon's corner. Anchored to
+     the centre the icon sits on, not the button edge, so it stays on the
+     corner when touch widens the button to 44px. */
   .chat-unread-dot {
     position: absolute;
     top: 2px;
-    right: 2px;
+    left: calc(50% + 3px);
     width: 6px;
     height: 6px;
     border-radius: 50%;

@@ -303,7 +303,11 @@ fn test_list_project_notes_with_status_fills_chat_activity() {
 
     let session = Session::new_running("write the project note", Path::new("/tmp"));
     store.create_session(&session).unwrap();
-    let session_note = ProjectNote::new(&project.id, "Overview", "Body").with_session(&session.id);
+    // Written well before its reply: a read only counts replies past the note.
+    let session_note = ProjectNote {
+        updated_at: 0,
+        ..ProjectNote::new(&project.id, "Overview", "Body").with_session(&session.id)
+    };
     store.create_project_note(&session_note).unwrap();
     let plain_note = ProjectNote::new(&project.id, "Pasted", "Body");
     store.create_project_note(&plain_note).unwrap();
@@ -4545,12 +4549,19 @@ fn change_feed_marking_a_chat_read_publishes_its_note_only_when_it_writes() {
     store.create_branch(&branch).unwrap();
     let branch_session = Session::new_running("branch note", Path::new("/tmp"));
     store.create_session(&branch_session).unwrap();
-    let note = Note::new(&branch.id, "Plan", "body").with_session(&branch_session.id);
+    // Both notes are written well before their replies: a read only counts
+    // replies past the note.
+    let note = Note {
+        updated_at: 0,
+        ..Note::new(&branch.id, "Plan", "body").with_session(&branch_session.id)
+    };
     store.create_note(&note).unwrap();
     let project_session = Session::new_running("project note", Path::new("/tmp"));
     store.create_session(&project_session).unwrap();
-    let project_note =
-        ProjectNote::new(&project.id, "Overview", "body").with_session(&project_session.id);
+    let project_note = ProjectNote {
+        updated_at: 0,
+        ..ProjectNote::new(&project.id, "Overview", "body").with_session(&project_session.id)
+    };
     store.create_project_note(&project_note).unwrap();
     for session_id in [&branch_session.id, &project_session.id] {
         store
@@ -4580,6 +4591,84 @@ fn change_feed_marking_a_chat_read_publishes_its_note_only_when_it_writes() {
     // Reopening a chat with nothing new writes nothing, so it reloads nothing.
     store.mark_session_chat_read(&branch_session.id).unwrap();
     assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn change_feed_marking_a_chat_read_skips_replies_its_note_already_covers() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let branch_session = Session::new_running("branch note", Path::new("/tmp"));
+    store.create_session(&branch_session).unwrap();
+    let project_session = Session::new_running("project note", Path::new("/tmp"));
+    store.create_session(&project_session).unwrap();
+    let sessions = [&branch_session.id, &project_session.id];
+    let add_reply_at = |session_id: &str, created_at: i64| {
+        let id = store
+            .add_session_message(session_id, MessageRole::Assistant, "a reply")
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session_messages SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![created_at, id],
+            )
+            .unwrap();
+    };
+    let read_at = |session_id: &str| store.session_chat_activity(session_id).unwrap().1;
+
+    // Each session replies, then writes its note after that reply.
+    for session_id in sessions {
+        add_reply_at(session_id, 1_000);
+    }
+    store
+        .create_note(&Note {
+            updated_at: 2_000,
+            ..Note::new(&branch.id, "Plan", "body").with_session(&branch_session.id)
+        })
+        .unwrap();
+    store
+        .create_project_note(&ProjectNote {
+            updated_at: 2_000,
+            ..ProjectNote::new(&project.id, "Overview", "body").with_session(&project_session.id)
+        })
+        .unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // The rows show no chat activity, so opening either chat writes nothing
+    // and reloads nothing, even though neither has been read.
+    for session_id in sessions {
+        store.mark_session_chat_read(session_id).unwrap();
+        assert_eq!(read_at(session_id), None);
+    }
+    assert!(rx.try_recv().is_err());
+
+    // A reply past the note is what the next open marks read.
+    for session_id in sessions {
+        add_reply_at(session_id, 3_000);
+        store.mark_session_chat_read(session_id).unwrap();
+        assert!(read_at(session_id).is_some_and(|at| at >= 3_000));
+    }
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Notes {
+            branch_id: Some(branch.id.clone()),
+            project_id: None
+        }
+    );
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Notes {
+            branch_id: None,
+            project_id: Some(project.id.clone())
+        }
+    );
 }
 
 #[test]

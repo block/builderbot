@@ -256,15 +256,18 @@ impl Store {
 
     /// Fill a project note's query-time fields from its session: status, and
     /// the chat activity its row's chat button shows.
-    fn resolve_project_note_session(&self, note: &mut ProjectNote) -> Result<(), StoreError> {
+    ///
+    /// Best-effort, like the status: a lookup miss leaves the chat button in
+    /// its plain state rather than failing the note or its list.
+    fn resolve_project_note_session(&self, note: &mut ProjectNote) {
         let resolved = self.resolve_session_status(note.session_id.as_deref());
         note.session_status = resolved.status;
         note.completion_reason = resolved.completion_reason;
-        if let Some(session_id) = note.session_id.as_deref() {
-            (note.last_chat_message_at, note.chat_read_at) =
-                self.session_chat_activity(session_id)?;
-        }
-        Ok(())
+        (note.last_chat_message_at, note.chat_read_at) = note
+            .session_id
+            .as_deref()
+            .and_then(|session_id| self.session_chat_activity(session_id).ok())
+            .unwrap_or_default();
     }
 
     /// Find a project note by id with session status resolved.
@@ -280,7 +283,7 @@ impl Store {
             Some(n) => n,
             None => return Ok(None),
         };
-        self.resolve_project_note_session(&mut note)?;
+        self.resolve_project_note_session(&mut note);
         Ok(Some(note))
     }
 
@@ -293,7 +296,7 @@ impl Store {
             Some(n) => n,
             None => return Ok(None),
         };
-        self.resolve_project_note_session(&mut note)?;
+        self.resolve_project_note_session(&mut note);
         Ok(Some(note))
     }
 
@@ -305,7 +308,7 @@ impl Store {
     ) -> Result<Vec<ProjectNote>, StoreError> {
         let mut notes = self.list_project_notes(project_id)?;
         for note in &mut notes {
-            self.resolve_project_note_session(note)?;
+            self.resolve_project_note_session(note);
         }
         Ok(notes)
     }

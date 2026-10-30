@@ -35,7 +35,8 @@
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
-  import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
+  import { minuteNow } from '../../shared/relativeTime.svelte';
+  import { formatNoteTimestamp, noteLastWrittenAt } from '../notes/noteTimestamps';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
   import { projectDisplayName } from '../../shared/utils';
@@ -299,13 +300,16 @@
     }
   }
 
-  /** All notes: completed (oldest first) followed by generating – matches branch timeline order. */
+  /**
+   * All notes: completed (oldest last-written first) followed by generating – matches
+   * branch timeline order.
+   */
   let timelineNotes = $derived(
     [...projectNotes].sort((a, b) => {
       const aIsActive = isSessionActive(a.sessionStatus);
       const bIsActive = isSessionActive(b.sessionStatus);
       if (aIsActive !== bIsActive) return aIsActive ? 1 : -1;
-      return (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt);
+      return noteLastWrittenAt(a) - noteLastWrittenAt(b);
     })
   );
   let projectNoteContextMenuActions = $derived.by(() => {
@@ -625,7 +629,7 @@
                 ? (liveHint ?? 'Generating note')
                 : isFailed
                   ? undefined
-                  : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
+                  : formatNoteTimestamp(note, nowMs)}
               deleting={deletingNoteIds.has(note.id)}
               isLast={false}
               sessionId={note.sessionId ?? undefined}

@@ -48,6 +48,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { formatNoteTimestamp, noteLastWrittenAt } from '../notes/noteTimestamps';
   import { reviewBadges } from './reviewBadges';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
@@ -758,7 +759,7 @@
         secondaryMeta = liveHint ?? 'Generating note';
       } else {
         type = 'note';
-        secondaryMeta = formatRelativeTime(note.completedAt ?? note.createdAt, nowMs);
+        secondaryMeta = formatNoteTimestamp(note, nowMs);
       }
 
       all.push({
@@ -768,8 +769,8 @@
         title: stripXmlTags(note.title),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
-        // Use completedAt so completed notes sort by completion time, not queue time
-        timestamp: Math.floor((note.completedAt ?? note.createdAt) / 1000),
+        // Sort by when the content was last written, not queue time
+        timestamp: Math.floor(noteLastWrittenAt(note) / 1000),
         order: 0,
         sessionId: note.sessionId ?? undefined,
         noteId: note.id,

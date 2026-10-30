@@ -12,6 +12,13 @@ use std::sync::{Arc, Mutex};
 /// session status identically.
 pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineItem {
     let resolved = store.resolve_session_status(note.session_id.as_deref());
+    // Best-effort, like the status above: a lookup miss leaves the chat button
+    // in its plain state rather than failing the note.
+    let (last_chat_message_at, chat_read_at) = note
+        .session_id
+        .as_deref()
+        .and_then(|session_id| store.session_chat_activity(session_id).ok())
+        .unwrap_or_default();
     NoteTimelineItem {
         id: note.id,
         title: note.title,
@@ -25,6 +32,8 @@ pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineIt
         suggested_next_commit_step: note.suggested_next_commit_step,
         suggested_next_note_step: note.suggested_next_note_step,
         subtype: note.subtype,
+        last_chat_message_at,
+        chat_read_at,
     }
 }
 
@@ -44,6 +53,8 @@ pub(crate) fn standalone_note_to_timeline_item(note: Note) -> NoteTimelineItem {
         suggested_next_commit_step: None,
         suggested_next_note_step: None,
         subtype: note.subtype,
+        last_chat_message_at: None,
+        chat_read_at: None,
     }
 }
 

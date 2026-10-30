@@ -1034,6 +1034,13 @@ pub struct ProjectNote {
     /// Why the session reached its terminal state.
     #[serde(skip_deserializing)]
     pub completion_reason: Option<String>,
+    /// When the session's chat last got a reply it shows. Populated at query
+    /// time, like `session_status`.
+    #[serde(skip_deserializing)]
+    pub last_chat_message_at: Option<i64>,
+    /// When the user last read the session's chat (`sessions.chat_read_at`).
+    #[serde(skip_deserializing)]
+    pub chat_read_at: Option<i64>,
 }
 
 impl ProjectNote {
@@ -1053,6 +1060,8 @@ impl ProjectNote {
             suggested_next_note_step: None,
             session_status: None,
             completion_reason: None,
+            last_chat_message_at: None,
+            chat_read_at: None,
         }
     }
 

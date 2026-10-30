@@ -31,6 +31,24 @@ export function countAssistantMessagesAfterNote(
 }
 
 /**
+ * The chat button on a note row: `'none'` when the chat has no replies since
+ * the note was last written, otherwise `'read'` or `'unread'` by whether the
+ * user has opened the chat since its latest reply. A turn that rewrites the
+ * note moves `updatedAt` past every reply, which drops it back to `'none'`.
+ */
+export type NoteChatState = 'none' | 'read' | 'unread';
+
+export function noteChatState(note: {
+  updatedAt: number;
+  lastChatMessageAt: number | null;
+  chatReadAt: number | null;
+}): NoteChatState {
+  const { lastChatMessageAt, chatReadAt } = note;
+  if (lastChatMessageAt === null || lastChatMessageAt <= note.updatedAt) return 'none';
+  return chatReadAt !== null && chatReadAt >= lastChatMessageAt ? 'read' : 'unread';
+}
+
+/**
  * Formats a label for the "view chat" button in the note modal.
  * Shows the count of assistant messages after the note was last updated.
  */

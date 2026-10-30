@@ -70,7 +70,9 @@ use tokio::sync::broadcast;
 /// Sessions are deliberately absent: chat polls at 500ms and session
 /// lifecycle already flows through `session-status-changed` & friends, so
 /// session-family writes (sessions, messages, queued messages, session-scoped
-/// images, repo actions) publish nothing here.
+/// images, repo actions) publish nothing here. The exception is
+/// [`Store::mark_session_chat_read`], which publishes [`StoreChange::Notes`]
+/// because note rows show whether their chat has unread replies.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StoreChange {
     /// A project row or its attached `project_repos` changed.

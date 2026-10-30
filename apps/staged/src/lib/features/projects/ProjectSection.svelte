@@ -37,6 +37,7 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { minuteNow } from '../../shared/relativeTime.svelte';
   import { formatNoteTimestamp, noteLastWrittenAt } from '../notes/noteTimestamps';
+  import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
   import { projectDisplayName } from '../../shared/utils';
@@ -633,6 +634,7 @@
               deleting={deletingNoteIds.has(note.id)}
               isLast={false}
               sessionId={note.sessionId ?? undefined}
+              chatState={noteType === 'note' ? noteChatState(note) : 'none'}
               onItemClick={isRunning || isFailed ? undefined : () => openProjectNote(note)}
               onSessionClick={(sid) => {
                 openProjectNote({ ...note, sessionId: sid }, true);

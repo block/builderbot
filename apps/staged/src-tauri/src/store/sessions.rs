@@ -2,10 +2,11 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use super::messages::VISIBLE_ASSISTANT_FILTER;
 use super::models::{
     AcpConfigSelection, CompletionReason, PipelineExecution, Session, SessionStatus,
 };
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
@@ -593,6 +594,46 @@ impl Store {
             "UPDATE sessions SET acp_title = ?1, updated_at = ?2 WHERE id = ?3",
             params![title, now_timestamp(), id],
         )?;
+        Ok(())
+    }
+
+    /// Record that the user has read this session's chat up to now.
+    ///
+    /// Writes only when the chat has a reply newer than the last read, so
+    /// reopening a chat with nothing new neither writes nor reloads anything.
+    /// Unlike other session writes this publishes a notes change: the read
+    /// state shows on the chat button of the note the session wrote.
+    pub fn mark_session_chat_read(&self, session_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            &format!(
+                "UPDATE sessions SET chat_read_at = ?2
+                 WHERE id = ?1
+                   AND (SELECT MAX(created_at) FROM session_messages
+                        WHERE session_id = ?1 AND {VISIBLE_ASSISTANT_FILTER})
+                       > COALESCE(chat_read_at, 0)"
+            ),
+            params![session_id, now_timestamp()],
+        )?;
+        if changed == 0 {
+            return Ok(());
+        }
+        let branch_id = Self::lookup_id(
+            &conn,
+            "SELECT branch_id FROM notes WHERE session_id = ?1",
+            session_id,
+        );
+        let project_id = Self::lookup_id(
+            &conn,
+            "SELECT project_id FROM project_notes WHERE session_id = ?1",
+            session_id,
+        );
+        if branch_id.is_some() || project_id.is_some() {
+            self.publish(StoreChange::Notes {
+                branch_id,
+                project_id,
+            });
+        }
         Ok(())
     }
 

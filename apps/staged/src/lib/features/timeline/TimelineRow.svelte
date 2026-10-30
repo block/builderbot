@@ -2,7 +2,8 @@
   TimelineRow.svelte - Renders a single timeline item (commit, note, or review)
 
   Icon + title + meta. Compact. The whole row is clickable to view the item.
-  Hover reveals session and delete actions on the right.
+  Hover reveals session and delete actions on the right; a note's chat button
+  stays visible while its chat has replies since the note.
 -->
 <script lang="ts">
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
@@ -11,6 +12,7 @@
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ImageLucide from '@lucide/svelte/icons/image';
   import MessageSquare from '@lucide/svelte/icons/message-square';
+  import MessageSquareText from '@lucide/svelte/icons/message-square-text';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
   import Clock from '@lucide/svelte/icons/clock';
@@ -19,6 +21,7 @@
   import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
+  import type { NoteChatState } from '../sessions/noteFreshness';
 
   export type TimelineItemType =
     | 'commit'
@@ -63,6 +66,8 @@
     deleting?: boolean;
     isLast?: boolean;
     sessionId?: string;
+    /** Whether a note's chat has read or unread replies since the note. */
+    chatState?: NoteChatState;
     onItemClick?: () => void;
     onSessionClick?: (sessionId: string) => void;
     onDeleteClick?: (opts?: { altKey: boolean }) => void;
@@ -110,6 +115,7 @@
     deleting = false,
     isLast = false,
     sessionId,
+    chatState = 'none',
     onItemClick,
     onSessionClick,
     onDeleteClick,
@@ -184,6 +190,13 @@
   );
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId && !deleting);
+  let sessionTitle = $derived(
+    chatState === 'unread'
+      ? 'View chat — unread replies'
+      : chatState === 'read'
+        ? 'View chat — replies since this note'
+        : 'View session'
+  );
   let pullTitle = $derived(pullDisabledReason ?? (pullQueued ? 'Cancel queued pull' : 'Pull'));
   let pushTitle = $derived(
     pushDisabledReason ??
@@ -562,11 +575,23 @@
             variant="ghost"
             size="icon-xs"
             onclick={handleSessionClick}
-            title="View session"
-            aria-label="View session"
-            class="session-action size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+            title={sessionTitle}
+            aria-label={sessionTitle}
+            class={[
+              'session-action relative size-[22px] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3',
+              chatState === 'none'
+                ? 'text-[var(--text-faint)]'
+                : 'has-chat-activity text-[var(--text-muted)]',
+            ]}
           >
-            <MessageSquare size={12} />
+            {#if chatState === 'none'}
+              <MessageSquare size={12} />
+            {:else}
+              <MessageSquareText size={12} />
+              {#if chatState === 'unread'}
+                <span class="chat-unread-dot"></span>
+              {/if}
+            {/if}
           </Button>
         {/if}
         {#if onDeleteClick || deleteDisabledReason}
@@ -846,24 +871,46 @@
     line-height: 1;
   }
 
-  /* Actions container - visible on row hover/focus, always available on touch */
   .timeline-actions {
     display: flex;
     align-items: center;
     gap: 2px;
     flex-shrink: 0;
+  }
+
+  /* Actions - visible on row hover/focus, always available on touch. Revealed
+     per child rather than on the container, so a chat button with replies
+     since its note can stay visible while the rest wait for hover. */
+  .timeline-actions > :global(*) {
     opacity: 0;
+  }
+
+  /* Buttons already transition opacity; their span wrappers need their own. */
+  .timeline-actions > :global(span) {
     transition: opacity 0.1s;
   }
 
-  .timeline-row:hover .timeline-actions,
-  .timeline-row:focus-within .timeline-actions,
-  .timeline-actions.always-visible {
+  .timeline-row:hover .timeline-actions > :global(*),
+  .timeline-row:focus-within .timeline-actions > :global(*),
+  .timeline-actions.always-visible > :global(*),
+  .timeline-actions > :global(.session-action.has-chat-activity) {
     opacity: 1;
   }
 
+  /* The project unread dot, smaller, on the chat icon's corner. */
+  .chat-unread-dot {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: var(--ui-accent);
+    pointer-events: none;
+  }
+
   @media (hover: none), (pointer: coarse) {
-    .timeline-actions {
+    .timeline-actions > :global(*) {
       opacity: 1;
     }
 

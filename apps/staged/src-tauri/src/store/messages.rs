@@ -13,6 +13,11 @@ const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at
     acp_raw_input, acp_raw_output, acp_content, acp_locations, acp_usage,
     acp_session_info, acp_config_options, acp_session_mode_state, acp_origin";
 const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
+/// Assistant replies the chat shows (empty ACP rows never render): what
+/// [`Store::count_assistant_messages_after`] counts and what a note row's chat
+/// button compares against.
+pub(super) const VISIBLE_ASSISTANT_FILTER: &str =
+    "role = 'assistant' AND NOT (content = '' AND acp_event_kind IS NOT NULL)";
 /// ACP rows the transcript needs on top of [`Store::get_session_messages`]:
 /// hidden rows of the kinds the frontend reads (`acpTranscript.ts`,
 /// `acpConfigMetadata.ts`), plus visible tool rows still in flight — the
@@ -592,15 +597,35 @@ impl Store {
     ) -> Result<i64, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM session_messages
-             WHERE session_id = ?1
-               AND role = 'assistant'
-               AND created_at > ?2
-               AND NOT (content = '' AND acp_event_kind IS NOT NULL)",
+            &format!(
+                "SELECT COUNT(*) FROM session_messages
+                 WHERE session_id = ?1 AND created_at > ?2 AND {VISIBLE_ASSISTANT_FILTER}"
+            ),
             params![session_id, after_timestamp],
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// When a session's chat last got a reply it shows, and when the user last
+    /// read it (`sessions.chat_read_at`): the inputs to a note row's chat
+    /// button. Either is `None` when there is no such reply, or no read yet.
+    pub fn session_chat_activity(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<i64>, Option<i64>), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT
+                   (SELECT MAX(created_at) FROM session_messages
+                    WHERE session_id = ?1 AND {VISIBLE_ASSISTANT_FILTER}),
+                   (SELECT chat_read_at FROM sessions WHERE id = ?1)"
+            ),
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(Into::into)
     }
 
     /// Get messages with id >= since_id, plus fresh copies of `refetch_ids`.

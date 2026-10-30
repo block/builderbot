@@ -192,6 +192,10 @@ pub struct NoteTimelineItem {
     /// `None` for session-produced notes, `"written"` for user-authored ones —
     /// the frontend routes the latter to the editor instead of the viewer.
     pub subtype: Option<String>,
+    /// When the session's chat last got a reply it shows.
+    pub last_chat_message_at: Option<i64>,
+    /// When the user last read the session's chat (`sessions.chat_read_at`).
+    pub chat_read_at: Option<i64>,
 }
 
 /// Review with session status resolved.
@@ -2330,6 +2334,7 @@ pub fn run() {
             session_commands::get_tool_image,
             session_commands::get_tool_call_body,
             session_commands::count_assistant_messages_after,
+            session_commands::mark_session_chat_read,
             session_commands::start_session,
             session_commands::resume_session,
             session_commands::queue_session_message,

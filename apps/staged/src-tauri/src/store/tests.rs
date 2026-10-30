@@ -296,6 +296,44 @@ fn test_get_project_note_with_status_is_not_project_scoped() {
 }
 
 #[test]
+fn test_list_project_notes_with_status_fills_chat_activity() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let session = Session::new_running("write the project note", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let session_note = ProjectNote::new(&project.id, "Overview", "Body").with_session(&session.id);
+    store.create_project_note(&session_note).unwrap();
+    let plain_note = ProjectNote::new(&project.id, "Pasted", "Body");
+    store.create_project_note(&plain_note).unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "a reply")
+        .unwrap();
+    store.mark_session_chat_read(&session.id).unwrap();
+    let (last_reply_at, read_at) = store.session_chat_activity(&session.id).unwrap();
+    assert!(last_reply_at.is_some() && read_at.is_some());
+
+    let notes = store.list_project_notes_with_status(&project.id).unwrap();
+    let chat_of = |id: &str| {
+        let note = notes.iter().find(|note| note.id == id).unwrap();
+        (note.last_chat_message_at, note.chat_read_at)
+    };
+    assert_eq!(chat_of(&session_note.id), (last_reply_at, read_at));
+    assert_eq!(chat_of(&plain_note.id), (None, None));
+
+    // The single-note refresh a finished session triggers carries them too.
+    let refreshed = store
+        .get_project_note_by_session_with_status(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (refreshed.last_chat_message_at, refreshed.chat_read_at),
+        (last_reply_at, read_at)
+    );
+}
+
+#[test]
 fn test_delete_project_cascades() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -2779,6 +2817,101 @@ fn test_count_assistant_messages_after() {
     assert_eq!(count, 0);
 }
 
+#[test]
+fn test_session_chat_activity_tracks_the_latest_visible_reply() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let set_created_at = |id: i64, created_at: i64| {
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session_messages SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![created_at, id],
+            )
+            .unwrap();
+    };
+
+    assert_eq!(
+        store.session_chat_activity(&session.id).unwrap(),
+        (None, None)
+    );
+
+    let reply = store
+        .add_session_message(&session.id, MessageRole::Assistant, "reply")
+        .unwrap();
+    set_created_at(reply, 1_000);
+    // Rows the chat doesn't show as replies never count, however late.
+    for role in [
+        MessageRole::User,
+        MessageRole::ToolCall,
+        MessageRole::ToolResult,
+    ] {
+        let id = store
+            .add_session_message(&session.id, role, "not a reply")
+            .unwrap();
+        set_created_at(id, 5_000);
+    }
+    let metadata = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("session_info_update".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    set_created_at(metadata, 5_000);
+
+    assert_eq!(
+        store.session_chat_activity(&session.id).unwrap(),
+        (Some(1_000), None)
+    );
+}
+
+#[test]
+fn test_mark_session_chat_read_only_writes_for_new_replies() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let read_at = || store.session_chat_activity(&session.id).unwrap().1;
+
+    // A chat with no replies has nothing to read.
+    store.mark_session_chat_read(&session.id).unwrap();
+    assert_eq!(read_at(), None);
+
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "reply")
+        .unwrap();
+    store.mark_session_chat_read(&session.id).unwrap();
+    let first_read = read_at().unwrap();
+    let reply_at = store.session_chat_activity(&session.id).unwrap().0;
+    assert!(reply_at.is_some_and(|at| at <= first_read));
+
+    // Reopening with nothing new leaves the read time alone.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store.mark_session_chat_read(&session.id).unwrap();
+    assert_eq!(read_at(), Some(first_read));
+
+    // A reply after the read moves it on at the next mark.
+    let later = store
+        .add_session_message(&session.id, MessageRole::Assistant, "later reply")
+        .unwrap();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE session_messages SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![first_read + 1, later],
+        )
+        .unwrap();
+    store.mark_session_chat_read(&session.id).unwrap();
+    assert!(read_at().unwrap() > first_read);
+}
+
 // =============================================================================
 // Workdirs
 // =============================================================================
@@ -4398,6 +4531,54 @@ fn change_feed_written_note_edits_publish_like_other_note_mutations() {
     assert!(store
         .update_written_note(&agent.id, "Hijacked", "mine now")
         .is_err());
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn change_feed_marking_a_chat_read_publishes_its_note_only_when_it_writes() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let branch_session = Session::new_running("branch note", Path::new("/tmp"));
+    store.create_session(&branch_session).unwrap();
+    let note = Note::new(&branch.id, "Plan", "body").with_session(&branch_session.id);
+    store.create_note(&note).unwrap();
+    let project_session = Session::new_running("project note", Path::new("/tmp"));
+    store.create_session(&project_session).unwrap();
+    let project_note =
+        ProjectNote::new(&project.id, "Overview", "body").with_session(&project_session.id);
+    store.create_project_note(&project_note).unwrap();
+    for session_id in [&branch_session.id, &project_session.id] {
+        store
+            .add_session_message(session_id, MessageRole::Assistant, "a reply")
+            .unwrap();
+    }
+    while rx.try_recv().is_ok() {}
+
+    // Note rows show the read state, so their lists reload in every window.
+    store.mark_session_chat_read(&branch_session.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Notes {
+            branch_id: Some(branch.id.clone()),
+            project_id: None
+        }
+    );
+    store.mark_session_chat_read(&project_session.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Notes {
+            branch_id: None,
+            project_id: Some(project.id.clone())
+        }
+    );
+
+    // Reopening a chat with nothing new writes nothing, so it reloads nothing.
+    store.mark_session_chat_read(&branch_session.id).unwrap();
     assert!(rx.try_recv().is_err());
 }
 

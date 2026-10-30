@@ -25,7 +25,7 @@
     NoteSubtype,
     UpstreamRelation,
   } from '../../types';
-  import type { NoteClickInfo } from '../sessions/noteFreshness';
+  import { noteChatState, type NoteChatState, type NoteClickInfo } from '../sessions/noteFreshness';
   import type { PendingAdd } from '../branches/timelineImages';
   import TimelineRow from './TimelineRow.svelte';
   import TimelineContextMenu, {
@@ -291,6 +291,7 @@
     noteContent?: string;
     noteUpdatedAt?: number;
     noteSubtype?: NoteSubtype;
+    chatState?: NoteChatState;
     reviewId?: string;
     imageId?: string;
     imageFilename?: string;
@@ -778,6 +779,7 @@
         noteContent: note.content,
         noteUpdatedAt: note.updatedAt,
         noteSubtype: note.subtype,
+        chatState: type === 'note' ? noteChatState(note) : 'none',
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
@@ -1174,6 +1176,7 @@
               !error &&
               !actionFooterVisible}
             sessionId={item.sessionId}
+            chatState={item.chatState}
             deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
             contextMenuKey={hasContextMenuAction(item) ? item.key : undefined}
             showConnector={item.showConnector}

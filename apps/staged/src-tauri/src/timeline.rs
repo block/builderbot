@@ -519,9 +519,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .into_iter()
         .map(|n| {
             let resolved = store.resolve_session_status(n.session_id.as_deref());
+            let (last_chat_message_at, chat_read_at) = match n.session_id.as_deref() {
+                Some(session_id) => store
+                    .session_chat_activity(session_id)
+                    .map_err(|e| e.to_string())?,
+                None => (None, None),
+            };
             // Session titles are temporary labels and may contain the full prompt.
             // Keep the stored document title, including when a session resumes.
-            NoteTimelineItem {
+            Ok(NoteTimelineItem {
                 id: n.id,
                 title: n.title,
                 content: n.content,
@@ -534,9 +540,11 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 suggested_next_commit_step: n.suggested_next_commit_step,
                 suggested_next_note_step: n.suggested_next_note_step,
                 subtype: n.subtype,
-            }
+                last_chat_message_at,
+                chat_read_at,
+            })
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
 
     let db_reviews = store
         .list_reviews_for_branch(branch_id)
@@ -1550,8 +1558,8 @@ mod tests {
     use super::*;
     use crate::git::Span;
     use crate::store::models::{
-        Branch, Comment, Commit, Note, PipelineExecution, PipelineKind, Project, ReviewScope,
-        Session, SessionStatus, Workdir,
+        Branch, Comment, Commit, MessageRole, Note, PipelineExecution, PipelineKind, Project,
+        ReviewScope, Session, SessionStatus, Workdir,
     };
     use crate::test_utils::TempGitRepo;
     use std::fs;
@@ -1993,6 +2001,35 @@ mod tests {
         };
         assert_eq!(title_of(&titled_note.id), "write up the plan");
         assert_eq!(title_of(&untitled_note.id), "summarize findings");
+    }
+
+    #[test]
+    fn build_branch_timeline_note_carries_chat_activity() {
+        let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let session = running_session(&store, "write up the plan", None);
+        let session_note = Note::new(&branch.id, "Plan", "body").with_session(&session.id);
+        store.create_note(&session_note).unwrap();
+        let written_note =
+            Note::new(&branch.id, "Draft", "body").with_subtype(Note::SUBTYPE_WRITTEN);
+        store.create_note(&written_note).unwrap();
+        store
+            .add_session_message(&session.id, MessageRole::Assistant, "a reply")
+            .unwrap();
+        store.mark_session_chat_read(&session.id).unwrap();
+        let (last_reply_at, read_at) = store.session_chat_activity(&session.id).unwrap();
+        assert!(last_reply_at.is_some() && read_at.is_some());
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let chat_of = |note_id: &str| {
+            let item = timeline.notes.iter().find(|n| n.id == note_id).unwrap();
+            (item.last_chat_message_at, item.chat_read_at)
+        };
+        assert_eq!(chat_of(&session_note.id), (last_reply_at, read_at));
+        // A note with no session has no chat to show.
+        assert_eq!(chat_of(&written_note.id), (None, None));
     }
 
     #[test]

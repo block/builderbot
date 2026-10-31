@@ -1050,6 +1050,11 @@ export function countAssistantMessagesAfter(
   return invokeCommand('count_assistant_messages_after', { sessionId, afterTimestamp });
 }
 
+/** Record that the user has read the session's chat, clearing its note row's unread dot. */
+export function markSessionChatRead(sessionId: string): Promise<void> {
+  return invokeCommand('mark_session_chat_read', { sessionId });
+}
+
 /** Create a session and immediately start the agent. */
 export function startSession(
   prompt: string,

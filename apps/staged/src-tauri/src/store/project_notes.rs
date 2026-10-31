@@ -249,7 +249,25 @@ impl Store {
             suggested_next_note_step: row.get(9)?,
             session_status: None,
             completion_reason: None,
+            last_chat_message_at: None,
+            chat_read_at: None,
         })
+    }
+
+    /// Fill a project note's query-time fields from its session: status, and
+    /// the chat activity its row's chat button shows.
+    ///
+    /// Best-effort, like the status: a lookup miss leaves the chat button in
+    /// its plain state rather than failing the note or its list.
+    fn resolve_project_note_session(&self, note: &mut ProjectNote) {
+        let resolved = self.resolve_session_status(note.session_id.as_deref());
+        note.session_status = resolved.status;
+        note.completion_reason = resolved.completion_reason;
+        (note.last_chat_message_at, note.chat_read_at) = note
+            .session_id
+            .as_deref()
+            .and_then(|session_id| self.session_chat_activity(session_id).ok())
+            .unwrap_or_default();
     }
 
     /// Find a project note by id with session status resolved.
@@ -265,9 +283,7 @@ impl Store {
             Some(n) => n,
             None => return Ok(None),
         };
-        let resolved = self.resolve_session_status(note.session_id.as_deref());
-        note.session_status = resolved.status;
-        note.completion_reason = resolved.completion_reason;
+        self.resolve_project_note_session(&mut note);
         Ok(Some(note))
     }
 
@@ -280,22 +296,19 @@ impl Store {
             Some(n) => n,
             None => return Ok(None),
         };
-        let resolved = self.resolve_session_status(note.session_id.as_deref());
-        note.session_status = resolved.status;
-        note.completion_reason = resolved.completion_reason;
+        self.resolve_project_note_session(&mut note);
         Ok(Some(note))
     }
 
-    /// Return project notes with session status resolved from the sessions table.
+    /// Return project notes with session status and chat activity resolved
+    /// from the sessions table.
     pub fn list_project_notes_with_status(
         &self,
         project_id: &str,
     ) -> Result<Vec<ProjectNote>, StoreError> {
         let mut notes = self.list_project_notes(project_id)?;
         for note in &mut notes {
-            let resolved = self.resolve_session_status(note.session_id.as_deref());
-            note.session_status = resolved.status;
-            note.completion_reason = resolved.completion_reason;
+            self.resolve_project_note_session(note);
         }
         Ok(notes)
     }

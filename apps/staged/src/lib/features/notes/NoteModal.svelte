@@ -35,6 +35,7 @@
     getProjectNote,
     getProjectNoteBySession,
     handleExternalLinkClick,
+    markSessionChatRead,
   } from '../../api/commands';
   import { listenToEvent } from '../../transport';
   import { notesChangeAffectsNote } from './noteRefresh';
@@ -395,6 +396,22 @@
       setChatOpen(true);
     }
   });
+
+  // Showing the chat marks its replies read, clearing the unread dot on the
+  // note's row; hiding it (or closing the dialog) does too, covering replies
+  // that streamed in while it was open.
+  $effect(() => {
+    const sid = open && chatOpen ? sessionId : null;
+    if (!sid) return;
+    markChatRead(sid);
+    return () => markChatRead(sid);
+  });
+
+  function markChatRead(sid: string) {
+    markSessionChatRead(sid).catch((error) => {
+      console.warn('Failed to mark chat read', error);
+    });
+  }
 
   function setChatOpen(next: boolean) {
     chatOpen = next;

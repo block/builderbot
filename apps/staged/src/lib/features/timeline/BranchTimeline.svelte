@@ -25,7 +25,7 @@
     NoteSubtype,
     UpstreamRelation,
   } from '../../types';
-  import type { NoteClickInfo } from '../sessions/noteFreshness';
+  import { noteChatState, type NoteChatState, type NoteClickInfo } from '../sessions/noteFreshness';
   import type { PendingAdd } from '../branches/timelineImages';
   import TimelineRow from './TimelineRow.svelte';
   import TimelineContextMenu, {
@@ -48,6 +48,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { formatNoteTimestamp, noteLastWrittenAt } from '../notes/noteTimestamps';
   import { reviewBadges } from './reviewBadges';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
@@ -290,6 +291,7 @@
     noteContent?: string;
     noteUpdatedAt?: number;
     noteSubtype?: NoteSubtype;
+    chatState?: NoteChatState;
     reviewId?: string;
     imageId?: string;
     imageFilename?: string;
@@ -758,7 +760,7 @@
         secondaryMeta = liveHint ?? 'Generating note';
       } else {
         type = 'note';
-        secondaryMeta = formatRelativeTime(note.completedAt ?? note.createdAt, nowMs);
+        secondaryMeta = formatNoteTimestamp(note, nowMs);
       }
 
       all.push({
@@ -768,8 +770,8 @@
         title: stripXmlTags(note.title),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
-        // Use completedAt so completed notes sort by completion time, not queue time
-        timestamp: Math.floor((note.completedAt ?? note.createdAt) / 1000),
+        // Sort by when the content was last written, not queue time
+        timestamp: Math.floor(noteLastWrittenAt(note) / 1000),
         order: 0,
         sessionId: note.sessionId ?? undefined,
         noteId: note.id,
@@ -777,6 +779,7 @@
         noteContent: note.content,
         noteUpdatedAt: note.updatedAt,
         noteSubtype: note.subtype,
+        chatState: type === 'note' ? noteChatState(note) : 'none',
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
@@ -1173,6 +1176,7 @@
               !error &&
               !actionFooterVisible}
             sessionId={item.sessionId}
+            chatState={item.chatState}
             deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
             contextMenuKey={hasContextMenuAction(item) ? item.key : undefined}
             showConnector={item.showConnector}

@@ -198,6 +198,10 @@ export interface NoteTimelineItem {
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
   subtype: NoteSubtype;
+  /** When the session's chat last got a reply it shows. */
+  lastChatMessageAt: number | null;
+  /** When the user last read the session's chat. */
+  chatReadAt: number | null;
 }
 
 /**
@@ -409,6 +413,10 @@ export interface ProjectNote {
   suggestedNextNoteStep: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  /** When the session's chat last got a reply it shows. */
+  lastChatMessageAt: number | null;
+  /** When the user last read the session's chat. */
+  chatReadAt: number | null;
 }
 
 export interface ProjectSessionResponse {

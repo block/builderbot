@@ -1278,6 +1278,18 @@ pub fn count_assistant_messages_after(
         .map_err(|e| e.to_string())
 }
 
+/// Record that the user has read the session's chat, clearing the unread dot
+/// on its note row.
+#[tauri::command]
+pub fn mark_session_chat_read(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .mark_session_chat_read(&session_id)
+        .map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Lifecycle commands
 // =============================================================================

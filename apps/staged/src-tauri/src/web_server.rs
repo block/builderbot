@@ -3309,6 +3309,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(count).unwrap())
         }
+        "mark_session_chat_read" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            store
+                .mark_session_chat_read(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "get_session_acp_metadata_messages" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

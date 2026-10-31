@@ -7,6 +7,7 @@ import {
   hasNoteFollowupBeenSent,
   latestAssistantMessage,
   noteActivityLabel,
+  noteChatState,
   type LinkedNoteContext,
 } from './noteFreshness';
 
@@ -197,6 +198,37 @@ describe('formatChatButtonLabel', () => {
 
   it('returns generic label for 0 messages', () => {
     expect(formatChatButtonLabel(0)).toBe('View chat');
+  });
+});
+
+describe('noteChatState', () => {
+  const updatedAt = 5000;
+
+  it('is none when the chat has no replies', () => {
+    expect(noteChatState({ updatedAt, lastChatMessageAt: null, chatReadAt: null })).toBe('none');
+  });
+
+  it('is none when every reply came before the note was written', () => {
+    expect(noteChatState({ updatedAt, lastChatMessageAt: 4000, chatReadAt: null })).toBe('none');
+  });
+
+  it('is unread when replies after the note have never been read', () => {
+    expect(noteChatState({ updatedAt, lastChatMessageAt: 6000, chatReadAt: null })).toBe('unread');
+  });
+
+  it('is read once the chat has been read since the last reply', () => {
+    expect(noteChatState({ updatedAt, lastChatMessageAt: 6000, chatReadAt: 6000 })).toBe('read');
+    expect(noteChatState({ updatedAt, lastChatMessageAt: 6000, chatReadAt: 9000 })).toBe('read');
+  });
+
+  it('is unread when a reply landed after the last read', () => {
+    expect(noteChatState({ updatedAt, lastChatMessageAt: 8000, chatReadAt: 6000 })).toBe('unread');
+  });
+
+  it('drops back to none when the note is rewritten after the read', () => {
+    expect(noteChatState({ updatedAt: 9000, lastChatMessageAt: 8000, chatReadAt: 8500 })).toBe(
+      'none'
+    );
   });
 });
 

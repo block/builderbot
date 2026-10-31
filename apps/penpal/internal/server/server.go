@@ -287,6 +287,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/agents", s.handleAgentStatus)
 	s.mux.HandleFunc("/api/agents/start", s.handleAgentStart)
 	s.mux.HandleFunc("/api/agents/stop", s.handleAgentStop)
+	s.mux.HandleFunc("/api/agents/attach", s.handleAgentAttach)
+	s.mux.HandleFunc("/api/agents/wait", s.handleAgentWait)
 	// Raw file content
 	s.mux.HandleFunc("/api/raw", s.handleRawFile)
 	// Activity tracking

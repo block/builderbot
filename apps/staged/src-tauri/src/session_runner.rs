@@ -4686,9 +4686,17 @@ fn emit_background_hold(
 }
 
 /// Emit a `session-status-changed` event with `"running"` status and branch/project
-/// context. Called by the MCP tool when it starts a repo session on behalf of a project
-/// session, so the frontend can register the session in its state stores and refresh
-/// the branch card timeline immediately (without waiting for completion).
+/// context for a repo session that is starting *immediately*, outside the queue
+/// drain. The callers are the immediate branch start in
+/// `start_or_queue_branch_session_for_store` and the `prs.rs` pipelines; the
+/// event goes out before the caller answers the client so the frontend registers
+/// the session and refreshes the branch timeline before it can complete.
+///
+/// Not the MCP path: `start_repo_session` writes a `queued` stub and kicks the
+/// drain, and `start_queued_session_for_branch` announces `running` itself when
+/// it claims the row. `branch_id` is a non-optional `&str` here because the
+/// emitted event must carry it — see the invariant documented on
+/// [`SessionStatusEvent::branch_id`].
 pub fn emit_session_running(
     app_handle: &AppHandle,
     session_id: &str,

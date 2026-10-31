@@ -77,6 +77,27 @@ pub trait MessageWriter: Send + Sync {
         false
     }
 
+    /// Persist a user message the connection delivered itself: one that
+    /// reached the agent mid-session through a [`TurnControlHandle`] (steered
+    /// into the live turn, or sent as the prompt that follows an interrupt)
+    /// rather than through a caller that wrote its own row before calling
+    /// [`SessionConnection::prompt`].
+    ///
+    /// Called on the connection task right after the open assistant message
+    /// is finalized and before anything the agent says in reply can be
+    /// appended, so the transcript reads assistant → user → assistant.
+    /// `attachment_ids` are the caller's own ids for the attachments behind
+    /// `images` (opaque here: this crate sends bytes, not ids), handed back
+    /// so the row can reference the stored attachments. The default records
+    /// nothing.
+    async fn record_user_message(
+        &self,
+        _text: &str,
+        _images: &[PromptImage],
+        _attachment_ids: &[String],
+    ) {
+    }
+
     /// Record a tool call with its ID, title, and optional raw input parameters.
     async fn record_tool_call(
         &self,
@@ -1094,6 +1115,11 @@ pub struct AcpDriver {
     /// hold, so the client can present the wait. Only ever called with a
     /// `background_hold` configured.
     background_hold_observer: Option<BackgroundHoldObserver>,
+    /// Treat the agent as not advertising steering even when it does, so
+    /// every [`TurnControlHandle::steer`] is refused locally and callers take
+    /// the interrupt-and-reprompt path. See
+    /// [`AcpDriver::with_steering_disabled`].
+    steering_disabled: bool,
 }
 
 const REMOTE_ACP_MAX_PENDING_LINE_BYTES: usize = 256 * 1024;
@@ -1118,6 +1144,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                steering_disabled: false,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
     }
@@ -1137,6 +1164,7 @@ impl AcpDriver {
                 remote_working_dir: None,
                 background_hold: None,
                 background_hold_observer: None,
+                steering_disabled: false,
             })
             .ok_or_else(|| {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
@@ -1157,6 +1185,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
     }
 
@@ -1181,6 +1210,7 @@ impl AcpDriver {
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         })
     }
 
@@ -1260,6 +1290,18 @@ impl AcpDriver {
         observer: Option<BackgroundHoldObserver>,
     ) -> Self {
         self.background_hold_observer = observer;
+        self
+    }
+
+    /// Ignore the agent's steering advertisement: every
+    /// [`TurnControlHandle::steer`] on connections from this driver is refused
+    /// as if the agent lacked the extension, so a caller's fallback
+    /// ([`TurnControlHandle::interrupt_and_reprompt`]) is what delivers the
+    /// message. A diagnostics knob: it exercises the interrupt path against an
+    /// agent that would otherwise take the steer, which every supported agent
+    /// now does.
+    pub fn with_steering_disabled(mut self, disabled: bool) -> Self {
+        self.steering_disabled = disabled;
         self
     }
 }
@@ -1412,8 +1454,171 @@ type SessionTurnResult = Result<AgentRunOutcome, String>;
 struct QueuedSessionTurn {
     prompt: String,
     images: Vec<PromptImage>,
-    /// Resolved by the connection task with the turn's outcome.
-    reply: oneshot::Sender<SessionTurnResult>,
+    /// The caller's ids for `images`, recorded with the user row when the
+    /// connection persists it (see [`MessageWriter::record_user_message`]).
+    attachment_ids: Vec<String>,
+    /// Resolved by the connection task with the turn's outcome. `None` for a
+    /// turn that did not come through [`SessionConnection::prompt`]: one the
+    /// turn-control channel started (served out of a hold, or re-prompted
+    /// after an interrupt). Its caller is answered through `control`, and its
+    /// outcome belongs to whichever `prompt()` is still pending on the
+    /// connection.
+    reply: Option<oneshot::Sender<SessionTurnResult>>,
+    /// The turn-control request this turn serves, if any. Answered once the
+    /// turn is being sent; its presence also tells the session loop that the
+    /// connection must persist the user message itself (see
+    /// [`MessageWriter::record_user_message`]).
+    control: Option<TurnControlReply>,
+}
+
+/// How a message reached the agent through [`TurnControlHandle::steer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerOutcome {
+    /// The agent injected the message into its in-flight turn.
+    Injected,
+    /// No turn was in flight on the connection (it was holding for background
+    /// work, or idle between turns), so the message was sent as a fresh
+    /// `session/prompt` on the same connection instead.
+    NewTurnStarted,
+}
+
+/// Why [`TurnControlHandle::steer`] did not deliver the message. The split
+/// matters to the caller's fallback: a `Refused` steer is known not to have
+/// reached the agent, so sending the same text again by another route cannot
+/// double-deliver it; an `Unacknowledged` one may have — the bridge took the
+/// frame and never answered — so the caller must not re-send blindly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerError {
+    /// The agent did not answer the `_session/steering` request within
+    /// `timeout` ([`STEER_ACK_TIMEOUT`]). Whether the message was injected is
+    /// unknown; no user row was persisted for it, and an answer landing after
+    /// this persists nothing either.
+    Unacknowledged { timeout: Duration },
+    /// The steer did not reach the agent's turn and the message was not
+    /// delivered: the agent does not advertise steering, it answered anything
+    /// but `injected` (`promptRequired`, `failed`, `startedNewTurn`), the
+    /// request could not be built or sent, or the connection is gone.
+    Refused(String),
+}
+
+impl std::fmt::Display for SteerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unacknowledged { timeout } => write!(
+                f,
+                "Agent did not answer the steer within {}s",
+                timeout.as_secs()
+            ),
+            Self::Refused(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for SteerError {}
+
+/// A request queued onto a [`SessionConnection`]'s turn-control channel by a
+/// [`TurnControlHandle`]: a message that must reach the agent now, not after
+/// the turn in flight ends.
+enum TurnControlRequest {
+    /// Inject into the in-flight turn via `_session/steering`.
+    Steer {
+        prompt: String,
+        images: Vec<PromptImage>,
+        attachment_ids: Vec<String>,
+        reply: oneshot::Sender<Result<SteerOutcome, SteerError>>,
+    },
+    /// `session/cancel` the in-flight turn, then send the message as the next
+    /// `session/prompt` on the same connection.
+    Interrupt {
+        prompt: String,
+        images: Vec<PromptImage>,
+        attachment_ids: Vec<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+impl TurnControlRequest {
+    /// Serve the request as a fresh turn on this connection — the answer
+    /// whenever nothing is in flight to steer or interrupt: a steer would come
+    /// back `promptRequired` (or, from codex-acp, start a turn this client
+    /// would not own), and an interrupt has nothing to cancel.
+    fn into_turn(self) -> QueuedSessionTurn {
+        let (prompt, images, attachment_ids, control) = match self {
+            Self::Steer {
+                prompt,
+                images,
+                attachment_ids,
+                reply,
+            } => (
+                prompt,
+                images,
+                attachment_ids,
+                TurnControlReply::Steer(reply),
+            ),
+            Self::Interrupt {
+                prompt,
+                images,
+                attachment_ids,
+                reply,
+            } => (
+                prompt,
+                images,
+                attachment_ids,
+                TurnControlReply::Interrupt(reply),
+            ),
+        };
+        QueuedSessionTurn {
+            prompt,
+            images,
+            attachment_ids,
+            reply: None,
+            control: Some(control),
+        }
+    }
+
+    fn reject(self, reason: String) {
+        match self {
+            Self::Steer { reply, .. } => {
+                let _ = reply.send(Err(SteerError::Refused(reason)));
+            }
+            Self::Interrupt { reply, .. } => {
+                let _ = reply.send(Err(reason));
+            }
+        }
+    }
+}
+
+/// The reply half of a [`TurnControlRequest`] whose message became a
+/// [`QueuedSessionTurn`] of its own.
+enum TurnControlReply {
+    Steer(oneshot::Sender<Result<SteerOutcome, SteerError>>),
+    Interrupt(oneshot::Sender<Result<(), String>>),
+}
+
+impl TurnControlReply {
+    /// Answer the caller: the message is going out as its own turn.
+    fn turn_started(self) {
+        match self {
+            Self::Steer(reply) => {
+                let _ = reply.send(Ok(SteerOutcome::NewTurnStarted));
+            }
+            Self::Interrupt(reply) => {
+                let _ = reply.send(Ok(()));
+            }
+        }
+    }
+
+    /// Answer the caller: the message is not going out after all.
+    fn reject(self, reason: String) {
+        match self {
+            Self::Steer(reply) => {
+                let _ = reply.send(Err(SteerError::Refused(reason)));
+            }
+            Self::Interrupt(reply) => {
+                let _ = reply.send(Err(reason));
+            }
+        }
+    }
 }
 
 /// A per-task stop queued onto a [`SessionConnection`]'s hold-control channel,
@@ -1465,6 +1670,205 @@ impl AsyncTaskStopHandle {
     }
 }
 
+/// Cloneable, thread-safe handle for delivering a message to a
+/// [`SessionConnection`]'s agent *now* — into the turn in flight, or in place
+/// of it — instead of queueing it for after the turn. Registered where a
+/// client's own commands can reach it, like [`AsyncTaskStopHandle`].
+#[derive(Clone)]
+pub struct TurnControlHandle {
+    turn_control_tx: mpsc::UnboundedSender<TurnControlRequest>,
+    /// Cleared when the connection task tears down, so a request issued after
+    /// the session settled fails fast instead of sitting queued.
+    connection_alive: Arc<AtomicBool>,
+}
+
+impl TurnControlHandle {
+    /// Inject a message into the agent's in-flight turn with the
+    /// `_session/steering` extension; tool calls already running survive.
+    ///
+    /// `Ok(Injected)` means the agent took it into the live turn. With no turn
+    /// in flight (the connection holding for background work, or idle) the
+    /// message is sent as a fresh `session/prompt` on the same connection and
+    /// the answer is `Ok(NewTurnStarted)`. [`SteerError::Refused`] when the
+    /// agent does not advertise steering, answered anything but `injected`
+    /// (`promptRequired` when the turn ended under the request, `failed`,
+    /// `startedNewTurn`), or the connection is gone — the message did not
+    /// reach the agent, and callers fall back to
+    /// [`TurnControlHandle::interrupt_and_reprompt`] with the same text.
+    /// [`SteerError::Unacknowledged`] when the agent did not answer within
+    /// `STEER_ACK_TIMEOUT`: the bridge may still have injected the message,
+    /// so callers must not re-send it by another route. The user message is
+    /// persisted (see [`MessageWriter::record_user_message`], with
+    /// `attachment_ids`) only on `Ok` — an answer that arrives after the
+    /// timeout persists nothing.
+    pub async fn steer(
+        &self,
+        prompt: &str,
+        images: &[PromptImage],
+        attachment_ids: &[String],
+    ) -> Result<SteerOutcome, SteerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send(TurnControlRequest::Steer {
+            prompt: prompt.to_string(),
+            images: images.to_vec(),
+            attachment_ids: attachment_ids.to_vec(),
+            reply: reply_tx,
+        })
+        .map_err(SteerError::Refused)?;
+        reply_rx.await.map_err(|_| {
+            SteerError::Refused("ACP connection closed before the steer resolved".to_string())
+        })?
+    }
+
+    /// Cancel the agent's in-flight turn (`session/cancel`) and send the
+    /// message as the next `session/prompt` on the same connection — the
+    /// delivery that works with every ACP agent. The connection never settles
+    /// in between: the `prompt()` future for the interrupted turn stays
+    /// pending and resolves with the final turn's outcome, and nothing is
+    /// torn down or respawned. With no turn in flight the message is simply
+    /// sent as a fresh turn.
+    ///
+    /// Resolves once the new prompt is going out. `Err` if the agent did not
+    /// acknowledge the cancel within `INTERRUPT_ACK_TIMEOUT` (the turn is
+    /// then cancelled without a re-prompt), the session was stopped while
+    /// the interrupt was pending (the stop wins; nothing is re-prompted), the
+    /// cancel could not be sent (the turn keeps running), or the connection
+    /// is gone. `attachment_ids` go onto the persisted user row.
+    pub async fn interrupt_and_reprompt(
+        &self,
+        prompt: &str,
+        images: &[PromptImage],
+        attachment_ids: &[String],
+    ) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.send(TurnControlRequest::Interrupt {
+            prompt: prompt.to_string(),
+            images: images.to_vec(),
+            attachment_ids: attachment_ids.to_vec(),
+            reply: reply_tx,
+        })?;
+        reply_rx
+            .await
+            .map_err(|_| "ACP connection closed before the interrupt resolved".to_string())?
+    }
+
+    /// Whether the connection behind this handle is still running. A request
+    /// made while this is `false` fails fast; `true` is advisory — the
+    /// connection can settle between the check and the request.
+    pub fn is_connection_alive(&self) -> bool {
+        self.connection_alive.load(Ordering::Relaxed)
+    }
+
+    /// Whether `other` reaches the same connection as this handle (clones of
+    /// one connection's handle do; a re-connect on the same session hands out
+    /// a different one).
+    pub fn same_connection(&self, other: &Self) -> bool {
+        self.turn_control_tx.same_channel(&other.turn_control_tx)
+    }
+
+    /// A handle to no connection: every request fails fast with the
+    /// connection-gone error. For registries that need a placeholder and for
+    /// tests of the plumbing around a handle.
+    #[doc(hidden)]
+    pub fn detached() -> Self {
+        let (turn_control_tx, _) = mpsc::unbounded_channel();
+        Self {
+            turn_control_tx,
+            connection_alive: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// A handle to a stand-in connection that answers every steer with
+    /// `steer` and every interrupt with `interrupt`, and appends
+    /// `"steer:<prompt>"` / `"interrupt:<prompt>"` to the returned log as the
+    /// requests arrive (followed by `"attachments:<id,id>"` when the request
+    /// carried attachment ids). For tests of the routing around a handle
+    /// (steer first, interrupt on refusal) that must not stand up a real
+    /// agent. Needs a tokio runtime: the stand-in is a task.
+    #[doc(hidden)]
+    pub fn scripted(
+        steer: Result<SteerOutcome, SteerError>,
+        interrupt: Result<(), String>,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        Self::scripted_connection(steer, interrupt, false)
+    }
+
+    /// [`Self::scripted`] whose connection reports itself gone right after it
+    /// answers its first request — the connection that settles under the
+    /// request. The stand-in keeps answering (every later request is logged
+    /// and answered the same way), but [`Self::is_connection_alive`] reads
+    /// `false` from the first answer on.
+    #[doc(hidden)]
+    pub fn scripted_then_gone(
+        steer: Result<SteerOutcome, SteerError>,
+        interrupt: Result<(), String>,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        Self::scripted_connection(steer, interrupt, true)
+    }
+
+    fn scripted_connection(
+        steer: Result<SteerOutcome, SteerError>,
+        interrupt: Result<(), String>,
+        gone_after_first_answer: bool,
+    ) -> (Self, Arc<std::sync::Mutex<Vec<String>>>) {
+        let (turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let served = Arc::clone(&log);
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        let alive = Arc::clone(&connection_alive);
+        tokio::spawn(async move {
+            while let Some(request) = turn_control_rx.recv().await {
+                let (entry, attachment_ids): (String, Vec<String>) = match &request {
+                    TurnControlRequest::Steer {
+                        prompt,
+                        attachment_ids,
+                        ..
+                    } => (format!("steer:{prompt}"), attachment_ids.clone()),
+                    TurnControlRequest::Interrupt {
+                        prompt,
+                        attachment_ids,
+                        ..
+                    } => (format!("interrupt:{prompt}"), attachment_ids.clone()),
+                };
+                {
+                    let mut served = served.lock().unwrap();
+                    served.push(entry);
+                    if !attachment_ids.is_empty() {
+                        served.push(format!("attachments:{}", attachment_ids.join(",")));
+                    }
+                }
+                if gone_after_first_answer {
+                    alive.store(false, Ordering::Relaxed);
+                }
+                match request {
+                    TurnControlRequest::Steer { reply, .. } => {
+                        let _ = reply.send(steer.clone());
+                    }
+                    TurnControlRequest::Interrupt { reply, .. } => {
+                        let _ = reply.send(interrupt.clone());
+                    }
+                }
+            }
+        });
+        (
+            Self {
+                turn_control_tx,
+                connection_alive,
+            },
+            log,
+        )
+    }
+
+    fn send(&self, request: TurnControlRequest) -> Result<(), String> {
+        if !self.connection_alive.load(Ordering::Relaxed) {
+            return Err("ACP connection is no longer running".to_string());
+        }
+        self.turn_control_tx
+            .send(request)
+            .map_err(|_| "ACP connection is no longer running".to_string())
+    }
+}
+
 /// A session-scoped connection to an ACP agent.
 ///
 /// Owns the agent (bridge) child process and the JSON-RPC connection through
@@ -1489,6 +1893,11 @@ pub struct SessionConnection {
     /// stop issued outside that window is rejected immediately (see
     /// [`AsyncTaskStopHandle`]).
     hold_active: Arc<AtomicBool>,
+    /// Messages for the turn in flight (see [`TurnControlHandle`]), served by
+    /// the live turn, the holding wait, and the between-turns wait alike.
+    turn_control_tx: mpsc::UnboundedSender<TurnControlRequest>,
+    /// Cleared by the connection task at teardown (see [`TurnControlHandle`]).
+    connection_alive: Arc<AtomicBool>,
     /// Handle to the connection task; awaited (once) to surface the session
     /// result when a turn's reply channel is dropped without an answer.
     connection_task: Option<tokio::task::JoinHandle<SessionTurnResult>>,
@@ -1530,6 +1939,17 @@ impl SessionConnection {
         }
     }
 
+    /// A cloneable, thread-safe handle for delivering a message to the turn
+    /// in flight ([`TurnControlHandle::steer`]) or in place of it
+    /// ([`TurnControlHandle::interrupt_and_reprompt`]), for callers that
+    /// route it from another thread (a UI command, an MCP tool).
+    pub fn turn_control_handle(&self) -> TurnControlHandle {
+        TurnControlHandle {
+            turn_control_tx: self.turn_control_tx.clone(),
+            connection_alive: Arc::clone(&self.connection_alive),
+        }
+    }
+
     /// Take the receiver for the connection's [`SessionSettled`] event.
     ///
     /// The event fires exactly once, after the agent has been torn down.
@@ -1560,7 +1980,9 @@ impl SessionConnection {
         let turn = QueuedSessionTurn {
             prompt: prompt.to_string(),
             images: images.to_vec(),
-            reply: reply_tx,
+            attachment_ids: vec![],
+            reply: Some(reply_tx),
+            control: None,
         };
         if self.prompt_tx.send(turn).is_err() {
             // The connection task already exited (e.g. setup failed before
@@ -1871,6 +2293,10 @@ impl AcpDriver {
             mpsc::unbounded_channel::<StopAsyncTaskRequest>();
         let hold_active = Arc::new(AtomicBool::new(false));
         let hold_active_for_task = Arc::clone(&hold_active);
+        let (turn_control_tx, mut turn_control_rx) =
+            mpsc::unbounded_channel::<TurnControlRequest>();
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        let connection_alive_for_task = Arc::clone(&connection_alive);
         let (settled_tx, settled_rx) = oneshot::channel::<SessionSettled>();
 
         // Owned copies for the connection task — its lifetime is the
@@ -1885,6 +2311,7 @@ impl AcpDriver {
         let auth_selection = auth_selection.cloned();
         let mcp_servers = self.mcp_servers.clone();
         let agent_label = self.agent_label.clone();
+        let steering_disabled = self.steering_disabled;
         let is_remote = self.is_remote;
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
@@ -1903,9 +2330,17 @@ impl AcpDriver {
                 .builder()
                 .name("staged-acp-client")
                 .on_receive_request(
-                    async move |args: RequestPermissionRequest, responder, _connection| {
-                        let response = permission_handler.request_permission(args).await?;
-                        responder.respond(response)
+                    async move |args: RequestPermissionRequest, responder, connection| {
+                        // The decision may wait on a person. Handlers run on
+                        // the connection's single dispatch task, so awaiting
+                        // it here would stall every other frame — the prompt
+                        // response that acknowledges a cancel, a steer's
+                        // answer — until someone clicks.
+                        let handler = Arc::clone(&permission_handler);
+                        connection.spawn(async move {
+                            let response = handler.request_permission(args).await?;
+                            responder.respond(response)
+                        })
                     },
                     agent_client_protocol::on_receive_request!(),
                 )
@@ -1975,9 +2410,11 @@ impl AcpDriver {
                         auth_selection.as_ref(),
                         background_hold.as_ref(),
                         background_hold_observer.as_ref(),
+                        steering_disabled,
                         &child_exited,
                         &mut prompt_rx,
                         &mut hold_control_rx,
+                        &mut turn_control_rx,
                         &hold_active_for_task,
                         &pending_reply,
                     )
@@ -1986,6 +2423,11 @@ impl AcpDriver {
                 })
                 .await
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
+
+            // Nothing serves the turn-control channel past this point: fail
+            // new requests fast at the handle and answer any already queued.
+            connection_alive_for_task.store(false, Ordering::Relaxed);
+            reject_queued_turn_control_requests(&mut turn_control_rx, "the ACP connection closed");
 
             writer.finalize().await;
             graceful_stop(&mut child, is_remote).await;
@@ -2025,6 +2467,8 @@ impl AcpDriver {
             prompt_tx,
             hold_control_tx,
             hold_active,
+            turn_control_tx,
+            connection_alive,
             connection_task: Some(connection_task),
             exit_result: None,
             settled_rx: Some(settled_rx),
@@ -2817,6 +3261,23 @@ fn task_tracking_mode_from_initialize(meta: Option<&Meta>) -> TaskTrackingMode {
     }
 }
 
+/// Top-level `_meta` key under which an agent advertises the
+/// `_session/steering` extension at initialize (a sibling of
+/// `agentCapabilities`, not inside it): `_meta.steering.supported`.
+const STEERING_META_KEY: &str = "steering";
+
+/// Whether the agent advertised steering at initialize (seen from
+/// claude-agent-acp 0.95 and codex-acp 2.2.2; absent from the 0.53 line). Anything missing or malformed is an agent without
+/// it, which [`TurnControlHandle::steer`] answers with an error so callers
+/// interrupt instead — the only safe gate with managed bridge versions that
+/// float.
+fn steering_supported_from_initialize(meta: Option<&Meta>) -> bool {
+    meta.and_then(|meta| meta.get(STEERING_META_KEY))
+        .and_then(|steering| steering.get("supported"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
 /// Method name shared by every `session/update` notification, typed or not.
 const SESSION_UPDATE_METHOD: &str = "session/update";
 
@@ -2857,6 +3318,67 @@ fn async_task_stop_outcome(
                 .unwrap_or(false)
         })
         .map_err(|e| format!("Async task stop request failed: {e:?}"))
+}
+
+/// Extension request that injects a message into the turn in flight:
+/// `{sessionId, prompt: ContentBlock[], _meta.steering.idleBehavior}` →
+/// `{outcome: "injected" | "startedNewTurn" | "promptRequired" | "failed"}`.
+/// The prompt is the same content-block array as `session/prompt`. Priority is
+/// the agent's call (`now`, or `later` while a permission request is open),
+/// not a client field. Sent verbatim with its leading `_`, like
+/// [`ASYNC_TASK_STOP_METHOD`].
+const STEERING_METHOD: &str = "_session/steering";
+
+/// The `_session/steering` request frame for one message.
+///
+/// `idleBehavior: promptRequired` asks an agent with no turn in flight to say
+/// so instead of starting a turn this client would not own. claude-agent-acp
+/// honours it; codex-acp ignores it and starts a turn — which is why the
+/// connection only ever sends this frame from inside a live turn (see
+/// [`serve_steer`]) and serves a steer that lands anywhere else as a turn of
+/// its own.
+fn steering_message(
+    agent_session_id: &str,
+    content_blocks: Vec<AcpContentBlock>,
+) -> Result<UntypedMessage, agent_client_protocol::Error> {
+    UntypedMessage::new(
+        STEERING_METHOD,
+        serde_json::json!({
+            "sessionId": agent_session_id,
+            "prompt": content_blocks,
+            "_meta": { STEERING_META_KEY: { "idleBehavior": "promptRequired" } },
+        }),
+    )
+}
+
+/// Fold a `_session/steering` response into the caller's answer. Only
+/// `injected` is a delivery. `promptRequired` means the turn ended under the
+/// request, `failed` is the agent's own refusal, `startedNewTurn` is a turn
+/// this client is not awaiting (unreachable from a live turn in practice, but
+/// mapped anyway); all read as "not injected" so the caller falls back, and
+/// a transport or agent error (method-not-found from a bridge without the
+/// extension) surfaces as such.
+fn steer_outcome(
+    result: Result<serde_json::Value, agent_client_protocol::Error>,
+) -> Result<SteerOutcome, SteerError> {
+    let response =
+        result.map_err(|e| SteerError::Refused(format!("Steering request failed: {e:?}")))?;
+    match response.get("outcome").and_then(serde_json::Value::as_str) {
+        Some("injected") => Ok(SteerOutcome::Injected),
+        Some(outcome) => {
+            let reason = response
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default();
+            Err(SteerError::Refused(format!(
+                "Steering not injected: agent answered '{outcome}'{reason}"
+            )))
+        }
+        None => Err(SteerError::Refused(format!(
+            "Steering not injected: malformed response {response}"
+        ))),
+    }
 }
 
 /// The three `sessionUpdate` discriminators of the typed asyncTasks
@@ -3310,7 +3832,15 @@ struct AcpNotificationHandler {
     phase: Mutex<HandlerPhase>,
     /// Signalled when replay matching determines all DB messages have been replayed.
     replay_done: tokio::sync::Notify,
+    /// Connection-wide: cancelled once, at a user cancel or teardown, after
+    /// which every permission request is answered `Cancelled`.
     permission_cancel_token: CancellationToken,
+    /// The turn in flight's child of `permission_cancel_token` — what pending
+    /// requests actually wait on, so an interrupt can resolve *this* turn's
+    /// requests `Cancelled` (ACP's rule for a client that cancels) without
+    /// burning the connection's token for the turns that follow. Rotated by
+    /// [`Self::begin_turn_permissions`] at every prompt.
+    turn_permission_token: std::sync::Mutex<CancellationToken>,
     /// This connection's task-tracking mode, fixed by [`setup_acp_session`]
     /// right after the initialize response — race-free, because `session/new`
     /// (and hence any update) only happens after initialize resolves. Unset
@@ -3364,12 +3894,14 @@ impl AcpNotificationHandler {
             }
         };
 
+        let turn_permission_token = std::sync::Mutex::new(permission_cancel_token.child_token());
         Self {
             writer,
             response: Mutex::new(response_completion::ResponseState::default()),
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
             permission_cancel_token,
+            turn_permission_token,
             task_tracking_mode: OnceLock::new(),
             background_tasks: Mutex::new(BackgroundTaskSet::default()),
             typed_tasks: Mutex::new(TypedAsyncTaskSet::default()),
@@ -3539,6 +4071,24 @@ impl AcpNotificationHandler {
         self.permission_cancel_token.cancel();
     }
 
+    /// A turn is about to be prompted: permission requests from here on wait
+    /// on a fresh token of its own.
+    fn begin_turn_permissions(&self) {
+        *self.turn_permission_token.lock().unwrap() = self.permission_cancel_token.child_token();
+    }
+
+    /// Resolve the turn in flight's pending permission requests `Cancelled`,
+    /// leaving the connection's token — and so the next turn's requests —
+    /// untouched. Until [`Self::begin_turn_permissions`] rotates the token, a
+    /// late request from the cancelled turn is answered `Cancelled` too.
+    fn cancel_turn_permissions(&self) {
+        self.turn_permission_token.lock().unwrap().cancel();
+    }
+
+    fn turn_permission_token(&self) -> CancellationToken {
+        self.turn_permission_token.lock().unwrap().clone()
+    }
+
     async fn is_replay_complete(&self) -> bool {
         let phase = self.phase.lock().await;
         match &*phase {
@@ -3576,7 +4126,8 @@ impl AcpNotificationHandler {
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        if self.permission_cancel_token.is_cancelled() {
+        let turn_token = self.turn_permission_token();
+        if turn_token.is_cancelled() {
             return Ok(RequestPermissionResponse::new(
                 RequestPermissionOutcome::Cancelled,
             ));
@@ -3604,7 +4155,7 @@ impl AcpNotificationHandler {
             ));
         }
 
-        let response = self.resolve_permission(request.clone()).await;
+        let response = self.resolve_permission(request.clone(), turn_token).await;
         self.pending_permissions
             .lock()
             .await
@@ -3612,7 +4163,11 @@ impl AcpNotificationHandler {
         Ok(response)
     }
 
-    async fn resolve_permission(&self, request: AcpPermissionRequest) -> RequestPermissionResponse {
+    async fn resolve_permission(
+        &self,
+        request: AcpPermissionRequest,
+        turn_token: CancellationToken,
+    ) -> RequestPermissionResponse {
         if let Some(origin) = request.origin.clone() {
             // Out-of-turn: the tool call must be one this connection actually
             // saw announced, or there is nothing to correlate the request to.
@@ -3655,10 +4210,7 @@ impl AcpNotificationHandler {
             );
         }
 
-        let decision = self
-            .writer
-            .request_permission(request, self.permission_cancel_token.clone())
-            .await;
+        let decision = self.writer.request_permission(request, turn_token).await;
         permission_response_for_decision(decision)
     }
 
@@ -4580,15 +5132,172 @@ fn serve_async_task_stop(
     }
 }
 
+/// Serve one queued steer from inside a live turn: send `_session/steering`
+/// for the message and schedule the agent's answer onto the request's reply
+/// channel. Never awaits the answer inline, for the same reason as
+/// [`serve_async_task_stop`] — the live turn's select must stay free to see
+/// the prompt resolve, the cancel, or the next control request.
+///
+/// The user message is persisted in the response callback, and only on
+/// `injected`: the callback runs under the connection's ordered-response
+/// barrier, so the assistant message open at that moment is finalized and the
+/// user row written before any later frame from the agent can be dispatched
+/// — the transcript reads assistant → user → assistant with no interleaving
+/// window — while a `promptRequired` or failed steer leaves no row behind for
+/// the caller's fallback delivery to duplicate.
+///
+/// The answer is bounded by [`STEER_ACK_TIMEOUT`]: the caller's reply sender
+/// sits in a slot that the response callback and a timer race for, and only
+/// the one that takes it answers. The timer answers
+/// [`SteerError::Unacknowledged`] — the one steer failure that does not mean
+/// "not delivered", so the caller knows not to re-send the text by another
+/// route. A `_session/steering` answer that lands after the timer has
+/// answered is logged and otherwise ignored — in particular it persists no
+/// user row, because the caller has by then reported the message as possibly
+/// delivered and left the transcript to the user to check.
+#[allow(clippy::too_many_arguments)]
+fn serve_steer(
+    connection: &ConnectionTo<Agent>,
+    setup: &AcpSessionSetup,
+    handler: &Arc<AcpNotificationHandler>,
+    our_session_id: &str,
+    prompt: String,
+    images: Vec<PromptImage>,
+    attachment_ids: Vec<String>,
+    reply: oneshot::Sender<Result<SteerOutcome, SteerError>>,
+) {
+    if !setup.steering_supported {
+        let _ = reply.send(Err(SteerError::Refused(
+            "Steering not available: agent does not advertise steering".to_string(),
+        )));
+        return;
+    }
+    log::info!("ACP session {our_session_id}: steering the turn in flight");
+    let supports_images = setup.agent_capabilities.prompt_capabilities.image;
+    let content_blocks = build_prompt_content_blocks(&prompt, &images, supports_images);
+    let message = match steering_message(&setup.agent_session_id, content_blocks) {
+        Ok(message) => message,
+        Err(e) => {
+            let _ = reply.send(Err(SteerError::Refused(format!(
+                "Failed to build steering request: {e:?}"
+            ))));
+            return;
+        }
+    };
+    let handler = Arc::clone(handler);
+    let session_id = our_session_id.to_string();
+    let reply_slot = Arc::new(std::sync::Mutex::new(Some(reply)));
+    let timed_out_slot = Arc::clone(&reply_slot);
+    let timed_out_session_id = session_id.clone();
+    let scheduled =
+        connection
+            .send_request(message)
+            .on_receiving_result(move |result| async move {
+                let outcome = steer_outcome(result);
+                let Some(reply) = reply_slot.lock().unwrap().take() else {
+                    log::warn!(
+                        "ACP session {session_id}: steer answered {outcome:?} after the \
+                         {}s timeout already failed it; ignoring the late answer",
+                        STEER_ACK_TIMEOUT.as_secs()
+                    );
+                    return Ok(());
+                };
+                match &outcome {
+                    Ok(outcome) => {
+                        log::info!("ACP session {session_id}: steer answered {outcome:?}");
+                        handler.writer.finalize().await;
+                        handler.response.lock().await.detach_message();
+                        handler
+                            .writer
+                            .record_user_message(&prompt, &images, &attachment_ids)
+                            .await;
+                    }
+                    Err(e) => log::warn!("ACP session {session_id}: steer not injected: {e}"),
+                }
+                let _ = reply.send(outcome);
+                Ok(())
+            });
+    if let Err(e) = scheduled {
+        // The reply sender moved into the callback and drops with it, which
+        // already answers the caller; the send failure is only loggable here.
+        log::warn!("ACP session {our_session_id}: failed to send steering request: {e:?}");
+        return;
+    }
+    // The timer runs on the connection's task set, like the permission
+    // handler's decision, so it is dropped with the connection: a steer the
+    // teardown drain answers is not answered a second time here.
+    let timer = connection.spawn(async move {
+        tokio::time::sleep(STEER_ACK_TIMEOUT).await;
+        if let Some(reply) = timed_out_slot.lock().unwrap().take() {
+            log::warn!(
+                "ACP session {timed_out_session_id}: agent did not answer the steer within {}s",
+                STEER_ACK_TIMEOUT.as_secs()
+            );
+            let _ = reply.send(Err(SteerError::Unacknowledged {
+                timeout: STEER_ACK_TIMEOUT,
+            }));
+        }
+        Ok(())
+    });
+    if let Err(e) = timer {
+        log::warn!("ACP session {our_session_id}: failed to arm the steer timeout: {e:?}");
+    }
+}
+
 // =============================================================================
 // Protocol helpers
 // =============================================================================
+
+/// How long an interrupt gives the agent to answer the in-flight
+/// `session/prompt` after `session/cancel` before giving up on the re-prompt:
+/// a bridge that cannot acknowledge a cancel should not be handed a second
+/// prompt, so the turn then settles cancelled, as a plain cancel would.
+///
+/// Longer than the in-turn cancel's 5 s bound on the same response because
+/// the cost of expiring is different: a plain cancel that times out loses
+/// nothing the user wanted, an interrupt that times out drops the message it
+/// was made for. claude-agent-acp 0.95 answered the cancel of a turn with a
+/// `sleep 1` shell call in flight only after ~4 s — it lets the tool wind
+/// down first — and real tool calls run longer than that.
+const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a steer waits for the agent's `_session/steering` answer before
+/// the request fails as [`SteerError::Unacknowledged`]. The same bound as
+/// [`INTERRUPT_ACK_TIMEOUT`], for the same reason: a bridge that takes the
+/// frame and never answers while the turn runs on must not wedge the caller's
+/// tool call (which has no keepalive of its own). Expiring is not a licence
+/// to re-send — the bridge may have injected the message anyway — which is
+/// why the caller gets a distinct error rather than a refusal.
+const STEER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long the holding wait gives the bridge to process a `session/cancel`
 /// before teardown. Out-of-turn there is no prompt response to await, so this
 /// bounded courtesy drain mirrors the in-turn cancel's bounded response wait
 /// (which the bridge answers by aborting the turn).
 const HOLDING_CANCEL_DRAIN: Duration = Duration::from_millis(500);
+
+/// How one prompt turn ended, from the session loop's point of view.
+enum TurnStep {
+    /// The turn ran to its own stop reason (or the user cancelled it).
+    Settled(AgentRunOutcome),
+    /// The turn was cancelled on behalf of a new message, which is the next
+    /// turn on this connection. A turn boundary, not a session end.
+    Interrupted(QueuedSessionTurn),
+}
+
+// Hand-written for the same reason as [`HoldOutcome`]'s: the queued turn
+// carries reply channels, not `Debug` types.
+impl std::fmt::Debug for TurnStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TurnStep::Settled(outcome) => f.debug_tuple("Settled").field(outcome).finish(),
+            TurnStep::Interrupted(turn) => f
+                .debug_struct("Interrupted")
+                .field("prompt", &turn.prompt)
+                .finish_non_exhaustive(),
+        }
+    }
+}
 
 /// Terminal decisions of the holding wait's timer core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4870,6 +5579,7 @@ async fn hold_for_background_quiescence(
     child_exited: &CancellationToken,
     prompt_rx: &mut mpsc::UnboundedReceiver<QueuedSessionTurn>,
     hold_control_rx: &mut mpsc::UnboundedReceiver<StopAsyncTaskRequest>,
+    turn_control_rx: &mut mpsc::UnboundedReceiver<TurnControlRequest>,
     hold_active: &AtomicBool,
     serve_stop: &dyn Fn(StopAsyncTaskRequest),
     our_session_id: &str,
@@ -4924,6 +5634,7 @@ async fn hold_for_background_quiescence(
     // Closed channels disable their branch instead of busy-looping the select.
     let mut prompts_open = true;
     let mut control_open = true;
+    let mut turn_control_open = true;
     let mut activity_open = true;
     let outcome = loop {
         if activity_rx.borrow().finish_requested {
@@ -4950,6 +5661,17 @@ async fn hold_for_background_quiescence(
                 // (or dead) bridge can't stall the hold's other exits.
                 Some(request) => serve_stop(request),
                 None => control_open = false,
+            },
+            // No turn is in flight to steer or interrupt (the bridge has no
+            // unsettled prompt by construction), so a message delivered now
+            // is simply the next turn — never a `_session/steering` frame,
+            // which Claude would answer `promptRequired` and codex-acp would
+            // turn into a prompt this client is not awaiting. Unlike per-task
+            // stops, these are not aimed at this hold and are never rejected
+            // at its boundaries.
+            request = turn_control_rx.recv(), if turn_control_open => match request {
+                Some(request) => break HoldOutcome::NewTurn(request.into_turn()),
+                None => turn_control_open = false,
             },
             changed = activity_rx.changed(), if activity_open => match changed {
                 Ok(()) => {
@@ -4995,6 +5717,19 @@ fn reject_queued_stop_requests(
     }
 }
 
+/// Answer every currently-queued turn-control request with an error. Only
+/// called at connection teardown: unlike per-task stops, a message is not
+/// aimed at one phase of the connection, so one racing a turn → hold boundary
+/// is left queued for whichever loop reads next.
+fn reject_queued_turn_control_requests(
+    turn_control_rx: &mut mpsc::UnboundedReceiver<TurnControlRequest>,
+    reason: &str,
+) {
+    while let Ok(request) = turn_control_rx.try_recv() {
+        request.reject(format!("Message not delivered: {reason}"));
+    }
+}
+
 /// Session-scoped connection loop: set up the ACP session once, then serve
 /// prompt turns received over `prompt_rx`.
 ///
@@ -5017,9 +5752,11 @@ async fn run_acp_session(
     auth_selection: Option<&AcpAuthenticationSelection>,
     background_hold: Option<&BackgroundHoldConfig>,
     background_hold_observer: Option<&BackgroundHoldObserver>,
+    steering_disabled: bool,
     child_exited: &CancellationToken,
     prompt_rx: &mut mpsc::UnboundedReceiver<QueuedSessionTurn>,
     hold_control_rx: &mut mpsc::UnboundedReceiver<StopAsyncTaskRequest>,
+    turn_control_rx: &mut mpsc::UnboundedReceiver<TurnControlRequest>,
     hold_active: &AtomicBool,
     pending_reply: &RefCell<Option<oneshot::Sender<SessionTurnResult>>>,
 ) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
@@ -5038,7 +5775,7 @@ async fn run_acp_session(
             auth_selection,
         }),
     );
-    let setup = tokio::select! {
+    let mut setup = tokio::select! {
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
             return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
@@ -5053,6 +5790,12 @@ async fn run_acp_session(
                 })??
         }
     };
+    if steering_disabled && setup.steering_supported {
+        log::info!(
+            "ACP session {our_session_id}: steering disabled by the driver; steers will be refused"
+        );
+        setup.steering_supported = false;
+    }
 
     // If resuming, wait for replay to complete (content match OR idle timeout).
     // An absolute 10s timeout prevents a hang if the server sends zero replay
@@ -5093,22 +5836,49 @@ async fn run_acp_session(
     // live turn when a prompt arrives while holding.
     let mut lifetime: Option<SessionLifetime> = None;
     let mut next_turn: Option<QueuedSessionTurn> = None;
+    let mut turn_control_open = true;
     loop {
-        let turn = match next_turn.take() {
-            // A prompt that arrived during the holding wait re-enters a live
-            // turn on the already-established session.
-            Some(turn) => turn,
-            None => tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    handler.cancel_pending_permissions();
-                    return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
+        let mut turn = match next_turn.take() {
+            // A Stop that landed while the interrupt (or the hold) was
+            // handing this turn over wins: the message is not sent and its
+            // caller is told so, instead of a prompt going out that the
+            // next select cancels at once — with a user row persisted and
+            // the caller told it was delivered.
+            Some(mut turn) if cancel_token.is_cancelled() => {
+                if let Some(control) = turn.control.take() {
+                    control.reject("Session stopped before the message could be sent".to_string());
                 }
-                turn = prompt_rx.recv() => match turn {
-                    Some(turn) => turn,
-                    // Every connection handle was dropped without sending a
-                    // prompt — nothing to serve, tear down.
-                    None => return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled)),
-                },
+                handler.cancel_pending_permissions();
+                transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::Cancelled);
+                return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
+            }
+            // A prompt that arrived during the holding wait (or the message
+            // an interrupt was made for) re-enters a live turn on the
+            // already-established session.
+            Some(turn) => turn,
+            None => loop {
+                // Biased: a prompt already queued when nothing is in flight
+                // goes first; a control request that landed next to it has
+                // nothing to steer yet and becomes the turn after.
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        handler.cancel_pending_permissions();
+                        return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled));
+                    }
+                    turn = prompt_rx.recv() => match turn {
+                        Some(turn) => break turn,
+                        // Every connection handle was dropped without sending a
+                        // prompt — nothing to serve, tear down.
+                        None => return Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled)),
+                    },
+                    // A message delivered while nothing is in flight has
+                    // nothing to steer or interrupt: it is the next turn.
+                    request = turn_control_rx.recv(), if turn_control_open => match request {
+                        Some(request) => break request.into_turn(),
+                        None => turn_control_open = false,
+                    },
+                }
             },
         };
         transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TurnLive);
@@ -5116,8 +5886,27 @@ async fn run_acp_session(
         // Stash the reply sender: unless the holding path below resolves it
         // early, the connection task resolves it after teardown, so prompt()
         // callers resume with the child already stopped, exactly like the
-        // old per-turn run().
-        *pending_reply.borrow_mut() = Some(turn.reply);
+        // old per-turn run(). A turn the control channel started has none;
+        // whatever prompt() is still pending (the interrupted turn's) keeps
+        // waiting and gets the final turn's result.
+        if let Some(reply) = turn.reply.take() {
+            *pending_reply.borrow_mut() = Some(reply);
+        }
+
+        if let Some(control) = turn.control.take() {
+            // The message came through the control channel, so no caller
+            // wrote its row. Close whatever assistant message is open (the
+            // interrupted turn's, or a continuation's) and persist it here,
+            // before the prompt goes out, so nothing the agent says in reply
+            // can land ahead of it.
+            handler.writer.finalize().await;
+            handler.response.lock().await.close_message();
+            handler
+                .writer
+                .record_user_message(&turn.prompt, &turn.images, &turn.attachment_ids)
+                .await;
+            control.turn_started();
+        }
 
         let prompt = run_prompt_turn(
             connection,
@@ -5125,10 +5914,11 @@ async fn run_acp_session(
             handler,
             our_session_id,
             cancel_token,
+            turn_control_rx,
             &turn.prompt,
             &turn.images,
         );
-        let outcome = if background_hold.is_some() {
+        let step = if background_hold.is_some() {
             tokio::select! {
                 biased;
                 result = prompt => result,
@@ -5142,6 +5932,17 @@ async fn run_acp_session(
             }
         } else {
             prompt.await
+        };
+        let outcome = match step {
+            // A turn boundary, not a session end: the connection stays up,
+            // the lifetime stays `TurnLive`, nothing is torn down, and the
+            // stashed reply keeps waiting for the turn that follows.
+            Ok(TurnStep::Interrupted(turn)) => {
+                next_turn = Some(turn);
+                continue;
+            }
+            Ok(TurnStep::Settled(outcome)) => Ok(outcome),
+            Err(e) => Err(e),
         };
 
         // Feature off: preserve the old behavior byte-for-byte — finalize()
@@ -5242,6 +6043,7 @@ async fn run_acp_session(
             child_exited,
             prompt_rx,
             hold_control_rx,
+            turn_control_rx,
             hold_active,
             &|request| serve_async_task_stop(connection, &setup, our_session_id, request),
             our_session_id,
@@ -5319,16 +6121,24 @@ async fn run_acp_session(
 }
 
 /// Send one prompt turn over an established ACP session and map its stop
-/// reason to an [`AgentRunOutcome`].
+/// reason to an [`AgentRunOutcome`] — or, when a message interrupts it, hand
+/// that message back as the next turn.
+///
+/// While the prompt is in flight the turn also serves the turn-control
+/// channel: a steer is forwarded to the agent as `_session/steering` without
+/// leaving the turn, an interrupt cancels the turn and ends it with
+/// [`TurnStep::Interrupted`].
+#[allow(clippy::too_many_arguments)]
 async fn run_prompt_turn(
     connection: &ConnectionTo<Agent>,
     setup: &AcpSessionSetup,
     handler: &Arc<AcpNotificationHandler>,
     our_session_id: &str,
     cancel_token: &CancellationToken,
+    turn_control_rx: &mut mpsc::UnboundedReceiver<TurnControlRequest>,
     prompt: &str,
     images: &[PromptImage],
-) -> Result<AgentRunOutcome, String> {
+) -> Result<TurnStep, String> {
     let supports_images = setup.agent_capabilities.prompt_capabilities.image;
     if !images.is_empty() && !supports_images {
         log::warn!(
@@ -5339,6 +6149,7 @@ async fn run_prompt_turn(
     let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
     let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
+    handler.begin_turn_permissions();
     handler.transition_to_live().await;
     handler
         .response
@@ -5349,24 +6160,144 @@ async fn run_prompt_turn(
     let prompt_task = connection.send_request(prompt_request).block_task();
     tokio::pin!(prompt_task);
 
-    let prompt_response = tokio::select! {
-        result = &mut prompt_task => {
-            result.map_err(|error| describe_prompt_error(error, &setup.auth_methods))?
-        }
-        _ = cancel_token.cancelled() => {
-            handler.cancel_pending_permissions();
-            if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
-                log::warn!("{e}");
+    // A closed control channel disables its branch instead of busy-looping.
+    let mut control_open = true;
+    let prompt_response = loop {
+        tokio::select! {
+            result = &mut prompt_task => {
+                break result.map_err(|error| describe_prompt_error(error, &setup.auth_methods))?;
             }
-
-            match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
-                Ok(result) => result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?,
-                Err(_) => {
-                    log::warn!(
-                        "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
-                    );
-                    return Ok(AgentRunOutcome::Cancelled);
+            _ = cancel_token.cancelled() => {
+                handler.cancel_pending_permissions();
+                if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                    log::warn!("{e}");
                 }
+
+                match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
+                    Ok(result) => {
+                        break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
+                        );
+                        return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
+                    }
+                }
+            }
+            request = turn_control_rx.recv(), if control_open => match request {
+                Some(TurnControlRequest::Steer { prompt, images, attachment_ids, reply }) => {
+                    serve_steer(
+                        connection,
+                        setup,
+                        handler,
+                        our_session_id,
+                        prompt,
+                        images,
+                        attachment_ids,
+                        reply,
+                    );
+                }
+                Some(TurnControlRequest::Interrupt {
+                    prompt: next_prompt,
+                    images: next_images,
+                    attachment_ids: next_attachment_ids,
+                    reply,
+                }) => {
+                    log::info!(
+                        "ACP session {our_session_id}: interrupting the turn in flight for a new message"
+                    );
+                    // Same wire sequence as the user-cancel arm above, but
+                    // only *this turn's* pending permission requests are
+                    // resolved `Cancelled` — the connection-wide token would
+                    // auto-answer every later request and silently break the
+                    // next turn. Resolving them is not optional: with a
+                    // request nobody had answered still pending, the cancel
+                    // went unacknowledged for the full timeout and the
+                    // message was dropped (seen against Goose) — and once
+                    // the turn is gone the dialog is stale anyway.
+                    handler.cancel_turn_permissions();
+                    if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                        // Like the user-cancel arm: a cancel that could not
+                        // be sent is logged and the turn goes on. Only the
+                        // interrupt fails — its message was not delivered,
+                        // but the turn's work is not lost over it.
+                        log::warn!("{e}");
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
+                    // Biased towards the acknowledgment: a Stop that is
+                    // already in by the time the ack arrives is caught by
+                    // the session loop before the re-prompt goes out. A Stop
+                    // that lands while the ack is still outstanding ends the
+                    // wait here, so the re-prompt is never sent and the
+                    // caller is not told it was.
+                    let acked = tokio::select! {
+                        biased;
+                        result = tokio::time::timeout(INTERRUPT_ACK_TIMEOUT, &mut prompt_task) => Some(result),
+                        _ = cancel_token.cancelled() => None,
+                    };
+                    match acked {
+                        // Whatever the stop reason (`cancelled`, or `end_turn`
+                        // if the turn finished under the cancel), the turn is
+                        // over and the message is the next one.
+                        Some(Ok(Ok(response))) => {
+                            if let Some(metadata) = prompt_response_metadata(&response) {
+                                handler.writer.record_acp_event_metadata(metadata).await;
+                            }
+                            return Ok(TurnStep::Interrupted(QueuedSessionTurn {
+                                prompt: next_prompt,
+                                images: next_images,
+                                attachment_ids: next_attachment_ids,
+                                reply: None,
+                                control: Some(TurnControlReply::Interrupt(reply)),
+                            }));
+                        }
+                        Some(Ok(Err(e))) => {
+                            let message = format!("Prompt failed after interrupt: {e:?}");
+                            let _ = reply.send(Err(message.clone()));
+                            return Err(message);
+                        }
+                        // A wedged bridge should not get a second prompt:
+                        // settle the turn cancelled, as a plain cancel would.
+                        Some(Err(_)) => {
+                            log::warn!(
+                                "Timed out waiting for ACP prompt response after session/cancel \
+                                 for session {our_session_id}; dropping the re-prompt"
+                            );
+                            let _ = reply.send(Err(format!(
+                                "Agent did not acknowledge session/cancel within {}s",
+                                INTERRUPT_ACK_TIMEOUT.as_secs()
+                            )));
+                            return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
+                        }
+                        // The session was stopped under the interrupt. The
+                        // cancel is already on the wire; finish as the
+                        // user-cancel arm does, with the message undelivered.
+                        None => {
+                            log::info!(
+                                "ACP session {our_session_id}: stopped while an interrupt awaited \
+                                 the cancel acknowledgment; dropping the re-prompt"
+                            );
+                            let _ = reply.send(Err(
+                                "Session stopped before the message could be sent".to_string(),
+                            ));
+                            handler.cancel_pending_permissions();
+                            match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
+                                Ok(result) => {
+                                    break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
+                                }
+                                Err(_) => {
+                                    log::warn!(
+                                        "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
+                                    );
+                                    return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
+                                }
+                            }
+                        }
+                    }
+                }
+                None => control_open = false,
             }
         }
     };
@@ -5383,9 +6314,9 @@ async fn run_prompt_turn(
         handler.finish_completed_response().await;
     }
 
-    Ok(AgentRunOutcome::from_stop_reason(
+    Ok(TurnStep::Settled(AgentRunOutcome::from_stop_reason(
         prompt_response.stop_reason,
-    ))
+    )))
 }
 
 /// The text a failed `session/prompt` surfaces to the user.
@@ -5919,6 +6850,9 @@ struct AcpSessionSetup {
     /// an `auth_required` raised at `session/prompt` can log the same
     /// inventory the setup path logs (see [`describe_prompt_error`]).
     auth_methods: Vec<AuthMethod>,
+    /// Whether the agent advertised `_session/steering` at initialize (see
+    /// [`steering_supported_from_initialize`]).
+    steering_supported: bool,
 }
 
 struct AcpSessionSetupContext<'a> {
@@ -6067,6 +7001,8 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         task_tracking_mode == TaskTrackingMode::Typed
     );
     handler.set_task_tracking_mode(task_tracking_mode);
+    let steering_supported = steering_supported_from_initialize(init_response.meta.as_ref());
+    log::debug!("ACP session {our_session_id}: steering advertised: {steering_supported}");
 
     match acp_session_id {
         Some(existing_id) => {
@@ -6116,6 +7052,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 agent_capabilities,
                 task_tracking_mode,
                 auth_methods: init_response.auth_methods.clone(),
+                steering_supported,
             })
         }
         None => {
@@ -6156,6 +7093,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 agent_capabilities,
                 task_tracking_mode,
                 auth_methods: init_response.auth_methods.clone(),
+                steering_supported,
             })
         }
     }
@@ -6188,8 +7126,14 @@ fn log_initialize_response(agent_label: &str, init_response: &InitializeResponse
         .unwrap_or_else(|_| "<unserializable>".to_string());
     let auth_methods = describe_auth_methods(&init_response.auth_methods);
 
+    let meta = init_response
+        .meta
+        .as_ref()
+        .map(|meta| serde_json::to_string(meta).unwrap_or_else(|_| "<unserializable>".to_string()))
+        .unwrap_or_else(|| "null".to_string());
+
     log::debug!(
-        "ACP initialized provider={agent_label} agent={agent_name} version={agent_version} protocol={} capabilities={} auth_methods=[{}]",
+        "ACP initialized provider={agent_label} agent={agent_name} version={agent_version} protocol={} capabilities={} auth_methods=[{}] _meta={meta}",
         init_response.protocol_version,
         capabilities,
         auth_methods
@@ -6480,8 +7424,10 @@ impl MessageWriter for BasicMessageWriter {
 
 #[cfg(test)]
 mod tests {
+    mod real_bridge;
     mod response_completion;
     mod settlement;
+    mod turn_control;
 
     use std::collections::BTreeSet;
 
@@ -6651,6 +7597,7 @@ mod tests {
             auth_methods: vec![AuthMethod::Agent(AuthMethodAgent::new(
                 "api-key", "API Key",
             ))],
+            steering_supported: false,
         };
         let handler = Arc::new(AcpNotificationHandler::new(
             Arc::new(BasicMessageWriter::new()),
@@ -6659,6 +7606,7 @@ mod tests {
             CancellationToken::new(),
         ));
 
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let outcome = agent_client_protocol::Client
             .connect_with(agent, async |connection| {
                 Ok(run_prompt_turn(
@@ -6667,6 +7615,7 @@ mod tests {
                     &handler,
                     "local-session",
                     &CancellationToken::new(),
+                    &mut turn_control_rx,
                     "hello",
                     &[],
                 )
@@ -8148,6 +9097,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -8162,6 +9112,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_env_snapshot(snapshot);
 
@@ -8187,6 +9138,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_interpreter_env_snapshot(snapshot.clone());
         let remote = AcpDriver {
@@ -8201,6 +9153,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             remote_working_dir: None,
             background_hold: None,
             background_hold_observer: None,
+            steering_disabled: false,
         }
         .with_interpreter_env_snapshot(snapshot);
 
@@ -10703,6 +11656,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -10717,6 +11671,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -10741,6 +11696,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -10756,6 +11712,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -10772,6 +11729,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -10798,6 +11756,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 &child_exited,
                 &mut prompt_rx,
                 &mut hold_control_rx,
+                &mut turn_control_rx,
                 &hold_active,
                 &|_| {},
                 "sess-1",
@@ -10814,6 +11773,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -10841,6 +11801,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -10871,6 +11832,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -10897,6 +11859,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -10933,6 +11896,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -10942,7 +11906,9 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             .send(QueuedSessionTurn {
                 prompt: String::from("follow-up"),
                 images: vec![],
-                reply: reply_tx,
+                attachment_ids: vec![],
+                reply: Some(reply_tx),
+                control: None,
             })
             .expect("queued turn should send");
 
@@ -10956,6 +11922,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 &child_exited,
                 &mut prompt_rx,
                 &mut hold_control_rx,
+                &mut turn_control_rx,
                 &hold_active,
                 &|_| {},
                 "sess-1",
@@ -10976,6 +11943,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             let handler = hold_test_handler();
             let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
             let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+            let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
             let cancel = CancellationToken::new();
             let child_exited = CancellationToken::new();
             let hold_active = AtomicBool::new(false);
@@ -10995,6 +11963,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     &child_exited,
                     &mut prompt_rx,
                     &mut hold_control_rx,
+                    &mut turn_control_rx,
                     &hold_active,
                     &|_| {},
                     "sess-1",
@@ -11015,6 +11984,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel::<QueuedSessionTurn>();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -11032,6 +12002,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -11111,6 +12082,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -11126,6 +12098,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -11189,6 +12162,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -11200,7 +12174,9 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             .send(QueuedSessionTurn {
                 prompt: String::from("follow-up"),
                 images: vec![],
-                reply: reply_tx,
+                attachment_ids: vec![],
+                reply: Some(reply_tx),
+                control: None,
             })
             .expect("queued turn should send");
 
@@ -11214,6 +12190,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 &child_exited,
                 &mut prompt_rx,
                 &mut hold_control_rx,
+                &mut turn_control_rx,
                 &hold_active,
                 &|_| {},
                 "sess-1",
@@ -11238,6 +12215,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         handler.set_task_tracking_mode(TaskTrackingMode::Typed);
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = AtomicBool::new(false);
@@ -11261,6 +12239,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &|_| {},
             "sess-1",
@@ -11309,6 +12288,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         // Shared with the hold: it flips true at entry, which is what lets
@@ -11343,6 +12323,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             &child_exited,
             &mut prompt_rx,
             &mut hold_control_rx,
+            &mut turn_control_rx,
             &hold_active,
             &serve,
             "sess-1",
@@ -11384,6 +12365,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         let handler = hold_test_handler();
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (hold_control_tx, mut hold_control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let child_exited = CancellationToken::new();
         let hold_active = Arc::new(AtomicBool::new(false));
@@ -11422,6 +12404,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 &child_exited,
                 &mut prompt_rx,
                 &mut hold_control_rx,
+                &mut turn_control_rx,
                 &hold_active,
                 &|_| {},
                 "sess-1",
@@ -11523,14 +12506,26 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         Append(String),
         Finalize,
         Resume,
+        UserMessage(String),
+        /// The attachment ids handed back with a `UserMessage` (only when
+        /// there were any).
+        UserAttachments(Vec<String>),
         Event(RecordedMetadata),
         ToolCall(String),
         ToolCallMetadata(RecordedMetadata),
+        /// A permission request reached the writer (by tool-call id).
+        Permission(String),
+        /// A held permission request was resolved by its token cancelling.
+        PermissionCancelled(String),
     }
 
     #[derive(Default)]
     struct TranscriptWriter {
         calls: Mutex<Vec<WriterCall>>,
+        /// Hold the next permission request open — a dialog nobody has
+        /// answered — until its cancel token fires or the test releases it.
+        hold_next_permission: AtomicBool,
+        release_permission: tokio::sync::Notify,
     }
 
     impl TranscriptWriter {
@@ -11546,7 +12541,10 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 .filter(|call| {
                     matches!(
                         call,
-                        WriterCall::Append(_) | WriterCall::Finalize | WriterCall::Resume
+                        WriterCall::Append(_)
+                            | WriterCall::Finalize
+                            | WriterCall::Resume
+                            | WriterCall::UserMessage(_)
                     )
                 })
                 .collect()
@@ -11557,7 +12555,13 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             self.calls()
                 .into_iter()
                 .filter(|call| {
-                    !matches!(call, WriterCall::Event(_) | WriterCall::ToolCallMetadata(_))
+                    !matches!(
+                        call,
+                        WriterCall::Event(_)
+                            | WriterCall::ToolCallMetadata(_)
+                            | WriterCall::Permission(_)
+                            | WriterCall::PermissionCancelled(_)
+                    )
                 })
                 .collect()
         }
@@ -11590,6 +12594,24 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             self.calls.lock().unwrap().push(WriterCall::Finalize);
         }
 
+        async fn record_user_message(
+            &self,
+            text: &str,
+            _images: &[PromptImage],
+            attachment_ids: &[String],
+        ) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(WriterCall::UserMessage(text.to_string()));
+            if !attachment_ids.is_empty() {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(WriterCall::UserAttachments(attachment_ids.to_vec()));
+            }
+        }
+
         async fn record_tool_call(
             &self,
             tool_call_id: &str,
@@ -11615,6 +12637,36 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         }
 
         async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
+
+        async fn request_permission(
+            &self,
+            request: AcpPermissionRequest,
+            cancel_token: CancellationToken,
+        ) -> AcpPermissionDecision {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(WriterCall::Permission(request.tool_call_id.clone()));
+            if cancel_token.is_cancelled() {
+                return AcpPermissionDecision::Cancelled;
+            }
+            if self
+                .hold_next_permission
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        self.calls
+                            .lock()
+                            .unwrap()
+                            .push(WriterCall::PermissionCancelled(request.tool_call_id.clone()));
+                        return AcpPermissionDecision::Cancelled;
+                    }
+                    _ = self.release_permission.notified() => {}
+                }
+            }
+            autoapprove_permission_decision(&request)
+        }
 
         async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
             self.calls

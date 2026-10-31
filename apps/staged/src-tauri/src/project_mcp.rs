@@ -1,5 +1,6 @@
 //! MCP server for project sessions.
-//! Exposes `start_repo_session` and `add_project_repo` tools to the agent.
+//! Exposes the repo-session tools (`start_repo_session`, `wait_for_repo_session`,
+//! `cancel_repo_session`, `continue_repo_session`) and `add_project_repo` to the agent.
 
 use std::sync::Arc;
 use tokio::task::JoinHandle;
@@ -17,6 +18,7 @@ use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::mcp_progress::send_progress_keepalives;
+use crate::session_commands::ContinueOutcome;
 use crate::session_runner::SessionRegistry;
 use crate::store::{
     AcpConfigSelection, Branch, CompletionReason, MessageRole, ProjectRepo, Session,
@@ -125,6 +127,16 @@ struct CancelRepoSessionParams {
     pub repo_session_id: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct ContinueRepoSessionParams {
+    /// Opaque handle returned by `start_repo_session`.
+    pub repo_session_id: String,
+    /// The follow-up for the repo session's agent: a correction, the answer to
+    /// a question it raised, or its next step. Written as an instruction to
+    /// that agent, not as a report to the user.
+    pub message: String,
+}
+
 fn default_wait_for_completion_seconds() -> u64 {
     240
 }
@@ -134,6 +146,12 @@ const REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS: usize = 240;
 #[derive(Debug, Default, serde::Serialize)]
 struct RepoSessionActivity {
     last_activity_at: Option<i64>,
+    /// When the session's agent last received a user message — the original
+    /// instructions or a `continue_repo_session` follow-up, whichever is
+    /// latest — so a parent that continued the session can confirm the
+    /// message landed in its transcript by comparing this with the time of
+    /// its own call (the tool description says so).
+    last_user_message_at: Option<i64>,
     last_message: Option<RepoSessionActivityEntry>,
     last_tool_call: Option<RepoSessionActivityEntry>,
     last_tool_result: Option<RepoSessionActivityEntry>,
@@ -380,7 +398,9 @@ impl ProjectToolsHandler {
                     activity.counts.tool_results += 1;
                     activity.last_tool_result = Some(entry);
                 }
-                MessageRole::User => {}
+                MessageRole::User => {
+                    activity.last_user_message_at = Some(message.created_at);
+                }
             }
         }
 
@@ -501,6 +521,22 @@ impl ProjectToolsHandler {
                 serde_json::Value::String(Self::last_assistant_output(store, &handle.session_id));
         }
 
+        Ok(payload)
+    }
+
+    /// The `continue_repo_session` reply: the session payload with how the
+    /// message was delivered and, when it was not, why.
+    fn continue_repo_session_payload(
+        store: &Store,
+        repo_session_id: &str,
+        handle: &RepoSessionHandle,
+        outcome: &ContinueOutcome,
+    ) -> Result<serde_json::Value, String> {
+        let mut payload = Self::repo_session_payload(store, repo_session_id, handle)?;
+        payload["delivery"] = serde_json::Value::String(outcome.delivery().to_string());
+        if let Some(reason) = outcome.reason() {
+            payload["reason"] = serde_json::Value::String(reason.to_string());
+        }
         Ok(payload)
     }
 
@@ -870,6 +906,60 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
+        description = "Send a follow-up message to a repo session started by `start_repo_session`: a correction, the answer to a question it raised, or its next step. A running session receives the message within seconds without being stopped, so its work so far is kept; a completed, cancelled, or failed session is resumed with the message as its next instruction. A session that has not started yet cannot take a message — wait for it to run, or cancel it and start a new one. Prefer this over cancelling and starting over whenever the session's work so far is still wanted. Returns the session's current state together with how the message was delivered, or why it was not. The activity's last user-message time is when the session's agent most recently received any user message — the original instructions included, not only this one — so to confirm this message landed, compare it with the time you made this call."
+    )]
+    async fn continue_repo_session(
+        &self,
+        Parameters(p): Parameters<ContinueRepoSessionParams>,
+    ) -> String {
+        let handle = match Self::decode_repo_session_handle(&p.repo_session_id) {
+            Ok(handle) => handle,
+            Err(e) => return e,
+        };
+        log::debug!(
+            "[project_mcp] continue_repo_session called: session={} message_chars={}",
+            handle.session_id,
+            p.message.chars().count()
+        );
+
+        // Repo sessions are not project sessions, so the resume never hands
+        // these to the run; `resume_session_for_store` just needs values.
+        let action_executor = self
+            .action_executor
+            .clone()
+            .unwrap_or_else(|| Arc::new(ActionExecutor::new()));
+        let action_registry = self
+            .action_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(ActionRegistry::new()));
+        let outcome = match crate::session_commands::continue_session_for_store(
+            Arc::clone(&self.store),
+            Arc::clone(&self.registry),
+            action_executor,
+            action_registry,
+            self.app_handle.clone(),
+            handle.session_id.clone(),
+            p.message,
+            Vec::new(),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(e) => return format!("Error continuing repo session: {e}"),
+        };
+
+        match Self::continue_repo_session_payload(
+            &self.store,
+            &p.repo_session_id,
+            &handle,
+            &outcome,
+        ) {
+            Ok(payload) => payload.to_string(),
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
         description = "Add a GitHub repository to the current project. Use this when the task requires a repository that isn't yet in the project. Returns once the repository worktree is ready; any setup actions then run in the background."
     )]
     async fn add_project_repo(&self, Parameters(p): Parameters<AddProjectRepoParams>) -> String {
@@ -1182,11 +1272,14 @@ mod tests {
         REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
     use crate::git::Span;
+    use crate::session_runner::SessionRegistry;
     use crate::store::{
         AcpConfigSelection, AcpConfigValueSelection, Branch, MessageRole, Project, ProjectNote,
-        Session, SessionMessage, Store,
+        Session, SessionMessage, SessionStatus, Store,
     };
+    use acp_client::{SteerError, SteerOutcome, TurnControlHandle};
     use std::path::Path;
+    use std::sync::Arc;
 
     #[test]
     fn comment_line_range_reports_one_indexed_inclusive_lines() {
@@ -1407,6 +1500,7 @@ mod tests {
         let activity = ProjectToolsHandler::summarize_session_activity(&session, &messages);
 
         assert_eq!(activity.last_activity_at, Some(109));
+        assert_eq!(activity.last_user_message_at, Some(106));
         assert_eq!(activity.counts.assistant_messages, 1);
         assert_eq!(activity.counts.tool_calls, 1);
         assert_eq!(activity.counts.tool_results, 1);
@@ -1516,6 +1610,368 @@ mod tests {
         assert!(cancel_description.contains("surprised at how long the session is taking"));
         assert!(!cancel_description.contains("strong evidence"));
         assert!(!cancel_description.contains("taking a long time"));
+    }
+
+    /// The continue tool's description has to carry the routing the parent
+    /// agent must know to choose it over cancel-and-restart: a running
+    /// session keeps its work, a stopped one is resumed, a queued one cannot
+    /// take a message — in words, not payload field names.
+    #[test]
+    fn continue_repo_session_description_explains_delivery_without_field_names() {
+        let router = ProjectToolsHandler::tool_router();
+        let description = router
+            .get("continue_repo_session")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("continue tool description");
+
+        assert!(description.contains("Send a follow-up message"));
+        assert!(description.contains("without being stopped"));
+        assert!(description.contains("resumed with the message"));
+        assert!(description.contains("has not started yet cannot take a message"));
+        assert!(description.contains("Prefer this over cancelling"));
+        assert!(description.contains("compare it with the time you made this call"));
+        assert!(!description.contains("`delivery`"));
+        assert!(!description.contains("last_user_message_at"));
+        assert!(!description.contains("injected"));
+        assert!(!description.contains("interrupt"));
+        assert!(!description.contains("steer"));
+    }
+
+    /// Fixture for the continue round trips: a `running` repo session with
+    /// its note artifact, registered as a live session so the registry can
+    /// carry a turn-control handle for it.
+    struct ContinueFixture {
+        store: Arc<Store>,
+        registry: Arc<SessionRegistry>,
+        _registration: crate::session_runner::ExternalSessionRegistration,
+        session: Session,
+        repo_session_id: String,
+        handle: RepoSessionHandle,
+    }
+
+    impl ContinueFixture {
+        fn running_note_session() -> Self {
+            let store = Arc::new(Store::in_memory().unwrap());
+            let project = Project::new("owner/repo");
+            store.create_project(&project).unwrap();
+            let branch = Branch::new(&project.id, "feature", "main");
+            store.create_branch(&branch).unwrap();
+            let session =
+                Session::new_running("investigate", Path::new("/tmp")).with_branch(&branch.id);
+            store.create_session(&session).unwrap();
+            let note = crate::store::Note::new(&branch.id, "", "").with_session(&session.id);
+            store.create_note(&note).unwrap();
+
+            let registry = Arc::new(SessionRegistry::new());
+            let registration = registry.register_external(&session.id);
+            let repo_session_id = ProjectToolsHandler::encode_repo_session_handle(
+                &session.id,
+                RepoArtifactKind::Note,
+                &note.id,
+            )
+            .unwrap();
+            let handle = ProjectToolsHandler::decode_repo_session_handle(&repo_session_id).unwrap();
+            Self {
+                store,
+                registry,
+                _registration: registration,
+                session,
+                repo_session_id,
+                handle,
+            }
+        }
+
+        /// What the `continue_repo_session` tool does between decoding the
+        /// handle and serialising the reply, with the resume step left out:
+        /// a resume needs the app handle the tool carries, which tests cannot
+        /// build, and every case here stays on the live connection anyway.
+        async fn continue_with(&self, message: &str) -> serde_json::Value {
+            let route = crate::session_commands::route_continue_session(
+                &self.store,
+                &self.registry,
+                &self.session.id,
+                message,
+                &[],
+                crate::session_commands::ContinueWaits::uniform(std::time::Duration::from_millis(
+                    200,
+                )),
+            )
+            .await
+            .unwrap();
+            let outcome = match route {
+                crate::session_commands::ContinueRoute::Delivered(outcome) => outcome,
+                other => panic!("a running session is reached live, got {other:?}"),
+            };
+            ProjectToolsHandler::continue_repo_session_payload(
+                &self.store,
+                &self.repo_session_id,
+                &self.handle,
+                &outcome,
+            )
+            .unwrap()
+        }
+
+        fn status(&self) -> SessionStatus {
+            self.store
+                .get_session(&self.session.id)
+                .unwrap()
+                .unwrap()
+                .status
+        }
+    }
+
+    /// A steered message leaves the row `running`: a parent that calls
+    /// `wait_for_repo_session` next must not see a spurious terminal state
+    /// (and the tool reply itself still says `running`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_running_session_by_steering_never_leaves_running() {
+        let f = ContinueFixture::running_note_session();
+        let (turn_control, served) =
+            TurnControlHandle::scripted(Ok(SteerOutcome::Injected), Ok(()));
+        f.registry
+            .set_turn_control_handle(&f.session.id, turn_control);
+
+        let payload = f.continue_with("also check the tests").await;
+
+        assert_eq!(payload["delivery"], "injected");
+        assert_eq!(payload["state"], "running");
+        assert!(payload.get("reason").is_none());
+        assert_eq!(payload["session_id"], f.session.id);
+        assert_eq!(f.status(), SessionStatus::Running);
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec!["steer:also check the tests".to_string()]
+        );
+    }
+
+    /// Same when the agent refused the steer and the turn was interrupted and
+    /// re-prompted on the same connection: the cancel is the turn's, not the
+    /// session's, so the row stays `running`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_running_session_by_interrupting_never_leaves_running() {
+        let f = ContinueFixture::running_note_session();
+        let (turn_control, served) = TurnControlHandle::scripted(
+            Err(SteerError::Refused(
+                "agent does not advertise steering".to_string(),
+            )),
+            Ok(()),
+        );
+        f.registry
+            .set_turn_control_handle(&f.session.id, turn_control);
+
+        let payload = f.continue_with("stop, different approach").await;
+
+        assert_eq!(payload["delivery"], "interrupted_and_reprompted");
+        assert_eq!(payload["state"], "running");
+        assert!(payload.get("reason").is_none());
+        assert_eq!(f.status(), SessionStatus::Running);
+        assert_eq!(
+            *served.lock().unwrap(),
+            vec![
+                "steer:stop, different approach".to_string(),
+                "interrupt:stop, different approach".to_string(),
+            ]
+        );
+    }
+
+    /// The tool's live half against the bridge Staged actually runs: the
+    /// session's real `MessageWriter` and `Store` behind an installed
+    /// `claude-agent-acp` (or `codex-acp`), its turn-control handle in the
+    /// registry the way the runner registers it, and
+    /// `continue_repo_session`'s routing and reply on top. Ignored by default
+    /// — it spawns the bridge as the local user and calls the model.
+    ///
+    /// ```sh
+    /// cargo test -p staged --lib continue_repo_session_live -- --ignored --nocapture --test-threads=1
+    /// ```
+    ///
+    /// `ACP_REAL_BRIDGE` picks the provider id (`claude` by default; `goose`
+    /// resolves from the login shell's `PATH` and, headless, needs
+    /// `GOOSE_DISABLE_KEYRING=1` or it blocks on a Keychain prompt) and
+    /// `ACP_REAL_BRIDGE_DIR` the install dir (`~/.staged/packages/bin`). The
+    /// resume (`resumed`) and `queued` paths are not covered here: a resume
+    /// needs the app handle the tool carries, which tests cannot build.
+    async fn continue_repo_session_live(steering_disabled: bool) {
+        const LONG_TURN: &str = "Count from 1 to 40 slowly. For EACH number: first run the \
+            shell command `sleep 1` with your shell tool as its own separate tool call (never a \
+            loop, never a script), then write that number on its own line. Keep going until 40. \
+            Do not explain what you are doing.";
+        const FOLLOW_UP: &str = "Stop counting right now. Run the shell command `pwd` with your \
+            shell tool, then reply with exactly one line: FOLLOW-UP-DONE";
+
+        if let Some(dir) = std::env::var_os("ACP_REAL_BRIDGE_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|home| std::path::PathBuf::from(home).join(".staged/packages/bin"))
+            })
+            .filter(|dir| dir.is_dir())
+        {
+            acp_client::set_bundled_tools_dir(dir);
+        }
+        let provider = std::env::var("ACP_REAL_BRIDGE").unwrap_or_else(|_| "claude".to_string());
+        // Goose does not advertise steering, so the route falls through to
+        // the interrupt whether or not it is forced off.
+        let expected_delivery = if steering_disabled || provider == "goose" {
+            "interrupted_and_reprompted"
+        } else {
+            "injected"
+        };
+        let driver = acp_client::AcpDriver::new(&provider)
+            .expect("the bridge must be installed (see the test docs)")
+            .with_env_snapshot(std::env::vars().collect())
+            .with_background_hold(crate::session_commands::default_background_hold())
+            .with_steering_disabled(steering_disabled);
+        let dir = std::env::temp_dir().join(format!(
+            "staged-continue-live-{}-{steering_disabled}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let f = ContinueFixture::running_note_session();
+        let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(
+            crate::agent::writer::MessageWriter::new(f.session.id.clone(), Arc::clone(&f.store)),
+        );
+        let acp_store: Arc<dyn acp_client::Store> = f.store.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let messages = || f.store.get_session_messages(&f.session.id).unwrap();
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let mut connection = driver
+                    .connect(
+                        &f.session.id,
+                        &dir,
+                        &acp_store,
+                        &writer,
+                        &cancel,
+                        None,
+                        &[],
+                        None,
+                    )
+                    .await
+                    .expect("bridge should spawn");
+                // What the turn loop does right after `connect`.
+                f.registry
+                    .set_turn_control_handle(&f.session.id, connection.turn_control_handle());
+                let settled_rx = connection.take_settled_receiver().unwrap();
+                let turn =
+                    tokio::task::spawn_local(
+                        async move { connection.prompt(LONG_TURN, &[]).await },
+                    );
+
+                // Into the turn: wait for its first transcript row, then a
+                // little longer so the agent is mid-work.
+                let started = std::time::Instant::now();
+                while messages().is_empty() {
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(90),
+                        "the agent never started working"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Captured right before the continue: every row streamed so
+                // far precedes the user row the connection persists.
+                let rows_before = messages().len();
+
+                let payload = f.continue_with(FOLLOW_UP).await;
+                eprintln!("continue_repo_session reply: {payload:#}");
+                assert_eq!(payload["delivery"], expected_delivery);
+                assert_eq!(payload["state"], "running");
+                assert!(payload.get("reason").is_none());
+                assert_eq!(f.status(), SessionStatus::Running);
+                // The row the connection persisted is what the parent sees as
+                // the message having landed.
+                let user_rows: Vec<SessionMessage> = messages()
+                    .into_iter()
+                    .filter(|m| m.role == MessageRole::User)
+                    .collect();
+                assert_eq!(user_rows.len(), 1, "{user_rows:#?}");
+                assert_eq!(user_rows[0].content, FOLLOW_UP);
+                assert_eq!(
+                    payload["activity"]["last_user_message_at"],
+                    serde_json::json!(user_rows[0].created_at)
+                );
+
+                let outcome = tokio::time::timeout(std::time::Duration::from_secs(240), turn)
+                    .await
+                    .expect("the continued turn should end")
+                    .unwrap();
+                assert_eq!(outcome, Ok(acp_client::AgentRunOutcome::Completed));
+                // Still exactly one user row, after the interrupted work and
+                // before the reply to it; the row never left `running`.
+                let all = messages();
+                let user_at = all
+                    .iter()
+                    .position(|m| m.role == MessageRole::User)
+                    .unwrap();
+                assert_eq!(
+                    all.iter().filter(|m| m.role == MessageRole::User).count(),
+                    1
+                );
+                assert!(
+                    user_at >= rows_before,
+                    "user row at {user_at}, {rows_before} rows preceded the continue: {all:#?}"
+                );
+                let reply: String = all[user_at + 1..]
+                    .iter()
+                    .filter(|m| m.role == MessageRole::Assistant)
+                    .map(|m| m.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    reply.contains("FOLLOW-UP-DONE"),
+                    "reply after the user row: {reply:?}"
+                );
+                assert_eq!(f.status(), SessionStatus::Running);
+                for m in &all {
+                    eprintln!(
+                        "  {:<10} | {}",
+                        m.role.as_str(),
+                        m.content.replace('\n', "⏎")
+                    );
+                }
+
+                cancel.cancel();
+                let settled = tokio::time::timeout(std::time::Duration::from_secs(30), settled_rx)
+                    .await
+                    .expect("teardown after cancel")
+                    .unwrap();
+                eprintln!("settled: {:?} / {:?}", settled.outcome, settled.reason);
+            })
+            .await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "spawns the installed ACP bridge and calls the model"]
+    async fn continue_repo_session_live_steers_a_running_session() {
+        continue_repo_session_live(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "spawns the installed ACP bridge and calls the model"]
+    async fn continue_repo_session_live_interrupts_when_steering_is_unavailable() {
+        continue_repo_session_live(true).await;
+    }
+
+    /// A session in its startup window (row `running`, no connection yet)
+    /// that stays that way past the wait is reported blocked with a reason,
+    /// still `running`, so the parent retries rather than restarting it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn continuing_a_starting_session_reports_blocked_with_a_reason() {
+        let f = ContinueFixture::running_note_session();
+
+        let payload = f.continue_with("hello?").await;
+
+        assert_eq!(payload["delivery"], "blocked");
+        assert_eq!(payload["state"], "running");
+        assert!(payload["reason"]
+            .as_str()
+            .unwrap()
+            .contains("still starting"));
+        assert_eq!(f.status(), SessionStatus::Running);
     }
 
     /// A parent project agent reads a child's note through this payload, so

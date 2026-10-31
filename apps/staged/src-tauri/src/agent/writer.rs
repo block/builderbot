@@ -20,7 +20,7 @@ use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
 use acp_client::{
     autoapprove_permission_decision, strip_code_fences, AcpEventMetadata, AcpInitializeMetadata,
-    AcpPermissionDecision, AcpPermissionRequest, AcpToolCallMetadata,
+    AcpPermissionDecision, AcpPermissionRequest, AcpToolCallMetadata, PromptImage,
 };
 use agent_client_protocol::schema::MaybeUndefined;
 
@@ -162,6 +162,69 @@ impl MessageWriter {
     /// of starting a new one on the next append.
     pub async fn resume_interrupted_text(&self) {
         *self.text_interrupted.lock().await = false;
+    }
+
+    /// Persist a user message the ACP connection delivered itself — steered
+    /// into the turn in flight, or sent as the prompt after an interrupt —
+    /// as an ordinary `user` row, and return its id.
+    ///
+    /// Finalizes first so the row lands after whatever the assistant had
+    /// streamed so far and the next [`append_text`](Self::append_text) opens
+    /// a fresh assistant row: the transcript reads assistant → user →
+    /// assistant. The connection finalizes before calling too; doing it here
+    /// as well costs nothing (finalize is idempotent) and keeps the ordering
+    /// a property of this method rather than of its caller.
+    ///
+    /// The `images` are the blocks the connection sent; `image_ids` are the
+    /// stored attachments they were built from, threaded through the
+    /// connection's `TurnControlRequest` by the caller that loaded them. They
+    /// are persisted on the row as its `image_ids` and the images are
+    /// re-associated with this session (`set_images_session_id`), as
+    /// `start_session` does for a first prompt. The two lists normally pair
+    /// up one to one; a shortfall (an attachment whose file could not be
+    /// read still keeps its id) is logged and otherwise harmless.
+    pub async fn record_user_message(
+        &self,
+        text: &str,
+        images: &[PromptImage],
+        image_ids: &[String],
+    ) -> Option<i64> {
+        self.finalize().await;
+        if images.len() != image_ids.len() {
+            log::debug!(
+                "Session {}: user message delivered mid-turn with {} image block(s) and {} \
+                 stored attachment id(s)",
+                self.session_id,
+                images.len(),
+                image_ids.len()
+            );
+        }
+        let id = match self.store.add_session_message_with_images(
+            &self.session_id,
+            MessageRole::User,
+            text,
+            image_ids,
+        ) {
+            Ok(id) => id,
+            Err(e) => {
+                log::error!("Failed to insert delivered user message: {e}");
+                return None;
+            }
+        };
+        // Same association `start_session` makes for the prompt's images, so
+        // the attachments show under this session in the branch timeline.
+        if !image_ids.is_empty() {
+            if let Err(e) = self
+                .store
+                .set_images_session_id(image_ids, &self.session_id)
+            {
+                log::warn!(
+                    "Failed to associate images {image_ids:?} with session {}: {e}",
+                    self.session_id
+                );
+            }
+        }
+        Some(id)
     }
 
     // =====================================================================
@@ -308,6 +371,15 @@ impl acp_client::MessageWriter for MessageWriter {
 
     async fn finalize(&self) {
         self.finalize().await
+    }
+
+    async fn record_user_message(
+        &self,
+        text: &str,
+        images: &[PromptImage],
+        attachment_ids: &[String],
+    ) {
+        self.record_user_message(text, images, attachment_ids).await;
     }
 
     async fn should_finish_after_response(&self) -> bool {
@@ -568,6 +640,110 @@ mod tests {
             // Closing a response prevents it from satisfying a later boundary.
             assert!(!writer.should_finish_after_response().await);
         }
+    }
+
+    /// A message the connection delivers mid-session (steer or interrupt) is
+    /// persisted between the assistant text before it and the reply after it,
+    /// as three rows in transcript order, and the reply does not extend the
+    /// row that was open when the message arrived.
+    #[tokio::test]
+    async fn record_user_message_lands_between_assistant_rows() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.append_text("Working on the first ").await;
+        writer.append_text("instruction.").await;
+        writer.finalize().await;
+        let user_row = writer
+            .record_user_message("Actually, do the second thing instead.", &[], &[])
+            .await
+            .expect("user row inserted");
+        writer.append_text("Switching to the second thing.").await;
+        writer.finalize().await;
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        let rows: Vec<(MessageRole, &str)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "Working on the first instruction."),
+                (MessageRole::User, "Actually, do the second thing instead."),
+                (MessageRole::Assistant, "Switching to the second thing."),
+            ]
+        );
+        assert_eq!(messages[1].id, user_row);
+        assert!(messages[1].image_ids.is_empty());
+        assert!(messages[1].acp.acp_event_kind.is_none());
+    }
+
+    /// The trait entry point (what the connection task calls) closes any
+    /// still-open assistant text itself, so a caller that skipped the
+    /// finalize still gets the row order right; image blocks are accepted
+    /// and the text is what gets persisted.
+    #[tokio::test]
+    async fn record_user_message_closes_open_assistant_text_first() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.append_text("Unflushed partial text").await;
+        let image = acp_client::PromptImage::new("AAAA", "image/png");
+        acp_client::MessageWriter::record_user_message(&writer, "Look at this.", &[image], &[])
+            .await;
+        writer.append_text("Reply.").await;
+        writer.finalize().await;
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        let rows: Vec<(MessageRole, &str)> = messages
+            .iter()
+            .map(|m| (m.role.clone(), m.content.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (MessageRole::Assistant, "Unflushed partial text"),
+                (MessageRole::User, "Look at this."),
+                (MessageRole::Assistant, "Reply."),
+            ]
+        );
+    }
+
+    /// The attachment ids the connection hands back land on the user row as
+    /// its `image_ids`, and the stored images are associated with the session
+    /// — what `start_session` does for a prompt's images, so a message with
+    /// attachments reads the same whether it was delivered live or on a
+    /// resume.
+    #[tokio::test]
+    async fn record_user_message_persists_attachment_ids_and_associates_the_images() {
+        use crate::store::{Image, Project};
+        let (store, session_id, writer) = setup_writer();
+        let project = Project::new("owner/repo");
+        store.create_project(&project).unwrap();
+        let image = Image::new(None, &project.id, "shot.png", "image/png", 3, true);
+        store.create_image(&image).unwrap();
+        assert_ne!(
+            store.get_image(&image.id).unwrap().unwrap().session_id,
+            Some(session_id.clone())
+        );
+
+        let user_row = writer
+            .record_user_message(
+                "See attached.",
+                &[acp_client::PromptImage::new("AAAA", "image/png")],
+                std::slice::from_ref(&image.id),
+            )
+            .await
+            .expect("user row inserted");
+
+        let messages = store.get_session_messages(&session_id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, user_row);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert_eq!(messages[0].image_ids, vec![image.id.clone()]);
+        assert_eq!(
+            store.get_image(&image.id).unwrap().unwrap().session_id,
+            Some(session_id)
+        );
     }
 
     #[tokio::test]

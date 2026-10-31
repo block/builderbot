@@ -31,11 +31,23 @@ impl ArtifactWriter {
     }
 
     fn recorded_result(&self) -> bool {
+        self.recorded_results() > 0
+    }
+
+    fn recorded_results(&self) -> usize {
         self.metadata
             .lock()
             .unwrap()
             .iter()
-            .any(|event| event.event_kind.as_deref() == Some("response_result"))
+            .filter(|event| event.event_kind.as_deref() == Some("response_result"))
+            .count()
+    }
+
+    /// How many results reached the completion boundary (the writer's
+    /// `should_finish_after_response`).
+    fn completion_checks(&self) -> usize {
+        self.acceptance_checks
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -173,6 +185,7 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
         handler.transition_to_background_holding().await;
         let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
         let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
         let child_exited = CancellationToken::new();
         let active = AtomicBool::new(false);
         let (observer, reported) = recording_hold_observer();
@@ -184,6 +197,7 @@ async fn background_response_releases_wait_only_at_completion_and_clears_indicat
             &child_exited,
             &mut prompt_rx,
             &mut control_rx,
+            &mut turn_control_rx,
             &active,
             &|_| {},
             "sess-1",
@@ -251,6 +265,7 @@ async fn idle_without_a_new_artifact_keeps_waiting() {
     idle(&handler).await;
     let (_prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
     let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+    let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
     let child_exited = CancellationToken::new();
     let active = AtomicBool::new(false);
     let mut hold = std::pin::pin!(hold_for_background_quiescence(
@@ -261,6 +276,7 @@ async fn idle_without_a_new_artifact_keeps_waiting() {
         &child_exited,
         &mut prompt_rx,
         &mut control_rx,
+        &mut turn_control_rx,
         &active,
         &|_| {},
         "sess-1",
@@ -373,12 +389,15 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
             let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
             let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
             let (_control_tx, mut control_rx) = mpsc::unbounded_channel();
+            let (_turn_control_tx, mut turn_control_rx) = mpsc::unbounded_channel();
             let (reply, _reply_rx) = oneshot::channel();
             prompt_tx
                 .send(QueuedSessionTurn {
                     prompt: "write".into(),
                     images: vec![],
-                    reply,
+                    attachment_ids: vec![],
+                    reply: Some(reply),
+                    control: None,
                 })
                 .unwrap();
             let child_exited = CancellationToken::new();
@@ -427,9 +446,12 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     None,
                     if scenario == 7 { None } else { Some(&QUIESCENCE_PROBE) },
                     Some(&observer),
+                    false,
                     &child_exited,
                     &mut prompt_rx,
                     &mut control_rx,
+
+                    &mut turn_control_rx,
                     &active,
                     &pending_reply,
                 );
@@ -604,6 +626,82 @@ async fn result_after_a_tool_call_ended_the_message_lands_in_a_new_row() {
     );
     assert!(writer.recorded_result());
     assert!(finish_requested(&handler));
+}
+
+/// A steer pre-empts the generation in flight: the bridge aborts that cycle
+/// and still emits its `result`, whose final text is the message the steer
+/// callback just closed (seen against claude-agent-acp 0.95, which then
+/// re-echoed the whole message as a new row after the user row). Detaching
+/// keeps the streamed text, so the result certifies it instead of
+/// re-injecting it, and the steered reply opens its own row.
+#[tokio::test]
+async fn result_of_a_cycle_a_steer_aborted_does_not_echo_the_closed_message() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "pong")).await;
+    // What `serve_steer`'s response callback does once the agent answers
+    // `injected`: close the row, detach it, record the user row.
+    handler.writer.finalize().await;
+    handler.response.lock().await.detach_message();
+    feed_sdk_frame(&handler, successful_result("aborted", "pong")).await;
+    feed(&handler, agent_text(Some("msg-2"), "RACE-DONE")).await;
+    feed_sdk_frame(&handler, successful_result("steered", "RACE-DONE")).await;
+
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("pong".into()),
+            RowFlow::Finalize,
+            // No second "pong": the aborted cycle's result matched the text
+            // the steer detached. The steered reply starts a row of its own
+            // (the steer's finalize already closed the previous one).
+            RowFlow::Append("RACE-DONE".into()),
+        ]
+    );
+    // Both results are recorded (the aborted cycle's usage is real), but only
+    // the steered reply's reaches the completion boundary: the aborted cycle
+    // is not a response of its own.
+    assert_eq!(writer.recorded_results(), 2);
+    assert_eq!(writer.completion_checks(), 1);
+}
+
+/// The other order: the steered reply's first chunk lands *before* the
+/// aborted cycle's `result`. The detached text is kept apart from the live
+/// buffer, so the aborted result still matches it rather than retiring a
+/// buffer that now holds the reply's first chunk — which would split the
+/// reply into a second row at its next chunk and leave the turn's final
+/// result unrecorded.
+#[tokio::test]
+async fn aborted_cycle_result_arriving_after_the_steered_reply_began_does_not_split_it() {
+    let writer = Arc::new(ArtifactWriter::default());
+    let handler = artifact_handler(&writer);
+    start_task(&handler, TaskTrackingMode::Raw).await;
+    feed(&handler, agent_text(Some("msg-1"), "pong")).await;
+    handler.writer.finalize().await;
+    handler.response.lock().await.detach_message();
+    feed(&handler, agent_text(Some("msg-2"), "RACE-")).await;
+    feed_sdk_frame(&handler, successful_result("aborted", "pong")).await;
+    feed(&handler, agent_text(Some("msg-2"), "DONE")).await;
+    feed_sdk_frame(&handler, successful_result("steered", "RACE-DONE")).await;
+
+    assert_eq!(
+        writer.flow(),
+        vec![
+            RowFlow::Append("pong".into()),
+            RowFlow::Finalize,
+            // One row for the reply, no boundary between its two chunks and
+            // no echoed "pong".
+            RowFlow::Append("RACE-".into()),
+            RowFlow::Append("DONE".into()),
+        ]
+    );
+    assert_eq!(handler.response.lock().await.text, "RACE-DONE");
+    // The final result is still honoured: recorded, and the one that
+    // completes the response.
+    assert_eq!(writer.recorded_results(), 2);
+    assert_eq!(writer.completion_checks(), 1);
+    assert!(handler.response.lock().await.completed);
 }
 
 #[tokio::test]

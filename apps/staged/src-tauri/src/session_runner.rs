@@ -36,7 +36,7 @@
 //! - All write paths in the background thread use `let _ =` or
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
-mod attachments;
+pub(crate) mod attachments;
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -266,6 +266,11 @@ struct RunningSession {
     /// re-connects). `None` until then, or for sessions that never connect
     /// (e.g. externally registered ones).
     async_task_stop: std::sync::Mutex<Option<acp_client::AsyncTaskStopHandle>>,
+    /// Turn-control handle for the session's current ACP connection — how a
+    /// message reaches the agent *now* (steered into the turn in flight, or
+    /// sent in place of it) rather than after the turn. Set and replaced
+    /// alongside `async_task_stop`.
+    turn_control: std::sync::Mutex<Option<acp_client::TurnControlHandle>>,
     /// The last background hold the session's connection reported, so a client
     /// that mounts mid-hold can ask for the wait it missed. The hold is
     /// reported on change only; the driver reports the cleared default on the
@@ -444,6 +449,7 @@ impl SessionRegistry {
             cancellation_completion_reason: std::sync::Mutex::new(None),
             finished: std::sync::atomic::AtomicBool::new(false),
             async_task_stop: std::sync::Mutex::new(None),
+            turn_control: std::sync::Mutex::new(None),
             background_hold: std::sync::Mutex::new(acp_client::BackgroundHoldStatus::default()),
         });
         let pending = inner.pending_cancellations.remove(session_id);
@@ -788,6 +794,31 @@ impl SessionRegistry {
             .running
             .get(session_id)
             .and_then(|running| running.async_task_stop.lock().unwrap().clone())
+    }
+
+    /// Store the turn-control handle for `session_id`'s current ACP
+    /// connection, replacing the previous connection's handle (a Pikchr
+    /// correction re-connects on the same session).
+    pub(crate) fn set_turn_control_handle(
+        &self,
+        session_id: &str,
+        handle: acp_client::TurnControlHandle,
+    ) {
+        if let Some(running) = self.inner.lock().unwrap().running.get(session_id) {
+            *running.turn_control.lock().unwrap() = Some(handle);
+        }
+    }
+
+    /// The turn-control handle for `session_id`'s current ACP connection —
+    /// `None` when the session isn't running or hasn't connected yet (the
+    /// startup window between `register` and `connect`).
+    pub fn turn_control_handle(&self, session_id: &str) -> Option<acp_client::TurnControlHandle> {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .and_then(|running| running.turn_control.lock().unwrap().clone())
     }
 
     /// Retain the hold `session_id`'s connection just reported, so a client
@@ -1255,6 +1286,48 @@ pub(crate) fn finish_failed_before_run<R: tauri::Runtime>(
     transitioned
 }
 
+/// Read the attachments for a prompt's content blocks: images as they are,
+/// PDFs rendered page by page (see `attachments`). An id that cannot be read
+/// is logged and skipped, so a bad attachment never blocks the message.
+pub(crate) fn load_prompt_attachments(
+    store: &Store,
+    image_ids: &[String],
+) -> attachments::PromptAttachments {
+    let mut attachments = attachments::PromptAttachments::default();
+    for image_id in image_ids {
+        match store.get_image(image_id) {
+            Ok(Some(image)) => {
+                match crate::store::images::image_file_path(
+                    &image.project_id,
+                    &image.id,
+                    &image.filename,
+                ) {
+                    Ok(path) => {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            attachments.add(&image, &bytes);
+                        } else {
+                            log::warn!(
+                                "Failed to read image file for image {image_id}: {}",
+                                path.display()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to resolve file path for image {image_id}: {e}");
+                    }
+                }
+            }
+            Ok(None) => {
+                log::warn!("Image {image_id} not found in store, skipping");
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch image {image_id} from store: {e}");
+            }
+        }
+    }
+    attachments
+}
+
 /// Start a session: persist the user message, spawn the agent, stream to DB.
 ///
 /// Returns immediately — the actual agent work happens on a background task.
@@ -1643,40 +1716,7 @@ pub fn start_session(
                 driver.with_mcp_servers(required_mcp_servers)
             };
 
-            // Read the attachments for the prompt content blocks: images as
-            // they are, PDFs rendered page by page (see `attachments`).
-            let mut attachments = attachments::PromptAttachments::default();
-            for image_id in &config.image_ids {
-                match store.get_image(image_id) {
-                    Ok(Some(image)) => {
-                        match crate::store::images::image_file_path(
-                            &image.project_id,
-                            &image.id,
-                            &image.filename,
-                        ) {
-                            Ok(path) => {
-                                if let Ok(bytes) = std::fs::read(&path) {
-                                    attachments.add(&image, &bytes);
-                                } else {
-                                    log::warn!(
-                                        "Failed to read image file for image {image_id}: {}",
-                                        path.display()
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("Failed to resolve file path for image {image_id}: {e}");
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        log::warn!("Image {image_id} not found in store, skipping");
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to fetch image {image_id} from store: {e}");
-                    }
-                }
-            }
+            let attachments = load_prompt_attachments(&store, &config.image_ids);
 
             let mut prompt = attachments.prompt(&config.prompt);
             let mut agent_session_id = config.agent_session_id.clone();
@@ -1754,10 +1794,17 @@ pub fn start_session(
                         // Expose the connection's per-task stop where the
                         // `stop_session_async_task` command (another thread)
                         // can reach it; requests are only served while the
-                        // connection holds for background work.
+                        // connection holds for background work. The
+                        // turn-control handle goes up next to it so a message
+                        // for this session can be steered into (or sent in
+                        // place of) the turn in flight from another thread.
                         registry.set_async_task_stop_handle(
                             &config.session_id,
                             connection.async_task_stop_handle(),
+                        );
+                        registry.set_turn_control_handle(
+                            &config.session_id,
+                            connection.turn_control_handle(),
                         );
                         let settled_rx = connection.take_settled_receiver();
                         let turn_result = connection.prompt(&prompt, images).await;
@@ -6081,6 +6128,46 @@ mod tests {
             registry.cancellation_completion_reason("session-resumed"),
             None
         );
+    }
+
+    /// The turn-control handle follows the connection, not the registration:
+    /// absent in the startup window before `connect`, replaced when a Pikchr
+    /// correction re-connects on the same session, and gone with the entry.
+    /// Reads for an unknown session answer `None` rather than erroring, since
+    /// the caller routes on that (a message for a not-yet-connected session
+    /// waits, one for a session that is not running takes the resume path).
+    #[test]
+    fn turn_control_handle_follows_the_connection() {
+        let registry = SessionRegistry::new();
+        let (_, epoch) = registry.register("session-steered");
+
+        // Registered but not connected yet.
+        assert!(registry.turn_control_handle("session-steered").is_none());
+
+        let first = acp_client::TurnControlHandle::detached();
+        registry.set_turn_control_handle("session-steered", first.clone());
+        let read = registry
+            .turn_control_handle("session-steered")
+            .expect("handle set once the connection is up");
+        assert!(read.same_connection(&first));
+
+        // A re-connect hands out the new connection's handle.
+        let second = acp_client::TurnControlHandle::detached();
+        registry.set_turn_control_handle("session-steered", second.clone());
+        let read = registry
+            .turn_control_handle("session-steered")
+            .expect("handle replaced on re-connect");
+        assert!(read.same_connection(&second));
+        assert!(!read.same_connection(&first));
+
+        // Setting for a session that isn't registered is a no-op...
+        registry
+            .set_turn_control_handle("session-unknown", acp_client::TurnControlHandle::detached());
+        assert!(registry.turn_control_handle("session-unknown").is_none());
+
+        // ...and the handle leaves with the entry.
+        registry.deregister("session-steered", epoch);
+        assert!(registry.turn_control_handle("session-steered").is_none());
     }
 
     /// Every way into a session but the pipeline handoff arrives at

@@ -41,7 +41,11 @@ vi.mock('../branches/dragDrop', () => ({ subscribeDragDrop: () => () => {} }));
 vi.mock('../agents/agent.svelte', () => ({ agentState: { providers: [] } }));
 vi.mock('../settings/preferences.svelte', () => ({ getPreferredAgent: () => undefined }));
 vi.mock('../timeline/liveSessionHints', () => ({
-  createLiveSessionHints: () => ({ syncRunningSessionIds: () => {}, destroy: () => {} }),
+  createLiveSessionHints: () => ({
+    syncRunningSessionIds: () => {},
+    setPaused: () => {},
+    destroy: () => {},
+  }),
 }));
 vi.mock('../sessions/hashtagItems', () => ({
   buildProjectHashtagItems: async () => [],

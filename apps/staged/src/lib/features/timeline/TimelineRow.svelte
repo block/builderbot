@@ -370,7 +370,10 @@
           >
         {/if}
         {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0) || (childSessionBadges && childSessionBadges.length > 0)}
-          <div class="timeline-meta">
+          <div
+            class="timeline-meta"
+            class:has-child-badges={childSessionBadges && childSessionBadges.length > 0}
+          >
             {#if meta}
               <span class="meta-item">{meta}</span>
             {/if}
@@ -834,6 +837,17 @@
     margin-top: 3px;
     min-width: 0;
     max-width: 100%;
+  }
+
+  /* Child-session badges are fixed-width pills (`flex: 0 0 auto; nowrap`),
+     so several concurrent children would run past the row's right edge in a
+     narrow project column. Let them wrap onto further lines instead. Only
+     when badges are present: the single-line hint still ellipsizes. Extra
+     lines grow the row downwards, so the title row and the marker's icon
+     keep their top alignment. */
+  .timeline-meta.has-child-badges {
+    flex-wrap: wrap;
+    row-gap: 4px;
   }
 
   .meta-item {

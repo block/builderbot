@@ -5,11 +5,7 @@
 //!
 //! - `POST /api/invoke/{command}` — dispatches to the same logic as Tauri commands
 //! - `GET  /api/events`           — WebSocket that broadcasts Tauri events as JSON
-//! - `POST /api/auth`             — accepts bearer token and sets session cookie
 //! - `GET  /*`                    — static files from `../dist` (the built Svelte frontend)
-//!
-//! All `/api/*` routes (except `/api/auth`) require authentication via either
-//! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
 //!
 //! # Handler futures must not own queue state
 //!
@@ -23,11 +19,6 @@
 //! spawns it and only awaits the handle; the source-text test
 //! `web_arms_that_write_running_rows_are_detached` keeps new arms honest.
 
-// The full implementation is preserved here but start() is currently stubbed out,
-// so most items appear unused to the compiler.
-#![allow(dead_code, unused_imports)]
-
-use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -37,17 +28,13 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{DefaultBodyLimit, Path, Query, Request, State, WebSocketUpgrade};
 use axum::http::StatusCode;
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::Router;
-use axum_extra::extract::cookie::{Cookie, CookieJar};
-use rand::RngExt;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;
-use subtle::ConstantTimeEq;
 use tauri::Manager;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -77,10 +64,6 @@ use crate::store::{self, Store};
 pub struct WebAppState {
     pub app_handle: tauri::AppHandle,
     pub event_tx: broadcast::Sender<WebEvent>,
-    /// Hex-encoded 256-bit token required to authenticate web clients.
-    pub auth_token: String,
-    /// Set of valid session IDs, one per authenticated client.
-    pub sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A serialized event for WebSocket broadcast.
@@ -143,12 +126,6 @@ pub fn emit_to_all<R: tauri::Runtime, S: serde::Serialize + Clone>(
 // =============================================================================
 // Server startup
 // =============================================================================
-
-/// Generate a cryptographically random hex-encoded token (256-bit).
-pub fn generate_token() -> String {
-    let bytes: [u8; 32] = rand::rng().random();
-    hex::encode(bytes)
-}
 
 const CERT_PATH_ENV: &str = "STAGED_WEB_CERT_PATH";
 const KEY_PATH_ENV: &str = "STAGED_WEB_KEY_PATH";
@@ -228,17 +205,53 @@ impl Listener for TlsListener {
 
 /// Start the Axum web server in a background tokio task.
 ///
-/// Stubbed — logs a warning and returns. The full implementation (TLS listener,
-/// Axum router with static file serving) is intentionally disabled in this build.
-/// All route handlers, auth middleware, and the `dispatch()` match block are kept
-/// compiling so they stay in sync with the rest of the codebase.
-///
-/// TODO(web): restore full web server startup from the `mobile-web` branch.
-/// That restore should serve [`app_router`], which already composes the API
-/// routes, [`media_router`] (the frontend's `resolveStagedMediaUrl` emits
-/// `/api/media/...` in non-Tauri builds) and the static bundle.
-pub fn start(_state: WebAppState) {
-    log::warn!("Web server requested but this build has the web server stubbed out");
+/// This should be called from the Tauri `setup` hook after all managed state
+/// has been registered.
+pub fn start(state: WebAppState) {
+    tauri::async_runtime::spawn(async move {
+        let dist_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            // In dev, the exe is in src-tauri/target/debug; dist is at ../../dist relative to src-tauri
+            .map(|p| {
+                // Try multiple candidate paths for the built frontend
+                let candidates = vec![
+                    p.join("../dist"),          // production bundle
+                    p.join("../../../../dist"), // dev (target/debug -> src-tauri -> apps/staged -> dist)
+                    PathBuf::from("../dist"),   // relative to cwd
+                ];
+                candidates
+                    .into_iter()
+                    .find(|c| c.exists())
+                    .unwrap_or_else(|| PathBuf::from("../dist"))
+            })
+            .unwrap_or_else(|| PathBuf::from("../dist"));
+
+        let app = app_router(state, &dist_dir);
+
+        let addr = "0.0.0.0:5175";
+        let tls_acceptor = match load_tls_acceptor() {
+            Ok(acceptor) => acceptor,
+            Err(e) => {
+                log::error!("[web_server] {e}");
+                return;
+            }
+        };
+        log::info!(
+            "[web_server] starting HTTPS on {addr}, serving static files from {}",
+            dist_dir.display()
+        );
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[web_server] failed to bind {addr}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(TlsListener::new(listener, tls_acceptor), app).await {
+            log::error!("[web_server] server error: {e}");
+        }
+    });
 }
 
 /// The composed app: API routes, note media, and the built frontend from
@@ -248,7 +261,9 @@ pub fn start(_state: WebAppState) {
 /// and a base64-image-heavy one ~3×. The default predicate skips images and
 /// bodies under 32 bytes, so WebSocket upgrades and media are untouched.
 pub(crate) fn app_router(state: WebAppState, dist_dir: &std::path::Path) -> Router {
-    let media_routes = match media_router(state.clone()) {
+    // Note media is served from `/api/media/...`, which the frontend's
+    // `resolveStagedMediaUrl` emits in non-Tauri builds.
+    let media_routes = match media_router(&state) {
         Ok(router) => router,
         Err(e) => {
             log::warn!("[web_server] note media unavailable: {e}");
@@ -306,25 +321,21 @@ where
     )
 }
 
-/// Kept ready for the mobile-web startup restore. The route and auth layer are
-/// exercised together by oneshot tests, without starting a listener.
-pub(crate) fn media_router(state: WebAppState) -> Result<Router, String> {
+/// Note and tool media routes, mounted by [`app_router`]. The routes are
+/// exercised by oneshot tests, without starting a listener.
+pub(crate) fn media_router(state: &WebAppState) -> Result<Router, String> {
     let store = get_store(
         state
             .app_handle
             .state::<Mutex<Option<Arc<Store>>>>()
             .inner(),
     )?;
-    Ok(media_router_for_store(
-        store,
-        state.auth_token,
-        state.sessions,
-    ))
+    Ok(media_router_for_store(store))
 }
 
 /// Tool and note media are user/agent-supplied bytes served from the app
 /// origin. Viewed top-level (e.g. "Open image in new tab") an SVG would run
-/// script with the session cookie in scope; `sandbox` puts it in an opaque
+/// script with this origin's `/api` routes in reach; `sandbox` puts it in an opaque
 /// origin with script disabled and `default-src 'none'` blocks its subresource
 /// loads, while `style-src 'unsafe-inline'` keeps its own `<style>` working.
 /// `<img>` rendering ignores response CSP, so this costs nothing there.
@@ -336,11 +347,7 @@ const UNTRUSTED_MEDIA_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'
 /// `sandbox` is dropped for it.
 const UNTRUSTED_PDF_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'";
 
-fn media_router_for_store(
-    store: Arc<Store>,
-    token: String,
-    sessions: Arc<Mutex<HashSet<String>>>,
-) -> Router {
+fn media_router_for_store(store: Arc<Store>) -> Router {
     Router::new()
         .route("/api/media/{file}", get(serve_media))
         .route(
@@ -349,19 +356,6 @@ fn media_router_for_store(
         )
         .route("/api/tool-bodies/{message_id}", get(serve_tool_call_body))
         .with_state(store)
-        .route_layer(middleware::from_fn(
-            move |jar: CookieJar, request: Request, next: Next| {
-                let token = token.clone();
-                let sessions = sessions.clone();
-                async move {
-                    if is_authenticated(&token, &sessions, &jar, request.headers()) {
-                        next.run(request).await
-                    } else {
-                        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-                    }
-                }
-            },
-        ))
 }
 
 async fn serve_media(
@@ -524,95 +518,6 @@ async fn serve_tool_call_body(
         Json(body),
     )
         .into_response()
-}
-
-// =============================================================================
-// Authentication
-// =============================================================================
-
-const SESSION_COOKIE_NAME: &str = "staged_session";
-const SESSION_MAX_AGE_DAYS: i64 = 7;
-
-/// Constant-time string comparison to prevent timing side-channel attacks.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-/// Middleware that rejects unauthenticated requests to protected routes.
-///
-/// Accepts either:
-/// - `Authorization: Bearer <token>` header matching the server's auth token
-/// - `staged_session` cookie matching the server's session ID
-async fn require_auth(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    request: Request,
-    next: Next,
-) -> Response {
-    if is_authenticated(&state.auth_token, &state.sessions, &jar, request.headers()) {
-        next.run(request).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-    }
-}
-
-fn is_authenticated(
-    token: &str,
-    sessions: &Mutex<HashSet<String>>,
-    jar: &CookieJar,
-    headers: &axum::http::HeaderMap,
-) -> bool {
-    if headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .is_some_and(|value| constant_time_eq(value, token))
-    {
-        return true;
-    }
-    jar.get(SESSION_COOKIE_NAME).is_some_and(|cookie| {
-        sessions
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|s| constant_time_eq(cookie.value(), s))
-    })
-}
-
-/// POST /api/auth — validate the bearer token and issue a session cookie.
-///
-/// Expects JSON body: `{ "token": "<auth_token>" }`
-async fn authenticate(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    Json(body): Json<Value>,
-) -> Response {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    if !constant_time_eq(token, &state.auth_token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
-    }
-
-    // Generate a unique session ID for this client and register it.
-    let new_session_id = generate_token();
-    state
-        .sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(new_session_id.clone());
-
-    let cookie = Cookie::build((SESSION_COOKIE_NAME, new_session_id))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .max_age(time::Duration::days(SESSION_MAX_AGE_DAYS))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .build();
-
-    (jar.add(cookie), Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 // =============================================================================
@@ -4375,10 +4280,8 @@ mod tests {
     /// post-completion hooks ran — would flip no token and write no status, and
     /// `session_runner`'s queued follow-up would drain anyway.
     ///
-    /// Latent rather than live, since [`start`] is stubbed and nothing serves
-    /// this dispatcher in this build. That is precisely why it needs a test:
-    /// the arms are kept compiling to stay in sync for the day the server is
-    /// restored, and a dormant arm has no user to notice it diverging.
+    /// The web server only starts when explicitly opted in, so a drifted arm
+    /// has few users to notice it diverging — which is why it needs a test.
     ///
     /// Both transports now share one body; the behaviour it must have is pinned
     /// by
@@ -4853,13 +4756,10 @@ mod media_tests {
             &pdf,
         )
         .unwrap();
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions)
-            .layer(compression_layer());
+        let router = media_router_for_store(fixture.store.clone()).layer(compression_layer());
         let request = |uri: String, range: Option<&str>| {
             let mut request = axum::http::Request::builder()
                 .uri(uri)
-                .header("Authorization", "Bearer bearer-token")
                 .header("Accept-Encoding", "br, gzip");
             if let Some(range) = range {
                 request = request.header("Range", range);
@@ -4926,51 +4826,35 @@ mod media_tests {
     }
 
     #[tokio::test]
-    async fn media_route_requires_auth_and_streams_ranges() {
+    async fn media_route_streams_ranges() {
         let fixture = Fixture::new();
         std::fs::write(fixture.dir.path().join("shot.png"), PNG).unwrap();
         let outcome = fixture.ingest("", "![a](shot.png)");
         let id = outcome.kept_ids.iter().next().unwrap();
-        let store = fixture.store.clone();
-        let sessions = Arc::new(Mutex::new(HashSet::from(["session-token".into()])));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
+        let router = media_router_for_store(fixture.store.clone());
         let uri = format!("/api/media/{id}.png");
-        for (auth, expected) in [
-            (None, StatusCode::UNAUTHORIZED),
-            (Some("wrong"), StatusCode::UNAUTHORIZED),
-            (Some("session-token"), StatusCode::PARTIAL_CONTENT),
-        ] {
-            let mut request = axum::http::Request::builder()
-                .uri(&uri)
-                .header("Range", "bytes=2-5");
-            if let Some(auth) = auth {
-                request = request.header("Cookie", format!("staged_session={auth}"));
-            }
-            let response = router
-                .clone()
-                .oneshot(request.body(axum::body::Body::empty()).unwrap())
-                .await
-                .unwrap();
-            assert_eq!(response.status(), expected);
-            if expected == StatusCode::PARTIAL_CONTENT {
-                assert_eq!(response.headers()["content-type"], "image/png");
-                assert_eq!(response.headers()["accept-ranges"], "bytes");
-                assert_eq!(
-                    response.headers()["cache-control"],
-                    "private, max-age=31536000, immutable"
-                );
-                assert_eq!(
-                    axum::body::to_bytes(response.into_body(), 100)
-                        .await
-                        .unwrap()
-                        .as_ref(),
-                    &PNG[2..6]
-                );
-            }
-        }
         let request = axum::http::Request::builder()
             .uri(&uri)
-            .header("Authorization", "Bearer bearer-token")
+            .header("Range", "bytes=2-5")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(
+            response.headers()["cache-control"],
+            "private, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            &PNG[2..6]
+        );
+        let request = axum::http::Request::builder()
+            .uri(&uri)
             .body(axum::body::Body::empty())
             .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
@@ -4996,17 +4880,18 @@ mod media_tests {
         // The cache policy covers every 2xx and the 304 a conditional
         // request gets back, but not a 416 (or 412), which describes the
         // request rather than the bytes and must not be stored for a year.
-        let bearer = |method: &str, headers: &[(&str, &str)]| {
-            let mut request = axum::http::Request::builder()
-                .method(method)
-                .uri(&uri)
-                .header("Authorization", "Bearer bearer-token");
+        let request_with = |method: &str, headers: &[(&str, &str)]| {
+            let mut request = axum::http::Request::builder().method(method).uri(&uri);
             for (name, value) in headers {
                 request = request.header(*name, *value);
             }
             request.body(axum::body::Body::empty()).unwrap()
         };
-        let response = router.clone().oneshot(bearer("HEAD", &[])).await.unwrap();
+        let response = router
+            .clone()
+            .oneshot(request_with("HEAD", &[]))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()["cache-control"],
@@ -5014,7 +4899,10 @@ mod media_tests {
         );
         let response = router
             .clone()
-            .oneshot(bearer("GET", &[("If-None-Match", etag.to_str().unwrap())]))
+            .oneshot(request_with(
+                "GET",
+                &[("If-None-Match", etag.to_str().unwrap())],
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
@@ -5025,7 +4913,7 @@ mod media_tests {
         let beyond_eof = format!("bytes={}-", PNG.len());
         let response = router
             .clone()
-            .oneshot(bearer("GET", &[("Range", beyond_eof.as_str())]))
+            .oneshot(request_with("GET", &[("Range", beyond_eof.as_str())]))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
@@ -5033,7 +4921,6 @@ mod media_tests {
 
         let request = axum::http::Request::builder()
             .uri("/api/media/not-a-media-id.png")
-            .header("Authorization", "Bearer bearer-token")
             .body(axum::body::Body::empty())
             .unwrap();
         assert_eq!(
@@ -5055,14 +4942,12 @@ mod media_tests {
         std::fs::write(fixture.dir.path().join("clip.mp4"), &mp4).unwrap();
         let outcome = fixture.ingest("", "![a](clip.mp4)");
         let id = outcome.kept_ids.iter().next().unwrap();
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(fixture.store.clone(), "bearer-token".into(), sessions)
+        let router = media_router_for_store(fixture.store.clone())
             .route("/text", get(|| async { "x".repeat(100) }))
             .layer(compression_layer());
         let request = |uri: &str, headers: &[(&str, &str)]| {
             let mut request = axum::http::Request::builder()
                 .uri(uri)
-                .header("Authorization", "Bearer bearer-token")
                 .header("Accept-Encoding", "br, gzip");
             for (name, value) in headers {
                 request = request.header(*name, *value);
@@ -5176,24 +5061,17 @@ mod media_tests {
                 },
             )
             .unwrap();
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
-        let get = |uri: String, auth: Option<&str>| {
-            let mut request = axum::http::Request::builder().uri(uri);
-            if let Some(auth) = auth {
-                request = request.header("Authorization", format!("Bearer {auth}"));
-            }
+        let router = media_router_for_store(store);
+        let get = |uri: String| {
+            let request = axum::http::Request::builder().uri(uri);
             router
                 .clone()
                 .oneshot(request.body(axum::body::Body::empty()).unwrap())
         };
 
-        let response = get(
-            format!("/api/tool-images/{id}/output/1"),
-            Some("bearer-token"),
-        )
-        .await
-        .unwrap();
+        let response = get(format!("/api/tool-images/{id}/output/1"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "image/png");
         assert_eq!(
@@ -5215,12 +5093,9 @@ mod media_tests {
 
         // The SVG is still served with its own type (the `<img>` needs it),
         // only ever under the sandboxing policy.
-        let response = get(
-            format!("/api/tool-images/{id}/output/2"),
-            Some("bearer-token"),
-        )
-        .await
-        .unwrap();
+        let response = get(format!("/api/tool-images/{id}/output/2"))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "image/svg+xml");
         assert_eq!(
@@ -5235,13 +5110,6 @@ mod media_tests {
             SVG
         );
 
-        assert_eq!(
-            get(format!("/api/tool-images/{id}/output/1"), None)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
         for uri in [
             format!("/api/tool-images/{id}/output/0"),
             format!("/api/tool-images/{id}/output/3"),
@@ -5252,10 +5120,7 @@ mod media_tests {
             "/api/tool-images/not-an-id/output/1".to_string(),
         ] {
             assert_eq!(
-                get(uri.clone(), Some("bearer-token"))
-                    .await
-                    .unwrap()
-                    .status(),
+                get(uri.clone()).await.unwrap().status(),
                 StatusCode::NOT_FOUND,
                 "{uri}"
             );
@@ -5311,22 +5176,16 @@ mod media_tests {
             )
             .unwrap();
 
-        let sessions = Arc::new(Mutex::new(HashSet::new()));
-        let router = media_router_for_store(store, "bearer-token".into(), sessions);
-        let get = |uri: String, auth: Option<&str>| {
-            let mut request = axum::http::Request::builder().uri(uri);
-            if let Some(auth) = auth {
-                request = request.header("Authorization", format!("Bearer {auth}"));
-            }
+        let router = media_router_for_store(store);
+        let get = |uri: String| {
+            let request = axum::http::Request::builder().uri(uri);
             router
                 .clone()
                 .oneshot(request.body(axum::body::Body::empty()).unwrap())
         };
 
         // …and the route serves the bodies, images projected to refs.
-        let response = get(format!("/api/tool-bodies/{id}"), Some("bearer-token"))
-            .await
-            .unwrap();
+        let response = get(format!("/api/tool-bodies/{id}")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "application/json");
         assert_eq!(
@@ -5352,23 +5211,13 @@ mod media_tests {
             })
         );
 
-        assert_eq!(
-            get(format!("/api/tool-bodies/{id}"), None)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNAUTHORIZED
-        );
         for uri in [
             format!("/api/tool-bodies/{in_flight_id}"),
             format!("/api/tool-bodies/{}", in_flight_id + 1),
             "/api/tool-bodies/not-an-id".to_string(),
         ] {
             assert_eq!(
-                get(uri.clone(), Some("bearer-token"))
-                    .await
-                    .unwrap()
-                    .status(),
+                get(uri.clone()).await.unwrap().status(),
                 StatusCode::NOT_FOUND,
                 "{uri}"
             );

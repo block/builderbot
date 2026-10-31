@@ -4229,6 +4229,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| format!("Failed to save preferences: {e}"))?;
             Ok(Value::Null)
         }
+        "list_preference_keys" => {
+            let store = preferences_store(app_handle)?;
+            serde_json::to_value(store.keys())
+                .map_err(|e| format!("Failed to list preference keys: {e}"))
+        }
         "delete_preference" => {
             let key: String = arg(&args, "key")?;
             let store = preferences_store(app_handle)?;

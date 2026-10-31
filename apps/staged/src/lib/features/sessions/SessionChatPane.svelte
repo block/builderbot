@@ -180,6 +180,7 @@
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, noteActivityLabel, type LinkedNoteContext } from './noteFreshness';
+  import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
   import NoteActivityCard from './NoteActivityCard.svelte';
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
@@ -302,6 +303,57 @@
   let expandedTools = $state<Set<string>>(new Set());
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
+
+  const replyDraftWriter = createDraftWriteScheduler();
+  // $state so the save effect re-runs when a finished load opens the gate —
+  // otherwise a keystroke typed during the load window is never scheduled.
+  let loadedDraftSessionId = $state<string | null>(null);
+  let draftLoadGeneration = 0;
+  // One-shot: set when a failed load re-opens the save gate while the composer
+  // may still hold the previously shown session's text; the save effect skips
+  // exactly that run so inherited text isn't filed under this session's key.
+  let suppressNextReplySave = false;
+
+  function replyDraftKey(id: string): string {
+    return `draft:session-reply:${id}`;
+  }
+
+  /**
+   * Restore the cached reply draft for `id` into the composer.
+   *
+   * Flushes the writer before reading: bouncing between sessions faster than
+   * the write debounce (A → B → A) leaves A's newest keystrokes pending, and a
+   * direct store read would restore the stale value — which the save effect
+   * below would then write back, superseding the pending newer text.
+   */
+  async function loadReplyDraft(id: string, generation: number, textWhenLoadStarted: string) {
+    try {
+      await replyDraftWriter.flush();
+      const draft = await loadDraft(replyDraftKey(id));
+      if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
+      if (inputText === textWhenLoadStarted) {
+        inputText = draft ?? '';
+      }
+      loadedDraftSessionId = id;
+      await tick();
+      autoResize();
+    } catch (err) {
+      console.error('[SessionChatPane] Failed to load reply draft:', err);
+      // Leave the composer as the user left it, but re-enable saving so
+      // further keystrokes still reach the store. Re-enabling fires the save
+      // effect once immediately: when the composer still holds exactly the
+      // text from before this load began, that text was inherited from the
+      // previously shown session (a switch A → B where B's load failed), and
+      // letting that run through would overwrite B's stored draft with A's
+      // text. Suppress it — text typed during the load window was written
+      // while this session was displayed, so it still saves.
+      if (generation === draftLoadGeneration && active && sessionId === id) {
+        suppressNextReplySave = inputText === textWhenLoadStarted;
+        loadedDraftSessionId = id;
+      }
+    }
+  }
+
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
   let modelSpecificFollowupConfig = $state<AcpConfigDiscovery | null>(null);
   let modelSpecificFollowupModelValue = $state<string | null>(null);
@@ -698,6 +750,9 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
+    // Flush (not cancel) so a reply typed within the debounce window of
+    // teardown still gets persisted.
+    void replyDraftWriter.flush();
   });
 
   // This pane is mounted once and reused across opens (`sessionPanePool`
@@ -753,6 +808,33 @@
 
   $effect(() => {
     onSessionChange?.(session);
+  });
+
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) {
+      loadedDraftSessionId = null;
+      return;
+    }
+
+    const generation = ++draftLoadGeneration;
+    const inputTextWhenLoadStarted = untrack(() => inputText);
+    suppressNextReplySave = false;
+    loadedDraftSessionId = null;
+    void loadReplyDraft(id, generation, inputTextWhenLoadStarted);
+  });
+
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    const text = inputText;
+    if (!isActive || !id || loadedDraftSessionId !== id) return;
+    if (suppressNextReplySave) {
+      suppressNextReplySave = false;
+      return;
+    }
+    replyDraftWriter.scheduleSave(replyDraftKey(id), text);
   });
 
   $effect(() => {
@@ -1209,6 +1291,7 @@
   async function handleSend() {
     const text = inputText.trim();
     if (!text) return;
+    void replyDraftWriter.clearNow(replyDraftKey(sessionId));
     inputText = '';
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];

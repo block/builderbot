@@ -7,6 +7,7 @@ import { projectSearchName } from '../branches/moveBranchTarget';
 import type { Project } from '../../types';
 
 export type NoteTransferMode = 'move' | 'copy';
+export type NoteTransferKind = 'branch' | 'project';
 
 export interface NoteTransferLabels {
   title: string;
@@ -169,4 +170,25 @@ export function repoAddedHint(repo: NoteRepo | null | undefined): string | null 
   if (!repo) return null;
   const path = repo.subpath ? `${repo.githubRepo} (${repo.subpath})` : repo.githubRepo;
   return `${path} is added to the project if it isn't there yet.`;
+}
+
+/**
+ * What travels with the note, shown under its title in the picker. A repo
+ * note brings its repo (see `repoAddedHint`). A moved project note brings
+ * the child notes its session spawned, sessions included, and whatever repos
+ * they are bound to; the commits and code reviews that session produced have
+ * no link back to it and stay on their branch. A copied project note is
+ * standalone, so there is nothing to say.
+ */
+export function noteTransferHint(
+  mode: NoteTransferMode,
+  noteKind: NoteTransferKind,
+  repo: { githubRepo: string; subpath: string | null } | null | undefined
+): string | null {
+  if (noteKind === 'branch') return repoAddedHint(repo);
+  if (mode !== 'move') return null;
+  return (
+    'moves with its child notes and their sessions; any repository they need is added to ' +
+    'the project. Commits and code reviews stay on their branch.'
+  );
 }

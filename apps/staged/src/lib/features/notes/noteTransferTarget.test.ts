@@ -5,6 +5,7 @@ import {
   noteTransferCandidates,
   newRemoteProjectBlocker,
   noteTransferBlocker,
+  noteTransferHint,
   noteTransferLabels,
   noteTransferTarget,
   repoAddedHint,
@@ -221,5 +222,24 @@ describe('transferFailedAfterCreate', () => {
     expect(transferFailedAfterCreate('copy', 'Fresh', 'disk full')).toBe(
       "Created Fresh, but the note wasn't copied: disk full"
     );
+  });
+});
+
+describe('noteTransferHint', () => {
+  const repo = { githubRepo: 'acme/widgets', subpath: null };
+
+  it('talks about the repo for a branch note, moved or copied', () => {
+    expect(noteTransferHint('move', 'branch', repo)).toBe(repoAddedHint(repo));
+    expect(noteTransferHint('copy', 'branch', repo)).toBe(repoAddedHint(repo));
+  });
+
+  it('says a moved project note takes its child notes but not its commits or reviews', () => {
+    const hint = noteTransferHint('move', 'project', null);
+    expect(hint).toContain('child notes and their sessions');
+    expect(hint).toContain('Commits and code reviews stay on their branch');
+  });
+
+  it('says nothing for a copied project note, which is standalone', () => {
+    expect(noteTransferHint('copy', 'project', null)).toBeNull();
   });
 });

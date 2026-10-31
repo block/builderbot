@@ -45,11 +45,17 @@
 //! What a move carries and what it leaves (see the store half in
 //! `store::note_transfer` for the row-level reasoning): the note keeps its id
 //! and its session (the transcript stays reachable; a resumed session keeps
-//! its original working directory), a child note is detached from its parent
-//! project note, and a project note's children are detached rather than moved.
-//! A copy is a standalone note: no session, no parent, no suggested next steps,
-//! and — having no session to overwrite it — editable like a note the user
-//! wrote.
+//! its original working directory). A branch note moved on its own is
+//! detached from its parent project note. A project note takes its child
+//! notes along: each lands on the branch in the target that tracks the same
+//! repo and subpath (added first when missing, as in step 1), with its session
+//! and its parent link, in the parent's transaction. The move waits for any child
+//! session that is still queued or running, and is refused when a child sits
+//! on a remote branch or either project is remote, the way a branch move is.
+//! The commits and code reviews a project session produced carry no link back
+//! to it and stay on their branch. A copy is a standalone note: no session,
+//! no parent, no children, no suggested next steps, and — having no session
+//! to overwrite it — editable like a note the user wrote.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -59,8 +65,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::note_media::{cleanup_unreferenced, files, refs};
 use crate::store::images::image_file_path;
-use crate::store::models::{Branch, Image, Note, ProjectNote, ProjectRepo, NOTE_MEDIA_SESSION_ID};
-use crate::store::{Store, StoreError};
+use crate::store::models::{
+    Branch, BranchType, Image, Note, Project, ProjectLocation, ProjectNote, ProjectRepo,
+    SessionStatus, NOTE_MEDIA_SESSION_ID,
+};
+use crate::store::{ChildNoteMove, Store, StoreError};
 use crate::NoteTimelineItem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +219,7 @@ where
         &target.id,
         owner_session,
         rehome,
+        &mut HashSet::new(),
     )?;
     let result = match mode {
         TransferMode::Move => store.move_note_to_branch(
@@ -263,12 +273,22 @@ fn bound_repo(store: &Store, branch: &Branch) -> Result<Option<ProjectRepo>, Str
 }
 
 /// Move or copy a project note into `target_project_id`.
-pub(crate) fn transfer_project_note(
+///
+/// A move takes the note's child notes and their sessions along, each onto
+/// the branch in the target that tracks its repo + subpath; `ensure_repo`
+/// runs for every such repo the target does not track yet, as it does in
+/// [`transfer_branch_note`]. A copy is standalone and has no children.
+pub(crate) async fn transfer_project_note<F, Fut>(
     store: &Store,
     note_id: &str,
     target_project_id: &str,
     mode: TransferMode,
-) -> Result<ProjectNote, String> {
+    mut ensure_repo: F,
+) -> Result<ProjectNote, String>
+where
+    F: FnMut(RepoKey) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
     let note = store
         .get_project_note(note_id)
         .map_err(|e| e.to_string())?
@@ -291,44 +311,263 @@ pub(crate) fn transfer_project_note(
         ));
     }
 
+    if mode == TransferMode::Copy {
+        let _media = lock_transfer_media();
+        let media = stage_media(
+            store,
+            &note.content,
+            None,
+            &target.id,
+            None,
+            None,
+            &mut HashSet::new(),
+        )?;
+        let mut copy = ProjectNote::new(&target.id, &note.title, &media.content);
+        copy.set_initial_read(note.is_read());
+        let result = store
+            .copy_project_note_to_project(&copy, &media.images)
+            .map(|()| copy);
+        return finish(store, mode, &note.content, media, result);
+    }
+
+    // Step 1: every repo the children are bound to has to be in the target.
+    let children = store
+        .list_child_notes(&note.id)
+        .map_err(|e| e.to_string())?;
+    if !children.is_empty() {
+        ensure_local_projects(store, &note, &target)?;
+    }
+    let mut keys: Vec<RepoKey> = Vec::new();
+    for child in &children {
+        let (_, key) = child_repo(store, &note, child)?;
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    for key in keys {
+        let already_tracked = store
+            .find_project_repo(&target.id, &key.github_repo, key.subpath.as_deref())
+            .map_err(|e| e.to_string())?
+            .is_some();
+        if !already_tracked {
+            ensure_repo(key.clone())
+                .await
+                .map_err(|e| format!("Could not add {} to {}: {e}", key.describe(), target.name))?;
+        }
+    }
+    // Adding repos can take seconds; what moves is the family as it reads
+    // now — including a child that finished, or a save that landed, meanwhile.
+    let note = refetch_project_note(store, &note)?;
+    let mut children_with_destination: Vec<(Note, Branch)> = Vec::new();
+    for child in store
+        .list_child_notes(&note.id)
+        .map_err(|e| e.to_string())?
+    {
+        let (_, key) = child_repo(store, &note, &child)?;
+        let target_branch = store
+            .find_branch_for_repo(&target.id, &key.github_repo, key.subpath.as_deref())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "{} tracks {} but has no branch for it.",
+                    target.name,
+                    key.describe()
+                )
+            })?;
+        children_with_destination.push((child, target_branch));
+    }
+
+    // Step 2: media files for the parent and every child, staged together so
+    // a failure part-way discards the lot, then step 3: the transaction. There
+    // is no await past this point, so the lock is never held across one.
     let _media = lock_transfer_media();
-    let (owner_session, rehome) = match mode {
-        TransferMode::Move => (
+    let mut staged: Vec<StagedMedia> = Vec::new();
+    let mut reserved = HashSet::new();
+    let mut plan: Vec<ChildNoteMove> = Vec::with_capacity(children_with_destination.len());
+    let outcome = (|| -> Result<(), String> {
+        staged.push(stage_media(
+            store,
+            &note.content,
+            None,
+            &target.id,
             note.session_id.as_deref(),
             Some(MoveSource {
                 note_id: &note.id,
                 project_id: &note.project_id,
                 branch_id: None,
             }),
-        ),
-        TransferMode::Copy => (None, None),
-    };
-    let media = stage_media(
-        store,
-        &note.content,
-        None,
-        &target.id,
-        owner_session,
-        rehome,
-    )?;
-    let result = match mode {
-        TransferMode::Move => store.move_project_note_to_project(
-            &note.id,
-            &note.project_id,
-            &target.id,
-            &media.content,
-            &media.images,
-            &media.rehomed,
-        ),
-        TransferMode::Copy => {
-            let mut copy = ProjectNote::new(&target.id, &note.title, &media.content);
-            copy.set_initial_read(note.is_read());
-            store
-                .copy_project_note_to_project(&copy, &media.images)
-                .map(|()| copy)
+            &mut reserved,
+        )?);
+        for (child, target_branch) in &children_with_destination {
+            let media = stage_media(
+                store,
+                &child.content,
+                Some(&target_branch.id),
+                &target.id,
+                child.session_id.as_deref(),
+                Some(MoveSource {
+                    note_id: &child.id,
+                    project_id: &note.project_id,
+                    branch_id: Some(&child.branch_id),
+                }),
+                &mut reserved,
+            )?;
+            plan.push(ChildNoteMove {
+                note_id: child.id.clone(),
+                expected_branch_id: child.branch_id.clone(),
+                target_branch_id: target_branch.id.clone(),
+                content: media.content.clone(),
+                media: media.images.clone(),
+                rehomed: media.rehomed.clone(),
+            });
+            staged.push(media);
         }
-    };
-    finish(store, mode, &note.content, media, result)
+        Ok(())
+    })();
+    if let Err(e) = outcome {
+        discard_all(store, staged);
+        return Err(e);
+    }
+
+    // Step 3: the transaction, parent and children together.
+    let parent_media = &staged[0];
+    let result = store.move_project_note_to_project(
+        &note.id,
+        &note.project_id,
+        &target.id,
+        &parent_media.content,
+        &parent_media.images,
+        &parent_media.rehomed,
+        &plan,
+    );
+    let previous_contents: Vec<&str> = std::iter::once(note.content.as_str())
+        .chain(
+            children_with_destination
+                .iter()
+                .map(|(child, _)| child.content.as_str()),
+        )
+        .collect();
+    finish_all(store, mode, &previous_contents, staged, result)
+}
+
+/// Remote branches of a project share one Blox workspace, so a child note's
+/// branch cannot change projects — the same rule the branch move applies. A
+/// project note without children has nothing on a workspace and still moves.
+fn ensure_local_projects(
+    store: &Store,
+    note: &ProjectNote,
+    target: &Project,
+) -> Result<(), String> {
+    let source = store
+        .get_project(&note.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", note.project_id))?;
+    for project in [&source, target] {
+        if project.location == ProjectLocation::Remote {
+            return Err(format!(
+                "Project '{}' runs on a remote workspace; {} has child notes, which can only move between local projects.",
+                project.name,
+                quoted(&note.title)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Where a child note is bound: its branch, and the repo + subpath that
+/// branch tracks (what the target has to track before the child can land).
+///
+/// Refused while the child's session is queued or running: `sessions.branch_id`
+/// is the branch queue's scheduling key, and rewriting it under a live drain
+/// would hand the session to a branch that is not running it. Also refused
+/// for a child on a remote branch, which the branch move excludes too.
+fn child_repo(
+    store: &Store,
+    parent: &ProjectNote,
+    child: &Note,
+) -> Result<(Branch, RepoKey), String> {
+    if let Some(session_id) = child.session_id.as_deref() {
+        let status = store
+            .get_session(session_id)
+            .map_err(|e| e.to_string())?
+            .map(|session| session.status);
+        if let Some(status @ (SessionStatus::Queued | SessionStatus::Running)) = status {
+            return Err(format!(
+                "{} has {} whose session is still {}; wait for it to finish before moving the note.",
+                quoted(&parent.title),
+                child_label(child),
+                status.as_str()
+            ));
+        }
+    }
+    let branch = store
+        .get_branch(&child.branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", child.branch_id))?;
+    if branch.branch_type == BranchType::Remote {
+        return Err(format!(
+            "{} has {} on remote branch '{}'; notes on remote branches can't move between projects.",
+            quoted(&parent.title),
+            child_label(child),
+            branch.branch_name
+        ));
+    }
+    let repo_id = branch.project_repo_id.as_deref().ok_or_else(|| {
+        format!(
+            "Branch '{}' is not bound to a repository, so {} of {} cannot move with it.",
+            branch.branch_name,
+            child_label(child),
+            quoted(&parent.title)
+        )
+    })?;
+    let repo = store
+        .get_project_repo(repo_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Repository not found: {repo_id}"))?;
+    Ok((
+        branch,
+        RepoKey {
+            github_repo: repo.github_repo,
+            subpath: repo.subpath,
+        },
+    ))
+}
+
+fn child_label(child: &Note) -> String {
+    if child.title.trim().is_empty() {
+        "a child note".to_string()
+    } else {
+        format!("child note \"{}\"", child.title)
+    }
+}
+
+/// [`refetch_branch_note`] for a project note being moved.
+fn refetch_project_note(store: &Store, before: &ProjectNote) -> Result<ProjectNote, String> {
+    let mode = TransferMode::Move;
+    let fresh = store
+        .get_project_note(&before.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            format!(
+                "{} was deleted while {} it.",
+                quoted(&before.title),
+                mode.gerund()
+            )
+        })?;
+    ensure_settled(
+        &fresh.title,
+        fresh.session_id.as_deref(),
+        fresh.completed_at,
+        mode,
+    )?;
+    if fresh.project_id != before.project_id {
+        return Err(format!(
+            "{} was moved while {} it.",
+            quoted(&fresh.title),
+            mode.gerund()
+        ));
+    }
+    Ok(fresh)
 }
 
 /// The production repo-adding step: the same path the "Add repository"
@@ -440,18 +679,42 @@ fn finish<T>(
     media: StagedMedia,
     result: Result<T, StoreError>,
 ) -> Result<T, String> {
+    finish_all(store, mode, &[previous_content], vec![media], result)
+}
+
+/// Settle the transaction's outcome for every note it carried: on success the
+/// paths re-homed rows no longer name are unlinked, and a move
+/// garbage-collects the source media the notes' old bodies referenced; on
+/// failure the staged copies and links are removed again.
+fn finish_all<T>(
+    store: &Store,
+    mode: TransferMode,
+    previous_contents: &[&str],
+    staged: Vec<StagedMedia>,
+    result: Result<T, StoreError>,
+) -> Result<T, String> {
     match result {
         Ok(value) => {
-            media.commit();
+            for media in staged {
+                media.commit();
+            }
             if mode == TransferMode::Move {
-                cleanup_unreferenced(store, refs::media_ids(previous_content));
+                for content in previous_contents {
+                    cleanup_unreferenced(store, refs::media_ids(content));
+                }
             }
             Ok(value)
         }
         Err(e) => {
-            media.discard(store);
+            discard_all(store, staged);
             Err(e.to_string())
         }
+    }
+}
+
+fn discard_all(store: &Store, staged: Vec<StagedMedia>) {
+    for media in staged {
+        media.discard(store);
     }
 }
 
@@ -553,6 +816,10 @@ impl MoveSource<'_> {
 /// A reference whose row or file is already gone is left as it is: the viewer
 /// renders it unavailable today and will keep doing so after the transfer,
 /// which is better than failing the transfer over media that was lost before.
+///
+/// `reserved` holds the filenames handed out so far in this transfer: the
+/// rows are not recorded until the transaction, so the store alone cannot
+/// keep two of them apart, within one note or across the notes of one move.
 fn stage_media(
     store: &Store,
     content: &str,
@@ -560,6 +827,7 @@ fn stage_media(
     project_id: &str,
     owner_session: Option<&str>,
     rehome: Option<MoveSource<'_>>,
+    reserved: &mut HashSet<String>,
 ) -> Result<StagedMedia, String> {
     let mut staged = StagedMedia {
         content: content.to_owned(),
@@ -574,9 +842,6 @@ fn stage_media(
     // re-homed and its references stay as written. The same id is only put
     // in place once however often the note embeds it.
     let mut landed = HashMap::<String, Option<String>>::new();
-    // Names handed out in this batch: the rows are not recorded until the
-    // transaction, so the store alone cannot keep two of them apart.
-    let mut reserved = HashSet::<String>::new();
     let mut edits = Vec::new();
     let result = (|| -> Result<(), String> {
         for reference in refs::extract_media_refs(content) {
@@ -596,7 +861,7 @@ fn stage_media(
                             branch_id,
                             project_id,
                             &source.filename,
-                            &reserved,
+                            reserved,
                         )
                         .map_err(|e| e.to_string())?;
                     let rehomes = match &rehome {
@@ -821,8 +1086,11 @@ pub async fn copy_note_to_project(
     Ok(crate::note_commands::standalone_note_to_timeline_item(note))
 }
 
+/// Move a project note and its child notes into another project, adding any
+/// repo a child is bound to that the project does not track yet.
 #[tauri::command(rename_all = "camelCase")]
-pub fn move_project_note_to_project(
+pub async fn move_project_note_to_project(
+    app_handle: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_note_id: String,
     target_project_id: String,
@@ -833,11 +1101,22 @@ pub fn move_project_note_to_project(
         &project_note_id,
         &target_project_id,
         TransferMode::Move,
+        |key| {
+            add_repo_to_project(
+                app_handle.clone(),
+                Arc::clone(&store),
+                target_project_id.clone(),
+                key,
+            )
+        },
     )
+    .await
 }
 
+/// Copy a project note into another project (or the same one). A copy is
+/// standalone, so no child moves along and no repo is ever added.
 #[tauri::command(rename_all = "camelCase")]
-pub fn copy_project_note_to_project(
+pub async fn copy_project_note_to_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     project_note_id: String,
     target_project_id: String,
@@ -848,7 +1127,14 @@ pub fn copy_project_note_to_project(
         &project_note_id,
         &target_project_id,
         TransferMode::Copy,
+        |key| {
+            std::future::ready(Err(format!(
+                "A copy never adds a repository ({}).",
+                key.describe()
+            )))
+        },
     )
+    .await
 }
 
 #[cfg(test)]
@@ -857,7 +1143,7 @@ mod tests {
 
     use super::*;
     use crate::note_media::tests::PNG;
-    use crate::store::models::{Branch, Project, ProjectRepo, Session, SessionStatus};
+    use crate::store::models::{Project, ProjectRepo, Session};
 
     struct Fixture {
         store: Store,
@@ -1636,6 +1922,7 @@ mod tests {
                 project_id: &f.source.id,
                 branch_id: Some(&f.source_branch.id),
             }),
+            &mut HashSet::new(),
         )
         .unwrap();
         // Staged but not yet recorded: the row still names the source.
@@ -1695,6 +1982,7 @@ mod tests {
                         project_id: &f.source.id,
                         branch_id: Some(&f.source_branch.id),
                     }),
+                    &mut HashSet::new(),
                 )
                 .unwrap()
             };
@@ -1909,42 +2197,366 @@ mod tests {
         assert_eq!(err, "Note not found: gone");
     }
 
-    #[test]
-    fn project_note_moves_directly_and_copies_duplicate() {
+    impl Fixture {
+        /// A project note in `source` with one finished child note on
+        /// `source_branch`, the shape `start_repo_session` leaves behind.
+        fn family(&self) -> (ProjectNote, Note, Session) {
+            let parent = ProjectNote::new(&self.source.id, "Plan", "body");
+            self.store.create_project_note(&parent).unwrap();
+            let (child, session) = self.child_of(&parent, &self.source_branch.id, "Findings");
+            (parent, child, session)
+        }
+
+        /// A child note of `parent` on `branch_id` whose session has completed.
+        fn child_of(&self, parent: &ProjectNote, branch_id: &str, title: &str) -> (Note, Session) {
+            let session =
+                Session::new_running("child", Path::new("/tmp/wt")).with_branch(branch_id);
+            self.store.create_session(&session).unwrap();
+            self.store
+                .update_session_status(&session.id, SessionStatus::Completed, None, None)
+                .unwrap();
+            let child = Note::new_standalone(branch_id, title, "child body")
+                .with_session(&session.id)
+                .with_parent_project_note(&parent.id);
+            self.store.create_note(&child).unwrap();
+            (child, session)
+        }
+
+        fn assert_family_unmoved(&self, parent: &ProjectNote, child: &Note, session: &Session) {
+            assert_eq!(
+                self.store
+                    .get_project_note(&parent.id)
+                    .unwrap()
+                    .unwrap()
+                    .project_id,
+                self.source.id
+            );
+            let stored = self.store.get_note(&child.id).unwrap().unwrap();
+            assert_eq!(stored.branch_id, child.branch_id);
+            assert_eq!(
+                stored.parent_project_note_id.as_deref(),
+                Some(parent.id.as_str())
+            );
+            assert_eq!(
+                self.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(child.branch_id.clone())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn project_note_move_takes_its_children_adding_the_repo_the_target_lacks() {
+        let f = fixture();
+        let parent = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&parent).unwrap();
+        let image = f.attachment("shot.png");
+        let (child, session) = f.child_of(&parent, &f.source_branch.id, "Findings");
+        f.store
+            .update_note_content(
+                &child.id,
+                &format!("see ![a](staged-media://{}.png)", image.id),
+            )
+            .unwrap();
+        let added = Mutex::new(Vec::new());
+
+        let moved = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| {
+                added.lock().unwrap().push(key.clone());
+                std::future::ready(f.attach_repo(key))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            added.lock().unwrap().as_slice(),
+            [RepoKey {
+                github_repo: "acme/widgets".into(),
+                subpath: Some("apps/web".into()),
+            }]
+        );
+        assert_eq!(moved.project_id, f.target.id);
+        let target_branch = f.target_branch().expect("repo was added with a branch");
+        let child = f.store.get_note(&child.id).unwrap().unwrap();
+        assert_eq!(child.branch_id, target_branch.id);
+        assert_eq!(
+            child.parent_project_note_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(
+            f.store.get_branch_id_for_session(&session.id).unwrap(),
+            Some(target_branch.id.clone())
+        );
+        assert_eq!(f.store.list_child_notes(&parent.id).unwrap().len(), 1);
+        assert!(f
+            .store
+            .list_notes_for_branch(&f.source_branch.id)
+            .unwrap()
+            .is_empty());
+        // Media only the child uses moved into the target with it, keeping
+        // its id (so the body is unchanged), owned by its session, and the
+        // source path was unlinked.
+        assert_eq!(
+            refs::media_ids(&child.content)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [image.id.clone()]
+        );
+        let rehomed = f.store.get_image(&image.id).unwrap().unwrap();
+        assert_eq!(rehomed.project_id, f.target.id);
+        assert_eq!(
+            rehomed.branch_id.as_deref(),
+            Some(target_branch.id.as_str())
+        );
+        assert_eq!(rehomed.session_id.as_deref(), Some(session.id.as_str()));
+        assert!(
+            image_file_path(&f.target.id, &rehomed.id, &rehomed.filename)
+                .unwrap()
+                .exists()
+        );
+        assert!(!image_file_path(&f.source.id, &image.id, &image.filename)
+            .unwrap()
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn project_note_move_reuses_the_branch_the_target_already_has() {
+        let f = fixture();
+        f.attach_repo(RepoKey {
+            github_repo: "acme/widgets".into(),
+            subpath: Some("apps/web".into()),
+        })
+        .unwrap();
+        let (parent, child, _) = f.family();
+
+        transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            f.store.get_note(&child.id).unwrap().unwrap().branch_id,
+            f.target_branch().unwrap().id
+        );
+    }
+
+    /// `sessions.branch_id` is the branch queue's scheduling key; a child
+    /// mid-flight cannot change branches under its drain.
+    #[tokio::test]
+    async fn project_note_move_waits_for_a_queued_or_running_child_session() {
+        let f = fixture();
+        let (parent, child, session) = f.family();
+
+        for status in [SessionStatus::Running, SessionStatus::Queued] {
+            f.store
+                .update_session_status(&session.id, status.clone(), None, None)
+                .unwrap();
+
+            let err = transfer_project_note(
+                &f.store,
+                &parent.id,
+                &f.target.id,
+                TransferMode::Move,
+                never_called,
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                err,
+                format!(
+                    "\"Plan\" has child note \"Findings\" whose session is still {}; wait for it to finish before moving the note.",
+                    status.as_str()
+                )
+            );
+            f.assert_family_unmoved(&parent, &child, &session);
+            assert!(f.store.list_project_repos(&f.target.id).unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_repo_add_leaves_the_family_in_the_source_project() {
+        let f = fixture();
+        let (parent, child, session) = f.family();
+
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |_| std::future::ready(Err::<(), _>("Workspace is not running".to_string())),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("Could not add acme/widgets at apps/web to target")
+                && err.contains("Workspace is not running"),
+            "{err}"
+        );
+        f.assert_family_unmoved(&parent, &child, &session);
+        assert!(f.target_branch().is_none());
+    }
+
+    #[tokio::test]
+    async fn project_note_move_is_refused_for_a_child_on_a_remote_branch() {
+        let f = fixture();
+        let (parent, _, _) = f.family();
+        let remote = Branch::new_remote(&f.source.id, "remote-feature", "origin/main", "ws-1")
+            .with_project_repo(f.source_branch.project_repo_id.as_deref().unwrap());
+        f.store.create_branch(&remote).unwrap();
+        let (remote_child, _) = f.child_of(&parent, &remote.id, "Remote findings");
+
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "\"Plan\" has child note \"Remote findings\" on remote branch 'remote-feature'; notes on remote branches can't move between projects."
+        );
+        assert_eq!(
+            f.store
+                .get_project_note(&parent.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            f.source.id
+        );
+        assert_eq!(
+            f.store
+                .get_note(&remote_child.id)
+                .unwrap()
+                .unwrap()
+                .branch_id,
+            remote.id
+        );
+    }
+
+    /// A childless project note can still move to or from a remote project;
+    /// one with children cannot, since their branches would have to.
+    #[tokio::test]
+    async fn project_note_move_into_a_remote_project_is_refused_only_with_children() {
+        let f = fixture();
+        let mut remote = Project::named("remote");
+        remote.location = ProjectLocation::Remote;
+        f.store.create_project(&remote).unwrap();
+        let childless = ProjectNote::new(&f.source.id, "Childless", "body");
+        f.store.create_project_note(&childless).unwrap();
+        let (parent, child, session) = f.family();
+
+        transfer_project_note(
+            &f.store,
+            &childless.id,
+            &remote.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap();
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &remote.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "Project 'remote' runs on a remote workspace; \"Plan\" has child notes, which can only move between local projects."
+        );
+        f.assert_family_unmoved(&parent, &child, &session);
+    }
+
+    #[tokio::test]
+    async fn project_note_moves_directly_and_copies_duplicate() {
         let f = fixture();
         let note = ProjectNote::new(&f.source.id, "Plan", "body");
         f.store.create_project_note(&note).unwrap();
 
-        let err = transfer_project_note(&f.store, &note.id, &f.source.id, TransferMode::Move)
-            .unwrap_err();
+        let err = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.source.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err, "\"Plan\" is already in source.");
 
-        let copy =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+        let copy = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
         assert_ne!(copy.id, note.id);
         assert_eq!(copy.project_id, f.target.id);
         assert_eq!(copy.content, "body");
         assert!(copy.session_id.is_none());
 
-        let moved =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Move).unwrap();
+        let moved = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap();
         assert_eq!(moved.id, note.id);
         assert_eq!(moved.project_id, f.target.id);
         assert!(f.store.list_project_notes(&f.source.id).unwrap().is_empty());
         assert_eq!(f.store.list_project_notes(&f.target.id).unwrap().len(), 2);
     }
 
-    #[test]
-    fn a_project_note_copy_takes_its_sources_read_state() {
+    #[tokio::test]
+    async fn a_project_note_copy_takes_its_sources_read_state() {
         let f = fixture();
         let note = ProjectNote::new(&f.source.id, "Plan", "body");
         f.store.create_project_note(&note).unwrap();
 
-        let unread_copy =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+        let unread_copy = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
         f.store.set_project_note_read(&note.id, true).unwrap();
-        let read_copy =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+        let read_copy = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
 
         assert!(!unread_copy.is_read());
         assert!(read_copy.is_read());
@@ -1953,8 +2565,37 @@ mod tests {
         assert_eq!(stored_read_at(&read_copy.id), read_copy.read_at);
     }
 
-    #[test]
-    fn project_note_media_follows_the_copy() {
+    /// A copy is standalone: the children stay with the original, and so
+    /// nothing needs adding to the target even when it lacks their repo.
+    #[tokio::test]
+    async fn project_note_copy_leaves_the_children_with_the_original() {
+        let f = fixture();
+        let (parent, child, _) = f.family();
+
+        let copy = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
+
+        assert!(f.store.list_child_notes(&copy.id).unwrap().is_empty());
+        assert_eq!(
+            f.store
+                .get_note(&child.id)
+                .unwrap()
+                .unwrap()
+                .parent_project_note_id
+                .as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn project_note_media_follows_the_copy() {
         let f = fixture();
         let session = Session::new_running("note", Path::new("/tmp/wt"));
         f.store.create_session(&session).unwrap();
@@ -1981,8 +2622,15 @@ mod tests {
         );
         f.store.create_project_note(&note).unwrap();
 
-        let copy =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+        let copy = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
 
         let copied_id = refs::media_ids(&copy.content).into_iter().next().unwrap();
         let copied = f.store.get_image(&copied_id).unwrap().unwrap();
@@ -2001,16 +2649,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn project_note_move_takes_its_media_along_with_its_id() {
+    #[tokio::test]
+    async fn project_note_move_takes_its_media_along_with_its_id() {
         let f = fixture();
         let image = f.project_attachment();
         let content = format!("![a](staged-media://{}.png)", image.id);
         let note = ProjectNote::new(&f.source.id, "Plan", &content);
         f.store.create_project_note(&note).unwrap();
 
-        let moved =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Move).unwrap();
+        let moved = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(moved.content, content);
         let rehomed = f.store.get_image(&image.id).unwrap().unwrap();
@@ -2028,8 +2683,8 @@ mod tests {
 
     /// A copy hands the file to the filesystem rather than reading it, and
     /// only an image is opened to read its size: a video's row keeps none.
-    #[test]
-    fn a_copied_video_is_cloned_without_being_sized() {
+    #[tokio::test]
+    async fn a_copied_video_is_cloned_without_being_sized() {
         let f = fixture();
         let bytes = b"\0\0\0\x18ftypisom\0\0\0\0not really a movie";
         let session = Session::new_running("note", Path::new("/tmp/wt"));
@@ -2054,8 +2709,15 @@ mod tests {
         );
         f.store.create_project_note(&note).unwrap();
 
-        let copy =
-            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+        let copy = transfer_project_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
 
         let copied_id = refs::media_ids(&copy.content).into_iter().next().unwrap();
         assert_ne!(copied_id, video.id);
@@ -2111,7 +2773,10 @@ mod tests {
                 &format!("![a](staged-media://{}.png)", image.id),
             );
             f.store.create_project_note(&note).unwrap();
-            let landed = transfer_project_note(&f.store, &note.id, &f.target.id, mode).unwrap();
+            let landed =
+                transfer_project_note(&f.store, &note.id, &f.target.id, mode, never_called)
+                    .await
+                    .unwrap();
             assert_resolves_in(&f.store, &landed.content, &f.target.id);
             f.store.delete_project(&f.source.id).unwrap();
             assert_resolves_in(&f.store, &landed.content, &f.target.id);

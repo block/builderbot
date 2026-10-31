@@ -143,6 +143,7 @@
 <NoteTransferDialog
   bind:open={dialogOpen}
   {mode}
+  {noteKind}
   {noteTitle}
   currentProjectId={projectId}
   loadNoteRepo={noteKind === 'branch' ? loadRepo : undefined}

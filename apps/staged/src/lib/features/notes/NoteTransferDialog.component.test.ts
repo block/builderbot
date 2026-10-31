@@ -93,6 +93,7 @@ async function open(
   const props = reactiveProps({
     open: true,
     mode: 'move' as const,
+    noteKind: repo === 'project' ? ('project' as const) : ('branch' as const),
     noteTitle: 'Plan',
     loadNoteRepo,
     onPrepare,

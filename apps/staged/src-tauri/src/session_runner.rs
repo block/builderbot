@@ -127,8 +127,14 @@ pub struct SessionStatusEvent {
     pub status: String,
     pub error_message: Option<String>,
     pub completion_reason: Option<String>,
-    /// Set on `"running"` events emitted when an MCP tool starts a repo session,
-    /// so the frontend can register the session and refresh the branch timeline.
+    /// The branch the session runs on. Invariant the frontend load-bears on:
+    /// *every* repo-session event carries this — queue-drain, immediate launch,
+    /// resume, and terminal emits alike — and a project-session event never
+    /// does, because project sessions don't run on a branch.
+    /// `activeSessionIds.ts` keys the child-badge query set on its presence, so
+    /// a repo-session emit site that omits it silently regresses to a
+    /// per-child, always-empty `listChildSessions` round-trip. Also what lets
+    /// the frontend register the session and refresh the branch timeline.
     pub branch_id: Option<String>,
     pub project_id: Option<String>,
     pub session_type: Option<String>,
@@ -1637,6 +1643,7 @@ pub fn start_session(
                     config.provider.clone(),
                     config.acp_config_selection.clone(),
                     config.parent_project_note_id.clone(),
+                    config.session_id.clone(),
                     cancel_token.clone(),
                 )
                 .await
@@ -4726,9 +4733,17 @@ fn emit_background_hold(
 }
 
 /// Emit a `session-status-changed` event with `"running"` status and branch/project
-/// context. Called by the MCP tool when it starts a repo session on behalf of a project
-/// session, so the frontend can register the session in its state stores and refresh
-/// the branch card timeline immediately (without waiting for completion).
+/// context for a repo session that is starting *immediately*, outside the queue
+/// drain. The callers are the immediate branch start in
+/// `start_or_queue_branch_session_for_store` and the `prs.rs` pipelines; the
+/// event goes out before the caller answers the client so the frontend registers
+/// the session and refreshes the branch timeline before it can complete.
+///
+/// Not the MCP path: `start_repo_session` writes a `queued` stub and kicks the
+/// drain, and `start_queued_session_for_branch` announces `running` itself when
+/// it claims the row. `branch_id` is a non-optional `&str` here because the
+/// emitted event must carry it — see the invariant documented on
+/// [`SessionStatusEvent::branch_id`].
 pub fn emit_session_running(
     app_handle: &AppHandle,
     session_id: &str,

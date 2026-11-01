@@ -747,6 +747,32 @@ export interface ActiveSessionInfo {
 }
 
 /**
+ * One running repo session spawned by a project session, projected to the
+ * repo it is working in. Backs the in-flight badges shown under a running
+ * project session's timeline row.
+ *
+ * `githubRepo`/`subpath` are the repo badge lookup key; both are null when the
+ * branch has no project repo, which just costs the badge its repo tint.
+ */
+export interface ChildSessionInfo {
+  sessionId: string;
+  /** One of `'commit'`, `'note'`, `'review'`. */
+  sessionType: string;
+  /** The only two statuses the query returns. */
+  status: 'queued' | 'running';
+  /**
+   * The child's title as the branch timeline would show it, resolved by the
+   * backend with the branch timeline's own rules: a commit's ACP title else
+   * its prompt, a note's stored title, a review's stored title else (while
+   * running) its ACP title. `null` only for a review with neither yet.
+   */
+  title: string | null;
+  branchId: string;
+  githubRepo: string | null;
+  subpath: string | null;
+}
+
+/**
  * Payload emitted by the `pr-created` domain event when a completed PR
  * session produced a pull request. The backend has already persisted the PR
  * number and kicked off a status refresh; clients only render.

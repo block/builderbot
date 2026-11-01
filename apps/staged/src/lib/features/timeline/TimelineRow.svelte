@@ -20,6 +20,8 @@
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
   import Spinner from '../../shared/Spinner.svelte';
+  import ChildSessionBadge from './ChildSessionBadge.svelte';
+  import type { ChildSessionBadgeProps } from './childSessionBadges';
   import { Button } from '$lib/components/ui/button';
   import type { NoteChatState } from '../sessions/noteFreshness';
 
@@ -63,6 +65,14 @@
     /** Tertiary metadata shown after the secondary meta (e.g. commit author). */
     tertiaryMeta?: string;
     badges?: TimelineBadge[];
+    /**
+     * In-flight repo sessions this row's session spawned. Rendered in place of
+     * `secondaryMeta` — distinct from `badges`, which counts comments/warnings
+     * on a finished artifact.
+     */
+    childSessionBadges?: ChildSessionBadgeProps[];
+    /** Opens a running child's chat; receives the child's session id. */
+    onChildSessionClick?: (sessionId: string) => void;
     deleting?: boolean;
     isLast?: boolean;
     sessionId?: string;
@@ -112,6 +122,8 @@
     secondaryMeta,
     tertiaryMeta,
     badges,
+    childSessionBadges,
+    onChildSessionClick,
     deleting = false,
     isLast = false,
     sessionId,
@@ -373,10 +385,26 @@
             class:failed-title={isFailed}>{title}</span
           >
         {/if}
-        {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
-          <div class="timeline-meta">
+        {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0) || (childSessionBadges && childSessionBadges.length > 0)}
+          <div
+            class="timeline-meta"
+            class:has-child-badges={childSessionBadges && childSessionBadges.length > 0}
+          >
             {#if meta}
               <span class="meta-item">{meta}</span>
+            {/if}
+            {#if childSessionBadges}
+              {#each childSessionBadges as childBadge (childBadge.key)}
+                <ChildSessionBadge
+                  sessionType={childBadge.sessionType}
+                  status={childBadge.status}
+                  label={childBadge.label}
+                  title={childBadge.title}
+                  onclick={onChildSessionClick
+                    ? () => onChildSessionClick(childBadge.key)
+                    : undefined}
+                />
+              {/each}
             {/if}
             {#if secondaryMeta}
               <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>
@@ -841,6 +869,17 @@
     margin-top: 3px;
     min-width: 0;
     max-width: 100%;
+  }
+
+  /* Child-session badges are fixed-width pills (`flex: 0 0 auto; nowrap`),
+     so several concurrent children would run past the row's right edge in a
+     narrow project column. Let them wrap onto further lines instead. Only
+     when badges are present: the single-line hint still ellipsizes. Extra
+     lines grow the row downwards, so the title row and the marker's icon
+     keep their top alignment. */
+  .timeline-meta.has-child-badges {
+    flex-wrap: wrap;
+    row-gap: 4px;
   }
 
   .meta-item {

@@ -1133,6 +1133,21 @@ pub fn get_active_sessions(
     get_active_sessions_impl(&store, &registry)
 }
 
+/// The in-flight repo sessions a project session spawned, in start order.
+///
+/// Backs the in-flight badges under a running project session's timeline row:
+/// every queued or running child, each with the title the branch timeline
+/// would give it.
+#[tauri::command]
+pub fn list_child_sessions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    parent_session_id: String,
+) -> Result<Vec<store::ChildSessionInfo>, String> {
+    get_store(&store)?
+        .list_active_child_sessions(&parent_session_id)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,

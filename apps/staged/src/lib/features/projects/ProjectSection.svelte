@@ -10,6 +10,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import type {
     AcpConfigSelection,
+    ChildSessionInfo,
     Project,
     ProjectRepo,
     Branch,
@@ -40,6 +41,12 @@
   import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import {
+    buildChildSessionBadges,
+    runningChildSessionIds,
+    runningSecondaryMeta,
+  } from '../timeline/childSessionBadges';
+  import { nextActiveSessionIds } from './activeSessionIds';
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -145,8 +152,14 @@
     return Array.from(ids);
   });
 
+  // Running children ride along: the poller's `getSession` round trip is
+  // what carries a live ACP title to the branch card's row for the same
+  // session, so it is what keeps a child badge's label current too.
   $effect(() => {
-    liveSessionHintPoller.syncRunningSessionIds(runningNoteSessionIds);
+    liveSessionHintPoller.syncRunningSessionIds([
+      ...runningNoteSessionIds,
+      ...runningChildSessionIds(childSessionsBySession),
+    ]);
   });
 
   // This section stays mounted while home covers its project (and while the
@@ -161,6 +174,73 @@
   onDestroy(() => {
     liveSessionHintPoller.destroy();
   });
+
+  // ── In-flight repo sessions spawned by running project sessions ────────
+  /** Queued and running children keyed by the project session that started them. */
+  let childSessionsBySession = $state<Record<string, ChildSessionInfo[]>>({});
+  let childSessionsGeneration = 0;
+
+  /**
+   * Rebuild the child map for the given project sessions.
+   *
+   * Rebuilt wholesale rather than patched, so a session that stopped running
+   * drops out without a separate pruning pass.
+   */
+  async function refreshChildSessions(parentIds: string[]) {
+    const generation = ++childSessionsGeneration;
+    try {
+      const entries = await Promise.all(
+        parentIds.map(
+          async (id) => [id, await commands.listChildSessions(id)] as [string, ChildSessionInfo[]]
+        )
+      );
+      // A newer refresh already landed; its result is the current one.
+      if (generation !== childSessionsGeneration) return;
+
+      const next: Record<string, ChildSessionInfo[]> = {};
+      for (const [id, children] of entries) {
+        if (children.length > 0) next[id] = children;
+      }
+      childSessionsBySession = next;
+    } catch (e) {
+      console.error('[ProjectSection] Failed to load child sessions:', e);
+    }
+  }
+
+  // The only trigger. Every `session-status-changed` branch below — and the
+  // `timeline-invalidated` handler in onMount — reassigns `activeSessionIds`
+  // to a *fresh* Set, so this derived-on-derived re-runs even when the id set
+  // is unchanged — which is what drops the badge of a child whose start this
+  // window never saw. Covers hydration too: a window opening onto an
+  // in-progress project session sees its in-flight children on the first pass.
+  $effect(() => {
+    void refreshChildSessions(runningNoteSessionIds);
+  });
+
+  /**
+   * Open a child repo session's chat — the dialog the branch card opens for
+   * the same session — on top of whatever dialog is showing.
+   */
+  function openChildSessionChat(sessionId: string) {
+    const child = Object.values(childSessionsBySession)
+      .flat()
+      .find((candidate) => candidate.sessionId === sessionId);
+    const branch = child ? branches.find((b) => b.id === child.branchId) : undefined;
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry({
+      kind: 'chat',
+      ref: `#chat:${sessionId}`,
+      sessionId,
+      branchId: child?.branchId ?? null,
+      projectId: project.id,
+      repoDir: branch?.worktreePath ?? projectDisplayRootCandidates,
+      repoLabel: branch ? repoForBranch(branch) : null,
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    closeReferenceDialogs();
+  }
 
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
@@ -541,8 +621,22 @@
     loadProjectNotes();
 
     // Refresh hashtag items when branch timelines are invalidated (e.g. branch session completion)
-    const onTimelineInvalidated = () => {
+    const onTimelineInvalidated = (event: Event) => {
       hashtagVersion++;
+
+      // Queuing a child through `start_repo_session` publishes no session
+      // event — the queued row is a session-family write — but its artifact
+      // stub lands on a branch of this project, and that change reaches
+      // every window as this event. Re-run the child query so the queued
+      // child badges at once rather than when the branch queue gets to it.
+      // The fresh Set is the trigger (see the badge `$effect`); its contents
+      // are unchanged.
+      if (runningNoteSessionIds.length === 0) return;
+      const branchIds = (event as CustomEvent<{ branchIds: string[] | null }>).detail?.branchIds;
+      if (branchIds !== null && !branchIds?.some((id) => branches.some((b) => b.id === id))) {
+        return;
+      }
+      activeSessionIds = new Set(activeSessionIds);
     };
     window.addEventListener('timeline-invalidated', onTimelineInvalidated);
 
@@ -558,6 +652,7 @@
       sessionId: string;
       status: string;
       projectId?: string;
+      branchId?: string | null;
     }>('session-status-changed', async (payload) => {
       const { sessionId, status, projectId } = payload;
       if (projectId !== project.id) return;
@@ -565,14 +660,16 @@
       if (status === 'running') {
         // Bridge: track until the stub (already loaded by startProjectSession) is
         // updated with an authoritative sessionStatus on the terminal event.
-        activeSessionIds = new Set([...activeSessionIds, sessionId]);
+        // This may be a repo session the queue just drained on a parent's
+        // behalf (`branchId` set); its id stays out of the set, but the
+        // fresh-Set reassignment is what makes its badge appear.
+        activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
         return;
       }
 
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        const next = new Set(activeSessionIds);
-        next.delete(sessionId);
-        activeSessionIds = next;
+        // A finished child drops its badge; a finished parent drops the row.
+        activeSessionIds = nextActiveSessionIds(activeSessionIds, payload);
 
         // Surgically update just the affected note instead of reloading all
         const updatedNote = await commands.getProjectNoteBySession(sessionId);
@@ -619,6 +716,11 @@
               isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
             {@const liveTitle =
               isRunning && note.sessionId ? liveSessionTitles[note.sessionId] : undefined}
+            {@const childBadges = buildChildSessionBadges(
+              (isRunning && note.sessionId ? childSessionsBySession[note.sessionId] : undefined) ??
+                [],
+              liveSessionTitles
+            )}
             <TimelineRow
               type={noteType}
               title={isRunning
@@ -627,10 +729,12 @@
                   ? 'Session finished — no note created'
                   : note.title || 'Untitled note'}
               secondaryMeta={isRunning
-                ? (liveHint ?? 'Generating note')
+                ? runningSecondaryMeta(childBadges, liveHint)
                 : isFailed
                   ? undefined
                   : formatNoteTimestamp(note, nowMs)}
+              childSessionBadges={childBadges}
+              onChildSessionClick={openChildSessionChat}
               deleting={deletingNoteIds.has(note.id)}
               isLast={false}
               sessionId={note.sessionId ?? undefined}

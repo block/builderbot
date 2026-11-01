@@ -29,6 +29,7 @@ import type {
   BranchSessionResponse,
   StoreIncompatibility,
   ActiveSessionInfo,
+  ChildSessionInfo,
   Session,
   SessionMessage,
   SessionPoll,
@@ -955,6 +956,15 @@ export function getSession(sessionId: string): Promise<Session | null> {
  */
 export function getActiveSessions(): Promise<ActiveSessionInfo[]> {
   return invokeCommand('get_active_sessions');
+}
+
+/**
+ * The in-flight repo sessions a project session spawned, in start order:
+ * queued children included, since the branch queue holds all but one of a
+ * burst of `start_repo_session` calls at the same repo.
+ */
+export function listChildSessions(parentSessionId: string): Promise<ChildSessionInfo[]> {
+  return invokeCommand('list_child_sessions', { parentSessionId });
 }
 
 const SESSION_MESSAGES_CACHE_TTL = 5 * 60_000;

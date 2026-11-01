@@ -8,6 +8,30 @@ use super::models::{
 };
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
+/// An in-flight session spawned by another session, projected to the repo it
+/// is working in.
+///
+/// `githubRepo`/`subpath` identify that repo; both are absent for a branch
+/// whose `project_repo_id` was cleared.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildSessionInfo {
+    pub session_id: String,
+    /// One of `"commit"`, `"note"`, `"review"`.
+    pub session_type: String,
+    /// `"queued"` or `"running"` — the only two statuses the query returns.
+    pub status: String,
+    /// The child's title as the branch timeline would show it, resolved by
+    /// the same rules ([`super::pending_commit_subject`],
+    /// [`super::review_title`], a note's stored title): the start of the prompt
+    /// until the agent pushes an ACP title. `None` only for a review with no
+    /// stored title and no ACP title yet.
+    pub title: Option<String>,
+    pub branch_id: String,
+    pub github_repo: Option<String>,
+    pub subpath: Option<String>,
+}
+
 impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -20,8 +44,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 session.id,
                 session.prompt,
@@ -39,6 +63,7 @@ impl Store {
                 session.acp_title,
                 session.branch_id,
                 session.completion_effects_at,
+                session.parent_session_id,
             ],
         )?;
         Ok(())
@@ -56,7 +81,7 @@ impl Store {
         id: &str,
     ) -> Result<Option<Session>, StoreError> {
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -309,7 +334,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -341,7 +366,7 @@ impl Store {
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions WHERE status IN ('running', 'queued')
              ORDER BY created_at ASC",
         )?;
@@ -349,6 +374,97 @@ impl Store {
             .query_map([], Self::row_to_session)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
+    }
+
+    /// List the in-flight sessions spawned by `parent_session_id` — queued or
+    /// running — oldest first, projected to the repo they are working in.
+    ///
+    /// Children are found through their artifact (commit / note / review)
+    /// rather than `sessions.branch_id`. Both are stamped on the queued row
+    /// now, but the artifact join is what resolves the child's kind, so it is
+    /// also the branch link — one join, one source of truth for the badge. A
+    /// `child_note` (a note carrying `parent_project_note_id`) reports as a
+    /// plain `"note"` here — the badge only needs to say what kind of work is
+    /// in flight and where. There is deliberately no visibility filter: a
+    /// hidden child note is as much a dependency of the parent as a visible
+    /// one.
+    ///
+    /// Queued children are included. The branch queue runs one session per
+    /// branch at a time, so an agent that fires several `start_repo_session`
+    /// calls at one repo has all but one of them waiting — a queued child is
+    /// still work the parent depends on, and dropping it made those
+    /// dependencies invisible. `status` tells the caller which is which.
+    ///
+    /// Each child yields exactly one row even if it somehow acquires several
+    /// artifacts: callers key UI elements by `session_id`, so a duplicate
+    /// here would throw in Svelte's keyed `{#each}`.
+    ///
+    /// `created_at` is only millisecond-precision, and an agent can fire
+    /// several `start_repo_session` calls inside one millisecond, so `rowid`
+    /// breaks the tie — otherwise badges for concurrent children could swap
+    /// positions from one refresh to the next.
+    pub fn list_active_child_sessions(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<ChildSessionInfo>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.id,
+                    CASE WHEN c.session_id IS NOT NULL THEN 'commit'
+                         WHEN n.session_id IS NOT NULL THEN 'note'
+                         ELSE 'review' END AS session_type,
+                    s.status,
+                    s.prompt,
+                    s.acp_title,
+                    n.title AS note_title,
+                    r.title AS review_title,
+                    b.id AS branch_id,
+                    pr.github_repo,
+                    pr.subpath
+             FROM sessions s
+             LEFT JOIN commits c ON c.session_id = s.id
+             LEFT JOIN notes n ON n.session_id = s.id
+             LEFT JOIN reviews r ON r.session_id = s.id
+             JOIN branches b ON b.id = COALESCE(c.branch_id, n.branch_id, r.branch_id)
+             LEFT JOIN project_repos pr ON pr.id = b.project_repo_id
+             WHERE s.parent_session_id = ?1 AND s.status IN ('queued', 'running')
+             GROUP BY s.id
+             ORDER BY s.created_at ASC, s.rowid ASC",
+        )?;
+        let children = stmt
+            .query_map(params![parent_session_id], |row| {
+                let session_type: String = row.get(1)?;
+                let status: String = row.get(2)?;
+                let prompt: String = row.get(3)?;
+                let acp_title: Option<String> = row.get(4)?;
+                let note_title: Option<String> = row.get(5)?;
+                let review_title: Option<String> = row.get(6)?;
+                // The same rule per kind as the branch timeline's row for the
+                // same session, so a badge and the branch card agree.
+                let title = match session_type.as_str() {
+                    "commit" => Some(super::pending_commit_subject(
+                        acp_title.as_deref(),
+                        Some(prompt.as_str()),
+                    )),
+                    "note" => note_title,
+                    _ => super::review_title(
+                        review_title,
+                        Some(status.as_str()),
+                        acp_title.as_deref(),
+                    ),
+                };
+                Ok(ChildSessionInfo {
+                    session_id: row.get(0)?,
+                    session_type,
+                    status,
+                    title,
+                    branch_id: row.get(7)?,
+                    github_repo: row.get(8)?,
+                    subpath: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(children)
     }
 
     /// Store the ACP session ID returned by the agent after `new_session`.
@@ -465,7 +581,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at, parent_session_id
              FROM sessions
              WHERE status = ?2 AND branch_id = ?1
              ORDER BY created_at ASC",
@@ -711,6 +827,7 @@ impl Store {
             acp_title: row.get(13)?,
             branch_id: row.get(14)?,
             completion_effects_at: row.get(15)?,
+            parent_session_id: row.get(16)?,
         })
     }
 }

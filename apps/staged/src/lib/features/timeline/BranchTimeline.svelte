@@ -54,6 +54,7 @@
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
+  import { sessionRowTitle } from './sessionRowTitle';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
 
   type PendingItem = {
@@ -711,7 +712,7 @@
       all.push({
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,
         type,
-        title: stripXmlTags(liveTitle ?? commit.subject),
+        title: sessionRowTitle('commit', commit.subject, liveTitle),
         meta: isDeleting ? 'Deleting...' : secondaryMeta,
         secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         tertiaryMeta: showAuthor ? commit.author : undefined,
@@ -767,7 +768,7 @@
         key: `note-${note.id}`,
         type,
         // Session labels can contain the full prompt, even when resuming a saved note.
-        title: stripXmlTags(note.title),
+        title: sessionRowTitle('note', note.title, undefined),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
         // Sort by when the content was last written, not queue time
@@ -826,7 +827,7 @@
       all.push({
         key: `review-${review.id}`,
         type,
-        title: liveTitle ?? (review.title || 'Code Review'),
+        title: sessionRowTitle('review', review.title, liveTitle),
         meta: isDeleting ? 'Deleting...' : meta,
         badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,

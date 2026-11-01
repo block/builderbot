@@ -19,6 +19,8 @@
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import ProjectsSidebar from './lib/features/projects/ProjectsSidebar.svelte';
   import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
+  import ResumeOnLaunchDialog from './lib/features/sessions/ResumeOnLaunchDialog.svelte';
+  import { resumeOnLaunch } from './lib/features/sessions/resumeOnLaunch.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
@@ -638,6 +640,14 @@
       storeError = e instanceof Error ? e.message : String(e);
     }
 
+    // Offer to resume the sessions the last quit interrupted. Desktop main
+    // window only: the backend hands the set out once, and the store-reset
+    // prompt wins when there is no store to resume against. Not awaited — the
+    // dialog appears over the shell once the window shows.
+    if (isTauri && getWindowLabel() === 'main' && !storeIncompat && !storeError) {
+      void resumeOnLaunch.load();
+    }
+
     // Discover available agents in the background.
     const providers = await refreshProviders();
 
@@ -860,6 +870,10 @@
   <!-- Shared remove-project confirmation — serves every route's delete entry
        point (sidebar, landing grid, ProjectHome top bar/shortcut). -->
   <ProjectDeleteDialog />
+
+  <!-- Launch-time "Resume interrupted sessions?" — opened by resumeOnLaunch.load()
+       from onMount on the desktop main window; stays closed everywhere else. -->
+  <ResumeOnLaunchDialog />
 
   <ReferenceModalHost />
   <Toaster

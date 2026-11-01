@@ -31,6 +31,7 @@ import type {
   StoreIncompatibility,
   ActiveSessionInfo,
   ChildSessionInfo,
+  LaunchRecovery,
   Session,
   SessionMessage,
   SessionPoll,
@@ -97,6 +98,25 @@ export function confirmResetStore(): Promise<void> {
  */
 export function quitApp(): Promise<void> {
   return invokeCommand('quit_app');
+}
+
+/**
+ * The sessions the last quit interrupted, handed out once per launch: a
+ * second window or a reload gets `null`. Desktop only — the web-mode dispatch
+ * table refuses it, so a browser client never takes the set.
+ */
+export function getInterruptedSessions(): Promise<LaunchRecovery | null> {
+  return invokeCommand('get_interrupted_sessions');
+}
+
+/**
+ * Record the launch offer as handled and restart `sessionIds` in the
+ * background (repo sessions first, then project sessions). An empty list is
+ * a dismissal: the marker is recorded and nothing restarts. Progress arrives
+ * as `session-status-changed` events.
+ */
+export function resumeInterruptedSessions(sessionIds: string[]): Promise<void> {
+  return invokeCommand('resume_interrupted_sessions', { sessionIds });
 }
 
 // =============================================================================

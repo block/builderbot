@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
+use crate::launch_resume::{LaunchResumeState, LaunchResumeSummary};
 use crate::managed_acp_tools::ReconcileRecord;
 use crate::session_queue::sweep::{self, QueueHealth};
 use crate::session_runner::SessionRegistry;
@@ -35,8 +36,11 @@ pub(super) fn session_queue_doctor_check<R: tauri::Runtime>(
 ) -> Option<DoctorCheck> {
     let store = crate::get_store(&app_handle.try_state::<Mutex<Option<Arc<Store>>>>()?).ok()?;
     let registry = app_handle.try_state::<Arc<SessionRegistry>>()?;
+    let launch_resume = app_handle
+        .try_state::<LaunchResumeState>()
+        .and_then(|state| state.last_run());
     match sweep::queue_health(&store, &registry) {
-        Ok(health) => Some(build_session_queue_check(&health)),
+        Ok(health) => Some(build_session_queue_check(&health, launch_resume.as_ref())),
         Err(e) => {
             log::warn!("[doctor] session-queue check failed to read the store: {e}");
             None
@@ -46,8 +50,12 @@ pub(super) fn session_queue_doctor_check<R: tauri::Runtime>(
 
 /// `Warn` while any row would be swept right now; `Pass` otherwise, naming
 /// the lifetime sweep count when it is non-zero so a recurrence stays
-/// visible after the sweep has already cleaned up.
-fn build_session_queue_check(health: &QueueHealth) -> DoctorCheck {
+/// visible after the sweep has already cleaned up. The detail also names
+/// what this launch's resume of interrupted sessions did, when it ran.
+fn build_session_queue_check(
+    health: &QueueHealth,
+    launch_resume: Option<&LaunchResumeSummary>,
+) -> DoctorCheck {
     let stranded = health.stranded.len();
     let (status, message) = if stranded > 0 {
         (
@@ -93,6 +101,13 @@ fn build_session_queue_check(health: &QueueHealth) -> DoctorCheck {
         )
     }));
     detail.push(format!("ended by the sweep so far: {}", health.swept_total));
+    detail.push(match launch_resume {
+        Some(run) => format!(
+            "launch resume this run: requested {}, resumed {}, re-queued {}, skipped {}, failed {}",
+            run.requested, run.resumed, run.requeued, run.skipped, run.failed
+        ),
+        None => "launch resume this run: not run".to_string(),
+    });
 
     DoctorCheck {
         id: SESSION_QUEUE_CHECK_ID.to_string(),

@@ -1,4 +1,7 @@
+import 'fake-indexeddb/auto';
+import { IDBFactory } from 'fake-indexeddb';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { createStore, keys as idbKeys } from 'idb-keyval';
 
 describe('browser-native command wrappers', () => {
   function selectedAcpConfig() {
@@ -760,5 +763,211 @@ describe('timeline boot snapshot', () => {
       fresh: null,
     });
     expect(cachedInvoke).not.toHaveBeenCalled();
+  });
+});
+
+describe('persisted branch timelines (desktop)', () => {
+  type CommandsModule = typeof import('./commands');
+
+  const timeline = (sha: string) => ({ commits: [{ sha }], notes: [], reviews: [], images: [] });
+  const branch = (id: string, over: Record<string, unknown> = {}) => ({
+    id,
+    projectId: 'p1',
+    projectRepoId: null,
+    branchType: 'local',
+    branchName: id,
+    baseBranch: 'main',
+    workspaceName: null,
+    worktreePath: `/wt/${id}`,
+    ...over,
+  });
+  const store = () => createStore('staged-cache', 'responses');
+
+  let invoke: ReturnType<typeof vi.fn>;
+  /** `invoke` answers from here, so a test can change a list between launches. */
+  let backend: {
+    branches: Record<string, unknown[]>;
+    projects: unknown[];
+    timelines: Record<string, unknown>;
+  };
+
+  function respond(command: string, args: Record<string, string>) {
+    switch (command) {
+      case 'list_projects':
+        return backend.projects;
+      case 'list_branches_for_project':
+        return backend.branches[args.projectId] ?? [];
+      case 'get_branch_timeline':
+        return backend.timelines[args.branchId];
+      default:
+        throw new Error(`unexpected command ${command}`);
+    }
+  }
+
+  /** Fresh module graph in desktop mode over the same IndexedDB — a relaunch. */
+  async function launch({ brokenIdb = false, awaitSeed = true } = {}): Promise<CommandsModule> {
+    vi.resetModules();
+    // Bound per launch: a previous instance finishing an IndexedDB read late
+    // must call its own spy, not the one the current launch is asserting on.
+    const spy = vi.fn(async (command: string, args: Record<string, string>) =>
+      respond(command, args)
+    );
+    invoke = spy;
+    vi.doMock('./transport', () => ({
+      isTauri: true,
+      invokeCommand: (...args: [string, Record<string, string>]) => spy(...args),
+    }));
+    if (brokenIdb) {
+      vi.doMock('idb-keyval', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('idb-keyval')>();
+        const broken = () => Promise.reject(new Error('IndexedDB unavailable'));
+        return { ...actual, createStore: () => broken, get: broken, set: broken, del: broken };
+      });
+    }
+    const commands = await import('./commands');
+    if (awaitSeed) await commands.whenTimelineCacheSeeded();
+    return commands;
+  }
+
+  /** A first session that lists `p1`, fetches every branch's timeline and so persists them. */
+  async function firstSession(): Promise<void> {
+    vi.setSystemTime(1_000_000);
+    const commands = await launch();
+    await commands.listBranchesForProject('p1');
+    for (const b of backend.branches.p1 as Array<{ id: string }>) {
+      await commands.getBranchTimeline(b.id);
+    }
+    // Relaunches happen a minute later, well past TIMELINE_FRESH_MS.
+    vi.setSystemTime(1_060_000);
+  }
+
+  const timelineCalls = () =>
+    invoke.mock.calls.filter(([command]) => command === 'get_branch_timeline');
+
+  beforeEach(() => {
+    // A new IndexedDB per test, so nothing persists across tests — only across launches.
+    vi.stubGlobal('indexedDB', new IDBFactory());
+    vi.useFakeTimers({ toFake: ['Date'] });
+    backend = {
+      projects: [{ id: 'p1' }],
+      branches: { p1: [branch('b1'), branch('b2')] },
+      timelines: { b1: timeline('b1-v1'), b2: timeline('b2-v1') },
+    };
+  });
+
+  afterEach(() => {
+    vi.doUnmock('./transport');
+    vi.doUnmock('idb-keyval');
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('paints the last persisted timeline on launch and issues one forced refetch per card', async () => {
+    await firstSession();
+    backend.timelines = { b1: timeline('b1-v2'), b2: timeline('b2-v2') };
+
+    const commands = await launch();
+    const first = commands.getBranchTimelineWithRevalidation('b1');
+    const second = commands.getBranchTimelineWithRevalidation('b2');
+
+    // Stale paint with the original fetchedAt behind it, refetch already in flight.
+    expect(first.cached).toEqual(timeline('b1-v1'));
+    expect(second.cached).toEqual(timeline('b2-v1'));
+    expect(first.fresh).not.toBeNull();
+    expect(timelineCalls()).toEqual([
+      ['get_branch_timeline', { branchId: 'b1' }],
+      ['get_branch_timeline', { branchId: 'b2' }],
+    ]);
+
+    await expect(first.fresh).resolves.toEqual(timeline('b1-v2'));
+    await expect(second.fresh).resolves.toEqual(timeline('b2-v2'));
+    // The fresh result replaces the paint and is itself now fresh — no second refetch.
+    expect(commands.getBranchTimelineWithRevalidation('b1')).toEqual({
+      cached: timeline('b1-v2'),
+      fresh: null,
+    });
+    expect(timelineCalls()).toHaveLength(2);
+
+    // ...and it is what the next launch will paint.
+    const next = await launch();
+    expect(next.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v2'));
+  });
+
+  it('misses as before when nothing is persisted, then persists the result', async () => {
+    const commands = await launch();
+    await commands.listBranchesForProject('p1');
+
+    const { cached, fresh } = commands.getBranchTimelineWithRevalidation('b1');
+    expect(cached).toBeNull();
+    await expect(fresh).resolves.toEqual(timeline('b1-v1'));
+    expect(timelineCalls()).toHaveLength(1);
+    await expect(idbKeys(store())).resolves.toEqual([
+      expect.stringContaining('get_branch_timeline:'),
+    ]);
+  });
+
+  it('falls back to a plain fetch when IndexedDB is unavailable', async () => {
+    const commands = await launch({ brokenIdb: true });
+    await commands.listBranchesForProject('p1');
+
+    const { cached, fresh } = commands.getBranchTimelineWithRevalidation('b1');
+    expect(cached).toBeNull();
+    await expect(fresh).resolves.toEqual(timeline('b1-v1'));
+    expect(timelineCalls()).toHaveLength(1);
+  });
+
+  it('drops a seeded entry once the branch list no longer has its branch or identity', async () => {
+    await firstSession();
+    // b2 was deleted; b1 now lives in a different worktree.
+    backend.branches.p1 = [branch('b1', { worktreePath: '/wt/elsewhere' })];
+
+    const commands = await launch();
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toEqual(timeline('b2-v1'));
+
+    await commands.listBranchesForProject('p1');
+    expect(commands.getBranchTimelineWithRevalidation('b1').cached).toBeNull();
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toBeNull();
+    await vi.waitFor(async () => {
+      expect(await idbKeys(store())).toEqual([]);
+    });
+  });
+
+  it('drops seeded entries whose project is gone', async () => {
+    await firstSession();
+    backend.projects = [{ id: 'p-other' }];
+
+    const commands = await launch();
+    await commands.listProjects();
+
+    expect(commands.getBranchTimelineWithRevalidation('b1').cached).toBeNull();
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toBeNull();
+    await vi.waitFor(async () => {
+      expect(await idbKeys(store())).toEqual([]);
+    });
+  });
+
+  it('honours a branch list that lands before the seed settles', async () => {
+    await firstSession();
+    backend.branches.p1 = [branch('b1')];
+
+    const commands = await launch({ awaitSeed: false });
+    // The backend answers on a microtask; the IndexedDB read takes longer.
+    await commands.listBranchesForProject('p1');
+    await commands.whenTimelineCacheSeeded();
+
+    expect(commands.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v1'));
+    expect(commands.getBranchTimelineWithRevalidation('b2').cached).toBeNull();
+  });
+
+  it('never rolls back a timeline a card fetched before the seed landed', async () => {
+    await firstSession();
+    backend.timelines.b1 = timeline('b1-v2');
+
+    const commands = await launch({ awaitSeed: false });
+    const fetched = commands.getBranchTimeline('b1', { force: true });
+    await commands.whenTimelineCacheSeeded();
+    await fetched;
+
+    expect(commands.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v2'));
   });
 });

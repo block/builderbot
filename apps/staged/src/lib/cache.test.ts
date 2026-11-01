@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createStore, entries, set } from 'idb-keyval';
 
 // Mock transport — web mode (isTauri = false) with controllable invokeCommand
@@ -1082,5 +1082,207 @@ describe('cache maintenance', () => {
     expect(remaining.has(_cacheKey('seed', { id: '2' }))).toBe(true);
     expect(remaining.has(_cacheKey('seed', { id: '3' }))).toBe(true);
     expect(remaining.get(_cacheKey('cmd'))?.data).toBe('fresh');
+  });
+});
+
+describe('desktop persistence (isTauri)', () => {
+  type CacheModule = typeof import('./cache');
+
+  const timeline = (sha: string) => ({ commits: [{ sha }], notes: [], reviews: [], images: [] });
+  const store = () => createStore('staged-cache', 'responses');
+
+  type Invoke = (...args: unknown[]) => unknown;
+  let invoke: ReturnType<typeof vi.fn<Invoke>>;
+
+  /**
+   * A fresh module instance in desktop mode, sharing the fake IndexedDB with
+   * every instance before it — the same thing a relaunch sees.
+   */
+  async function loadDesktopCache({ brokenIdb = false } = {}): Promise<CacheModule> {
+    vi.resetModules();
+    vi.doMock('./transport', () => ({
+      isTauri: true,
+      invokeCommand: (...args: unknown[]) => invoke(...args),
+    }));
+    if (brokenIdb) {
+      vi.doMock('idb-keyval', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('idb-keyval')>();
+        const broken = () => Promise.reject(new Error('IndexedDB unavailable'));
+        return {
+          ...actual,
+          createStore: () => broken,
+          get: broken,
+          set: broken,
+          del: broken,
+          keys: broken,
+          entries: broken,
+          clear: broken,
+        };
+      });
+    }
+    return await import('./cache');
+  }
+
+  async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
+    const out: T[] = [];
+    for await (const item of gen) out.push(item);
+    return out;
+  }
+
+  beforeEach(() => {
+    invoke = vi.fn<Invoke>();
+  });
+
+  afterEach(() => {
+    vi.doUnmock('./transport');
+    vi.doUnmock('idb-keyval');
+    vi.useRealTimers();
+  });
+
+  it('persists get_branch_timeline and serves it stale-while-revalidate on the next launch', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(1_000_000);
+    const firstLaunch = await loadDesktopCache();
+    invoke.mockResolvedValue(timeline('v1'));
+    const config = { ttl: 30_000, scope: 'branch-identity' };
+
+    await expect(
+      collect(firstLaunch.cachedInvoke('get_branch_timeline', { branchId: 'b1' }, config))
+    ).resolves.toEqual([{ data: timeline('v1'), source: 'network', fetchedAt: 1_000_000 }]);
+
+    // Relaunch a minute later: the entry is past the TTL, so it paints and revalidates.
+    vi.setSystemTime(1_060_000);
+    const secondLaunch = await loadDesktopCache();
+    invoke.mockReset().mockResolvedValue(timeline('v2'));
+
+    await expect(
+      collect(secondLaunch.cachedInvoke('get_branch_timeline', { branchId: 'b1' }, config))
+    ).resolves.toEqual([
+      { data: timeline('v1'), source: 'cache', fetchedAt: 1_000_000 },
+      { data: timeline('v2'), source: 'network', fetchedAt: 1_060_000 },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    await expect(secondLaunch.readCachedEntries('get_branch_timeline')).resolves.toEqual([
+      {
+        args: { branchId: 'b1' },
+        data: timeline('v2'),
+        fetchedAt: 1_060_000,
+        scope: 'branch-identity',
+      },
+    ]);
+  });
+
+  it('keeps every other command on the network path with nothing written', async () => {
+    const cache = await loadDesktopCache();
+    invoke.mockResolvedValue(['project']);
+
+    await expect(
+      collect(cache.cachedInvoke('list_projects', undefined, { ttl: 60_000 }))
+    ).resolves.toEqual([{ data: ['project'], source: 'network', fetchedAt: expect.any(Number) }]);
+    await expect(cache.cachedCommand('list_projects', undefined, { ttl: 60_000 })).resolves.toEqual(
+      { data: ['project'], revalidating: null }
+    );
+    expect(invoke).toHaveBeenCalledTimes(2);
+    await expect(entries(store())).resolves.toEqual([]);
+    // Nothing to read back either, even though the store is empty rather than absent.
+    await expect(cache.readCachedEntries('list_projects')).resolves.toEqual([]);
+  });
+
+  it('keys entries per branch so two branches never read each other', async () => {
+    const cache = await loadDesktopCache();
+    invoke.mockResolvedValueOnce(timeline('a')).mockResolvedValueOnce(timeline('b'));
+    const config = { ttl: 30_000 };
+
+    await collect(cache.cachedInvoke('get_branch_timeline', { branchId: 'a' }, config));
+    await collect(cache.cachedInvoke('get_branch_timeline', { branchId: 'b' }, config));
+
+    const persisted = await cache.readCachedEntries<{ commits: { sha: string }[] }>(
+      'get_branch_timeline'
+    );
+    expect(persisted.map((e) => [e.args?.branchId, e.data.commits[0].sha])).toEqual([
+      ['a', 'a'],
+      ['b', 'b'],
+    ]);
+  });
+
+  it('falls back to the network when IndexedDB is unavailable', async () => {
+    const cache = await loadDesktopCache({ brokenIdb: true });
+    invoke.mockResolvedValue(timeline('v1'));
+
+    await expect(
+      collect(cache.cachedInvoke('get_branch_timeline', { branchId: 'b1' }, { ttl: 30_000 }))
+    ).resolves.toEqual([
+      { data: timeline('v1'), source: 'network', fetchedAt: expect.any(Number) },
+    ]);
+    await expect(
+      cache.cachedCommand('get_branch_timeline', { branchId: 'b1' }, { ttl: 30_000 })
+    ).resolves.toEqual({ data: timeline('v1'), revalidating: null });
+    await expect(cache.readCachedEntries('get_branch_timeline')).resolves.toEqual([]);
+    // Maintenance must not surface the failure either.
+    await expect(
+      cache.invalidateCache('get_branch_timeline', { branchId: 'b1' })
+    ).resolves.toBeUndefined();
+    await expect(cache.invalidateCacheByCommand('get_branch_timeline')).resolves.toBeUndefined();
+    await expect(cache.sweepCache()).resolves.toBeUndefined();
+    await expect(cache.clearAllCache()).resolves.toBeUndefined();
+  });
+
+  it('evicts the oldest-fetched entries once a command passes maxEntries', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const cache = await loadDesktopCache();
+    const config = { ttl: 30_000, maxEntries: 2 };
+    const fetchAt = async (branchId: string, at: number) => {
+      vi.setSystemTime(at);
+      invoke.mockResolvedValueOnce(timeline(branchId));
+      await collect(
+        cache.cachedInvoke('get_branch_timeline', { branchId }, { ...config, bypassRead: true })
+      );
+    };
+    const persistedIds = async () =>
+      (await cache.readCachedEntries('get_branch_timeline')).map((e) => e.args?.branchId);
+
+    await fetchAt('old', 1_000);
+    await fetchAt('mid', 2_000);
+    await expect(persistedIds()).resolves.toEqual(['old', 'mid']);
+
+    await fetchAt('new', 3_000);
+    await vi.waitFor(async () => {
+      expect(await persistedIds()).toEqual(['mid', 'new']);
+    });
+
+    // Refetching a key the store already holds is not growth: nothing else goes.
+    await fetchAt('mid', 4_000);
+    await vi.waitFor(async () => {
+      expect(await persistedIds()).toEqual(['new', 'mid']);
+    });
+  });
+
+  it('skips persisted entries from another schema version when reading back', async () => {
+    const cache = await loadDesktopCache();
+    const now = Date.now();
+    const key = cache._cacheKey('get_branch_timeline', { branchId: 'old-build' });
+    await set(
+      key,
+      { key, data: timeline('x'), fetchedAt: now, schemaVersion: cache.CACHE_SCHEMA_VERSION - 1 },
+      store()
+    );
+    const current = cache._cacheKey('get_branch_timeline', { branchId: 'current' });
+    await set(
+      current,
+      {
+        key: current,
+        data: timeline('y'),
+        fetchedAt: now,
+        schemaVersion: cache.CACHE_SCHEMA_VERSION,
+      },
+      store()
+    );
+
+    await expect(cache.readCachedEntries('get_branch_timeline')).resolves.toEqual([
+      { args: { branchId: 'current' }, data: timeline('y'), fetchedAt: now, scope: undefined },
+    ]);
+    // The sweep now runs on the desktop too and removes the dead entry.
+    await cache.sweepCache();
+    await expect(entries(store())).resolves.toHaveLength(1);
   });
 });

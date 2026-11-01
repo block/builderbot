@@ -15,7 +15,7 @@ images and raw HTML media are not ingested. Fenced and indented code examples
 are skipped. Indentation is judged relative to the enclosing list item or quote,
 as the renderer does, so an image indented under a list step is ingested. A
 fence ends with its container: a line without the `>` prefix ends a quoted
-fence, and a dedented ```` ``` ```` under a list item ends the item and opens
+fence, and a dedented ` ``` ` under a list item ends the item and opens
 a new top-level fence rather than closing the old one, so the text that
 follows stays code. Other dedented lines are absorbed by the list item, as
 Marked does, unless a blank line precedes them (or, in an HTML block, they
@@ -83,9 +83,10 @@ Amendments reuse previous attachments by ID or SHA-256 content; the previous
 attachments are only read and hashed once a fresh file actually needs
 deduplicating, so amendments that repeat stored references read no attachment
 bytes. Branch moves already relocate session-scoped image rows and files. Only
-the completed turn's output is scanned for a note, so a follow-up that does not
-rewrite the note leaves the saved note and its attachments untouched, even if
-the original source files no longer exist. A turn that does rewrite the note
+the completed turn's `write_note` call (or, when there was none, the turn's
+own assistant text — see [note-delivery.md](note-delivery.md)) is read for a
+note, so a follow-up that does not rewrite the note leaves the saved note and
+its attachments untouched, even if the original source files no longer exist. A turn that does rewrite the note
 typically repeats the agent's original source paths, since the agent never saw
 the stored references. When such a path no longer exists, the attachment the
 previous note saved under the same basename is reused, so the rewrite keeps the
@@ -102,8 +103,10 @@ by the previous attachment. On Blox the read script exits 1 for a missing path
 and 2, with a `not a regular file` message, for a directory or device at it,
 and only the former falls back; an unreachable workspace is treated as a
 missing source so a saved attachment is not deleted over a transient failure.
-A turn that rewrites the note without a `suggested-next-steps` block keeps the
-stored next steps, since only the turn's own output is scanned for the block.
+A turn that rewrites the note while omitting `suggested_next_steps` from its
+`write_note` call keeps the stored next steps; the same holds for the legacy
+separator fallback when the turn's text has no `suggested-next-steps` block,
+since only the turn's own output is read.
 
 Cleanup runs **after** a successful note save, and failed saves roll back new
 attachments. Deleting a project note includes its child-note attachments.
@@ -131,9 +134,10 @@ A project agent reads a child repo session's note through the
 `wait_for_repo_session` and `cancel_repo_session` replies, which materialize
 the note content the same way, always into the local OS temp directory because
 project sessions run locally. The reply's `output` field is the child's raw
-final message and still carries the child's original pre-ingest paths, which
-may no longer exist (and never do on Blox), so parents should prefer
-`note.content`.
+final assistant message, which since the move to `write_note` is commentary
+rather than the note itself, and any paths it carries are the child's original
+pre-ingest paths, which may no longer exist (and never do on Blox) — so parents
+should read `note.content`.
 
 ## Serving and implementation choices
 

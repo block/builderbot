@@ -681,10 +681,23 @@ export interface SessionPoll {
  */
 export interface SessionLiveDelivery {
   supported: boolean;
+  /**
+   * When `supported` is false, whether asking again while the session stays
+   * running could get a yes: true while the agent's connection is still coming
+   * up, false when another Staged instance owns the session or it is not
+   * running. Always false when `supported` is true.
+   */
+  retryable: boolean;
   reason?: string;
 }
 
-/** How `send_session_message_now` delivered a message, or why it did not. */
+/**
+ * How `send_session_message_now` delivered a message, or why it did not.
+ * Mirrors the Rust `ContinueOutcome::delivery()` spellings, which the
+ * `continue_repo_session` MCP tool shares; `resumed` and `not_resumable` are
+ * only reached through the tool, since the command never resumes a stopped
+ * session (it answers `not_running` instead).
+ */
 export type SessionMessageDeliveryKind =
   | 'injected'
   | 'interrupted_and_reprompted'
@@ -692,11 +705,15 @@ export type SessionMessageDeliveryKind =
   | 'resumed'
   | 'rejected_queued'
   | 'blocked'
-  | 'not_resumable';
+  | 'not_resumable'
+  | 'not_running';
 
 export interface SessionMessageDelivery {
   delivery: SessionMessageDeliveryKind;
-  /** Set when the message was not delivered (`blocked`, `not_resumable`). */
+  /**
+   * Set when the message was not delivered (`blocked`, `not_resumable`,
+   * `not_running`).
+   */
   reason?: string;
 }
 

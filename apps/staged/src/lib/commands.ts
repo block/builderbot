@@ -1164,9 +1164,12 @@ export function getSessionLiveDelivery(sessionId: string): Promise<SessionLiveDe
 }
 
 /**
- * Deliver a message to the session now instead of queueing it: steered into
- * the running turn (or interrupting it) over the live connection, or resuming
- * a stopped session — the same path as the `continue_repo_session` MCP tool.
+ * Deliver a message to the running session now instead of queueing it:
+ * steered into the running turn (or interrupting it) over the live
+ * connection, as the `continue_repo_session` MCP tool does. Unlike the tool
+ * it does not resume a stopped session: that comes back `not_running`, and
+ * the caller resumes through `resumeSession` so the branch override and
+ * follow-up config apply.
  */
 export function sendSessionMessageNow(
   sessionId: string,

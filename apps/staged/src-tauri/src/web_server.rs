@@ -3684,23 +3684,17 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let session_id: String = arg(&args, "sessionId")?;
             let content: String = arg(&args, "content")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
-            let app_handle = app_handle.clone();
             let session_registry = Arc::clone(session_registry);
-            let action_executor = Arc::clone(action_executor);
-            let action_registry = Arc::clone(action_registry);
-            // Detached like `resume_session`: a stopped session is resumed
-            // through the same launch, and a client that disconnects while
-            // that resume is mid-flight must not abandon it half-started.
+            // Detached: interrupt-and-reprompt is two agent round trips, and
+            // a client that disconnects between them must not leave the turn
+            // cancelled with the re-prompt never sent.
             let delivery = detached(async move {
-                let outcome = session_commands::continue_session_for_store(
-                    store,
-                    session_registry,
-                    action_executor,
-                    action_registry,
-                    app_handle,
-                    session_id,
-                    content,
-                    image_ids.unwrap_or_default(),
+                let outcome = session_commands::send_session_message_now_for_store(
+                    &store,
+                    &session_registry,
+                    &session_id,
+                    &content,
+                    &image_ids.unwrap_or_default(),
                 )
                 .await?;
                 Ok(session_commands::SessionMessageDelivery::from(&outcome))

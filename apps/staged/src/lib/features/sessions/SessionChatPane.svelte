@@ -15,8 +15,9 @@
   - Message queue: sending while running persists a follow-up for backend drain
   - Live send: when the backend reports the running session can take a message
     now (`get_session_live_delivery`), the composer offers "Send" beside
-    "Queue"; "Send" goes through `send_session_message_now`, the path the
-    `continue_repo_session` MCP tool uses (steer, else interrupt-and-reprompt)
+    "Queue"; "Send" goes through `send_session_message_now`, the live path the
+    `continue_repo_session` MCP tool uses (steer, else interrupt-and-reprompt);
+    a session that stopped meanwhile falls back to the idle resume path
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
   - Fixed-size modal with proper scrolling
@@ -104,6 +105,12 @@
   } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import { composerSendControl } from './composerSendControl';
+  import {
+    LIVE_DELIVERY_UNKNOWN,
+    liveDeliveryKnowledge,
+    shouldAskLiveDelivery,
+    type LiveDeliveryKnowledge,
+  } from './liveDelivery';
   import {
     backgroundHoldTaskRows,
     isTaskHeld,
@@ -283,12 +290,14 @@
   /** Latest background hold reported for this session; null when not holding. */
   let backgroundHold = $state<SessionBackgroundHold | null>(null);
   /**
-   * The backend confirmed this running session can take a message now: it is
-   * owned by this process and its agent connection is up. Asked on each poll
-   * tick until it says yes (the connection comes up a few seconds into a run),
-   * and dropped whenever the status leaves `running`.
+   * What the backend has said about this running session taking a message
+   * now (owned by this process, agent connection up). Asked on each poll tick
+   * until the answer is settled: a yes, or a no that cannot change during this
+   * run (another Staged instance owns the row). A retryable no — the
+   * connection comes up a few seconds into a run — is asked again. Forgotten
+   * whenever the status leaves `running` or the pane changes session.
    */
-  let liveDelivery = $state(false);
+  let liveDelivery = $state<LiveDeliveryKnowledge>(LIVE_DELIVERY_UNKNOWN);
   let liveDeliveryInFlight = false;
   /**
    * Counts hold reports received by event, so the mount-time snapshot can tell
@@ -347,7 +356,7 @@
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
-  let canSendLive = $derived(isLive && liveDelivery);
+  let canSendLive = $derived(isLive && liveDelivery.supported);
   let sendControl = $derived(
     composerSendControl({ isLive, canSendLive, mode: preferences.composerSendMode })
   );
@@ -807,7 +816,7 @@
       } else {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
-        liveDelivery = false;
+        liveDelivery = LIVE_DELIVERY_UNKNOWN;
         finishPolling();
       }
     });
@@ -827,7 +836,7 @@
     if (!isActive || !id) return;
 
     backgroundHold = null;
-    liveDelivery = false;
+    liveDelivery = LIVE_DELIVERY_UNKNOWN;
     stoppingTaskIds = new Set();
     taskStopNotices = new Map();
     const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
@@ -1175,21 +1184,24 @@
 
   /**
    * Learn whether the running session can take a message now. One cheap
-   * registry lookup per poll tick while the answer is still no; nothing once
-   * it is yes. A status other than `running` withdraws the flag at once.
+   * registry lookup per poll tick while the answer is a retryable no; nothing
+   * once it is settled (see `liveDelivery`). A status other than `running`
+   * forgets the answer at once, so the next run asks afresh.
    */
   function refreshLiveDelivery(status: SessionStatus | undefined) {
     if (status !== 'running') {
-      liveDelivery = false;
+      liveDelivery = LIVE_DELIVERY_UNKNOWN;
       return;
     }
-    if (liveDelivery || liveDeliveryInFlight || !sessionId) return;
+    if (!shouldAskLiveDelivery(status, liveDelivery) || liveDeliveryInFlight || !sessionId) {
+      return;
+    }
     const id = sessionId;
     liveDeliveryInFlight = true;
     getSessionLiveDelivery(id)
       .then((capability) => {
         if (closed || sessionId !== id || session?.status !== 'running') return;
-        liveDelivery = capability.supported;
+        liveDelivery = liveDeliveryKnowledge(capability);
       })
       .catch(() => {
         // Best-effort: the next tick asks again.
@@ -1260,6 +1272,11 @@
   let noteFollowupSending = $state(false);
 
   async function handleSend() {
+    // A send still in flight (a live send can take a few seconds: steer
+    // acknowledgement, interrupt-and-reprompt, or a resume) owns the composer
+    // until it settles; a second Cmd+Enter meanwhile must not clear the draft
+    // typed since, so the guard comes before anything is taken out of the box.
+    if (sending) return;
     const text = inputText.trim();
     if (!text) return;
     inputText = '';
@@ -1294,11 +1311,15 @@
   /**
    * Deliver a message to the running session now — the composer's "Send"
    * mode. The backend steers it into the turn in flight, or interrupts the
-   * turn and re-prompts when the agent cannot steer; a session that stopped
-   * between the click and the request is resumed, as `continue_repo_session`
-   * would. Anything not delivered (`blocked`, `rejected_queued`,
-   * `not_resumable`) is reported and the draft restored — never re-queued
-   * behind the user's back, since a blocked steer may already have landed.
+   * turn and re-prompts when the agent cannot steer. It never resumes: a
+   * session that stopped between the last poll and the click comes back
+   * `not_running`, and the message goes through `sendMessage` instead — the
+   * idle path, which applies this pane's branch override and follow-up
+   * config (the note chat pane's branch would otherwise be lost). Anything
+   * not delivered (`blocked`, `rejected_queued`, `not_resumable`, or a kind
+   * this pane does not know) is reported and the draft restored — never
+   * re-queued behind the user's back, since a blocked steer may already have
+   * landed.
    */
   async function sendMessageNow(text: string, imageIds?: string[]) {
     if (!session || sending) return;
@@ -1312,23 +1333,47 @@
         case 'injected':
         case 'interrupted_and_reprompted':
         case 'started_new_turn':
-        case 'resumed':
           // The user row is persisted by the delivery itself; the poll picks
-          // it up. A resume flipped the row back to running.
-          if (result.delivery === 'resumed') {
-            session = { ...session, status: 'running' };
-            clearBackgroundHold();
-          }
+          // it up.
           startPolling();
           scrollToBottom();
+          return;
+        case 'resumed':
+          // The command does not resume (see `not_running`); the kind belongs
+          // to the shared MCP spelling. Should it ever arrive, the row is
+          // running again on a fresh connection.
+          session = { ...session, status: 'running' };
+          clearBackgroundHold();
+          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          startPolling();
+          scrollToBottom();
+          return;
+        case 'not_running':
+          // Stopped since the last poll: resume it the way the idle composer
+          // does, with the branch override and follow-up config. `sending` is
+          // already held here, so the lock is passed through.
+          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          await sendMessage(text, imageIds, true);
           return;
         case 'rejected_queued':
           error = 'The session has not started yet; queue the message instead.';
           break;
         case 'blocked':
+          // The connection may have gone under the request: ask again before
+          // offering "Send" next time.
+          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          error = `Not delivered: ${result.reason ?? result.delivery}`;
+          break;
         case 'not_resumable':
           error = `Not delivered: ${result.reason ?? result.delivery}`;
           break;
+        default: {
+          // A delivery kind the backend added that this hand-maintained union
+          // does not know: say so rather than restoring the draft in silence.
+          const unknownKind: never = result.delivery;
+          error = `Not delivered: ${String(unknownKind)}`;
+          break;
+        }
       }
       inputText = text;
       replyImageIds = imageIds ?? [];
@@ -1367,8 +1412,10 @@
       };
       // A new turn is starting: any hold reported belonged to the previous
       // one, so drop it rather than letting this local flip back to `running`
-      // re-render the old wait in place of "Thinking…".
+      // re-render the old wait in place of "Thinking…". Likewise whatever was
+      // known about live delivery was about the previous run.
       clearBackgroundHold();
+      liveDelivery = LIVE_DELIVERY_UNKNOWN;
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;

@@ -19,8 +19,15 @@ dev repo="":
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Install JS deps if needed
-    [[ -d node_modules ]] || pnpm install
+    # Install JS deps if they are missing or older than the workspace lockfile.
+    # The lockfile lives at the repo root, and pnpm rewrites the root
+    # node_modules/.modules.yaml on every install, so that file is the install's
+    # timestamp. node_modules' own mtime is not: it only moves when a top-level
+    # entry is added or removed, so a rebase that bumps versions in place leaves
+    # it untouched and the stale packages go unnoticed.
+    if [[ ! -d node_modules || ../../pnpm-lock.yaml -nt ../../node_modules/.modules.yaml ]]; then
+        pnpm install
+    fi
 
     # Dev instances share the managed ACP bridges and Node runtime in
     # ~/.staged/packages with every other Staged instance. Export

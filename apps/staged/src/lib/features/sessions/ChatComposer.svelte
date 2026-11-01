@@ -230,7 +230,7 @@
           <DropdownMenu.Trigger
             class={cn(
               buttonVariants({ variant: 'accent' }),
-              'composer-send-menu-trigger h-auto min-h-9 w-8 rounded-l-none px-0 max-[640px]:min-h-11'
+              'composer-send-menu-trigger -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 max-[640px]:min-h-11'
             )}
             title="Change how messages are delivered"
             aria-label="Change how messages are delivered"
@@ -358,8 +358,14 @@
     margin-left: auto;
   }
 
-  /* A hairline between the split button's two accent segments. */
+  /* A hairline between the split button's two accent segments. Every button
+     paints a 1px transparent border with bg-clip-padding, so without the
+     trigger's -ml-px overlap the primary's right border and the trigger's left
+     border sit side by side as a 2px seam of composer background. With the
+     overlap only this border column remains; it is mixed into the accent fill
+     (not transparent) so it renders as an opaque tint of the fill rather than
+     a near-invisible wash over the chrome background behind the control. */
   .composer-send-split :global(.composer-send-menu-trigger) {
-    border-left-color: color-mix(in srgb, var(--bg-primary) 35%, transparent);
+    border-left-color: color-mix(in srgb, var(--bg-primary) 35%, var(--ui-accent));
   }
 </style>

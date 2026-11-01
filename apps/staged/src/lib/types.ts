@@ -274,6 +274,12 @@ export interface NoteTimelineItem {
   sessionErrorMessage?: string | null;
   rateLimitResetsAt?: string | null;
   rateLimitKind?: string | null;
+  /**
+   * The session is a detached remote note session Staged is still working
+   * on (the sweep is polling the workstation for its note, or an instance is
+   * storing the note it found), so the row says "no note created yet".
+   */
+  isPollingForNote: boolean;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;

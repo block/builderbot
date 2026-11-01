@@ -844,7 +844,8 @@
           note.completionReason,
           'note',
           note.sessionErrorMessage,
-          note.rateLimitResetsAt
+          note.rateLimitResetsAt,
+          note.isPollingForNote
         );
       } else if (phase === 'queued') {
         type = 'queued-note';

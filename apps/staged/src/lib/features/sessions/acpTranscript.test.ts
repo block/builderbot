@@ -151,10 +151,12 @@ describe('buildAcpTranscriptGroups', () => {
       detail: 'Disconnect test note',
       statusTone: 'success',
     });
+    // Finished like any other completed call: the footer shows no status
+    // for a success, so a special label would never render.
     expect(group.items[1]).toMatchObject({
       status: 'completed',
       verb: 'Ran',
-      statusLabel: 'Finished with the session',
+      statusLabel: 'Succeeded',
     });
 
     // The same rows in a session that ended in error are cut off.
@@ -169,6 +171,47 @@ describe('buildAcpTranscriptGroups', () => {
       statusLabel: 'Interrupted',
     });
     expect(failedGroup.items[1]).toMatchObject({ verb: 'Interrupted', statusLabel: 'Interrupted' });
+  });
+
+  it('only relabels unsettled calls from the final turn of a completed session', () => {
+    // Turn 1's `write_note` call was cut off by the follow-up prompt that
+    // opened turn 2 (the Pikchr repair, say); turn 2's call is the one whose
+    // lost update the completed session stands for.
+    const visible = [
+      message({ id: 1, role: 'user', content: 'write the note' }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__staged__write_note',
+          input: { title: 'First attempt', body: 'Body' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-1',
+        acpToolStatus: 'in_progress',
+      }),
+      message({ id: 3, role: 'user', content: 'fix the diagram' }),
+      message({
+        id: 4,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__staged__write_note',
+          input: { title: 'Second attempt', body: 'Body' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-2',
+        acpToolStatus: 'in_progress',
+      }),
+    ];
+    const groups = buildAcpTranscriptGroups(visible, [], undefined, {
+      sessionSettled: true,
+      sessionCompleted: true,
+    });
+    const tools = groups.flatMap((g) => (g.type === 'tools' ? g.items : []));
+    expect(tools.map((t) => [t.detail, t.verb, t.statusLabel])).toEqual([
+      ['First attempt', 'Note not saved', 'Interrupted'],
+      ['Second attempt', 'Saved note', 'Succeeded'],
+    ]);
   });
 
   it('pairs tool results by ACP tool call id without relying on adjacency', () => {

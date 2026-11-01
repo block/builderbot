@@ -66,6 +66,9 @@ pub struct MessageWriter {
     /// A filled slot means the turn's deliverable exists, whatever the
     /// assistant text says (see [`MessageWriter::should_finish_after_response`]).
     note_slot: Option<crate::note_tool::NoteSubmissionSlot>,
+    /// Bumped on every event the driver hands this writer, for a watchdog
+    /// that wants to know how long the agent has been silent.
+    activity: Option<Arc<super::ActivityClock>>,
 }
 
 /// The title of a tool call recorded from an update that names none (see
@@ -170,6 +173,7 @@ impl MessageWriter {
             tool_call_rows: Mutex::new(HashMap::new()),
             tool_result_rows: Mutex::new(HashMap::new()),
             note_slot: None,
+            activity: None,
         }
     }
 
@@ -220,6 +224,20 @@ impl MessageWriter {
     pub fn with_note_slot(mut self, slot: crate::note_tool::NoteSubmissionSlot) -> Self {
         self.note_slot = Some(slot);
         self
+    }
+
+    /// Have every driver event bump `clock`, so a watchdog on the run can
+    /// tell how long the agent has been silent.
+    pub fn with_activity_clock(mut self, clock: Arc<super::ActivityClock>) -> Self {
+        self.activity = Some(clock);
+        self
+    }
+
+    /// The agent was heard from: record it for the watchdog, if any.
+    fn heard_from_agent(&self) {
+        if let Some(clock) = &self.activity {
+            clock.touch();
+        }
     }
 
     // =====================================================================
@@ -472,6 +490,7 @@ impl MessageWriter {
 #[async_trait]
 impl acp_client::MessageWriter for MessageWriter {
     async fn append_text(&self, text: &str) {
+        self.heard_from_agent();
         self.append_text(text).await
     }
 
@@ -485,10 +504,12 @@ impl acp_client::MessageWriter for MessageWriter {
         images: &[PromptImage],
         attachment_ids: &[String],
     ) {
+        self.heard_from_agent();
         self.record_user_message(text, images, attachment_ids).await;
     }
 
     async fn should_finish_after_response(&self) -> bool {
+        self.heard_from_agent();
         // Inspect only the currently streamed response, never older transcript
         // rows. The ACP caller invokes this only at a completed response boundary.
         self.flush_text().await;
@@ -513,10 +534,12 @@ impl acp_client::MessageWriter for MessageWriter {
         title: &str,
         raw_input: Option<&serde_json::Value>,
     ) {
+        self.heard_from_agent();
         self.record_tool_call(tool_call_id, title, raw_input).await
     }
 
     async fn resume_interrupted_text(&self) {
+        self.heard_from_agent();
         self.resume_interrupted_text().await
     }
 
@@ -526,15 +549,18 @@ impl acp_client::MessageWriter for MessageWriter {
         title: Option<&str>,
         raw_input: Option<&serde_json::Value>,
     ) {
+        self.heard_from_agent();
         self.update_tool_call_title(tool_call_id, title, raw_input)
             .await
     }
 
     async fn record_tool_result(&self, tool_call_id: &str, content: &str) {
+        self.heard_from_agent();
         self.record_tool_result(tool_call_id, content).await
     }
 
     async fn on_session_info_update(&self, info: &acp_client::SessionInfoUpdate) {
+        self.heard_from_agent();
         let metadata = AcpMessageMetadata {
             acp_event_kind: Some("session_info_update".to_string()),
             acp_session_info: serde_json::to_value(info).ok(),
@@ -574,6 +600,7 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn on_model_state_update(&self, state: &acp_client::SessionModelState) {
+        self.heard_from_agent();
         let metadata = AcpMessageMetadata {
             acp_event_kind: Some("session_mode_state".to_string()),
             acp_session_mode_state: serde_json::to_value(state).ok(),
@@ -588,6 +615,7 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn on_config_option_update(&self, options: &[acp_client::SessionConfigOption]) {
+        self.heard_from_agent();
         if options.is_empty() {
             return;
         }
@@ -615,6 +643,7 @@ impl acp_client::MessageWriter for MessageWriter {
     /// `session/load`, and a boundary it can never produce would stall the
     /// match cursor — so boundary construction drops rows carrying this kind.
     async fn on_config_option_fallback(&self, notice: &str) {
+        self.heard_from_agent();
         self.finalize().await;
 
         if let Err(e) = self.store.add_authored_session_message(
@@ -628,6 +657,7 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn on_initialize(&self, metadata: &AcpInitializeMetadata) {
+        self.heard_from_agent();
         let metadata = AcpMessageMetadata {
             acp_event_kind: Some("initialize".to_string()),
             acp_protocol_version: Some(metadata.protocol_version.clone()),
@@ -645,6 +675,7 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn record_tool_call_metadata(&self, metadata: AcpToolCallMetadata) {
+        self.heard_from_agent();
         let tool_call_id = metadata.tool_call_id.clone();
         let metadata = acp_tool_call_metadata(metadata);
         let row_id = if let Some(tool_call_id) = tool_call_id {
@@ -668,6 +699,7 @@ impl acp_client::MessageWriter for MessageWriter {
     }
 
     async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
+        self.heard_from_agent();
         if let Some(provider_metadata) = provider_metadata_for_acp_event(&metadata) {
             if let Err(e) = self
                 .store
@@ -691,6 +723,7 @@ impl acp_client::MessageWriter for MessageWriter {
         request: AcpPermissionRequest,
         cancel_token: CancellationToken,
     ) -> AcpPermissionDecision {
+        self.heard_from_agent();
         if cancel_token.is_cancelled() {
             AcpPermissionDecision::Cancelled
         } else {

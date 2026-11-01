@@ -100,14 +100,26 @@ export interface AcpTranscriptOptions {
    */
   sessionSettled?: boolean;
   /**
-   * The settled session ended `completed`. An unsettled call in it was not
-   * cut off: its update was lost but its work stood — a remote note session
-   * completed from the workstation outbox stored the very note whose
-   * `write_note` row never got its result. Such calls render as finished
-   * ("Saved note" for the note row) rather than as interrupted; only a
-   * session that ended in `error` or `cancelled` labels them "Interrupted".
+   * The settled session ended `completed`. An unsettled call in its *final
+   * turn* was not cut off: its update was lost but its work stood — a remote
+   * note session completed from the workstation outbox stored the very note
+   * whose `write_note` row never got its result. Such calls render as
+   * finished ("Saved note" for the note row) rather than as interrupted.
+   * Unsettled calls from an earlier turn were cut off by the prompt that
+   * followed them, whatever the session's final status, and stay
+   * "Interrupted"; so does every unsettled call of a session that ended in
+   * `error` or `cancelled`.
    */
   sessionCompleted?: boolean;
+}
+
+/** [`AcpTranscriptOptions`] resolved against the transcript being built. */
+interface TranscriptContext extends AcpTranscriptOptions {
+  /**
+   * The id of the user message that opened the session's final turn;
+   * `-Infinity` when the transcript has none, so every call counts as final.
+   */
+  finalTurnStartId: number;
 }
 
 export function buildAcpTranscriptGroups(
@@ -132,6 +144,13 @@ export function buildAcpTranscriptGroups(
     toolAssemblies,
     assignedResultIds
   );
+  const context: TranscriptContext = {
+    ...options,
+    finalTurnStartId: visibleMessages.reduce(
+      (latest, m) => (m.role === 'user' ? Math.max(latest, m.id) : latest),
+      -Infinity
+    ),
+  };
   const groups: AcpTranscriptGroup[] = [];
   const emittedTools = new Set<string>();
 
@@ -148,7 +167,7 @@ export function buildAcpTranscriptGroups(
         if (assembly && !emittedTools.has(key)) {
           pushToolGroup(
             groups,
-            richToolItem(assembly, displayRoots, announcedPikchrSessions, options)
+            richToolItem(assembly, displayRoots, announcedPikchrSessions, context)
           );
           emittedTools.add(key);
         }
@@ -158,7 +177,7 @@ export function buildAcpTranscriptGroups(
         if (assembly && !emittedTools.has(key)) {
           pushToolGroup(
             groups,
-            richToolItem(assembly, displayRoots, announcedPikchrSessions, options)
+            richToolItem(assembly, displayRoots, announcedPikchrSessions, context)
           );
           emittedTools.add(key);
         }
@@ -626,17 +645,19 @@ function richToolItem(
   tool: ToolAssembly,
   displayRoots?: DisplayRootInput,
   announcedPikchrSessions?: Map<string, string>,
-  options: AcpTranscriptOptions = {}
+  context: TranscriptContext = { finalTurnStartId: -Infinity }
 ): RichToolItem {
   const recordedStatus = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
   // A call still running when its session ended never got its result: the
   // session's connection is gone, so nothing will update the row again. In
-  // a session that nevertheless completed the call's work stood (see
-  // `AcpTranscriptOptions.sessionCompleted`); otherwise it was cut off.
+  // a session that nevertheless completed, a call from the final turn's
+  // work stood (see `AcpTranscriptOptions.sessionCompleted`); one from an
+  // earlier turn, or any call in a session that failed, was cut off.
   const unsettled =
-    !!options.sessionSettled && (recordedStatus === 'pending' || recordedStatus === 'in_progress');
-  const interrupted = unsettled && !options.sessionCompleted;
-  const finishedWithSession = unsettled && !!options.sessionCompleted;
+    !!context.sessionSettled && (recordedStatus === 'pending' || recordedStatus === 'in_progress');
+  const finishedWithSession =
+    unsettled && !!context.sessionCompleted && tool.positionId >= context.finalTurnStartId;
+  const interrupted = unsettled && !finishedWithSession;
   const status: ToolStatus = interrupted
     ? 'cancelled'
     : finishedWithSession
@@ -665,11 +686,7 @@ function richToolItem(
     verb: display.verb,
     detail: display.detail,
     status,
-    statusLabel: interrupted
-      ? 'Interrupted'
-      : finishedWithSession
-        ? 'Finished with the session'
-        : toolStatusLabel(status),
+    statusLabel: interrupted ? 'Interrupted' : toolStatusLabel(status),
     statusTone: toolStatusTone(status),
     toolCallId: tool.toolCallId,
     toolKind: tool.metadata.toolKind ?? null,

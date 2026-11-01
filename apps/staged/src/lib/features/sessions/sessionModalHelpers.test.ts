@@ -4,10 +4,12 @@ import {
   formatToolDisplay,
   insertedText,
   isAwaitingRemoteNote,
+  isStoringRemoteNote,
   makePathsRelative,
   newestUserMessageId,
   reconnectedOutcomeMessage,
   REMOTE_NOTE_POLL_SUFFIX,
+  REMOTE_NOTE_STORING_SUFFIX,
   sessionEndMessage,
   sessionErrorMessage,
   sessionEndNoticeKind,
@@ -413,6 +415,19 @@ describe('newestUserMessageId', () => {
       })
     ).toBe(
       'This session paused because the provider reported an API limit. Resume manually when ready.'
+    );
+  });
+});
+
+describe('detached remote note sessions', () => {
+  it('tells a detached session whose note is being stored', () => {
+    const storing = `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_STORING_SUFFIX}`;
+    expect(isStoringRemoteNote(storing)).toBe(true);
+    expect(isAwaitingRemoteNote(storing)).toBe(false);
+    expect(isStoringRemoteNote(null)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: storing })).toBe(
+      'Staged lost the connection to this remote session, but the workstation agent ' +
+        'finished its note. Staged is storing it and will complete the session.'
     );
   });
 });

@@ -221,6 +221,56 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// [`Self::finish_detached_recovery`] for exactly the `error`/`detached`
+    /// row the caller read: the write also requires `updated_at` and
+    /// `error_message` to still be what the caller observed.
+    ///
+    /// This is what makes the sweep's claim exclusive across Staged instances
+    /// sharing the store. Two instances that both read the same detached row
+    /// (same polling marker, same `updated_at`) and both find the finished
+    /// note race to claim it; the first write restamps `updated_at` and
+    /// replaces the marker, so the second fails the predicate and backs off
+    /// without ingesting. The caller then guards its final write on the
+    /// stamp this claim returned, so a row another instance re-claimed in the
+    /// meantime (a stale storing claim, see
+    /// `session_runner::detached_note_poll_action`) is left to them too.
+    ///
+    /// Returns the `updated_at` the row now carries when it was written,
+    /// `None` when the row had moved on.
+    pub fn finish_detached_recovery_observed(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+        observed_error_message: Option<&str>,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if new_status == SessionStatus::Error {
+            error_message
+        } else {
+            None
+        };
+        let now = now_timestamp();
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'error' AND completion_reason = ?6
+               AND updated_at = ?7 AND error_message IS ?8",
+            params![
+                new_status.as_str(),
+                error_msg,
+                completion_reason.map(|r| r.as_str()),
+                now,
+                id,
+                CompletionReason::Detached.as_str(),
+                observed_updated_at,
+                observed_error_message,
+            ],
+        )?;
+        Ok((rows > 0).then_some(now))
+    }
+
     /// [`Self::transition_from_running`] for exactly the `running` row the
     /// caller read: the write also requires `updated_at` to still be
     /// `observed_updated_at`.

@@ -4,7 +4,6 @@ import {
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
 } from '../../shared/disconnectedSession';
-import { isAwaitingRemoteNote } from '../sessions/sessionModalHelpers';
 
 export type ArtifactKind = 'commit' | 'note' | 'review';
 
@@ -29,13 +28,15 @@ const RECONCILE_INTERRUPTIONS: ReadonlySet<string> = new Set([
  * The subtitle of a timeline row whose session ended without producing its
  * artifact. `errorMessage` is the session's: reconcile's messages say more
  * than its completion reason does. `rateLimitResetsAt` dates a rate-limit
- * pause's subtitle.
+ * pause's subtitle. `isPollingForNote` is the note row's
+ * `NoteTimelineItem.isPollingForNote`.
  */
 export function failedArtifactSubtitle(
   completionReason: string | null | undefined,
   kind: ArtifactKind,
   errorMessage?: string | null,
-  rateLimitResetsAt?: string | null
+  rateLimitResetsAt?: string | null,
+  isPollingForNote = false
 ): string {
   const noun = artifactNoun[kind];
   if (errorMessage === RECONCILE_WORKSTATION_GONE) {
@@ -54,12 +55,12 @@ export function failedArtifactSubtitle(
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;
     // A detached remote session may still complete on its own while the
-    // sweep is polling the workstation (see docs/note-delivery.md); the
-    // row's error message carries the marker that says so. Past the poll
-    // window, or for a note that cannot be stored, nothing arrives without
-    // a Resume, so "yet" would be a false promise.
+    // sweep is polling the workstation or an instance is storing the note it
+    // found (`NoteTimelineItem.isPollingForNote`, see docs/note-delivery.md).
+    // Past the poll window, or for a note that cannot be stored, nothing
+    // arrives without a Resume, so "yet" would be a false promise.
     case 'detached':
-      return isAwaitingRemoteNote(errorMessage)
+      return isPollingForNote
         ? `Lost the remote session — no ${noun} created yet`
         : `Lost the remote session — no ${noun} created`;
     case 'project_session_interrupted':

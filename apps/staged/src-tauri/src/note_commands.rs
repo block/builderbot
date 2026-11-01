@@ -19,6 +19,10 @@ pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineIt
         .as_deref()
         .and_then(|session_id| store.session_chat_activity(session_id).ok())
         .unwrap_or_default();
+    let is_polling_for_note = crate::session_runner::note_recovery_is_pending(
+        resolved.completion_reason.as_deref(),
+        resolved.error_message.as_deref(),
+    );
     NoteTimelineItem {
         id: note.id,
         title: note.title,
@@ -29,6 +33,7 @@ pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineIt
         session_error_message: resolved.error_message,
         rate_limit_resets_at: resolved.rate_limit_resets_at,
         rate_limit_kind: resolved.rate_limit_kind,
+        is_polling_for_note,
         created_at: note.created_at,
         updated_at: note.updated_at,
         completed_at: note.completed_at,
@@ -54,6 +59,7 @@ pub(crate) fn standalone_note_to_timeline_item(note: Note) -> NoteTimelineItem {
         session_error_message: None,
         rate_limit_resets_at: None,
         rate_limit_kind: None,
+        is_polling_for_note: false,
         created_at: note.created_at,
         updated_at: note.updated_at,
         completed_at: note.completed_at,

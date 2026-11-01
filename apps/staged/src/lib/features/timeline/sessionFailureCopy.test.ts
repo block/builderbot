@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { REMOTE_NOTE_POLL_SUFFIX } from '../sessions/sessionModalHelpers';
 import { failedArtifactSubtitle, formatRateLimitResetTime } from './sessionFailureCopy';
 import {
   RECONCILE_MAY_STILL_RUN,
@@ -20,21 +19,13 @@ describe('failedArtifactSubtitle', () => {
     expect(failedArtifactSubtitle('interrupted', 'note')).toBe('Session stopped — no note created');
   });
 
-  it('says "yet" for a detached remote session only while the sweep is still polling', () => {
-    expect(
-      failedArtifactSubtitle(
-        'detached',
-        'note',
-        `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_POLL_SUFFIX}`
-      )
-    ).toBe('Lost the remote session — no note created yet');
-    expect(
-      failedArtifactSubtitle(
-        'detached',
-        'note',
-        'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.'
-      )
-    ).toBe('Lost the remote session — no note created');
+  it('says "yet" for a detached remote session only while Staged is still working on its note', () => {
+    expect(failedArtifactSubtitle('detached', 'note', null, null, true)).toBe(
+      'Lost the remote session — no note created yet'
+    );
+    expect(failedArtifactSubtitle('detached', 'note', null, null, false)).toBe(
+      'Lost the remote session — no note created'
+    );
     expect(failedArtifactSubtitle('detached', 'note')).toBe(
       'Lost the remote session — no note created'
     );

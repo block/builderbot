@@ -91,6 +91,20 @@ export function isAwaitingRemoteNote(errorMessage: string | null | undefined): b
 }
 
 /**
+ * Tail of the error message a Staged instance writes on a `detached` remote
+ * note session while it stores the finished note it found on the workstation
+ * (`STORING_REMOTE_NOTE_SUFFIX` in `src-tauri/src/session_runner.rs`, pinned
+ * by the same backend test). A claim this old that never completed belongs to
+ * an instance that died mid-store; the sweep polls the row again.
+ */
+export const REMOTE_NOTE_STORING_SUFFIX = 'storing the note it finished on the workstation.';
+
+/** Whether a Staged instance is storing this row's note right now (or died trying). */
+export function isStoringRemoteNote(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.trimEnd().endsWith(REMOTE_NOTE_STORING_SUFFIX);
+}
+
+/**
  * Which end-of-session notice the chat pane shows under the transcript.
  *
  * - `detached`: a lost remote session. Always the resumable notice, whatever
@@ -154,6 +168,12 @@ function detachedEndMessage(errorMessage: string | null | undefined): string {
       'Staged lost the connection to this remote session. The workstation agent may still ' +
       'be running; Staged is checking for its note and will complete the session when it ' +
       'appears.'
+    );
+  }
+  if (isStoringRemoteNote(errorMessage)) {
+    return (
+      'Staged lost the connection to this remote session, but the workstation agent ' +
+      'finished its note. Staged is storing it and will complete the session.'
     );
   }
   const message = errorMessage?.trim();

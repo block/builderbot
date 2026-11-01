@@ -758,6 +758,15 @@ export interface ChildSessionInfo {
   sessionId: string;
   /** One of `'commit'`, `'note'`, `'review'`. */
   sessionType: string;
+  /** The only two statuses the query returns. */
+  status: 'queued' | 'running';
+  /**
+   * The child's title as the branch timeline would show it, resolved by the
+   * backend with the branch timeline's own rules: a commit's ACP title else
+   * its prompt, a note's stored title, a review's stored title else (while
+   * running) its ACP title. `null` only for a review with neither yet.
+   */
+  title: string | null;
   branchId: string;
   githubRepo: string | null;
   subpath: string | null;

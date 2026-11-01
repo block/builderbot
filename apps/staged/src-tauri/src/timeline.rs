@@ -10,7 +10,7 @@
 
 use crate::git;
 use crate::session_runner;
-use crate::store::{CommentAuthor, CommentType, ResolvedSession, Review, Store};
+use crate::store::{CommentAuthor, CommentType, Review, Store};
 use crate::{
     blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
@@ -276,19 +276,6 @@ fn map_local_commits(
         .collect()
 }
 
-/// The agent-pushed ACP session title, when set and non-empty.
-///
-/// Applied at read time only, as an interim display name for in-progress
-/// pending commits and untitled reviews. Notes always use their stored titles.
-fn non_empty_acp_title(resolved: &ResolvedSession) -> Option<String> {
-    resolved
-        .acp_title
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-}
-
 /// Clamp commit sort keys so they never decrease in branch order.
 ///
 /// Committer dates are naturally non-decreasing along a branch; the author
@@ -488,9 +475,10 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 id: Some(dc.id.clone()),
                 sha: String::new(),
                 short_sha: String::new(),
-                subject: non_empty_acp_title(&resolved)
-                    .or_else(|| session.as_ref().map(|s| s.prompt.clone()))
-                    .unwrap_or_else(|| "Pending commit".to_string()),
+                subject: crate::store::pending_commit_subject(
+                    resolved.acp_title.as_deref(),
+                    session.as_ref().map(|s| s.prompt.as_str()),
+                ),
                 author: String::new(),
                 author_email: String::new(),
                 timestamp: dc.created_at / 1000,
@@ -558,13 +546,13 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             let counts = review_comment_counts(&r);
             // Untitled running reviews would otherwise render a static
             // placeholder; surface the agent-pushed ACP title instead. A
-            // stored title always wins.
-            let title = match r.title {
-                None if resolved.status.as_deref() == Some("running") => {
-                    non_empty_acp_title(&resolved)
-                }
-                title => title,
-            };
+            // stored title always wins. Shared with the child-session badges
+            // so both name an in-flight review identically.
+            let title = crate::store::review_title(
+                r.title,
+                resolved.status.as_deref(),
+                resolved.acp_title.as_deref(),
+            );
             ReviewTimelineItem {
                 id: r.id,
                 commit_sha: r.commit_sha,

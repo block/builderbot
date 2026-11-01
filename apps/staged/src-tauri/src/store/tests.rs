@@ -5,7 +5,8 @@ use std::path::Path;
 
 use super::models::*;
 use super::{
-    SessionPollRequest, Store, ToolCallBody, TranscriptWindow, DEFERRED_TOOL_BODY_MIN_BYTES,
+    ChildSessionInfo, SessionPollRequest, Store, ToolCallBody, TranscriptWindow,
+    DEFERRED_TOOL_BODY_MIN_BYTES,
 };
 
 #[test]
@@ -915,7 +916,7 @@ fn child_session(store: &Store, parent_id: &str, branch_id: &str, kind: &str) ->
 }
 
 #[test]
-fn test_list_running_child_sessions_projects_each_kind_to_its_repo() {
+fn test_list_active_child_sessions_projects_each_kind_to_its_repo() {
     let store = Store::in_memory().unwrap();
     let (_project, branch, repo, parent) = child_session_fixture(&store);
 
@@ -924,13 +925,14 @@ fn test_list_running_child_sessions_projects_each_kind_to_its_repo() {
         store.transition_queued_to_running(&child.id).unwrap();
     }
 
-    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
     let kinds: Vec<&str> = children.iter().map(|c| c.session_type.as_str()).collect();
     // Ordered by start order, which is the order they were enqueued: these
     // three share a `created_at`, so the row order is the tie-break's doing and
     // badge positions stay put across refreshes.
     assert_eq!(kinds, vec!["commit", "note", "review"]);
     for child in &children {
+        assert_eq!(child.status, "running");
         assert_eq!(child.branch_id, branch.id);
         assert_eq!(
             child.github_repo.as_deref(),
@@ -940,35 +942,183 @@ fn test_list_running_child_sessions_projects_each_kind_to_its_repo() {
     }
 }
 
+/// Every `start_repo_session` outcome — hidden child note, detached note,
+/// commit, code review — is a dependency of the parent and must badge.
 #[test]
-fn test_list_running_child_sessions_maps_a_child_note_to_note() {
+fn test_list_active_child_sessions_covers_every_start_repo_session_outcome() {
     let store = Store::in_memory().unwrap();
     let (project, branch, _repo, parent) = child_session_fixture(&store);
     let project_note = ProjectNote::new(&project.id, "Parent", "");
     store.create_project_note(&project_note).unwrap();
 
-    // A `child_note` outcome: the note is aggregated under the project note and
-    // hidden from the repo timeline, but it is still a note as far as the badge
-    // is concerned.
-    let child = Session::new_queued("investigate").with_parent_session(&parent.id);
-    store.create_session(&child).unwrap();
+    // `child_note`: aggregated under the project note and hidden from the
+    // repo's visible timeline (`list_notes` filters it out), but still a note
+    // as far as the badge is concerned — there is no visibility filter here.
+    let hidden = Session::new_queued("investigate").with_parent_session(&parent.id);
+    store.create_session(&hidden).unwrap();
     store
         .create_note(
             &Note::new(&branch.id, "investigate", "")
-                .with_session(&child.id)
+                .with_session(&hidden.id)
                 .with_parent_project_note(&project_note.id),
         )
         .unwrap();
-    store.transition_queued_to_running(&child.id).unwrap();
+    // `note_in_repo`, `commit`, `code_review`.
+    let detached = child_session(&store, &parent.id, &branch.id, "note");
+    let commit = child_session(&store, &parent.id, &branch.id, "commit");
+    let review = child_session(&store, &parent.id, &branch.id, "review");
+    for child in [&hidden, &detached, &commit, &review] {
+        store.transition_queued_to_running(&child.id).unwrap();
+    }
+    assert!(
+        store
+            .list_notes_for_branch(&branch.id)
+            .unwrap()
+            .iter()
+            .all(|n| n.session_id.as_deref() != Some(hidden.id.as_str())),
+        "fixture: the child note should be hidden from the branch timeline"
+    );
 
-    let children = store.list_running_child_sessions(&parent.id).unwrap();
-    assert_eq!(children.len(), 1);
-    assert_eq!(children[0].session_type, "note");
-    assert_eq!(children[0].session_id, child.id);
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
+    let mut ids: Vec<&str> = children.iter().map(|c| c.session_id.as_str()).collect();
+    ids.sort();
+    let mut expected = vec![
+        hidden.id.as_str(),
+        detached.id.as_str(),
+        commit.id.as_str(),
+        review.id.as_str(),
+    ];
+    expected.sort();
+    assert_eq!(ids, expected);
+    let kind_of = |id: &str| {
+        children
+            .iter()
+            .find(|c| c.session_id == id)
+            .map(|c| c.session_type.as_str())
+            .unwrap()
+    };
+    assert_eq!(kind_of(&hidden.id), "note");
+    assert_eq!(kind_of(&detached.id), "note");
+    assert_eq!(kind_of(&commit.id), "commit");
+    assert_eq!(kind_of(&review.id), "review");
+}
+
+/// The branch queue runs one session per branch at a time, so a parent that
+/// fires several `start_repo_session` calls at one repo has most of them
+/// waiting. They are dependencies all the same and must appear, flagged
+/// `queued` so the UI can draw them differently from running work.
+#[test]
+fn test_list_active_child_sessions_includes_queued_children() {
+    let store = Store::in_memory().unwrap();
+    let (project, branch, _repo, parent) = child_session_fixture(&store);
+    let project_note = ProjectNote::new(&project.id, "Parent", "");
+    store.create_project_note(&project_note).unwrap();
+
+    let running = child_session(&store, &parent.id, &branch.id, "commit");
+    store.transition_queued_to_running(&running.id).unwrap();
+
+    // One queued child of every outcome, hidden child note included.
+    let queued_hidden = Session::new_queued("investigate").with_parent_session(&parent.id);
+    store.create_session(&queued_hidden).unwrap();
+    store
+        .create_note(
+            &Note::new(&branch.id, "investigate", "")
+                .with_session(&queued_hidden.id)
+                .with_parent_project_note(&project_note.id),
+        )
+        .unwrap();
+    let queued_note = child_session(&store, &parent.id, &branch.id, "note");
+    let queued_commit = child_session(&store, &parent.id, &branch.id, "commit");
+    let queued_review = child_session(&store, &parent.id, &branch.id, "review");
+
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
+    assert_eq!(children.len(), 5);
+    let status_of = |id: &str| {
+        children
+            .iter()
+            .find(|c| c.session_id == id)
+            .map(|c| c.status.as_str())
+            .unwrap_or_else(|| panic!("child {id} missing from the badge rows"))
+    };
+    assert_eq!(status_of(&running.id), "running");
+    for queued in [&queued_hidden, &queued_note, &queued_commit, &queued_review] {
+        assert_eq!(status_of(&queued.id), "queued");
+    }
+}
+
+/// Each badge carries the title the branch timeline would give the same
+/// session: a commit's live ACP title else its prompt, a note's stored title
+/// (ACP titles never apply to notes), and a review's stored title else — only
+/// while running — its ACP title.
+#[test]
+fn test_list_active_child_sessions_titles_follow_the_branch_timeline_rules() {
+    let store = Store::in_memory().unwrap();
+    let (_project, branch, _repo, parent) = child_session_fixture(&store);
+
+    let commit = child_session(&store, &parent.id, &branch.id, "commit");
+    let note = child_session(&store, &parent.id, &branch.id, "note");
+    let review = child_session(&store, &parent.id, &branch.id, "review");
+    let title_of = |children: &[ChildSessionInfo], id: &str| {
+        children
+            .iter()
+            .find(|c| c.session_id == id)
+            .unwrap()
+            .title
+            .clone()
+    };
+
+    // Queued, nothing pushed yet: the commit shows the start of its prompt,
+    // the note its stub title, the review nothing.
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
+    assert_eq!(title_of(&children, &commit.id).as_deref(), Some("commit"));
+    assert_eq!(title_of(&children, &note.id).as_deref(), Some("research"));
+    assert_eq!(title_of(&children, &review.id), None);
+
+    // The agent pushes an ACP title while each is still queued: only the
+    // commit's label changes. The review's does not — the branch timeline
+    // applies an ACP title to a review only once it is running.
+    for child in [&commit, &note, &review] {
+        store
+            .update_session_acp_title(&child.id, Some("Live title"))
+            .unwrap();
+    }
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
+    assert_eq!(
+        title_of(&children, &commit.id).as_deref(),
+        Some("Live title")
+    );
+    assert_eq!(title_of(&children, &note.id).as_deref(), Some("research"));
+    assert_eq!(title_of(&children, &review.id), None);
+
+    // Running: the review picks the ACP title up too.
+    for child in [&commit, &note, &review] {
+        store.transition_queued_to_running(&child.id).unwrap();
+    }
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
+    assert_eq!(
+        title_of(&children, &review.id).as_deref(),
+        Some("Live title")
+    );
+
+    // A stored review title beats the ACP title.
+    let review_row = store
+        .list_reviews_for_branch(&branch.id)
+        .unwrap()
+        .into_iter()
+        .find(|r| r.session_id.as_deref() == Some(review.id.as_str()))
+        .unwrap();
+    store
+        .update_review_title(&review_row.id, "Stored review title")
+        .unwrap();
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
+    assert_eq!(
+        title_of(&children, &review.id).as_deref(),
+        Some("Stored review title")
+    );
 }
 
 #[test]
-fn test_list_running_child_sessions_yields_one_row_per_multi_artifact_child() {
+fn test_list_active_child_sessions_yields_one_row_per_multi_artifact_child() {
     let store = Store::in_memory().unwrap();
     let (_project, branch, _repo, parent) = child_session_fixture(&store);
 
@@ -981,22 +1131,19 @@ fn test_list_running_child_sessions_yields_one_row_per_multi_artifact_child() {
         .unwrap();
     store.transition_queued_to_running(&child.id).unwrap();
 
-    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].session_id, child.id);
     assert_eq!(children[0].session_type, "note");
 }
 
 #[test]
-fn test_list_running_child_sessions_excludes_inactive_children_and_other_parents() {
+fn test_list_active_child_sessions_excludes_finished_children_and_other_parents() {
     let store = Store::in_memory().unwrap();
     let (_project, branch, _repo, parent) = child_session_fixture(&store);
 
     let running = child_session(&store, &parent.id, &branch.id, "commit");
     store.transition_queued_to_running(&running.id).unwrap();
-
-    // Queued: nothing is happening for it yet, so a spinner would misreport.
-    child_session(&store, &parent.id, &branch.id, "note");
 
     // Terminal children have already landed on the branch timeline.
     for status in [
@@ -1016,7 +1163,7 @@ fn test_list_running_child_sessions_excludes_inactive_children_and_other_parents
     let other_child = child_session(&store, &other_parent.id, &branch.id, "commit");
     store.transition_queued_to_running(&other_child.id).unwrap();
 
-    let children = store.list_running_child_sessions(&parent.id).unwrap();
+    let children = store.list_active_child_sessions(&parent.id).unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].session_id, running.id);
 }

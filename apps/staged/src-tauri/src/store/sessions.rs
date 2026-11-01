@@ -8,18 +8,25 @@ use super::models::{
 };
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
-/// A running session spawned by another session, projected to the repo it is
-/// working in.
+/// An in-flight session spawned by another session, projected to the repo it
+/// is working in.
 ///
-/// `githubRepo`/`subpath` are the repo badge lookup key; both are absent for a
-/// branch whose `project_repo_id` was cleared, which just means the badge falls
-/// back to plain styling.
+/// `githubRepo`/`subpath` identify that repo; both are absent for a branch
+/// whose `project_repo_id` was cleared.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSessionInfo {
     pub session_id: String,
     /// One of `"commit"`, `"note"`, `"review"`.
     pub session_type: String,
+    /// `"queued"` or `"running"` — the only two statuses the query returns.
+    pub status: String,
+    /// The child's title as the branch timeline would show it, resolved by
+    /// the same rules ([`super::pending_commit_subject`],
+    /// [`super::review_title`], a note's stored title): the start of the prompt
+    /// until the agent pushes an ACP title. `None` only for a review with no
+    /// stored title and no ACP title yet.
+    pub title: Option<String>,
     pub branch_id: String,
     pub github_repo: Option<String>,
     pub subpath: Option<String>,
@@ -369,8 +376,8 @@ impl Store {
         Ok(sessions)
     }
 
-    /// List the still-running sessions spawned by `parent_session_id`, oldest
-    /// first, projected to the repo they are working in.
+    /// List the in-flight sessions spawned by `parent_session_id` — queued or
+    /// running — oldest first, projected to the repo they are working in.
     ///
     /// Children are found through their artifact (commit / note / review)
     /// rather than `sessions.branch_id`. Both are stamped on the queued row
@@ -378,10 +385,15 @@ impl Store {
     /// also the branch link — one join, one source of truth for the badge. A
     /// `child_note` (a note carrying `parent_project_note_id`) reports as a
     /// plain `"note"` here — the badge only needs to say what kind of work is
-    /// in flight and where.
+    /// in flight and where. There is deliberately no visibility filter: a
+    /// hidden child note is as much a dependency of the parent as a visible
+    /// one.
     ///
-    /// Queued children are excluded: nothing is happening for them yet, so
-    /// showing them under a spinner would misreport the parent's progress.
+    /// Queued children are included. The branch queue runs one session per
+    /// branch at a time, so an agent that fires several `start_repo_session`
+    /// calls at one repo has all but one of them waiting — a queued child is
+    /// still work the parent depends on, and dropping it made those
+    /// dependencies invisible. `status` tells the caller which is which.
     ///
     /// Each child yields exactly one row even if it somehow acquires several
     /// artifacts: callers key UI elements by `session_id`, so a duplicate
@@ -391,7 +403,7 @@ impl Store {
     /// several `start_repo_session` calls inside one millisecond, so `rowid`
     /// breaks the tie — otherwise badges for concurrent children could swap
     /// positions from one refresh to the next.
-    pub fn list_running_child_sessions(
+    pub fn list_active_child_sessions(
         &self,
         parent_session_id: &str,
     ) -> Result<Vec<ChildSessionInfo>, StoreError> {
@@ -401,6 +413,11 @@ impl Store {
                     CASE WHEN c.session_id IS NOT NULL THEN 'commit'
                          WHEN n.session_id IS NOT NULL THEN 'note'
                          ELSE 'review' END AS session_type,
+                    s.status,
+                    s.prompt,
+                    s.acp_title,
+                    n.title AS note_title,
+                    r.title AS review_title,
                     b.id AS branch_id,
                     pr.github_repo,
                     pr.subpath
@@ -410,18 +427,40 @@ impl Store {
              LEFT JOIN reviews r ON r.session_id = s.id
              JOIN branches b ON b.id = COALESCE(c.branch_id, n.branch_id, r.branch_id)
              LEFT JOIN project_repos pr ON pr.id = b.project_repo_id
-             WHERE s.parent_session_id = ?1 AND s.status = 'running'
+             WHERE s.parent_session_id = ?1 AND s.status IN ('queued', 'running')
              GROUP BY s.id
              ORDER BY s.created_at ASC, s.rowid ASC",
         )?;
         let children = stmt
             .query_map(params![parent_session_id], |row| {
+                let session_type: String = row.get(1)?;
+                let status: String = row.get(2)?;
+                let prompt: String = row.get(3)?;
+                let acp_title: Option<String> = row.get(4)?;
+                let note_title: Option<String> = row.get(5)?;
+                let review_title: Option<String> = row.get(6)?;
+                // The same rule per kind as the branch timeline's row for the
+                // same session, so a badge and the branch card agree.
+                let title = match session_type.as_str() {
+                    "commit" => Some(super::pending_commit_subject(
+                        acp_title.as_deref(),
+                        Some(prompt.as_str()),
+                    )),
+                    "note" => note_title,
+                    _ => super::review_title(
+                        review_title,
+                        Some(status.as_str()),
+                        acp_title.as_deref(),
+                    ),
+                };
                 Ok(ChildSessionInfo {
                     session_id: row.get(0)?,
-                    session_type: row.get(1)?,
-                    branch_id: row.get(2)?,
-                    github_repo: row.get(3)?,
-                    subpath: row.get(4)?,
+                    session_type,
+                    status,
+                    title,
+                    branch_id: row.get(7)?,
+                    github_repo: row.get(8)?,
+                    subpath: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

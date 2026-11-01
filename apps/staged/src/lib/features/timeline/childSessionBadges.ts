@@ -6,77 +6,70 @@
  * the hint does, so they take the subtitle's place until the children finish.
  */
 
-import type { ChildSessionInfo, RepoBadge } from '../../types';
+import type { ChildSessionInfo } from '../../types';
+import { sessionRowTitle, truncateTitle, type SessionRowKind } from './sessionRowTitle';
+
+/**
+ * Longest label a badge shows before clipping. The project column is narrow,
+ * and the full title stays reachable through the badge's tooltip.
+ */
+export const CHILD_BADGE_TITLE_MAX_CHARS = 36;
 
 export interface ChildSessionBadgeProps {
   /** Child session id — unique per badge, so two children in one repo keep two badges. */
   key: string;
-  /** One of `'commit'`, `'note'`, `'review'`. */
-  sessionType: string;
-  /**
-   * Repo name to read as "*type* in *shortName*". `null` when the child's
-   * branch has no project repo at all, which leaves the badge as just its type.
-   */
-  shortName: string | null;
-  /** Repo badge hue, or `null` while the badge is still being generated. */
-  hue: number | null;
+  /** Drives the badge's colour, the same per-kind colour the branch timeline uses. */
+  sessionType: SessionRowKind;
+  /** Queued children wait on the branch queue; running ones get a spinner. */
+  status: 'queued' | 'running';
+  /** The clipped label. */
+  label: string;
+  /** The whole title, for the tooltip. */
+  title: string;
+}
+
+function asRowKind(sessionType: string): SessionRowKind {
+  return sessionType === 'commit' || sessionType === 'review' ? sessionType : 'note';
 }
 
 /**
- * Stand-in short name for a repo whose badge hasn't been generated yet: the
- * subpath's last segment, else the repo name after the owner. Mirrors the
- * segment the backend's `fallback_short_name` picks, without its lowercasing
- * and truncation — this is a one-off label, not a name that has to stay
- * unique against other badges.
- */
-export function fallbackShortName(
-  githubRepo: string | null,
-  subpath: string | null
-): string | null {
-  const source = subpath?.trim() ? subpath : githubRepo;
-  if (!source) return null;
-  const segment = source.split('/').filter(Boolean).pop();
-  return segment ?? null;
-}
-
-/**
- * Project running children onto badge props, tinting each with its *repo's*
- * hue rather than the session type's colour — the type is already in the
- * label, and the repo is what distinguishes one in-flight child from another.
+ * Project in-flight children onto badge props.
  *
- * `lookupBadge` is the (githubRepo, subpath) → badge cache lookup; a miss
- * falls back to an untinted badge rather than dropping the child, so work in a
- * repo whose badge is still generating stays visible.
+ * Each badge is titled the way the branch timeline would title the same
+ * session (`sessionRowTitle`), with `liveTitles` — the hint poller's live ACP
+ * titles, keyed by session id — layered on top exactly as BranchTimeline
+ * layers them on its rows.
  */
 export function buildChildSessionBadges(
   children: ChildSessionInfo[],
-  lookupBadge: (githubRepo: string, subpath: string | null) => RepoBadge | undefined
+  liveTitles: Record<string, string> = {}
 ): ChildSessionBadgeProps[] {
   return children.map((child) => {
-    const badge = child.githubRepo ? lookupBadge(child.githubRepo, child.subpath) : undefined;
+    const kind = asRowKind(child.sessionType);
+    const title = sessionRowTitle(kind, child.title, liveTitles[child.sessionId]);
     return {
       key: child.sessionId,
-      sessionType: child.sessionType,
-      shortName: badge?.shortName ?? fallbackShortName(child.githubRepo, child.subpath),
-      hue: badge?.hue ?? null,
+      sessionType: kind,
+      status: child.status,
+      label: truncateTitle(title, CHILD_BADGE_TITLE_MAX_CHARS),
+      title,
     };
   });
 }
 
-/** The repos whose badges need generating before these children can be tinted. */
-export function childSessionRepos(
-  children: ChildSessionInfo[]
-): Array<{ githubRepo: string; subpath: string | null }> {
-  const seen = new Set<string>();
-  const repos: Array<{ githubRepo: string; subpath: string | null }> = [];
-  for (const child of children) {
-    if (!child.githubRepo) continue;
-    const key = `${child.githubRepo}:${child.subpath ?? ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    repos.push({ githubRepo: child.githubRepo, subpath: child.subpath });
+/**
+ * The children whose titles can still change: the hint poller tracks these
+ * alongside their parents so a badge picks up an ACP title the way the branch
+ * card's row does. Queued children have no agent yet, so nothing to poll.
+ */
+export function runningChildSessionIds(childrenBySession: Record<string, ChildSessionInfo[]>) {
+  const ids: string[] = [];
+  for (const children of Object.values(childrenBySession)) {
+    for (const child of children) {
+      if (child.status === 'running') ids.push(child.sessionId);
+    }
   }
-  return repos;
+  return ids;
 }
 
 /**

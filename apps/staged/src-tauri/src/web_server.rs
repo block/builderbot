@@ -3275,7 +3275,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let parent_session_id: String = arg(&args, "parentSessionId")?;
             let children = store
-                .list_running_child_sessions(&parent_session_id)
+                .list_active_child_sessions(&parent_session_id)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(children).unwrap())
         }

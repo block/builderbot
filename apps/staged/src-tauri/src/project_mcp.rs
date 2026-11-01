@@ -1483,7 +1483,7 @@ mod tests {
             .create_commit(&crate::store::Commit::new_pending(&branch.id).with_session(&session.id))
             .unwrap();
         store.transition_queued_to_running(&session.id).unwrap();
-        let children = store.list_running_child_sessions(&parent.id).unwrap();
+        let children = store.list_active_child_sessions(&parent.id).unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].session_id, session.id);
         assert_eq!(children[0].session_type, "commit");

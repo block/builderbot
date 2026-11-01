@@ -959,8 +959,9 @@ export function getActiveSessions(): Promise<ActiveSessionInfo[]> {
 }
 
 /**
- * The still-running repo sessions a project session spawned, in start order.
- * Queued children are excluded — nothing is happening for them yet.
+ * The in-flight repo sessions a project session spawned, in start order:
+ * queued children included, since the branch queue holds all but one of a
+ * burst of `start_repo_session` calls at the same repo.
  */
 export function listChildSessions(parentSessionId: string): Promise<ChildSessionInfo[]> {
   return invokeCommand('list_child_sessions', { parentSessionId });

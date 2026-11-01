@@ -71,6 +71,8 @@
      * on a finished artifact.
      */
     childSessionBadges?: ChildSessionBadgeProps[];
+    /** Opens a running child's chat; receives the child's session id. */
+    onChildSessionClick?: (sessionId: string) => void;
     deleting?: boolean;
     isLast?: boolean;
     sessionId?: string;
@@ -121,6 +123,7 @@
     tertiaryMeta,
     badges,
     childSessionBadges,
+    onChildSessionClick,
     deleting = false,
     isLast = false,
     sessionId,
@@ -394,8 +397,12 @@
               {#each childSessionBadges as childBadge (childBadge.key)}
                 <ChildSessionBadge
                   sessionType={childBadge.sessionType}
-                  shortName={childBadge.shortName}
-                  hue={childBadge.hue}
+                  status={childBadge.status}
+                  label={childBadge.label}
+                  title={childBadge.title}
+                  onclick={onChildSessionClick
+                    ? () => onChildSessionClick(childBadge.key)
+                    : undefined}
                 />
               {/each}
             {/if}

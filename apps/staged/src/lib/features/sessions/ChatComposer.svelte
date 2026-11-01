@@ -11,13 +11,14 @@
   session, a plain "Queue" on a running one — and, when the backend reports
   the running session can take a message now (`canSendLive`), a split button
   whose primary segment performs the remembered mode (Queue / Send) and whose
-  dropdown switches it. While the session row is still loading the control
-  is disabled (titled "Loading session…") but the draft can be typed.
+  dropdown switches it. While the pane has no session row to submit to
+  (`sessionBlock`: still loading, or the load settled without one) the
+  control is disabled with a title saying which, but the draft can be typed.
 
   Failures of the composer's own actions (`sendError`: a refused send, a
-  queue change that failed) are shown on a line inside the composer, next to
-  the attachment error, rather than in the pane's transcript slot — the
-  transcript stays readable behind them.
+  queue change that failed) are shown on a `ComposerError` line inside the
+  composer, next to the attachment error, rather than in the pane's
+  transcript slot — the transcript stays readable behind them.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -43,14 +44,16 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { cn } from '$lib/components/utils';
   import {
-    COMPOSER_LOADING_TITLE,
     COMPOSER_SEND_MODE_OPTIONS,
     composerSendControl,
     composerSubmitBlock,
+    composerSubmitBlockTitle,
     type ComposerSendMode,
+    type ComposerSessionBlock,
   } from './composerSendControl';
   import { ATTACHMENT_ACCEPT } from './attachErrors';
   import AttachmentThumb from './AttachmentThumb.svelte';
+  import ComposerError from './ComposerError.svelte';
   import type { AttachmentPreview } from './attachmentPreview';
   import HashtagInput from './HashtagInput.svelte';
   import type { HashtagItem } from '../../types';
@@ -87,10 +90,12 @@
     onSendModeChange?: (mode: ComposerSendMode) => void;
     sending?: boolean;
     /**
-     * The session row has not loaded yet: submit is disabled (and Cmd+Enter
-     * is the parent's no-op) while the draft can still be typed.
+     * Why there is no session row to submit to — still loading, or the load
+     * settled without one — or `null` once the row is in. While set, submit
+     * is disabled with a title saying which (and Cmd+Enter is the parent's
+     * no-op) while the draft can still be typed.
      */
-    loading?: boolean;
+    sessionBlock?: ComposerSessionBlock | null;
     /**
      * Why the last composer action failed (send refused, queue change
      * failed), shown inline until the parent clears it — on the next
@@ -120,7 +125,7 @@
     sendMode = 'queue',
     onSendModeChange,
     sending = false,
-    loading = false,
+    sessionBlock = null,
     sendError = null,
     onSend,
     configPicker,
@@ -130,10 +135,10 @@
 
   let sendControl = $derived(composerSendControl({ isLive, canSendLive, mode: sendMode }));
   let submitBlock = $derived(
-    composerSubmitBlock({ loading, sending, hasText: value.trim().length > 0 })
+    composerSubmitBlock({ sessionBlock, sending, hasText: value.trim().length > 0 })
   );
   let sendDisabled = $derived(submitBlock !== null);
-  let sendTitle = $derived(submitBlock === 'loading' ? COMPOSER_LOADING_TITLE : sendControl.title);
+  let sendTitle = $derived(composerSubmitBlockTitle(submitBlock) ?? sendControl.title);
 
   function handleSendModeChange(value: string) {
     if (value === 'queue' || value === 'send') onSendModeChange?.(value);
@@ -173,12 +178,10 @@
       {/each}
     </div>
   {/if}
-  {#if canAttachImages && attachError}
-    <p class="composer-error" role="alert">{attachError}</p>
+  {#if canAttachImages}
+    <ComposerError message={attachError} />
   {/if}
-  {#if sendError}
-    <p class="composer-error" role="alert">{sendError}</p>
-  {/if}
+  <ComposerError message={sendError} />
   <HashtagInput
     bind:textareaEl
     bind:value
@@ -231,7 +234,7 @@
             )}
             title="Change how messages are delivered"
             aria-label="Change how messages are delivered"
-            disabled={sending || loading}
+            disabled={sending || sessionBlock !== null}
           >
             <ChevronDown size={14} />
           </DropdownMenu.Trigger>
@@ -295,13 +298,6 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-  }
-
-  /* Attachment and send failures share one line style. */
-  .composer-error {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--ui-danger);
   }
 
   .reply-image-thumb {

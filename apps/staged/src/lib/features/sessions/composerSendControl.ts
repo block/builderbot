@@ -83,34 +83,64 @@ export function composerSendControl({
   };
 }
 
+/**
+ * Why the pane has no session row to submit to, or `null` once it has one.
+ * The draft can be typed in either state.
+ */
+export type ComposerSessionBlock =
+  /** The row is still being fetched. */
+  | 'loading'
+  /** The fetch settled without a row: it failed, or the session is gone. */
+  | 'unavailable';
+
+export interface ComposerSessionBlockInput {
+  /** The pane's load is in flight. */
+  loading: boolean;
+  /** The pane holds a session row. */
+  hasSession: boolean;
+}
+
+/**
+ * The pane's session state as the composer sees it. Loading wins over a
+ * missing row because a reopen keeps `hasSession` false until the fetch
+ * settles, and only a settled fetch with no row means the session is gone.
+ */
+export function composerSessionBlock({
+  loading,
+  hasSession,
+}: ComposerSessionBlockInput): ComposerSessionBlock | null {
+  if (loading) return 'loading';
+  if (!hasSession) return 'unavailable';
+  return null;
+}
+
 /** Why the submit control is disabled, or `null` when it can be pressed. */
 export type ComposerSubmitBlock =
-  /** The session row has not loaded yet; the draft can be typed meanwhile. */
-  | 'loading'
+  | ComposerSessionBlock
   /** A send is in flight and owns the composer until it settles. */
   | 'sending'
   /** Nothing to send. */
   | 'empty';
 
 export interface ComposerSubmitBlockInput {
-  loading: boolean;
+  sessionBlock: ComposerSessionBlock | null;
   sending: boolean;
   /** The draft has non-whitespace text. */
   hasText: boolean;
 }
 
 /**
- * Whether the composer's submit control is disabled, and why. `loading` wins
- * because it is the only block the label does not already explain (the
- * spinner covers `sending`, the empty box covers `empty`), so it gets a
- * hover title of its own: `COMPOSER_LOADING_TITLE`.
+ * Whether the composer's submit control is disabled, and why. A session
+ * block wins because it is the only kind the control does not already
+ * explain (the spinner covers `sending`, the empty box covers `empty`), so
+ * it gets a hover title of its own: see `composerSubmitBlockTitle`.
  */
 export function composerSubmitBlock({
-  loading,
+  sessionBlock,
   sending,
   hasText,
 }: ComposerSubmitBlockInput): ComposerSubmitBlock | null {
-  if (loading) return 'loading';
+  if (sessionBlock) return sessionBlock;
   if (sending) return 'sending';
   if (!hasText) return 'empty';
   return null;
@@ -118,6 +148,24 @@ export function composerSubmitBlock({
 
 /** Hover title for the submit control while the session row is loading. */
 export const COMPOSER_LOADING_TITLE = 'Loading session…';
+
+/** Hover title for the submit control once the load settled without a row. */
+export const COMPOSER_UNAVAILABLE_TITLE = 'Session unavailable';
+
+/**
+ * The hover title a submit block earns on its own, or `null` when the
+ * control's regular title (Send / Queue) should stand.
+ */
+export function composerSubmitBlockTitle(block: ComposerSubmitBlock | null): string | null {
+  switch (block) {
+    case 'loading':
+      return COMPOSER_LOADING_TITLE;
+    case 'unavailable':
+      return COMPOSER_UNAVAILABLE_TITLE;
+    default:
+      return null;
+  }
+}
 
 /** Menu entries for the mode dropdown, in display order. */
 export const COMPOSER_SEND_MODE_OPTIONS: readonly {

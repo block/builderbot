@@ -104,7 +104,8 @@
     setComposerSendMode,
   } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
-  import { composerSendControl } from './composerSendControl';
+  import ComposerError from './ComposerError.svelte';
+  import { composerSendControl, composerSessionBlock } from './composerSendControl';
   import {
     LIVE_DELIVERY_UNKNOWN,
     liveDeliveryKnowledge,
@@ -602,6 +603,8 @@
   async function handleAttachFiles(files: File[]) {
     if (!projectId) return;
     attachError = null;
+    // Attaching is a draft edit: the last failure line has been read.
+    sendError = null;
     const rejections: AttachRejection[] = [];
     for (const file of files) {
       const reason = await addImageFile(file);
@@ -659,6 +662,8 @@
     imagePreviews = new Map(imagePreviews);
     imagePreviews.delete(imageId);
     attachError = null;
+    // Removing an attachment is a draft edit too.
+    sendError = null;
     deleteImage(imageId).catch((err) => {
       console.error('Failed to delete image:', err);
     });
@@ -675,6 +680,7 @@
     // Surface rejection reasons (signature, size) as paste does, reporting
     // the whole batch once so a later success cannot hide an earlier one.
     attachError = null;
+    sendError = null;
     const rejections: AttachRejection[] = [];
     for (const path of imagePaths) {
       try {
@@ -1278,8 +1284,9 @@
    * `error`: that state replaces the whole transcript with a centered card,
    * which hides the very conversation the user is trying to continue, and
    * (see `reopenMode`) would turn the next reopen into a full reload.
-   * Cleared when the next action starts, when the draft is edited, and when
-   * the pane moves to another session.
+   * Cleared when the next action starts, when the draft is edited (text,
+   * attachments), and when the pane moves to another session. Rendered by
+   * `ChatComposer`, or by the pipeline stop area that stands in for it.
    */
   let sendError = $state<string | null>(null);
 
@@ -1294,14 +1301,18 @@
     error = null;
   }
 
-  /** The submit control is disabled until the session row has loaded. */
-  let composerLoading = $derived(loading || !session);
+  /**
+   * Why the composer has no session row to submit to (loading, or the load
+   * settled without one), or `null`. The submit control is disabled while
+   * set, with a title saying which.
+   */
+  let composerBlock = $derived(composerSessionBlock({ loading, hasSession: session !== null }));
 
   async function handleSend() {
-    // Until the row has loaded there is nothing to send to; the control is
-    // disabled, and Cmd+Enter keeps the draft rather than taking it out of
-    // the box only to put it back.
-    if (composerLoading) return;
+    // Without a row there is nothing to send to; the control is disabled, and
+    // Cmd+Enter keeps the draft rather than taking it out of the box only to
+    // put it back.
+    if (composerBlock) return;
     // A send still in flight (a live send can take a few seconds: steer
     // acknowledgement, interrupt-and-reprompt, or a resume) owns the composer
     // until it settles; a second Cmd+Enter meanwhile must not clear the draft
@@ -1512,6 +1523,7 @@
   async function handleDeleteQueuedMessage(id: string) {
     if (queueActionIds.has(id)) return;
     queueActionIds = new Set(queueActionIds).add(id);
+    beginComposerAction();
     try {
       await deleteQueuedSessionMessage(id);
       await refreshQueuedMessages();
@@ -1549,6 +1561,7 @@
   async function handleCancel() {
     if (!session || cancelling) return;
     cancelling = true;
+    beginComposerAction();
     try {
       await cancelSession(session.id);
     } catch (e) {
@@ -2974,8 +2987,11 @@
   <!-- Input area with queued messages and image previews -->
   <div class="input-wrapper">
     {#if isPipelineRunning && grouped.length === 0}
+      <!-- Stands in for the composer, so it shows the composer's failure
+           line too: a failed Stop has nowhere else to appear. -->
       <div class="pipeline-stop-area">
-        <span class="inline-flex" title="Stop workflow">
+        <ComposerError message={sendError} />
+        <span class="inline-flex pipeline-stop-button" title="Stop workflow">
           <Button
             variant="destructive"
             size="sm"
@@ -3078,7 +3094,7 @@
         sendMode={preferences.composerSendMode}
         onSendModeChange={setComposerSendMode}
         {sending}
-        loading={composerLoading}
+        sessionBlock={composerBlock}
         {sendError}
         onSend={handleSend}
       >
@@ -3684,13 +3700,20 @@
 
   /* ----- Pipeline stop area ---------------------------------------------- */
 
+  /* Same chrome as .chat-composer: the error line (if any) above, the
+     button right-aligned beneath it. */
   .pipeline-stop-area {
     display: flex;
-    justify-content: flex-end;
+    flex-direction: column;
+    gap: 8px;
     padding: 10px 14px;
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
+  }
+
+  .pipeline-stop-button {
+    align-self: flex-end;
   }
 
   /* ======================================================================= */

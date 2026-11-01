@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COMPOSER_LOADING_TITLE,
   COMPOSER_SEND_MODE_OPTIONS,
+  COMPOSER_UNAVAILABLE_TITLE,
   composerSendControl,
+  composerSessionBlock,
   composerSubmitBlock,
+  composerSubmitBlockTitle,
   normalizeComposerSendMode,
 } from './composerSendControl';
 
@@ -57,21 +61,67 @@ describe('composerSendControl', () => {
   });
 });
 
+describe('composerSessionBlock', () => {
+  it('reports loading while the fetch is in flight, with or without a stale row', () => {
+    expect(composerSessionBlock({ loading: true, hasSession: false })).toBe('loading');
+    expect(composerSessionBlock({ loading: true, hasSession: true })).toBe('loading');
+  });
+
+  it('reports unavailable once the fetch settled without a row', () => {
+    expect(composerSessionBlock({ loading: false, hasSession: false })).toBe('unavailable');
+  });
+
+  it('reports no block once the row is in', () => {
+    expect(composerSessionBlock({ loading: false, hasSession: true })).toBeNull();
+  });
+});
+
 describe('composerSubmitBlock', () => {
   it('disables submit while the session row is loading, whatever the draft holds', () => {
-    expect(composerSubmitBlock({ loading: true, sending: false, hasText: true })).toBe('loading');
-    expect(composerSubmitBlock({ loading: true, sending: false, hasText: false })).toBe('loading');
+    const sessionBlock = 'loading';
+    expect(composerSubmitBlock({ sessionBlock, sending: false, hasText: true })).toBe('loading');
+    expect(composerSubmitBlock({ sessionBlock, sending: false, hasText: false })).toBe('loading');
     // Loading explains the block better than a spinner that is not spinning.
-    expect(composerSubmitBlock({ loading: true, sending: true, hasText: true })).toBe('loading');
+    expect(composerSubmitBlock({ sessionBlock, sending: true, hasText: true })).toBe('loading');
+  });
+
+  it('disables submit once the load settled without a row', () => {
+    const sessionBlock = 'unavailable';
+    expect(composerSubmitBlock({ sessionBlock, sending: false, hasText: true })).toBe(
+      'unavailable'
+    );
+    expect(composerSubmitBlock({ sessionBlock, sending: true, hasText: false })).toBe(
+      'unavailable'
+    );
   });
 
   it('disables submit while a send is in flight', () => {
-    expect(composerSubmitBlock({ loading: false, sending: true, hasText: true })).toBe('sending');
-    expect(composerSubmitBlock({ loading: false, sending: true, hasText: false })).toBe('sending');
+    expect(composerSubmitBlock({ sessionBlock: null, sending: true, hasText: true })).toBe(
+      'sending'
+    );
+    expect(composerSubmitBlock({ sessionBlock: null, sending: true, hasText: false })).toBe(
+      'sending'
+    );
   });
 
   it('disables submit on an empty draft and otherwise allows it', () => {
-    expect(composerSubmitBlock({ loading: false, sending: false, hasText: false })).toBe('empty');
-    expect(composerSubmitBlock({ loading: false, sending: false, hasText: true })).toBeNull();
+    expect(composerSubmitBlock({ sessionBlock: null, sending: false, hasText: false })).toBe(
+      'empty'
+    );
+    expect(composerSubmitBlock({ sessionBlock: null, sending: false, hasText: true })).toBeNull();
+  });
+});
+
+describe('composerSubmitBlockTitle', () => {
+  it('titles the session blocks differently so a settled failure reads as such', () => {
+    expect(composerSubmitBlockTitle('loading')).toBe(COMPOSER_LOADING_TITLE);
+    expect(composerSubmitBlockTitle('unavailable')).toBe(COMPOSER_UNAVAILABLE_TITLE);
+    expect(COMPOSER_LOADING_TITLE).not.toBe(COMPOSER_UNAVAILABLE_TITLE);
+  });
+
+  it('leaves the control title alone for blocks the control already explains', () => {
+    expect(composerSubmitBlockTitle('sending')).toBeNull();
+    expect(composerSubmitBlockTitle('empty')).toBeNull();
+    expect(composerSubmitBlockTitle(null)).toBeNull();
   });
 });

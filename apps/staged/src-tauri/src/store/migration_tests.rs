@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -272,7 +272,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -366,7 +366,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -455,7 +455,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -531,7 +531,7 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     // Reviews the removed auto-review feature created in the background are
@@ -606,7 +606,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set
@@ -684,7 +684,7 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "notes", "subtype"));
 
     let subtype = |id: &str| -> Option<String> {
@@ -783,7 +783,7 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
 
@@ -854,7 +854,7 @@ fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
 
     // Only the flag goes: an action that had auto-commit enabled keeps running
@@ -912,7 +912,7 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
 
     let branch_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -963,7 +963,7 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 35);
+    assert_eq!(version, 36);
     assert!(column_exists(&conn, "sessions", "chat_read_at"));
 
     let read_at = |id: &str| -> Option<i64> {

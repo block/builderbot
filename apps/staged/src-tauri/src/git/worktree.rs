@@ -405,19 +405,24 @@ pub struct CommitInfo {
 /// Get commits between base and head.
 /// Returns commits in reverse chronological order (newest first).
 ///
-/// Uses `merge-base` to find the actual fork point so that only the
-/// branch's own commits are returned, even after a rebase or when the
-/// base ref (e.g. `origin/main`) has moved forward.
+/// `merge_base` is the fork point from `base` — `merge-base <base> HEAD` —
+/// as the caller already has it, so that only the branch's own commits are
+/// returned even after a rebase or when the base ref (e.g. `origin/main`)
+/// has moved forward, without a second `merge-base` spawn here. The branch
+/// timeline takes it from the git-state build, which counts
+/// `commitsSinceFork` from the same point. With `None` (no fork point: `base`
+/// missing, or unrelated histories) the log runs from `base` itself, so a
+/// missing base still fails here the way it always has.
 ///
-/// Both inner calls run via `cli::run_smart` because this is on the
-/// foreground first-paint path — `merge-base` and `git log` are
-/// env-independent reads, so the lite path is correct and avoids
-/// blocking on the per-project `$SHELL -ils` capture.
-pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitInfo>, GitError> {
-    let mb_output = cli::run_smart(worktree, &["merge-base", base, "HEAD"])?;
-    let merge_base = mb_output.trim().to_string();
-
-    let range = format!("{merge_base}..HEAD");
+/// Runs via `cli::run_smart` because this is on the foreground first-paint
+/// path — `git log` is an env-independent read, so the lite path is correct
+/// and avoids blocking on the per-project `$SHELL -ils` capture.
+pub fn get_commits_since_base(
+    worktree: &Path,
+    base: &str,
+    merge_base: Option<&str>,
+) -> Result<Vec<CommitInfo>, GitError> {
+    let range = format!("{}..HEAD", merge_base.unwrap_or(base));
 
     let output = cli::run_smart(worktree, &["log", BRANCH_COMMIT_LOG_FORMAT, &range])?;
 

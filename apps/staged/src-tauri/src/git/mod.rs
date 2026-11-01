@@ -1,3 +1,4 @@
+mod branch_config;
 mod cli;
 mod commit;
 pub mod config_apply;
@@ -15,6 +16,7 @@ mod types;
 mod upstream;
 mod worktree;
 
+pub use branch_config::{read_branch_config_snapshot, BranchConfigSnapshot};
 pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
 pub(crate) use cli::run_smart as cli_run_smart;
@@ -43,9 +45,11 @@ pub use refs::{
     origin_ref_for_branch, prune_remote, resolve_ref, BranchRef,
 };
 pub use state::{
-    compute_branch_git_state, compute_branch_git_state_batched, compute_local_branch_git_state,
-    ensure_fast_forward_pullable, fast_forward_to_ref, update_repo_fetch_cache, BaseGitState,
-    BranchGitState, FetchGitState, FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation,
+    compute_branch_git_snapshot_batched, compute_branch_git_state,
+    compute_branch_git_state_batched, compute_local_branch_git_state,
+    compute_local_branch_git_state_with, ensure_fast_forward_pullable, fast_forward_to_ref,
+    update_repo_fetch_cache, BaseGitState, BatchedBranchGitSnapshot, BranchGitState,
+    BranchGitStateQuery, FetchGitState, FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation,
     WorktreeGitState, WorktreeStatusScope,
 };
 pub use types::*;

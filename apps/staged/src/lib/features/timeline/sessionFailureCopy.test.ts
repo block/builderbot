@@ -19,6 +19,12 @@ describe('failedArtifactSubtitle', () => {
     expect(failedArtifactSubtitle('interrupted', 'note')).toBe('Session stopped — no note created');
   });
 
+  it('leaves room for a detached remote session to complete on its own', () => {
+    expect(failedArtifactSubtitle('detached', 'note')).toBe(
+      'Lost the remote session — no note created yet'
+    );
+  });
+
   it('names a truncated background wait', () => {
     expect(failedArtifactSubtitle('held_until_cap', 'commit')).toBe(
       'Session stopped waiting on background work — no commit created'

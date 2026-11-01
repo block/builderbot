@@ -52,8 +52,10 @@ export function failedArtifactSubtitle(
       return rateLimitPausedSubtitle(rateLimitResetsAt) ?? `Paused by API limit — no ${noun} yet`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;
+    // A detached remote session may still complete on its own: the sweep
+    // keeps checking the workstation for a while (see docs/note-delivery.md).
     case 'detached':
-      return `Lost the remote session — no ${noun} created`;
+      return `Lost the remote session — no ${noun} created yet`;
     case 'project_session_interrupted':
       return `Session stopped by project session — no ${noun} created`;
     case 'interrupted':

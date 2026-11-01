@@ -2638,8 +2638,13 @@ impl AcpDriver {
             self.is_remote,
             self.remote_working_dir.as_deref(),
         )?;
+        // The local directory is only the proxy child's cwd; the agent itself
+        // runs in the remote checkout. A branch that exists only on the
+        // workstation (no local clone) has no such directory, which is the
+        // expected case for remote-only projects rather than something to
+        // warn about on every session start.
         if self.is_remote && spawn_working_dir.as_path() != working_dir {
-            log::warn!(
+            log::debug!(
                 "Remote ACP spawn cwd missing ({}); falling back to {}",
                 working_dir.display(),
                 spawn_working_dir.display()

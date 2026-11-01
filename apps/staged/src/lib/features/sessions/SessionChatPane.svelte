@@ -753,13 +753,20 @@
   // re-evaluates groups whose data actually changed — a rebuild happens twice
   // per second while a session streams.
   let previousGrouped: AcpTranscriptGroup[] = [];
+  let sessionSettled = $derived(
+    !!session && session.status !== 'running' && session.status !== 'queued'
+  );
   let grouped = $derived.by(() => {
     previousGrouped = stabilizeAcpTranscriptGroups(
       previousGrouped,
       buildAcpTranscriptGroups(
         messages,
         metadataRowsForWindow(acpMetadataMessages, messages, hasOlderMessages),
-        displayRoots
+        displayRoots,
+        // Once the session has ended, tool calls that never settled render as
+        // interrupted rather than "running" forever: their results went
+        // with the connection (a crash, a detached remote session).
+        { sessionSettled }
       )
     );
     return previousGrouped;

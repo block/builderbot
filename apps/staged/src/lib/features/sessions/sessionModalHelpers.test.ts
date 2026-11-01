@@ -6,6 +6,7 @@ import {
   makePathsRelative,
   newestUserMessageId,
   reconnectedOutcomeMessage,
+  REMOTE_NOTE_POLL_SUFFIX,
   sessionEndMessage,
   sessionErrorMessage,
   snippetLabel,
@@ -237,6 +238,28 @@ describe('sessionEndMessage', () => {
   it('explains a lost workspace agent', () => {
     expect(sessionEndMessage({ completionReason: 'remote_agent_lost' })).toBe(
       'This session’s agent stopped running on its workspace.'
+    );
+  });
+
+  it('tells a detached session still being checked from one Staged gave up on', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'detached',
+        errorMessage: `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_POLL_SUFFIX}`,
+      })
+    ).toBe(
+      'Staged lost the connection to this remote session. The workstation agent may still be ' +
+        'running; Staged is checking for its note and will complete the session when it appears.'
+    );
+    expect(
+      sessionEndMessage({
+        completionReason: 'detached',
+        errorMessage:
+          'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.',
+      })
+    ).toBe('Staged lost this remote session before it delivered its result.');
+    expect(sessionEndMessage({ completionReason: 'detached' })).toBe(
+      'Staged lost this remote session before it delivered its result.'
     );
   });
 

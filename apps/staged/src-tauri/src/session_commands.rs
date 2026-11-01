@@ -436,8 +436,10 @@ fn background_hold_from_overrides(
 /// it: an agent that writes the note into its reply produces nothing the user
 /// sees unless that fallback fires.
 pub(crate) fn note_delivery_guidance() -> &'static str {
-    "To deliver the note, call the `write_note` tool. The call is the deliverable: Staged saves \
-exactly what you pass to it and nothing else. Your assistant text is not saved and is not shown \
+    "To deliver the note, call the `write_note` tool from the `staged` MCP server (in Claude Code \
+its full name is `mcp__staged__write_note`; it is available now, so call it directly rather than \
+searching for it first). The call is the deliverable: Staged saves exactly what you pass to it \
+and nothing else. Your assistant text is not saved and is not shown \
 with the note, so do not write the note into your reply. Pass the complete note on every call \
 (calling again replaces the saved note; the last call of the turn wins):\n\
 - `title`: a plain-text title (no markdown, no leading `#`).\n\
@@ -14412,6 +14414,9 @@ mod tests {
     /// assistant text is not saved; none of them mention the `---` contract.
     fn assert_note_delivery_guidance(prompt: &str) {
         assert!(prompt.contains("call the `write_note` tool"), "{prompt}");
+        // Named in full so the Claude bridge can load the deferred MCP tool
+        // up front instead of spending a ToolSearch round trip on it.
+        assert!(prompt.contains("`mcp__staged__write_note`"), "{prompt}");
         assert!(
             prompt.contains("Your assistant text is not saved"),
             "{prompt}"

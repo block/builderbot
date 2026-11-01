@@ -658,6 +658,29 @@ impl Store {
         Ok(sessions)
     }
 
+    /// Sessions parked in `error`/[`CompletionReason::Detached`]: remote
+    /// sessions Staged lost while their agent may still have been working.
+    /// The dead-owner sweep re-polls the remote note sessions among them for
+    /// a bounded window after the detachment (see
+    /// `session_runner::poll_detached_remote_note_sessions`), so the
+    /// predicate is the claimed state alone; the caller applies the window
+    /// from `updated_at`, which every write into this state restamps.
+    pub fn get_detached_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+             FROM sessions WHERE status = 'error' AND completion_reason = ?1
+             ORDER BY updated_at ASC",
+        )?;
+        let sessions = stmt
+            .query_map(
+                params![CompletionReason::Detached.as_str()],
+                Self::row_to_session,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
     /// How many sessions ended with exactly this `error_message`.
     ///
     /// Backs the Doctor's session-queue readout: the stranded-session sweep

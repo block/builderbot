@@ -49,7 +49,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -2059,6 +2059,12 @@ pub fn start_session(
             // it either, the row went `detached`, and this is the resume).
             // It goes through the post-completion hooks — bound to this
             // session's note — before the outbox is emptied for this run.
+            //
+            // The helper is attached whenever it installed, whatever the
+            // settling did: a recovery that failed (the workstation dropped
+            // between the two round trips) is logged, not a reason to run
+            // this turn on the `---` fallback. Unusable content is cleared
+            // by the recovery itself, so no session is stuck on it.
             if let (true, Some(ws_name)) = (is_note_session, config.workspace_name.clone()) {
                 let session_id = config.session_id.clone();
                 let turn_id = uuid::Uuid::new_v4().simple().to_string();
@@ -2073,7 +2079,7 @@ pub fn start_session(
                 let prepared = tokio::task::spawn_blocking(move || {
                     let exec = remote_note_outbox::workspace_exec(&ws_name);
                     let helper = remote_note_outbox::install_helper(&exec)?;
-                    remote_note_outbox::recover_uncollected_outbox(
+                    if let Err(e) = remote_note_outbox::recover_uncollected_outbox(
                         &exec,
                         &session_id,
                         &mut |submission| {
@@ -2088,7 +2094,12 @@ pub fn start_session(
                                 Some(submission),
                             )
                         },
-                    )?;
+                    ) {
+                        log::warn!(
+                            "Session {session_id}: could not settle the workstation note outbox \
+                             before this run (attaching the write_note helper anyway): {e}"
+                        );
+                    }
                     Ok::<_, String>(remote_note_outbox::stdio_mcp_server(
                         &helper,
                         &session_id,
@@ -2472,12 +2483,6 @@ pub fn start_session(
             }
         }
         let note_submission = crate::note_tool::current_submission(&note_slot);
-        // Whether this run's note came through the workstation outbox: it
-        // can rescue a lost connection below, and the outbox is emptied once
-        // the hooks have stored it.
-        let remote_note_delivered = note_submission
-            .as_ref()
-            .is_some_and(|submission| submission.source == NoteSubmissionSource::Outbox);
 
         if let Err(ref e) = result {
             if config.acp_config_selection.is_some()
@@ -2549,7 +2554,12 @@ pub fn start_session(
         // detach — may still be running on the workstation, as may background
         // work a hold lost: record the row `disconnected`, with no hooks,
         // completion effects or queue drain.
-        if !remote_note_delivered
+        // A remote note session with the workstation `write_note` helper
+        // attached settles from its outbox instead (`detached` while the sweep
+        // keeps checking it; see `lost_remote_agent_terminal_state`).
+        let remote_note_helper_attached =
+            remote_note_turn.get().is_some() && config.workspace_name.is_some();
+        if !remote_note_helper_attached
             && disconnect::run_leaves_session_disconnected(
                 config.workspace_name.is_some(),
                 cancel_token.is_cancelled(),
@@ -2587,7 +2597,7 @@ pub fn start_session(
             registry,
             app_handle,
             note_submission,
-            remote_note_delivered,
+            remote_note_helper_attached,
         );
     });
 
@@ -2766,9 +2776,10 @@ fn finish_disconnected_run(
 /// drains. `registration` is the run's registry entry, which this ends.
 ///
 /// `note_submission` is the note the turn delivered through `write_note`, if
-/// any, for the post-completion hooks; `remote_note_delivered` says it came
-/// from the workstation outbox, so losing the remote agent afterwards still
-/// counts as a finished turn.
+/// any, for the post-completion hooks; `remote_note_helper_attached` says the
+/// run had the workstation `write_note` helper, so a lost remote agent settles
+/// from the outbox (see `lost_remote_agent_terminal_state`) and the outbox is
+/// emptied when the run is done with it.
 #[allow(clippy::too_many_arguments)]
 fn finish_session_run(
     config: &SessionConfig,
@@ -2781,7 +2792,7 @@ fn finish_session_run(
     registry: Arc<SessionRegistry>,
     app_handle: AppHandle,
     note_submission: Option<NoteSubmission>,
-    remote_note_delivered: bool,
+    remote_note_helper_attached: bool,
 ) {
     let session_id_for_status = config.session_id.clone();
     let cancellation_completion_reason = registry
@@ -2855,15 +2866,34 @@ fn finish_session_run(
                 None,
             )
         }
-        // The connection to the remote agent failed, but the workstation
-        // outbox holds this run's completed note: the deliverable is
-        // intact, so the turn counts as finished.
-        Err(AgentRunError::Other(ref message)) if remote_note_delivered => {
-            log::warn!(
-                "Session {session_id_for_status}: lost the remote agent after the note \
-                 was delivered ({message}); completing from the workstation outbox"
+        // The connection to the remote agent failed while the
+        // workstation `write_note` helper was attached. The outbox
+        // decides: this run's completed, valid note finishes the turn;
+        // anything else leaves the row `detached` — the agent is very
+        // likely still working on the workstation (Blox keeps the ACP
+        // turn alive when the client drops), so the dead-session sweep
+        // keeps checking the outbox for a while.
+        Err(AgentRunError::Other(ref message)) if remote_note_helper_attached => {
+            let ws_name = config.workspace_name.as_deref().unwrap_or_default();
+            let (status, error, reason) = lost_remote_agent_terminal_state(
+                message,
+                ws_name,
+                note_submission
+                    .as_ref()
+                    .filter(|submission| submission.source == NoteSubmissionSource::Outbox),
             );
-            ("completed", None, CompletionReason::TurnComplete, None)
+            match reason {
+                CompletionReason::TurnComplete => log::warn!(
+                    "Session {session_id_for_status}: lost the remote agent after the \
+                     note was delivered ({message}); completing from the workstation \
+                     outbox"
+                ),
+                _ => log::warn!(
+                    "Session {session_id_for_status}: lost the remote agent ({message}); {}",
+                    error.as_deref().unwrap_or_default()
+                ),
+            }
+            (status, error, reason, None)
         }
         Err(AgentRunError::Other(ref message)) => {
             log::error!("Session {session_id_for_status} failed: {message}");
@@ -3099,26 +3129,35 @@ fn finish_session_run(
         &app_handle,
         &session_id_for_status,
         new_status,
-        error_msg,
+        error_msg.clone(),
         Some(&completion_reason),
         rate_limit_recovery.as_ref(),
         config.branch_id.clone(),
         config.project_id.clone(),
     );
 
-    // The hooks have stored the note the workstation outbox delivered:
-    // empty it, so the next run of this session does not find a `done`
-    // marker it would take for an uncollected note (and re-ingest over
-    // whatever the user edited meanwhile). After the terminal status so
-    // the round trip does not hold the row in `running`; a failure here
-    // only costs that re-ingest, so it is logged and otherwise ignored.
-    if remote_note_delivered && completed_successfully {
+    // This run is done with the workstation outbox: empty it, so the
+    // next run of this session does not find a `done` marker it would
+    // take for an uncollected note — and store a note this run already
+    // ingested (over whatever the user edited meanwhile), gave up on
+    // (the Pikchr repair loop ran out of attempts), or threw away (a Stop
+    // after the agent had already called `write_note`). The one state
+    // that keeps the outbox is `detached` while the sweep is still
+    // checking it: there the note has not arrived yet and the sweep is
+    // what collects it. After the terminal status so the round trip does
+    // not hold the row in `running`; a failure here only costs a
+    // re-ingest on resume, so it is logged and otherwise ignored.
+    if remote_outbox_is_cleared_at_run_end(
+        remote_note_helper_attached,
+        &completion_reason,
+        error_msg.as_deref(),
+    ) {
         if let Some(ws_name) = config.workspace_name.as_deref() {
             let exec = remote_note_outbox::workspace_exec(ws_name);
             if let Err(e) = remote_note_outbox::clear_outbox(&exec, &session_id_for_status) {
                 log::warn!(
                     "Session {session_id_for_status}: failed to clear the workstation note \
-                     outbox after ingesting it: {e}"
+                     outbox at the end of the run: {e}"
                 );
             }
         }
@@ -3383,6 +3422,68 @@ fn note_turn_delivered(
                 .any(|m| extract_note_content(&m.content).is_some())
         })
         .unwrap_or(false)
+}
+
+/// Terminal state of a remote note session whose connection to the agent
+/// failed (`AgentRunError::Other`) while the workstation `write_note` helper
+/// was attached, given what the post-run outbox collection put in the slot.
+///
+/// - This run's note, with every Pikchr block parsing: the deliverable is
+///   intact, so the turn counts as finished.
+/// - This run's note with a Pikchr block that does not parse: the turn that
+///   failed was (or would have been) the repair turn, and the slot holds the
+///   body it was trying to fix. Completing with it would store a known-bad
+///   note, so the row goes `detached` without the sweep marker; the outbox
+///   is cleared at the end of the run like any other observed state, and a
+///   resume has the agent write the note again.
+/// - No note: the agent is very likely still working on the workstation, so
+///   the row goes `detached` with the marker the dead-session sweep polls
+///   for ([`awaiting_remote_note_message`]).
+fn lost_remote_agent_terminal_state(
+    error: &str,
+    ws_name: &str,
+    delivered: Option<&NoteSubmission>,
+) -> (&'static str, Option<String>, CompletionReason) {
+    let Some(submission) = delivered else {
+        return (
+            "error",
+            Some(awaiting_remote_note_message(ws_name, Some(error))),
+            CompletionReason::Detached,
+        );
+    };
+    match crate::pikchr_validation::validate_pikchr_blocks(&submission.body)
+        .into_iter()
+        .next()
+    {
+        None => ("completed", None, CompletionReason::TurnComplete),
+        Some(pikchr_error) => (
+            "error",
+            Some(format!(
+                "Staged lost the connection to the agent on {ws_name} ({error}) after it saved \
+                 a note whose Pikchr block at line {} does not parse ({}); that note was not \
+                 stored. Resume to have the agent write it again.",
+                pikchr_error.line_number, pikchr_error.message
+            )),
+            CompletionReason::Detached,
+        ),
+    }
+}
+
+/// Whether the end of a run empties the session's workstation outbox.
+///
+/// A run that attached the `write_note` helper owns the outbox for its
+/// duration and leaves it empty, whatever its terminal status: a stored note
+/// must not be re-ingested on resume, and neither must a note the run
+/// rejected (Pikchr repair exhausted) or discarded (Stop after the call).
+/// The exception is a row the sweep is still polling
+/// ([`detached_note_poll_is_pending`]): its note has not arrived yet, and the
+/// outbox is where it will.
+fn remote_outbox_is_cleared_at_run_end(
+    remote_helper_attached: bool,
+    completion_reason: &CompletionReason,
+    error_message: Option<&str>,
+) -> bool {
+    remote_helper_attached && !detached_note_poll_is_pending(completion_reason, error_message)
 }
 
 /// The first invalid `pikchr` block in the note body handed to `write_note`,
@@ -5030,7 +5131,8 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 /// will ever drain.
 pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let reattach_handle = app_handle.clone();
-    recover_dead_sessions_with(store, app_handle, |store, session, running| {
+    let poll_handle = app_handle.clone();
+    recover_dead_sessions_with(Arc::clone(&store), app_handle, |store, session, running| {
         if dead_owner_recovery(store, session) != DeadOwnerRecovery::Reattach {
             // A remote note session's agent may well have finished after the
             // owner died: its note waits in the workstation outbox. Collect
@@ -5056,6 +5158,8 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
         );
         true
     });
+
+    poll_detached_remote_note_sessions(&store, &poll_handle);
 }
 
 /// [`recover_dead_sessions`], with the reattach step as a parameter: `reattach`
@@ -5865,28 +5969,8 @@ fn recover_detached_remote_note_session(
 ) {
     let ws_name = context.workspace_name.as_str();
     let exec = remote_note_outbox::workspace_exec(ws_name);
-    // Media in the note resolves against the branch's remote checkout, as it
-    // does when the hooks run at the end of a live session.
-    let remote_working_dir =
-        crate::branches::resolve_branch_workspace_subpath(store, &context.branch)
-            .ok()
-            .flatten()
-            .and_then(|subpath| {
-                crate::branches::resolve_workspace_repo_path(ws_name, &subpath).ok()
-            });
-    let working_dir = PathBuf::from(remote_working_dir.as_deref().unwrap_or("/"));
-    let mut ingest = |submission: NoteSubmission| {
-        run_post_completion_hooks(
-            session_id,
-            &working_dir,
-            None,
-            Some(ws_name),
-            remote_working_dir.as_deref(),
-            store,
-            0,
-            Some(submission),
-        )
-    };
+    let target = detached_note_hooks_target(store, &context);
+    let mut ingest = target.ingest(store, session_id, ws_name);
 
     let Some(outcome) =
         finalize_detached_remote_note_session(store, session_id, ws_name, &exec, &mut ingest)
@@ -5894,6 +5978,63 @@ fn recover_detached_remote_note_session(
         return;
     };
 
+    emit_detached_recovery_outcome(app_handle, session_id, &context, outcome);
+}
+
+/// Where the post-completion hooks resolve a detached note's media: the
+/// branch's remote checkout, as when the hooks run at the end of a live
+/// session.
+struct DetachedNoteHooksTarget {
+    working_dir: PathBuf,
+    remote_working_dir: Option<String>,
+}
+
+impl DetachedNoteHooksTarget {
+    fn ingest<'a>(
+        &'a self,
+        store: &'a Arc<Store>,
+        session_id: &'a str,
+        ws_name: &'a str,
+    ) -> impl FnMut(NoteSubmission) + 'a {
+        move |submission| {
+            run_post_completion_hooks(
+                session_id,
+                &self.working_dir,
+                None,
+                Some(ws_name),
+                self.remote_working_dir.as_deref(),
+                store,
+                0,
+                Some(submission),
+            )
+        }
+    }
+}
+
+fn detached_note_hooks_target(
+    store: &Arc<Store>,
+    context: &DetachedRemoteNoteContext,
+) -> DetachedNoteHooksTarget {
+    let ws_name = context.workspace_name.as_str();
+    let remote_working_dir =
+        crate::branches::resolve_branch_workspace_subpath(store, &context.branch)
+            .ok()
+            .flatten()
+            .and_then(|subpath| {
+                crate::branches::resolve_workspace_repo_path(ws_name, &subpath).ok()
+            });
+    DetachedNoteHooksTarget {
+        working_dir: PathBuf::from(remote_working_dir.as_deref().unwrap_or("/")),
+        remote_working_dir,
+    }
+}
+
+fn emit_detached_recovery_outcome(
+    app_handle: &AppHandle,
+    session_id: &str,
+    context: &DetachedRemoteNoteContext,
+    outcome: DetachedRecoveryOutcome,
+) {
     let branch_id = context.branch.id.clone();
     emit_status(
         app_handle,
@@ -5979,31 +6120,30 @@ fn finalize_detached_remote_note_session(
                 error: None,
             }
         }
+        // No note yet, or no answer: the agent may still be working, so the
+        // row carries the marker that keeps the sweep polling the outbox.
         Ok(state) => {
             log::info!(
                 "Recovered detached remote session {session_id}: no completed note in the \
-                 workstation outbox ({state:?})"
+                 workstation outbox yet ({state:?}); the sweep keeps checking"
             );
             DetachedRecoveryOutcome {
                 status: SessionStatus::Error,
                 reason: CompletionReason::Detached,
-                error: Some(format!(
-                    "Staged lost this session while the agent was running on {ws_name}; no \
-                     completed note was found on the workstation."
-                )),
+                error: Some(awaiting_remote_note_message(ws_name, None)),
             }
         }
         Err(e) => {
             log::warn!(
                 "Recovered detached remote session {session_id}: could not read the \
-                 workstation outbox: {e}"
+                 workstation outbox ({e}); the sweep keeps checking"
             );
             DetachedRecoveryOutcome {
                 status: SessionStatus::Error,
                 reason: CompletionReason::Detached,
-                error: Some(format!(
-                    "Staged lost this session while the agent was running on {ws_name}, and \
-                     could not read the workstation outbox: {e}"
+                error: Some(awaiting_remote_note_message(
+                    ws_name,
+                    Some(&format!("could not read the workstation outbox: {e}")),
                 )),
             }
         }
@@ -6025,6 +6165,299 @@ fn finalize_detached_remote_note_session(
         return None;
     }
     Some(outcome)
+}
+
+// -----------------------------------------------------------------------------
+// Detached remote note sessions: re-polling the workstation outbox
+// -----------------------------------------------------------------------------
+
+/// How long after a remote note session detaches the sweep keeps checking its
+/// workstation outbox. Blox keeps the ACP turn alive when the laptop drops,
+/// so the agent usually finishes within minutes; past this window the row is
+/// left `detached` with its Resume affordance, and the resume's start-of-run
+/// recovery picks up whatever landed later.
+const DETACHED_NOTE_POLL_WINDOW: Duration = Duration::from_secs(30 * 60);
+
+/// How many detached rows one instance polls at a time. Each poll is a `ws
+/// exec` round trip of a few seconds; a burst of detached rows (an instance
+/// that died with several remote note sessions running) is spread across
+/// sweep ticks, oldest-unpolled first, instead of hammering `sq blox`.
+const DETACHED_NOTE_POLL_MAX_CONCURRENT: usize = 2;
+
+/// Tail of the `error_message` that marks a `detached` row as one the sweep
+/// is still polling. It is the message's last sentence, so the chat pane can
+/// tell "still checking" from "gave up" without a schema change; the
+/// frontend mirrors it in `sessionModalHelpers.ts`.
+pub(crate) const AWAITING_REMOTE_NOTE_SUFFIX: &str =
+    "the workstation agent may still be running, so Staged keeps checking for its note.";
+
+/// The `error_message` of a `detached` row the sweep polls. `detail` is what
+/// went wrong on this side (the connection error, an unreadable outbox).
+fn awaiting_remote_note_message(ws_name: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => format!(
+            "Staged lost the connection to this session while the agent was running on \
+             {ws_name} ({detail}); {AWAITING_REMOTE_NOTE_SUFFIX}"
+        ),
+        None => format!(
+            "Staged lost this session while the agent was running on {ws_name}; \
+             {AWAITING_REMOTE_NOTE_SUFFIX}"
+        ),
+    }
+}
+
+/// The `error_message` of a `detached` row whose poll window ran out.
+fn detached_note_expired_message(ws_name: &str) -> String {
+    format!(
+        "Staged lost this session while the agent was running on {ws_name}, and no completed \
+         note appeared on the workstation within {} minutes. Resume to check again and \
+         continue.",
+        DETACHED_NOTE_POLL_WINDOW.as_secs() / 60
+    )
+}
+
+/// Whether a terminal state is a `detached` row the sweep is still polling.
+fn detached_note_poll_is_pending(
+    completion_reason: &CompletionReason,
+    error_message: Option<&str>,
+) -> bool {
+    *completion_reason == CompletionReason::Detached
+        && error_message.is_some_and(|message| message.ends_with(AWAITING_REMOTE_NOTE_SUFFIX))
+}
+
+/// What the sweep does with one `error`/`detached` row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetachedNotePollAction {
+    /// Not a row the sweep polls: another reason, no marker (an expired
+    /// window, a known-bad note, a row from before polling existed).
+    Skip,
+    /// Inside the window: read the outbox.
+    Poll,
+    /// The window since the detaching write ran out: record that, once.
+    Expire,
+}
+
+fn detached_note_poll_action(
+    session: &crate::store::Session,
+    now_ms: i64,
+) -> DetachedNotePollAction {
+    if session.status != SessionStatus::Error
+        || !session.completion_reason.as_ref().is_some_and(|reason| {
+            detached_note_poll_is_pending(reason, session.error_message.as_deref())
+        })
+    {
+        return DetachedNotePollAction::Skip;
+    }
+    let window_ms = DETACHED_NOTE_POLL_WINDOW.as_millis() as i64;
+    if now_ms.saturating_sub(session.updated_at) > window_ms {
+        DetachedNotePollAction::Expire
+    } else {
+        DetachedNotePollAction::Poll
+    }
+}
+
+/// When each detached row was last polled by this process, so a tick with
+/// more due rows than [`DETACHED_NOTE_POLL_MAX_CONCURRENT`] serves the
+/// longest-waiting ones first instead of the same two every time.
+fn detached_note_poll_schedule() -> &'static std::sync::Mutex<HashMap<String, Instant>> {
+    static SCHEDULE: OnceLock<std::sync::Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    SCHEDULE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// The sweep's second half: re-poll `detached` remote note rows for a bounded
+/// window after they detached, and complete them through the normal hooks
+/// when the workstation agent gets its note out.
+///
+/// Rows past the window are settled once with
+/// [`detached_note_expired_message`] (a guarded write, so a resumed or
+/// already-completed row is untouched) and never polled again. Rows inside
+/// it are polled oldest-unpolled first, at most
+/// [`DETACHED_NOTE_POLL_MAX_CONCURRENT`] in flight, each on its own thread
+/// because a poll is a `ws exec` round trip.
+fn poll_detached_remote_note_sessions(store: &Arc<Store>, app_handle: &AppHandle) {
+    let sessions = match store.get_detached_sessions() {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            log::warn!("[session_runner] Failed to query detached sessions: {e}");
+            return;
+        }
+    };
+    let now = crate::store::now_timestamp();
+    let mut due = Vec::new();
+    for session in sessions {
+        match detached_note_poll_action(&session, now) {
+            DetachedNotePollAction::Skip => {}
+            DetachedNotePollAction::Expire => {
+                let Some(context) = detached_remote_note_context(store, &session.id) else {
+                    continue;
+                };
+                if let Some(outcome) =
+                    expire_detached_remote_note_session(store, &session.id, &context.workspace_name)
+                {
+                    emit_detached_recovery_outcome(app_handle, &session.id, &context, outcome);
+                }
+            }
+            DetachedNotePollAction::Poll => {
+                if let Some(context) = detached_remote_note_context(store, &session.id) {
+                    due.push((session.id, context));
+                }
+            }
+        }
+    }
+    if due.is_empty() {
+        return;
+    }
+
+    let mut schedule = detached_note_poll_schedule()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    schedule.retain(|id, _| due.iter().any(|(due_id, _)| due_id == id));
+    // `None` (never polled) sorts before every `Some`, then oldest first.
+    due.sort_by_key(|(id, _)| schedule.get(id).copied());
+    let in_flight_now = detached_recovery_in_flight()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .len();
+    let mut budget = DETACHED_NOTE_POLL_MAX_CONCURRENT.saturating_sub(in_flight_now);
+    for (session_id, context) in due {
+        if budget == 0 {
+            break;
+        }
+        {
+            let mut in_flight = detached_recovery_in_flight()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !in_flight.insert(session_id.clone()) {
+                continue;
+            }
+        }
+        schedule.insert(session_id.clone(), Instant::now());
+        budget -= 1;
+        let store = Arc::clone(store);
+        let app_handle = app_handle.clone();
+        std::thread::spawn(move || {
+            let ws_name = context.workspace_name.as_str();
+            let exec = remote_note_outbox::workspace_exec(ws_name);
+            let target = detached_note_hooks_target(&store, &context);
+            let mut ingest = target.ingest(&store, &session_id, ws_name);
+            if let Some(outcome) = poll_detached_remote_note_session_once(
+                &store,
+                &session_id,
+                ws_name,
+                &exec,
+                &mut ingest,
+            ) {
+                emit_detached_recovery_outcome(&app_handle, &session_id, &context, outcome);
+            }
+            detached_recovery_in_flight()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&session_id);
+        });
+    }
+}
+
+/// One poll of a `detached` row's workstation outbox.
+///
+/// Claim-first, with the claim being the terminal write itself: a `done`
+/// marker is followed by [`Store::finish_detached_recovery`] to `completed`
+/// *before* the hooks run, so of two instances that both read the marker
+/// only the one whose write lands ingests the note and clears the outbox;
+/// the other, and a row the user resumed meanwhile, return `None` without
+/// touching anything. No note yet, or no answer from the workstation, writes
+/// nothing: the row keeps its marker and `updated_at`, and the next tick
+/// polls again until the window runs out.
+fn poll_detached_remote_note_session_once(
+    store: &Arc<Store>,
+    session_id: &str,
+    ws_name: &str,
+    exec: remote_note_outbox::RemoteExec,
+    ingest: &mut dyn FnMut(NoteSubmission),
+) -> Option<DetachedRecoveryOutcome> {
+    match remote_note_outbox::collect(exec, session_id, None) {
+        Ok(OutboxState::Delivered(submission)) => {
+            let claimed = store
+                .finish_detached_recovery(
+                    session_id,
+                    SessionStatus::Completed,
+                    None,
+                    Some(&CompletionReason::TurnComplete),
+                )
+                .unwrap_or(false);
+            if !claimed {
+                log::info!(
+                    "Detached remote session {session_id}: the workstation note is complete but \
+                     another instance or a resume took the row first; leaving it to them"
+                );
+                return None;
+            }
+            log::info!(
+                "Detached remote session {session_id}: note \"{}\" appeared in the workstation \
+                 outbox; completing the session",
+                submission.title
+            );
+            ingest(submission);
+            if let Err(e) = remote_note_outbox::clear_outbox(exec, session_id) {
+                log::warn!(
+                    "Detached remote session {session_id}: failed to clear the workstation \
+                     outbox after ingesting it: {e}"
+                );
+            }
+            Some(DetachedRecoveryOutcome {
+                status: SessionStatus::Completed,
+                reason: CompletionReason::TurnComplete,
+                error: None,
+            })
+        }
+        Ok(state) => {
+            log::debug!(
+                "Detached remote session {session_id}: no completed note on {ws_name} yet \
+                 ({state:?})"
+            );
+            None
+        }
+        Err(e) => {
+            log::info!(
+                "Detached remote session {session_id}: could not read the outbox on {ws_name} \
+                 ({e}); trying again next sweep"
+            );
+            None
+        }
+    }
+}
+
+/// Settle a `detached` row whose poll window ran out: a guarded write that
+/// replaces the polling marker with [`detached_note_expired_message`], so the
+/// row is never polled again and the UI stops promising a check. `None` when
+/// the row left the claimed state (resumed, or completed by another
+/// instance's poll) first.
+fn expire_detached_remote_note_session(
+    store: &Arc<Store>,
+    session_id: &str,
+    ws_name: &str,
+) -> Option<DetachedRecoveryOutcome> {
+    let outcome = DetachedRecoveryOutcome {
+        status: SessionStatus::Error,
+        reason: CompletionReason::Detached,
+        error: Some(detached_note_expired_message(ws_name)),
+    };
+    let settled = store
+        .finish_detached_recovery(
+            session_id,
+            outcome.status.clone(),
+            outcome.error.as_deref(),
+            Some(&outcome.reason),
+        )
+        .unwrap_or(false);
+    if settled {
+        log::info!(
+            "Detached remote session {session_id}: no note appeared on {ws_name} within the \
+             poll window; leaving the row detached"
+        );
+        Some(outcome)
+    } else {
+        None
+    }
 }
 
 /// How often [`spawn_dead_session_sweep`] re-runs [`recover_dead_sessions`].

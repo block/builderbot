@@ -75,6 +75,16 @@ export interface ToolDisplay {
 }
 
 /**
+ * Tail of the error message the backend writes on a `detached` remote note
+ * session while its dead-session sweep is still polling the workstation for
+ * the note (`AWAITING_REMOTE_NOTE_SUFFIX` in `src-tauri/src/session_runner.rs`,
+ * which has a test pinning this file to the same text). The sweep replaces
+ * the message once it gives up, so the tail is what tells the two apart.
+ */
+export const REMOTE_NOTE_POLL_SUFFIX =
+  'the workstation agent may still be running, so Staged keeps checking for its note.';
+
+/**
  * The resumable-session notice: why the session ended. A Blox session that
  * Staged settled after losing its connection (see `disconnectedSession.ts`)
  * says what Staged found instead of, or as well as, the generic reason.
@@ -93,6 +103,16 @@ export function sessionEndMessage(
     case RECONCILE_MAY_STILL_RUN:
       return `${endReasonMessage(current)} The workstation didn’t confirm the stop, so the turn may still be running there.`;
     default:
+      if (
+        current.completionReason === 'detached' &&
+        current.errorMessage?.trimEnd().endsWith(REMOTE_NOTE_POLL_SUFFIX)
+      ) {
+        return (
+          'Staged lost the connection to this remote session. The workstation agent may still ' +
+          'be running; Staged is checking for its note and will complete the session when it ' +
+          'appears.'
+        );
+      }
       return endReasonMessage(current);
   }
 }

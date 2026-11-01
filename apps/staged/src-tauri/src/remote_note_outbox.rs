@@ -185,13 +185,20 @@ fn outbox_dir_expr(session_id: &str) -> String {
     format!("\"$HOME/.staged/sessions/{session_id}\"")
 }
 
-/// Empty the session's outbox. Runs after a note has been collected *and*
-/// ingested — never blind at session start, where a `done` marker may be a
-/// finished note the laptop lost before it could read it (see
-/// [`recover_uncollected_outbox`]). Always exits 0.
+/// Empty the session's outbox and remove its directory once it is empty.
+/// Runs after a note has been collected *and* ingested (or after a run
+/// observed the outbox and settled: see `session_runner`'s
+/// `remote_outbox_is_cleared_at_run_end`) — never blind at session start,
+/// where a `done` marker may be a finished note the laptop lost before it
+/// could read it (see [`recover_uncollected_outbox`]). The `rmdir` is
+/// best-effort: a directory the helper is still writing into is left alone.
+/// Always exits 0.
 pub(crate) fn clear_outbox_script(session_id: &str) -> String {
     let dir = outbox_dir_expr(session_id);
-    format!("d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\"; exit 0")
+    format!(
+        "d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\"; \
+         rmdir \"$d\" 2>/dev/null; exit 0"
+    )
 }
 
 pub(crate) fn clear_outbox(exec: RemoteExec, session_id: &str) -> Result<(), String> {
@@ -217,10 +224,19 @@ pub(crate) fn stdio_mcp_server(
     )
 }
 
-/// Print the outbox as three lines: `done`/`pending`, then `meta.json` and
-/// `note.md` each as one base64 line (empty when the file is missing). Base64
-/// keeps arbitrary markdown — including lines that look like our framing —
-/// out of the line protocol. Always exits 0.
+/// Print the outbox as four lines: `done`/`pending`, then `meta.json` and
+/// `note.md` each as one base64 line (empty when the file is missing), then
+/// the `done`/`pending` state again. Base64 keeps arbitrary markdown —
+/// including lines that look like our framing — out of the line protocol.
+///
+/// The marker is tested twice because the three reads are separate steps: a
+/// rewrite that starts after the first test (the helper unlinks `done`, then
+/// renames a new body and a new meta into place, then recreates `done`) can
+/// hand this script the new body with the old title. The helper's own
+/// ordering guarantees that `done` is absent for the whole of such a rewrite,
+/// so a marker that is present both before and after the reads brackets a
+/// title and body from the same call; [`parse_collect_output`] treats any
+/// other combination as pending. Always exits 0.
 pub(crate) fn collect_script(session_id: &str) -> String {
     let dir = outbox_dir_expr(session_id);
     format!(
@@ -228,6 +244,7 @@ pub(crate) fn collect_script(session_id: &str) -> String {
          if [ -f \"$d/done\" ]; then echo done; else echo pending; fi; \
          if [ -f \"$d/meta.json\" ]; then base64 < \"$d/meta.json\" | tr -d '\\n'; fi; echo; \
          if [ -f \"$d/note.md\" ]; then base64 < \"$d/note.md\" | tr -d '\\n'; fi; echo; \
+         if [ -f \"$d/done\" ]; then echo done; else echo pending; fi; \
          exit 0"
     )
 }
@@ -260,12 +277,28 @@ pub(crate) struct OutboxSnapshot {
 pub(crate) fn parse_collect_output(output: &str) -> Result<OutboxSnapshot, String> {
     use base64::Engine;
     let mut lines = output.lines().map(str::trim);
-    let done = match lines.next() {
+    let done_before = match lines.next() {
         Some("done") => true,
         Some("pending") => false,
         other => {
             return Err(format!(
                 "unexpected outbox status line {other:?} in {output:?}"
+            ))
+        }
+    };
+    let meta_line = lines.next();
+    let body_line = lines.next();
+    // The marker re-read after both files (see `collect_script`). An older
+    // script that printed only three lines is read as before; a marker that
+    // changed state while the files were being read means the files may
+    // straddle two calls, so the outbox counts as pending for this read.
+    let done = match lines.next() {
+        None => done_before,
+        Some("done") => done_before,
+        Some("pending") => false,
+        other => {
+            return Err(format!(
+                "unexpected trailing outbox status line {other:?} in {output:?}"
             ))
         }
     };
@@ -278,13 +311,13 @@ pub(crate) fn parse_collect_output(output: &str) -> Result<OutboxSnapshot, Strin
                 .map_err(|e| format!("outbox {what} is not valid base64: {e}")),
         }
     };
-    let meta = decode(lines.next(), "meta.json")?
+    let meta = decode(meta_line, "meta.json")?
         .map(|bytes| {
             serde_json::from_slice::<OutboxMeta>(&bytes)
                 .map_err(|e| format!("outbox meta.json does not parse: {e}"))
         })
         .transpose()?;
-    let body = decode(lines.next(), "note.md")?
+    let body = decode(body_line, "note.md")?
         .map(|bytes| {
             String::from_utf8(bytes).map_err(|e| format!("outbox note.md is not UTF-8: {e}"))
         })
@@ -333,16 +366,54 @@ pub(crate) fn outbox_state(
     Ok(OutboxState::Delivered(submission))
 }
 
-/// Pull the session's outbox from the workstation and interpret it.
+/// Why a collection failed: the two kinds call for different handling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CollectError {
+    /// The workstation could not be reached (or the session id is unusable).
+    /// Nothing is known about the outbox; leave it for the next attempt.
+    Transport(String),
+    /// The workstation answered, but what it holds is not a usable note: a
+    /// `done` marker next to a missing file, undecodable framing, or a body
+    /// the tool itself would have rejected. Retrying reads the same bytes.
+    Content(String),
+}
+
+impl CollectError {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Transport(message) | Self::Content(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for CollectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// Pull the session's outbox from the workstation and interpret it, telling
+/// a workstation that could not be reached from one that holds garbage.
+pub(crate) fn collect_classified(
+    exec: RemoteExec,
+    session_id: &str,
+    expected_turn: Option<&str>,
+) -> Result<OutboxState, CollectError> {
+    validate_session_id(session_id).map_err(CollectError::Transport)?;
+    let output = exec(&["sh", "-c", &collect_script(session_id)]).map_err(|e| {
+        CollectError::Transport(format!("failed to read the remote note outbox: {e}"))
+    })?;
+    let snapshot = parse_collect_output(&output).map_err(CollectError::Content)?;
+    outbox_state(snapshot, expected_turn).map_err(CollectError::Content)
+}
+
+/// [`collect_classified`] for callers that treat every failure alike.
 pub(crate) fn collect(
     exec: RemoteExec,
     session_id: &str,
     expected_turn: Option<&str>,
 ) -> Result<OutboxState, String> {
-    validate_session_id(session_id)?;
-    let output = exec(&["sh", "-c", &collect_script(session_id)])
-        .map_err(|e| format!("failed to read the remote note outbox: {e}"))?;
-    outbox_state(parse_collect_output(&output)?, expected_turn)
+    collect_classified(exec, session_id, expected_turn).map_err(|e| e.message().to_string())
 }
 
 /// Collect the outbox right after a turn settled and, when it holds this
@@ -372,6 +443,10 @@ pub(crate) enum OutboxRecovery {
     Empty,
     /// A finished note from an earlier run was handed to `ingest`, then cleared.
     Ingested,
+    /// The outbox held something marked `done` that is not a usable note (a
+    /// file missing beside the marker, or a body the tool would reject). It
+    /// was logged and cleared so the session is not stuck on it forever.
+    Discarded,
 }
 
 /// Session start: a `done` marker already in the outbox is a note the agent
@@ -382,15 +457,19 @@ pub(crate) enum OutboxRecovery {
 /// clear the outbox so the new run's collector cannot mistake it for its own.
 /// With no complete note the outbox is just emptied of partial files.
 ///
-/// The clear only follows a successful collection; a collection failure
-/// leaves the outbox alone for the next attempt.
+/// Only a workstation that could not be reached is an error here: the outbox
+/// is left alone for the next attempt. Content the collector cannot turn into
+/// a note (a `done` marker beside a missing file, a body the tool would have
+/// rejected) is cleared and reported as [`OutboxRecovery::Discarded`], since
+/// every later resume would otherwise trip over the same bytes and the
+/// session would be stuck on the `---` fallback for good.
 pub(crate) fn recover_uncollected_outbox(
     exec: RemoteExec,
     session_id: &str,
     ingest: &mut dyn FnMut(NoteSubmission),
 ) -> Result<OutboxRecovery, String> {
-    let recovery = match collect(exec, session_id, None)? {
-        OutboxState::Delivered(submission) => {
+    let recovery = match collect_classified(exec, session_id, None) {
+        Ok(OutboxState::Delivered(submission)) => {
             log::warn!(
                 "Session {session_id}: the workstation outbox holds an uncollected note \
                  \"{}\" from an earlier run; ingesting it before this run starts",
@@ -400,7 +479,15 @@ pub(crate) fn recover_uncollected_outbox(
             OutboxRecovery::Ingested
         }
         // `collect(.., None)` accepts any turn, so the stale arm cannot fire.
-        OutboxState::Pending | OutboxState::StaleTurn { .. } => OutboxRecovery::Empty,
+        Ok(OutboxState::Pending | OutboxState::StaleTurn { .. }) => OutboxRecovery::Empty,
+        Err(CollectError::Content(message)) => {
+            log::warn!(
+                "Session {session_id}: the workstation outbox holds an unusable note \
+                 ({message}); discarding it so this session can continue"
+            );
+            OutboxRecovery::Discarded
+        }
+        Err(CollectError::Transport(message)) => return Err(message),
     };
     clear_outbox(exec, session_id)?;
     Ok(recovery)
@@ -615,6 +702,67 @@ mod tests {
         assert!(parse_collect_output("done\nnot base64!\n\n").is_err());
     }
 
+    #[test]
+    fn a_marker_that_changed_during_the_reads_makes_the_snapshot_pending() {
+        let meta = br#"{"title":"T","turn":"t1"}"#;
+        let four_lines = |after: &str| format!("done\n{}\n{}\n{after}\n", b64(meta), b64(b"B"));
+        assert!(parse_collect_output(&four_lines("done")).unwrap().done);
+        let straddled = parse_collect_output(&four_lines("pending")).unwrap();
+        assert!(
+            !straddled.done,
+            "a rewrite started mid-read: not a complete note"
+        );
+        assert!(
+            straddled.meta.is_some(),
+            "the files themselves are still reported"
+        );
+        assert_eq!(
+            outbox_state(straddled, Some("t1")).unwrap(),
+            OutboxState::Pending
+        );
+        // The marker appearing only after the reads is the mirror image: the
+        // first test saw no note, so nothing complete was read.
+        let late = format!("pending\n{}\n{}\ndone\n", b64(meta), b64(b"B"));
+        assert!(!parse_collect_output(&late).unwrap().done);
+        assert!(parse_collect_output("done\n\n\nmaybe\n").is_err());
+        assert_eq!(
+            collect_script("sess-1")
+                .matches("echo done; else echo pending")
+                .count(),
+            2,
+            "the script tests the marker before and after the reads"
+        );
+    }
+
+    #[test]
+    fn collect_tells_an_unreachable_workstation_from_unusable_content() {
+        let unreachable = |_: &[&str]| -> Result<String, String> { Err("suspended".into()) };
+        assert!(matches!(
+            collect_classified(&unreachable, "sess-1", None),
+            Err(CollectError::Transport(message)) if message.contains("suspended")
+        ));
+        let marker_without_files =
+            |_: &[&str]| -> Result<String, String> { Ok("done\n\n\n".into()) };
+        assert!(matches!(
+            collect_classified(&marker_without_files, "sess-1", None),
+            Err(CollectError::Content(message)) if message.contains("missing")
+        ));
+        let empty_title = format!(
+            "done\n{}\n{}\n",
+            b64(br#"{"title":"  ","turn":"t1"}"#),
+            b64(b"Body")
+        );
+        let rejected = move |_: &[&str]| -> Result<String, String> { Ok(empty_title.clone()) };
+        assert!(matches!(
+            collect_classified(&rejected, "sess-1", None),
+            Err(CollectError::Content(_))
+        ));
+        assert!(matches!(
+            collect_classified(&unreachable, "../etc", None),
+            Err(CollectError::Transport(_))
+        ));
+    }
+
     fn done_snapshot(turn: Option<&str>) -> OutboxSnapshot {
         OutboxSnapshot {
             done: true,
@@ -778,6 +926,20 @@ mod tests {
         assert_eq!(ingested, 0);
         let commands = log.borrow();
         assert_eq!(commands.len(), 2, "{commands:?}");
+        assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
+    }
+
+    #[test]
+    fn session_start_discards_unusable_outbox_content_and_continues() {
+        let log = RefCell::new(Vec::new());
+        // `done` beside a missing `note.md`: a v1 helper's partial write.
+        let exec = collecting_exec("done\n\n\n", &log);
+        let mut ingested = 0;
+        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| ingested += 1).unwrap();
+        assert_eq!(recovery, OutboxRecovery::Discarded);
+        assert_eq!(ingested, 0);
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
         assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
     }
 
@@ -1128,13 +1290,38 @@ mod tests {
         assert_eq!(ingested[0].title, "Lost");
         assert_eq!(ingested[0].body, "found later");
         let outbox = home.path().join(".staged/sessions/sess-1");
-        assert!(!outbox.join("done").exists());
-        assert!(!outbox.join("note.md").exists());
-        assert!(!outbox.join("meta.json").exists());
+        assert!(
+            !outbox.exists(),
+            "the emptied outbox directory is removed too"
+        );
         assert_eq!(
             recover_uncollected_outbox(&exec, "sess-1", &mut |_| panic!("nothing to ingest"))
                 .unwrap(),
             OutboxRecovery::Empty
+        );
+
+        // The collect script against a real shell: four lines, marker
+        // bracketing the files, nothing left behind after a clear.
+        run_helper(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Again","body":"second"}}}),
+            ],
+        );
+        let output = exec(&["sh", "-c", &collect_script("sess-1")]).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 4, "{output:?}");
+        assert_eq!((lines[0], lines[3]), ("done", "done"));
+        assert!(matches!(
+            collect(&exec, "sess-1", None).unwrap(),
+            OutboxState::Delivered(submission) if submission.title == "Again"
+        ));
+        std::fs::write(outbox.join("extra"), "keep").unwrap();
+        clear_outbox(&exec, "sess-1").unwrap();
+        assert!(
+            outbox.exists(),
+            "a directory holding anything else is not removed"
         );
     }
 

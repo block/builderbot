@@ -1,5 +1,6 @@
 import type { SessionMessage } from '../../types';
 import type { DisplayRootInput } from './pathDisplayRoots';
+import { writeNoteToolCall, writeNoteVerb } from './noteToolCall';
 import { formatToolDisplay, parseToolCall, verbGroupSummary } from './sessionModalHelpers';
 import { deferredToolBody } from './toolCallBodies';
 
@@ -90,10 +91,21 @@ const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
 const PIKCHR_SESSION_STARTED_EVENT = 'pikchr_session_started';
 const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>();
 
+export interface AcpTranscriptOptions {
+  /**
+   * The session has reached a terminal state. Tool calls still `pending` or
+   * `in_progress` then can never settle — their results were lost with the
+   * connection (a crash, a detached remote session) — and render as
+   * interrupted instead of running forever.
+   */
+  sessionSettled?: boolean;
+}
+
 export function buildAcpTranscriptGroups(
   visibleMessages: SessionMessage[],
   acpMetadataMessages: SessionMessage[],
-  displayRoots?: DisplayRootInput
+  displayRoots?: DisplayRootInput,
+  options: AcpTranscriptOptions = {}
 ): AcpTranscriptGroup[] {
   const metadataRows = sortedUniqueMessages(
     [...visibleMessages.filter(hasAcpMetadata), ...acpMetadataMessages].filter(hasAcpMetadata)
@@ -125,14 +137,20 @@ export function buildAcpTranscriptGroups(
         const key = toolKeyForMessage(message);
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
+          pushToolGroup(
+            groups,
+            richToolItem(assembly, displayRoots, announcedPikchrSessions, options)
+          );
           emittedTools.add(key);
         }
       } else if (!assignedResultIds.has(message.id)) {
         const key = `result:${message.id}`;
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
+          pushToolGroup(
+            groups,
+            richToolItem(assembly, displayRoots, announcedPikchrSessions, options)
+          );
           emittedTools.add(key);
         }
       }
@@ -598,11 +616,21 @@ function eventTitle(kind: AcpTranscriptEventKind): string {
 function richToolItem(
   tool: ToolAssembly,
   displayRoots?: DisplayRootInput,
-  announcedPikchrSessions?: Map<string, string>
+  announcedPikchrSessions?: Map<string, string>,
+  options: AcpTranscriptOptions = {}
 ): RichToolItem {
-  const status = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
+  const recordedStatus = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
+  // A call still running when its session ended never got its result: the
+  // session's connection is gone, so nothing will update the row again.
+  const interrupted =
+    !!options.sessionSettled && (recordedStatus === 'pending' || recordedStatus === 'in_progress');
+  const status: ToolStatus = interrupted ? 'cancelled' : recordedStatus;
   const pending = status === 'pending' || status === 'in_progress';
-  const display = formatToolDisplay(tool.call.content, displayRoots, pending);
+  // The `write_note` row shows the note it saved, not a shell line.
+  const note = writeNoteToolCall(tool.call.content, tool.metadata.rawInput);
+  const display = note
+    ? { verb: writeNoteVerb(status), detail: note.title }
+    : formatToolDisplay(tool.call.content, displayRoots, pending);
   const isPikchrDiagramTool = isPikchrTool(tool);
   // A successful tool result names the child session authoritatively; tools
   // without an output-derived id — still running, or failed before the result
@@ -617,7 +645,7 @@ function richToolItem(
     verb: display.verb,
     detail: display.detail,
     status,
-    statusLabel: toolStatusLabel(status),
+    statusLabel: interrupted ? 'Interrupted' : toolStatusLabel(status),
     statusTone: toolStatusTone(status),
     toolCallId: tool.toolCallId,
     toolKind: tool.metadata.toolKind ?? null,

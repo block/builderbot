@@ -97,17 +97,78 @@ describe('buildAcpTranscriptGroups', () => {
     const settled = buildAcpTranscriptGroups(visible, [], undefined, { sessionSettled: true });
     const settledGroup = settled[0];
     if (settledGroup.type !== 'tools') throw new Error('expected a tool group');
+    // The collapsed header says so too, not only the status dot.
     expect(settledGroup.items[0]).toMatchObject({
       status: 'cancelled',
       statusLabel: 'Interrupted',
       statusTone: 'cancelled',
-      verb: 'Ran',
+      verb: 'Interrupted',
+      detail: 'sleep 60',
     });
     // The call that did finish is untouched.
     expect(settledGroup.items[1]).toMatchObject({ status: 'completed', statusLabel: 'Succeeded' });
-    const [grouped] = groupRichToolsByVerb(settledGroup.items);
-    expect(grouped.summary).toBe('2 commands');
-    expect(grouped.statusTone).toBe('cancelled');
+    const [interruptedGroup, ranGroup] = groupRichToolsByVerb(settledGroup.items);
+    expect(interruptedGroup.verb).toBe('Interrupted');
+    expect(interruptedGroup.statusTone).toBe('cancelled');
+    expect(ranGroup.summary).toBe('1 commands');
+  });
+
+  it('treats unsettled calls in a session that still completed as finished, not interrupted', () => {
+    // A remote note session completed from the workstation outbox: the
+    // `write_note` call's update was lost with the connection, but the very
+    // note it saved is what completed the session.
+    const visible = [
+      message({
+        id: 1,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__staged__write_note',
+          input: { title: 'Disconnect test note', body: 'Body' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-1',
+        acpToolStatus: 'in_progress',
+      }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'Bash', input: { command: 'sleep 60' } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-2',
+        acpToolStatus: 'pending',
+      }),
+    ];
+
+    const completed = buildAcpTranscriptGroups(visible, [], undefined, {
+      sessionSettled: true,
+      sessionCompleted: true,
+    });
+    const group = completed[0];
+    if (group.type !== 'tools') throw new Error('expected a tool group');
+    expect(group.items[0]).toMatchObject({
+      status: 'completed',
+      verb: 'Saved note',
+      detail: 'Disconnect test note',
+      statusTone: 'success',
+    });
+    expect(group.items[1]).toMatchObject({
+      status: 'completed',
+      verb: 'Ran',
+      statusLabel: 'Finished with the session',
+    });
+
+    // The same rows in a session that ended in error are cut off.
+    const failed = buildAcpTranscriptGroups(visible, [], undefined, {
+      sessionSettled: true,
+      sessionCompleted: false,
+    });
+    const failedGroup = failed[0];
+    if (failedGroup.type !== 'tools') throw new Error('expected a tool group');
+    expect(failedGroup.items[0]).toMatchObject({
+      verb: 'Note not saved',
+      statusLabel: 'Interrupted',
+    });
+    expect(failedGroup.items[1]).toMatchObject({ verb: 'Interrupted', statusLabel: 'Interrupted' });
   });
 
   it('pairs tool results by ACP tool call id without relying on adjacency', () => {

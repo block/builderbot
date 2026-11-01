@@ -55,7 +55,10 @@ fn recording_exec<'a>(
 
 /// The production ingest, pointed at the local checkout so no workstation is
 /// consulted for media.
-fn ingest_locally<'a>(store: &'a Arc<Store>, session_id: &str) -> impl FnMut(NoteSubmission) + 'a {
+fn ingest_locally<'a>(
+    store: &'a Arc<Store>,
+    session_id: &str,
+) -> impl FnMut(NoteSubmission) -> bool + 'a {
     let session_id = session_id.to_string();
     move |submission| {
         run_post_completion_hooks(
@@ -68,8 +71,21 @@ fn ingest_locally<'a>(store: &'a Arc<Store>, session_id: &str) -> impl FnMut(Not
             0,
             Some(submission),
         )
+        .note_stored
     }
 }
+
+/// An ingest whose store write fails: counts the calls, stores nothing.
+fn counting_unstored(ingested: &mut usize) -> impl FnMut(NoteSubmission) -> bool + '_ {
+    move |_| {
+        *ingested += 1;
+        false
+    }
+}
+
+/// The lost-connection error as the Blox proxy reports it: the SDK's
+/// transport message nested in two internal errors.
+const PROXY_TRANSPORT_CLOSED: &str = r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("Prompt failed: Error { code: -32603: Internal error, message: \"Incoming transport closed\", data: None }")) }"#;
 
 #[test]
 fn the_sweep_winner_completes_the_session_from_the_outbox_once() {
@@ -122,7 +138,8 @@ fn the_sweep_winner_completes_the_session_from_the_outbox_once() {
     let mut ingested = 0;
     let second =
         finalize_detached_remote_note_session(&store, &session_id, "ws-1", &exec, &mut |_| {
-            ingested += 1
+            ingested += 1;
+            true
         });
     assert_eq!(second, None);
     assert_eq!(ingested, 0);
@@ -143,7 +160,8 @@ fn a_sweep_without_a_finished_note_leaves_the_row_detached() {
 
     let outcome =
         finalize_detached_remote_note_session(&store, &session_id, "ws-1", &exec, &mut |_| {
-            ingested += 1
+            ingested += 1;
+            true
         })
         .expect("the sweep claims the row");
     assert_eq!(outcome.status, SessionStatus::Error);
@@ -169,7 +187,8 @@ fn a_sweep_without_a_finished_note_leaves_the_row_detached() {
     log.borrow_mut().clear();
     assert_eq!(
         finalize_detached_remote_note_session(&store, &session_id, "ws-1", &exec, &mut |_| {
-            ingested += 1
+            ingested += 1;
+            true
         }),
         None
     );
@@ -236,7 +255,7 @@ fn the_poll_window_is_bounded_and_keyed_on_the_marker() {
     );
     assert_eq!(
         detached_note_poll_action(&detached, detached.updated_at + window_ms + 1),
-        DetachedNotePollAction::Expire
+        DetachedNotePollAction::PollThenExpire
     );
 
     // Without the marker a detached row is never polled: an expired window,
@@ -307,7 +326,8 @@ fn a_poll_that_finds_the_note_claims_the_row_then_ingests_once() {
     let mut ingested = 0;
     assert_eq!(
         poll_detached_remote_note_session_once(&store, &session_id, "ws-1", &exec, &mut |_| {
-            ingested += 1
+            ingested += 1;
+            true
         }),
         None
     );
@@ -364,7 +384,8 @@ fn a_poll_without_a_note_writes_nothing_and_a_resumed_row_is_left_alone() {
     let mut ingested = 0;
     assert_eq!(
         poll_detached_remote_note_session_once(&store, &session_id, "ws-1", &exec, &mut |_| {
-            ingested += 1
+            ingested += 1;
+            true
         }),
         None
     );
@@ -465,7 +486,7 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
         "a known-bad note is not stored and not polled for: {error:?}"
     );
     assert!(
-        remote_outbox_is_cleared_at_run_end(true, &reason, error.as_deref()),
+        remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, error.as_deref()),
         "...and the outbox holding it is emptied"
     );
 
@@ -478,15 +499,320 @@ fn a_lost_connection_completes_only_from_a_valid_outbox_note() {
     assert!(
         error
             .as_deref()
-            .is_some_and(|e| e.contains("Incoming transport closed")
+            .is_some_and(|e| e.contains("incoming transport closed")
                 && e.contains("ws-1")
                 && e.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)),
         "{error:?}"
     );
     assert!(
-        !remote_outbox_is_cleared_at_run_end(true, &reason, error.as_deref()),
+        !remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, error.as_deref()),
         "the sweep still needs the outbox"
     );
+}
+
+/// A run that attached the helper, whose start-of-run recovery went through.
+const SETTLED_RUN: RemoteOutboxUse = RemoteOutboxUse {
+    helper_attached: true,
+    recovery_settled: true,
+    own_note_collected: false,
+};
+
+#[test]
+fn the_detached_message_carries_the_innermost_error_not_the_debug_dump() {
+    assert_eq!(
+        innermost_error_detail(PROXY_TRANSPORT_CLOSED),
+        "incoming transport closed"
+    );
+    assert_eq!(
+        innermost_error_detail(
+            r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("agent transport closed")) }"#
+        ),
+        "agent transport closed",
+        "a generic message falls back to the data string"
+    );
+    assert_eq!(
+        innermost_error_detail(
+            r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
+        ),
+        r#"prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#,
+        "nothing better than the whole error: keep it"
+    );
+    assert_eq!(innermost_error_detail("child exited."), "child exited");
+    assert_eq!(
+        innermost_error_detail("ACP connection closed before the interrupt resolved"),
+        "ACP connection closed before the interrupt resolved",
+        "a leading acronym keeps its case"
+    );
+
+    let (_, error, _) = lost_remote_agent_terminal_state(PROXY_TRANSPORT_CLOSED, "ws-1", None);
+    let error = error.unwrap();
+    assert!(
+        error.contains("(incoming transport closed)") && !error.contains("Error {"),
+        "{error}"
+    );
+}
+
+#[test]
+fn only_a_transport_loss_detaches_a_remote_note_session() {
+    use acp_client::SessionSettleReason;
+    // The connection failed mid-turn and the error is the pipe going away.
+    for message in [
+        PROXY_TRANSPORT_CLOSED,
+        "Failed to write prompt: Broken pipe (os error 32)",
+    ] {
+        assert!(
+            remote_agent_connection_was_lost(Some(SessionSettleReason::Failed), message),
+            "{message}"
+        );
+    }
+    // The agent answered, or never started, or the run failed locally.
+    for (settle, message) in [
+        (
+            Some(SessionSettleReason::Failed),
+            "ACP authentication is required to run the prompt. Sign this agent in, then retry.",
+        ),
+        (
+            Some(SessionSettleReason::Failed),
+            r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("model refused the request")) }"#,
+        ),
+        // A bridge reporting its subprocess dying is an answer over a live
+        // transport, with nothing left running behind it (see
+        // `acp_client::is_transport_loss_error`).
+        (Some(SessionSettleReason::Failed), "child exited"),
+        (None, "Timed out waiting for ACP protocol startup after 90s"),
+        (None, "Failed to create ACP session: transport closed"),
+        (
+            Some(SessionSettleReason::Quiescent),
+            "Failed to persist write_note follow-up prompt: database is locked",
+        ),
+        (
+            Some(SessionSettleReason::ResponseComplete),
+            "Pikchr validation failed but no agent session id is available for correction",
+        ),
+    ] {
+        assert!(
+            !remote_agent_connection_was_lost(settle, message),
+            "{settle:?} / {message}"
+        );
+    }
+}
+
+#[test]
+fn an_unsettled_start_of_run_recovery_keeps_the_outbox_unless_the_run_saw_its_own_note() {
+    let unsettled = RemoteOutboxUse {
+        recovery_settled: false,
+        ..SETTLED_RUN
+    };
+    for (reason, message) in [
+        (CompletionReason::TurnComplete, None),
+        (CompletionReason::Crashed, Some("auth required")),
+        (CompletionReason::Interrupted, None),
+    ] {
+        assert!(
+            !remote_outbox_is_cleared_at_run_end(unsettled, &reason, message),
+            "an earlier run's note may still be waiting unseen: {reason:?}"
+        );
+        assert!(
+            remote_outbox_is_cleared_at_run_end(
+                RemoteOutboxUse {
+                    own_note_collected: true,
+                    ..unsettled
+                },
+                &reason,
+                message
+            ),
+            "this run's note overwrote whatever was there: {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn a_note_that_cannot_be_stored_stays_on_the_workstation_in_both_sweep_paths() {
+    // The startup sweep's path: claim, collect, ingest fails.
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    let output = done_output();
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec(&output, &log);
+    let mut ingested = 0;
+    let outcome = finalize_detached_remote_note_session(
+        &store,
+        &session_id,
+        "ws-1",
+        &exec,
+        &mut counting_unstored(&mut ingested),
+    )
+    .expect("the sweep claims the row");
+    assert_eq!(ingested, 1);
+    assert_eq!(outcome.status, SessionStatus::Error);
+    assert_eq!(outcome.reason, CompletionReason::Detached);
+    assert!(
+        outcome
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("\"Plan\"")
+                && e.contains("could not be stored")
+                && e.contains("Resume")
+                && !e.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        log.borrow().len(),
+        1,
+        "collect only, no clear: {:?}",
+        log.borrow()
+    );
+    let session = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Error);
+    assert_eq!(session.error_message, outcome.error);
+    assert_eq!(store.get_note(&note_id).unwrap().unwrap().content, "");
+
+    // The polling path: claim with the storing marker, ingest fails.
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    detach_awaiting_note(&store, &session_id);
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec(&output, &log);
+    let mut ingested = 0;
+    let outcome = poll_detached_remote_note_session_once(
+        &store,
+        &session_id,
+        "ws-1",
+        &exec,
+        &mut counting_unstored(&mut ingested),
+    )
+    .expect("the poll that sees `done` settles the row");
+    assert_eq!(ingested, 1);
+    assert_eq!(outcome.status, SessionStatus::Error);
+    assert_eq!(outcome.reason, CompletionReason::Detached);
+    assert!(
+        outcome
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("could not be stored") && e.contains("Resume")),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        log.borrow().len(),
+        1,
+        "collect only, no clear: {:?}",
+        log.borrow()
+    );
+    let session = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Error);
+    assert_eq!(session.error_message, outcome.error);
+    assert_eq!(
+        detached_note_poll_action(&session, session.updated_at),
+        DetachedNotePollAction::Skip,
+        "an unstorable note is not polled for again; Resume collects it"
+    );
+    assert_eq!(store.get_note(&note_id).unwrap().unwrap().content, "");
+}
+
+#[test]
+fn a_poll_that_finds_the_note_claims_with_the_storing_marker_before_completing() {
+    // Mid-ingest another instance's poll reads the same `done`: the storing
+    // marker has no polling suffix, so it neither polls nor claims the row.
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, _) = remote_note_session(&store);
+    detach_awaiting_note(&store, &session_id);
+    let output = done_output();
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec(&output, &log);
+    let store_for_ingest = Arc::clone(&store);
+    let session_for_ingest = session_id.clone();
+    let mut ingest = |_: NoteSubmission| {
+        let row = store_for_ingest
+            .get_session(&session_for_ingest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, SessionStatus::Error);
+        assert_eq!(row.completion_reason, Some(CompletionReason::Detached));
+        assert_eq!(
+            row.error_message.as_deref(),
+            Some(detached_note_storing_message("ws-1").as_str())
+        );
+        assert_eq!(
+            detached_note_poll_action(&row, row.updated_at),
+            DetachedNotePollAction::Skip
+        );
+        true
+    };
+    let outcome =
+        poll_detached_remote_note_session_once(&store, &session_id, "ws-1", &exec, &mut ingest)
+            .unwrap();
+    assert_eq!(outcome.status, SessionStatus::Completed);
+    let session = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert_eq!(session.error_message, None);
+    assert_eq!(log.borrow().len(), 2, "collect, then clear");
+}
+
+#[test]
+fn a_row_past_the_window_gets_one_last_poll_before_it_expires() {
+    // The laptop was closed overnight: the note is waiting, the window is
+    // long gone. The first tick completes the row instead of expiring it.
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    detach_awaiting_note(&store, &session_id);
+    let output = done_output();
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec(&output, &log);
+    let outcome = poll_detached_remote_note_session(
+        &store,
+        &session_id,
+        "ws-1",
+        &exec,
+        &mut ingest_locally(&store, &session_id),
+        true,
+    )
+    .expect("the last poll completes the row");
+    assert_eq!(outcome.status, SessionStatus::Completed);
+    assert_eq!(
+        store.get_session(&session_id).unwrap().unwrap().status,
+        SessionStatus::Completed
+    );
+    assert_eq!(store.get_note(&note_id).unwrap().unwrap().content, "Body");
+
+    // Nothing there, or no answer: that last poll is what expires the row.
+    for exec in [
+        &(|_: &[&str]| -> Result<String, String> { Ok("pending\n\n\n".into()) })
+            as remote_note_outbox::RemoteExec,
+        &(|_: &[&str]| -> Result<String, String> { Err("suspended".into()) }),
+    ] {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (session_id, _) = remote_note_session(&store);
+        detach_awaiting_note(&store, &session_id);
+        let outcome = poll_detached_remote_note_session(
+            &store,
+            &session_id,
+            "ws-1",
+            exec,
+            &mut |_| panic!("nothing to ingest"),
+            true,
+        )
+        .expect("the expiry is recorded");
+        assert_eq!(outcome.reason, CompletionReason::Detached);
+        assert!(outcome
+            .error
+            .as_deref()
+            .is_some_and(|m| m.contains("30 minutes")));
+        // Inside the window the same empty poll writes nothing.
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (session_id, _) = remote_note_session(&store);
+        detach_awaiting_note(&store, &session_id);
+        assert_eq!(
+            poll_detached_remote_note_session(
+                &store,
+                &session_id,
+                "ws-1",
+                exec,
+                &mut |_| panic!("nothing to ingest"),
+                false,
+            ),
+            None
+        );
+    }
 }
 
 #[test]
@@ -505,18 +831,25 @@ fn the_outbox_is_cleared_whenever_the_run_is_done_with_it() {
         ),
     ] {
         assert!(
-            remote_outbox_is_cleared_at_run_end(true, &reason, message),
+            remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, message),
             "{reason:?} / {message:?}"
         );
     }
-    let awaiting = awaiting_remote_note_message("ws-1", Some("Incoming transport closed"));
+    let awaiting = awaiting_remote_note_message("ws-1", Some("incoming transport closed"));
     assert!(!remote_outbox_is_cleared_at_run_end(
-        true,
+        SETTLED_RUN,
         &CompletionReason::Detached,
         Some(&awaiting)
     ));
     assert!(
-        !remote_outbox_is_cleared_at_run_end(false, &CompletionReason::TurnComplete, None),
+        !remote_outbox_is_cleared_at_run_end(
+            RemoteOutboxUse {
+                helper_attached: false,
+                ..SETTLED_RUN
+            },
+            &CompletionReason::TurnComplete,
+            None
+        ),
         "a run without the helper never touched the outbox"
     );
 }

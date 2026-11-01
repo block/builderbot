@@ -3,12 +3,14 @@ import {
   foldSnippetsIntoPrompt,
   formatToolDisplay,
   insertedText,
+  isAwaitingRemoteNote,
   makePathsRelative,
   newestUserMessageId,
   reconnectedOutcomeMessage,
   REMOTE_NOTE_POLL_SUFFIX,
   sessionEndMessage,
   sessionErrorMessage,
+  sessionEndNoticeKind,
   snippetLabel,
 } from './sessionModalHelpers';
 import {
@@ -242,22 +244,21 @@ describe('sessionEndMessage', () => {
   });
 
   it('tells a detached session still being checked from one Staged gave up on', () => {
-    expect(
-      sessionEndMessage({
-        completionReason: 'detached',
-        errorMessage: `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_POLL_SUFFIX}`,
-      })
-    ).toBe(
+    const polling = `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_POLL_SUFFIX}`;
+    const expired =
+      'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.';
+    expect(isAwaitingRemoteNote(polling)).toBe(true);
+    expect(isAwaitingRemoteNote(expired)).toBe(false);
+    expect(isAwaitingRemoteNote(null)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: polling })).toBe(
       'Staged lost the connection to this remote session. The workstation agent may still be ' +
         'running; Staged is checking for its note and will complete the session when it appears.'
     );
-    expect(
-      sessionEndMessage({
-        completionReason: 'detached',
-        errorMessage:
-          'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.',
-      })
-    ).toBe('Staged lost this remote session before it delivered its result.');
+    // The backend's other detached messages are written for the user and
+    // already say what Resume does: shown as they are.
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: expired })).toBe(
+      expired
+    );
     expect(sessionEndMessage({ completionReason: 'detached' })).toBe(
       'Staged lost this remote session before it delivered its result.'
     );
@@ -413,5 +414,60 @@ describe('newestUserMessageId', () => {
     ).toBe(
       'This session paused because the provider reported an API limit. Resume manually when ready.'
     );
+  });
+});
+
+describe('sessionEndNoticeKind', () => {
+  const polling = `Staged lost the connection to this session while the agent was running on ws-1 (incoming transport closed); ${REMOTE_NOTE_POLL_SUFFIX}`;
+
+  it('shows a detached row with an error message as the resumable detached notice, not a raw error', () => {
+    // Every detached row the backend writes carries an error_message; the
+    // raw-error branch would hide the Resume action and the polling copy.
+    const detached = {
+      status: 'error',
+      completionReason: 'detached',
+      errorMessage: polling,
+    } as const;
+    expect(sessionEndNoticeKind(detached)).toBe('detached');
+    expect(sessionEndMessage(detached)).toContain('Staged is checking for its note');
+    expect(
+      sessionEndNoticeKind({
+        status: 'error',
+        completionReason: 'detached',
+        errorMessage:
+          'Staged lost this session while the agent was running on ws-1; its note "Plan" is complete on the workstation but could not be stored here. Resume to collect it again.',
+      })
+    ).toBe('detached');
+  });
+
+  it('keeps the raw error for other failed runs and the generic notice for resumable ones', () => {
+    expect(
+      sessionEndNoticeKind({
+        status: 'error',
+        completionReason: 'crashed',
+        errorMessage: 'ACP authentication is required to run the prompt.',
+      })
+    ).toBe('error');
+    expect(
+      sessionEndNoticeKind({
+        status: 'cancelled',
+        completionReason: 'interrupted',
+        errorMessage: 'killed',
+      })
+    ).toBe('error');
+    expect(sessionEndNoticeKind({ status: 'error', completionReason: 'crashed' })).toBe(
+      'resumable'
+    );
+    expect(sessionEndNoticeKind({ status: 'completed', completionReason: 'turn_complete' })).toBe(
+      null
+    );
+    expect(sessionEndNoticeKind({ status: 'running', completionReason: null })).toBe(null);
+    expect(
+      sessionEndNoticeKind({
+        status: 'running',
+        completionReason: 'detached',
+        errorMessage: polling,
+      })
+    ).toBe(null);
   });
 });

@@ -36,18 +36,28 @@ instructions, the note follow-up prompt, and the Pikchr correction prompt) all
 use `session_commands::note_delivery_guidance`, which tells the agent to call
 the tool and that its assistant text is not saved. The guidance names the
 tool both as `write_note` and by its Claude Code name `mcp__staged__write_note`,
-and says it is available now: the Claude bridge defers MCP tools behind
-`ToolSearch`, and an agent that only knows the short name spends a search
-round trip (or gives up) before it can call it.
+says that Claude Code may have deferred it, and tells the agent to load it
+with `ToolSearch select:mcp__staged__write_note` before calling it rather than
+calling it blind. The deferral is Claude Code's, not Staged's: claiming the
+tool was "available now" did not stop the bridge from deferring it (7 of 8
+sessions in the retest searched anyway), and one session called it
+schema-less with empty input, which the helper rejected. The search round
+trip is accepted; the rejected empty call is what the wording avoids. The
+Goose wording is unchanged.
 
 In the chat pane a `write_note` call (`mcp__staged__write_note` from Claude,
 `staged: write note` from Goose) is not shown as a generic "Ran" row: it gets
 its own "Saved note" / "Saving note" / "Note rejected" row named after the
 title, with the body as a collapsed preview and the suggested next steps
 (`noteToolCall.ts`, `NoteToolDetails.svelte`). Tool calls still `pending` or
-`in_progress` when the session has settled (interrupted, crashed, detached)
-render as "Interrupted" instead of spinning; the backend does not rewrite
-their status, the transcript builder derives it from the session status.
+`in_progress` when the session has settled render by the session's outcome
+(`AcpTranscriptOptions`): in a session that ended `error` or `cancelled`
+they were cut off and read "Interrupted" in the collapsed header as well as
+in the status; in a session that ended `completed` — a remote note session
+completed from the workstation outbox — their work stood, so the `write_note`
+row reads "Saved note" and other calls "Finished with the session". The
+backend does not rewrite their status; the transcript builder derives it
+from the session status.
 
 Source: `src-tauri/src/note_tool.rs` (schema, handler, in-process server).
 
@@ -145,9 +155,9 @@ fills. From there it feeds, with no further round trip:
   `ingest_note_media`), unchanged.
 
 A `done` marker from a different turn is ignored (`StaleTurn`), and a missing
-marker is `Pending`. A turn that ends in a connection error never reaches the
-in-loop collection; the runner then collects once more after the run
-(`lost_remote_agent_terminal_state`):
+marker is `Pending`. A turn that ends because the connection to the agent was
+lost never reaches the in-loop collection; the runner then collects once more
+after the run (`lost_remote_agent_terminal_state`):
 
 - this run's completed note is there and its body passes the Pikchr check →
   `completed` / `turn_complete`, hooks run from the outbox;
@@ -158,6 +168,20 @@ in-loop collection; the runner then collects once more after the run
 - no note → `error` / `detached` with the "keeps checking" message, and the
   sweep polls the outbox from then on (see _Polling a detached row_ below).
 
+Only a _transport loss_ takes that path (`remote_agent_connection_was_lost`):
+the connection must have settled `Failed` while serving the turn, _and_ the
+error must be the pipe going away (`acp_client::is_transport_loss_error`:
+"transport closed", "connection closed", "broken pipe", "child exited" and
+the like). Every other failure of a remote note session is an ordinary
+`crashed` row: an agent that answered (`auth_required`, a refused prompt)
+settles `Failed` too but through a reply; the 90 s ACP startup timeout and a
+`session/new` refusal never settle at all; a local persistence error comes
+after a clean settle. None of those leave an agent working on the
+workstation, so none deserve 30 minutes of `ws exec` polls. The detached
+row's message carries the innermost human sentence of the error
+(`innermost_error_detail`: "incoming transport closed"), not the Rust Debug
+dump of the nested protocol error.
+
 A Pikchr repair loop that gave up (`AgentRunError::PikchrRepairExhausted`,
 matched as a variant, not by message text) never enters that rescue because
 its note is known bad.
@@ -167,11 +191,23 @@ clean turn (note ingested or not), a Stop after a `write_note` call, an
 exhausted repair loop, a crash, and the lost-connection cases above except
 the last. The clear is one more `ws exec` after the terminal status is
 written, so it never holds the row in `running`, and it removes the now-empty
-`~/.staged/sessions/<session-id>/` directory too. Only a lost connection
-with _no_ note found leaves the outbox in place, because the agent may still
-write into it and the sweep (or the next run's start-of-run recovery) is
-what reads it. The outbox is never cleared at start, which is what lets that
-recovery tell an uncollected note from an old one.
+`~/.staged/sessions/<session-id>/` directory too. Two states keep the outbox
+(`remote_outbox_is_cleared_at_run_end`, `RemoteOutboxUse`):
+
+- a lost connection with _no_ note found, because the agent may still write
+  into it and the sweep (or the next run's start-of-run recovery) is what
+  reads it;
+- a run whose start-of-run recovery did not settle — the workstation dropped
+  between installing the helper and reading the outbox, or a waiting note
+  could not be stored — and that never collected its own note. An earlier
+  run's finished note may still be sitting there unread (the per-turn
+  collector reports it as a stale turn and ignores it), and the clear would
+  delete the only copy; the next run's recovery gets another chance. Once
+  the run collects its own note the earlier one has been overwritten, and
+  the clear is back on.
+
+The outbox is never cleared at start, which is what lets that recovery tell
+an uncollected note from an old one.
 
 ### Background hold ends late for remote note sessions
 
@@ -224,14 +260,18 @@ collection thread instead (guarded against overlapping sweeps in-process):
    returns without a single `ws exec`, so the outbox is collected and the
    hooks run exactly once.
 2. The claimant collects the outbox (any turn id). `done` marker present →
-   hooks run with the outbox note, the outbox is cleared, and the row is
-   moved to `completed` / `turn_complete` through
-   `Store::finish_detached_recovery`, which only touches a row still in the
-   claimed state. Otherwise (no marker, or the workstation could not be
-   read) the row stays `error` / `detached` with a message naming the
-   workstation that ends in the "keeps checking" marker sentence, and the
-   sweep goes on polling it. `detached` is resumable; the agent may still be
-   working there.
+   hooks run with the outbox note; only when they report the note stored
+   (`HooksOutcome::note_stored`) is the outbox cleared and the row moved to
+   `completed` / `turn_complete` through `Store::finish_detached_recovery`,
+   which only touches a row still in the claimed state. A note the hooks
+   could not store (a media ingest or store write failed) leaves the row
+   `error` / `detached` with a message naming the note and asking for Resume
+   (`detached_note_unstored_message`), and the outbox intact, so the resume's
+   start-of-run recovery collects it again. Otherwise (no marker, or the
+   workstation could not be read) the row stays `error` / `detached` with a
+   message naming the workstation that ends in the "keeps checking" marker
+   sentence, and the sweep goes on polling it. `detached` is resumable; the
+   agent may still be working there.
 3. If the user resumed the session while the workstation was being read, the
    final write finds the row `running` again and leaves it to its new run,
    which will find the note at start (see step 3 of the remote start sequence).
@@ -260,33 +300,90 @@ minute later. The 60 s sweep therefore keeps reading the outbox of every
   known-bad note, a row written before polling existed) is never polled.
 - **For how long.** 30 minutes (`DETACHED_NOTE_POLL_WINDOW`) from the row's
   `updated_at`, i.e. from the detaching write. Polls that find nothing write
-  nothing to the row, so the window keeps counting from the detach; the
-  first poll after it ran out replaces the message with
-  `detached_note_expired_message` ("…no completed note appeared on the
-  workstation within 30 minutes. Resume to check again and continue.") through
-  the guarded `finish_detached_recovery`, so a row that was resumed or
-  completed by another instance in the meantime is untouched. The row stays
-  `detached`, resumable, and Resume still finds a late note through the
-  start-of-run recovery.
-- **Claim first.** The claim _is_ the terminal write: a poll that reads
-  `done` calls `finish_detached_recovery` to `completed` / `turn_complete`
-  before it runs the hooks. Two instances sharing the database can both read
-  the marker, but only the one whose write lands ingests the note and clears
-  the outbox; the other, and a poll racing a Resume, return without touching
-  anything.
+  nothing to the row, so the window keeps counting from the detach. A row
+  found past the window is not expired blind: it gets one last poll
+  (`DetachedNotePollAction::PollThenExpire`, `poll_detached_remote_note_session`),
+  because the common case is a laptop closed overnight whose note has long
+  since landed on the workstation — that poll completes the row on the first
+  tick after relaunch. Only when the last poll returns `Pending` or an error
+  is the message replaced with `detached_note_expired_message` ("…no
+  completed note appeared on the workstation within 30 minutes. Resume to
+  check again and continue.") through the guarded `finish_detached_recovery`,
+  so a row that was resumed or completed by another instance in the meantime
+  is untouched. The row stays `detached`, resumable, and Resume still finds
+  a late note through the start-of-run recovery.
+- **Claim first, complete last.** A poll that reads `done` claims the row
+  with an intermediate write (`detached_note_storing_message`, a `detached`
+  message without the polling marker, so no other instance polls or claims
+  it), runs the hooks, and writes `completed` / `turn_complete` and clears
+  the outbox only when the hooks report the note stored. A note that could
+  not be stored leaves `detached_note_unstored_message` and the outbox in
+  place for a Resume; a process that dies between the claim and the final
+  write leaves the storing message, likewise collected by a Resume. Two
+  instances sharing the database can both read the marker, but only the one
+  whose claim lands ingests the note; the other, and a poll racing a Resume,
+  return without touching anything. Both sweep paths therefore fail the same
+  way: toward a `detached` row with the note still on the workstation, never
+  toward a `completed` row with no note.
 - **How many at once.** Each poll is a `ws exec` round trip on its own
   thread, at most `DETACHED_NOTE_POLL_MAX_CONCURRENT` (2) in flight across
   polls and startup collections, served oldest-unpolled first across ticks,
   so an instance that died holding several remote note sessions does not
   fan out a burst of `sq blox` calls.
 
-What the user sees: the timeline row says "Lost the remote session — no note
-created yet"; the chat pane says "Staged lost the connection to this remote
-session. The workstation agent may still be running; Staged is checking for
-its note and will complete the session when it appears." while the marker is
-present, and the generic lost-session copy with Resume once it is not. The
+What the user sees: while the marker is present the timeline row says "Lost
+the remote session — no note created yet" (the `NoteTimelineItem` carries
+the session's `error_message` as `sessionErrorMessage` for that check) and
+the chat pane says "Staged lost the connection to this remote session. The
+workstation agent may still be running; Staged is checking for its note and
+will complete the session when it appears." Once the marker is gone the row
+drops the "yet", and the chat pane shows the backend's own sentence (the
+expired window, the unstored note, the broken diagram) — each written to say
+what Resume will do. Every `detached` row carries an error message, so the
+chat pane decides the detached notice _before_ its raw-error branch
+(`sessionEndNoticeKind`): the row always gets the informational alert with
+its Resume button, never the destructive alert with the raw text. The
 session completes on its own, through the normal hooks, when the note
 appears.
+
+## Design decisions
+
+Decisions that were weighed and settled, so a later reader does not reopen
+them by accident:
+
+- **A Stop after `write_note` discards the note.** A remote note session the
+  user stops after the agent has already called `write_note` ends
+  `cancelled` with no note, the outbox is cleared at the end of the run, and
+  a later Resume does not re-ingest it. This matches the local path (a
+  cancelled run runs no post-completion hooks) and the rule that a Stop means
+  "I do not want this turn's output". Keeping an already-delivered note on
+  Stop would mean the hooks run for cancelled sessions, with the commit
+  detection and media ingest that come with them; nothing asked for that.
+  Revisit only if users start pressing Stop _because_ the note is saved and
+  the agent is still running — the chat pane's "Saved note" row makes that
+  moment visible.
+- **Clear policy.** The outbox is cleared at the end of every run that saw
+  its state, and kept only when the sweep is still polling for the note or
+  when the start-of-run recovery did not settle and the run never collected
+  its own note (above). Clearing at start was rejected because it would
+  delete an uncollected note on every resume; never clearing was rejected
+  because a stored note would be re-ingested on the next run, over whatever
+  the user edited meanwhile.
+- **Detached polling window.** 30 minutes from the detaching write, with
+  one last poll before expiring. Shorter windows miss the agent finishing a
+  long turn (Blox keeps the turn alive); longer ones keep spending `ws exec`
+  on a session that may never finish. Past the window the row is resumable
+  and Resume collects a late note, so the cost of expiring is one click,
+  never a lost note.
+- **Only a transport loss detaches.** Auth failures, startup timeouts,
+  refused prompts and local persistence errors are `crashed`, not
+  `detached`, even on a remote note session with the helper attached: no
+  agent is working on the workstation in those cases, so polling would be
+  30 minutes of round trips for nothing and the "may still be running" copy
+  would be false.
+- **Remote note sessions run unattended.** Permission prompts never route
+  to the laptop (see _Permissions never block on the laptop_); the session's
+  deliverable has to survive the laptop going away.
 
 ## How to test manually
 
@@ -322,17 +419,25 @@ Blox:
    sweep logs `Recovered detached remote session … note "<title>" found` and
    the note row fills in; if the agent had not finished, the chat pane shows
    "Staged lost the connection to this remote session. The workstation agent
-   may still be running; Staged is checking for its note…" and the row offers
-   Resume. Leave it: when the agent finishes on the workstation, a later
-   sweep logs `note "<title>" appeared in the workstation outbox; completing
-the session` and the note row fills in with no click. Kill the agent
-   before it writes (`pkill` the agent on the workstation, not `sq blox acp`),
-   and the row must stay `detached`; after 30 minutes its message changes to
-   the "no completed note appeared … within 30 minutes" copy. Write the note
-   by hand (step 5) and press Resume: the new run's log shows `uncollected
-note … from an earlier run; ingesting it before this run starts`, the
-   note row fills in before the new turn, and `~/.staged/sessions/<session-id>/`
-   is gone afterwards.
+   may still be running; Staged is checking for its note…" in an
+   informational alert with a Resume button (never a red alert with the raw
+   error), and the timeline row says "no note created yet". Leave it: when
+   the agent finishes on the workstation, a later sweep logs `note "<title>"
+appeared in the workstation outbox; completing the session` and the note
+   row fills in with no click; the chat pane's `write_note` row reads "Saved
+   note", not "Interrupted". Kill the agent before it writes (`pkill` the
+   agent on the workstation, not `sq blox acp`), and the row must stay
+   `detached`; after 30 minutes its message changes to the "no completed
+   note appeared … within 30 minutes" copy and the timeline row drops the
+   "yet". Write the note by hand (step 5) into the outbox of a row that is
+   already past the window: the next sweep tick must complete it (the last
+   poll before expiring), with no Resume. Otherwise press Resume: the new
+   run's log shows `uncollected note … from an earlier run; ingesting it
+before this run starts`, the note row fills in before the new turn, and
+   `~/.staged/sessions/<session-id>/` is gone afterwards.
+   Auth check: sign the remote agent out and start a remote note session;
+   the row must end `crashed` with the auth message, not `detached`, and the
+   log must show no `Detached remote session` polling for it.
 4. Run two Staged builds against the same data dir and repeat step 3: only
    one of them logs `note "<title>" found in the workstation outbox` (or
    `appeared in the workstation outbox`); the other logs nothing for the
@@ -350,13 +455,18 @@ rewrite blocked between its renames and protocol-version negotiation, local
 `sh` run of the install, collect, clear and recovery scripts, schema parity
 with the Rust tool), `session_runner::tests::detached_recovery` (claim-first
 sweep: one winner, resume during collection; the poll window and its marker;
-a poll that finds the note claims then ingests once; polls that find nothing
-write nothing; expiry is guarded and ends the polling; the lost-connection
-terminal states; the end-of-run clear rule; frontend marker parity),
+a poll that finds the note claims with the storing marker, then ingests once,
+then completes; a note that cannot be stored stays on the workstation in both
+sweep paths; polls that find nothing write nothing; a row past the window
+gets one last poll before the guarded expiry; only a transport loss detaches,
+with the innermost error in the message; the lost-connection terminal states;
+the end-of-run clear rule including the unsettled-recovery exception;
+frontend marker parity),
 `acp-client` driver tests (stdio injection and unattended mode for the
 `goose` and `claude` providers, `initialize` capabilities), `blox-cli`
 (`--env-vars`), the session runner and prompt tests for the fallback and
 follow-up paths, and on the frontend `toolCallViewModel.test.ts` /
 `acpTranscript.test.ts` (the `write_note` row for both agents, interrupted
-pending calls), `sessionModalHelpers.test.ts` and `sessionFailureCopy.test.ts`
-(the detached copy).
+pending calls), `sessionModalHelpers.test.ts` (the detached copy and which end-of-session
+notice the chat pane renders) and `sessionFailureCopy.test.ts` (the timeline
+copy says "yet" only while the sweep polls).

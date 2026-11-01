@@ -436,10 +436,11 @@ fn background_hold_from_overrides(
 /// it: an agent that writes the note into its reply produces nothing the user
 /// sees unless that fallback fires.
 pub(crate) fn note_delivery_guidance() -> &'static str {
-    "To deliver the note, call the `write_note` tool from the `staged` MCP server (in Claude Code \
-its full name is `mcp__staged__write_note`; it is available now, so call it directly rather than \
-searching for it first). The call is the deliverable: Staged saves exactly what you pass to it \
-and nothing else. Your assistant text is not saved and is not shown \
+    "To deliver the note, call the `write_note` tool from the `staged` MCP server. In Claude Code \
+its full name is `mcp__staged__write_note` and it may be deferred: if it is not in your loaded \
+tools, load it with `ToolSearch select:mcp__staged__write_note` first, then call it with its \
+schema — never call it with empty or guessed input. The call is the deliverable: Staged saves \
+exactly what you pass to it and nothing else. Your assistant text is not saved and is not shown \
 with the note, so do not write the note into your reply. Pass the complete note on every call \
 (calling again replaces the saved note; the last call of the turn wins):\n\
 - `title`: a plain-text title (no markdown, no leading `#`).\n\

@@ -99,6 +99,15 @@ export interface AcpTranscriptOptions {
    * interrupted instead of running forever.
    */
   sessionSettled?: boolean;
+  /**
+   * The settled session ended `completed`. An unsettled call in it was not
+   * cut off: its update was lost but its work stood — a remote note session
+   * completed from the workstation outbox stored the very note whose
+   * `write_note` row never got its result. Such calls render as finished
+   * ("Saved note" for the note row) rather than as interrupted; only a
+   * session that ended in `error` or `cancelled` labels them "Interrupted".
+   */
+  sessionCompleted?: boolean;
 }
 
 export function buildAcpTranscriptGroups(
@@ -621,16 +630,27 @@ function richToolItem(
 ): RichToolItem {
   const recordedStatus = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
   // A call still running when its session ended never got its result: the
-  // session's connection is gone, so nothing will update the row again.
-  const interrupted =
+  // session's connection is gone, so nothing will update the row again. In
+  // a session that nevertheless completed the call's work stood (see
+  // `AcpTranscriptOptions.sessionCompleted`); otherwise it was cut off.
+  const unsettled =
     !!options.sessionSettled && (recordedStatus === 'pending' || recordedStatus === 'in_progress');
-  const status: ToolStatus = interrupted ? 'cancelled' : recordedStatus;
+  const interrupted = unsettled && !options.sessionCompleted;
+  const finishedWithSession = unsettled && !!options.sessionCompleted;
+  const status: ToolStatus = interrupted
+    ? 'cancelled'
+    : finishedWithSession
+      ? 'completed'
+      : recordedStatus;
   const pending = status === 'pending' || status === 'in_progress';
-  // The `write_note` row shows the note it saved, not a shell line.
+  // The `write_note` row shows the note it saved, not a shell line. An
+  // interrupted call says so in its header, not just in its status dot.
   const note = writeNoteToolCall(tool.call.content, tool.metadata.rawInput);
   const display = note
     ? { verb: writeNoteVerb(status), detail: note.title }
-    : formatToolDisplay(tool.call.content, displayRoots, pending);
+    : interrupted
+      ? { verb: 'Interrupted', detail: formatToolDisplay(tool.call.content, displayRoots).detail }
+      : formatToolDisplay(tool.call.content, displayRoots, pending);
   const isPikchrDiagramTool = isPikchrTool(tool);
   // A successful tool result names the child session authoritatively; tools
   // without an output-derived id — still running, or failed before the result
@@ -645,7 +665,11 @@ function richToolItem(
     verb: display.verb,
     detail: display.detail,
     status,
-    statusLabel: interrupted ? 'Interrupted' : toolStatusLabel(status),
+    statusLabel: interrupted
+      ? 'Interrupted'
+      : finishedWithSession
+        ? 'Finished with the session'
+        : toolStatusLabel(status),
     statusTone: toolStatusTone(status),
     toolCallId: tool.toolCallId,
     toolKind: tool.metadata.toolKind ?? null,

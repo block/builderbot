@@ -4,6 +4,7 @@ import {
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
 } from '../../shared/disconnectedSession';
+import { isAwaitingRemoteNote } from '../sessions/sessionModalHelpers';
 
 export type ArtifactKind = 'commit' | 'note' | 'review';
 
@@ -52,10 +53,15 @@ export function failedArtifactSubtitle(
       return rateLimitPausedSubtitle(rateLimitResetsAt) ?? `Paused by API limit — no ${noun} yet`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;
-    // A detached remote session may still complete on its own: the sweep
-    // keeps checking the workstation for a while (see docs/note-delivery.md).
+    // A detached remote session may still complete on its own while the
+    // sweep is polling the workstation (see docs/note-delivery.md); the
+    // row's error message carries the marker that says so. Past the poll
+    // window, or for a note that cannot be stored, nothing arrives without
+    // a Resume, so "yet" would be a false promise.
     case 'detached':
-      return `Lost the remote session — no ${noun} created yet`;
+      return isAwaitingRemoteNote(errorMessage)
+        ? `Lost the remote session — no ${noun} created yet`
+        : `Lost the remote session — no ${noun} created`;
     case 'project_session_interrupted':
       return `Session stopped by project session — no ${noun} created`;
     case 'interrupted':

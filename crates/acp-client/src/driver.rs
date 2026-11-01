@@ -9095,14 +9095,15 @@ mod tests {
         consume_remote_acp_line, decode_remote_acp_line, defensive_permission_decision,
         describe_prompt_error, hold_for_background_quiescence,
         is_config_selection_unavailable_error, is_missing_mcp_transport_error,
-        labeled_background_continuation_origin, mcp_server_transport_supported,
-        origin_task_name_label, permission_response_for_decision, permission_response_for_options,
-        reject_queued_stop_requests, remote_acp_segments, resolve_acp_working_dir,
-        resolve_session_config_option_selection, resolve_spawn_working_dir, run_prompt_turn,
-        sanitize_remote_acp_chunk, sdk_message_mentions_task, sdk_message_origin_kind,
-        sdk_message_session_state, sdk_message_settles_task, send_session_setup_request,
-        setup_acp_session, shell_exec_line, shell_exec_line_seed_name, shell_extra_env_seeds,
-        shell_quote, task_tracking_mode_from_initialize, unattended_mode_switch,
+        is_transport_loss_error, labeled_background_continuation_origin,
+        mcp_server_transport_supported, origin_task_name_label, permission_response_for_decision,
+        permission_response_for_options, reject_queued_stop_requests, remote_acp_segments,
+        resolve_acp_working_dir, resolve_session_config_option_selection,
+        resolve_spawn_working_dir, run_prompt_turn, sanitize_remote_acp_chunk,
+        sdk_message_mentions_task, sdk_message_origin_kind, sdk_message_session_state,
+        sdk_message_settles_task, send_session_setup_request, setup_acp_session, shell_exec_line,
+        shell_exec_line_seed_name, shell_extra_env_seeds, shell_quote,
+        task_tracking_mode_from_initialize, unattended_mode_switch,
         AcpAuthenticationMethodCategory, AcpAuthenticationRequired, AcpAuthenticationSelection,
         AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionDecision,
         AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
@@ -10233,6 +10234,31 @@ mod tests {
         ));
         assert!(!is_config_selection_unavailable_error(
             "Failed to create ACP session: transport closed"
+        ));
+    }
+
+    #[test]
+    fn detects_transport_loss_errors() {
+        // The Blox proxy reporting the workstation side going away, as seen
+        // in production: the SDK's message nested in an internal error.
+        assert!(is_transport_loss_error(
+            r#"ACP protocol failed: Error { code: -32603: Internal error, message: "Internal error", data: Some(String("Prompt failed: Error { code: -32603: Internal error, message: \"Incoming transport closed\", data: None }")) }"#
+        ));
+        assert!(is_transport_loss_error(
+            "Failed to write prompt: Broken pipe (os error 32)"
+        ));
+        // Answers from a live agent are not losses.
+        assert!(!is_transport_loss_error(
+            "ACP authentication is required to run the prompt. Sign this agent in, then retry."
+        ));
+        assert!(!is_transport_loss_error(
+            "Timed out waiting for ACP protocol startup after 90s"
+        ));
+        assert!(!is_transport_loss_error(
+            r#"Prompt failed: Error { code: -32603: Internal error, message: "Internal error", data: None }"#
+        ));
+        assert!(!is_transport_loss_error(
+            "Failed to persist write_note follow-up prompt: database is locked"
         ));
     }
 

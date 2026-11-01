@@ -279,6 +279,9 @@ pub struct ResolvedSession {
     pub session_id: Option<String>,
     pub status: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, when it ended in one. Timeline rows
+    /// read it to tell a detached remote note session the sweep is still
+    /// polling from one it gave up on (see `docs/note-delivery.md`).
     pub error_message: Option<String>,
     pub rate_limit_resets_at: Option<String>,
     pub rate_limit_kind: Option<String>,

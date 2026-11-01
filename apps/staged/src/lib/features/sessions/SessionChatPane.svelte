@@ -168,6 +168,7 @@
     newestUserMessageId,
     sessionEndMessage,
     sessionErrorMessage,
+    sessionEndNoticeKind,
     XML_BLOCK_TAGS,
   } from './sessionModalHelpers';
   import AttachmentThumb from './AttachmentThumb.svelte';
@@ -756,6 +757,8 @@
   let sessionSettled = $derived(
     !!session && session.status !== 'running' && session.status !== 'queued'
   );
+  let sessionCompleted = $derived(sessionSettled && session?.status === 'completed');
+  let endNotice = $derived(session ? sessionEndNoticeKind(session) : null);
   let grouped = $derived.by(() => {
     previousGrouped = stabilizeAcpTranscriptGroups(
       previousGrouped,
@@ -765,8 +768,10 @@
         displayRoots,
         // Once the session has ended, tool calls that never settled render as
         // interrupted rather than "running" forever: their results went
-        // with the connection (a crash, a detached remote session).
-        { sessionSettled }
+        // with the connection (a crash, a detached remote session). In a
+        // session that still completed (a remote note collected from the
+        // workstation outbox) they render as finished instead.
+        { sessionSettled, sessionCompleted }
       )
     );
     return previousGrouped;
@@ -3752,10 +3757,32 @@
       </div>
     {/if}
 
-    <!-- Cancelled sessions normally carry no message; one appears when the run
-         was killed from outside with a recorded reason (e.g. a Pikchr child
-         session whose generate_pikchr call timed out) and reads as an error. -->
-    {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage && !isReconcileCancelNotice(session.status, session.errorMessage)}
+    <!-- A detached remote session always carries an error message (the sweep's
+         polling marker, an expired poll window, a note that could not be
+         stored), so it is decided before the raw-error branch: it keeps its
+         Resume action and its own copy (`sessionEndMessage`) instead of a
+         destructive alert. Cancelled sessions normally carry no message; one
+         appears when the run was killed from outside with a recorded reason
+         (e.g. a Pikchr child session whose generate_pikchr call timed out) and
+         reads as an error. -->
+    {#if session && endNotice === 'detached'}
+      <Alert.Root class="mt-3">
+        <Info class="text-[var(--ui-warning)]" />
+        <Alert.Description>
+          {sessionEndMessage(session)}
+        </Alert.Description>
+        <Alert.Action>
+          <Button
+            variant="outline"
+            size="xs"
+            onclick={() => sendMessage('Continue where you left off.')}
+            disabled={sending}
+          >
+            Resume
+          </Button>
+        </Alert.Action>
+      </Alert.Root>
+    {:else if session && endNotice === 'error' && session.errorMessage}
       {@const authError = isAuthenticationError(session.errorMessage)}
       <Alert.Root variant="destructive" class="mt-3">
         <AlertCircle />
@@ -3801,7 +3828,6 @@
           session.completionReason === 'crashed' ||
           session.completionReason === 'remote_agent_lost' ||
           session.completionReason === 'app_quit' ||
-          session.completionReason === 'detached' ||
           isReconcileCancelNotice(session.status, session.errorMessage)}
         <Alert.Root class="mt-3">
           <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />

@@ -457,8 +457,10 @@ pub(crate) enum OutboxRecovery {
 /// clear the outbox so the new run's collector cannot mistake it for its own.
 /// With no complete note the outbox is just emptied of partial files.
 ///
-/// Only a workstation that could not be reached is an error here: the outbox
-/// is left alone for the next attempt. Content the collector cannot turn into
+/// Two failures leave the outbox alone for the next attempt and are errors
+/// here: a workstation that could not be reached, and a waiting note that
+/// `ingest` reports it could not store (it returns `false`) — clearing after
+/// either would delete the only copy. Content the collector cannot turn into
 /// a note (a `done` marker beside a missing file, a body the tool would have
 /// rejected) is cleared and reported as [`OutboxRecovery::Discarded`], since
 /// every later resume would otherwise trip over the same bytes and the
@@ -466,7 +468,7 @@ pub(crate) enum OutboxRecovery {
 pub(crate) fn recover_uncollected_outbox(
     exec: RemoteExec,
     session_id: &str,
-    ingest: &mut dyn FnMut(NoteSubmission),
+    ingest: &mut dyn FnMut(NoteSubmission) -> bool,
 ) -> Result<OutboxRecovery, String> {
     let recovery = match collect_classified(exec, session_id, None) {
         Ok(OutboxState::Delivered(submission)) => {
@@ -475,7 +477,13 @@ pub(crate) fn recover_uncollected_outbox(
                  \"{}\" from an earlier run; ingesting it before this run starts",
                 submission.title
             );
-            ingest(submission);
+            let title = submission.title.clone();
+            if !ingest(submission) {
+                return Err(format!(
+                    "the uncollected note \"{title}\" could not be stored; leaving it in the \
+                     outbox"
+                ));
+            }
             OutboxRecovery::Ingested
         }
         // `collect(.., None)` accepts any turn, so the stale arm cannot fire.
@@ -903,7 +911,8 @@ mod tests {
         let exec = collecting_exec(&done_output("earlier-run"), &log);
         let mut ingested = Vec::new();
         let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |submission| {
-            ingested.push(submission)
+            ingested.push(submission);
+            true
         })
         .unwrap();
         assert_eq!(recovery, OutboxRecovery::Ingested);
@@ -917,11 +926,28 @@ mod tests {
     }
 
     #[test]
+    fn session_start_keeps_a_note_it_could_not_store() {
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec(&done_output("earlier-run"), &log);
+        let error = recover_uncollected_outbox(&exec, "sess-1", &mut |_| false).unwrap_err();
+        assert!(
+            error.contains("Plan") && error.contains("could not be stored"),
+            "{error}"
+        );
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 1, "collect only, no clear: {commands:?}");
+    }
+
+    #[test]
     fn session_start_with_nothing_waiting_only_clears() {
         let log = RefCell::new(Vec::new());
         let exec = collecting_exec("pending\n\n\n", &log);
         let mut ingested = 0;
-        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| ingested += 1).unwrap();
+        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| {
+            ingested += 1;
+            true
+        })
+        .unwrap();
         assert_eq!(recovery, OutboxRecovery::Empty);
         assert_eq!(ingested, 0);
         let commands = log.borrow();
@@ -935,7 +961,11 @@ mod tests {
         // `done` beside a missing `note.md`: a v1 helper's partial write.
         let exec = collecting_exec("done\n\n\n", &log);
         let mut ingested = 0;
-        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| ingested += 1).unwrap();
+        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| {
+            ingested += 1;
+            true
+        })
+        .unwrap();
         assert_eq!(recovery, OutboxRecovery::Discarded);
         assert_eq!(ingested, 0);
         let commands = log.borrow();
@@ -952,8 +982,11 @@ mod tests {
             Err("workstation suspended".to_string())
         };
         let mut ingested = 0;
-        let error =
-            recover_uncollected_outbox(&exec, "sess-1", &mut |_| ingested += 1).unwrap_err();
+        let error = recover_uncollected_outbox(&exec, "sess-1", &mut |_| {
+            ingested += 1;
+            true
+        })
+        .unwrap_err();
         assert!(error.contains("workstation suspended"), "{error}");
         assert_eq!(ingested, 0);
         assert_eq!(log.borrow().len(), 1, "no clear after a failed collection");
@@ -1283,7 +1316,11 @@ mod tests {
         let exec = local_exec(home.path());
         let mut ingested = Vec::new();
         assert_eq!(
-            recover_uncollected_outbox(&exec, "sess-1", &mut |s| ingested.push(s)).unwrap(),
+            recover_uncollected_outbox(&exec, "sess-1", &mut |s| {
+                ingested.push(s);
+                true
+            })
+            .unwrap(),
             OutboxRecovery::Ingested
         );
         assert_eq!(ingested.len(), 1);

@@ -62,6 +62,10 @@ pub struct MessageWriter {
     /// ACP can send interleaved content updates for multiple tool calls; each
     /// tool call updates its own row instead of sharing one global result row.
     tool_result_rows: Mutex<HashMap<String, i64>>,
+    /// The session's `write_note` submission slot, when it is a note session.
+    /// A filled slot means the turn's deliverable exists, whatever the
+    /// assistant text says (see [`MessageWriter::should_finish_after_response`]).
+    note_slot: Option<crate::note_tool::NoteSubmissionSlot>,
 }
 
 /// The title of a tool call recorded from an update that names none (see
@@ -165,6 +169,7 @@ impl MessageWriter {
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
             tool_result_rows: Mutex::new(HashMap::new()),
+            note_slot: None,
         }
     }
 
@@ -208,6 +213,13 @@ impl MessageWriter {
             tool_result_rows: Mutex::new(tool_result_rows),
             ..writer
         }
+    }
+
+    /// Attach the session's `write_note` submission slot so a saved note
+    /// counts as the finished deliverable.
+    pub fn with_note_slot(mut self, slot: crate::note_tool::NoteSubmissionSlot) -> Self {
+        self.note_slot = Some(slot);
+        self
     }
 
     // =====================================================================
@@ -480,9 +492,19 @@ impl acp_client::MessageWriter for MessageWriter {
         // Inspect only the currently streamed response, never older transcript
         // rows. The ACP caller invokes this only at a completed response boundary.
         self.flush_text().await;
-        crate::session_runner::session_has_note_artifact(&self.store, &self.session_id)
-            && crate::session_runner::extract_note_content(self.current_text.lock().await.as_str())
-                .is_some()
+        if !crate::session_runner::session_has_note_artifact(&self.store, &self.session_id) {
+            return false;
+        }
+        // The tool call is the deliverable; the `---` text is the fallback.
+        if self
+            .note_slot
+            .as_ref()
+            .is_some_and(crate::note_tool::has_submission)
+        {
+            return true;
+        }
+        crate::session_runner::extract_note_content(self.current_text.lock().await.as_str())
+            .is_some()
     }
 
     async fn record_tool_call(

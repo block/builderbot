@@ -429,10 +429,12 @@ describe('held_until_cap', () => {
       'crashed',
       'app_quit',
       'remote_agent_lost',
+      'detached',
       'unknown',
     ] as const) {
       expect(isCompletedTurnReason(reason)).toBe(false);
     }
+    expect(isResumableReason('detached')).toBe(true);
     expect(isCompletedTurnReason(null)).toBe(false);
     expect(isCompletedTurnReason(undefined)).toBe(false);
   });

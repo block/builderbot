@@ -3794,6 +3794,7 @@
           session.completionReason === 'crashed' ||
           session.completionReason === 'remote_agent_lost' ||
           session.completionReason === 'app_quit' ||
+          session.completionReason === 'detached' ||
           isReconcileCancelNotice(session.status, session.errorMessage)}
         <Alert.Root class="mt-3">
           <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />

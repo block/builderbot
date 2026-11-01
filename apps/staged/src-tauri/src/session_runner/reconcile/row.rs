@@ -612,6 +612,7 @@ impl Reconciler {
                 .and_then(|dir| dir.to_str()),
             &self.store,
             turn_start_message_id,
+            None,
         );
     }
 }

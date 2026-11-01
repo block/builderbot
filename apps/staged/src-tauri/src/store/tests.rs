@@ -2223,6 +2223,7 @@ fn test_completion_reason_resumability() {
         CompletionReason::RemoteAgentLost,
         CompletionReason::RateLimited,
         CompletionReason::AppQuit,
+        CompletionReason::Detached,
     ] {
         assert!(reason.is_resumable(), "{reason:?} should be resumable");
     }

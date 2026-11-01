@@ -108,6 +108,8 @@ function endReasonMessage(
       return 'This session’s agent stopped running on its workspace.';
     case 'rate_limited':
       return rateLimitEndMessage(current);
+    case 'detached':
+      return 'Staged lost this remote session before it delivered its result.';
     case 'app_quit':
       return 'This session was interrupted when Staged closed.';
     case 'project_session_interrupted':

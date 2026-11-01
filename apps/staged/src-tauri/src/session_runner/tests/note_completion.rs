@@ -56,6 +56,7 @@ async fn finished_notes_preserve_diagram_repair_and_completion_hooks() {
             None,
             &store,
             turn,
+            None,
         );
         let (title, content, completed, commit_step, note_step) = if project_note {
             let note = store.get_project_note(&id).unwrap().unwrap();
@@ -132,6 +133,7 @@ fn completion_ingests_media_for_branch_and_project_notes() {
             None,
             &store,
             0,
+            None,
         );
         let note_content = if project_note {
             store.get_project_note(&id).unwrap().unwrap().content
@@ -222,6 +224,7 @@ fn rewriting_turn_without_a_next_steps_block_keeps_stored_steps() {
                 None,
                 &store,
                 turn,
+                None,
             );
             steps(&store)
         };
@@ -276,6 +279,7 @@ fn follow_up_turn_without_a_note_keeps_saved_media_even_when_sources_are_gone() 
             None,
             &f.store,
             turn,
+            None,
         );
         f.store.get_note(&note.id).unwrap().unwrap()
     };

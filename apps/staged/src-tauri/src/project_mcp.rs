@@ -34,8 +34,8 @@ mod wait;
 enum RepoSessionOutcome {
     /// The session should produce a "detached" note in the repository — a note that
     /// stands alone in the repo's visible timeline, not aggregated under a project note.
-    /// A note stub is created and the agent is instructed to output note content after a
-    /// horizontal rule (---).
+    /// A note stub is created and the agent is instructed to deliver the note by calling
+    /// the `write_note` tool (its assistant text is not saved).
     NoteInRepo,
     /// The session should make code changes and create a commit. A pending commit record
     /// is created and the agent is instructed to commit with a signed-off conventional
@@ -55,7 +55,9 @@ enum RepoSessionOutcome {
 
 /// Build the note stub for a `note_in_repo` / `child_note` repo-session outcome.
 ///
-/// The note is bound to the spawned repo session. When `parent_project_note_id`
+/// The stub is empty until the spawned session's `write_note` call (or, as a
+/// logged fallback, its `---`-separated final text) fills it in the
+/// post-completion hooks. The note is bound to the spawned repo session. When `parent_project_note_id`
 /// is `Some` (a `child_note` outcome with a parent project note in scope), the
 /// note is additionally attached to that parent so it is aggregated under it and
 /// excluded from the repo's visible timeline. When `None`, the note falls back to

@@ -737,6 +737,12 @@ export type CompletionReason =
   | 'remote_agent_lost'
   | 'rate_limited'
   | 'app_quit'
+  /**
+   * Staged lost a session running on a remote workspace and found no
+   * completed deliverable there. The agent may still be working on the
+   * workstation; the session is worth resuming.
+   */
+  | 'detached'
   | 'unknown';
 
 /**
@@ -750,6 +756,7 @@ export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<Completi
   'remote_agent_lost',
   'rate_limited',
   'app_quit',
+  'detached',
   'interrupted',
   'project_session_interrupted',
   'held_until_cap',

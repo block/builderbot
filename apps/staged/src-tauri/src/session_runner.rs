@@ -51,12 +51,19 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use acp_client::{AgentRunOutcome, McpServer, McpServerHttp};
+
+use crate::remote_note_outbox::{self, OutboxState};
+
+use crate::note_tool::{
+    new_submission_slot, NoteSubmission, NoteSubmissionSlot, SuggestedNextSteps,
+    NOTE_MCP_SERVER_NAME,
+};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, MessageWriter};
@@ -1772,6 +1779,16 @@ pub fn start_session(
         // Reset with `settle_reason`.
         let background_work_left = Cell::new(false);
 
+        // Where this turn's `write_note` call lands (see `note_tool`). Shared
+        // with the tool server and the message writer inside the run, and
+        // drained by the post-completion hooks after it.
+        let note_slot: NoteSubmissionSlot = new_submission_slot();
+
+        // Set when this run injected the workstation `write_note` helper: the
+        // id the helper stamps into its outbox, so the collector after the
+        // run can tell this run's note from an older one.
+        let remote_note_turn: std::cell::OnceCell<String> = std::cell::OnceCell::new();
+
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
             // The user's per-agent variables (Doctor settings → Environment
@@ -1984,6 +2001,87 @@ pub fn start_session(
                 None
             };
 
+            // Note sessions deliver their note through the `write_note` tool
+            // rather than as text after `---` (see `note_tool`). The tool is
+            // bound to this session's submission slot, which the
+            // post-completion hooks read. Locally it is served over HTTP like
+            // the other required servers; a startup failure is a local infra
+            // hiccup, so it stays non-fatal — the agent then falls back to
+            // the separator contract the hooks still parse.
+            let is_note_session = session_has_note_artifact(&store, &config.session_id);
+            let _note_tool_handle = if is_note_session && config.workspace_name.is_none() {
+                match crate::note_tool::start_note_mcp_server(
+                    config.session_id.clone(),
+                    Arc::clone(&note_slot),
+                )
+                .await
+                {
+                    Ok((port, handle)) => {
+                        log::info!(
+                            "Session {}: note MCP server started on port {port}",
+                            config.session_id
+                        );
+                        required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
+                            NOTE_MCP_SERVER_NAME,
+                            format!("http://127.0.0.1:{port}/mcp"),
+                        )));
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Session {}: failed to start note MCP server \
+                             (continuing with the `---` fallback): {e}",
+                            config.session_id
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Remote note sessions get the same tool from a stdio helper on
+            // the workstation (see `remote_note_outbox`): install it, empty
+            // this session's outbox while the laptop is still connected, and
+            // hand it to `session/new` as a stdio MCP server. The helper is
+            // what lets the note survive a laptop disconnect, but a
+            // workstation without `node` is not fatal — the agent falls
+            // back to the `---` contract the hooks still parse.
+            if let (true, Some(ws_name)) = (is_note_session, config.workspace_name.clone()) {
+                let session_id = config.session_id.clone();
+                let turn_id = uuid::Uuid::new_v4().simple().to_string();
+                let turn_for_task = turn_id.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    let exec = remote_note_outbox::workspace_exec(&ws_name);
+                    let helper = remote_note_outbox::install_helper(&exec)?;
+                    remote_note_outbox::clear_outbox(&exec, &session_id)?;
+                    Ok::<_, String>(remote_note_outbox::stdio_mcp_server(
+                        &helper,
+                        &session_id,
+                        &turn_for_task,
+                    ))
+                })
+                .await
+                .map_err(|e| format!("remote write_note helper setup task failed: {e}"))?;
+                match prepared {
+                    Ok(server) => {
+                        log::info!(
+                            "Session {}: remote write_note helper attached (turn {turn_id})",
+                            config.session_id
+                        );
+                        required_mcp_servers.push(server);
+                        let _ = remote_note_turn.set(turn_id);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Session {}: remote write_note helper unavailable \
+                             (continuing with the `---` fallback): {e}",
+                            config.session_id
+                        );
+                    }
+                }
+            }
+
             let driver = if required_mcp_servers.is_empty() {
                 driver
             } else {
@@ -1995,13 +2093,14 @@ pub fn start_session(
             let mut prompt = attachments.prompt(&config.prompt);
             let mut agent_session_id = config.agent_session_id.clone();
             let mut repair_attempts = 0;
+            let mut note_followup_attempts = 0;
             let mut include_images = true;
 
             loop {
-                let writer = Arc::new(MessageWriter::new(
-                    config.session_id.clone(),
-                    Arc::clone(&store),
-                ));
+                let writer = Arc::new(
+                    MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
+                        .with_note_slot(Arc::clone(&note_slot)),
+                );
                 let store_trait: Arc<dyn acp_client::Store> = store.clone();
                 let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
                 let images = if include_images {
@@ -2134,13 +2233,68 @@ pub fn start_session(
                     return turn_result;
                 }
 
-                match validate_latest_session_pikchr(&store, &config.session_id)? {
+                // Diagrams are checked wherever the note landed: the final
+                // assistant message (the `---` contract) and the body handed
+                // to `write_note`, which the transcript never carries.
+                let pikchr_error = match validate_latest_session_pikchr(&store, &config.session_id)?
+                {
+                    LatestAssistantPikchrValidation::Invalid(error) => Some(error),
                     LatestAssistantPikchrValidation::SkippedFinalMessage
                     | LatestAssistantPikchrValidation::NoPikchr
                     | LatestAssistantPikchrValidation::Valid => {
+                        validate_submitted_note_pikchr(&note_slot)
+                    }
+                };
+                match pikchr_error {
+                    None => {
+                        // A note session whose turn ended without a
+                        // `write_note` call (and without the `---` fallback)
+                        // gets one follow-up asking for the call before an
+                        // empty note is stored. Mirrors Buzz's stance: if it
+                        // wasn't posted, it didn't happen.
+                        if is_note_session
+                            && note_followup_attempts < NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS
+                            && !note_turn_delivered(
+                                &store,
+                                &config.session_id,
+                                turn_start_message_id,
+                                &note_slot,
+                            )
+                        {
+                            note_followup_attempts += 1;
+                            let Some(stored_id) =
+                                stored_agent_session_id(&store, &config.session_id)?
+                            else {
+                                log::warn!(
+                                    "Session {}: turn ended without a write_note call and no \
+                                     agent session id is available for a follow-up; storing \
+                                     the note as delivered",
+                                    config.session_id
+                                );
+                                return Ok(AgentRunOutcome::Completed);
+                            };
+                            log::warn!(
+                                "Session {}: turn ended without a write_note call; asking the \
+                                 agent to call it now",
+                                config.session_id
+                            );
+                            let followup = NOTE_WRITE_FOLLOWUP_PROMPT.to_string();
+                            store
+                                .add_session_message(
+                                    &config.session_id,
+                                    MessageRole::User,
+                                    &followup,
+                                )
+                                .map_err(|e| {
+                                    format!("Failed to persist write_note follow-up prompt: {e}")
+                                })?;
+                            agent_session_id = Some(stored_id);
+                            prompt = followup;
+                            continue;
+                        }
                         return Ok(AgentRunOutcome::Completed);
                     }
-                    LatestAssistantPikchrValidation::Invalid(error) => {
+                    Some(error) => {
                         if repair_attempts >= PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS {
                             return Err(format!(
                                 "Pikchr validation failed after {} repair attempts: block starting at line {}: {}",
@@ -2181,6 +2335,52 @@ pub fn start_session(
                 }
             }
         });
+
+        let mut note_submission = crate::note_tool::current_submission(&note_slot);
+
+        // A remote note session's `write_note` calls landed in the
+        // workstation outbox, not the local slot: collect it now. Skipped
+        // after a Stop — a cancelled session runs no hooks anyway.
+        let remote_outbox: Option<OutboxState> =
+            match (remote_note_turn.get(), config.workspace_name.as_deref()) {
+                (Some(turn_id), Some(ws_name))
+                    if note_submission.is_none() && !cancel_token.is_cancelled() =>
+                {
+                    let exec = remote_note_outbox::workspace_exec(ws_name);
+                    match remote_note_outbox::collect(&exec, &session_id_for_status, Some(turn_id))
+                    {
+                        Ok(state) => {
+                            match &state {
+                                OutboxState::Delivered(submission) => {
+                                    log::info!(
+                                        "Session {session_id_for_status}: collected note \"{}\" \
+                                     from the workstation outbox",
+                                        submission.title
+                                    );
+                                    note_submission = Some(submission.clone());
+                                }
+                                OutboxState::Pending => log::info!(
+                                    "Session {session_id_for_status}: workstation outbox has no \
+                                 completed write_note call"
+                                ),
+                                OutboxState::StaleTurn { found } => log::warn!(
+                                    "Session {session_id_for_status}: workstation outbox holds a \
+                                 note from another run ({found:?}); ignoring it"
+                                ),
+                            }
+                            Some(state)
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Session {session_id_for_status}: failed to collect the \
+                             workstation note outbox: {e}"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
 
         if let Err(ref e) = result {
             if config.acp_config_selection.is_some()
@@ -2252,7 +2452,9 @@ pub fn start_session(
         // detach — may still be running on the workstation, as may background
         // work a hold lost: record the row `disconnected`, with no hooks,
         // completion effects or queue drain.
-        if disconnect::run_leaves_session_disconnected(
+        let remote_note_delivered = matches!(remote_outbox, Some(OutboxState::Delivered(_)));
+        if !remote_note_delivered
+            && disconnect::run_leaves_session_disconnected(
             config.workspace_name.is_some(),
             cancel_token.is_cancelled(),
             registry.cancellation_completion_reason(&session_id_for_status)
@@ -2287,6 +2489,8 @@ pub fn start_session(
             store_for_status,
             registry,
             app_handle,
+            note_submission,
+            remote_note_delivered,
         );
     });
 
@@ -2462,6 +2666,11 @@ fn finish_disconnected_run(
 /// hooks for a turn that completed, the terminal state, the completion side
 /// effects, the terminal status event, and the queued follow-up and branch
 /// drains. `registration` is the run's registry entry, which this ends.
+///
+/// `note_submission` is the note the turn delivered through `write_note`, if
+/// any, for the post-completion hooks; `remote_note_delivered` says it came
+/// from the workstation outbox, so losing the remote agent afterwards still
+/// counts as a finished turn.
 #[allow(clippy::too_many_arguments)]
 fn finish_session_run(
     config: &SessionConfig,
@@ -2473,6 +2682,8 @@ fn finish_session_run(
     store_for_status: Arc<Store>,
     registry: Arc<SessionRegistry>,
     app_handle: AppHandle,
+    note_submission: Option<NoteSubmission>,
+    remote_note_delivered: bool,
 ) {
     let session_id_for_status = config.session_id.clone();
     let cancellation_completion_reason = registry
@@ -2534,6 +2745,17 @@ fn finish_session_run(
         Err(ref e) if cancel_requested => {
             log::info!("Session {session_id_for_status} cancelled (error during teardown: {e})");
             ("cancelled", None, cancellation_completion_reason, None)
+        }
+        // The connection to the remote agent failed, but the workstation
+        // outbox holds this run's completed note: the deliverable is
+        // intact, so the turn counts as finished. A Pikchr repair loop
+        // that gave up is excluded — that note is known-bad.
+        Err(ref e) if remote_note_delivered && !e.starts_with("Pikchr validation failed") => {
+            log::warn!(
+                "Session {session_id_for_status}: lost the remote agent after the note \
+                 was delivered ({e}); completing from the workstation outbox"
+            );
+            ("completed", None, CompletionReason::TurnComplete)
         }
         Err(ref e) => {
             log::error!("Session {session_id_for_status} failed: {e}");
@@ -2652,6 +2874,7 @@ fn finish_session_run(
         &completion_reason,
         &store_for_status,
         turn_start_message_id,
+        note_submission,
     );
 
     // The registry entry is still in place during the hooks, so a Stop
@@ -2928,31 +3151,81 @@ fn build_pikchr_correction_prompt(
     error: &crate::pikchr_validation::PikchrValidationError,
     note_format_required: bool,
 ) -> String {
-    let note_format = if note_format_required {
-        "\n\nThis session is producing a Staged note. Preserve the required final response format:\n\
-- Start with a fenced block whose opening line is exactly: ```suggested-next-steps\n\
-- Put only a JSON object in that block, with nullable string fields `suggestedNextCommitStep` and `suggestedNextNoteStep`.\n\
-- After that block, include a `---` separator on its own line.\n\
-- Start the note content immediately after `---` with a markdown H1 (`# <Title>`).\n\
-- Do not wrap the note content in code fences."
+    let (subject, delivery) = if note_format_required {
+        (
+            "The note you saved contains an invalid fenced `pikchr` code block.",
+            "Call `write_note` again with the complete corrected note (title, body, and suggested \
+next steps). The call replaces the saved note; your assistant text is not saved, so do not paste \
+the note into your reply.",
+        )
     } else {
-        ""
+        (
+            "The final assistant response contains an invalid fenced `pikchr` code block.",
+            "Return a complete corrected final response.",
+        )
     };
 
     format!(
         "<action>\n\
-The final assistant response contains an invalid fenced `pikchr` code block.\n\
+{subject}\n\
 \n\
 The Pikchr block starting at line {} failed to parse:\n\
 {}\n\
 \n\
-Return a complete corrected final response. Fix the Pikchr code so every fenced `pikchr` block parses successfully.\n\
+{delivery} Fix the Pikchr code so every fenced `pikchr` block parses successfully.\n\
 \n\
-Do not edit files, run git operations, create commits, or change repository state.\
-{note_format}\n\
+Do not edit files, run git operations, create commits, or change repository state.\n\
 </action>",
         error.line_number, error.message
     )
+}
+
+/// How many times a note session is asked to call `write_note` after a turn
+/// that delivered no note. One: a second silence stores the empty note so the
+/// session cannot loop.
+const NOTE_WRITE_FOLLOWUP_MAX_ATTEMPTS: u32 = 1;
+
+/// Follow-up prompt for a note session whose turn ended without `write_note`.
+const NOTE_WRITE_FOLLOWUP_PROMPT: &str = "<action>\n\
+Your turn ended without a `write_note` call, so no note was saved. Call the `write_note` tool now \
+with the complete note: `title` (plain text), `body` (markdown, without the title), and \
+`suggested_next_steps` (an object with nullable `suggestedNextCommitStep` and `suggestedNextNoteStep`). \
+Your assistant text is not saved — only the tool call is. Do not create commits or change files.\n\
+</action>";
+
+/// Whether the completed turn delivered its note: through `write_note` (the
+/// slot), or — the logged fallback the hooks still parse — as assistant text
+/// after a `---` separator.
+fn note_turn_delivered(
+    store: &Store,
+    session_id: &str,
+    turn_start_message_id: i64,
+    slot: &NoteSubmissionSlot,
+) -> bool {
+    if crate::note_tool::has_submission(slot) {
+        return true;
+    }
+    store
+        .get_session_messages_since(session_id, turn_start_message_id, &[])
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .any(|m| extract_note_content(&m.content).is_some())
+        })
+        .unwrap_or(false)
+}
+
+/// The first invalid `pikchr` block in the note body handed to `write_note`,
+/// if any. The transcript never sees that body, so the final-message check
+/// cannot cover it.
+fn validate_submitted_note_pikchr(
+    slot: &NoteSubmissionSlot,
+) -> Option<crate::pikchr_validation::PikchrValidationError> {
+    let submission = crate::note_tool::current_submission(slot)?;
+    crate::pikchr_validation::validate_pikchr_blocks(&submission.body)
+        .into_iter()
+        .next()
 }
 
 // =============================================================================
@@ -4576,6 +4849,10 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 ///   there is nothing to kick. Anything else ended with its owner, so
 ///   transition it to error with `AppQuit` reason and emit
 ///   `session-status-changed` so the frontend learns the outcome.
+///   A note session on a Blox workspace that is not reattached to is
+///   finalized from its workstation outbox instead
+///   ([`recover_detached_remote_note_session`]): completed when the agent
+///   got its note out, `Detached` otherwise.
 ///
 /// Only `running` rows are swept. A `queued` row carries no owner — it waits
 /// for a branch drain, and whether one is still coming depends on the
@@ -4586,6 +4863,19 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
     let reattach_handle = app_handle.clone();
     recover_dead_sessions_with(store, app_handle, |store, session, running| {
         if dead_owner_recovery(store, session) != DeadOwnerRecovery::Reattach {
+            // A remote note session's agent may well have finished after the
+            // owner died: its note waits in the workstation outbox. Collect
+            // it off this thread (a `ws exec` round trip) and finalize the
+            // row from there, instead of ending the row blind.
+            if let Some(context) = detached_remote_note_context(store, &session.id) {
+                spawn_detached_remote_note_recovery(
+                    Arc::clone(store),
+                    reattach_handle.clone(),
+                    session.id.clone(),
+                    context,
+                );
+                return true;
+            }
             return false;
         }
         let sole_turn_of_owner = is_owners_sole_turn(store, session, running);
@@ -4892,6 +5182,8 @@ fn reattach_dead_owner_session(
                     store,
                     registry,
                     app_handle,
+                    None,
+                    false,
                 )
             }
             Err(error) => {
@@ -5333,6 +5625,172 @@ fn head_before(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<S
     Ok((!sha.is_empty()).then(|| sha.to_string()))
 }
 
+/// What a detached remote note session needs for its outbox collection.
+struct DetachedRemoteNoteContext {
+    workspace_name: String,
+    branch: crate::store::Branch,
+}
+
+/// `Some` when `session_id` is a note session on a branch that runs on a Blox
+/// workspace — the only sessions whose deliverable can outlive their owner.
+fn detached_remote_note_context(
+    store: &Store,
+    session_id: &str,
+) -> Option<DetachedRemoteNoteContext> {
+    if !session_has_note_artifact(store, session_id) {
+        return None;
+    }
+    let branch_id = store.get_branch_id_for_session(session_id).ok().flatten()?;
+    let branch = store.get_branch(&branch_id).ok().flatten()?;
+    let workspace_name = branch.workspace_name.clone()?;
+    Some(DetachedRemoteNoteContext {
+        workspace_name,
+        branch,
+    })
+}
+
+/// Sessions whose detached recovery is in flight in this process, so a sweep
+/// that fires while a collection is still talking to the workstation does not
+/// start a second one.
+fn detached_recovery_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static IN_FLIGHT: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        OnceLock::new();
+    IN_FLIGHT.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn spawn_detached_remote_note_recovery(
+    store: Arc<Store>,
+    app_handle: AppHandle,
+    session_id: String,
+    context: DetachedRemoteNoteContext,
+) {
+    {
+        let mut in_flight = detached_recovery_in_flight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !in_flight.insert(session_id.clone()) {
+            return;
+        }
+    }
+    std::thread::spawn(move || {
+        recover_detached_remote_note_session(&store, &app_handle, &session_id, context);
+        detached_recovery_in_flight()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
+    });
+}
+
+/// Finalize a remote note session whose owner process died.
+///
+/// The workstation outbox decides the outcome: a `done` marker means the
+/// agent finished its `write_note` call, so the note is stored through the
+/// usual hooks and the row completes normally; anything else leaves the row
+/// `error`/[`CompletionReason::Detached`] — resumable, with the agent's work
+/// possibly still in progress on the workstation.
+fn recover_detached_remote_note_session(
+    store: &Arc<Store>,
+    app_handle: &AppHandle,
+    session_id: &str,
+    context: DetachedRemoteNoteContext,
+) {
+    let ws_name = context.workspace_name.as_str();
+    let exec = remote_note_outbox::workspace_exec(ws_name);
+    let (status, reason, error, submission) =
+        match remote_note_outbox::collect(&exec, session_id, None) {
+            Ok(OutboxState::Delivered(submission)) => {
+                log::info!(
+                    "Recovered detached remote session {session_id}: note \"{}\" found in \
+                     the workstation outbox",
+                    submission.title
+                );
+                (
+                    SessionStatus::Completed,
+                    CompletionReason::TurnComplete,
+                    None,
+                    Some(submission),
+                )
+            }
+            Ok(state) => {
+                log::info!(
+                    "Recovered detached remote session {session_id}: no completed note in \
+                     the workstation outbox ({state:?})"
+                );
+                (
+                    SessionStatus::Error,
+                    CompletionReason::Detached,
+                    Some(format!(
+                        "Staged lost this session while the agent was running on {ws_name}; \
+                         no completed note was found on the workstation."
+                    )),
+                    None,
+                )
+            }
+            Err(e) => {
+                log::warn!(
+                    "Recovered detached remote session {session_id}: could not read the \
+                     workstation outbox: {e}"
+                );
+                (
+                    SessionStatus::Error,
+                    CompletionReason::Detached,
+                    Some(format!(
+                        "Staged lost this session while the agent was running on {ws_name}, \
+                         and could not read the workstation outbox: {e}"
+                    )),
+                    None,
+                )
+            }
+        };
+
+    if let Some(submission) = submission {
+        // Media in the note resolves against the branch's remote checkout, as
+        // it does when the hooks run at the end of a live session.
+        let remote_working_dir =
+            crate::branches::resolve_branch_workspace_subpath(store, &context.branch)
+                .ok()
+                .flatten()
+                .and_then(|subpath| {
+                    crate::branches::resolve_workspace_repo_path(ws_name, &subpath).ok()
+                });
+        let working_dir = PathBuf::from(remote_working_dir.as_deref().unwrap_or("/"));
+        run_post_completion_hooks(
+            session_id,
+            &working_dir,
+            None,
+            Some(ws_name),
+            remote_working_dir.as_deref(),
+            store,
+            0,
+            Some(submission),
+        );
+    }
+
+    let transitioned = store
+        .transition_from_running(session_id, status.clone(), error.as_deref(), Some(&reason))
+        .unwrap_or(false);
+    let branch_id = Some(context.branch.id.clone());
+    let project_id = Some(context.branch.project_id.clone());
+    emit_status(
+        app_handle,
+        session_id,
+        status.as_str(),
+        error,
+        Some(&reason),
+        branch_id.clone(),
+        project_id,
+    );
+    if transitioned {
+        if let Some(branch_id) = branch_id {
+            crate::session_queue::kick(
+                app_handle,
+                &branch_id,
+                crate::session_queue::KickSource::DeadOwnerRecovered,
+            );
+        }
+    }
+}
+
 /// How often [`spawn_dead_session_sweep`] re-runs [`recover_dead_sessions`].
 const DEAD_SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -5430,11 +5888,14 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 /// - **Commits**: If a pending commit record is linked to this session and
 ///   HEAD has moved since the session started, record the new SHA.
 ///   For remote workspaces, HEAD is checked via `blox ws_exec`.
-/// - **Notes**: If a note is linked to this session, parse the last assistant
+/// - **Notes**: If a note is linked to this session, store the note the turn
+///   delivered through `write_note` (`note_submission`). When the turn made no
+///   such call, fall back — with a warning — to parsing the last assistant
 ///   message of the completed turn (messages from `turn_start_message_id`
 ///   onwards) for content after the first `---`. Earlier turns are never
 ///   re-extracted: their media sources may be gone, and re-ingesting them
 ///   would replace saved attachments with unavailable placeholders.
+#[allow(clippy::too_many_arguments)]
 fn run_post_completion_hooks(
     session_id: &str,
     working_dir: &std::path::Path,
@@ -5443,6 +5904,7 @@ fn run_post_completion_hooks(
     remote_working_dir: Option<&str>,
     store: &Arc<Store>,
     turn_start_message_id: i64,
+    note_submission: Option<NoteSubmission>,
 ) {
     detect_session_commit(
         session_id,
@@ -5493,26 +5955,54 @@ fn run_post_completion_hooks(
     .collect();
 
     if !note_targets.is_empty() {
-        // Scan this turn's assistant messages once for all note targets.
-        if let Ok(messages) =
-            store.get_session_messages_since(session_id, turn_start_message_id, &[])
-        {
-            let note_content = messages
-                .iter()
-                .rev()
-                .filter(|m| m.role == MessageRole::Assistant)
-                .find_map(|m| extract_note_content(&m.content));
+        // The turn's note and next steps, resolved once for all note targets:
+        // the `write_note` submission when the turn made the call, otherwise
+        // the legacy scan of this turn's assistant messages for text after
+        // `---` — kept as a fallback and logged when it fires.
+        let delivered = match note_submission {
+            Some(submission) => {
+                log::info!(
+                    "Session {session_id}: note delivered via write_note ({:?}): \"{}\"",
+                    submission.source,
+                    submission.title
+                );
+                Some((
+                    Some(submission.as_note_content()),
+                    submission.suggested_next_steps.clone(),
+                ))
+            }
+            None => store
+                .get_session_messages_since(session_id, turn_start_message_id, &[])
+                .ok()
+                .map(|messages| {
+                    let note_content = messages
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == MessageRole::Assistant)
+                        .find_map(|m| extract_note_content(&m.content));
+                    if note_content.is_some() {
+                        log::warn!(
+                            "Session {session_id}: no write_note call this turn; falling back \
+                             to the `---` separator parser for the note"
+                        );
+                    }
 
-            // Search assistant messages in reverse so the *last* message
-            // containing the fenced block wins (mirrors extract_note_content).
-            let suggested_next_steps = messages
-                .iter()
-                .rev()
-                .filter(|m| m.role == MessageRole::Assistant)
-                .find_map(|m| extract_suggested_next_steps(&m.content));
+                    // Search assistant messages in reverse so the *last*
+                    // message containing the fenced block wins (mirrors
+                    // extract_note_content).
+                    let suggested_next_steps = messages
+                        .iter()
+                        .rev()
+                        .filter(|m| m.role == MessageRole::Assistant)
+                        .find_map(|m| extract_suggested_next_steps(&m.content));
+                    (note_content, suggested_next_steps)
+                }),
+        };
+
+        if let Some((note_content, suggested_next_steps)) = delivered {
             if let Some(ref steps) = suggested_next_steps {
                 log::info!(
-                    "Session {session_id}: extracted suggested next steps — commit: {:?}, note: {:?}",
+                    "Session {session_id}: suggested next steps — commit: {:?}, note: {:?}",
                     steps.suggested_next_commit_step,
                     steps.suggested_next_note_step,
                 );
@@ -5628,7 +6118,11 @@ fn run_post_completion_hooks(
                     if target.is_amendment {
                         log::info!("Session {session_id}: turn did not rewrite the {label}; keeping existing content and attachments");
                     } else {
-                        log::warn!("Session {session_id}: {label} session completed but no --- found in assistant output");
+                        log::warn!(
+                            "Session {session_id}: {label} session completed without a \
+                             write_note call or a --- separator in the assistant output; \
+                             storing an empty note"
+                        );
                     }
                     let result = match target.kind {
                         NoteKind::Repo => store.mark_note_completed(&target.id),
@@ -5744,6 +6238,7 @@ fn detect_turn_artifacts(
     completion_reason: &CompletionReason,
     store: &Arc<Store>,
     turn_start_message_id: i64,
+    note_submission: Option<NoteSubmission>,
 ) {
     let remote_working_dir = config
         .remote_working_dir
@@ -5758,6 +6253,7 @@ fn detect_turn_artifacts(
             remote_working_dir,
             store,
             turn_start_message_id,
+            note_submission,
         ),
         TurnArtifactHooks::CommitOnly => detect_session_commit(
             &config.session_id,
@@ -6366,15 +6862,6 @@ fn extract_review_title(text: &str) -> Option<String> {
     }
 }
 
-/// Structured representation of the suggested next steps extracted from a
-/// `suggested-next-steps` fenced block.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SuggestedNextSteps {
-    suggested_next_commit_step: Option<String>,
-    suggested_next_note_step: Option<String>,
-}
-
 /// Extract suggested next steps from assistant output.
 ///
 /// Looks for a ```suggested-next-steps fenced block and parses the JSON object
@@ -6642,6 +7129,7 @@ mod tests {
             CompletionReason::Crashed,
             CompletionReason::RemoteAgentLost,
             CompletionReason::AppQuit,
+            CompletionReason::Detached,
             CompletionReason::Unknown,
         ] {
             assert!(
@@ -7360,13 +7848,17 @@ mod tests {
                 let prompt = build_pikchr_correction_prompt(&error, true);
                 assert!(prompt.contains("line 2"));
                 assert!(prompt.contains(&error.message));
-                assert!(prompt.contains("complete corrected final response"));
+                assert!(prompt.contains("Call `write_note` again with the complete corrected note"));
+                assert!(prompt.contains("your assistant text is not saved"));
                 assert!(prompt.contains("Do not edit files"));
                 assert!(prompt.contains("run git operations"));
                 assert!(prompt.contains("create commits"));
-                assert!(prompt.contains("```suggested-next-steps"));
-                assert!(prompt.contains("`---` separator"));
-                assert!(prompt.contains("# <Title>"));
+                assert!(!prompt.contains("```suggested-next-steps"));
+                assert!(!prompt.contains("`---` separator"));
+
+                let response_prompt = build_pikchr_correction_prompt(&error, false);
+                assert!(response_prompt.contains("complete corrected final response"));
+                assert!(!response_prompt.contains("write_note"));
             }
             other => panic!("expected invalid Pikchr, got {other:?}"),
         }
@@ -9568,6 +10060,7 @@ mod tests {
             None,
             &fixture.store,
             0,
+            None,
         );
 
         assert_reassociated(&fixture);
@@ -9668,6 +10161,7 @@ mod tests {
             None,
             &fixture.store,
             0,
+            None,
         );
     }
 
@@ -9760,6 +10254,7 @@ mod tests {
             None,
             &fixture.store,
             0,
+            None,
         );
 
         let store = &fixture.store;
@@ -9808,6 +10303,7 @@ mod tests {
             None,
             &fixture.store,
             0,
+            None,
         );
 
         assert_untouched(&fixture);
@@ -10042,6 +10538,7 @@ Solid changes with minor nit
             None,
             &store,
             0,
+            None,
         );
 
         let review = store.get_review(&review_id).unwrap().unwrap();
@@ -10072,6 +10569,7 @@ Solid changes with minor nit
             None,
             &store,
             0,
+            None,
         );
 
         let review = store.get_review(&review_id).unwrap().unwrap();
@@ -10094,6 +10592,7 @@ Solid changes with minor nit
             None,
             &store,
             0,
+            None,
         );
 
         let review = store.get_review(&review_id).unwrap().unwrap();

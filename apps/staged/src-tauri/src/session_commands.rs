@@ -426,6 +426,42 @@ fn background_hold_from_overrides(
     Some(config)
 }
 
+/// How a note session hands its note back: the `write_note` MCP tool. Shared by
+/// every note-producing prompt (branch note, project session, note follow-up)
+/// so the contract is stated once. The tool is served over HTTP locally and by
+/// a stdio helper on Blox; the agent sees the same tool either way.
+///
+/// The `---` separator contract this replaces is still parsed by the
+/// post-completion hooks as a logged fallback, but prompts no longer mention
+/// it: an agent that writes the note into its reply produces nothing the user
+/// sees unless that fallback fires.
+pub(crate) fn note_delivery_guidance() -> &'static str {
+    "To deliver the note, call the `write_note` tool. The call is the deliverable: Staged saves \
+exactly what you pass to it and nothing else. Your assistant text is not saved and is not shown \
+with the note, so do not write the note into your reply. Pass the complete note on every call \
+(calling again replaces the saved note; the last call of the turn wins):\n\
+- `title`: a plain-text title (no markdown, no leading `#`).\n\
+- `body`: the full note in markdown, without the title. Do not wrap it in code fences.\n\
+- `suggested_next_steps`: an object with two nullable string fields, `suggestedNextCommitStep` \
+and `suggestedNextNoteStep`, suggesting what the user might want to do next.\n\
+\n\
+Guidelines for suggested next steps:\n\
+- Keep suggestions very concise (a few words). They are shown alongside the note title, so you \
+can assume the user has already read the title for context. Do NOT repeat information from the \
+title.\n\
+- If the note is a plan, suggest a commit to implement it: \
+{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}\n\
+- If the note is a plan with multiple options, pick the best option: \
+{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}\n\
+- If the note is bug research, suggest both a fix and a deeper plan: \
+{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}\n\
+- If the note is pure research or informational with no clear next action: \
+{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}\n\
+\n\
+Once the tool reports the note is saved, end your turn without repeating the note. If the turn \
+ends without a `write_note` call, no note is saved."
+}
+
 fn note_media_guidance() -> &'static str {
     "Staged notes can embed images and videos. Use standard image syntax with an absolute path on this machine: \
 `![Short caption](/absolute/path/to/file.png)`. Supported: png, jpg, jpeg, gif, webp (up to 10 MB) and \
@@ -476,6 +512,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, pikchr_tools_available);
     let media_guidance = note_media_guidance();
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
+    let delivery_guidance = note_delivery_guidance();
 
     format!(
         "<action>\n\
@@ -487,25 +524,7 @@ Use the existing conversation context. Do not create commits.\n\
 \n\
 {standalone_guidance}\n\
 \n\
-Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:\n\
-\n\
-```suggested-next-steps\n\
-{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
-```\n\
-\n\
----\n\
-# <Title>\n\
-<Body>\n\
-\n\
-Formatting requirements:\n\
-- The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps\n\
-- The closing fence line must be exactly: ```\n\
-- Put only a JSON object inside the suggested-next-steps block.\n\
-- Include both nullable string fields: suggestedNextCommitStep and suggestedNextNoteStep.\n\
-- Keep suggested next steps concise; use null when there is no clear next action.\n\
-- The `---` separator must be on its own line.\n\
-- The note content must start immediately after `---` with a markdown H1.\n\
-- Do not wrap the note in code fences.\n\
+{delivery_guidance}\n\
 </action>\n\
 \n\
 {visible_request}"
@@ -4765,6 +4784,7 @@ repository edits directly here; use `start_repo_session` for implementation work
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, true);
     let media_guidance = note_media_guidance();
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
+    let delivery_guidance = note_delivery_guidance();
 
     format!(
         "The user is requesting work at the project level. Investigate and \
@@ -4790,8 +4810,7 @@ When you delegate work via `start_repo_session`, organize the end of the note in
 that group the delegated work — for example `## Research`, `## Plans`, or `## Collected logs` — \
 and reference each spawned child note using the hashtag form `#note:<id>`, where `<id>` is the \
 `artifact.id` returned by `start_repo_session`.\n\n\
-To return the note, include a horizontal rule (---) followed by the note content. \
-Begin the note with a markdown H1 heading as the title.\n\n"
+{delivery_guidance}\n\n"
     )
 }
 
@@ -8423,42 +8442,7 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.",
             NOTE_STANDALONE_OUTPUT_GUIDANCE.trim(),
-            "To return the note, your final response must include the structure shown below. \
-Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
-what the user might want to do next. The block must contain a single JSON object with \
-two nullable string fields:
-
-```suggested-next-steps
-{\"suggestedNextCommitStep\": \"Fix the null pointer bug in parser.rs\", \"suggestedNextNoteStep\": \"Make a plan to fix the null pointer bug\"}
-```
-
-Guidelines for suggested next steps:
-- Keep suggestions very concise (a few words). They are shown alongside the note title, \
-so you can assume the user has already read the title for context. \
-Do NOT repeat information from the title.
-- If the note is a plan, suggest a commit to implement it: \
-{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}
-- If the note is a plan with multiple options, pick the best option: \
-{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}
-- If the note is bug research, suggest both a fix and a deeper plan: \
-{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}
-- If the note is pure research or informational with no clear next action: \
-{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}
-
-Then, after the suggested-next-steps block, include the note itself:
-
----
-# <Title>
-<Body>
-
-Formatting requirements:
-- The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps
-- The closing fence line must be exactly: ```
-- Put only the JSON object inside the suggested-next-steps block (no prose or markdown).
-- Do not wrap the block in any additional code fences.
-- `---` must be on its own line, with a newline immediately before and after it.
-- The note content must start immediately after `---` with a markdown H1 (`# Title`).
-- Do not wrap the note in code fences.",
+            note_delivery_guidance(),
         ]
         .join("\n\n"),
         BranchSessionType::Commit => {
@@ -14421,7 +14405,50 @@ mod tests {
         );
 
         assert_note_standalone_output_guidance(&prompt);
-        assert!(prompt.contains("The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps"));
+        assert_note_delivery_guidance(&prompt);
+    }
+
+    /// Every note-producing prompt instructs the `write_note` call and says
+    /// assistant text is not saved; none of them mention the `---` contract.
+    fn assert_note_delivery_guidance(prompt: &str) {
+        assert!(prompt.contains("call the `write_note` tool"), "{prompt}");
+        assert!(
+            prompt.contains("Your assistant text is not saved"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("suggestedNextCommitStep"), "{prompt}");
+        assert!(prompt.contains("`suggested_next_steps`"), "{prompt}");
+        assert!(!prompt.contains("```suggested-next-steps"), "{prompt}");
+        assert!(!prompt.contains("horizontal rule"), "{prompt}");
+        assert!(!prompt.contains("\n---\n"), "{prompt}");
+    }
+
+    #[test]
+    fn project_session_prompt_delivers_the_note_through_write_note() {
+        for is_remote in [false, true] {
+            let prompt = build_project_session_action_instructions_with_pikchr_reference(
+                is_remote,
+                "https://example.invalid/grammar.md",
+            );
+            assert_note_delivery_guidance(&prompt);
+        }
+    }
+
+    #[test]
+    fn note_followup_prompt_delivers_the_note_through_write_note() {
+        for has_parsed_note in [false, true] {
+            let prompt = build_note_followup_message_with_pikchr_reference(
+                has_parsed_note,
+                "https://example.invalid/grammar.md",
+                true,
+            );
+            assert_note_delivery_guidance(&prompt);
+            assert!(prompt.ends_with(if has_parsed_note {
+                "Please update the note to reflect the latest chat."
+            } else {
+                "Please write the note for this session."
+            }));
+        }
     }
 
     #[test]

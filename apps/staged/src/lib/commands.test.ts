@@ -893,6 +893,28 @@ describe('persisted branch timelines (desktop)', () => {
     expect(next.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v2'));
   });
 
+  it('refetches a seeded entry even when its fetchedAt is within TIMELINE_FRESH_MS', async () => {
+    const commands0 = await launch();
+    await commands0.listBranchesForProject('p1');
+    await commands0.getBranchTimeline('b1');
+    backend.timelines = { b1: timeline('b1-v2'), b2: timeline('b2-v1') };
+
+    // Relaunch with the clock untouched: the seeded entry's fetchedAt is "now".
+    const commands = await launch();
+    const { cached, fresh } = commands.getBranchTimelineWithRevalidation('b1');
+    expect(cached).toEqual(timeline('b1-v1'));
+    expect(fresh).not.toBeNull();
+    await expect(fresh).resolves.toEqual(timeline('b1-v2'));
+    expect(timelineCalls()).toEqual([['get_branch_timeline', { branchId: 'b1' }]]);
+
+    // Once this launch's result is in, it is fresh and nothing more is fetched.
+    expect(commands.getBranchTimelineWithRevalidation('b1')).toEqual({
+      cached: timeline('b1-v2'),
+      fresh: null,
+    });
+    expect(timelineCalls()).toHaveLength(1);
+  });
+
   it('misses as before when nothing is persisted, then persists the result', async () => {
     const commands = await launch();
     await commands.listBranchesForProject('p1');

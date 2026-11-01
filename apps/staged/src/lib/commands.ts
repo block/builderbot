@@ -909,7 +909,11 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
   if (!entry) {
     return { cached: null, fresh: getBranchTimeline(branchId) };
   }
-  const isFresh = Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
+  // A seeded entry is never fresh, whatever its fetchedAt says: it is a
+  // previous launch's timeline, and the backend map that would otherwise
+  // refresh it is per process, so the paint must always come with a refetch.
+  const isFresh =
+    Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS && !isSeededTimeline(branchId, entry);
   return {
     cached: entry.timeline,
     fresh: isFresh ? null : getBranchTimeline(branchId, { force: true }),

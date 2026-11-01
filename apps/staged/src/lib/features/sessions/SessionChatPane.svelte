@@ -1399,9 +1399,10 @@
   /**
    * Actually send a message to the backend and start the agent. Resolves
    * `true` once the backend accepted the message (even if the pane has moved
-   * to another session since), `false` when nothing was sent: the guard
-   * refused, or the resume failed — in which case `error` says why and the
-   * caller decides whether to restore its draft.
+   * to another session since), `false` when nothing was sent, and the caller
+   * decides whether to restore its draft. `error` says why on `false` in
+   * every case but one: when another send already holds `sending`, nothing is
+   * written, since the spinner already explains the wait.
    */
   async function sendMessage(
     text: string,
@@ -1411,9 +1412,13 @@
   ): Promise<boolean> {
     const targetSessionId = target?.sessionId ?? session?.id;
     const targetBranchId = target ? target.branchId : (branchId ?? null);
-    if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) {
+    if (!targetSessionId || session?.id !== targetSessionId) {
+      // Reachable from Cmd+Enter while the session is still loading, or when
+      // the pane moved on before a targeted send ran.
+      error = 'No session to send to yet; try again in a moment.';
       return false;
     }
+    if (!sendingLocked && sending) return false;
     if (!sendingLocked) sending = true;
     error = null;
     const acpConfigSelection: AcpConfigSelection | undefined =

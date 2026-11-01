@@ -90,6 +90,8 @@ const completedNote: ProjectNote = {
   suggestedNextNoteStep: null,
   sessionStatus: 'completed',
   completionReason: null,
+  lastChatMessageAt: null,
+  chatReadAt: null,
 };
 
 const REF = `#project-note:${completedNote.id}`;

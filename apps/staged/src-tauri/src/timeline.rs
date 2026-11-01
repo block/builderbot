@@ -82,6 +82,39 @@ fn remember_git_user_identity(cache_key: &str, read: Option<GitUserIdentity>) ->
         })
 }
 
+/// What the local arm takes from its one config read: the branch on origin
+/// to compare against and the identity to mark the user's commits with.
+///
+/// A successful read is authoritative, an empty one included — a repo with no
+/// `user.*` set has no own commits to mark, and the remembered identity is
+/// replaced. A failed read (an unreadable config file, a killed child: git's
+/// silent "no match" is a successful empty read, not a failure) falls back to
+/// the branch's own name — the answer for a branch with no upstream — and to
+/// the identity the last successful build remembered, which it leaves in
+/// place.
+fn local_identity_and_remote_branch(
+    cache_key: &str,
+    branch_name: &str,
+    base_branch: &str,
+    config: Result<git::BranchConfigSnapshot, git::GitError>,
+) -> (String, GitUserIdentity) {
+    let config = config
+        .map_err(|e| log::warn!("[timeline] config read failed for {cache_key}: {e}"))
+        .ok();
+    let remote_branch = config
+        .as_ref()
+        .map(|config| config.upstream_branch_name(branch_name, base_branch))
+        .unwrap_or_else(|| branch_name.to_string());
+    let identity = remember_git_user_identity(
+        cache_key,
+        config.map(|config| GitUserIdentity {
+            name: config.user_name,
+            email: config.user_email,
+        }),
+    );
+    (remote_branch, identity)
+}
+
 /// Extract the GitHub username from a noreply email address.
 /// Matches both `<username>@users.noreply.github.com` and
 /// `<id>+<username>@users.noreply.github.com`.
@@ -377,28 +410,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
             // One `git config` read covers the branch's upstream entries and
-            // the user identity. If it fails, the upstream is the branch's
-            // own name — the answer for a branch with no upstream — and the
-            // identity is whatever the last build read.
-            let config = git::read_branch_config_snapshot(worktree_path, &branch.branch_name)
-                .map_err(|e| {
-                    log::warn!(
-                        "[timeline] config read failed for {}: {e}",
-                        worktree_path.display()
-                    );
-                })
-                .ok();
-            let remote_branch = config
-                .as_ref()
-                .map(|config| config.upstream_branch_name(&branch.branch_name, &branch.base_branch))
-                .unwrap_or_else(|| branch.branch_name.clone());
-            identity = remember_git_user_identity(
+            // the user identity; `local_identity_and_remote_branch` says what
+            // a failed read falls back to.
+            let (remote_branch, read_identity) = local_identity_and_remote_branch(
                 &format!("local:{}", wd.path),
-                config.map(|config| GitUserIdentity {
-                    name: config.user_name,
-                    email: config.user_email,
-                }),
+                &branch.branch_name,
+                &branch.base_branch,
+                git::read_branch_config_snapshot(worktree_path, &branch.branch_name),
             );
+            identity = read_identity;
 
             // Foreground: `Indexed` skips the untracked-file walk and lite-env
             // skips the per-project `$SHELL -ils` capture. A captured-env
@@ -2255,6 +2275,56 @@ mod tests {
         );
         assert!(cleared.name.is_none());
         assert!(remember_git_user_identity(&key, None).name.is_none());
+    }
+
+    /// A config read that fails outright — git complaining on stderr, not its
+    /// silent "no match" — keeps the identity the last build read and
+    /// compares against the branch's own name. Only a successful read may
+    /// replace the remembered identity, and a successful empty read does.
+    #[test]
+    fn failed_config_read_keeps_the_remembered_identity_and_the_local_name() {
+        let key = format!("test:{}", Uuid::new_v4());
+        let (remote_branch, identity) = local_identity_and_remote_branch(
+            &key,
+            "feature-x-2",
+            "main",
+            Ok(git::BranchConfigSnapshot {
+                upstream_remote: Some("origin".into()),
+                upstream_merge: Some("refs/heads/feature-x".into()),
+                user_name: Some("Matt".into()),
+                user_email: Some("matt@example.com".into()),
+            }),
+        );
+        assert_eq!(remote_branch, "feature-x");
+        assert_eq!(identity.name.as_deref(), Some("Matt"));
+        assert_eq!(identity.email.as_deref(), Some("matt@example.com"));
+
+        let (remote_branch, identity) = local_identity_and_remote_branch(
+            &key,
+            "feature-x-2",
+            "main",
+            Err(git::GitError::CommandFailed(
+                "fatal: bad config line 1 in file .git/config\n".into(),
+            )),
+        );
+        assert_eq!(remote_branch, "feature-x-2");
+        assert_eq!(identity.name.as_deref(), Some("Matt"));
+        assert_eq!(identity.email.as_deref(), Some("matt@example.com"));
+        // The cache was left as it was, not overwritten with an empty identity.
+        assert_eq!(
+            remember_git_user_identity(&key, None).email.as_deref(),
+            Some("matt@example.com")
+        );
+
+        let (remote_branch, identity) = local_identity_and_remote_branch(
+            &key,
+            "feature-x-2",
+            "main",
+            Ok(git::BranchConfigSnapshot::default()),
+        );
+        assert_eq!(remote_branch, "feature-x-2");
+        assert!(identity.name.is_none() && identity.email.is_none());
+        assert!(remember_git_user_identity(&key, None).email.is_none());
     }
 
     // ── timeline ordering across a rebase ───────────────────────────────

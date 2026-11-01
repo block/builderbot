@@ -452,6 +452,61 @@ fn diverged_build_asks_git_for_the_upstream_merge_base() {
     assert!(calls.contains(&"merge-base HEAD origin/feature".to_string()));
 }
 
+/// A failed upstream count leaves nothing to derive the upstream merge base
+/// from, so the build spends one more spawn asking git for it; the counts
+/// themselves read as zero, as they always have.
+#[test]
+fn failed_upstream_count_asks_git_for_the_upstream_merge_base() {
+    let (_origin, clone) = remote_backed_feature();
+    let upstream_tip = run_git(&clone.path, &["rev-parse", "origin/feature"])
+        .trim()
+        .to_string();
+    fs::write(clone.path.join("local.txt"), "local\n").unwrap();
+    run_git(&clone.path, &["add", "."]);
+    run_git(&clone.path, &["commit", "-m", "local"]);
+
+    let calls = Mutex::new(Vec::new());
+    let (state, fork_point) = compute_branch_git_state_with(
+        &format!("local:{}:feature:main:failed-count", clone.path.display()),
+        |args| {
+            calls.lock().unwrap().push(args.join(" "));
+            if args.starts_with(&["rev-list", "--left-right"]) {
+                return Err("fatal: bad revision 'HEAD...origin/feature'".to_string());
+            }
+            super::cli::run(&clone.path, args).map_err(|e| e.to_string())
+        },
+        BranchGitStateQuery {
+            branch_name: "feature",
+            remote_branch: "feature",
+            base_branch: "main",
+            fetch_mode: FetchMode::Never,
+            worktree_scope: WorktreeStatusScope::Full,
+        },
+        |merge_base| merge_base.map(str::to_string),
+    );
+    let calls = calls.into_inner().unwrap();
+
+    assert!(state.upstream.exists);
+    assert_eq!(
+        state.upstream.merge_base_sha.as_deref(),
+        Some(upstream_tip.as_str())
+    );
+    assert_eq!((state.upstream.ahead, state.upstream.behind), (0, 0));
+    assert!(fork_point.is_some());
+    assert!(
+        calls.contains(&"merge-base HEAD origin/feature".to_string()),
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("merge-base"))
+            .count(),
+        2,
+        "{calls:?}"
+    );
+}
+
 /// Ahead of and behind the upstream derive the merge base from the counts
 /// too: the upstream tip and HEAD respectively.
 #[test]

@@ -524,12 +524,23 @@ const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 const MAX_SNAPSHOT_TIMELINES = 40;
 
 /**
- * Cap on timelines kept in IndexedDB across launches. Each is a few KB to a
- * few tens of KB; the boot seed reads them all in one request, so the cap
- * bounds both the store and the time to first cached paint. Oldest fetched
- * go first, and every card view refetches, so this is "least recently viewed".
+ * Cap on timelines kept in IndexedDB across launches, on both platforms. Each
+ * is a few KB to a few tens of KB; the desktop boot seed reads them all in one
+ * request, so the cap bounds both the store and the time to first cached
+ * paint, and on the web it bounds a store that previously grew until the
+ * seven-day sweep. Oldest fetched go first, and every card view refetches, so
+ * this is "least recently viewed": a web card beyond the cap misses IndexedDB
+ * and fetches, exactly as it did before anything was persisted for it.
  */
 const MAX_PERSISTED_TIMELINES = 200;
+
+/**
+ * Oldest persisted timeline the desktop boot seed will paint. Older entries
+ * are dropped at boot instead: the card would refetch anyway, and a day-old
+ * commit list is more misleading than "Looking for changes…" for the second
+ * or two the rebuild takes.
+ */
+const MAX_SEED_AGE_MS = 24 * 60 * 60 * 1000;
 
 type TimelineCacheEntry = { timeline: BranchTimeline; fetchedAt: number };
 
@@ -544,6 +555,13 @@ type TimelineCacheEntry = { timeline: BranchTimeline; fetchedAt: number };
 // the authority, observed as they arrive. A seeded entry keeps its original
 // `fetchedAt`, so `getBranchTimelineWithRevalidation` reads it as stale and
 // issues the one forced refetch that overwrites it.
+//
+// A seeded entry is a paint, never an answer: while it is still the seeded
+// one, a plain `getBranchTimeline` read treats it as a miss (joining the
+// card's refetch when one is in flight), so no caller resolves with a
+// previous launch's timeline. Entries older than `MAX_SEED_AGE_MS` are not
+// seeded at all. The web's localStorage snapshot is a separate, older
+// mechanism and is not covered by either rule.
 // -----------------------------------------------------------------------------
 
 type TimelineScopeBranch = Pick<
@@ -657,16 +675,18 @@ function noteProjectBranches(
  *
  * An entry is skipped when a fetch for its branch is already in memory or in
  * flight (the seed lost the race to a card and must not roll a fresher
- * timeline back), when its identity has already been contradicted by a list,
- * or when it carries no identity at all.
+ * timeline back). It is skipped and removed when its identity has already
+ * been contradicted by a list, when it carries no identity at all, or when it
+ * is older than `MAX_SEED_AGE_MS`.
  */
 async function seedTimelineCacheFromIndexedDb(): Promise<void> {
   if (!isTauri) return;
   const entries = await readCachedEntries<BranchTimeline>('get_branch_timeline');
+  const now = Date.now();
   for (const { args, data, fetchedAt, scope } of entries) {
     const branchId = args?.branchId;
     if (typeof branchId !== 'string') continue;
-    if (!scope || !isSeedScopeValid(branchId, scope)) {
+    if (!scope || !isSeedScopeValid(branchId, scope) || now - fetchedAt > MAX_SEED_AGE_MS) {
       void invalidateCache('get_branch_timeline', { branchId });
       continue;
     }
@@ -811,13 +831,28 @@ interface GetBranchTimelineOptions {
   force?: boolean;
 }
 
+/**
+ * Whether `entry` is still the one the desktop boot seed placed for
+ * `branchId`: a previous launch's timeline, kept only to paint while this
+ * launch's refetch runs. False once any fetch has replaced it.
+ */
+function isSeededTimeline(branchId: string, entry: TimelineCacheEntry | undefined): boolean {
+  return entry !== undefined && seededTimelines.get(branchId)?.entry === entry;
+}
+
 export function getBranchTimeline(
   branchId: string,
   { force = false }: GetBranchTimelineOptions = {}
 ): Promise<BranchTimeline> {
+  // A seeded entry is a miss for a plain read: `getBranchTimelineWithRevalidation`
+  // paints it, but a caller that wants the timeline (hashtag items, the diff
+  // session launcher) must not resolve with a previous launch's. It joins the
+  // card's forced refetch when one is in flight, and otherwise bypasses the
+  // IndexedDB read, which holds the very entry being skipped.
+  const seeded = isSeededTimeline(branchId, timelineCache.get(branchId));
   if (!force) {
     const cached = timelineCache.get(branchId);
-    if (cached) {
+    if (cached && !seeded) {
       return Promise.resolve(cached.timeline);
     }
 
@@ -840,7 +875,7 @@ export function getBranchTimeline(
       { branchId },
       {
         ttl: TIMELINE_CACHE_TTL,
-        bypassRead: force,
+        bypassRead: force || seeded,
         maxEntries: MAX_PERSISTED_TIMELINES,
         // Before the first branch list of a launch, the refetch of a seeded
         // entry inherits the identity it was persisted under; a list that

@@ -39,6 +39,37 @@ pub fn run_lite(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     run_with_env(repo, args, EnvSource::Lite)
 }
 
+/// What a git run that got as far as exiting left behind, for callers that
+/// read meaning into a particular non-zero exit (`git config --get-regexp`
+/// exits 1 when nothing matches, which is an answer, not a failure).
+///
+/// `code` is `None` when the child was killed by a signal. `stderr` is
+/// decoded lossily; `stdout` must be UTF-8, as for [`run`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitOutput {
+    pub success: bool,
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// [`run_lite`] without the success check: a non-zero exit is returned as a
+/// [`GitOutput`] for the caller to interpret. A git that cannot be spawned, a
+/// path that is not a repository, and non-UTF-8 stdout are still errors.
+pub fn run_lite_output(repo: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
+    let output = spawn_git(repo, args, EnvSource::Lite)?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if !output.status.success() && stderr.contains("not a git repository") {
+        return Err(GitError::NotARepo(repo.display().to_string()));
+    }
+    Ok(GitOutput {
+        success: output.status.success(),
+        code: output.status.code(),
+        stdout: String::from_utf8(output.stdout).map_err(|_| GitError::InvalidUtf8)?,
+        stderr,
+    })
+}
+
 /// Fast-path variant of [`run`] for foreground first-paint reads.
 ///
 /// Tries the lite env first (parent env minus `GIT_*`), which avoids blocking
@@ -92,7 +123,14 @@ pub enum EnvSource {
     Captured,
 }
 
-fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String, GitError> {
+/// Spawn `git -C <repo> <args>` with `source`'s env, non-interactive and
+/// detached from the controlling TTY, and wait for it. Only failing to run
+/// git at all is an error here; the exit status is the caller's to read.
+fn spawn_git(
+    repo: &Path,
+    args: &[&str],
+    source: EnvSource,
+) -> Result<std::process::Output, GitError> {
     let repo_str = repo
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(repo.display().to_string()))?;
@@ -103,13 +141,17 @@ fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String,
     force_non_interactive(&mut command);
     detach_from_ctty(&mut command);
 
-    let output = command.output().map_err(|e| {
+    command.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             GitError::GitNotFound
         } else {
             GitError::CommandFailed(e.to_string())
         }
-    })?;
+    })
+}
+
+fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String, GitError> {
+    let output = spawn_git(repo, args, source)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -383,5 +425,40 @@ mod tests {
             .and_then(|(_, v)| v)
             .expect("GIT_SSH_COMMAND should still be set");
         assert_eq!(ssh, "/usr/local/bin/my-ssh-wrapper");
+    }
+
+    /// `run_lite_output` hands back the exit status instead of judging it:
+    /// a no-match `git config --get-regexp` is exit 1 with nothing on stderr,
+    /// a successful one is exit 0 with the entries, and a non-repo path is
+    /// still the error every runner reports.
+    #[test]
+    fn run_lite_output_reports_the_exit_status() {
+        let repo = TempGitRepo::new();
+        let hit = run_lite_output(
+            repo.path(),
+            &["config", "--local", "--get-regexp", "^user\\.name$"],
+        )
+        .expect("git ran");
+        assert!(hit.success);
+        assert_eq!(hit.code, Some(0));
+        assert_eq!(hit.stdout.trim(), "user.name Test");
+        assert!(hit.stderr.is_empty());
+
+        let miss = run_lite_output(
+            repo.path(),
+            &["config", "--get-regexp", "^staged\\.no-such-key\\."],
+        )
+        .expect("git ran");
+        assert!(!miss.success);
+        assert_eq!(miss.code, Some(1));
+        assert!(miss.stdout.is_empty());
+        assert!(miss.stderr.trim().is_empty(), "{:?}", miss.stderr);
+
+        // `git config` reads the global config happily outside any repo, so
+        // the non-repo shape needs a command that looks for one.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = run_lite_output(tmp.path(), &["status"])
+            .expect_err("a non-repo path is an error, not an exit status");
+        assert!(matches!(err, GitError::NotARepo(_)), "{err:?}");
     }
 }

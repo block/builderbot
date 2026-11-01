@@ -1842,6 +1842,113 @@ mod tests {
         assert!(snapshot.state.head_sha.is_none());
     }
 
+    /// The fetch cache already knows the branch is not on origin: the script
+    /// is told to skip the upstream (`upstream_missing`), and the identity
+    /// and commit log still ride along in the same round trip.
+    #[test]
+    fn batched_snapshot_with_a_known_missing_upstream_still_carries_the_log() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        let base = repo.commit("base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base]);
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("file.txt", "base\none\n");
+        let first = repo.commit("feat: one");
+        repo.write_file("file.txt", "base\none\ntwo\n");
+        let second = repo.commit("feat: two");
+        // origin/feature does exist here, so only the cached verdict can
+        // make the script leave it alone.
+        repo.run_git(&["update-ref", "refs/remotes/origin/feature", &second]);
+        let repo_str = repo.path().to_str().unwrap();
+
+        let key = format!("{repo_str}#feature#known-missing");
+        fetch_cache().lock().unwrap().insert(
+            key.clone(),
+            FetchCacheEntry {
+                fetched_at: now_ms(),
+                upstream_known_missing: true,
+            },
+        );
+        let snapshot = compute_branch_git_snapshot_batched(
+            &key,
+            run_batch_script_locally,
+            repo_str,
+            "feature",
+            "main",
+            FetchMode::Never,
+            WorktreeStatusScope::Full,
+        );
+        assert!(!snapshot.state.upstream.exists);
+        assert!(snapshot.state.upstream.sha.is_none());
+        assert!(matches!(
+            snapshot.state.upstream.relation,
+            UpstreamRelation::Missing
+        ));
+        assert!(matches!(snapshot.state.fetch.status, FetchStatus::Fresh));
+        assert_eq!(snapshot.user_name.as_deref(), Some("Test"));
+        assert_eq!(snapshot.user_email.as_deref(), Some("test@example.com"));
+        assert_eq!(
+            log_shas(&snapshot.commit_lines.unwrap()),
+            vec![second.clone(), first.clone()]
+        );
+        assert_eq!(snapshot.state.base.sha.as_deref(), Some(base.as_str()));
+        assert_eq!(snapshot.state.head_sha.as_deref(), Some(second.as_str()));
+        assert_eq!(snapshot.state.base.commits_since_fork, 0);
+
+        // Without the cached verdict the same repo reads its upstream.
+        let plain = batched_snapshot(repo.path(), "feature");
+        assert!(plain.state.upstream.exists);
+        assert!(matches!(
+            plain.state.upstream.relation,
+            UpstreamRelation::InSync
+        ));
+        assert_eq!(log_shas(&plain.commit_lines.unwrap()), vec![second, first]);
+    }
+
+    /// The upstream merge base is derived from the `rev-list` counts; when
+    /// that count fails there is nothing to derive it from, so the counts
+    /// read as zero and git is asked for the merge base — `None` when it
+    /// cannot answer that either.
+    #[test]
+    fn failed_upstream_counts_fall_back_to_a_merge_base_spawn() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let failing_counts = |args: &[&str]| -> Result<String, String> {
+            calls.lock().unwrap().push(args.join(" "));
+            match args[0] {
+                "rev-list" => Err("fatal: bad revision 'HEAD...origin/feature'".to_string()),
+                "merge-base" => Ok("3333\n".to_string()),
+                other => panic!("unexpected git {other}"),
+            }
+        };
+        assert_eq!(
+            upstream_counts_and_merge_base(&failing_counts, "origin/feature", "2222", "1111"),
+            (0, 0, Some("3333".to_string()))
+        );
+        assert_eq!(
+            calls.into_inner().unwrap(),
+            vec![
+                "rev-list --left-right --count HEAD...origin/feature",
+                "merge-base HEAD origin/feature"
+            ]
+        );
+
+        let nothing_works = |_: &[&str]| -> Result<String, String> { Err("boom".to_string()) };
+        assert_eq!(
+            upstream_counts_and_merge_base(&nothing_works, "origin/feature", "2222", "1111"),
+            (0, 0, None)
+        );
+
+        // For contrast, a count that settles the relation needs no second spawn.
+        let behind = |args: &[&str]| -> Result<String, String> {
+            assert_eq!(args[0], "rev-list", "{args:?}");
+            Ok("0\t2\n".to_string())
+        };
+        assert_eq!(
+            upstream_counts_and_merge_base(&behind, "origin/feature", "2222", "1111"),
+            (0, 2, Some("1111".to_string()))
+        );
+    }
+
     const FULL_SNAPSHOT_OUTPUT: &str = "UP_REMOTE=origin\nUP_MERGE=refs/heads/feature\nHEAD=1111\nBRANCH=feature\nSTATUS_START\n M file.txt\nSTATUS_END\nUP_SHA=2222\nUP_COUNTS=1\t2\nUP_MB=3333\nUP_BEHIND_BASE=4\nBASE_SHA=5555\nBASE_MB=3333\nBASE_BEHIND=6\nUSER_NAME=Matt Toohey\nUSER_EMAIL=matt@example.com\nLOG_OK=true\nLOG_START\n1111\x1f1111\x1fMatt\x1fmatt@example.com\x1f10\x1f9\x1fUSER_NAME=not a key\n\n0aaa\x1f0aaa\x1fMatt\x1fmatt@example.com\x1f8\x1f7\x1fSTATUS_END\n";
 
     #[test]

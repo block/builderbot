@@ -959,6 +959,54 @@ describe('persisted branch timelines (desktop)', () => {
     expect(commands.getBranchTimelineWithRevalidation('b2').cached).toBeNull();
   });
 
+  it('treats a seeded entry as a miss for plain reads, which join the card refetch', async () => {
+    await firstSession();
+    backend.timelines = { b1: timeline('b1-v2'), b2: timeline('b2-v2') };
+
+    const commands = await launch();
+    // A non-card caller (hashtag items, the diff session launcher) asks plainly:
+    // it gets this launch's timeline, never the persisted one, from one fetch.
+    await expect(commands.getBranchTimeline('b1')).resolves.toEqual(timeline('b1-v2'));
+    expect(timelineCalls()).toEqual([['get_branch_timeline', { branchId: 'b1' }]]);
+    // That fetch replaced the seeded entry: the card is fresh and plain reads
+    // are answered from memory again.
+    expect(commands.getBranchTimelineWithRevalidation('b1')).toEqual({
+      cached: timeline('b1-v2'),
+      fresh: null,
+    });
+    await expect(commands.getBranchTimeline('b1')).resolves.toEqual(timeline('b1-v2'));
+    expect(timelineCalls()).toHaveLength(1);
+
+    // A card that painted first: the plain read shares its forced refetch.
+    const card = commands.getBranchTimelineWithRevalidation('b2');
+    expect(card.cached).toEqual(timeline('b2-v1'));
+    await expect(commands.getBranchTimeline('b2')).resolves.toEqual(timeline('b2-v2'));
+    await expect(card.fresh).resolves.toEqual(timeline('b2-v2'));
+    expect(timelineCalls()).toHaveLength(2);
+  });
+
+  it('seeds nothing older than a day and removes it from IndexedDB', async () => {
+    await firstSession();
+    const day = 24 * 60 * 60 * 1000;
+
+    // Just inside the cutoff still paints; its refetch re-stamps b1 only.
+    vi.setSystemTime(1_000_000 + day - 60_000);
+    const first = await launch();
+    const b1 = first.getBranchTimelineWithRevalidation('b1');
+    expect(b1.cached).toEqual(timeline('b1-v1'));
+    await b1.fresh;
+
+    // Past the cutoff: b2 (still stamped from the first session) is dropped
+    // from the paint and the store; b1, re-fetched a minute ago, is kept.
+    vi.setSystemTime(1_000_000 + day + 60_000);
+    const second = await launch();
+    expect(second.getBranchTimelineWithRevalidation('b2').cached).toBeNull();
+    expect(second.getBranchTimelineWithRevalidation('b1').cached).toEqual(timeline('b1-v1'));
+    await vi.waitFor(async () => {
+      expect(await idbKeys(store())).toEqual([expect.stringContaining('b1')]);
+    });
+  });
+
   it('never rolls back a timeline a card fetched before the seed landed', async () => {
     await firstSession();
     backend.timelines.b1 = timeline('b1-v2');

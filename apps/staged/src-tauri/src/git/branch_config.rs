@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use super::cli::{self, GitError};
+use super::cli::{self, GitError, GitOutput};
 use super::upstream::upstream_branch_name_from_config;
 
 /// The config entries a timeline build reads, as of one `git config` call.
@@ -51,13 +51,38 @@ pub fn read_branch_config_snapshot(
     local: &str,
 ) -> Result<BranchConfigSnapshot, GitError> {
     let pattern = branch_config_regexp(local);
-    match cli::run_lite(worktree, &["config", "-z", "--get-regexp", &pattern]) {
-        Ok(raw) => Ok(snapshot_from_entries(&parse_config_entries_z(&raw), local)),
-        Err(GitError::CommandFailed(stderr)) if stderr.trim().is_empty() => {
-            Ok(BranchConfigSnapshot::default())
-        }
-        Err(err) => Err(err),
+    let output = cli::run_lite_output(worktree, &["config", "-z", "--get-regexp", &pattern])?;
+    snapshot_from_output(&output, local)
+}
+
+/// Read the snapshot off a finished `git config -z --get-regexp` run.
+///
+/// Exit 0 is the entries. Exit 1 with nothing on stderr is git's "no key
+/// matched" and an empty snapshot: the repo really has no identity and no
+/// upstream entries, and the caller may take that as the answer. Everything
+/// else — an unreadable config file (exit 3 or 128), a child killed before it
+/// exited, an exit 1 that came with a complaint — is a failed read, returned
+/// as an error so the caller keeps what it last knew rather than forgetting
+/// the user's identity for a paint.
+fn snapshot_from_output(output: &GitOutput, local: &str) -> Result<BranchConfigSnapshot, GitError> {
+    if output.success {
+        return Ok(snapshot_from_entries(
+            &parse_config_entries_z(&output.stdout),
+            local,
+        ));
     }
+    let stderr = output.stderr.trim();
+    if output.code == Some(1) && stderr.is_empty() {
+        return Ok(BranchConfigSnapshot::default());
+    }
+    Err(GitError::CommandFailed(if stderr.is_empty() {
+        match output.code {
+            Some(code) => format!("git config exited with status {code}"),
+            None => "git config was killed by a signal".to_string(),
+        }
+    } else {
+        stderr.to_string()
+    }))
 }
 
 /// `^(branch\.<local>\.|user\.)`, with `local` escaped for the POSIX extended
@@ -251,6 +276,99 @@ mod tests {
         let snapshot = read_branch_config_snapshot(repo.path(), "v1.2").unwrap();
         assert_eq!(snapshot.upstream_remote.as_deref(), Some("origin"));
         assert_eq!(snapshot.upstream_branch_name("v1.2", "main"), "v1.2");
+    }
+
+    fn output(success: bool, code: Option<i32>, stdout: &str, stderr: &str) -> GitOutput {
+        GitOutput {
+            success,
+            code,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    /// Only git's own "no match" (exit 1, silent) is an empty snapshot. Any
+    /// other failure is an error, including an exit 1 that complained, so a
+    /// caller never mistakes a read it could not do for "no identity set".
+    #[test]
+    fn only_a_silent_exit_one_is_an_empty_snapshot() {
+        let parsed = snapshot_from_output(
+            &output(
+                true,
+                Some(0),
+                "user.name\nMatt\0user.email\nm@example.com\0",
+                "",
+            ),
+            "feature",
+        )
+        .unwrap();
+        assert_eq!(parsed.user_name.as_deref(), Some("Matt"));
+        assert_eq!(parsed.user_email.as_deref(), Some("m@example.com"));
+
+        assert_eq!(
+            snapshot_from_output(&output(false, Some(1), "", ""), "feature").unwrap(),
+            BranchConfigSnapshot::default()
+        );
+        assert_eq!(
+            snapshot_from_output(&output(false, Some(1), "", "  \n"), "feature").unwrap(),
+            BranchConfigSnapshot::default()
+        );
+
+        let complained = snapshot_from_output(
+            &output(
+                false,
+                Some(1),
+                "",
+                "error: key does not contain a section: x\n",
+            ),
+            "feature",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&complained, GitError::CommandFailed(msg) if msg.contains("does not contain a section")),
+            "{complained:?}"
+        );
+
+        let bad_file = snapshot_from_output(
+            &output(
+                false,
+                Some(128),
+                "",
+                "fatal: bad config line 1 in file .git/config\n",
+            ),
+            "feature",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&bad_file, GitError::CommandFailed(msg) if msg.contains("bad config line")),
+            "{bad_file:?}"
+        );
+
+        // Silent failures that are not exit 1: the status is the message.
+        let exit_three =
+            snapshot_from_output(&output(false, Some(3), "", ""), "feature").unwrap_err();
+        assert!(
+            matches!(&exit_three, GitError::CommandFailed(msg) if msg == "git config exited with status 3"),
+            "{exit_three:?}"
+        );
+        let killed = snapshot_from_output(&output(false, None, "", ""), "feature").unwrap_err();
+        assert!(
+            matches!(&killed, GitError::CommandFailed(msg) if msg.contains("killed by a signal")),
+            "{killed:?}"
+        );
+    }
+
+    /// A config file git cannot parse fails the read with git's message on
+    /// stderr — not an empty snapshot that would read as "no identity".
+    #[test]
+    fn an_unreadable_config_file_is_an_error_not_an_empty_snapshot() {
+        let repo = TempGitRepo::new();
+        std::fs::write(repo.path().join(".git/config"), "[core\n").unwrap();
+        let err = read_branch_config_snapshot(repo.path(), "feature").unwrap_err();
+        assert!(
+            matches!(&err, GitError::CommandFailed(msg) if msg.contains("bad config line")),
+            "{err:?}"
+        );
     }
 
     /// A repo with no identity and no upstream: `--get-regexp` exits 1 with

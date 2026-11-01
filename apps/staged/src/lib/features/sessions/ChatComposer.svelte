@@ -6,6 +6,12 @@
   SessionChatPane, which backs both the session dialog and the note dialog's
   chat pane, so the composer looks and behaves identically everywhere: the
   text input gets its own full-width row with the controls beneath it.
+
+  The submit control follows `composerSendControl`: a plain "Send" on an idle
+  session, a plain "Queue" on a running one — and, when the backend reports
+  the running session can take a message now (`canSendLive`), a split button
+  whose primary segment performs the remembered mode (Queue / Send) and whose
+  dropdown switches it.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -25,8 +31,16 @@
   import type { Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Spinner from '../../shared/Spinner.svelte';
-  import { Button } from '$lib/components/ui/button';
+  import { Button, buttonVariants } from '$lib/components/ui/button';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { cn } from '$lib/components/utils';
+  import {
+    COMPOSER_SEND_MODE_OPTIONS,
+    composerSendControl,
+    type ComposerSendMode,
+  } from './composerSendControl';
   import { ATTACHMENT_ACCEPT } from './attachErrors';
   import AttachmentThumb from './AttachmentThumb.svelte';
   import type { AttachmentPreview } from './attachmentPreview';
@@ -54,6 +68,15 @@
     attachError?: string | null;
     /** Session is running — attach/remove disabled, send queues instead. */
     isLive?: boolean;
+    /**
+     * The running session can take a message now (backend-reported), so the
+     * submit control offers "Send" beside "Queue". Ignored unless `isLive`.
+     */
+    canSendLive?: boolean;
+    /** The remembered submit mode for live-capable sessions. */
+    sendMode?: ComposerSendMode;
+    /** The user picked a mode from the split button's menu. */
+    onSendModeChange?: (mode: ComposerSendMode) => void;
     sending?: boolean;
     onSend?: () => void;
     /** Agent config picker rendered at the start of the control row. */
@@ -74,12 +97,22 @@
     onRemoveImage,
     attachError = null,
     isLive = false,
+    canSendLive = false,
+    sendMode = 'queue',
+    onSendModeChange,
     sending = false,
     onSend,
     configPicker,
   }: Props = $props();
 
   let fileInputEl = $state<HTMLInputElement>();
+
+  let sendControl = $derived(composerSendControl({ isLive, canSendLive, mode: sendMode }));
+  let sendDisabled = $derived(sending || !value.trim());
+
+  function handleSendModeChange(value: string) {
+    if (value === 'queue' || value === 'send') onSendModeChange?.(value);
+  }
 
   function openImagePicker() {
     fileInputEl?.click();
@@ -152,25 +185,65 @@
         </Button>
       </span>
     {/if}
-    <span class="inline-flex composer-send" title={isLive ? 'Queue message' : 'Send message'}>
-      <Button
-        variant="accent"
-        class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
-        onclick={onSend}
-        disabled={sending || !value.trim()}
-      >
-        {#if sending}
-          <Spinner size={14} />
-          Sending…
-        {:else if isLive}
-          Queue
-        {:else}
-          Send
-        {/if}
-      </Button>
-    </span>
+    {#if sendControl.split}
+      <span class="inline-flex composer-send composer-send-split" title={sendControl.title}>
+        <Button
+          variant="accent"
+          class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
+          onclick={onSend}
+          disabled={sendDisabled}
+        >
+          {@render sendLabel()}
+        </Button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger
+            class={cn(
+              buttonVariants({ variant: 'accent' }),
+              'composer-send-menu-trigger h-auto min-h-9 w-8 rounded-l-none px-0 max-[640px]:min-h-11'
+            )}
+            title="Change how messages are delivered"
+            aria-label="Change how messages are delivered"
+            disabled={sending}
+          >
+            <ChevronDown size={14} />
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Content align="end" side="top" sideOffset={4} class="min-w-[220px]">
+            <DropdownMenu.RadioGroup value={sendMode} onValueChange={handleSendModeChange}>
+              {#each COMPOSER_SEND_MODE_OPTIONS as option (option.mode)}
+                <DropdownMenu.RadioItem value={option.mode}>
+                  <span class="flex min-w-0 flex-col">
+                    <span>{option.label}</span>
+                    <span class="truncate text-xs text-muted-foreground">{option.description}</span>
+                  </span>
+                </DropdownMenu.RadioItem>
+              {/each}
+            </DropdownMenu.RadioGroup>
+          </DropdownMenu.Content>
+        </DropdownMenu.Root>
+      </span>
+    {:else}
+      <span class="inline-flex composer-send" title={sendControl.title}>
+        <Button
+          variant="accent"
+          class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
+          onclick={onSend}
+          disabled={sendDisabled}
+        >
+          {@render sendLabel()}
+        </Button>
+      </span>
+    {/if}
   </div>
 </div>
+
+{#snippet sendLabel()}
+  {#if sending}
+    <Spinner size={14} />
+    Sending…
+  {:else}
+    {sendControl.label}
+  {/if}
+{/snippet}
 
 <style>
   .chat-composer {
@@ -258,5 +331,10 @@
 
   .composer-controls .composer-send {
     margin-left: auto;
+  }
+
+  /* A hairline between the split button's two accent segments. */
+  .composer-send-split :global(.composer-send-menu-trigger) {
+    border-left-color: color-mix(in srgb, var(--bg-primary) 35%, transparent);
   }
 </style>

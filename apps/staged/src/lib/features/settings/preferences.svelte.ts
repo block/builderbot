@@ -34,9 +34,15 @@ import {
   normalizeProjectStatusOptions,
   type ProjectStatusOption,
 } from '../projects/projectStatusDisplay';
+import {
+  DEFAULT_COMPOSER_SEND_MODE,
+  normalizeComposerSendMode,
+  type ComposerSendMode,
+} from '../sessions/composerSendControl';
 
 // Re-export so picker code can import the type alongside the actions.
 export type { AcpConfigPref, AcpConfigPrefPatch };
+export type { ComposerSendMode };
 
 /**
  * The agent/model/effort the `generate_pikchr` diagram sub-session runs under,
@@ -84,6 +90,12 @@ const DIAGRAM_SUBSESSION_CONFIG_STORE_KEY = 'diagram-subsession-config';
 const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
 /** The statuses a project can be manually set to (frontend-only). */
 const PROJECT_STATUS_OPTIONS_STORE_KEY = 'project-status-options';
+/**
+ * How the chat composer submits to a running session that can take a message
+ * now: queue it for after the turn, or send it live. Global, not per session
+ * or repo (frontend-only).
+ */
+const COMPOSER_SEND_MODE_STORE_KEY = 'composer-send-mode';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -191,6 +203,11 @@ export const preferences = $state({
   projectStatusOptions: DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({
     ...o,
   })) as ProjectStatusOption[],
+  /**
+   * The chat composer's last-used submit mode for running sessions whose
+   * agent can take a message now. Remembered globally; defaults to queueing.
+   */
+  composerSendMode: DEFAULT_COMPOSER_SEND_MODE as ComposerSendMode,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -404,6 +421,11 @@ export async function initPreferences(): Promise<void> {
   if (typeof savedBranchPrefix === 'string') {
     preferences.branchPrefix = savedBranchPrefix;
   }
+
+  // Load the composer's last-used submit mode (malformed values fall back to queue)
+  preferences.composerSendMode = normalizeComposerSendMode(
+    await getStoreValue<unknown>(COMPOSER_SEND_MODE_STORE_KEY)
+  );
 }
 
 // =============================================================================
@@ -453,6 +475,19 @@ export async function selectDiffTheme(name: string): Promise<void> {
 export function setBranchPrefix(prefix: string): void {
   preferences.branchPrefix = prefix;
   setStoreValue(BRANCH_PREFIX_STORE_KEY, prefix.trim());
+}
+
+// =============================================================================
+// Composer Send Mode Actions
+// =============================================================================
+
+/**
+ * Remember how the chat composer submits to a running session: `queue` (after
+ * the turn) or `send` (deliver now). One global setting for every session.
+ */
+export function setComposerSendMode(mode: ComposerSendMode): void {
+  preferences.composerSendMode = mode;
+  setStoreValue(COMPOSER_SEND_MODE_STORE_KEY, mode);
 }
 
 // =============================================================================

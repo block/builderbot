@@ -13,6 +13,10 @@
     a labeled Stop button; once messages exist, Stop lives on the Thinking row
     and the composer queues follow-ups as usual
   - Message queue: sending while running persists a follow-up for backend drain
+  - Live send: when the backend reports the running session can take a message
+    now (`get_session_live_delivery`), the composer offers "Send" beside
+    "Queue"; "Send" goes through `send_session_message_now`, the path the
+    `continue_repo_session` MCP tool uses (steer, else interrupt-and-reprompt)
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
   - Fixed-size modal with proper scrolling
@@ -49,6 +53,7 @@
     Session,
     SessionBackgroundHoldPayload,
     SessionMessage,
+    SessionStatus,
     QueuedSessionMessage,
     HashtagItem,
     ProjectRepo,
@@ -65,6 +70,7 @@
     getSession,
     getSessionAcpMetadataMessages,
     getSessionBackgroundHold,
+    getSessionLiveDelivery,
     getLatestSessionMessages,
     getOlderSessionMessages,
     handleExternalLinkClick,
@@ -74,6 +80,7 @@
     queueSessionMessage,
     resumeSession,
     sendQueuedSessionMessage,
+    sendSessionMessageNow,
     stopSessionAsyncTask,
     type AcpConfigDiscovery,
     type AcpConfigSelector,
@@ -90,8 +97,13 @@
     defaultSelectorValue,
     selectorHasValue,
   } from '../agents/acpConfigSelection';
-  import { setAcpConfigPref } from '../settings/preferences.svelte';
+  import {
+    preferences,
+    setAcpConfigPref,
+    setComposerSendMode,
+  } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
+  import { composerSendControl } from './composerSendControl';
   import {
     backgroundHoldTaskRows,
     isTaskHeld,
@@ -271,6 +283,14 @@
   /** Latest background hold reported for this session; null when not holding. */
   let backgroundHold = $state<SessionBackgroundHold | null>(null);
   /**
+   * The backend confirmed this running session can take a message now: it is
+   * owned by this process and its agent connection is up. Asked on each poll
+   * tick until it says yes (the connection comes up a few seconds into a run),
+   * and dropped whenever the status leaves `running`.
+   */
+  let liveDelivery = $state(false);
+  let liveDeliveryInFlight = false;
+  /**
    * Counts hold reports received by event, so the mount-time snapshot can tell
    * whether a newer report landed while it was in flight.
    */
@@ -327,6 +347,10 @@
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
+  let canSendLive = $derived(isLive && liveDelivery);
+  let sendControl = $derived(
+    composerSendControl({ isLive, canSendLive, mode: preferences.composerSendMode })
+  );
   // Holding is a sub-state of running, so the session stays live and only the
   // activity row changes: the wait plus its live task count, and a Stop that
   // says what it stops.
@@ -783,6 +807,7 @@
       } else {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
+        liveDelivery = false;
         finishPolling();
       }
     });
@@ -802,6 +827,7 @@
     if (!isActive || !id) return;
 
     backgroundHold = null;
+    liveDelivery = false;
     stoppingTaskIds = new Set();
     taskStopNotices = new Map();
     const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
@@ -1093,6 +1119,7 @@
       if (JSON.stringify(result.queuedMessages) !== JSON.stringify(queuedMessages)) {
         queuedMessages = result.queuedMessages;
       }
+      refreshLiveDelivery(s?.status ?? session?.status);
 
       applyAcpMetadataUpdates(result.acpMetadataMessages);
       const merged = mergeSinceMessages(messages, result.messages, request.sinceId);
@@ -1144,6 +1171,32 @@
     }
     if (!changed) return;
     acpMetadataMessages = [...byId.values()].sort((a, b) => a.id - b.id);
+  }
+
+  /**
+   * Learn whether the running session can take a message now. One cheap
+   * registry lookup per poll tick while the answer is still no; nothing once
+   * it is yes. A status other than `running` withdraws the flag at once.
+   */
+  function refreshLiveDelivery(status: SessionStatus | undefined) {
+    if (status !== 'running') {
+      liveDelivery = false;
+      return;
+    }
+    if (liveDelivery || liveDeliveryInFlight || !sessionId) return;
+    const id = sessionId;
+    liveDeliveryInFlight = true;
+    getSessionLiveDelivery(id)
+      .then((capability) => {
+        if (closed || sessionId !== id || session?.status !== 'running') return;
+        liveDelivery = capability.supported;
+      })
+      .catch(() => {
+        // Best-effort: the next tick asks again.
+      })
+      .finally(() => {
+        liveDeliveryInFlight = false;
+      });
   }
 
   async function refreshQueuedMessages() {
@@ -1217,6 +1270,11 @@
     // Reset textarea height after clearing (oninput won't fire for programmatic changes)
     tick().then(() => autoResize());
 
+    if (sendControl.action === 'send-now') {
+      await sendMessageNow(text, imageIdsToSend);
+      return;
+    }
+
     if (isLive) {
       try {
         await queueSessionMessage(sessionId, text, imageIdsToSend, branchId ?? null);
@@ -1231,6 +1289,56 @@
 
     // Session is idle — send immediately
     await sendMessage(text, imageIdsToSend);
+  }
+
+  /**
+   * Deliver a message to the running session now — the composer's "Send"
+   * mode. The backend steers it into the turn in flight, or interrupts the
+   * turn and re-prompts when the agent cannot steer; a session that stopped
+   * between the click and the request is resumed, as `continue_repo_session`
+   * would. Anything not delivered (`blocked`, `rejected_queued`,
+   * `not_resumable`) is reported and the draft restored — never re-queued
+   * behind the user's back, since a blocked steer may already have landed.
+   */
+  async function sendMessageNow(text: string, imageIds?: string[]) {
+    if (!session || sending) return;
+    const id = session.id;
+    sending = true;
+    error = null;
+    try {
+      const result = await sendSessionMessageNow(id, text, imageIds);
+      if (session?.id !== id) return;
+      switch (result.delivery) {
+        case 'injected':
+        case 'interrupted_and_reprompted':
+        case 'started_new_turn':
+        case 'resumed':
+          // The user row is persisted by the delivery itself; the poll picks
+          // it up. A resume flipped the row back to running.
+          if (result.delivery === 'resumed') {
+            session = { ...session, status: 'running' };
+            clearBackgroundHold();
+          }
+          startPolling();
+          scrollToBottom();
+          return;
+        case 'rejected_queued':
+          error = 'The session has not started yet; queue the message instead.';
+          break;
+        case 'blocked':
+        case 'not_resumable':
+          error = `Not delivered: ${result.reason ?? result.delivery}`;
+          break;
+      }
+      inputText = text;
+      replyImageIds = imageIds ?? [];
+    } catch (e) {
+      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      inputText = text;
+      replyImageIds = imageIds ?? [];
+    } finally {
+      sending = false;
+    }
   }
 
   /** Actually send a message to the backend and start the agent. */
@@ -2844,7 +2952,7 @@
       <ChatComposer
         bind:textareaEl={inputEl}
         bind:value={inputText}
-        placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
+        placeholder={sendControl.placeholder}
         {hashtagItems}
         onkeydown={handleInputKeydown}
         oninput={autoResize}
@@ -2855,6 +2963,9 @@
         onRemoveImage={removeReplyImage}
         {attachError}
         {isLive}
+        {canSendLive}
+        sendMode={preferences.composerSendMode}
+        onSendModeChange={setComposerSendMode}
         {sending}
         onSend={handleSend}
       >

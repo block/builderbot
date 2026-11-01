@@ -199,3 +199,30 @@ describe.each([true, false])('project status synchronization (native=%s)', (nati
     expect(client.preferences.projectStatusOptions).toEqual([]);
   });
 });
+
+describe.each([true, false])('composer send mode (native=%s)', (native) => {
+  const modeKey = 'composer-send-mode';
+
+  it('defaults to queue and persists the chosen mode globally', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.composerSendMode).toBe('queue');
+
+    client.setComposerSendMode('send');
+    expect(client.preferences.composerSendMode).toBe('send');
+    expect(values.get(modeKey)).toBe('send');
+
+    // A fresh client reads the remembered mode back.
+    const reopened = await newClient(native);
+    await reopened.initPreferences();
+    expect(reopened.preferences.composerSendMode).toBe('send');
+  });
+
+  it('falls back to queue for a malformed stored value', async () => {
+    values.set(modeKey, 'later');
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.composerSendMode).toBe('queue');
+    expect(set).not.toHaveBeenCalledWith(modeKey, expect.anything());
+  });
+});

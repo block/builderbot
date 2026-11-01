@@ -673,6 +673,33 @@ export interface SessionPoll {
   acpMetadataMessages: SessionMessage[];
 }
 
+/**
+ * Whether a message typed for a session can reach its agent now (the chat
+ * composer's "Send" mode) instead of waiting in the queue. Computed by the
+ * backend from the same gate `continue_repo_session` applies before delivering
+ * to a running session; `reason` says why not.
+ */
+export interface SessionLiveDelivery {
+  supported: boolean;
+  reason?: string;
+}
+
+/** How `send_session_message_now` delivered a message, or why it did not. */
+export type SessionMessageDeliveryKind =
+  | 'injected'
+  | 'interrupted_and_reprompted'
+  | 'started_new_turn'
+  | 'resumed'
+  | 'rejected_queued'
+  | 'blocked'
+  | 'not_resumable';
+
+export interface SessionMessageDelivery {
+  delivery: SessionMessageDeliveryKind;
+  /** Set when the message was not delivered (`blocked`, `not_resumable`). */
+  reason?: string;
+}
+
 // =============================================================================
 // Branch sessions
 // =============================================================================

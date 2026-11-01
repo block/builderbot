@@ -2333,6 +2333,123 @@ pub fn delete_queued_session_message(
         .map_err(|e| e.to_string())
 }
 
+/// Whether a message typed for `session_id` can reach its agent *now* (the
+/// chat composer's "Send" mode) — exactly the gate `route_continue_session`
+/// applies to a `running` row before delivering, read without waiting:
+/// the row is `running`, this process owns it, and its ACP connection has
+/// handed out a live turn-control handle. Anything else is "queue only",
+/// with `reason` saying why, so the composer can hide the mode switch
+/// rather than offer a send that would come back blocked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLiveDelivery {
+    pub supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl SessionLiveDelivery {
+    fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            supported: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+pub(crate) fn live_delivery_for_session(
+    store: &Store,
+    registry: &session_runner::SessionRegistry,
+    session_id: &str,
+) -> Result<SessionLiveDelivery, String> {
+    let session = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    if session.status != store::SessionStatus::Running {
+        return Ok(SessionLiveDelivery::unsupported(format!(
+            "the session is {}",
+            session.status.as_str()
+        )));
+    }
+    if let Some(owner_pid) = session.owner_pid.filter(|pid| *pid != std::process::id()) {
+        return Ok(SessionLiveDelivery::unsupported(format!(
+            "the session is owned by another Staged instance (pid {owner_pid})"
+        )));
+    }
+    match registry.turn_control_handle(session_id) {
+        Some(handle) if handle.is_connection_alive() => Ok(SessionLiveDelivery {
+            supported: true,
+            reason: None,
+        }),
+        _ => Ok(SessionLiveDelivery::unsupported(
+            "the session's agent has not connected yet",
+        )),
+    }
+}
+
+#[tauri::command]
+pub fn get_session_live_delivery(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    session_id: String,
+) -> Result<SessionLiveDelivery, String> {
+    let store = get_store(&store)?;
+    live_delivery_for_session(&store, &registry, &session_id)
+}
+
+/// The `send_session_message_now` reply: how the message reached (or failed
+/// to reach) the agent, in the wire spelling the project MCP server's
+/// `continue_repo_session` tool uses, with the reason when it did not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMessageDelivery {
+    pub delivery: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl From<&ContinueOutcome> for SessionMessageDelivery {
+    fn from(outcome: &ContinueOutcome) -> Self {
+        Self {
+            delivery: outcome.delivery().to_string(),
+            reason: outcome.reason().map(str::to_string),
+        }
+    }
+}
+
+/// Deliver a chat message to a session now instead of queueing it: the
+/// composer's "Send" mode. Shares `continue_session_for_store` with the
+/// project MCP server's `continue_repo_session` tool, so a running session
+/// is steered (or interrupted and re-prompted), a stopped one is resumed,
+/// and a queued one is refused — the reply says which.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn send_session_message_now(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    content: String,
+    image_ids: Option<Vec<String>>,
+) -> Result<SessionMessageDelivery, String> {
+    let store = get_store(&store)?;
+    let outcome = continue_session_for_store(
+        store,
+        Arc::clone(&registry),
+        Arc::clone(&action_executor),
+        Arc::clone(&action_registry),
+        app_handle,
+        session_id,
+        content,
+        image_ids.unwrap_or_default(),
+    )
+    .await?;
+    Ok(SessionMessageDelivery::from(&outcome))
+}
+
 #[tauri::command]
 pub async fn send_queued_session_message(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -8242,6 +8359,129 @@ mod tests {
             store.get_session(&session.id).unwrap().unwrap().status,
             store::SessionStatus::Queued
         );
+    }
+
+    /// The composer's live-delivery flag is the running-row gate of
+    /// `route_continue_session` read without the wait: a `running` row this
+    /// process owns, with a live turn-control handle, can take a message now.
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_delivery_is_supported_for_a_running_session_with_a_live_connection() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, _) =
+            acp_client::TurnControlHandle::scripted(Ok(acp_client::SteerOutcome::Injected), Ok(()));
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let capability = live_delivery_for_session(&store, &registry, &session.id).unwrap();
+
+        assert_eq!(
+            capability,
+            SessionLiveDelivery {
+                supported: true,
+                reason: None
+            }
+        );
+    }
+
+    /// A `running` row still in its startup window (no connection yet) and
+    /// one whose connection has gone are both "queue only" — the flag never
+    /// waits for a handle the way the delivery itself does.
+    #[test]
+    fn live_delivery_is_unsupported_until_the_agent_connects() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let session = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+
+        let starting = live_delivery_for_session(&store, &registry, &session.id).unwrap();
+        assert!(!starting.supported);
+        assert!(
+            starting
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("not connected"),
+            "{starting:?}"
+        );
+
+        registry.set_turn_control_handle(&session.id, acp_client::TurnControlHandle::detached());
+        let dead = live_delivery_for_session(&store, &registry, &session.id).unwrap();
+        assert!(!dead.supported);
+    }
+
+    /// Stopped and queued rows are not live: the composer keeps its plain
+    /// button for them (a stopped session's "Send" resumes it, as
+    /// `continue_session_for_store` would; a queued one cannot take a
+    /// message out of FIFO order).
+    #[test]
+    fn live_delivery_is_unsupported_for_rows_that_are_not_running() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let registry = test_registry();
+
+        let queued = create_session_with_status(&store, "prompt", store::SessionStatus::Queued);
+        let capability = live_delivery_for_session(&store, &registry, &queued.id).unwrap();
+        assert!(!capability.supported);
+        assert_eq!(capability.reason.as_deref(), Some("the session is queued"));
+
+        let completed = create_session_with_status(&store, "prompt", store::SessionStatus::Running);
+        store
+            .update_session_status(
+                &completed.id,
+                store::SessionStatus::Completed,
+                None,
+                Some(&store::CompletionReason::TurnComplete),
+            )
+            .unwrap();
+        let capability = live_delivery_for_session(&store, &registry, &completed.id).unwrap();
+        assert!(!capability.supported);
+        assert_eq!(
+            capability.reason.as_deref(),
+            Some("the session is completed")
+        );
+
+        assert!(live_delivery_for_session(&store, &registry, "missing").is_err());
+    }
+
+    /// A `running` row another Staged instance owns has its connection in
+    /// that process; a handle here would never appear, so it is queue only.
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_delivery_is_unsupported_for_a_session_owned_by_another_instance() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut session = store::Session::new_running("prompt", Path::new("/tmp"));
+        let other_pid = std::process::id() + 1;
+        session.owner_pid = Some(other_pid);
+        store.create_session(&session).unwrap();
+        let registry = test_registry();
+        let _registration = registry.register_external(&session.id);
+        let (handle, _) =
+            acp_client::TurnControlHandle::scripted(Ok(acp_client::SteerOutcome::Injected), Ok(()));
+        registry.set_turn_control_handle(&session.id, handle);
+
+        let capability = live_delivery_for_session(&store, &registry, &session.id).unwrap();
+
+        assert!(!capability.supported);
+        let reason = capability.reason.unwrap();
+        assert!(reason.contains("another Staged instance"), "{reason}");
+        assert!(reason.contains(&other_pid.to_string()), "{reason}");
+    }
+
+    /// The wire reply of `send_session_message_now` spells the outcome the
+    /// way `continue_repo_session` does, reason included.
+    #[test]
+    fn session_message_delivery_mirrors_the_continue_outcome() {
+        let injected = SessionMessageDelivery::from(&ContinueOutcome::Injected);
+        assert_eq!(injected.delivery, "injected");
+        assert_eq!(injected.reason, None);
+
+        let blocked = SessionMessageDelivery::from(&ContinueOutcome::blocked("still starting"));
+        assert_eq!(blocked.delivery, "blocked");
+        assert_eq!(blocked.reason.as_deref(), Some("still starting"));
+
+        let rejected = SessionMessageDelivery::from(&ContinueOutcome::RejectedQueued);
+        assert_eq!(rejected.delivery, "rejected_queued");
+        assert_eq!(rejected.reason, None);
     }
 
     /// A running session with a connection is steered first; the agent took

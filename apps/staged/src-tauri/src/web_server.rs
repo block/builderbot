@@ -3679,6 +3679,42 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .await?;
             Ok(Value::Null)
         }
+        "send_session_message_now" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let content: String = arg(&args, "content")?;
+            let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
+            let app_handle = app_handle.clone();
+            let session_registry = Arc::clone(session_registry);
+            let action_executor = Arc::clone(action_executor);
+            let action_registry = Arc::clone(action_registry);
+            // Detached like `resume_session`: a stopped session is resumed
+            // through the same launch, and a client that disconnects while
+            // that resume is mid-flight must not abandon it half-started.
+            let delivery = detached(async move {
+                let outcome = session_commands::continue_session_for_store(
+                    store,
+                    session_registry,
+                    action_executor,
+                    action_registry,
+                    app_handle,
+                    session_id,
+                    content,
+                    image_ids.unwrap_or_default(),
+                )
+                .await?;
+                Ok(session_commands::SessionMessageDelivery::from(&outcome))
+            })
+            .await?;
+            Ok(serde_json::to_value(delivery).unwrap())
+        }
+        "get_session_live_delivery" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let capability =
+                session_commands::live_delivery_for_session(&store, session_registry, &session_id)?;
+            Ok(serde_json::to_value(capability).unwrap())
+        }
         "build_note_followup_message" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

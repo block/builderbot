@@ -23,9 +23,9 @@ mod types;
 
 // Re-export the main API
 pub use agent_client_protocol::schema::v1::{
-    ConfigOptionUpdate, McpServer, McpServerHttp, McpServerSse, SessionConfigOption,
-    SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
-    StopReason,
+    ConfigOptionUpdate, EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
+    SessionConfigOption, SessionConfigOptionCategory, SessionInfoUpdate,
+    SessionModeState as SessionModelState, StopReason,
 };
 pub use driver::{
     autoapprove_permission_decision, background_continuation_origin, carry_config_value_hint,

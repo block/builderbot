@@ -1506,6 +1506,11 @@ impl AcpDriver {
             .filter(|_| self.runs_dedicated_remote_process())
             .map(|turn| turn.agent_session_id.as_str())
     }
+
+    /// The MCP servers this driver hands to `session/new` / `session/load`.
+    pub fn mcp_servers(&self) -> &[McpServer] {
+        &self.mcp_servers
+    }
 }
 
 /// Environment for the remote ACP process so the provider never blocks on a
@@ -10734,6 +10739,20 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
         assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
     }
 
+    fn stdio_note_server() -> McpServer {
+        McpServer::Stdio(
+            agent_client_protocol::schema::v1::McpServerStdio::new(
+                "staged",
+                PathBuf::from("/usr/bin/python3"),
+            )
+            .args(vec![
+                "/home/bloxer/.staged/bin/staged-note-mcp.py".to_string(),
+                "session-1".to_string(),
+                "turn-1".to_string(),
+            ]),
+        )
+    }
+
     #[test]
     fn remote_goose_driver_runs_unattended_through_env() {
         let driver = AcpDriver::for_workspace_with_binary(
@@ -10851,6 +10870,25 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             caps["_meta"].is_object(),
             "the AIR asyncTasks advertisement still rides along: {request}"
         );
+    }
+
+    #[test]
+    fn remote_driver_keeps_stdio_servers() {
+        let driver = AcpDriver::for_workspace_with_binary(
+            PathBuf::from("/usr/local/bin/sq"),
+            "ws-1",
+            Some("goose"),
+            "s1",
+        )
+        .with_mcp_servers(vec![stdio_note_server()]);
+
+        assert!(
+            matches!(driver.mcp_servers(), [McpServer::Stdio(server)] if server.name == "staged")
+        );
+        assert!(mcp_server_transport_supported(
+            &driver.mcp_servers()[0],
+            &McpCapabilities::default()
+        ));
     }
 
     #[test]

@@ -183,6 +183,44 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Finish a detached-recovery claim: move a row that is
+    /// `error`/`detached` to `new_status`, and only such a row.
+    ///
+    /// The dead-owner sweep claims a remote note session by transitioning it
+    /// from `running` to `error`/[`CompletionReason::Detached`] *before* it
+    /// talks to the workstation, so two Staged instances sharing the store
+    /// cannot both collect and ingest the same outbox. Once the claimant knows
+    /// the outcome it settles the row through this method; the predicate
+    /// means a row the user resumed in the meantime (`running` or `queued`
+    /// again) is left to its new owner. Returns whether the row was updated.
+    pub fn finish_detached_recovery(
+        &self,
+        id: &str,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if new_status == SessionStatus::Error {
+            error_message
+        } else {
+            None
+        };
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'error' AND completion_reason = ?6",
+            params![
+                new_status.as_str(),
+                error_msg,
+                completion_reason.map(|r| r.as_str()),
+                now_timestamp(),
+                id,
+                CompletionReason::Detached.as_str()
+            ],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// [`Self::transition_from_running`] for exactly the `running` row the
     /// caller read: the write also requires `updated_at` to still be
     /// `observed_updated_at`.

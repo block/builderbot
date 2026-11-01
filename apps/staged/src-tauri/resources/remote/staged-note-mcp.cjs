@@ -19,6 +19,11 @@
  *     meta.json  {"title", "suggestedNextSteps", "turn", "writtenAt", "helperVersion"}
  *     done       marker: the turn delivered a note
  *
+ * `done` is removed before a rewrite starts and recreated after both files
+ * are in place, so a collector that sees it — even one that lands between
+ * the renames of a second call — always reads a title and body from the
+ * same call.
+ *
  * The laptop collects the outbox after the turn, or on its next sweep if it
  * was disconnected while the agent was still working. The whole point of this
  * file living on the workstation is that the note survives that disconnect.
@@ -33,9 +38,23 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline");
 
-const HELPER_VERSION = 1;
+const HELPER_VERSION = 2;
 const SERVER_NAME = "staged";
 const TOOL_NAME = "write_note";
+
+// MCP protocol revisions this helper implements (newest first). `initialize`
+// answers with the client's version when it is one of these, otherwise with
+// the newest one we speak — never with a version we have not implemented.
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+/** The protocol version to answer an `initialize` carrying `requested`. */
+function negotiateProtocolVersion(requested) {
+  if (typeof requested === "string" && SUPPORTED_PROTOCOL_VERSIONS.indexOf(requested) !== -1) {
+    return requested;
+  }
+  return LATEST_PROTOCOL_VERSION;
+}
 
 // Must stay word-for-word in step with `WRITE_NOTE_DESCRIPTION` in
 // `apps/staged/src-tauri/src/note_tool.rs`.
@@ -122,6 +141,15 @@ function writeAtomic(directory, name, data) {
       // nothing to clean up
     }
     throw error;
+  }
+}
+
+/** Unlink `filePath`, treating a missing file as already removed. */
+function removeIfPresent(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
   }
 }
 
@@ -215,8 +243,11 @@ function handleWriteNote(sessionId, turnId, args) {
     writtenAt: Math.floor(Date.now() / 1000),
     helperVersion: HELPER_VERSION,
   };
-  // Body first, then meta, then the marker: a collector that sees `done`
-  // can rely on the other two being complete.
+  // Drop the marker of any earlier call first, then body, then meta, then
+  // the marker again: a collector that sees `done` can rely on the other two
+  // being complete *and* from the same call, even if it reads while a
+  // rewrite is between its renames.
+  removeIfPresent(path.join(directory, "done"));
   writeAtomic(directory, "note.md", Buffer.from(body, "utf8"));
   writeAtomic(directory, "meta.json", Buffer.from(JSON.stringify(meta), "utf8"));
   writeAtomic(directory, "done", Buffer.alloc(0));
@@ -250,7 +281,7 @@ function handleLine(sessionId, turnId, rawLine) {
 
   if (method === "initialize") {
     reply(id, {
-      protocolVersion: params.protocolVersion || "2025-06-18",
+      protocolVersion: negotiateProtocolVersion(params.protocolVersion),
       capabilities: { tools: {} },
       serverInfo: { name: SERVER_NAME, version: String(HELPER_VERSION) },
       instructions:

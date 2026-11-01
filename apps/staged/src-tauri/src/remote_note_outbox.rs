@@ -36,7 +36,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::note_tool::{
-    NoteSubmission, NoteSubmissionSource, SuggestedNextSteps, WriteNoteParams, NOTE_MCP_SERVER_NAME,
+    NoteSubmission, NoteSubmissionSlot, NoteSubmissionSource, SuggestedNextSteps, WriteNoteParams,
+    NOTE_MCP_SERVER_NAME,
 };
 
 /// The helper script, embedded so the running build always installs the
@@ -184,9 +185,10 @@ fn outbox_dir_expr(session_id: &str) -> String {
     format!("\"$HOME/.staged/sessions/{session_id}\"")
 }
 
-/// Empty the session's outbox so a stale note from an earlier run can never be
-/// mistaken for this run's. Runs at session start, while the laptop is
-/// connected. Always exits 0.
+/// Empty the session's outbox. Runs after a note has been collected *and*
+/// ingested — never blind at session start, where a `done` marker may be a
+/// finished note the laptop lost before it could read it (see
+/// [`recover_uncollected_outbox`]). Always exits 0.
 pub(crate) fn clear_outbox_script(session_id: &str) -> String {
     let dir = outbox_dir_expr(session_id);
     format!("d={dir}; rm -f \"$d/note.md\" \"$d/meta.json\" \"$d/done\"; exit 0")
@@ -341,6 +343,67 @@ pub(crate) fn collect(
     let output = exec(&["sh", "-c", &collect_script(session_id)])
         .map_err(|e| format!("failed to read the remote note outbox: {e}"))?;
     outbox_state(parse_collect_output(&output)?, expected_turn)
+}
+
+/// Collect the outbox right after a turn settled and, when it holds this
+/// run's note, record it in the run's [`NoteSubmissionSlot`] — the same slot
+/// the local tool fills. From there the post-turn Pikchr validation, the
+/// "did the turn deliver a note" check behind the `write_note` follow-up and
+/// the post-completion hooks all read it, so one `ws exec` round trip serves
+/// all three and remote notes get the checks local ones do. Anything other
+/// than this turn's completed note leaves the slot untouched.
+pub(crate) fn collect_turn_into_slot(
+    exec: RemoteExec,
+    session_id: &str,
+    turn_id: &str,
+    slot: &NoteSubmissionSlot,
+) -> Result<OutboxState, String> {
+    let state = collect(exec, session_id, Some(turn_id))?;
+    if let OutboxState::Delivered(submission) = &state {
+        crate::note_tool::store_submission(slot, submission.clone());
+    }
+    Ok(state)
+}
+
+/// What [`recover_uncollected_outbox`] found at session start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboxRecovery {
+    /// Nothing complete was waiting; whatever partial files were there are gone.
+    Empty,
+    /// A finished note from an earlier run was handed to `ingest`, then cleared.
+    Ingested,
+}
+
+/// Session start: a `done` marker already in the outbox is a note the agent
+/// finished that the laptop never ingested — the previous run lost its
+/// connection, the dead-owner sweep could not reach the workstation and the
+/// row became `detached`, and now the user is resuming. Hand it to `ingest`
+/// (the normal post-completion hooks, bound to the session's note), *then*
+/// clear the outbox so the new run's collector cannot mistake it for its own.
+/// With no complete note the outbox is just emptied of partial files.
+///
+/// The clear only follows a successful collection; a collection failure
+/// leaves the outbox alone for the next attempt.
+pub(crate) fn recover_uncollected_outbox(
+    exec: RemoteExec,
+    session_id: &str,
+    ingest: &mut dyn FnMut(NoteSubmission),
+) -> Result<OutboxRecovery, String> {
+    let recovery = match collect(exec, session_id, None)? {
+        OutboxState::Delivered(submission) => {
+            log::warn!(
+                "Session {session_id}: the workstation outbox holds an uncollected note \
+                 \"{}\" from an earlier run; ingesting it before this run starts",
+                submission.title
+            );
+            ingest(submission);
+            OutboxRecovery::Ingested
+        }
+        // `collect(.., None)` accepts any turn, so the stale arm cannot fire.
+        OutboxState::Pending | OutboxState::StaleTurn { .. } => OutboxRecovery::Empty,
+    };
+    clear_outbox(exec, session_id)?;
+    Ok(recovery)
 }
 
 #[cfg(test)]
@@ -620,6 +683,120 @@ mod tests {
         assert!(outbox_state(incomplete, None).is_err());
     }
 
+    /// Answers the collect script with `collect_output` and records every
+    /// command; anything else succeeds with empty output.
+    fn collecting_exec<'a>(
+        collect_output: &str,
+        log: &'a RefCell<Vec<Vec<String>>>,
+    ) -> impl Fn(&[&str]) -> Result<String, String> + 'a {
+        let collect_output = collect_output.to_string();
+        move |args: &[&str]| {
+            log.borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            if args.len() == 3 && args[2].contains("echo done; else echo pending") {
+                Ok(collect_output.clone())
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    fn done_output(turn: &str) -> String {
+        let meta = format!(
+            r#"{{"title":"Plan","suggestedNextSteps":null,"turn":"{turn}","writtenAt":1,"helperVersion":2}}"#
+        );
+        format!("done\n{}\n{}\n", b64(meta.as_bytes()), b64(b"Body"))
+    }
+
+    #[test]
+    fn collecting_a_turn_fills_the_slot_only_for_this_turns_note() {
+        let slot = crate::note_tool::new_submission_slot();
+
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec("pending\n\n\n", &log);
+        assert_eq!(
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot).unwrap(),
+            OutboxState::Pending
+        );
+        assert!(!crate::note_tool::has_submission(&slot));
+
+        let exec = collecting_exec(&done_output("t0"), &log);
+        assert_eq!(
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot).unwrap(),
+            OutboxState::StaleTurn {
+                found: Some("t0".into())
+            }
+        );
+        assert!(
+            !crate::note_tool::has_submission(&slot),
+            "another run's note must not pass for this turn's"
+        );
+
+        let exec = collecting_exec(&done_output("t1"), &log);
+        assert!(matches!(
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+        let submission = crate::note_tool::current_submission(&slot).unwrap();
+        assert_eq!(submission.title, "Plan");
+        assert_eq!(submission.body, "Body");
+        assert_eq!(submission.source, NoteSubmissionSource::Outbox);
+        // One round trip per collection, nothing else.
+        assert_eq!(log.borrow().len(), 3, "{:?}", log.borrow());
+        assert!(log
+            .borrow()
+            .iter()
+            .all(|cmd| cmd[2].contains("echo done; else echo pending")));
+    }
+
+    #[test]
+    fn session_start_ingests_an_uncollected_note_before_clearing() {
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec(&done_output("earlier-run"), &log);
+        let mut ingested = Vec::new();
+        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |submission| {
+            ingested.push(submission)
+        })
+        .unwrap();
+        assert_eq!(recovery, OutboxRecovery::Ingested);
+        assert_eq!(ingested.len(), 1);
+        assert_eq!(ingested[0].title, "Plan");
+        assert_eq!(ingested[0].source, NoteSubmissionSource::Outbox);
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
+        assert!(commands[0][2].contains("echo done; else echo pending"));
+        assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
+    }
+
+    #[test]
+    fn session_start_with_nothing_waiting_only_clears() {
+        let log = RefCell::new(Vec::new());
+        let exec = collecting_exec("pending\n\n\n", &log);
+        let mut ingested = 0;
+        let recovery = recover_uncollected_outbox(&exec, "sess-1", &mut |_| ingested += 1).unwrap();
+        assert_eq!(recovery, OutboxRecovery::Empty);
+        assert_eq!(ingested, 0);
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 2, "{commands:?}");
+        assert_eq!(commands[1][2], clear_outbox_script("sess-1"));
+    }
+
+    #[test]
+    fn session_start_leaves_the_outbox_alone_when_it_cannot_be_read() {
+        let log: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let exec = |args: &[&str]| -> Result<String, String> {
+            log.borrow_mut()
+                .push(args.iter().map(|a| a.to_string()).collect());
+            Err("workstation suspended".to_string())
+        };
+        let mut ingested = 0;
+        let error =
+            recover_uncollected_outbox(&exec, "sess-1", &mut |_| ingested += 1).unwrap_err();
+        assert!(error.contains("workstation suspended"), "{error}");
+        assert_eq!(ingested, 0);
+        assert_eq!(log.borrow().len(), 1, "no clear after a failed collection");
+    }
+
     /// Drive the helper as the agent would: newline-delimited JSON-RPC on
     /// stdin, one response per line on stdout. Returns the parsed responses.
     fn run_helper(
@@ -836,6 +1013,128 @@ mod tests {
             property_names(&nested_steps_schema(helper_schema)),
             property_names(&nested_steps_schema(&tool_schema)),
             "helper: {helper_schema}\ntool: {tool_schema}"
+        );
+    }
+
+    #[test]
+    fn helper_negotiates_a_protocol_version_it_implements() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping helper protocol test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let initialize = |id: u32, version: Option<&str>| {
+            let mut params =
+                serde_json::json!({"capabilities":{},"clientInfo":{"name":"test","version":"0"}});
+            if let Some(version) = version {
+                params["protocolVersion"] = serde_json::Value::String(version.to_string());
+            }
+            serde_json::json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":params})
+        };
+        let responses = run_helper(
+            home.path(),
+            &node,
+            &[
+                initialize(1, Some("2024-11-05")),
+                initialize(2, Some("2025-06-18")),
+                initialize(3, Some("2099-01-01")),
+                initialize(4, None),
+            ],
+        );
+        // A revision we implement is echoed; anything else gets our newest.
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(responses[1]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(responses[2]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(responses[3]["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn helper_rewrite_drops_the_done_marker_until_both_files_are_renamed() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping helper rewrite test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        let call = |id: u32, title: &str, body: &str| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"write_note","arguments":{"title":title,"body":body}}});
+
+        let first = run_helper(home.path(), &node, &[call(1, "First", "first body")]);
+        assert_eq!(first[0]["result"]["isError"], false);
+        assert!(outbox.join("done").exists());
+
+        // Make the second call's `meta.json` rename fail: a non-empty
+        // directory in its place cannot be renamed over. The helper is then
+        // stopped between `note.md` and `meta.json` — exactly where a sweep
+        // reading the outbox must not find `done`.
+        std::fs::remove_file(outbox.join("meta.json")).unwrap();
+        std::fs::create_dir(outbox.join("meta.json")).unwrap();
+        std::fs::write(outbox.join("meta.json/keep"), "x").unwrap();
+        let second = run_helper(home.path(), &node, &[call(2, "Second", "second body")]);
+        assert_eq!(
+            second[0]["result"]["isError"], true,
+            "the blocked rename is reported to the agent: {second:?}"
+        );
+        assert!(
+            !outbox.join("done").exists(),
+            "`done` was unlinked before the rewrite began"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outbox.join("note.md")).unwrap(),
+            "second body",
+            "the body rename landed before the failure"
+        );
+        let exec = local_exec(home.path());
+        assert_eq!(
+            collect(&exec, "sess-1", None).unwrap(),
+            OutboxState::Pending,
+            "a half-written rewrite is never collected as a note"
+        );
+
+        // Unblock and rewrite again: the marker comes back last, with both
+        // files from the same call.
+        std::fs::remove_dir_all(outbox.join("meta.json")).unwrap();
+        let third = run_helper(home.path(), &node, &[call(3, "Third", "third body")]);
+        assert_eq!(third[0]["result"]["isError"], false);
+        match collect(&exec, "sess-1", Some("turn-1")).unwrap() {
+            OutboxState::Delivered(submission) => {
+                assert_eq!(submission.title, "Third");
+                assert_eq!(submission.body, "third body");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_start_recovery_runs_against_a_local_shell() {
+        let Some(node) = node() else {
+            eprintln!("node not available; skipping local recovery test");
+            return;
+        };
+        let home = tempfile::tempdir().unwrap();
+        run_helper(
+            home.path(),
+            &node,
+            &[
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_note","arguments":{"title":"Lost","body":"found later"}}}),
+            ],
+        );
+        let exec = local_exec(home.path());
+        let mut ingested = Vec::new();
+        assert_eq!(
+            recover_uncollected_outbox(&exec, "sess-1", &mut |s| ingested.push(s)).unwrap(),
+            OutboxRecovery::Ingested
+        );
+        assert_eq!(ingested.len(), 1);
+        assert_eq!(ingested[0].title, "Lost");
+        assert_eq!(ingested[0].body, "found later");
+        let outbox = home.path().join(".staged/sessions/sess-1");
+        assert!(!outbox.join("done").exists());
+        assert!(!outbox.join("note.md").exists());
+        assert!(!outbox.join("meta.json").exists());
+        assert_eq!(
+            recover_uncollected_outbox(&exec, "sess-1", &mut |_| panic!("nothing to ingest"))
+                .unwrap(),
+            OutboxRecovery::Empty
         );
     }
 

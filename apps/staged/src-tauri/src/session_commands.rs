@@ -1677,6 +1677,49 @@ pub(crate) async fn reattach_session_config(
     })
 }
 
+/// How long `prepare_resume` may take once the resume already holds its row
+/// or its turn. It awaits a HEAD read and, for a remote branch, a workspace
+/// path resolution over the network, neither of which has a timeout of its
+/// own (the continue path allows 30 s for the remote connect alone, see
+/// `ContinueWaits::DEFAULT`).
+///
+/// `resume_claimed_session_for_store` runs after `continue_resume_gate` has
+/// claimed the row `running` under a liveness hold, and a hold keeps the
+/// stranded-session sweep off the row for as long as it lives (the sweep is
+/// structural, with no clock), so an unbounded hang there would hold the
+/// branch busy for good: every row queued behind it waits on a call that may
+/// never return. Under the cap the hang becomes an `Err` that
+/// `fail_session_start_on_error` records on the row as `error`, releasing the
+/// hold and draining the branch. The drain's re-queued resume
+/// (`start_requeued_session_for_branch`) prepares before its claim, so a hang
+/// there strands no row, but it would hold that branch's drain open; the same
+/// cap turns it into a failed pre-claim start the drain retries a bounded
+/// number of times.
+pub(crate) const RESUME_PREPARE_CAP: Duration = Duration::from_secs(60);
+
+/// The error a resume ends with when its preparation outlives `cap`.
+pub(crate) fn resume_prepare_timed_out(cap: Duration) -> String {
+    format!(
+        "the resume did not finish preparing within {cap:?} (reading the branch HEAD or \
+         resolving the remote workspace hung), so the session was not restarted"
+    )
+}
+
+/// Run a resume's preparation under `cap` (see [`RESUME_PREPARE_CAP`]). A
+/// preparation that outlives the cap is dropped — it only reads, so there is
+/// nothing to undo; a remote path resolution already on a blocking thread
+/// finishes there and is discarded — and reported as
+/// [`resume_prepare_timed_out`].
+pub(crate) async fn prepare_resume_within<T, F>(cap: Duration, prepare: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    match tokio::time::timeout(cap, prepare).await {
+        Ok(result) => result,
+        Err(_) => Err(resume_prepare_timed_out(cap)),
+    }
+}
+
 /// The second half of a resume, after the row has been claimed `running`
 /// (and with the caller's liveness hold still in place): announce the
 /// status, persist the config selection and hand the row to the runner. A
@@ -2069,9 +2112,14 @@ pub(crate) async fn send_session_message_now_for_store(
 /// preparation and launch as `resume_session_for_store`, without the claim
 /// it already made. No `branch_id` override and no config selection: the
 /// resume resolves the branch from the session's artifact (or from the row
-/// itself for pipeline sessions) and keeps the session's selection. A
-/// preparation failure is recorded on the row like a launch failure — the
-/// row is `running` and ours from the claim on.
+/// itself for pipeline sessions) and keeps the session's selection.
+///
+/// The row is `running` and ours from the claim on, under a liveness hold the
+/// stranded-session sweep respects, so the preparation runs under
+/// [`RESUME_PREPARE_CAP`]: a preparation that fails or outlives the cap is
+/// recorded on the row as `error` like a launch failure, and the hold is
+/// released when this returns, so the branch drains instead of waiting on
+/// the hang.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resume_claimed_session_for_store(
     store: Arc<Store>,
@@ -2084,7 +2132,12 @@ pub(crate) async fn resume_claimed_session_for_store(
     image_ids: Vec<String>,
 ) -> Result<(), String> {
     let ClaimedResume { session, _liveness } = claim;
-    let plan = match prepare_resume(&store, &session, None, None).await {
+    let plan = match prepare_resume_within(
+        RESUME_PREPARE_CAP,
+        prepare_resume(&store, &session, None, None),
+    )
+    .await
+    {
         Ok(plan) => plan,
         Err(e) => {
             let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
@@ -6224,8 +6277,15 @@ async fn start_requeued_session_for_branch(
     // Everything that awaits — the pre-run HEAD, the remote workspace path —
     // before the claim (see `QueuedSessionClaim::claim`). A failure here
     // leaves the row queued for the drain's bounded retries, as a fresh
-    // start's context build does.
-    let plan = prepare_resume(&store, &session, Some(branch_id.clone()), None).await?;
+    // start's context build does. Those retries bound how often a start may
+    // fail, not how long one may take, so the preparation gets the same cap
+    // as the claimed resume: a hang would otherwise hold this branch's drain
+    // open, and under the cap it is one more failed attempt.
+    let plan = prepare_resume_within(
+        RESUME_PREPARE_CAP,
+        prepare_resume(&store, &session, Some(branch_id.clone()), None),
+    )
+    .await?;
 
     // Live from before the claim flips the row to `running` until
     // `start_session` has registered it (see `SessionRegistry::hold`).
@@ -8231,10 +8291,58 @@ mod tests {
         let end = body.find("\n}\n").expect("fn end");
         let body = &body[..end];
         assert!(body.contains("prepare_resume(&store, &session, Some(branch_id.clone()), None)"));
+        assert!(body.contains("prepare_resume_within("));
+        assert!(body.contains("RESUME_PREPARE_CAP"));
         assert!(body.contains("launch_resume("));
         assert!(body.contains("REPO_SESSION_RESUME_PROMPT"));
         assert!(!body.contains("agent_session_id: None"));
         assert!(!body.contains("session_runner::start_session("));
+    }
+
+    /// A claimed resume holds its row `running` with a liveness hold the
+    /// stranded-session sweep respects, so its preparation must be bounded
+    /// and a timeout must reach `fail_session_start_on_error`, or a hung
+    /// `prepare_resume` holds the branch busy for good. The path needs a
+    /// concrete app runtime to drive, so this is pinned by source text like
+    /// the claim invariants below.
+    #[test]
+    fn claimed_resume_bounds_its_preparation_and_records_a_timeout() {
+        let source = include_str!("session_commands.rs");
+        let start = "pub(crate) async fn resume_claimed_session_for_store(";
+        let body = &source[source.find(start).expect(start)..];
+        let end = body.find("\n}\n").expect("fn end");
+        let body = &body[..end];
+        let bounded = body
+            .find("prepare_resume_within(")
+            .expect("the preparation is bounded");
+        let cap = body
+            .find("RESUME_PREPARE_CAP")
+            .expect("the preparation uses the shared cap");
+        let recorded = body
+            .find("fail_session_start_on_error(")
+            .expect("a failed preparation is recorded on the row");
+        assert!(bounded < recorded && cap < recorded);
+    }
+
+    /// The bound itself: a preparation that finishes passes its result
+    /// through, one that hangs ends with the timeout message.
+    #[tokio::test]
+    async fn prepare_resume_within_maps_a_hang_to_the_timeout_error() {
+        let cap = Duration::from_millis(20);
+        assert_eq!(
+            prepare_resume_within(cap, async { Ok::<u8, String>(7) }).await,
+            Ok(7)
+        );
+        assert_eq!(
+            prepare_resume_within(cap, async { Err::<u8, String>("no HEAD".to_string()) }).await,
+            Err("no HEAD".to_string())
+        );
+        let started = Instant::now();
+        assert_eq!(
+            prepare_resume_within(cap, std::future::pending::<Result<u8, String>>()).await,
+            Err(resume_prepare_timed_out(cap))
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     /// The window between a `Started` claim and the runner taking the row is

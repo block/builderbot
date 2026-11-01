@@ -11,9 +11,10 @@ use super::plan::{
 use super::run::{run_project_phase, run_repo_phase, wait_until_settled, PhaseOutcome};
 use super::{build_recovery, handled_through_from_preferences, LaunchResumeState};
 use crate::session_commands::{
-    claim_startable_queued_sessions, queued_start_kind, ClaimedResume, QueuedStartKind,
+    claim_startable_queued_sessions, prepare_resume_within, queued_start_kind,
+    resume_prepare_timed_out, ClaimedResume, QueuedStartKind,
 };
-use crate::session_runner::SessionRegistry;
+use crate::session_runner::{finish_failed_before_run, SessionRegistry};
 use crate::store::{self, CompletionReason, Session, SessionStatus, Store};
 
 fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
@@ -390,9 +391,6 @@ async fn no_op_resume(_claim: ClaimedResume) -> Result<(), String> {
     Ok(())
 }
 
-/// A cap no test resume comes near, so it never changes an outcome.
-const NO_CAP: Duration = Duration::from_secs(30);
-
 /// Three rows the quit sweep cancelled while queued, behind a session with a
 /// conversation to resume: the resumable one is claimed `running`, the three
 /// go back on the queue in their original order, and the drain starts them in
@@ -422,15 +420,7 @@ async fn requeued_rows_drain_in_original_order_behind_a_resumed_session() {
     let order: Vec<&str> = plan.repo.iter().map(|p| p.session_id.as_str()).collect();
     assert_eq!(order, vec![&resumable.id, &first.id, &second.id, &third.id]);
 
-    let outcome = run_repo_phase(
-        &store,
-        &registry,
-        app.handle(),
-        &plan.repo,
-        NO_CAP,
-        no_op_resume,
-    )
-    .await;
+    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
     assert_eq!(outcome.resumed, vec![resumable.id.clone()]);
     assert_eq!(
         outcome.requeued,
@@ -502,15 +492,7 @@ async fn resumable_session_behind_requeued_rows_keeps_its_place() {
         .collect();
     let plan = plan_launch_resume(candidates);
 
-    let outcome = run_repo_phase(
-        &store,
-        &registry,
-        app.handle(),
-        &plan.repo,
-        NO_CAP,
-        no_op_resume,
-    )
-    .await;
+    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
     assert!(outcome.resumed.is_empty());
     assert_eq!(
         outcome.requeued,
@@ -571,10 +553,18 @@ async fn resumable_session_behind_requeued_rows_keeps_its_place() {
     assert_eq!(claimed.agent_id.as_deref(), Some("acp-1"));
 }
 
-/// A resume that never reaches the runner is given `resume_cap`, counted as
-/// failed, and left to finish on its own task; the sessions behind it still
-/// run. The hung row stays `running` and claimed: its runner (or the
-/// stranded-session sweep) records how it ends.
+/// A resume whose preparation hangs is bounded by `RESUME_PREPARE_CAP`
+/// inside `resume_claimed_session_for_store`: the timeout is an `Err` that
+/// `fail_session_start_on_error` records on the row, so the row ends in
+/// `error` with the timeout message, the claim's liveness hold is released
+/// (the row is no longer live), and the branch is kicked — the rows re-queued
+/// behind it can be claimed, and the phase moves on to the sessions after it.
+///
+/// That production function needs a concrete app runtime (the launch takes
+/// the action executors and the Wry handle), so the test resume mirrors its
+/// failure path on a mock runtime: the same bound, the same row write, the
+/// claim dropped on return. The branch kick itself is the drain's; the test
+/// asks the drain's claim query what it would start.
 #[tokio::test]
 async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
     let (store, project, branch) = store_with_branch();
@@ -586,10 +576,12 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
     let app = mock_app();
 
     let hanging = interrupted_commit(&store, &branch.id, 100, Some("acp-hang"));
-    let prompt_one = interrupted_commit(&store, &other_branch.id, 200, Some("acp-ok"));
+    let behind_one = interrupted_queued_commit(&store, &branch.id, 200);
+    let behind_two = interrupted_queued_commit(&store, &branch.id, 300);
+    let elsewhere = interrupted_commit(&store, &other_branch.id, 400, Some("acp-ok"));
 
     let plan = plan_launch_resume(
-        [&hanging, &prompt_one]
+        [&hanging, &behind_one, &behind_two, &elsewhere]
             .iter()
             .map(|s| {
                 super::plan::classify_candidate(
@@ -599,22 +591,53 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
             })
             .collect(),
     );
+    // Branches are grouped in id order (unspecified here); within the branch
+    // the hung row leads and the re-queued rows follow it.
+    let position = |id: &str| plan.repo.iter().position(|p| p.session_id == id).unwrap();
+    assert!(position(&hanging.id) < position(&behind_one.id));
+    assert!(position(&behind_one.id) < position(&behind_two.id));
+
+    const CAP: Duration = Duration::from_millis(100);
     let hanging_id = hanging.id.clone();
+    let hanging_branch = branch.id.clone();
+    let store_for_resume = Arc::clone(&store);
+    let registry_for_resume = Arc::clone(&registry);
+    let app_handle = app.handle().clone();
     let started = std::time::Instant::now();
     let outcome = run_repo_phase(
         &store,
         &registry,
         app.handle(),
         &plan.repo,
-        Duration::from_millis(100),
         move |claim: ClaimedResume| {
+            let store = Arc::clone(&store_for_resume);
+            let registry = Arc::clone(&registry_for_resume);
+            let app_handle = app_handle.clone();
+            let branch_id = hanging_branch.clone();
             let hangs = claim.session.id == hanging_id;
             async move {
-                if hangs {
-                    let _claim = claim;
-                    std::future::pending::<()>().await;
+                if !hangs {
+                    return Ok(());
                 }
-                Ok(())
+                // `resume_claimed_session_for_store`, minus the launch: the
+                // preparation never finishes, the bound ends it, and the
+                // failure is written to the still-held row before the claim
+                // (and with it the hold) is dropped on return. The hold is
+                // what the bound protects: live here, released below.
+                assert!(registry.is_live(&claim.session.id));
+                let prepared: Result<(), String> =
+                    prepare_resume_within(CAP, std::future::pending()).await;
+                let error = prepared.expect_err("the bound ends the hang");
+                assert!(finish_failed_before_run(
+                    &claim.session.id,
+                    Some(branch_id),
+                    None,
+                    &store,
+                    &app_handle,
+                    &error,
+                ));
+                drop(claim);
+                Err(error)
             }
         },
     )
@@ -624,16 +647,40 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
         started.elapsed() < Duration::from_secs(5),
         "the cap, not the hang, ended the wait"
     );
-    assert_eq!(outcome.resumed, vec![prompt_one.id.clone()]);
-    assert_eq!(outcome.failed.len(), 1, "{:?}", outcome.failed);
-    assert_eq!(outcome.failed[0].0, hanging.id);
-    assert!(
-        outcome.failed[0].1.contains("did not reach the runner"),
-        "{}",
-        outcome.failed[0].1
+    assert_eq!(outcome.resumed, vec![elsewhere.id.clone()]);
+    assert_eq!(
+        outcome.requeued,
+        vec![behind_one.id.clone(), behind_two.id.clone()]
     );
-    assert_eq!(status_of(&store, &hanging.id), SessionStatus::Running);
-    assert_eq!(status_of(&store, &prompt_one.id), SessionStatus::Running);
+    assert_eq!(
+        outcome.failed,
+        vec![(hanging.id.clone(), resume_prepare_timed_out(CAP))]
+    );
+
+    // The hung row: `error` with the timeout as its message, no longer live,
+    // so nothing holds the branch.
+    let hung = store.get_session(&hanging.id).unwrap().unwrap();
+    assert_eq!(hung.status, SessionStatus::Error);
+    assert_eq!(
+        hung.error_message.as_deref(),
+        Some(resume_prepare_timed_out(CAP).as_str())
+    );
+    assert_eq!(hung.completion_reason, Some(CompletionReason::Crashed));
+    assert!(!registry.is_live(&hanging.id));
+
+    // The re-queued rows behind it are claimable in order: an errored row is
+    // no barrier to the drain.
+    assert_eq!(
+        claim_startable_queued_sessions(&store, &branch.id).unwrap(),
+        vec![behind_one.id.clone()]
+    );
+    complete(&store, &behind_one.id);
+    assert_eq!(
+        claim_startable_queued_sessions(&store, &branch.id).unwrap(),
+        vec![behind_two.id.clone()]
+    );
+
+    assert_eq!(status_of(&store, &elsewhere.id), SessionStatus::Running);
 }
 
 /// A row that moved before the phase reached it (resumed by hand, or by
@@ -654,15 +701,7 @@ async fn phase_skips_rows_that_are_no_longer_interrupted() {
     assert!(store.transition_app_quit_to_queued(&session.id).unwrap());
     assert!(store.transition_queued_to_running(&session.id).unwrap());
 
-    let outcome = run_repo_phase(
-        &store,
-        &registry,
-        app.handle(),
-        &plan.repo,
-        NO_CAP,
-        no_op_resume,
-    )
-    .await;
+    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
     assert_eq!(outcome, PhaseOutcome::default());
     assert_eq!(status_of(&store, &session.id), SessionStatus::Running);
 }
@@ -685,15 +724,7 @@ async fn phase_leaves_pipeline_rows_terminal() {
         &store,
         store.get_session(&push.id).unwrap().as_ref().unwrap(),
     )]);
-    let outcome = run_repo_phase(
-        &store,
-        &registry,
-        app.handle(),
-        &plan.repo,
-        NO_CAP,
-        no_op_resume,
-    )
-    .await;
+    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
     assert_eq!(
         outcome.skipped,
         vec![(push.id.clone(), PIPELINE_NOT_RESUMED_REASON.to_string())]

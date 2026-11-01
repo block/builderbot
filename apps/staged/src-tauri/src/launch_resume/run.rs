@@ -9,7 +9,10 @@
 //! `wait_for_repo_session` on relaunch finds its children queued or running
 //! rather than dead. Every claim goes through `continue_resume_gate`, the
 //! same check the MCP `continue_repo_session` path uses, so two exclusive
-//! sessions on one branch cannot both claim.
+//! sessions on one branch cannot both claim, and every resume runs its
+//! preparation under `session_commands::RESUME_PREPARE_CAP`, so a claim
+//! whose preparation hangs ends in `error` and releases the branch rather
+//! than holding it.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -38,15 +41,6 @@ use super::LaunchResumeSummary;
 /// `queued` already counts as settled, so a row the drain has not reached
 /// never holds phase 2 up; this cap bounds the ones it has.
 pub(crate) const REPO_PHASE_SETTLE_CAP: Duration = Duration::from_secs(15);
-/// How long phase 1 gives one resume to reach the runner before moving on.
-/// `prepare_resume` awaits a HEAD read and, for a remote branch, a workspace
-/// path resolution over the network, neither of which has a timeout of its
-/// own; the continue path allows 30 s for the remote connect alone. The
-/// resume keeps running past this on its own task — a late failure is still
-/// recorded on the row by `fail_session_start_on_error` — but the phase
-/// counts it as failed and goes on, so one hanging remote branch cannot stall
-/// the repo sessions behind it or phase 2.
-pub(crate) const REPO_RESUME_START_CAP: Duration = Duration::from_secs(60);
 const SETTLE_POLL: Duration = Duration::from_millis(200);
 
 /// What one phase did, for the log and the Doctor.
@@ -109,24 +103,26 @@ fn requeue<R: tauri::Runtime>(
 }
 
 /// Phase 1 over the planned repo sessions, in plan order. `resume` finishes a
-/// claim the gate made (the production runner, or a no-op in tests), on a
-/// task of its own and given `resume_cap` to reach the runner. A claim the
-/// gate blocks — the branch is busy, provisioning, or has rows queued ahead —
-/// falls back to re-queue; the row keeps its ACP session id, so the drain
-/// resumes its conversation in turn rather than starting it over. One the
-/// gate refuses outright (the worktree is gone) is left terminal.
+/// claim the gate made: in production `resume_claimed_session_for_store`,
+/// which bounds its preparation with `RESUME_PREPARE_CAP` and ends the row in
+/// `error` (releasing the claim and draining the branch) when the bound or
+/// the preparation fails, so the phase simply awaits it and counts an `Err`
+/// as failed. A claim the gate blocks — the branch is busy, provisioning, or
+/// has rows queued ahead — falls back to re-queue; the row keeps its ACP
+/// session id, so the drain resumes its conversation in turn rather than
+/// starting it over. One the gate refuses outright (the worktree is gone) is
+/// left terminal.
 pub(crate) async fn run_repo_phase<R, F, Fut>(
     store: &Arc<Store>,
     registry: &Arc<SessionRegistry>,
     app_handle: &tauri::AppHandle<R>,
     planned: &[PlannedSession],
-    resume_cap: Duration,
     resume: F,
 ) -> PhaseOutcome
 where
     R: tauri::Runtime,
     F: Fn(ClaimedResume) -> Fut,
-    Fut: Future<Output = Result<(), String>> + Send + 'static,
+    Fut: Future<Output = Result<(), String>>,
 {
     let mut outcome = PhaseOutcome::default();
     let mut branches_to_kick = BTreeSet::new();
@@ -156,12 +152,14 @@ where
             }
             LaunchAction::Requeue => true,
             LaunchAction::Resume => match continue_resume_gate(store, registry, session.clone()) {
-                Ok(Ok(claim)) => match resume_within(resume_cap, resume(claim)).await {
+                Ok(Ok(claim)) => match resume(claim).await {
                     Ok(()) => {
                         outcome.resumed.push(item.session_id.clone());
                         continue;
                     }
                     Err(e) => {
+                        // Recorded on the row by the resume itself (it is
+                        // `error` now, and its branch has been kicked).
                         log::warn!(
                             "[launch_resume] resume of session {} failed: {e}",
                             item.session_id
@@ -218,24 +216,6 @@ where
         crate::session_queue::kick(app_handle, &branch_id, KickSource::LaunchResume);
     }
     outcome
-}
-
-/// Drive one resume on its own task, for at most `cap`. A resume that
-/// outlives the cap is left running — the row is claimed and announced, and
-/// the runner or `fail_session_start_on_error` records how it ends — and
-/// reported here as a failure so the phase moves on. A task that panics is
-/// reported the same way.
-async fn resume_within<Fut>(cap: Duration, resume: Fut) -> Result<(), String>
-where
-    Fut: Future<Output = Result<(), String>> + Send + 'static,
-{
-    match tokio::time::timeout(cap, tokio::spawn(resume)).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(join)) => Err(format!("the resume task ended abnormally: {join}")),
-        Err(_) => Err(format!(
-            "did not reach the runner within {cap:?}; it continues in the background"
-        )),
-    }
 }
 
 /// Whether a phase-1 session has settled: `running` and owned by something in
@@ -393,17 +373,10 @@ pub(crate) async fn run_launch_resume(
         plan.project.len()
     );
 
-    let repo_outcome = run_repo_phase(
-        &store,
-        &registry,
-        &deps.app_handle,
-        &plan.repo,
-        REPO_RESUME_START_CAP,
-        |claim| {
-            let deps = deps.clone();
-            async move { deps.resume(claim, REPO_SESSION_RESUME_PROMPT).await }
-        },
-    )
+    let repo_outcome = run_repo_phase(&store, &registry, &deps.app_handle, &plan.repo, |claim| {
+        let deps = deps.clone();
+        async move { deps.resume(claim, REPO_SESSION_RESUME_PROMPT).await }
+    })
     .await;
 
     let touched: Vec<String> = repo_outcome.touched().cloned().collect();

@@ -101,9 +101,10 @@ export function quitApp(): Promise<void> {
 }
 
 /**
- * The sessions the last quit interrupted, handed out once per launch: a
- * second window or a reload gets `null`. Desktop only — the web-mode dispatch
- * table refuses it, so a browser client never takes the set.
+ * The sessions the last quit interrupted, offered until answered: a reload
+ * before the answer sees the same set; after `resumeInterruptedSessions` it
+ * is `null`. Desktop only — the web-mode dispatch table refuses it, so a
+ * browser client never takes the set.
  */
 export function getInterruptedSessions(): Promise<LaunchRecovery | null> {
   return invokeCommand('get_interrupted_sessions');

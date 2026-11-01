@@ -5,10 +5,11 @@
 //! dead-owner recovery ends the same way). Nothing restarted them: the user
 //! had to find each one and press Resume. This module finds them once per
 //! process, right after the startup queue recovery, hands the set to the main
-//! window once (`get_interrupted_sessions`), and on the user's say-so
-//! restarts them in two phases (`resume_interrupted_sessions`): repo sessions
-//! first, project sessions second, so a resumed project agent that polls its
-//! children finds them queued or running.
+//! window whenever it asks until it is answered (`get_interrupted_sessions`,
+//! so a reload between the offer and the answer sees it again), and on the
+//! user's say-so restarts them in two phases (`resume_interrupted_sessions`):
+//! repo sessions first, project sessions second, so a resumed project agent
+//! that polls its children finds them queued or running.
 //!
 //! - [`plan`] decides what each row gets — resume, re-queue, or left alone —
 //!   and in what order, from the rows alone.
@@ -99,8 +100,8 @@ pub(crate) struct LaunchResumeSummary {
     pub(crate) failed: usize,
 }
 
-/// Managed state: the offer, handed out once; the marker to record when it
-/// is handled; and the last run's summary.
+/// Managed state: the offer, held until it is answered; the marker to record
+/// when it is; and the last run's summary.
 #[derive(Default)]
 pub struct LaunchResumeState {
     offer: Mutex<Option<LaunchRecovery>>,
@@ -113,9 +114,19 @@ impl LaunchResumeState {
         self.last_run.lock().unwrap().clone()
     }
 
-    #[cfg(test)]
+    /// The pending offer, left in place: a main-window reload between the
+    /// offer and the answer asks again and must see the same set.
     pub(crate) fn offer(&self) -> Option<LaunchRecovery> {
         self.offer.lock().unwrap().clone()
+    }
+
+    /// Clear the offer and take the marker to record. The first answer gets
+    /// the marker; a second answer (two windows, a reload mid-answer) gets
+    /// `None` and records nothing — the rows it names have moved under the
+    /// first answer, so `run_launch_resume` ignores them.
+    pub(crate) fn take_handled(&self) -> Option<i64> {
+        *self.offer.lock().unwrap() = None;
+        self.offered_through.lock().unwrap().take()
     }
 }
 
@@ -237,18 +248,22 @@ pub(crate) fn detect_at_launch<R: tauri::Runtime>(app_handle: &tauri::AppHandle<
 // Commands
 // =============================================================================
 
-/// The launch's interrupted set, handed out once. A second window, or a
-/// reload, gets `None`.
+/// The launch's interrupted set, until it is answered: a reload between the
+/// offer and the answer sees it again; after `resume_interrupted_sessions`
+/// (and on a launch with nothing to offer) this is `None`.
 #[tauri::command]
 pub fn get_interrupted_sessions(
     state: tauri::State<'_, LaunchResumeState>,
 ) -> Option<LaunchRecovery> {
-    state.offer.lock().unwrap().take()
+    state.offer()
 }
 
-/// Record the offer as handled, then restart `session_ids` on a task of its
-/// own (progress arrives as `session-status-changed` events). An empty list
-/// is a dismissal: the marker is recorded and nothing is restarted.
+/// Record the offer as handled and clear it, then restart `session_ids` on a
+/// task of its own (progress arrives as `session-status-changed` events). An
+/// empty list is a dismissal: the marker is recorded and nothing is
+/// restarted. A second answer is harmless: the marker is already recorded,
+/// and `run_launch_resume` ignores rows that are no longer terminal with the
+/// quit's reason.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn resume_interrupted_sessions(
@@ -260,7 +275,7 @@ pub fn resume_interrupted_sessions(
     state: tauri::State<'_, LaunchResumeState>,
     session_ids: Vec<String>,
 ) -> Result<(), String> {
-    if let Some(through) = state.offered_through.lock().unwrap().take() {
+    if let Some(through) = state.take_handled() {
         if let Err(e) = write_handled_through(&app_handle, through) {
             log::warn!("[launch_resume] could not record the handled marker: {e}");
         }

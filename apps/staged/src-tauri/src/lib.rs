@@ -2048,7 +2048,7 @@ pub fn run() {
                     session_queue::KickSource::Startup,
                 );
                 // Then the sessions the last quit ended, offered to the main
-                // window once it asks (see `launch_resume`). After the
+                // window when it asks (see `launch_resume`). After the
                 // dead-owner recovery, so crash-orphaned rows are in the set.
                 launch_resume::detect_at_launch(app.handle(), &store);
             }

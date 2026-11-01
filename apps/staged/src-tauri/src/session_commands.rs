@@ -1464,7 +1464,7 @@ pub(crate) async fn resume_session_for_store(
         image_ids,
         queued_message_id,
     )
-    .await
+    .map(|_| ())
 }
 
 /// Everything a resume reads before the row is claimed: the session's
@@ -1682,8 +1682,15 @@ pub(crate) async fn reattach_session_config(
 /// status, persist the config selection and hand the row to the runner. A
 /// failure from here on is recorded on the row, which is already `running`
 /// and announced.
+///
+/// Synchronous on purpose: everything a resume has to wait for is read by
+/// `prepare_resume` before the claim, so nothing between a claim and the
+/// runner handoff can suspend (the invariant `QueuedSessionClaim::claim`
+/// documents, which the branch drain's re-queued resume relies on too).
+/// Returns the runner's outcome so a caller that distinguishes a start from
+/// a shutdown refusal can.
 #[allow(clippy::too_many_arguments)]
-async fn launch_resume(
+fn launch_resume(
     plan: ResumePlan,
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -1694,7 +1701,7 @@ async fn launch_resume(
     prompt: String,
     image_ids: Option<Vec<String>>,
     queued_message_id: Option<String>,
-) -> Result<(), String> {
+) -> Result<session_runner::SessionStartOutcome, String> {
     let session_id = session.id.clone();
     let ResumePlan {
         provider,
@@ -1740,7 +1747,7 @@ async fn launch_resume(
 
     // The row is `running` and announced from here on, so a failure in the
     // rest of the start is recorded on it rather than returned alone.
-    let started = async {
+    let started = (|| -> Result<session_runner::SessionStartOutcome, String> {
         // Persist the effective selection before spawning the run: on an
         // unavailable-config failure the run clears the stored selection, so
         // persisting afterwards could resurrect the stale value it just cleared.
@@ -1790,8 +1797,7 @@ async fn launch_resume(
             app_handle.clone(),
             Arc::clone(&registry),
         )
-    }
-    .await;
+    })();
     fail_session_start_on_error(
         &store,
         &registry,
@@ -1800,9 +1806,7 @@ async fn launch_resume(
         config_branch_id,
         config_project_id,
         started,
-    )?;
-
-    Ok(())
+    )
 }
 
 /// The refusal `resume_session_for_store` returns when the row is already
@@ -2108,7 +2112,7 @@ pub(crate) async fn resume_claimed_session_for_store(
         Some(image_ids),
         None,
     )
-    .await
+    .map(|_| ())
 }
 
 /// Everything `continue_session_for_store` does short of the resume's
@@ -3065,6 +3069,32 @@ pub(crate) fn resumable_agent_session_id(agent_id: Option<&str>) -> Option<Strin
     agent_id
         .filter(|id| !id.starts_with(PENDING_BRANCH_START_AGENT_ID_PREFIX))
         .map(ToString::to_string)
+}
+
+/// How a queued start path launches its row: from the beginning, with the
+/// prompt the row was enqueued with, or by resuming the conversation the row
+/// already has.
+///
+/// Only launch resume produces a `queued` row with a real ACP session id:
+/// `transition_app_quit_to_queued` keeps `agent_id`, so a session the quit
+/// interrupted mid-run and the resume gate then blocked (rows queued ahead of
+/// it, the branch busy) waits its turn in the FIFO like any other row — and
+/// when its turn comes, `load_session` restores its conversation and it
+/// carries on where it left off, rather than redoing its task from the
+/// original prompt with no memory of having run before. A freshly enqueued
+/// row has no agent id, and the immediate-start placeholder is not a
+/// conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QueuedStartKind {
+    Fresh,
+    Resume { agent_session_id: String },
+}
+
+pub(crate) fn queued_start_kind(session: &store::Session) -> QueuedStartKind {
+    match resumable_agent_session_id(session.agent_id.as_deref()) {
+        Some(agent_session_id) => QueuedStartKind::Resume { agent_session_id },
+        None => QueuedStartKind::Fresh,
+    }
 }
 
 pub(crate) fn resolve_resume_acp_config_selection(
@@ -5882,6 +5912,15 @@ async fn start_queued_session_for_branch(
         )
     })?;
 
+    // A row launch resume put back on the queue with its conversation intact
+    // is resumed in its turn, not started over (see `QueuedStartKind`).
+    if let QueuedStartKind::Resume { .. } = queued_start_kind(&session) {
+        return start_requeued_session_for_branch(
+            store, registry, app_handle, branch_id, session, claim,
+        )
+        .await;
+    }
+
     // Use the original prompt from the queued session.
     let (prompt, launch_context) = extract_launch_context(&session.prompt)?;
     let session_id = session.id.clone();
@@ -6147,6 +6186,71 @@ async fn start_queued_session_for_branch(
         store,
         app_handle,
         Arc::clone(&registry),
+    )
+    .map(QueuedSessionStart::from_runner)
+}
+
+/// The queued start for a re-queued row that has a conversation to load
+/// ([`QueuedStartKind::Resume`]): the same preparation and launch as a manual
+/// resume, with the launch-resume interruption prompt as its next turn, and
+/// the same claim under the branch launch lock as every queued start. The row
+/// keeps the working directory and prompt it ran with; the fresh path's
+/// context rebuild is for an agent that has none.
+///
+/// A resume that fails — `load_session` unsupported, the agent gone — ends the
+/// row in `error` through `fail_session_start_on_error`, as a manual resume
+/// does. It is never retried as a fresh start: that is the from-scratch
+/// restart this path exists to avoid.
+async fn start_requeued_session_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session: store::Session,
+    claim: QueuedSessionClaim,
+) -> Result<QueuedSessionStart, String> {
+    let session_id = session.id.clone();
+    // The launch takes the project-tool handles whatever the session; a
+    // branch session never wires them up.
+    let action_executor = app_handle
+        .try_state::<Arc<ActionExecutor>>()
+        .map(|state| Arc::clone(&state))
+        .ok_or_else(|| "action executor is not available".to_string())?;
+    let action_registry = app_handle
+        .try_state::<Arc<ActionRegistry>>()
+        .map(|state| Arc::clone(&state))
+        .ok_or_else(|| "action registry is not available".to_string())?;
+
+    // Everything that awaits — the pre-run HEAD, the remote workspace path —
+    // before the claim (see `QueuedSessionClaim::claim`). A failure here
+    // leaves the row queued for the drain's bounded retries, as a fresh
+    // start's context build does.
+    let plan = prepare_resume(&store, &session, Some(branch_id.clone()), None).await?;
+
+    // Live from before the claim flips the row to `running` until
+    // `start_session` has registered it (see `SessionRegistry::hold`).
+    let _liveness = registry.hold(&session_id);
+
+    let claimed = claim.claim(&store)?;
+    if claimed != QueuedSessionStart::Started {
+        return Ok(claimed);
+    }
+
+    log::info!(
+        "[session_queue] re-queued session {session_id} on branch {branch_id} resumes its \
+         conversation"
+    );
+    launch_resume(
+        plan,
+        store,
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        &session,
+        crate::launch_resume::plan::REPO_SESSION_RESUME_PROMPT.to_string(),
+        None,
+        None,
     )
     .map(QueuedSessionStart::from_runner)
 }
@@ -8055,6 +8159,84 @@ mod tests {
         session
     }
 
+    /// A row launch resume re-queued keeps its ACP session id, and that is
+    /// what makes the drain resume it rather than start it over; a freshly
+    /// enqueued row and one carrying the immediate-start placeholder start
+    /// from the beginning.
+    #[test]
+    fn queued_start_kind_resumes_only_rows_with_a_conversation() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("owner/repo");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        let fresh = store::Session::new_queued("commit").with_branch(&branch.id);
+        store.create_session(&fresh).unwrap();
+        assert_eq!(queued_start_kind(&fresh), QueuedStartKind::Fresh);
+
+        let placeholder = store::Session::new_queued("commit")
+            .with_branch(&branch.id)
+            .with_agent(&new_pending_branch_start_agent_id());
+        assert_eq!(queued_start_kind(&placeholder), QueuedStartKind::Fresh);
+
+        let interrupted = store::Session::new_running("commit", Path::new("/tmp"))
+            .with_branch(&branch.id)
+            .with_agent("acp-live");
+        store.create_session(&interrupted).unwrap();
+        assert!(store
+            .transition_from_running(
+                &interrupted.id,
+                store::SessionStatus::Cancelled,
+                None,
+                Some(&store::CompletionReason::AppQuit),
+            )
+            .unwrap());
+        assert!(store
+            .transition_app_quit_to_queued(&interrupted.id)
+            .unwrap());
+        let requeued = store.get_session(&interrupted.id).unwrap().unwrap();
+        assert_eq!(requeued.status, store::SessionStatus::Queued);
+        assert_eq!(
+            queued_start_kind(&requeued),
+            QueuedStartKind::Resume {
+                agent_session_id: "acp-live".to_string()
+            }
+        );
+    }
+
+    /// The re-queued resume goes through `prepare_resume` and `launch_resume`
+    /// with the interruption prompt and never through the fresh path's
+    /// `agent_session_id: None` start. The start paths need a concrete app
+    /// runtime to drive, so this is pinned by source text like the claim
+    /// invariants below.
+    #[test]
+    fn requeued_start_resumes_the_conversation_instead_of_starting_over() {
+        let source = include_str!("session_commands.rs");
+        let start = "async fn start_queued_session_for_branch(";
+        let body = &source[source.find(start).expect(start)..];
+        let dispatch = body
+            .find("start_requeued_session_for_branch(")
+            .expect("dispatch to the re-queued resume");
+        let fresh_start = body
+            .find("session_runner::start_session(")
+            .expect("fresh start");
+        assert!(
+            dispatch < fresh_start,
+            "the re-queued resume must be dispatched before the fresh start path"
+        );
+
+        let resume = "async fn start_requeued_session_for_branch(";
+        let body = &source[source.find(resume).expect(resume)..];
+        let end = body.find("\n}\n").expect("fn end");
+        let body = &body[..end];
+        assert!(body.contains("prepare_resume(&store, &session, Some(branch_id.clone()), None)"));
+        assert!(body.contains("launch_resume("));
+        assert!(body.contains("REPO_SESSION_RESUME_PROMPT"));
+        assert!(!body.contains("agent_session_id: None"));
+        assert!(!body.contains("session_runner::start_session("));
+    }
+
     /// The window between a `Started` claim and the runner taking the row is
     /// where a dropped caller strands a `running` row (see
     /// `QueuedSessionClaim::claim`). Pin that no start path awaits inside it.
@@ -8065,6 +8247,11 @@ mod tests {
                 include_str!("session_commands.rs"),
                 "async fn start_queued_session_for_branch(",
                 "session_runner::start_session(",
+            ),
+            (
+                include_str!("session_commands.rs"),
+                "async fn start_requeued_session_for_branch(",
+                "launch_resume(",
             ),
             (
                 include_str!("prs.rs"),
@@ -8102,6 +8289,11 @@ mod tests {
             (
                 include_str!("session_commands.rs"),
                 "async fn start_queued_session_for_branch(",
+                "registry.hold(&session_id)",
+            ),
+            (
+                include_str!("session_commands.rs"),
+                "async fn start_requeued_session_for_branch(",
                 "registry.hold(&session_id)",
             ),
             (

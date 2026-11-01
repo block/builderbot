@@ -961,7 +961,6 @@ export interface SessionBackgroundHoldTask {
 // Store status
 // =============================================================================
 
-/** Returned by get_store_status when the database needs a reset or is too new. */
 /**
  * One session the last app quit interrupted, as the launch dialog lists it.
  * Mirrors `launch_resume::InterruptedSession`.
@@ -976,8 +975,9 @@ export interface InterruptedSession {
   branchName: string | null;
   projectName: string | null;
   /**
-   * `resume`: its conversation is restored and it continues. `restart`: it
-   * never reached its agent, so it is re-queued and runs from the beginning.
+   * `resume`: its conversation is restored and it continues (at once, or in
+   * its turn on the branch queue if the branch is busy). `restart`: it never
+   * reached its agent, so it is re-queued and runs from the beginning.
    * `manual`: listed only; `reason` says why it is not restarted.
    */
   disposition: 'resume' | 'restart' | 'manual';
@@ -987,14 +987,16 @@ export interface InterruptedSession {
 }
 
 /**
- * The set offered once per launch by `get_interrupted_sessions`. Repo
- * sessions are restarted before project sessions (see `launch_resume`).
+ * The set offered per launch by `get_interrupted_sessions`, until it is
+ * answered. Repo sessions are restarted before project sessions (see
+ * `launch_resume`).
  */
 export interface LaunchRecovery {
   repoSessions: InterruptedSession[];
   projectSessions: InterruptedSession[];
 }
 
+/** Returned by get_store_status when the database needs a reset or is too new. */
 export interface StoreIncompatibility {
   /** App version that last used this database (e.g. "0.1.0"). */
   dbAppVersion: string;

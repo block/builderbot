@@ -641,8 +641,8 @@
     }
 
     // Offer to resume the sessions the last quit interrupted. Desktop main
-    // window only: the backend hands the set out once, and the store-reset
-    // prompt wins when there is no store to resume against. Not awaited — the
+    // window only: the backend holds the set until it is answered, and the
+    // store-reset prompt wins when there is no store to resume against. Not awaited — the
     // dialog appears over the shell once the window shows.
     if (isTauri && getWindowLabel() === 'main' && !storeIncompat && !storeError) {
       void resumeOnLaunch.load();

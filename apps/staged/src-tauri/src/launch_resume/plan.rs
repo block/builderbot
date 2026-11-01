@@ -59,7 +59,10 @@ pub(crate) enum LaunchAction {
     /// `continue_resume_gate` then `resume_claimed_session_for_store`.
     Resume,
     /// Flip back to `queued` and kick the branch; the drain rebuilds its
-    /// context as if it had never been touched.
+    /// context as if it had never been touched. (A `Resume` row the gate
+    /// blocks is re-queued the same way, but keeps its agent id, so the drain
+    /// resumes its conversation in turn — see
+    /// `session_commands::QueuedStartKind`.)
     Requeue,
     /// Left as it is, with the reason shown to the user.
     Skip { reason: &'static str },

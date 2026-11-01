@@ -10,7 +10,9 @@ use super::plan::{
 };
 use super::run::{run_project_phase, run_repo_phase, wait_until_settled, PhaseOutcome};
 use super::{build_recovery, handled_through_from_preferences, LaunchResumeState};
-use crate::session_commands::claim_startable_queued_sessions;
+use crate::session_commands::{
+    claim_startable_queued_sessions, queued_start_kind, ClaimedResume, QueuedStartKind,
+};
 use crate::session_runner::SessionRegistry;
 use crate::store::{self, CompletionReason, Session, SessionStatus, Store};
 
@@ -344,27 +346,52 @@ fn handled_marker_reads_missing_or_malformed_as_zero() {
     );
 }
 
+/// The offer stays until it is answered, so a main-window reload between
+/// `load()` and the user's answer asks again and sees the same set. The
+/// answer clears it and takes the marker exactly once; a second answer has
+/// nothing to record.
 #[test]
-fn state_hands_the_offer_out_once() {
+fn state_holds_the_offer_until_it_is_answered() {
     let app = mock_app();
     app.manage(LaunchResumeState::default());
     let (store, _project, branch) = store_with_branch();
     interrupted_commit(&store, &branch.id, 10, Some("acp-1"));
 
     super::detect_at_launch(app.handle(), &store);
+    let first = super::get_interrupted_sessions(app.state()).expect("an offer");
+    let after_reload =
+        super::get_interrupted_sessions(app.state()).expect("the offer again after a reload");
+    assert_eq!(first, after_reload);
+
     let state = app.state::<LaunchResumeState>();
-    assert!(state.offer().is_some());
-    assert!(state.offer.lock().unwrap().take().is_some());
-    assert!(state.offer().is_none());
+    let marker = state.take_handled().expect("the marker, once");
+    assert_eq!(marker, first.repo_sessions[0].interrupted_at);
+    assert!(super::get_interrupted_sessions(app.state()).is_none());
+    assert!(state.take_handled().is_none());
+}
+
+/// A launch with nothing interrupted offers nothing and has no marker.
+#[test]
+fn state_is_empty_when_nothing_was_interrupted() {
+    let app = mock_app();
+    app.manage(LaunchResumeState::default());
+    let (store, _project, _branch) = store_with_branch();
+
+    super::detect_at_launch(app.handle(), &store);
+    assert!(super::get_interrupted_sessions(app.state()).is_none());
+    assert!(app.state::<LaunchResumeState>().take_handled().is_none());
 }
 
 // ---------------------------------------------------------------------------
 // Phase 1 ordering
 // ---------------------------------------------------------------------------
 
-async fn no_op_resume(_claim: crate::session_commands::ClaimedResume) -> Result<(), String> {
+async fn no_op_resume(_claim: ClaimedResume) -> Result<(), String> {
     Ok(())
 }
+
+/// A cap no test resume comes near, so it never changes an outcome.
+const NO_CAP: Duration = Duration::from_secs(30);
 
 /// Three rows the quit sweep cancelled while queued, behind a session with a
 /// conversation to resume: the resumable one is claimed `running`, the three
@@ -395,7 +422,15 @@ async fn requeued_rows_drain_in_original_order_behind_a_resumed_session() {
     let order: Vec<&str> = plan.repo.iter().map(|p| p.session_id.as_str()).collect();
     assert_eq!(order, vec![&resumable.id, &first.id, &second.id, &third.id]);
 
-    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
+    let outcome = run_repo_phase(
+        &store,
+        &registry,
+        app.handle(),
+        &plan.repo,
+        NO_CAP,
+        no_op_resume,
+    )
+    .await;
     assert_eq!(outcome.resumed, vec![resumable.id.clone()]);
     assert_eq!(
         outcome.requeued,
@@ -467,7 +502,15 @@ async fn resumable_session_behind_requeued_rows_keeps_its_place() {
         .collect();
     let plan = plan_launch_resume(candidates);
 
-    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
+    let outcome = run_repo_phase(
+        &store,
+        &registry,
+        app.handle(),
+        &plan.repo,
+        NO_CAP,
+        no_op_resume,
+    )
+    .await;
     assert!(outcome.resumed.is_empty());
     assert_eq!(
         outcome.requeued,
@@ -495,6 +538,23 @@ async fn resumable_session_behind_requeued_rows_keeps_its_place() {
         ]
     );
 
+    // The re-queue keeps the conversation: the row the dialog promised to
+    // `resume` is started by the drain as a resume of `acp-1`, not from the
+    // original prompt, while the rows that never ran start fresh.
+    let requeued = store.get_session(&resumable.id).unwrap().unwrap();
+    assert_eq!(requeued.status, SessionStatus::Queued);
+    assert_eq!(requeued.agent_id.as_deref(), Some("acp-1"));
+    assert_eq!(
+        queued_start_kind(&requeued),
+        QueuedStartKind::Resume {
+            agent_session_id: "acp-1".to_string()
+        }
+    );
+    for id in [&first.id, &second.id, &third.id] {
+        let row = store.get_session(id).unwrap().unwrap();
+        assert_eq!(queued_start_kind(&row), QueuedStartKind::Fresh);
+    }
+
     assert_eq!(
         claim_startable_queued_sessions(&store, &branch.id).unwrap(),
         vec![first.id.clone()]
@@ -504,6 +564,76 @@ async fn resumable_session_behind_requeued_rows_keeps_its_place() {
         claim_startable_queued_sessions(&store, &branch.id).unwrap(),
         vec![resumable.id.clone()]
     );
+    // The claim is the drain's `transition_queued_to_running`, which leaves
+    // the agent id for `load_session`.
+    let claimed = store.get_session(&resumable.id).unwrap().unwrap();
+    assert_eq!(claimed.status, SessionStatus::Running);
+    assert_eq!(claimed.agent_id.as_deref(), Some("acp-1"));
+}
+
+/// A resume that never reaches the runner is given `resume_cap`, counted as
+/// failed, and left to finish on its own task; the sessions behind it still
+/// run. The hung row stays `running` and claimed: its runner (or the
+/// stranded-session sweep) records how it ends.
+#[tokio::test]
+async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
+    let (store, project, branch) = store_with_branch();
+    let other_branch = store::Branch::new(&project.id, "fix-signup", "main");
+    store.create_branch(&other_branch).unwrap();
+    let workdir = store::Workdir::new(&project.id, "/private/tmp").with_branch(&other_branch.id);
+    store.create_workdir(&workdir).unwrap();
+    let registry = Arc::new(SessionRegistry::new());
+    let app = mock_app();
+
+    let hanging = interrupted_commit(&store, &branch.id, 100, Some("acp-hang"));
+    let prompt_one = interrupted_commit(&store, &other_branch.id, 200, Some("acp-ok"));
+
+    let plan = plan_launch_resume(
+        [&hanging, &prompt_one]
+            .iter()
+            .map(|s| {
+                super::plan::classify_candidate(
+                    &store,
+                    store.get_session(&s.id).unwrap().as_ref().unwrap(),
+                )
+            })
+            .collect(),
+    );
+    let hanging_id = hanging.id.clone();
+    let started = std::time::Instant::now();
+    let outcome = run_repo_phase(
+        &store,
+        &registry,
+        app.handle(),
+        &plan.repo,
+        Duration::from_millis(100),
+        move |claim: ClaimedResume| {
+            let hangs = claim.session.id == hanging_id;
+            async move {
+                if hangs {
+                    let _claim = claim;
+                    std::future::pending::<()>().await;
+                }
+                Ok(())
+            }
+        },
+    )
+    .await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the cap, not the hang, ended the wait"
+    );
+    assert_eq!(outcome.resumed, vec![prompt_one.id.clone()]);
+    assert_eq!(outcome.failed.len(), 1, "{:?}", outcome.failed);
+    assert_eq!(outcome.failed[0].0, hanging.id);
+    assert!(
+        outcome.failed[0].1.contains("did not reach the runner"),
+        "{}",
+        outcome.failed[0].1
+    );
+    assert_eq!(status_of(&store, &hanging.id), SessionStatus::Running);
+    assert_eq!(status_of(&store, &prompt_one.id), SessionStatus::Running);
 }
 
 /// A row that moved before the phase reached it (resumed by hand, or by
@@ -524,7 +654,15 @@ async fn phase_skips_rows_that_are_no_longer_interrupted() {
     assert!(store.transition_app_quit_to_queued(&session.id).unwrap());
     assert!(store.transition_queued_to_running(&session.id).unwrap());
 
-    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
+    let outcome = run_repo_phase(
+        &store,
+        &registry,
+        app.handle(),
+        &plan.repo,
+        NO_CAP,
+        no_op_resume,
+    )
+    .await;
     assert_eq!(outcome, PhaseOutcome::default());
     assert_eq!(status_of(&store, &session.id), SessionStatus::Running);
 }
@@ -547,7 +685,15 @@ async fn phase_leaves_pipeline_rows_terminal() {
         &store,
         store.get_session(&push.id).unwrap().as_ref().unwrap(),
     )]);
-    let outcome = run_repo_phase(&store, &registry, app.handle(), &plan.repo, no_op_resume).await;
+    let outcome = run_repo_phase(
+        &store,
+        &registry,
+        app.handle(),
+        &plan.repo,
+        NO_CAP,
+        no_op_resume,
+    )
+    .await;
     assert_eq!(
         outcome.skipped,
         vec![(push.id.clone(), PIPELINE_NOT_RESUMED_REASON.to_string())]

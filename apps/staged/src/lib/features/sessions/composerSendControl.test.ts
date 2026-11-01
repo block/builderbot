@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   COMPOSER_SEND_MODE_OPTIONS,
   composerSendControl,
+  composerSubmitBlock,
   normalizeComposerSendMode,
 } from './composerSendControl';
 
@@ -53,5 +54,24 @@ describe('composerSendControl', () => {
 
   it('offers exactly the two modes in the dropdown', () => {
     expect(COMPOSER_SEND_MODE_OPTIONS.map((o) => o.mode)).toEqual(['queue', 'send']);
+  });
+});
+
+describe('composerSubmitBlock', () => {
+  it('disables submit while the session row is loading, whatever the draft holds', () => {
+    expect(composerSubmitBlock({ loading: true, sending: false, hasText: true })).toBe('loading');
+    expect(composerSubmitBlock({ loading: true, sending: false, hasText: false })).toBe('loading');
+    // Loading explains the block better than a spinner that is not spinning.
+    expect(composerSubmitBlock({ loading: true, sending: true, hasText: true })).toBe('loading');
+  });
+
+  it('disables submit while a send is in flight', () => {
+    expect(composerSubmitBlock({ loading: false, sending: true, hasText: true })).toBe('sending');
+    expect(composerSubmitBlock({ loading: false, sending: true, hasText: false })).toBe('sending');
+  });
+
+  it('disables submit on an empty draft and otherwise allows it', () => {
+    expect(composerSubmitBlock({ loading: false, sending: false, hasText: false })).toBe('empty');
+    expect(composerSubmitBlock({ loading: false, sending: false, hasText: true })).toBeNull();
   });
 });

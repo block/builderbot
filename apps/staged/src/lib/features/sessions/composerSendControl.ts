@@ -83,6 +83,42 @@ export function composerSendControl({
   };
 }
 
+/** Why the submit control is disabled, or `null` when it can be pressed. */
+export type ComposerSubmitBlock =
+  /** The session row has not loaded yet; the draft can be typed meanwhile. */
+  | 'loading'
+  /** A send is in flight and owns the composer until it settles. */
+  | 'sending'
+  /** Nothing to send. */
+  | 'empty';
+
+export interface ComposerSubmitBlockInput {
+  loading: boolean;
+  sending: boolean;
+  /** The draft has non-whitespace text. */
+  hasText: boolean;
+}
+
+/**
+ * Whether the composer's submit control is disabled, and why. `loading` wins
+ * because it is the only block the label does not already explain (the
+ * spinner covers `sending`, the empty box covers `empty`), so it gets a
+ * hover title of its own: `COMPOSER_LOADING_TITLE`.
+ */
+export function composerSubmitBlock({
+  loading,
+  sending,
+  hasText,
+}: ComposerSubmitBlockInput): ComposerSubmitBlock | null {
+  if (loading) return 'loading';
+  if (sending) return 'sending';
+  if (!hasText) return 'empty';
+  return null;
+}
+
+/** Hover title for the submit control while the session row is loading. */
+export const COMPOSER_LOADING_TITLE = 'Loading session…';
+
 /** Menu entries for the mode dropdown, in display order. */
 export const COMPOSER_SEND_MODE_OPTIONS: readonly {
   mode: ComposerSendMode;

@@ -11,7 +11,13 @@
   session, a plain "Queue" on a running one — and, when the backend reports
   the running session can take a message now (`canSendLive`), a split button
   whose primary segment performs the remembered mode (Queue / Send) and whose
-  dropdown switches it.
+  dropdown switches it. While the session row is still loading the control
+  is disabled (titled "Loading session…") but the draft can be typed.
+
+  Failures of the composer's own actions (`sendError`: a refused send, a
+  queue change that failed) are shown on a line inside the composer, next to
+  the attachment error, rather than in the pane's transcript slot — the
+  transcript stays readable behind them.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -37,8 +43,10 @@
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { cn } from '$lib/components/utils';
   import {
+    COMPOSER_LOADING_TITLE,
     COMPOSER_SEND_MODE_OPTIONS,
     composerSendControl,
+    composerSubmitBlock,
     type ComposerSendMode,
   } from './composerSendControl';
   import { ATTACHMENT_ACCEPT } from './attachErrors';
@@ -78,6 +86,17 @@
     /** The user picked a mode from the split button's menu. */
     onSendModeChange?: (mode: ComposerSendMode) => void;
     sending?: boolean;
+    /**
+     * The session row has not loaded yet: submit is disabled (and Cmd+Enter
+     * is the parent's no-op) while the draft can still be typed.
+     */
+    loading?: boolean;
+    /**
+     * Why the last composer action failed (send refused, queue change
+     * failed), shown inline until the parent clears it — on the next
+     * successful action or when the draft is edited.
+     */
+    sendError?: string | null;
     onSend?: () => void;
     /** Agent config picker rendered at the start of the control row. */
     configPicker?: Snippet;
@@ -101,6 +120,8 @@
     sendMode = 'queue',
     onSendModeChange,
     sending = false,
+    loading = false,
+    sendError = null,
     onSend,
     configPicker,
   }: Props = $props();
@@ -108,7 +129,11 @@
   let fileInputEl = $state<HTMLInputElement>();
 
   let sendControl = $derived(composerSendControl({ isLive, canSendLive, mode: sendMode }));
-  let sendDisabled = $derived(sending || !value.trim());
+  let submitBlock = $derived(
+    composerSubmitBlock({ loading, sending, hasText: value.trim().length > 0 })
+  );
+  let sendDisabled = $derived(submitBlock !== null);
+  let sendTitle = $derived(submitBlock === 'loading' ? COMPOSER_LOADING_TITLE : sendControl.title);
 
   function handleSendModeChange(value: string) {
     if (value === 'queue' || value === 'send') onSendModeChange?.(value);
@@ -149,7 +174,10 @@
     </div>
   {/if}
   {#if canAttachImages && attachError}
-    <p class="attach-error" role="alert">{attachError}</p>
+    <p class="composer-error" role="alert">{attachError}</p>
+  {/if}
+  {#if sendError}
+    <p class="composer-error" role="alert">{sendError}</p>
   {/if}
   <HashtagInput
     bind:textareaEl
@@ -186,7 +214,7 @@
       </span>
     {/if}
     {#if sendControl.split}
-      <span class="inline-flex composer-send composer-send-split" title={sendControl.title}>
+      <span class="inline-flex composer-send composer-send-split" title={sendTitle}>
         <Button
           variant="accent"
           class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
@@ -203,7 +231,7 @@
             )}
             title="Change how messages are delivered"
             aria-label="Change how messages are delivered"
-            disabled={sending}
+            disabled={sending || loading}
           >
             <ChevronDown size={14} />
           </DropdownMenu.Trigger>
@@ -222,7 +250,7 @@
         </DropdownMenu.Root>
       </span>
     {:else}
-      <span class="inline-flex composer-send" title={sendControl.title}>
+      <span class="inline-flex composer-send" title={sendTitle}>
         <Button
           variant="accent"
           class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
@@ -269,7 +297,8 @@
     flex-wrap: wrap;
   }
 
-  .attach-error {
+  /* Attachment and send failures share one line style. */
+  .composer-error {
     margin: 0;
     font-size: var(--size-sm);
     color: var(--ui-danger);

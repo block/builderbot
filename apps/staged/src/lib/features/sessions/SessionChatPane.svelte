@@ -950,6 +950,8 @@
       hasOlderMessages = false;
       acpMetadataMessages = [];
       queuedMessages = [];
+      // A failure line is about the session that was shown when it happened.
+      sendError = null;
     }
     loading = true;
     error = null;
@@ -1270,8 +1272,36 @@
 
   let sending = $state(false);
   let noteFollowupSending = $state(false);
+  /**
+   * Why the last composer action failed (a refused or failed send, a queue
+   * change or cancel that failed). Shown on a line inside the composer, not in
+   * `error`: that state replaces the whole transcript with a centered card,
+   * which hides the very conversation the user is trying to continue, and
+   * (see `reopenMode`) would turn the next reopen into a full reload.
+   * Cleared when the next action starts, when the draft is edited, and when
+   * the pane moves to another session.
+   */
+  let sendError = $state<string | null>(null);
+
+  /**
+   * A composer action is starting: drop the previous action's failure line,
+   * and a stale load error with it — the action's outcome is what the pane
+   * should show now, and the poll a successful one starts refreshes the
+   * transcript anyway.
+   */
+  function beginComposerAction() {
+    sendError = null;
+    error = null;
+  }
+
+  /** The submit control is disabled until the session row has loaded. */
+  let composerLoading = $derived(loading || !session);
 
   async function handleSend() {
+    // Until the row has loaded there is nothing to send to; the control is
+    // disabled, and Cmd+Enter keeps the draft rather than taking it out of
+    // the box only to put it back.
+    if (composerLoading) return;
     // A send still in flight (a live send can take a few seconds: steer
     // acknowledgement, interrupt-and-reprompt, or a resume) owns the composer
     // until it settles; a second Cmd+Enter meanwhile must not clear the draft
@@ -1293,11 +1323,12 @@
     }
 
     if (isLive) {
+      beginComposerAction();
       try {
         await queueSessionMessage(sessionId, text, imageIdsToSend, branchId ?? null);
         await refreshQueuedMessages();
       } catch (e) {
-        error = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
+        sendError = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
         inputText = text;
         replyImageIds = imageIdsToSend ?? [];
       }
@@ -1329,7 +1360,7 @@
     if (!session || sending) return;
     const id = session.id;
     sending = true;
-    error = null;
+    beginComposerAction();
     try {
       const result = await sendSessionMessageNow(id, text, imageIds);
       if (session?.id !== id) return;
@@ -1357,38 +1388,38 @@
           // does, with the branch override and follow-up config. `sending` is
           // already held here, so the lock is passed through. A resume that
           // fails (worktree gone, or the queue drain re-ran the session first
-          // so the row is already running) has set `error`; fall through to
-          // the draft restore below without overwriting it.
+          // so the row is already running) has set `sendError`; fall through
+          // to the draft restore below without overwriting it.
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
           if (await sendMessage(text, imageIds, true)) return;
           break;
         case 'rejected_queued':
-          error = 'The session has not started yet; queue the message instead.';
+          sendError = 'The session has not started yet; queue the message instead.';
           break;
         case 'blocked':
           // The connection may have gone under the request: ask again before
           // offering "Send" next time.
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
-          error = `Not delivered: ${result.reason ?? result.delivery}`;
+          sendError = `Not delivered: ${result.reason ?? result.delivery}`;
           break;
         case 'not_resumable':
           // Defensive: the command refuses a stopped session before the
           // resume gate (`not_running`), so this kind only reaches the MCP
           // tool. Kept because the shared union still spells it.
-          error = `Not delivered: ${result.reason ?? result.delivery}`;
+          sendError = `Not delivered: ${result.reason ?? result.delivery}`;
           break;
         default: {
           // A delivery kind the backend added that this hand-maintained union
           // does not know: say so rather than restoring the draft in silence.
           const unknownKind: never = result.delivery;
-          error = `Not delivered: ${String(unknownKind)}`;
+          sendError = `Not delivered: ${String(unknownKind)}`;
           break;
         }
       }
       inputText = text;
       replyImageIds = imageIds ?? [];
     } catch (e) {
-      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
       inputText = text;
       replyImageIds = imageIds ?? [];
     } finally {
@@ -1400,9 +1431,11 @@
    * Actually send a message to the backend and start the agent. Resolves
    * `true` once the backend accepted the message (even if the pane has moved
    * to another session since), `false` when nothing was sent, and the caller
-   * decides whether to restore its draft. `error` says why on `false` in
-   * every case but one: when another send already holds `sending`, nothing is
-   * written, since the spinner already explains the wait.
+   * decides whether to restore its draft. `sendError` says why on `false` in
+   * every case but two: when nothing could be targeted (defensive — the
+   * composer is disabled until the row has loaded, and a targeted send checks
+   * its target before calling), and when another send already holds
+   * `sending`, since the spinner already explains the wait.
    */
   async function sendMessage(
     text: string,
@@ -1413,14 +1446,14 @@
     const targetSessionId = target?.sessionId ?? session?.id;
     const targetBranchId = target ? target.branchId : (branchId ?? null);
     if (!targetSessionId || session?.id !== targetSessionId) {
-      // Reachable from Cmd+Enter while the session is still loading, or when
-      // the pane moved on before a targeted send ran.
-      error = 'No session to send to yet; try again in a moment.';
+      // The row is not loaded, or the pane moved on before a targeted send
+      // ran. Nothing is said: a message here would be about a session this
+      // pane no longer shows.
       return false;
     }
     if (!sendingLocked && sending) return false;
     if (!sendingLocked) sending = true;
-    error = null;
+    beginComposerAction();
     const acpConfigSelection: AcpConfigSelection | undefined =
       followupAcpConfigSelection ?? undefined;
     try {
@@ -1446,7 +1479,7 @@
       scrollToBottom();
       return true;
     } catch (e) {
-      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
       return false;
     } finally {
       if (!sendingLocked) sending = false;
@@ -1459,7 +1492,7 @@
     const hasParsedNote = noteInfo.hasParsedNote;
     sending = true;
     noteFollowupSending = true;
-    error = null;
+    beginComposerAction();
     try {
       const prompt = await buildNoteFollowupMessage(
         target.sessionId,
@@ -1469,7 +1502,7 @@
       if (session?.id !== target.sessionId || (branchId ?? null) !== target.branchId) return;
       await sendMessage(prompt, undefined, true, target);
     } catch (e) {
-      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       noteFollowupSending = false;
       sending = false;
@@ -1483,7 +1516,7 @@
       await deleteQueuedSessionMessage(id);
       await refreshQueuedMessages();
     } catch (e) {
-      error = `Failed to remove queued message: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to remove queued message: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       const next = new Set(queueActionIds);
       next.delete(id);
@@ -1494,7 +1527,7 @@
   async function handleSendQueuedMessage(id: string) {
     if (isLive || sending || queueActionIds.has(id)) return;
     queueActionIds = new Set(queueActionIds).add(id);
-    error = null;
+    beginComposerAction();
     try {
       await sendQueuedSessionMessage(id);
       await refreshQueuedMessages();
@@ -1504,7 +1537,7 @@
       startPolling();
       scrollToBottom();
     } catch (e) {
-      error = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
       await refreshQueuedMessages();
     } finally {
       const next = new Set(queueActionIds);
@@ -1519,7 +1552,7 @@
     try {
       await cancelSession(session.id);
     } catch (e) {
-      error = `Failed to cancel: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to cancel: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       cancelling = false;
     }
@@ -1600,6 +1633,12 @@
       e.preventDefault();
       handleSend();
     }
+  }
+
+  /** The draft changed: the last failure line has been read, so drop it. */
+  function handleInput() {
+    sendError = null;
+    autoResize();
   }
 
   function autoResize() {
@@ -3027,7 +3066,7 @@
         placeholder={sendControl.placeholder}
         {hashtagItems}
         onkeydown={handleInputKeydown}
-        oninput={autoResize}
+        oninput={handleInput}
         {canAttachImages}
         attachedImageIds={replyImageIds}
         {imagePreviews}
@@ -3039,6 +3078,8 @@
         sendMode={preferences.composerSendMode}
         onSendModeChange={setComposerSendMode}
         {sending}
+        loading={composerLoading}
+        {sendError}
         onSend={handleSend}
       >
         {#snippet configPicker()}

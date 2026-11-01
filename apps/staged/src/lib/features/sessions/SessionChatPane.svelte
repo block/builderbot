@@ -1304,8 +1304,12 @@
       return;
     }
 
-    // Session is idle — send immediately
-    await sendMessage(text, imageIdsToSend);
+    // Session is idle — send immediately. `sendMessage` reports the failure
+    // itself; the draft goes back in the box so it can be retried.
+    if (!(await sendMessage(text, imageIdsToSend))) {
+      inputText = text;
+      replyImageIds = imageIdsToSend ?? [];
+    }
   }
 
   /**
@@ -1351,10 +1355,13 @@
         case 'not_running':
           // Stopped since the last poll: resume it the way the idle composer
           // does, with the branch override and follow-up config. `sending` is
-          // already held here, so the lock is passed through.
+          // already held here, so the lock is passed through. A resume that
+          // fails (worktree gone, or the queue drain re-ran the session first
+          // so the row is already running) has set `error`; fall through to
+          // the draft restore below without overwriting it.
           liveDelivery = LIVE_DELIVERY_UNKNOWN;
-          await sendMessage(text, imageIds, true);
-          return;
+          if (await sendMessage(text, imageIds, true)) return;
+          break;
         case 'rejected_queued':
           error = 'The session has not started yet; queue the message instead.';
           break;
@@ -1365,6 +1372,9 @@
           error = `Not delivered: ${result.reason ?? result.delivery}`;
           break;
         case 'not_resumable':
+          // Defensive: the command refuses a stopped session before the
+          // resume gate (`not_running`), so this kind only reaches the MCP
+          // tool. Kept because the shared union still spells it.
           error = `Not delivered: ${result.reason ?? result.delivery}`;
           break;
         default: {
@@ -1386,23 +1396,31 @@
     }
   }
 
-  /** Actually send a message to the backend and start the agent. */
+  /**
+   * Actually send a message to the backend and start the agent. Resolves
+   * `true` once the backend accepted the message (even if the pane has moved
+   * to another session since), `false` when nothing was sent: the guard
+   * refused, or the resume failed — in which case `error` says why and the
+   * caller decides whether to restore its draft.
+   */
   async function sendMessage(
     text: string,
     imageIds?: string[],
     sendingLocked = false,
     target: SendMessageTarget | null = null
-  ) {
+  ): Promise<boolean> {
     const targetSessionId = target?.sessionId ?? session?.id;
     const targetBranchId = target ? target.branchId : (branchId ?? null);
-    if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) return;
+    if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) {
+      return false;
+    }
     if (!sendingLocked) sending = true;
     error = null;
     const acpConfigSelection: AcpConfigSelection | undefined =
       followupAcpConfigSelection ?? undefined;
     try {
       await resumeSession(targetSessionId, text, imageIds, targetBranchId, acpConfigSelection);
-      if (session?.id !== targetSessionId) return;
+      if (session?.id !== targetSessionId) return true;
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = {
@@ -1421,8 +1439,10 @@
       modelSpecificFollowupSessionId = null;
       startPolling();
       scrollToBottom();
+      return true;
     } catch (e) {
       error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      return false;
     } finally {
       if (!sendingLocked) sending = false;
     }

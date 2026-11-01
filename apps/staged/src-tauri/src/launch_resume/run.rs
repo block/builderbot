@@ -9,10 +9,17 @@
 //! `wait_for_repo_session` on relaunch finds its children queued or running
 //! rather than dead. Every claim goes through `continue_resume_gate`, the
 //! same check the MCP `continue_repo_session` path uses, so two exclusive
-//! sessions on one branch cannot both claim, and every resume runs its
-//! preparation under `session_commands::RESUME_PREPARE_CAP`, so a claim
-//! whose preparation hangs ends in `error` and releases the branch rather
-//! than holding it.
+//! sessions on one branch cannot both claim. The one wait in a resume's
+//! preparation, the pre-run HEAD read, runs under
+//! `session_commands::RESUME_HEAD_READ_CAP` and degrades to no snapshot, so a
+//! claim cannot hold its branch on a slow checkout and a slow checkout does
+//! not fail the resume.
+//!
+//! Phase 1 is sequential in plan order, so its worst case is the cap times
+//! the number of slow HEAD reads before phase 2 starts. Resumes on different
+//! branches are independent (ordering only matters within a branch), so
+//! running branches concurrently is a possible follow-up if that sum shows
+//! up on multi-branch remote setups.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -104,10 +111,11 @@ fn requeue<R: tauri::Runtime>(
 
 /// Phase 1 over the planned repo sessions, in plan order. `resume` finishes a
 /// claim the gate made: in production `resume_claimed_session_for_store`,
-/// which bounds its preparation with `RESUME_PREPARE_CAP` and ends the row in
-/// `error` (releasing the claim and draining the branch) when the bound or
-/// the preparation fails, so the phase simply awaits it and counts an `Err`
-/// as failed. A claim the gate blocks — the branch is busy, provisioning, or
+/// whose preparation bounds its pre-run HEAD read (`RESUME_HEAD_READ_CAP`,
+/// degrading to no snapshot rather than failing) and which ends the row in
+/// `error` (releasing the claim and draining the branch) when the
+/// preparation or launch fails, so the phase simply awaits it and counts an
+/// `Err` as failed. A claim the gate blocks — the branch is busy, provisioning, or
 /// has rows queued ahead — falls back to re-queue; the row keeps its ACP
 /// session id, so the drain resumes its conversation in turn rather than
 /// starting it over. One the gate refuses outright (the worktree is gone) is

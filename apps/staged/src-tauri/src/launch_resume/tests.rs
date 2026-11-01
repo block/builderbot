@@ -11,10 +11,10 @@ use super::plan::{
 use super::run::{run_project_phase, run_repo_phase, wait_until_settled, PhaseOutcome};
 use super::{build_recovery, handled_through_from_preferences, LaunchResumeState};
 use crate::session_commands::{
-    claim_startable_queued_sessions, prepare_resume_within, queued_start_kind,
-    resume_prepare_timed_out, ClaimedResume, QueuedStartKind,
+    claim_startable_queued_sessions, queued_start_kind, resume_pre_head_within, ClaimedResume,
+    QueuedStartKind,
 };
-use crate::session_runner::{finish_failed_before_run, SessionRegistry};
+use crate::session_runner::SessionRegistry;
 use crate::store::{self, CompletionReason, Session, SessionStatus, Store};
 
 fn mock_app() -> tauri::App<tauri::test::MockRuntime> {
@@ -553,20 +553,26 @@ async fn resumable_session_behind_requeued_rows_keeps_its_place() {
     assert_eq!(claimed.agent_id.as_deref(), Some("acp-1"));
 }
 
-/// A resume whose preparation hangs is bounded by `RESUME_PREPARE_CAP`
-/// inside `resume_claimed_session_for_store`: the timeout is an `Err` that
-/// `fail_session_start_on_error` records on the row, so the row ends in
-/// `error` with the timeout message, the claim's liveness hold is released
-/// (the row is no longer live), and the branch is kicked — the rows re-queued
-/// behind it can be claimed, and the phase moves on to the sessions after it.
+/// A resume whose pre-run HEAD read hangs is bounded by `RESUME_HEAD_READ_CAP`
+/// inside `prepare_resume`, and the bound degrades rather than fails: the
+/// read is dropped, the snapshot is `None` (the commit completion hook has
+/// nothing to compare against for this run), and the resume goes ahead. The
+/// row stays `running` from the claim with nothing recorded as an error, the
+/// claim's liveness hold is released when the resume returns (in production
+/// the runner's own hold takes over at `start_session`), and the phase moves
+/// on to the sessions after it. The rows re-queued behind it on the same
+/// branch wait on it as on any running exclusive session and are claimable in
+/// order once it completes.
 ///
-/// That production function needs a concrete app runtime (the launch takes
-/// the action executors and the Wry handle), so the test resume mirrors its
-/// failure path on a mock runtime: the same bound, the same row write, the
-/// claim dropped on return. The branch kick itself is the drain's; the test
-/// asks the drain's claim query what it would start.
+/// `resume_claimed_session_for_store` needs a concrete app runtime (the
+/// launch takes the action executors and the Wry handle), so the test resume
+/// mirrors the production path on a mock runtime: the same bounded read, the
+/// claim dropped on return. It shows the bound degrading and the hold
+/// releasing; what guards `resume_claimed_session_for_store` and
+/// `prepare_resume` themselves is the source pin
+/// `session_commands::tests::resume_preparation_bounds_only_the_head_read`.
 #[tokio::test]
-async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
+async fn a_hanging_head_read_costs_the_snapshot_and_the_resume_goes_ahead() {
     let (store, project, branch) = store_with_branch();
     let other_branch = store::Branch::new(&project.id, "fix-signup", "main");
     store.create_branch(&other_branch).unwrap();
@@ -575,13 +581,13 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
     let registry = Arc::new(SessionRegistry::new());
     let app = mock_app();
 
-    let hanging = interrupted_commit(&store, &branch.id, 100, Some("acp-hang"));
+    let slow = interrupted_commit(&store, &branch.id, 100, Some("acp-slow"));
     let behind_one = interrupted_queued_commit(&store, &branch.id, 200);
     let behind_two = interrupted_queued_commit(&store, &branch.id, 300);
     let elsewhere = interrupted_commit(&store, &other_branch.id, 400, Some("acp-ok"));
 
     let plan = plan_launch_resume(
-        [&hanging, &behind_one, &behind_two, &elsewhere]
+        [&slow, &behind_one, &behind_two, &elsewhere]
             .iter()
             .map(|s| {
                 super::plan::classify_candidate(
@@ -592,17 +598,18 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
             .collect(),
     );
     // Branches are grouped in id order (unspecified here); within the branch
-    // the hung row leads and the re-queued rows follow it.
+    // the slow row leads and the re-queued rows follow it.
     let position = |id: &str| plan.repo.iter().position(|p| p.session_id == id).unwrap();
-    assert!(position(&hanging.id) < position(&behind_one.id));
+    assert!(position(&slow.id) < position(&behind_one.id));
     assert!(position(&behind_one.id) < position(&behind_two.id));
 
     const CAP: Duration = Duration::from_millis(100);
-    let hanging_id = hanging.id.clone();
-    let hanging_branch = branch.id.clone();
-    let store_for_resume = Arc::clone(&store);
+    let slow_id = slow.id.clone();
     let registry_for_resume = Arc::clone(&registry);
-    let app_handle = app.handle().clone();
+    // What the slow resume's preparation produced for `pre_head_sha`, so the
+    // test can assert the degradation and not only that the phase moved on.
+    let snapshot = Arc::new(std::sync::Mutex::new(None::<Option<String>>));
+    let snapshot_for_resume = Arc::clone(&snapshot);
     let started = std::time::Instant::now();
     let outcome = run_repo_phase(
         &store,
@@ -610,34 +617,25 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
         app.handle(),
         &plan.repo,
         move |claim: ClaimedResume| {
-            let store = Arc::clone(&store_for_resume);
             let registry = Arc::clone(&registry_for_resume);
-            let app_handle = app_handle.clone();
-            let branch_id = hanging_branch.clone();
-            let hangs = claim.session.id == hanging_id;
+            let snapshot = Arc::clone(&snapshot_for_resume);
+            let slow = claim.session.id == slow_id;
             async move {
-                if !hangs {
+                if !slow {
                     return Ok(());
                 }
-                // `resume_claimed_session_for_store`, minus the launch: the
-                // preparation never finishes, the bound ends it, and the
-                // failure is written to the still-held row before the claim
-                // (and with it the hold) is dropped on return. The hold is
-                // what the bound protects: live here, released below.
+                // `prepare_resume`'s HEAD read, minus the launch: the read
+                // never finishes, the bound drops it, and the preparation
+                // carries on with no snapshot. The claim (and with it the
+                // hold the bound protects: live here, released on return) is
+                // dropped as the production resume drops it, after the runner
+                // would have taken the row.
                 assert!(registry.is_live(&claim.session.id));
-                let prepared: Result<(), String> =
-                    prepare_resume_within(CAP, std::future::pending()).await;
-                let error = prepared.expect_err("the bound ends the hang");
-                assert!(finish_failed_before_run(
-                    &claim.session.id,
-                    Some(branch_id),
-                    None,
-                    &store,
-                    &app_handle,
-                    &error,
-                ));
+                let pre_head_sha =
+                    resume_pre_head_within(CAP, &claim.session.id, std::future::pending()).await;
+                *snapshot.lock().unwrap() = Some(pre_head_sha);
                 drop(claim);
-                Err(error)
+                Ok(())
             }
         },
     )
@@ -647,29 +645,34 @@ async fn a_hanging_resume_is_bounded_and_the_phase_moves_on() {
         started.elapsed() < Duration::from_secs(5),
         "the cap, not the hang, ended the wait"
     );
-    assert_eq!(outcome.resumed, vec![elsewhere.id.clone()]);
+    assert_eq!(*snapshot.lock().unwrap(), Some(None), "no pre-run snapshot");
+    let mut resumed = outcome.resumed.clone();
+    resumed.sort();
+    let mut expected = vec![slow.id.clone(), elsewhere.id.clone()];
+    expected.sort();
+    assert_eq!(resumed, expected);
     assert_eq!(
         outcome.requeued,
         vec![behind_one.id.clone(), behind_two.id.clone()]
     );
-    assert_eq!(
-        outcome.failed,
-        vec![(hanging.id.clone(), resume_prepare_timed_out(CAP))]
-    );
+    assert_eq!(outcome.failed, vec![]);
 
-    // The hung row: `error` with the timeout as its message, no longer live,
-    // so nothing holds the branch.
-    let hung = store.get_session(&hanging.id).unwrap().unwrap();
-    assert_eq!(hung.status, SessionStatus::Error);
-    assert_eq!(
-        hung.error_message.as_deref(),
-        Some(resume_prepare_timed_out(CAP).as_str())
-    );
-    assert_eq!(hung.completion_reason, Some(CompletionReason::Crashed));
-    assert!(!registry.is_live(&hanging.id));
+    // The slow row resumed: `running` from the claim, no error recorded, and
+    // the claim's hold released now that the resume has returned.
+    let resumed_row = store.get_session(&slow.id).unwrap().unwrap();
+    assert_eq!(resumed_row.status, SessionStatus::Running);
+    assert_eq!(resumed_row.error_message, None);
+    assert_eq!(resumed_row.completion_reason, None);
+    assert_eq!(resumed_row.agent_id.as_deref(), Some("acp-slow"));
+    assert!(!registry.is_live(&slow.id));
 
-    // The re-queued rows behind it are claimable in order: an errored row is
-    // no barrier to the drain.
+    // The re-queued rows behind it wait on the resumed session like any
+    // running exclusive session, and are claimable in order once it is done.
+    assert_eq!(
+        claim_startable_queued_sessions(&store, &branch.id).unwrap(),
+        Vec::<String>::new()
+    );
+    complete(&store, &slow.id);
     assert_eq!(
         claim_startable_queued_sessions(&store, &branch.id).unwrap(),
         vec![behind_one.id.clone()]

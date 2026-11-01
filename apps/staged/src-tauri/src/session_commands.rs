@@ -1569,20 +1569,22 @@ async fn prepare_resume(
     // Only resumed commit sessions need a pre-run HEAD snapshot. The
     // completion hook ignores non-commit sessions anyway, but keeping this
     // narrow makes the intent explicit and avoids unnecessary git lookups.
-    let (pre_head_sha, workspace_name) = {
-        if let Some(ref branch) = linked_branch {
-            let ws_name = branch.workspace_name.clone();
-            let head = if linked_commit.is_some() {
-                crate::branches::branch_head_sha(store, branch, &working_dir)
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            (head, ws_name)
-        } else {
-            (None, None)
+    // The read is the one thing in this preparation that can block, and the
+    // snapshot is optional, so it runs under `RESUME_HEAD_READ_CAP` and a
+    // slow or failed read degrades to `None` rather than failing the resume.
+    let workspace_name = linked_branch
+        .as_ref()
+        .and_then(|branch| branch.workspace_name.clone());
+    let pre_head_sha = match &linked_branch {
+        Some(branch) if linked_commit.is_some() => {
+            resume_pre_head_within(
+                RESUME_HEAD_READ_CAP,
+                &session_id,
+                crate::branches::branch_head_sha(store, branch, &working_dir),
+            )
+            .await
         }
+        _ => None,
     };
 
     // For remote branches, resolve the actual workspace path so the remote
@@ -1677,46 +1679,70 @@ pub(crate) async fn reattach_session_config(
     })
 }
 
-/// How long `prepare_resume` may take once the resume already holds its row
-/// or its turn. It awaits a HEAD read and, for a remote branch, a workspace
-/// path resolution over the network, neither of which has a timeout of its
-/// own (the continue path allows 30 s for the remote connect alone, see
-/// `ContinueWaits::DEFAULT`).
+/// How long a resume waits for its pre-run HEAD snapshot (`branch_head_sha`
+/// in `prepare_resume`) before going ahead without one.
 ///
-/// `resume_claimed_session_for_store` runs after `continue_resume_gate` has
-/// claimed the row `running` under a liveness hold, and a hold keeps the
-/// stranded-session sweep off the row for as long as it lives (the sweep is
-/// structural, with no clock), so an unbounded hang there would hold the
-/// branch busy for good: every row queued behind it waits on a call that may
-/// never return. Under the cap the hang becomes an `Err` that
-/// `fail_session_start_on_error` records on the row as `error`, releasing the
-/// hold and draining the branch. The drain's re-queued resume
+/// That read is the only thing in `prepare_resume` that can block. The rest
+/// is store reads; the remote workspace path resolution
+/// (`resolve_branch_workspace_subpath`, `resolve_workspace_repo_path`) is
+/// store reads and string formatting — `home:` becomes `/home/bloxer/…` —
+/// with no round trip. On a remote branch the read is bounded already: it
+/// goes through `blox_cli::ws_exec`, whose `EXEC_TIMEOUT` is 300 s. The
+/// genuinely unbounded path is a local commit session's `git rev-parse HEAD`
+/// through `git::cli::run_smart`: the git process has no timeout, and when
+/// the lite-env attempt fails in an env-sensitive way the retry blocks on the
+/// per-project shell-env capture, a login shell that can hang on a slow
+/// profile. This cap is what bounds that, and it tightens the remote case to
+/// a minute.
+///
+/// The snapshot only feeds the commit completion hook (`pre_head_sha` is an
+/// `Option`; `None` means no commit detection for this run), so a read that
+/// outlives the cap costs the snapshot, not the session: the resume goes
+/// ahead without it, the way a failed read already did. Degrading rather than
+/// failing matters because of where the wait sits. In
+/// `resume_claimed_session_for_store` the row is already claimed `running`
+/// under a liveness hold the stranded-session sweep respects (the sweep is
+/// structural, with no clock), so an unbounded hang would hold the branch
+/// busy — every row queued behind it waiting on a call that may never
+/// return — while failing the resume on a slow read would turn an
+/// interrupted session into an `error` row over a slow workstation (a cold
+/// Blox start, a slow `sq` auth). The drain's re-queued resume
 /// (`start_requeued_session_for_branch`) prepares before its claim, so a hang
-/// there strands no row, but it would hold that branch's drain open; the same
-/// cap turns it into a failed pre-claim start the drain retries a bounded
-/// number of times.
-pub(crate) const RESUME_PREPARE_CAP: Duration = Duration::from_secs(60);
+/// there strands no row but would hold that branch's drain open, and a
+/// failure there would spend one of the drain's bounded retries; both paths
+/// prepare through `prepare_resume`, so both get the same degradation.
+pub(crate) const RESUME_HEAD_READ_CAP: Duration = Duration::from_secs(60);
 
-/// The error a resume ends with when its preparation outlives `cap`.
-pub(crate) fn resume_prepare_timed_out(cap: Duration) -> String {
-    format!(
-        "the resume did not finish preparing within {cap:?} (reading the branch HEAD or \
-         resolving the remote workspace hung), so the session was not restarted"
-    )
-}
-
-/// Run a resume's preparation under `cap` (see [`RESUME_PREPARE_CAP`]). A
-/// preparation that outlives the cap is dropped — it only reads, so there is
-/// nothing to undo; a remote path resolution already on a blocking thread
-/// finishes there and is discarded — and reported as
-/// [`resume_prepare_timed_out`].
-pub(crate) async fn prepare_resume_within<T, F>(cap: Duration, prepare: F) -> Result<T, String>
+/// A resume's pre-run HEAD snapshot, read under `cap` (see
+/// [`RESUME_HEAD_READ_CAP`]). `None` when the read fails or outlives the cap:
+/// the snapshot is optional, so either is logged and the resume goes ahead
+/// without commit detection. A read that outlives the cap is dropped — it
+/// only reads, so there is nothing to undo; the git process already on a
+/// blocking thread finishes there and its result is discarded.
+pub(crate) async fn resume_pre_head_within<F>(
+    cap: Duration,
+    session_id: &str,
+    read: F,
+) -> Option<String>
 where
-    F: std::future::Future<Output = Result<T, String>>,
+    F: std::future::Future<Output = Result<String, String>>,
 {
-    match tokio::time::timeout(cap, prepare).await {
-        Ok(result) => result,
-        Err(_) => Err(resume_prepare_timed_out(cap)),
+    match tokio::time::timeout(cap, read).await {
+        Ok(Ok(sha)) => Some(sha),
+        Ok(Err(e)) => {
+            log::warn!(
+                "[session] resume of {session_id} has no pre-run HEAD snapshot (read failed: \
+                 {e}); commit detection is off for this run"
+            );
+            None
+        }
+        Err(_) => {
+            log::warn!(
+                "[session] resume of {session_id} has no pre-run HEAD snapshot (read did not \
+                 finish within {cap:?}); commit detection is off for this run"
+            );
+            None
+        }
     }
 }
 
@@ -2115,11 +2141,13 @@ pub(crate) async fn send_session_message_now_for_store(
 /// itself for pipeline sessions) and keeps the session's selection.
 ///
 /// The row is `running` and ours from the claim on, under a liveness hold the
-/// stranded-session sweep respects, so the preparation runs under
-/// [`RESUME_PREPARE_CAP`]: a preparation that fails or outlives the cap is
-/// recorded on the row as `error` like a launch failure, and the hold is
-/// released when this returns, so the branch drains instead of waiting on
-/// the hang.
+/// stranded-session sweep respects, so nothing in the preparation may wait
+/// without bound: its one wait, the pre-run HEAD read, runs under
+/// [`RESUME_HEAD_READ_CAP`] inside `prepare_resume` and degrades to no
+/// snapshot, so a slow checkout delays the resume by at most the cap and does
+/// not fail it. A preparation or launch that does fail is recorded on the
+/// row as `error`, and the hold is released when this returns either way, so
+/// the branch drains.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resume_claimed_session_for_store(
     store: Arc<Store>,
@@ -2132,12 +2160,7 @@ pub(crate) async fn resume_claimed_session_for_store(
     image_ids: Vec<String>,
 ) -> Result<(), String> {
     let ClaimedResume { session, _liveness } = claim;
-    let plan = match prepare_resume_within(
-        RESUME_PREPARE_CAP,
-        prepare_resume(&store, &session, None, None),
-    )
-    .await
-    {
+    let plan = match prepare_resume(&store, &session, None, None).await {
         Ok(plan) => plan,
         Err(e) => {
             let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
@@ -6274,18 +6297,14 @@ async fn start_requeued_session_for_branch(
         .map(|state| Arc::clone(&state))
         .ok_or_else(|| "action registry is not available".to_string())?;
 
-    // Everything that awaits — the pre-run HEAD, the remote workspace path —
-    // before the claim (see `QueuedSessionClaim::claim`). A failure here
-    // leaves the row queued for the drain's bounded retries, as a fresh
-    // start's context build does. Those retries bound how often a start may
-    // fail, not how long one may take, so the preparation gets the same cap
-    // as the claimed resume: a hang would otherwise hold this branch's drain
-    // open, and under the cap it is one more failed attempt.
-    let plan = prepare_resume_within(
-        RESUME_PREPARE_CAP,
-        prepare_resume(&store, &session, Some(branch_id.clone()), None),
-    )
-    .await?;
+    // Everything that awaits — the pre-run HEAD read — happens before the
+    // claim (see `QueuedSessionClaim::claim`). A failure here leaves the row
+    // queued for the drain's bounded retries, as a fresh start's context
+    // build does. Those retries bound how often a start may fail, not how
+    // long one may take; the read is bounded inside `prepare_resume`
+    // (`RESUME_HEAD_READ_CAP`) and degrades to no snapshot, so a slow checkout
+    // neither holds this branch's drain open nor spends a retry.
+    let plan = prepare_resume(&store, &session, Some(branch_id.clone()), None).await?;
 
     // Live from before the claim flips the row to `running` until
     // `start_session` has registered it (see `SessionRegistry::hold`).
@@ -8291,8 +8310,10 @@ mod tests {
         let end = body.find("\n}\n").expect("fn end");
         let body = &body[..end];
         assert!(body.contains("prepare_resume(&store, &session, Some(branch_id.clone()), None)"));
-        assert!(body.contains("prepare_resume_within("));
-        assert!(body.contains("RESUME_PREPARE_CAP"));
+        // No bound around the whole preparation: the HEAD read is bounded
+        // inside `prepare_resume` and degrades, so a slow checkout spends
+        // none of the drain's retries (see `RESUME_HEAD_READ_CAP`).
+        assert!(!body.contains("tokio::time::timeout("));
         assert!(body.contains("launch_resume("));
         assert!(body.contains("REPO_SESSION_RESUME_PROMPT"));
         assert!(!body.contains("agent_session_id: None"));
@@ -8300,47 +8321,76 @@ mod tests {
     }
 
     /// A claimed resume holds its row `running` with a liveness hold the
-    /// stranded-session sweep respects, so its preparation must be bounded
-    /// and a timeout must reach `fail_session_start_on_error`, or a hung
-    /// `prepare_resume` holds the branch busy for good. The path needs a
-    /// concrete app runtime to drive, so this is pinned by source text like
+    /// stranded-session sweep respects, so nothing in its preparation may
+    /// wait without bound — and the one wait, the pre-run HEAD read, must
+    /// degrade rather than fail the resume, or a slow checkout turns an
+    /// interrupted session into an `error` row. Pin both: `prepare_resume`
+    /// bounds exactly the HEAD read with `RESUME_HEAD_READ_CAP`, and the
+    /// claimed resume calls it with no bound of its own while still recording
+    /// a preparation that does fail. This is what guards
+    /// `resume_claimed_session_for_store` itself; the launch_resume test of a
+    /// hanging read mirrors the path on a mock runtime (the path needs a
+    /// concrete app runtime to drive), so this is pinned by source text like
     /// the claim invariants below.
     #[test]
-    fn claimed_resume_bounds_its_preparation_and_records_a_timeout() {
+    fn resume_preparation_bounds_only_the_head_read() {
         let source = include_str!("session_commands.rs");
-        let start = "pub(crate) async fn resume_claimed_session_for_store(";
-        let body = &source[source.find(start).expect(start)..];
+
+        let prepare = "async fn prepare_resume(";
+        let body = &source[source.find(prepare).expect(prepare)..];
         let end = body.find("\n}\n").expect("fn end");
         let body = &body[..end];
         let bounded = body
-            .find("prepare_resume_within(")
-            .expect("the preparation is bounded");
-        let cap = body
-            .find("RESUME_PREPARE_CAP")
-            .expect("the preparation uses the shared cap");
+            .find("resume_pre_head_within(")
+            .expect("the HEAD read is bounded");
+        let call = &body[bounded..];
+        let cap = call
+            .find("RESUME_HEAD_READ_CAP")
+            .expect("the HEAD read uses the shared cap");
+        let read = call
+            .find("crate::branches::branch_head_sha(")
+            .expect("the HEAD read");
+        assert!(cap < read, "the cap wraps the HEAD read itself");
+        assert!(
+            !body.contains("tokio::time::timeout("),
+            "nothing else in the preparation is bounded: nothing else waits"
+        );
+
+        let claimed = "pub(crate) async fn resume_claimed_session_for_store(";
+        let body = &source[source.find(claimed).expect(claimed)..];
+        let end = body.find("\n}\n").expect("fn end");
+        let body = &body[..end];
+        let prepared = body
+            .find("prepare_resume(&store, &session, None, None)")
+            .expect("the claimed resume prepares");
         let recorded = body
             .find("fail_session_start_on_error(")
             .expect("a failed preparation is recorded on the row");
-        assert!(bounded < recorded && cap < recorded);
+        assert!(prepared < recorded);
+        assert!(
+            !body.contains("tokio::time::timeout("),
+            "no bound around the whole preparation: a slow HEAD read must not fail the resume"
+        );
     }
 
-    /// The bound itself: a preparation that finishes passes its result
-    /// through, one that hangs ends with the timeout message.
+    /// The bound itself: a read that finishes is the snapshot, one that
+    /// fails or hangs is no snapshot — never an error.
     #[tokio::test]
-    async fn prepare_resume_within_maps_a_hang_to_the_timeout_error() {
+    async fn resume_pre_head_within_degrades_a_hang_to_no_snapshot() {
         let cap = Duration::from_millis(20);
         assert_eq!(
-            prepare_resume_within(cap, async { Ok::<u8, String>(7) }).await,
-            Ok(7)
+            resume_pre_head_within(cap, "s", async { Ok("abc123".to_string()) }).await,
+            Some("abc123".to_string())
         );
         assert_eq!(
-            prepare_resume_within(cap, async { Err::<u8, String>("no HEAD".to_string()) }).await,
-            Err("no HEAD".to_string())
+            resume_pre_head_within(cap, "s", async { Err("no HEAD".to_string()) }).await,
+            None
         );
         let started = Instant::now();
         assert_eq!(
-            prepare_resume_within(cap, std::future::pending::<Result<u8, String>>()).await,
-            Err(resume_prepare_timed_out(cap))
+            resume_pre_head_within(cap, "s", std::future::pending::<Result<String, String>>())
+                .await,
+            None
         );
         assert!(started.elapsed() < Duration::from_secs(5));
     }

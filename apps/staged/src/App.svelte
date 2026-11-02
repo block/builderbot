@@ -27,6 +27,8 @@
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
+  import { safeAreaOffset } from './lib/shared/safeArea';
+  import { guardDocumentScroll } from './lib/shared/documentScroll';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
@@ -86,6 +88,7 @@
   let unlistenStoreReset: UnlistenFn | undefined;
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
+  let unguardDocumentScroll: (() => void) | undefined;
   let stopUpdaterLoop: (() => void) | null = null;
   let updaterStartPending = false;
   let updaterStartQueued = false;
@@ -391,6 +394,7 @@
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
+    unguardDocumentScroll = guardDocumentScroll();
 
     // Web resume accelerator: the restored project id is available synchronously
     // (navigation seeds it from localStorage at module load). Warm that project's
@@ -647,6 +651,7 @@
     destroyed = true;
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
+    unguardDocumentScroll?.();
     unregisterShortcuts?.();
     unlistenMenu?.();
     unlistenReferenceCopy?.();
@@ -849,7 +854,15 @@
   <ProjectDeleteDialog />
 
   <ReferenceModalHost />
-  <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
+  <Toaster
+    position="bottom-right"
+    visibleToasts={4}
+    duration={8000}
+    closeButton
+    expand
+    offset={safeAreaOffset('24px')}
+    mobileOffset={safeAreaOffset('16px')}
+  />
 {/if}
 
 <style>
@@ -861,12 +874,23 @@
     color: var(--text-primary);
   }
 
+  /* The dynamic viewport, not 100vh: iOS Safari's 100vh is the viewport with
+     its toolbar hidden, 40 px taller than <body>, and that overflow is what
+     focus restoring scrolled <body> by (issue 02) and what hid the bottom of
+     every pane under the toolbar (issue 08). 100vh stays as the fallback for
+     webviews without dynamic units. */
   main {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     background-color: var(--bg-chrome);
+    /* index.html sets viewport-fit=cover, so the page runs under the notch
+       and the home indicator wherever there are any; keep the panes clear of
+       them. The TopBar pads the top inset itself so its background fills the
+       status bar. Every inset is 0 on desktop. */
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
 
   /* One grid cell shared by the workspace and the detail host over it, so
@@ -915,6 +939,8 @@
   }
 
   .reset-shell {
+    /* No TopBar here to take the top inset. */
+    padding-top: env(safe-area-inset-top);
     display: flex;
     align-items: center;
     justify-content: center;

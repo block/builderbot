@@ -31,6 +31,7 @@
   import { Checkbox } from '$lib/components/ui/checkbox';
   import * as Select from '$lib/components/ui/select';
   import Spinner from '../../shared/Spinner.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import type { ProjectAction } from '../../api/commands';
   import IconPicker from './IconPicker.svelte';
 
@@ -76,7 +77,7 @@
         : { name: '', command: '', actionType: 'run', pinned: defaultPinned, icon: null };
       error = null;
       saving = false;
-      void tick().then(() => nameElement?.focus());
+      void tick().then(() => focusAfterDialogEnter(nameElement));
     }
     wasOpen = open;
   });

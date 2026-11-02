@@ -3,6 +3,7 @@
   import type { Snippet } from 'svelte';
   import { listParentBranchCommits, type ParentBranchCommit } from '../../commands';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
+  import { visibleViewportRect } from '../../shared/visibleViewportRect';
   import { onBranchGitStateUpdated } from '../../services/branchEventService';
 
   interface Props {
@@ -45,20 +46,21 @@
     if (!popoverEl) return;
     const anchorRect = anchorEl.getBoundingClientRect();
     const popoverRect = popoverEl.getBoundingClientRect();
+    // Kept inside what is on screen, which on iOS excludes the keyboard.
+    const visible = visibleViewportRect();
+    const minLeft = visible.left + VIEWPORT_PADDING;
     left = clamp(
       anchorRect.left,
-      VIEWPORT_PADDING,
-      window.innerWidth - popoverRect.width - VIEWPORT_PADDING
+      minLeft,
+      Math.max(minLeft, visible.right - popoverRect.width - VIEWPORT_PADDING)
     );
+    const minTop = visible.top + VIEWPORT_PADDING;
     const preferredTop = anchorRect.bottom + ANCHOR_GAP;
-    const maxTop = window.innerHeight - popoverRect.height - VIEWPORT_PADDING;
-    if (
-      preferredTop > maxTop &&
-      anchorRect.top - popoverRect.height - ANCHOR_GAP >= VIEWPORT_PADDING
-    ) {
+    const maxTop = visible.bottom - popoverRect.height - VIEWPORT_PADDING;
+    if (preferredTop > maxTop && anchorRect.top - popoverRect.height - ANCHOR_GAP >= minTop) {
       top = anchorRect.top - popoverRect.height - ANCHOR_GAP;
     } else {
-      top = clamp(preferredTop, VIEWPORT_PADDING, Math.max(VIEWPORT_PADDING, maxTop));
+      top = clamp(preferredTop, minTop, Math.max(minTop, maxTop));
     }
     positioned = true;
   }
@@ -233,7 +235,7 @@
     z-index: 1100;
     min-width: 280px;
     max-width: min(420px, calc(100vw - 16px));
-    max-height: min(360px, calc(100vh - 16px));
+    max-height: min(360px, calc(100dvh - 16px));
     overflow-y: auto;
     padding: 6px;
     border: 1px solid var(--border-muted);

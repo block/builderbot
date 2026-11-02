@@ -18,6 +18,9 @@
   runs during project setup) gets a Detect Actions affordance in the run slot
   and the more menu.
 
+  A touch long press anywhere on the card opens the more menu (a bottom sheet
+  on phones), like the context menus on project and timeline rows.
+
   Pass `reorderable` to make the card a drag-to-reorder handle (the sidebar's
   pinned list); the drag callbacks are only wired up in that mode. Pass
   `hidePinButton` to drop the pin toggle from the action row (the sidebar keeps
@@ -54,6 +57,8 @@
     type OpenerApp,
   } from '../branches/branch';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { createLongPress } from '$lib/components/ui/context-menu/longPress';
+  import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import type { NewProjectEventDetail } from './newProjectEvent';
   import * as commands from '../../api/commands';
   import { toast } from 'svelte-sonner';
@@ -102,6 +107,8 @@
   let togglingPin = $state(false);
   let dragging = $state(false);
   let dragOver = $state(false);
+  let moreMenuOpen = $state(false);
+  let moreTrigger = $state<HTMLElement | null>(null);
 
   // Actions state — the shared runner, scoped to this repo's synthetic scope
   // id. Runs execute against the main local clone via run_repo_action. Both
@@ -160,6 +167,10 @@
     if (repo.hasLocalClone) void reloadActions();
   }
 
+  // Keep `viewport.hasCoarsePointer` live even when the host screen never
+  // subscribed.
+  onMount(() => watchViewport());
+
   onMount(() => {
     window.addEventListener('project-actions-changed', handleActionsChanged);
 
@@ -176,7 +187,37 @@
     });
   });
 
+  // The touch side is the shared context-menu long press (longPress.ts),
+  // which also keeps the release from clicking whatever is under the finger.
+  // A reorderable card is left alone: there a touch hold starts the drag.
+  const longPress = createLongPress({
+    isDisabled: () => reorderable,
+    onLongPress: openMoreMenu,
+  });
+
+  // A press on the ⋮ trigger is the trigger's own: bits-ui toggles the menu
+  // on its touch pointerup, so a long press there that had already opened
+  // the menu would close it again on release. Left alone, the release opens
+  // it, like a tap.
+  function isOnMoreTrigger(e: Event): boolean {
+    return !!moreTrigger && moreTrigger.contains(e.target as Node);
+  }
+
+  function handleTouchStart(e: TouchEvent) {
+    if (!isOnMoreTrigger(e)) longPress.ontouchstart(e);
+  }
+
+  function handleContextMenu(e: MouseEvent) {
+    if (longPress.oncontextmenu(e)) return;
+    // Android Chrome raises its own contextmenu for a touch hold. A
+    // right-click with a mouse keeps the browser's default.
+    if (reorderable || !viewport.hasCoarsePointer || isOnMoreTrigger(e)) return;
+    e.preventDefault();
+    openMoreMenu();
+  }
+
   onDestroy(() => {
+    longPress.destroy();
     window.removeEventListener('project-actions-changed', handleActionsChanged);
     unlistenRepoActionsDetection?.();
   });
@@ -204,6 +245,22 @@
       console.error('[RepoCard] Failed to resolve clone details:', e);
       cloneDetailsLoaded = false;
     }
+  }
+
+  function openMoreMenu() {
+    // A programmatic open skips onOpenChange.
+    moreMenuOpen = true;
+    void loadCloneDetails();
+  }
+
+  // A long press can open the menu while the ⋮ trigger is scrolled out of a
+  // horizontal repos row. bits-ui then focuses the trigger on close, which
+  // scrolls the row sideways under the finger, so the next tap lands on the
+  // neighbouring card. On touch screens, focus it without scrolling.
+  function handleMoreMenuCloseAutoFocus(e: Event) {
+    if (!viewport.hasCoarsePointer || !moreTrigger) return;
+    e.preventDefault();
+    moreTrigger.focus({ preventScroll: true });
   }
 
   function openNewProjectForRepo() {
@@ -338,6 +395,8 @@
   ondragleave={reorderable ? handleDragLeave : undefined}
   ondrop={reorderable ? handleDrop : undefined}
   ondragend={reorderable ? handleDragEnd : undefined}
+  ontouchstart={handleTouchStart}
+  oncontextmenu={handleContextMenu}
   data-repo={repo.githubRepo}
   data-subpath={repo.subpath}
 >
@@ -437,18 +496,25 @@
       {/if}
 
       <DropdownMenu.Root
+        bind:open={moreMenuOpen}
         onOpenChange={(open) => {
           if (open) void loadCloneDetails();
         }}
       >
         <DropdownMenu.Trigger
+          bind:ref={moreTrigger}
           class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
           title="More options"
           aria-label="More options"
         >
           <MoreVertical size={12} />
         </DropdownMenu.Trigger>
-        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
+        <DropdownMenu.Content
+          align="end"
+          sideOffset={4}
+          class="min-w-[172px]"
+          onCloseAutoFocus={handleMoreMenuCloseAutoFocus}
+        >
           <DropdownMenu.Item onSelect={openNewProjectForRepo}>
             <Plus size={14} /> New Project
           </DropdownMenu.Item>
@@ -556,6 +622,16 @@
   .repo-card.reorderable {
     cursor: grab;
     user-select: none;
+  }
+
+  /* Keep iOS from selecting the title and raising its callout on the hold
+     that opens the more menu (as context-menu-trigger does). */
+  @media (pointer: coarse) {
+    .repo-card {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+    }
   }
 
   .repo-card.dragging {

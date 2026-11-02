@@ -55,6 +55,7 @@
   import { createImage } from '../../commands';
   import { readClipboardText } from '../../transport';
   import { viewport } from '../../shared/viewport.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import { isMac } from '../keyboard/shortcuts';
 
   interface Props {
@@ -283,12 +284,13 @@
     if (modePrefill && !userDraft) {
       prompt = modePrefill;
       const modeSelection = modePrefill.includes('\n') ? 'last-line' : prefillSelection;
-      tick().then(() => {
-        if (textareaEl && textareaEl.textContent) {
-          selectPromptContent(textareaEl, modeSelection);
-          textareaEl.focus();
-        }
-      });
+      tick().then(() =>
+        focusAfterDialogEnter(textareaEl, (el) => {
+          if (!el.textContent) return;
+          selectPromptContent(el, modeSelection);
+          el.focus();
+        })
+      );
     } else {
       prompt = userDraft;
     }
@@ -384,14 +386,16 @@
     if (textareaEl) {
       const el = textareaEl;
       const shouldSelect = prefilled;
-      tick().then(() => {
-        el.focus();
-        if (shouldSelect && el.textContent) {
-          selectPromptContent(el, prefillSelection);
-        } else {
-          placeCursorAtEnd(el);
-        }
-      });
+      tick().then(() =>
+        focusAfterDialogEnter(el, (target) => {
+          target.focus();
+          if (shouldSelect && target.textContent) {
+            selectPromptContent(target, prefillSelection);
+          } else {
+            placeCursorAtEnd(target);
+          }
+        })
+      );
     }
   });
 
@@ -547,7 +551,7 @@
 <Dialog.Root {open} onOpenChange={(v) => !v && handleClose()}>
   <Dialog.Content
     bind:ref={modalElement}
-    class={`max-h-[calc(100vh-16vh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
+    class={`max-h-[calc(100dvh-16dvh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
     style={dialogWidth.style}
     showCloseButton={false}
   >

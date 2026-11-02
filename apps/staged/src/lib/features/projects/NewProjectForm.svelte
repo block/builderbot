@@ -19,6 +19,7 @@
   import type { BranchSelection } from './RepoConfigForm.svelte';
   import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { RepoSelection } from '../../shared/githubUrl';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import type { PullRequest } from '../../types';
   import { sqState } from '../settings/sq.svelte';
 
@@ -167,7 +168,7 @@
 
   let nameInputRef = $state<HTMLInputElement | null>(null);
   $effect(() => {
-    nameInputRef?.focus();
+    focusAfterDialogEnter(nameInputRef);
   });
 
   function handleNameInput() {

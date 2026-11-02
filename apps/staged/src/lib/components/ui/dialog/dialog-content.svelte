@@ -9,7 +9,8 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import XIcon from '@lucide/svelte/icons/x';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
-  import { watchKeyboardInset } from '$lib/shared/keyboardInset.svelte';
+  import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
+  import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
   import { getWindowSync } from '$lib/transport';
 
   let {
@@ -21,6 +22,8 @@
     showCloseButton = true,
     fullScreenOnMobile = true,
     onpointerdown: onPointerDown,
+    onOpenAutoFocus,
+    onCloseAutoFocus,
     ...restProps
   }: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof DialogPortal>>;
@@ -29,35 +32,71 @@
     fullScreenOnMobile?: boolean;
   } = $props();
 
-  // Keep `viewport.isMobile` live even when the host screen never subscribed,
-  // and keep `--keyboard-inset` updated so the full-screen height shrinks to
-  // the space above the on-screen keyboard.
-  onMount(() => {
-    const unwatchViewport = watchViewport();
-    const unwatchKeyboard = watchKeyboardInset();
-    return () => {
-      unwatchViewport();
-      unwatchKeyboard();
-    };
-  });
+  // Keep `viewport.isMobile` live even when the host screen never subscribed.
+  onMount(() => watchViewport());
 
   const fullScreen = $derived(fullScreenOnMobile && viewport.isMobile);
 
+  // A full-screen dialog covers the visual viewport — the part of the page
+  // actually on screen — so the on-screen keyboard shrinks it rather than
+  // scrolling it away.
+  $effect(() => {
+    if (fullScreen) return watchVisualViewport();
+  });
+
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
-  // `max-h-[calc(100vh-16vh)]`) without specificity fights. Safe-area padding
-  // keeps the header/footer clear of notches and home indicators. Tailwind v4
-  // translate utilities use the individual `translate` property, so reset that
-  // alongside `transform` to prevent desktop centering from shifting the mobile
-  // panel offscreen. The height subtracts `--keyboard-inset` so the dialog
-  // shrinks to the space above the on-screen keyboard, pinning its footer to
-  // the keyboard's top edge.
-  const fullScreenStyle =
-    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:calc(100dvh - var(--keyboard-inset, 0px));max-height:none;transform:none;translate:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+  // `max-h-[calc(100dvh-16dvh)]`) without specificity fights. Safe-area padding
+  // keeps the header/footer clear of notches and home indicators; with the
+  // keyboard up the footer sits on the keyboard instead, so the bottom inset
+  // goes. Tailwind v4 translate utilities use the individual `translate`
+  // property, so reset that alongside `transform` to prevent desktop centering
+  // from shifting the mobile panel offscreen. `top` and `height` track the
+  // visual viewport, pinning the footer to the keyboard's top edge. Rows
+  // pack at the top (`align-content: start`) instead of stretching over the
+  // full height, so a short form starts under the header rather than
+  // spreading down the screen to where the keyboard will open.
+  const fullScreenStyle = $derived.by(() => {
+    const { top, height, keyboardOpen } = visibleViewport;
+    return [
+      'position:fixed',
+      'left:0',
+      'right:0',
+      'bottom:auto',
+      `top:${top}px`,
+      'width:100%',
+      'max-width:none',
+      `height:${height === null ? '100dvh' : `${height}px`}`,
+      'max-height:none',
+      'transform:none',
+      'translate:none',
+      'border-radius:0',
+      'align-content:start',
+      'padding-top:env(safe-area-inset-top)',
+      `padding-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+    ].join(';');
+  });
 
   const contentStyle = $derived(
     fullScreen ? `${styleProp ? `${styleProp};` : ''}${fullScreenStyle}` : styleProp
   );
+
+  // On touch screens, focus goes back to the dialog's trigger without
+  // scrolling it into view; see restoreFocusWithoutScroll. With a mouse and
+  // keyboard, bits-ui's restore (which shows the trigger) is kept.
+  const focusRestore = restoreFocusWithoutScroll(() => viewport.hasCoarsePointer);
+
+  function handleOpenAutoFocus(event: Event) {
+    focusRestore.capture();
+    // Nothing is focused on open unless the caller says otherwise.
+    if (onOpenAutoFocus) onOpenAutoFocus(event);
+    else event.preventDefault();
+  }
+
+  function handleCloseAutoFocus(event: Event) {
+    onCloseAutoFocus?.(event);
+    focusRestore.restore(event);
+  }
 
   const dragRegionSelector =
     '[data-dialog-drag-region], [data-slot="dialog-header"], .modal-header, .diagram-viewer-header';
@@ -123,7 +162,9 @@
       className
     )}
     style={contentStyle}
-    onOpenAutoFocus={(e) => e.preventDefault()}
+    data-full-screen={fullScreen ? '' : undefined}
+    onOpenAutoFocus={handleOpenAutoFocus}
+    onCloseAutoFocus={handleCloseAutoFocus}
     onpointerdown={handlePointerDown}
     preventOverflowTextSelection={false}
     preventScroll={false}

@@ -90,6 +90,20 @@ describe('filterMoveTargets', () => {
   it('matches nothing when neither the name nor a repo matches', () => {
     expect(filterMoveTargets([alpha, beta], repos, 'zzz')).toEqual([]);
   });
+
+  it('matches every term of a multi-word query against the name, in any order', () => {
+    const oneTwoThree = project({ id: 'c', name: 'one two three' });
+    const all = [alpha, beta, oneTwoThree];
+    expect(filterMoveTargets(all, repos, 'one three')).toEqual([oneTwoThree]);
+    expect(filterMoveTargets(all, repos, 'Three ONE')).toEqual([oneTwoThree]);
+    expect(filterMoveTargets(all, repos, 'one four')).toEqual([]);
+  });
+
+  it('lets terms span the project name and an attached repo', () => {
+    expect(filterMoveTargets([alpha, beta], repos, 'alpha widgets')).toEqual([alpha]);
+    expect(filterMoveTargets([alpha, beta], repos, 'web beta')).toEqual([beta]);
+    expect(filterMoveTargets([alpha, beta], repos, 'alpha gadgets')).toEqual([]);
+  });
 });
 
 describe('moveTargetInvalidReason', () => {

@@ -13,17 +13,19 @@
  */
 
 import type { Project } from '../../types';
+import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
 import { projectDisplayName } from '../../shared/utils';
 
 /**
- * Case-insensitive substring match on the display name. Whitespace around
- * the query is ignored; an empty (or whitespace-only) query matches every
- * project and returns the input array unchanged.
+ * Case-insensitive match on the display name: every whitespace-separated
+ * term of the query must appear somewhere in the name, in any order ("one
+ * three" finds "one two three"). An empty (or whitespace-only) query matches
+ * every project and returns the input array unchanged.
  */
 export function searchProjects(projects: Project[], query: string): Project[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return projects;
-  return projects.filter((p) => projectDisplayName(p).toLowerCase().includes(q));
+  const terms = queryTerms(query);
+  if (terms.length === 0) return projects;
+  return projects.filter((p) => matchesAllTerms(terms, projectDisplayName(p)));
 }
 
 /**

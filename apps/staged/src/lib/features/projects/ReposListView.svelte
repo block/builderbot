@@ -14,6 +14,7 @@
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { useWorkspaceLayer } from '../layout/workspaceLayer';
   import SearchField from '../../shared/SearchField.svelte';
+  import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import NewProjectModal from './NewProjectModal.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import { onViewHidden, selectProject } from '../layout/navigation.svelte';
@@ -43,14 +44,9 @@
   }
 
   let filteredRepos = $derived.by(() => {
-    if (!searchQuery.trim()) return repos;
-    const q = searchQuery.toLowerCase().trim();
-    return repos.filter(
-      (r) =>
-        r.shortName.toLowerCase().includes(q) ||
-        r.githubRepo.toLowerCase().includes(q) ||
-        (r.subpath && r.subpath.toLowerCase().includes(q))
-    );
+    const terms = queryTerms(searchQuery);
+    if (terms.length === 0) return repos;
+    return repos.filter((r) => matchesAllTerms(terms, r.shortName, r.githubRepo, r.subpath));
   });
 
   let pinnedRepos = $derived(filteredRepos.filter((r) => r.pinned));

@@ -1,4 +1,11 @@
-function searchTerms(githubRepo: string, subpath: string | null | undefined): string[] {
+import { matchesAllTerms, queryTerms } from './textSearch';
+
+/**
+ * The lower-cased fields a repo is searched by: the full `owner/repo`, its
+ * owner and name, the subpath and each of its segments, and the repo joined
+ * with its subpath both ways ("owner/repo/sub", "repo/sub").
+ */
+export function searchTerms(githubRepo: string, subpath: string | null | undefined): string[] {
   const repo = githubRepo.toLowerCase();
   const [owner = '', repoName = ''] = repo.split('/');
   const subpathParts = subpath?.toLowerCase().split('/').filter(Boolean) ?? [];
@@ -20,10 +27,5 @@ export function matchesRepoSearch(
   subpath: string | null | undefined,
   query: string
 ): boolean {
-  const tokens = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-
-  if (tokens.length === 0) return true;
-
-  const terms = searchTerms(githubRepo, subpath);
-  return tokens.every((token) => terms.some((term) => term.includes(token)));
+  return matchesAllTerms(queryTerms(query), ...searchTerms(githubRepo, subpath));
 }

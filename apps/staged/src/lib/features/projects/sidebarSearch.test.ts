@@ -4,7 +4,6 @@ import { repoKey } from './repoReorder';
 import {
   matchingProjectIds,
   matchingRepoKeys,
-  normalizeQuery,
   resultsLabel,
   searchRepos,
   sidebarPinnedRepos,
@@ -70,13 +69,6 @@ function project(overrides: Partial<Project> = {}): Project {
   };
 }
 
-describe('normalizeQuery', () => {
-  it('trims and lower-cases, treating whitespace as empty', () => {
-    expect(normalizeQuery('  Cash ')).toBe('cash');
-    expect(normalizeQuery('   ')).toBe('');
-  });
-});
-
 describe('searchRepos', () => {
   it('returns the same array for an empty or whitespace query', () => {
     expect(searchRepos(all, '')).toBe(all);
@@ -96,6 +88,12 @@ describe('searchRepos', () => {
   it('matches across the repo/subpath boundary', () => {
     expect(searchRepos(all, 'builderbot/apps/sta')).toEqual([staged]);
     expect(searchRepos(all, 'g2/web')).toEqual([g2]);
+  });
+
+  it('matches every term across the path and short name, in any order', () => {
+    expect(searchRepos(all, 'staged block')).toEqual([staged]);
+    expect(searchRepos(all, 'BLOCK apps')).toEqual([staged, differ]);
+    expect(searchRepos(all, 'staged cash')).toEqual([]);
   });
 
   it('does not invent a trailing slash for repos without a subpath', () => {

@@ -18,26 +18,23 @@
  */
 
 import type { Project, RepoHomeItem } from '../../types';
+import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
 import { searchProjects } from './projectSearch';
 import { repoKey } from './repoReorder';
 
-/** Trimmed, lower-cased query; empty when the field is blank. */
-export function normalizeQuery(query: string): string {
-  return query.trim().toLowerCase();
-}
-
 /**
- * Case-insensitive substring match against the repo's full path
- * (`githubRepo/subpath`) and its short name, so "builderbot", "apps/staged"
- * and "staged" all find the same card. An empty query returns the input
- * array unchanged.
+ * Case-insensitive match against the repo's full path (`githubRepo/subpath`)
+ * and its short name, so "builderbot", "apps/staged" and "staged" all find
+ * the same card. Every whitespace-separated term of the query must appear in
+ * one of the two, in any order ("staged block" finds block/builderbot/apps/
+ * staged). An empty query returns the input array unchanged.
  */
 export function searchRepos(repos: RepoHomeItem[], query: string): RepoHomeItem[] {
-  const q = normalizeQuery(query);
-  if (!q) return repos;
+  const terms = queryTerms(query);
+  if (terms.length === 0) return repos;
   return repos.filter((r) => {
     const path = r.subpath ? `${r.githubRepo}/${r.subpath}` : r.githubRepo;
-    return path.toLowerCase().includes(q) || r.shortName.toLowerCase().includes(q);
+    return matchesAllTerms(terms, path, r.shortName);
   });
 }
 
@@ -57,7 +54,7 @@ export function sidebarPinnedRepos(homeRepos: RepoHomeItem[]): RepoHomeItem[] {
  * blank and every card shows.
  */
 export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<string> | null {
-  if (!normalizeQuery(query)) return null;
+  if (queryTerms(query).length === 0) return null;
   return new Set(searchRepos(repos, query).map(repoKey));
 }
 
@@ -66,7 +63,7 @@ export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<stri
  * the query is blank and every row shows.
  */
 export function matchingProjectIds(projects: Project[], query: string): Set<string> | null {
-  if (!normalizeQuery(query)) return null;
+  if (queryTerms(query).length === 0) return null;
   return new Set(searchProjects(projects, query).map((p) => p.id));
 }
 

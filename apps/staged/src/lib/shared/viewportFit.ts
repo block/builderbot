@@ -16,10 +16,15 @@
 // bar `default`) has no top inset and keeps cover, and so does a
 // black-translucent app wherever iOS lays it out to the bottom edge.
 //
-// iOS hands the page its safe-area insets a moment after launch (about 2 s
-// on the simulator, well after the first frame), with a `resize`, and the
-// status bar comes and goes with rotation, so the check runs on every
-// `resize` until cover is gone.
+// iOS hands the page its safe-area insets a moment after launch, with a
+// `resize`: on the simulator, 70-140 ms after the first script runs and after
+// `load`. The status bar also comes and goes with rotation, so the check runs
+// on every `resize` until cover is gone. Until the insets arrive an old
+// install is drawn under the status bar, but only as a blank page: on cold
+// launches the app first rendered after the insets arrived, or in the same
+// frame, so the TopBar never showed under the clock. Should the app ever
+// render earlier, its first frames would sit under the status bar and shift
+// 62 px when cover is dropped.
 
 export interface ViewportFitSample {
   /** Running as a home-screen app. */

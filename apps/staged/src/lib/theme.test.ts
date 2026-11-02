@@ -42,4 +42,14 @@ describe('createAdaptiveTheme', () => {
     expect(vars['--pikchr-orange']).toBe('#da9a6f');
     expect(vars['--pikchr-yellow']).not.toBe(vars['--pikchr-orange']);
   });
+
+  it('paints inputs white on light chrome and on the lifted surface on dark chrome', () => {
+    const light = themeToVarMap(createAdaptiveTheme('#ffffff', '#24292e', '#6e7781'));
+    expect(light['--bg-input']).toBe('#ffffff');
+    expect(light['--bg-input']).not.toBe(light['--bg-elevated']);
+
+    const dark = themeToVarMap(createAdaptiveTheme('#27212e', '#ffffff', '#91889b'));
+    expect(dark['--bg-input']).toBe('#38333f');
+    expect(dark['--bg-input']).toBe(dark['--bg-elevated']);
+  });
 });

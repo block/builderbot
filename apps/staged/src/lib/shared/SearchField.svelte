@@ -1,9 +1,10 @@
 <!--
   SearchField.svelte - Bordered search input shell shared by the list views
 
-  Wraps the shared Input in the rounded, elevated box with a leading search
-  icon that ProjectsList and ReposListView both use, so the styling and
-  accessibility of the two stay in step. The parent owns the query (bind:value)
+  Wraps the shared Input in the rounded box with a leading search icon that
+  ProjectsList and ReposListView both use, so the styling and accessibility of
+  the two stay in step. The box paints the --bg-input surface: white in light
+  mode so it reads like the cards beside it, the lifted control surface in dark. The parent owns the query (bind:value)
   and may bind `ref` to the underlying input for focus management and keyboard
   handling.
 
@@ -79,7 +80,7 @@
     padding: 8px 12px;
     border: 1px solid var(--border-muted);
     border-radius: 8px;
-    background: var(--bg-elevated);
+    background: var(--bg-input);
     color: var(--text-muted);
     transition: border-color 0.15s ease;
   }

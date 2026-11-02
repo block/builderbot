@@ -446,6 +446,7 @@ fn a_stale_storing_claim_is_polled_again_and_the_slow_claimant_backs_off() {
         .settle(&store, &session_id, &claim)
         .expect("A's claim lands");
     let a_claimed = ObservedDetachedRow {
+        parked: RemoteNoteParkedState::Detached,
         updated_at: claim_stamp,
         error_message: claim.error.clone(),
     };
@@ -516,6 +517,7 @@ fn a_stale_storing_claim_is_polled_again_and_the_slow_claimant_backs_off() {
         .expect("B re-claims the stale row");
     assert_ne!(a_stamp, b_stamp);
     let a_claimed = ObservedDetachedRow {
+        parked: RemoteNoteParkedState::Detached,
         updated_at: a_stamp,
         error_message: claim.error.clone(),
     };
@@ -614,7 +616,7 @@ fn an_expired_window_settles_the_row_once_and_stops_the_polling() {
         &store,
         &session_id,
         &as_read,
-        detached_note_expired_message("ws-1"),
+        RemoteNoteParkedState::Detached.expired("ws-1"),
     )
     .expect("the first expiry settles the row");
     assert_eq!(outcome.status, SessionStatus::Error);
@@ -655,7 +657,7 @@ fn an_expired_window_settles_the_row_once_and_stops_the_polling() {
             &store,
             &session_id,
             &as_read,
-            detached_note_expired_message("ws-1")
+            RemoteNoteParkedState::Detached.expired("ws-1")
         ),
         None
     );
@@ -1540,4 +1542,499 @@ fn only_a_detached_row_can_be_finished_by_the_recovery_write() {
     let session = store.get_session(&session_id).unwrap().unwrap();
     assert_eq!(session.status, SessionStatus::Completed);
     assert_eq!(session.error_message, None);
+}
+
+// =============================================================================
+// Hold-stopped rows: a note written after the run ended
+// =============================================================================
+
+/// End the running session as `completed`/`hold_stopped` with its note still
+/// empty, as a run does when the user stops the wait on background work
+/// before the agent called `write_note`.
+fn hold_stop_without_note(store: &Arc<Store>, session_id: &str) {
+    assert!(store
+        .transition_from_running(
+            session_id,
+            SessionStatus::Completed,
+            None,
+            Some(&CompletionReason::HoldStopped),
+        )
+        .unwrap());
+}
+
+fn hold_stopped_rows(store: &Arc<Store>) -> Vec<String> {
+    store
+        .get_hold_stopped_sessions_awaiting_note()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect()
+}
+
+#[test]
+fn hold_stopped_rows_are_polled_only_while_their_note_is_empty() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    assert!(
+        hold_stopped_rows(&store).is_empty(),
+        "a running row is not awaiting a note"
+    );
+    hold_stop_without_note(&store, &session_id);
+    assert_eq!(hold_stopped_rows(&store), vec![session_id.clone()]);
+
+    // A project note session with an empty note qualifies the same way; a
+    // hold-stopped session without a note artifact, or with a filled note,
+    // does not.
+    let project = Project::new("test/project-notes");
+    store.create_project(&project).unwrap();
+    let project_session = Session::new_running("project note", std::path::Path::new("."));
+    store.create_session(&project_session).unwrap();
+    store
+        .create_project_note(
+            &crate::store::ProjectNote::new(&project.id, "", "").with_session(&project_session.id),
+        )
+        .unwrap();
+    hold_stop_without_note(&store, &project_session.id);
+    let bare_session = Session::new_running("no note", std::path::Path::new("."));
+    store.create_session(&bare_session).unwrap();
+    hold_stop_without_note(&store, &bare_session.id);
+    let filled_session = Session::new_running("filled", std::path::Path::new("."));
+    store.create_session(&filled_session).unwrap();
+    let branch_id = store.get_note(&note_id).unwrap().unwrap().branch_id;
+    let filled_note = Note::new(&branch_id, "Title", "Body").with_session(&filled_session.id);
+    store.create_note(&filled_note).unwrap();
+    hold_stop_without_note(&store, &filled_session.id);
+    assert_eq!(
+        hold_stopped_rows(&store),
+        vec![session_id.clone(), project_session.id.clone()]
+    );
+
+    // The poll action: a hold-stopped row no sweep has written to is due
+    // inside the window and gets one last poll past it; a hold-stopped row
+    // of another reason, or a completed row of another reason, never.
+    let row = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(
+        detached_note_poll_action(&row, row.updated_at),
+        DetachedNotePollAction::Poll
+    );
+    assert_eq!(
+        detached_note_poll_action(
+            &row,
+            row.updated_at + DETACHED_NOTE_POLL_WINDOW.as_millis() as i64 + 1
+        ),
+        DetachedNotePollAction::PollThenExpire
+    );
+    let mut other_reason = row.clone();
+    other_reason.completion_reason = Some(CompletionReason::TurnComplete);
+    assert_eq!(
+        detached_note_poll_action(&other_reason, row.updated_at),
+        DetachedNotePollAction::Skip
+    );
+
+    // Once the note is filled in, the row drops out of the query.
+    store
+        .update_note_title_and_content(&note_id, "Plan", "Body", None, None)
+        .unwrap();
+    assert_eq!(hold_stopped_rows(&store), vec![project_session.id]);
+}
+
+#[test]
+fn a_late_note_fills_a_hold_stopped_row_in_without_changing_its_status() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    hold_stop_without_note(&store, &session_id);
+    let output = done_output();
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec(&output, &log);
+
+    // Mid-ingest the row carries the storing claim: still completed /
+    // hold_stopped, with the marker in its message, and not due for
+    // another instance's poll.
+    let store_for_ingest = Arc::clone(&store);
+    let session_for_ingest = session_id.clone();
+    let mut ingest_locally = ingest_locally(&store, &session_id);
+    let mut ingest = |submission: NoteSubmission| {
+        let row = store_for_ingest
+            .get_session(&session_for_ingest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, SessionStatus::Completed);
+        assert_eq!(row.completion_reason, Some(CompletionReason::HoldStopped));
+        assert_eq!(
+            row.error_message.as_deref(),
+            Some(hold_stopped_note_storing_message("ws-1").as_str())
+        );
+        assert_eq!(
+            detached_note_poll_action(&row, row.updated_at),
+            DetachedNotePollAction::Skip
+        );
+        ingest_locally(submission)
+    };
+    let as_read = observed(&store, &session_id);
+    assert_eq!(as_read.parked, RemoteNoteParkedState::HoldStopped);
+    let outcome = settled(poll_detached_remote_note_session_once(
+        &store,
+        &session_id,
+        "ws-1",
+        &exec,
+        &mut ingest,
+        &as_read,
+    ));
+    assert_eq!(
+        outcome,
+        DetachedRecoveryOutcome {
+            status: SessionStatus::Completed,
+            reason: CompletionReason::HoldStopped,
+            error: None,
+        }
+    );
+    let session = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert_eq!(
+        session.completion_reason,
+        Some(CompletionReason::HoldStopped)
+    );
+    assert_eq!(session.error_message, None, "the claim is dropped again");
+    let note = store.get_note(&note_id).unwrap().unwrap();
+    assert_eq!(
+        (note.title.as_str(), note.content.as_str()),
+        ("Plan", "Body")
+    );
+    {
+        let commands = log.borrow();
+        assert_eq!(commands.len(), 2, "collect, then clear: {commands:?}");
+        assert_eq!(commands[1][2], clear_outbox_script(&session_id));
+    }
+    assert!(
+        hold_stopped_rows(&store).is_empty(),
+        "a filled note ends the polling"
+    );
+
+    // A second instance that read the row before the claim: its claim fails
+    // on the restamped row, so it neither ingests nor clears.
+    log.borrow_mut().clear();
+    let mut ingested = 0;
+    assert_eq!(
+        poll_detached_remote_note_session_once(
+            &store,
+            &session_id,
+            "ws-1",
+            &exec,
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &as_read
+        ),
+        DetachedNotePoll::Taken
+    );
+    assert_eq!(ingested, 0);
+    assert_eq!(log.borrow().len(), 1, "the read happened, nothing after it");
+}
+
+#[test]
+fn a_hold_stopped_poll_without_a_note_writes_nothing_and_a_resume_wins_the_row() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    hold_stop_without_note(&store, &session_id);
+    let before = store.get_session(&session_id).unwrap().unwrap();
+    let log = RefCell::new(Vec::new());
+
+    // Inside the window with nothing on the workstation: no write at all,
+    // so the window keeps counting from the hold_stopped write.
+    let pending = recording_exec("pending\n", &log);
+    let visit = poll_detached_remote_note_session(
+        &store,
+        &session_id,
+        "ws-1",
+        &pending,
+        &mut ingest_locally(&store, &session_id),
+        &plan(&store, &session_id, false),
+    );
+    assert_eq!(
+        visit,
+        DetachedNotePollVisit {
+            outcome: None,
+            unreachable: false,
+        }
+    );
+    let after = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(
+        (after.updated_at, after.error_message),
+        (before.updated_at, None)
+    );
+    assert_eq!(log.borrow().len(), 1, "one read, no clear");
+
+    // The user resumes while a poll is out: the row is `running` when the
+    // poll's claim lands, so the note is left to the new run (whose
+    // start-of-run recovery collects it).
+    let as_read = observed(&store, &session_id);
+    store
+        .update_session_status(&session_id, SessionStatus::Running, None, None)
+        .unwrap();
+    let output = done_output();
+    let done = recording_exec(&output, &log);
+    let mut ingested = 0;
+    assert_eq!(
+        poll_detached_remote_note_session_once(
+            &store,
+            &session_id,
+            "ws-1",
+            &done,
+            &mut |_| {
+                ingested += 1;
+                true
+            },
+            &as_read,
+        ),
+        DetachedNotePoll::Taken
+    );
+    assert_eq!(ingested, 0);
+    assert_eq!(log.borrow().len(), 2, "the read happened, nothing after it");
+    assert_eq!(
+        store.get_note(&note_id).unwrap().unwrap().content,
+        "",
+        "the resumed run owns the note"
+    );
+}
+
+#[test]
+fn an_expired_hold_stopped_row_is_settled_once_and_its_outbox_cleared() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    hold_stop_without_note(&store, &session_id);
+    let log = RefCell::new(Vec::new());
+    let pending = recording_exec("pending\n", &log);
+
+    let visit = poll_detached_remote_note_session(
+        &store,
+        &session_id,
+        "ws-1",
+        &pending,
+        &mut ingest_locally(&store, &session_id),
+        &plan(&store, &session_id, true),
+    );
+    let outcome = visit
+        .outcome
+        .expect("the last poll past the window expires the row");
+    assert_eq!(
+        (outcome.status, outcome.reason),
+        (SessionStatus::Completed, CompletionReason::HoldStopped)
+    );
+    let session = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(session.status, SessionStatus::Completed);
+    assert_eq!(
+        session.completion_reason,
+        Some(CompletionReason::HoldStopped)
+    );
+    assert_eq!(session.error_message, outcome.error);
+    assert!(
+        session
+            .error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("30 minutes")
+                && m.contains("cleared")
+                && !m.ends_with(AWAITING_REMOTE_NOTE_SUFFIX)
+                && !m.ends_with(STORING_REMOTE_NOTE_SUFFIX)),
+        "{session:?}"
+    );
+    assert_eq!(
+        store.get_note(&note_id).unwrap().unwrap().content,
+        "",
+        "the note stays empty"
+    );
+    {
+        let commands = log.borrow();
+        assert_eq!(
+            commands.len(),
+            2,
+            "the last read, then the clear so nothing is stranded: {commands:?}"
+        );
+        assert_eq!(commands[1][2], clear_outbox_script(&session_id));
+    }
+    // The settled message ends the polling: not due, and never claimed by a
+    // sweep that read the row before the expiry.
+    assert_eq!(
+        detached_note_poll_action(&session, session.updated_at),
+        DetachedNotePollAction::Skip
+    );
+    assert_eq!(
+        hold_stopped_rows(&store),
+        vec![session_id.clone()],
+        "the query is content-based; the message is what stops the polling"
+    );
+    assert!(
+        !note_recovery_is_pending(Some("hold_stopped"), session.error_message.as_deref()),
+        "the timeline never shows a hold-stopped row as polling"
+    );
+
+    // A detached row past its window keeps its outbox for a Resume; only a
+    // hold-stopped row, which nothing will read again, clears it.
+    assert!(RemoteNoteParkedState::HoldStopped.clears_outbox_on_expiry());
+    assert!(!RemoteNoteParkedState::Detached.clears_outbox_on_expiry());
+
+    // A hold-stopped row whose workstation cannot be reached past the
+    // window is given up on with its own message, and no clear is attempted.
+    let branch_id = store.get_note(&note_id).unwrap().unwrap().branch_id;
+    let unreachable = Session::new_running("another note", std::path::Path::new("."));
+    store.create_session(&unreachable).unwrap();
+    store
+        .create_note(&Note::new(&branch_id, "", "").with_session(&unreachable.id))
+        .unwrap();
+    let unreachable_id = unreachable.id;
+    hold_stop_without_note(&store, &unreachable_id);
+    let failing = |_: &[&str]| Err::<String, String>("workstation not found".to_string());
+    let visit = poll_detached_remote_note_session(
+        &store,
+        &unreachable_id,
+        "ws-1",
+        &failing,
+        &mut ingest_locally(&store, &unreachable_id),
+        &DetachedNotePollPlan {
+            observed: observed(&store, &unreachable_id),
+            past_window: true,
+            prior_unreachable: DETACHED_NOTE_POLL_MAX_UNREACHABLE - 1,
+        },
+    );
+    assert!(visit.unreachable);
+    let row = store.get_session(&unreachable_id).unwrap().unwrap();
+    assert_eq!(row.status, SessionStatus::Completed);
+    assert!(
+        row.error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("could not be reached")),
+        "{row:?}"
+    );
+    assert_eq!(
+        detached_note_poll_action(&row, row.updated_at),
+        DetachedNotePollAction::Skip
+    );
+}
+
+#[test]
+fn a_late_note_that_cannot_be_stored_leaves_the_hold_stopped_row_and_the_outbox_for_a_resume() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    hold_stop_without_note(&store, &session_id);
+    let output = done_output();
+    let log = RefCell::new(Vec::new());
+    let exec = recording_exec(&output, &log);
+    let mut ingested = 0;
+
+    let outcome = settled(poll_detached_remote_note_session_once(
+        &store,
+        &session_id,
+        "ws-1",
+        &exec,
+        &mut counting_unstored(&mut ingested),
+        &observed(&store, &session_id),
+    ));
+    assert_eq!(ingested, 1);
+    assert_eq!(
+        (outcome.status, outcome.reason),
+        (SessionStatus::Completed, CompletionReason::HoldStopped)
+    );
+    let session = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(
+        session.error_message.as_deref(),
+        Some(hold_stopped_note_unstored_message("ws-1", "Plan").as_str())
+    );
+    assert_eq!(
+        detached_note_poll_action(&session, session.updated_at),
+        DetachedNotePollAction::Skip,
+        "the row is parked for a Resume, not polled again"
+    );
+    assert_eq!(store.get_note(&note_id).unwrap().unwrap().content, "");
+    assert_eq!(log.borrow().len(), 1, "the read only: the outbox is kept");
+
+    // A resume clears the marker with its status write, as every status
+    // write does.
+    store
+        .update_session_status(&session_id, SessionStatus::Running, None, None)
+        .unwrap();
+    assert_eq!(
+        store
+            .get_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .error_message,
+        None
+    );
+}
+
+#[test]
+fn only_a_hold_stopped_row_as_observed_takes_the_marker_write() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (session_id, note_id) = remote_note_session(&store);
+    let running = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(
+        store
+            .mark_hold_stopped_note_recovery_observed(
+                &session_id,
+                running.updated_at,
+                None,
+                Some("claim")
+            )
+            .unwrap(),
+        None,
+        "a running row is not hold-stopped"
+    );
+    hold_stop_without_note(&store, &session_id);
+    let row = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(
+        store
+            .mark_hold_stopped_note_recovery_observed(
+                &session_id,
+                row.updated_at - 1,
+                None,
+                Some("claim")
+            )
+            .unwrap(),
+        None,
+        "a stale stamp fails the predicate"
+    );
+    let stamp = store
+        .mark_hold_stopped_note_recovery_observed(&session_id, row.updated_at, None, Some("claim"))
+        .unwrap()
+        .expect("the observed row takes the write");
+    let claimed = store.get_session(&session_id).unwrap().unwrap();
+    assert_eq!(
+        (
+            claimed.status,
+            claimed.completion_reason,
+            claimed.error_message.as_deref(),
+            claimed.updated_at
+        ),
+        (
+            SessionStatus::Completed,
+            Some(CompletionReason::HoldStopped),
+            Some("claim"),
+            stamp
+        )
+    );
+    assert_eq!(
+        store
+            .mark_hold_stopped_note_recovery_observed(&session_id, row.updated_at, None, None)
+            .unwrap(),
+        None,
+        "the pre-claim observation no longer matches"
+    );
+    let dropped = store
+        .mark_hold_stopped_note_recovery_observed(&session_id, stamp, Some("claim"), None)
+        .unwrap()
+        .expect("the claimant drops its claim");
+
+    // Once the note is filled, no marker can be written on the row — even by
+    // a claim whose observation (no message, this very stamp) still matches,
+    // as a second instance's would if the store happened within one
+    // millisecond. Dropping a marker needs no empty note.
+    store
+        .update_note_title_and_content(&note_id, "Plan", "Body", None, None)
+        .unwrap();
+    assert_eq!(
+        store
+            .mark_hold_stopped_note_recovery_observed(&session_id, dropped, None, Some("claim"))
+            .unwrap(),
+        None
+    );
 }

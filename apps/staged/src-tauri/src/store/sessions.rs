@@ -717,11 +717,11 @@ impl Store {
     /// from `updated_at`, which every write into this state restamps.
     pub fn get_detached_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
              FROM sessions WHERE status = 'error' AND completion_reason = ?1
-             ORDER BY updated_at ASC",
-        )?;
+             ORDER BY updated_at ASC"
+        ))?;
         let sessions = stmt
             .query_map(
                 params![CompletionReason::Detached.as_str()],
@@ -729,6 +729,96 @@ impl Store {
             )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
+    }
+
+    /// Sessions that ended `completed`/[`CompletionReason::HoldStopped`]
+    /// with their note still empty: the user stopped the wait on the agent's
+    /// background work before it called `write_note`. For a remote note
+    /// session the agent carries on regardless (Blox keeps the turn alive),
+    /// so the dead-owner sweep polls these rows' workstation outboxes for a
+    /// bounded window (`session_runner::poll_detached_remote_note_sessions`)
+    /// and fills the note in when it lands. Oldest write first; the caller
+    /// applies the window from `updated_at` and tells a remote session from
+    /// a local one.
+    pub fn get_hold_stopped_sessions_awaiting_note(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions s
+             WHERE s.status = 'completed' AND s.completion_reason = ?1
+               AND (EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.content = '')
+                    OR EXISTS (SELECT 1 FROM project_notes p WHERE p.session_id = s.id AND p.content = ''))
+             ORDER BY s.updated_at ASC"
+        ))?;
+        let sessions = stmt
+            .query_map(
+                params![CompletionReason::HoldStopped.as_str()],
+                Self::row_to_session,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
+    /// The sweep's guarded write for exactly the `completed`/`hold_stopped`
+    /// row it read: sets `error_message` to `error_message` and restamps
+    /// `updated_at`, only while the row still is `completed`/`hold_stopped`
+    /// with the observed stamp and message. Status and completion reason are
+    /// left alone — the session did complete; only its note is outstanding.
+    ///
+    /// This is the one writer that puts an `error_message` on a completed
+    /// row. The message is the sweep's own marker (a storing claim, an
+    /// expired window, an unreachable workstation, a note that could not be
+    /// stored), exactly as `finish_detached_recovery_observed` records them
+    /// on a `detached` row, and it serves the same purpose: the restamp and
+    /// the message make the claim exclusive across Staged instances sharing
+    /// the store, and the message keeps a settled row from being polled
+    /// again. The chat pane shows a completed row's message only for `error`
+    /// and `cancelled` rows, so the marker is invisible there; any later
+    /// status write (a resume) clears it.
+    ///
+    /// A marker (`error_message` is `Some`) is only ever meaningful while
+    /// the note is still empty, so writing one also requires an empty repo
+    /// or project note for the session. That closes the one gap the stamp
+    /// cannot: the awaiting row and the row whose note the sweep has just
+    /// stored both carry no message, and `updated_at` has millisecond
+    /// resolution, so a claim read before another instance's claim could
+    /// otherwise land on the stored row if the whole store happened within
+    /// one millisecond. Dropping the marker after a stored note
+    /// (`error_message` is `None`) has no such requirement.
+    ///
+    /// Returns the `updated_at` the row now carries when it was written,
+    /// `None` when the row had moved on.
+    pub fn mark_hold_stopped_note_recovery_observed(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+        observed_error_message: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        let note_guard = if error_message.is_some() {
+            " AND (EXISTS (SELECT 1 FROM notes n WHERE n.session_id = sessions.id AND n.content = '')
+                   OR EXISTS (SELECT 1 FROM project_notes p WHERE p.session_id = sessions.id AND p.content = ''))"
+        } else {
+            ""
+        };
+        let rows = conn.execute(
+            &format!(
+                "UPDATE sessions SET error_message = ?1, updated_at = ?2
+                 WHERE id = ?3 AND status = 'completed' AND completion_reason = ?4
+                   AND updated_at = ?5 AND error_message IS ?6{note_guard}"
+            ),
+            params![
+                error_message,
+                now,
+                id,
+                CompletionReason::HoldStopped.as_str(),
+                observed_updated_at,
+                observed_error_message,
+            ],
+        )?;
+        Ok((rows > 0).then_some(now))
     }
 
     /// How many sessions ended with exactly this `error_message`.

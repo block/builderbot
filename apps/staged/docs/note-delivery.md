@@ -267,19 +267,22 @@ Two mechanisms cover that:
 
   `graceful_stop` then kills the proxy. After an unacknowledged cancel the
   proxy is known to answer nothing, so its whole process group is SIGKILLed
-  at once, with no SIGINT grace; otherwise the group gets SIGINT and five
-  seconds, then SIGKILL — again to the _group_, not the `sq` wrapper pid
-  alone. `sq blox acp` wraps a `blox.exoskeleton` child, and killing only
-  the wrapper left a frozen child orphaned: the kernel SIGCONTs a stopped
-  process whose group has lost its last running member, and the revived
-  proxy then relayed the queued cancel to the workstation and ended the turn
-  the user had been told might still finish. SIGKILL is delivered to a
-  stopped process, so the group kill reaches the frozen child (verified on
-  macOS by `acp-client`'s `session_isolation` tests with a SIGSTOPped
-  grandchild). Cost of an unacknowledged Stop on a remote note session: the
-  10 s deadline plus one `ws exec` outbox read, about 13 s to the row
-  settling (it was 17 to 18 s while the five-second grace was still offered
-  to a proxy that could not use it).
+  at once, with no SIGINT grace; otherwise the group gets SIGINT and up to
+  five seconds for the `sq` wrapper to exit, and then the _group_ is
+  SIGKILLed regardless — whether the wrapper exited on the SIGINT or sat
+  out the grace. `sq blox acp` wraps a `blox.exoskeleton` child, and
+  killing only the wrapper, or trusting the wrapper's exit, left a frozen
+  child orphaned: the kernel SIGCONTs a stopped process whose group has
+  lost its last running member, and the revived proxy then relayed the
+  queued cancel to the workstation and ended the turn the user had been
+  told might still finish. SIGKILL is delivered to a stopped process, so
+  the group kill reaches the frozen child, and an already-empty group just
+  answers `ESRCH` (verified on macOS by `acp-client`'s `session_isolation`
+  tests with a SIGSTOPped grandchild under both a SIGINT-ignoring and a
+  SIGINT-honouring wrapper). Cost of an unacknowledged Stop on a remote
+  note session: the 10 s deadline plus one `ws exec` outbox read, about
+  13 s to the row settling (it was 17 to 18 s while the five-second grace
+  was still offered to a proxy that could not use it).
 
 - **One connection, one session.** The Blox proxy reuses a long-lived
   workstation bridge process, which relays _every_ session's
@@ -291,7 +294,12 @@ Two mechanisms cover that:
   the task sets or the activity signal — so an older session finishing its
   turn on the workstation is neither rendered in the wrong chat pane nor
   counted as activity by the wrong session's holding debounce or inactivity
-  watchdog.
+  watchdog. The gate is closed, not open, while the session is still
+  unknown: a fresh connection receives the older session's streaming turn
+  from the moment it is attached, during the `initialize` and
+  `session/new` round trips, and nothing legitimate can arrive for a
+  session that does not exist yet, so every stamped frame before
+  `session/new` answers is dropped too.
 - **Silence triggers a probe.** Each connection of a remote note session with
   the helper attached runs an inactivity watchdog
   (`session_runner::remote_note_watchdog`) against the turn. The message
@@ -335,7 +343,10 @@ prompt tells the agent not to write `---` text, so `should_finish_after_response
 never fires for them. A remote note session under a background hold therefore
 runs to the hold's quiescence timeout (or its cap) even when the note was
 saved early. Polling the outbox during the turn would cost a `ws exec` per
-poll; this is a known limitation, not an oversight.
+poll; this is a known limitation, not an oversight. A hold the user _stops_
+before the agent has written is a different matter: the agent carries on,
+and its late note is picked up by the sweep (see _Polling a hold-stopped
+row_ below).
 
 ### Permissions never block on the laptop
 
@@ -489,6 +500,63 @@ its Resume button, never the destructive alert with the raw text. The
 session completes on its own, through the normal hooks, when the note
 appears.
 
+### Polling a hold-stopped row
+
+A remote note turn can complete and then sit in a background hold while the
+agent works on (Claude Code backgrounding a blocked command, say). If the
+user stops that wait before the agent has called `write_note`, the run ends
+`completed` / `hold_stopped` and reads the outbox once on its way out — but
+the Stop does not stop the workstation agent (Blox keeps the turn alive),
+so the agent's `write_note` typically lands a minute _after_ the run has
+stored an empty note and cleared the outbox. Nothing used to read it again
+short of a Resume, and the note sat stranded in `~/.staged/sessions/<id>/`.
+
+The sweep therefore polls these rows with the same machinery as detached
+ones (`RemoteNoteParkedState::HoldStopped`), with these differences:
+
+- **Which rows.** `Store::get_hold_stopped_sessions_awaiting_note`:
+  `completed` / `hold_stopped` sessions whose repo or project note still has
+  empty content. The sweep keeps only those on a branch with a Blox
+  workspace. The row is due while it carries no message at all (no sweep
+  has touched it yet), or a storing claim older than
+  `DETACHED_NOTE_STORING_STALE`.
+- **Same window, same claim.** 30 minutes from the `hold_stopped` write
+  (`DETACHED_NOTE_POLL_WINDOW`), one last poll past it, at most two in
+  flight, oldest-unpolled first. A poll that finds `done` first claims the
+  row with `hold_stopped_note_storing_message` through
+  `Store::mark_hold_stopped_note_recovery_observed`, a guarded write whose
+  predicate requires the row to still be `completed` / `hold_stopped` with
+  the observed stamp and message; it restamps `updated_at` and sets the
+  message, leaving status and completion reason alone. Only the winner runs
+  the hooks, writes the message back to nothing, and clears the outbox; the
+  loser and a row the user resumed meanwhile back off. Every marker write
+  additionally requires the note to still be empty: the awaiting row and
+  the row whose note was just stored both carry no message, and
+  `updated_at` is in milliseconds, so without that guard a claim read
+  before another instance's could land on the stored row if the whole store
+  took under a millisecond. A note that cannot be stored leaves
+  `hold_stopped_note_unstored_message` and the outbox for a Resume. This is the one place an `error_message` is written on a
+  completed row; the chat pane shows a completed row's message only for
+  `error` / `cancelled` rows, so the marker is invisible there, and any
+  later status write (a resume) clears it.
+- **The row stays `completed`.** A found note fills the note in; the row's
+  status and `hold_stopped` reason do not change, the timeline never shows
+  it as "polling" (`isPollingForNote` is for detached rows), and the chat
+  pane keeps "The wait for this session's background work was stopped"
+  with its Resume button. A status event is still emitted so the open
+  views refresh the note.
+- **Expiry clears the outbox.** When the last poll past the window finds no
+  note, the row gets `hold_stopped_note_expired_message` (no marker tail, so
+  it is never polled again) and the workstation outbox is cleared, so
+  nothing is left stranded — unlike a detached row, whose expired message
+  asks for a Resume that will collect the note. An unreachable workstation
+  follows the detached rule (five consecutive failed reads past the
+  window, then `hold_stopped_note_unreachable_message`, nothing cleared).
+
+Rows from before this existed (any `hold_stopped` remote note session with
+an empty note) are past the window on the first sweep after upgrade: each
+gets one poll, a late note is stored, and the outbox is cleared either way.
+
 ## Design decisions
 
 Decisions that were weighed and settled, so a later reader does not reopen
@@ -519,14 +587,18 @@ them by accident:
   may have reached the agent after all; and an interrupt's unacknowledged
   cancel counts as lost only when the agent was silent for the whole 30 s
   wait, since an interrupt is not the user giving up on the session.
-- **A stopped background hold still collects the outbox once.** A remote
-  note turn that completed and was then stopped during its background hold
-  (`HoldStopped`) skips the in-loop collection, like any cancel. The agent
-  may have called `write_note` from the background work the hold was
-  waiting on, so the end of the run reads the outbox once more and stores a
-  note it finds through the normal hooks (the row is `completed` /
-  `hold_stopped` either way). A note the agent writes _after_ that read is
-  picked up by the next run's start-of-run recovery.
+- **A stopped background hold collects the outbox once, then the sweep
+  takes over.** A remote note turn that completed and was then stopped
+  during its background hold (`HoldStopped`) skips the in-loop collection,
+  like any cancel. The agent may have called `write_note` from the
+  background work the hold was waiting on, so the end of the run reads the
+  outbox once more and stores a note it finds through the normal hooks (the
+  row is `completed` / `hold_stopped` either way). A note the agent writes
+  _after_ that read is picked up by the sweep for 30 minutes (_Polling a
+  hold-stopped row_), which fills the note in without changing the row's
+  status; past the window the outbox is cleared rather than left for a
+  Resume, because a completed row does not ask the user to come back the
+  way a detached one does.
 - **The inactivity watchdog probes, it does not time out.** Ten minutes of
   silence is a reason to _look_ at the outbox, not to end the turn: an agent
   thinking through a large diff is quiet for that long legitimately. Only a
@@ -544,10 +616,11 @@ them by accident:
 - **Clear policy.** The outbox is cleared at the end of every run that saw
   its state, and kept only when the sweep is still polling for the note or
   when the start-of-run recovery did not settle and the run never collected
-  its own note (above). Clearing at start was rejected because it would
-  delete an uncollected note on every resume; never clearing was rejected
-  because a stored note would be re-ingested on the next run, over whatever
-  the user edited meanwhile.
+  its own note (above). The sweep clears it again after it stores a late
+  note, and after a hold-stopped row's window expires. Clearing at start
+  was rejected because it would delete an uncollected note on every resume;
+  never clearing was rejected because a stored note would be re-ingested on
+  the next run, over whatever the user edited meanwhile.
 - **Detached polling window.** 30 minutes from the detaching write, with
   one last poll before expiring. Shorter windows miss the agent finishing a
   long turn (Blox keeps the turn alive); longer ones keep spending `ws exec`
@@ -658,6 +731,16 @@ treating the connection as lost and completing from the outbox`, and the
    row ends `completed` with no click. Thaw a proxy you still have with
    `kill -CONT <pid>` to confirm a probe that finds `pending` never
    interrupts an agent that resumes talking.
+   Hold test: prompt the agent to run a bare `sleep 60` (the Claude harness
+   blocks it, so the agent backgrounds it and ends its turn into a hold),
+   press Stop on the hold before the agent has written. The row ends
+   `completed` / `hold_stopped` with an empty note and the log shows
+   `workstation outbox has no completed write_note call`. About a minute
+   later the workstation writes `done`; the next sweep tick logs
+   `Hold-stopped remote note session <id>: note "<title>" appeared in the
+workstation outbox; storing it`, the note fills in on the timeline, the
+   row stays `completed` / `hold_stopped`, and `~/.staged/sessions/<id>/`
+   is gone from the workstation.
 4. Run two Staged builds against the same data dir and repeat step 3: only
    one of them logs `note "<title>" found in the workstation outbox` (or
    `appeared in the workstation outbox`); the other logs nothing for the
@@ -681,7 +764,12 @@ it once; a stale storing claim is polled again and the slow claimant's late
 write is refused; a note that cannot be stored stays on the workstation in
 both sweep paths; polls that find nothing write nothing; a row past the
 window gets one last poll before the guarded expiry; an unreadable outbox
-past the window is retried five times, then expired as unreachable; only a
+past the window is retried five times, then expired as unreachable; a
+hold-stopped row with an empty note is polled while the note is empty, a
+late note fills it in under a storing claim without changing its status,
+a poll without a note writes nothing and a resume wins the row, an expired
+window settles it once and clears the outbox, an unstorable note keeps the
+outbox, and the marker write takes only the observed row; only a
 transport loss detaches, with bridge subprocess-exit wording excluded and the
 innermost error in the message; an unacknowledged Stop and a watchdog hit
 count as a lost agent, an acknowledged Stop does not, and an unacknowledged
@@ -697,11 +785,12 @@ probed), `agent::activity::tests`,
 `goose` and `claude` providers, `initialize` capabilities; the transport-loss
 phrase list in both directions; a Stop the fake agent never acknowledges
 settles `CancelUnacknowledged` at the deadline while an acknowledged one
-settles `Cancelled`; `session_isolation`: frames for another ACP session are
-dropped by all three notification handlers and are not activity, and a
-remote proxy group with a SIGINT-ignoring wrapper and a SIGSTOPped child is
-killed whole — at once after an unacknowledged cancel, after the grace
-otherwise), `blox-cli`
+settles `Cancelled`; `session_isolation`: frames for another ACP session, or for any session
+before the connection's own is named, are dropped by all three notification
+handlers and are not activity, and a remote proxy group with a SIGSTOPped
+child is killed whole — at once after an unacknowledged cancel, after the
+grace when the wrapper ignores SIGINT, and right after the wrapper is reaped
+when it honours it), `blox-cli`
 (`--env-vars`), the session runner and prompt tests for the fallback and
 follow-up paths, and on the frontend `toolCallViewModel.test.ts` /
 `acpTranscript.test.ts` (the `write_note` row for both agents, interrupted

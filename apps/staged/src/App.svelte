@@ -27,6 +27,7 @@
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
+  import { safeAreaOffset } from './lib/shared/safeArea';
   import { guardDocumentScroll } from './lib/shared/documentScroll';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
@@ -853,7 +854,15 @@
   <ProjectDeleteDialog />
 
   <ReferenceModalHost />
-  <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
+  <Toaster
+    position="bottom-right"
+    visibleToasts={4}
+    duration={8000}
+    closeButton
+    expand
+    offset={safeAreaOffset('24px')}
+    mobileOffset={safeAreaOffset('16px')}
+  />
 {/if}
 
 <style>
@@ -877,6 +886,11 @@
     height: 100dvh;
     overflow: hidden;
     background-color: var(--bg-chrome);
+    /* index.html sets viewport-fit=cover, so the page runs under the notch
+       and the home indicator wherever there are any; keep the panes clear of
+       them. The TopBar pads the top inset itself so its background fills the
+       status bar. Every inset is 0 on desktop. */
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
 
   /* One grid cell shared by the workspace and the detail host over it, so
@@ -925,6 +939,8 @@
   }
 
   .reset-shell {
+    /* No TopBar here to take the top inset. */
+    padding-top: env(safe-area-inset-top);
     display: flex;
     align-items: center;
     justify-content: center;

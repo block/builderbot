@@ -303,8 +303,9 @@
 <style>
   .launcher {
     position: fixed;
-    bottom: 16px;
-    right: 16px;
+    /* Measured from the safe area, clear of the home indicator. */
+    bottom: calc(16px + env(safe-area-inset-bottom));
+    right: calc(16px + env(safe-area-inset-right));
     width: 340px;
     background: var(--bg-chrome);
     border: 1px solid var(--border-subtle);

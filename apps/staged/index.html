@@ -7,10 +7,16 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="theme-color" content="#060606" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- `default` keeps the home-screen app below the status bar, which iOS
+         tints to match the page. With black-translucent and viewport-fit=cover,
+         iOS 27 draws the page under the status bar but keeps the layout
+         viewport the height below it, so the page ends 62 px above the bottom
+         of the screen. iOS reads this tag only when the app is added to the
+         Home Screen. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, interactive-widget=resizes-content, viewport-fit=cover"
     />
     <title>Staged</title>
     <!-- The window starts hidden and is shown by App.svelte after the

@@ -112,8 +112,12 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    /* Under the status bar of the home-screen web app (index.html sets
+       viewport-fit=cover): the bar's background fills the inset and its
+       controls sit below it. The inset is 0 everywhere else. */
     padding: 8px;
-    min-height: 42px;
+    padding-top: calc(8px + env(safe-area-inset-top));
+    min-height: calc(42px + env(safe-area-inset-top));
     background: var(--bg-app-bar);
     border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
     flex-shrink: 0;
@@ -221,6 +225,7 @@
   @media (max-width: 768px) {
     .top-bar {
       padding: 6px 8px;
+      padding-top: calc(6px + env(safe-area-inset-top));
     }
     .title-content {
       max-width: min(46vw, 420px);

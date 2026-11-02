@@ -1964,6 +1964,9 @@
     width: 100vw;
     height: 100vh;
     height: 100dvh;
+    /* Clear of the status bar and home indicator (viewport-fit=cover). */
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+      env(safe-area-inset-left);
     background: var(--bg-chrome);
   }
 

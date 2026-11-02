@@ -81,9 +81,18 @@ pub(crate) async fn detect_actions_for_repo_context(
     // This is essential when the upstream repo has been restructured (e.g. a
     // subpath moved) — without this the stale working tree would be missing
     // the expected directories. Only the main checkout is affected; worktrees
-    // are separate directories and remain untouched.
+    // are separate directories and remain untouched. It fetches, so it runs
+    // on the blocking pool.
     if let Some(clone_path) = &local_clone {
-        crate::git::update_clone_to_remote_head(clone_path, github_repo);
+        let clone_path = clone_path.clone();
+        let github_repo = github_repo.to_owned();
+        if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+            crate::git::update_clone_to_remote_head(&clone_path, &github_repo)
+        })
+        .await
+        {
+            log::warn!("updating the local clone before action detection failed: {e}");
+        }
     }
 
     // Pick the right AI provider working directory. When we have a local
@@ -924,10 +933,14 @@ pub(crate) async fn run_branch_action_impl(
             None => action.command.clone(),
         };
 
-        // Find the sq binary and build args for `sq blox ws exec`
-        let sq_binary = blox_cli::find_sq_binary().ok_or_else(|| {
-            "Could not find `sq` binary. Is it installed and on your PATH?".to_string()
-        })?;
+        // Find the sq binary and build args for `sq blox ws exec`. The lookup
+        // asks a login shell, so it runs on the blocking pool.
+        let sq_binary = tauri::async_runtime::spawn_blocking(blox_cli::find_sq_binary)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "Could not find `sq` binary. Is it installed and on your PATH?".to_string()
+            })?;
 
         let args = vec![
             "blox".to_string(),

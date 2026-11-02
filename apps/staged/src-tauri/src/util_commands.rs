@@ -183,6 +183,14 @@ pub async fn check_blox_auth() -> Result<(), String> {
 /// empty list.
 #[tauri::command]
 pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
+    tauri::async_runtime::spawn_blocking(available_openers)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The body of [`get_available_openers`]. Blocking: it waits on one `mdfind`
+/// per known app, then on the icon extraction threads.
+fn available_openers() -> Vec<OpenerApp> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -243,13 +251,13 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
             }
         }
 
-        Ok(available)
+        available
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         // On non-macOS platforms, return empty list
-        Ok(Vec::new())
+        Vec::new()
     }
 }
 
@@ -361,8 +369,15 @@ fn prettify_app_name(id: &str) -> String {
 /// On macOS, uses the `open -b` command with the app's bundle ID.
 /// On other platforms, returns an error.
 #[tauri::command]
-#[allow(unused_variables)]
 pub async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_in_app_blocking(&path, &app_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The body of [`open_in_app`]. Blocking: it waits for `open` to exit.
+#[allow(unused_variables)]
+fn open_in_app_blocking(path: &str, app_id: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -377,7 +392,7 @@ pub async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
         let status = Command::new("open")
             .arg("-b")
             .arg(bundle_id)
-            .arg(&path)
+            .arg(path)
             .status()
             .map_err(|e| format!("Failed to run open command: {e}"))?;
 

@@ -814,8 +814,22 @@ async fn blocking_store_json<T>(
 where
     T: serde::Serialize + Send + 'static,
 {
+    blocking_json(read).await
+}
+
+/// Run a blocking call and its JSON serialization on the blocking pool. For
+/// arms that wait on `gh`, git or another child process: run inline, the
+/// call holds its tokio worker for its whole duration, and with it the timers
+/// and sockets every other request and `/api/events` depend on.
+async fn blocking_json<T, E>(
+    call: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<Value, String>
+where
+    T: serde::Serialize + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
-        let value = read().map_err(|e| e.to_string())?;
+        let value = call().map_err(|e| e.to_string())?;
         Ok(serde_json::to_value(value).unwrap())
     })
     .await
@@ -958,6 +972,21 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             if let Some(ref sub) = subpath {
                 project = project.with_subpath(sub.clone());
             }
+
+            // Without a prefetched default branch this asks `gh`, so it runs on
+            // the blocking pool, and before the first write so no await falls
+            // between the writes below (see the module docs).
+            let effective_base = match github_repo.clone() {
+                Some(repo) => Some(
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::git::resolve_default_branch(default_branch, &repo)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            };
+
             store.create_project(&project).map_err(|e| e.to_string())?;
 
             if let Ok(project_dir) = crate::git::project_worktree_root_for(&project.id) {
@@ -976,7 +1005,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     .map_err(|e| e.to_string())?;
             }
 
-            if let Some(repo) = github_repo {
+            if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
                 let mut project_repo = crate::store::ProjectRepo::new(
                     &project.id,
                     &repo,
@@ -988,8 +1017,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 store
                     .create_project_repo(&project_repo)
                     .map_err(|e| e.to_string())?;
-
-                let effective_base = crate::git::resolve_default_branch(default_branch, &repo);
 
                 match project.location {
                     crate::store::ProjectLocation::Local => {
@@ -1275,20 +1302,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            store
-                .pin_repo(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?;
-            // Backfill default_branch if not yet detected
-            if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
-                if badge.default_branch.is_none() {
-                    if let Err(e) =
-                        crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
-                    {
-                        log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+            // The backfill may ask `gh` or git for the default branch, so the
+            // whole arm runs on the blocking pool.
+            blocking_json(move || {
+                store
+                    .pin_repo(&github_repo, &subpath)
+                    .map_err(|e| e.to_string())?;
+                // Backfill default_branch if not yet detected
+                if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+                    if badge.default_branch.is_none() {
+                        if let Err(e) =
+                            crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
+                        {
+                            log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+                        }
                     }
                 }
-            }
-            Ok(Value::Null)
+                Ok::<_, String>(())
+            })
+            .await
         }
         "unpin_repo" => {
             let store = get_store(store_mutex)?;
@@ -1338,8 +1370,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            let branch = crate::detect_and_store_default_branch(&store, &github_repo, &subpath)?;
-            Ok(serde_json::to_value(branch).unwrap())
+            blocking_json(move || {
+                crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
+            })
+            .await
         }
         "get_repo_default_branch_timeline" => {
             let store = get_store(store_mutex)?;
@@ -1444,71 +1478,51 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // =====================================================================
         // GitHub commands
         // =====================================================================
-        "list_github_orgs" => {
-            let orgs = crate::git::list_github_orgs().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(orgs).unwrap())
-        }
+        "list_github_orgs" => blocking_json(crate::git::list_github_orgs).await,
         "list_github_repos" => {
             let owner: Option<String> = opt_arg(&args, "owner")?;
-            let repos =
-                crate::git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || crate::git::list_github_repos(owner.as_deref())).await
         }
         "list_user_repos" => {
             let limit: Option<u32> = opt_arg(&args, "limit")?;
-            let repos =
-                crate::git::list_user_repos(limit.unwrap_or(30)).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || crate::git::list_user_repos(limit.unwrap_or(30))).await
         }
         "get_github_repo" => {
             let owner: String = arg(&args, "owner")?;
             let repo: String = arg(&args, "repo")?;
-            let result = crate::git::fetch_github_repo(&owner, &repo).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(result).unwrap())
+            blocking_json(move || crate::git::fetch_github_repo(&owner, &repo)).await
         }
         "search_github_repos" => {
             let query: String = arg(&args, "query")?;
             let owner: Option<String> = opt_arg(&args, "owner")?;
-            let repos = crate::git::search_github_repos(&query, owner.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || crate::git::search_github_repos(&query, owner.as_deref())).await
         }
         "check_monorepo_modules" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            let count =
-                crate::git::check_monorepo_modules(&github_repo).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(count).unwrap())
+            blocking_json(move || crate::git::check_monorepo_modules(&github_repo)).await
         }
         "validate_subpath" => {
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            crate::git::validate_subpath_in_repo(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || crate::git::validate_subpath_in_repo(&github_repo, &subpath))
+                .await
         }
         "list_repo_directories" => {
             let github_repo: String = arg(&args, "githubRepo")?;
             let path: String = arg(&args, "path")?;
-            let dirs = crate::git::list_repo_directories(&github_repo, &path)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(dirs).unwrap())
+            blocking_json(move || crate::git::list_repo_directories(&github_repo, &path)).await
         }
         "list_git_branches" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            let branches =
-                crate::git::list_branches_for_repo(&github_repo).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(branches).unwrap())
+            blocking_json(move || crate::git::list_branches_for_repo(&github_repo)).await
         }
         "detect_default_branch_cmd" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            let branch = crate::git::detect_default_branch_for_repo(&github_repo)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(branch).unwrap())
+            blocking_json(move || crate::git::detect_default_branch_for_repo(&github_repo)).await
         }
         "prune_remote_refs" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            crate::git::prune_remote_for_repo(&github_repo).map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || crate::git::prune_remote_for_repo(&github_repo)).await
         }
         "check_existing_local_branch" => {
             let store = get_store(store_mutex)?;
@@ -1522,12 +1536,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .get_project(&project_id)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Project not found: {project_id}"))?;
-            let result = project
+            let repo_path = project
                 .primary_repo()
                 .and_then(crate::paths::clone_path_for)
-                .filter(|p| p.exists())
-                .map(|repo_path| crate::git::branch_exists(&repo_path, trimmed).unwrap_or(false))
-                .unwrap_or(false);
+                .filter(|p| p.exists());
+            let branch_name = trimmed.to_owned();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                repo_path
+                    .map(|repo_path| {
+                        crate::git::branch_exists(&repo_path, &branch_name).unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(result).unwrap())
         }
         "get_pr_for_repo" => {
@@ -1977,118 +1999,38 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "setup_worktree" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-            // Fast-path: already has a workdir
-            if let Some(existing) = store
-                .get_workdir_for_branch(&branch.id)
-                .map_err(|e| e.to_string())?
-            {
-                return Ok(
-                    serde_json::to_value(crate::branches::to_branch_with_workdir(
-                        branch,
-                        Some(existing.path),
-                    ))
-                    .unwrap(),
-                );
-            }
-
-            let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
-            let repo_path =
-                crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-            crate::branches::fetch_for_worktree_with_offline_fallback(
-                &repo_path,
-                &repo_slug,
-                &branch.branch_name,
-                &branch.base_branch,
-            )?;
-            let desired_worktree_path = crate::git::project_worktree_path_for(
-                &branch.project_id,
-                &repo_slug,
-                &branch.branch_name,
-            )
-            .map_err(|e| e.to_string())?;
-
-            let worktree_str = crate::branches::create_and_link_worktree(
-                &store,
-                app_handle,
-                &branch,
-                &repo_path,
-                &desired_worktree_path,
-            )?;
-
-            Ok(
-                serde_json::to_value(crate::branches::to_branch_with_workdir(
-                    branch,
-                    Some(worktree_str),
-                ))
-                .unwrap(),
-            )
+            let result =
+                crate::branches::setup_worktree_impl(store, app_handle.clone(), branch_id).await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "setup_worktree_and_run_prerun" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
+            let app_handle = app_handle.clone();
 
-            // Reuse setup_worktree logic inline
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-            let worktree_str = if let Some(existing) = store
-                .get_workdir_for_branch(&branch.id)
-                .map_err(|e| e.to_string())?
-            {
-                existing.path
-            } else {
-                let repo_slug =
-                    crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
-                let repo_path =
-                    crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-                crate::branches::fetch_for_worktree_with_offline_fallback(
-                    &repo_path,
-                    &repo_slug,
-                    &branch.branch_name,
-                    &branch.base_branch,
-                )?;
-                let desired_worktree_path = crate::git::project_worktree_path_for(
-                    &branch.project_id,
-                    &repo_slug,
-                    &branch.branch_name,
+            // Detached so prerun is still kicked off when the client goes away
+            // while the worktree is being set up.
+            let result = detached(async move {
+                let result = crate::branches::setup_worktree_impl(
+                    Arc::clone(&store),
+                    app_handle.clone(),
+                    branch_id.clone(),
                 )
-                .map_err(|e| e.to_string())?;
-                crate::branches::create_and_link_worktree(
-                    &store,
+                .await?;
+
+                // Prerun runs detached: this is an HTTP request with no timeout
+                // layer in front of it, and prerun can take minutes.
+                crate::branches::spawn_prerun_actions(
+                    store,
                     app_handle,
-                    &branch,
-                    &repo_path,
-                    &desired_worktree_path,
-                )?
-            };
-
-            let result = crate::branches::to_branch_with_workdir(branch, Some(worktree_str));
-
-            // Prerun runs detached: this is an HTTP request with no timeout
-            // layer in front of it, and prerun can take minutes.
-            crate::branches::spawn_prerun_actions(
-                store,
-                app_handle.clone(),
-                branch_id,
-                provider,
-                "setup_worktree_and_run_prerun",
-            );
+                    branch_id,
+                    provider,
+                    "setup_worktree_and_run_prerun",
+                );
+                Ok(result)
+            })
+            .await?;
 
             Ok(serde_json::to_value(result).unwrap())
         }
@@ -2099,57 +2041,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let head_ref: String = arg(&args, "headRef")?;
             let base_ref: String = arg(&args, "baseRef")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
-
-            let target_repo = match project_repo_id {
-                Some(repo_id) => store
-                    .get_project_repo(&repo_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-                None => store
-                    .get_primary_project_repo(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-            };
-
-            let repo_path = crate::git::ensure_local_clone(&target_repo.github_repo)
-                .map_err(|e| e.to_string())?;
-            let desired_worktree_path = crate::git::project_worktree_path_for(
-                &project_id,
-                &target_repo.github_repo,
-                &head_ref,
+            let result = crate::branches::setup_worktree_from_pr_impl(
+                store,
+                project_id,
+                pr_number,
+                head_ref,
+                base_ref,
+                project_repo_id,
             )
-            .map_err(|e| e.to_string())?;
-
-            let (worktree_path, branch_name, base_branch) =
-                crate::git::create_worktree_from_pr_at_path(
-                    &repo_path,
-                    pr_number,
-                    &head_ref,
-                    &base_ref,
-                    &desired_worktree_path,
-                )
-                .map_err(|e| e.to_string())?;
-
-            let worktree_str = worktree_path
-                .to_str()
-                .ok_or("Invalid worktree path")?
-                .to_string();
-
-            let branch = store::Branch::new(&project_id, &branch_name, &base_branch)
-                .with_project_repo(&target_repo.id)
-                .with_pr(pr_number);
-            store.create_branch(&branch).map_err(|e| e.to_string())?;
-
-            let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
-            store.create_workdir(&workdir).map_err(|e| e.to_string())?;
-
-            Ok(
-                serde_json::to_value(crate::branches::to_branch_with_workdir(
-                    branch,
-                    Some(worktree_str),
-                ))
-                .unwrap(),
-            )
+            .await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "create_remote_branch" => {
             let store = get_store(store_mutex)?;
@@ -2158,51 +2059,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let base_branch: Option<String> = opt_arg(&args, "baseBranch")?;
             let workspace_name: String = arg(&args, "workspaceName")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
-
-            let project = store
-                .get_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {project_id}"))?;
-            let resolved_workspace_name = crate::branches::resolve_project_workspace_name(
-                &store,
-                &project,
-                Some(&workspace_name),
-            )?;
-
-            let target_repo = match project_repo_id {
-                Some(repo_id) => store
-                    .get_project_repo(&repo_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-                None => store
-                    .get_primary_project_repo(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-            };
-            let effective_base = match base_branch {
-                Some(b) => b,
-                None => crate::git::detect_default_branch_for_repo(&target_repo.github_repo)
-                    .map_err(|e| e.to_string())?,
-            };
-            let effective_base = if effective_base.starts_with("origin/") {
-                effective_base
-            } else {
-                format!("origin/{effective_base}")
-            };
-
-            let branch = store::Branch::new_remote(
-                &project_id,
-                &branch_name,
-                &effective_base,
-                &resolved_workspace_name,
+            let result = crate::branches::create_remote_branch_impl(
+                store,
+                project_id,
+                branch_name,
+                base_branch,
+                workspace_name,
+                project_repo_id,
             )
-            .with_project_repo(&target_repo.id);
-            store.create_branch(&branch).map_err(|e| e.to_string())?;
-
-            Ok(
-                serde_json::to_value(crate::branches::to_branch_with_workdir(branch, None))
-                    .unwrap(),
-            )
+            .await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "start_workspace" => {
             let store = get_store(store_mutex)?;
@@ -3071,9 +2937,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let commit_sha: Option<String> = opt_arg(&args, "commitSha")?;
             let scope: String = arg(&args, "scope")?;
-            let response =
-                crate::diff_commands::get_diff_files_impl(store, branch_id, commit_sha, scope)?;
-            Ok(serde_json::to_value(response).unwrap())
+            blocking_json(move || {
+                crate::diff_commands::get_diff_files_impl(store, branch_id, commit_sha, scope)
+            })
+            .await
         }
         "get_file_diff" => {
             let store = get_store(store_mutex)?;
@@ -3081,19 +2948,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let commit_sha: String = arg(&args, "commitSha")?;
             let scope: String = arg(&args, "scope")?;
             let path: String = arg(&args, "path")?;
-            let result = crate::diff_commands::get_file_diff_impl(
-                store, branch_id, commit_sha, scope, path,
-            )?;
-            Ok(serde_json::to_value(result).unwrap())
+            blocking_json(move || {
+                crate::diff_commands::get_file_diff_impl(store, branch_id, commit_sha, scope, path)
+            })
+            .await
         }
         "get_file_at_ref" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let ref_name: String = arg(&args, "refName")?;
             let path: String = arg(&args, "path")?;
-            let file =
-                crate::diff_commands::get_file_at_ref_impl(store, branch_id, ref_name, path)?;
-            Ok(serde_json::to_value(file).unwrap())
+            blocking_json(move || {
+                crate::diff_commands::get_file_at_ref_impl(store, branch_id, ref_name, path)
+            })
+            .await
         }
 
         // =====================================================================
@@ -4192,7 +4060,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // In web mode, the browser handles URL opening
             Err("open_url is handled by the browser in web mode".to_string())
         }
-        "is_sq_available" => Ok(serde_json::to_value(crate::blox::is_sq_available()).unwrap()),
+        "is_sq_available" => {
+            // The first call looks `sq` up through a login shell.
+            let available = tauri::async_runtime::spawn_blocking(crate::blox::is_sq_available)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(available).unwrap())
+        }
         "read_text_file" => {
             let file_path: String = arg(&args, "filePath")?;
             let path = std::path::Path::new(&file_path);
@@ -4315,7 +4189,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 mod tests {
     use super::{event_gap_payload, normalize_ws_client_id, web_client_id};
     use serde_json::{json, Value};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn ws_client_id_drops_blank_and_reserved_ids() {
@@ -4576,6 +4450,206 @@ mod tests {
         }
     }
 
+    /// No async Tauri command or `dispatch` arm may wait on `gh`, git or any
+    /// other child process on the tokio runtime. Tauri runs `async fn`
+    /// commands on the shared runtime and `dispatch` runs inside axum on the
+    /// same one. A worker parked in a synchronous wait stops polling the timer
+    /// and I/O drivers, so a single slow `gh` call froze every view, poll and
+    /// session stream for its whole duration. Such calls go through
+    /// `spawn_blocking` (`blocking_json` in `dispatch`, `run_blox_blocking`
+    /// for Blox).
+    ///
+    /// Source-level like the other arm checks. Each body has the argument
+    /// lists of the `OFFLOADED` calls cut out; what remains must not name one
+    /// of the `BLOCKING` primitives or helpers, or call a function from a
+    /// `BLOCKING_MODULES` module that is neither `PURE` nor awaited. The async
+    /// helpers a body calls are checked the same way, one level down, which
+    /// covers the `_impl` bodies the two transports share.
+    #[test]
+    fn async_commands_and_arms_keep_blocking_calls_off_the_runtime() {
+        /// Every file that defines a command, plus the shared bodies in
+        /// `project_commands.rs`. Checked against `generate_handler!` below.
+        const SOURCES: &[(&str, &str)] = &[
+            ("actions/commands.rs", include_str!("actions/commands.rs")),
+            ("app_lifecycle.rs", include_str!("app_lifecycle.rs")),
+            ("branches.rs", include_str!("branches.rs")),
+            ("diff_commands.rs", include_str!("diff_commands.rs")),
+            ("doctor/login.rs", include_str!("doctor/login.rs")),
+            ("doctor/mod.rs", include_str!("doctor/mod.rs")),
+            ("github_commands.rs", include_str!("github_commands.rs")),
+            ("image_commands.rs", include_str!("image_commands.rs")),
+            (
+                "image_commands/tool_results.rs",
+                include_str!("image_commands/tool_results.rs"),
+            ),
+            ("lib.rs", include_str!("lib.rs")),
+            ("note_commands.rs", include_str!("note_commands.rs")),
+            ("note_transfer.rs", include_str!("note_transfer.rs")),
+            ("pr_detection.rs", include_str!("pr_detection.rs")),
+            ("pr_poll_scheduler.rs", include_str!("pr_poll_scheduler.rs")),
+            ("project_commands.rs", include_str!("project_commands.rs")),
+            ("prs.rs", include_str!("prs.rs")),
+            ("review_commands.rs", include_str!("review_commands.rs")),
+            ("session_commands.rs", include_str!("session_commands.rs")),
+            ("timeline.rs", include_str!("timeline.rs")),
+            ("util_commands.rs", include_str!("util_commands.rs")),
+            ("web_server.rs", include_str!("web_server.rs")),
+            ("window_commands.rs", include_str!("window_commands.rs")),
+        ];
+        /// Calls whose argument list runs off the runtime.
+        const OFFLOADED: &[&str] = &[
+            "spawn_blocking(",
+            "thread::spawn(",
+            "blocking_json(",
+            "blocking_store_json(",
+            "run_blox_blocking(",
+        ];
+        /// Blocking primitives, and crate helpers that wait on `gh`, git or
+        /// another child process.
+        const BLOCKING: &[&str] = &[
+            "std::process::Command",
+            "Command::new(",
+            ".join()",
+            "ensure_local_clone",
+            "fetch_for_worktree_with_offline_fallback(",
+            "create_and_link_worktree(",
+            "setup_worktree_sync(",
+            "run_workspace_git(",
+            "rename_local_branch(",
+            "resolve_default_branch(",
+            "detect_default_branch_for_repo(",
+            "detect_and_store_default_branch(",
+            "update_clone_to_remote_head(",
+            "get_diff_files_impl(",
+            "get_file_diff_impl(",
+            "get_file_at_ref_impl(",
+            "find_sq_binary(",
+            "is_sq_available(",
+        ];
+        /// Modules whose functions shell out unless listed in `PURE`. An
+        /// awaited call is to an async function, which offloads its own work.
+        const BLOCKING_MODULES: &[&str] = &["git::", "blox::", "blox_cli::"];
+        /// Functions in those modules that do no I/O.
+        const PURE: &[&str] = &[
+            "project_worktree_root_for",
+            "github_single_comment_body",
+            "github_issue_comment_body",
+        ];
+
+        /// What `code` runs inline that blocks.
+        fn blocking_calls(code: &str) -> Vec<String> {
+            let code = cut_offloaded(code, OFFLOADED).replace("tokio::process::Command::new(", "");
+            let mut found: Vec<String> = BLOCKING
+                .iter()
+                .filter(|marker| code.contains(*marker))
+                .map(|marker| format!("`{marker}`"))
+                .collect();
+            for module in BLOCKING_MODULES {
+                for (at, _) in code.match_indices(module) {
+                    if code[..at].ends_with(is_ident_char) {
+                        continue;
+                    }
+                    let path_end = code[at..]
+                        .find(|c: char| !is_ident_char(c) && c != ':')
+                        .map_or(code.len(), |i| at + i);
+                    let path = &code[at..path_end];
+                    let segments: Vec<&str> = path.split("::").collect();
+                    let is_type = segments.iter().any(|s| s.starts_with(char::is_uppercase));
+                    if !code[path_end..].starts_with('(')
+                        || is_type
+                        || PURE.contains(&segments[segments.len() - 1])
+                    {
+                        continue;
+                    }
+                    let after_call = &code[closing_bracket(&code, path_end) + 1..];
+                    if !after_call.trim_start().starts_with(".await") {
+                        found.push(format!("`{path}(`"));
+                    }
+                }
+            }
+            found
+        }
+
+        /// The async helpers `code` calls inline, by name. A call qualified by
+        /// one of `BLOCKING_MODULES` is that module's function, not a helper.
+        fn called_helpers<'a>(
+            code: &str,
+            helpers: &'a BTreeMap<String, Vec<String>>,
+        ) -> BTreeSet<&'a str> {
+            let code = cut_offloaded(code, OFFLOADED);
+            let mut called = BTreeSet::new();
+            for (open, _) in code.match_indices('(') {
+                let start = code[..open].trim_end_matches(is_ident_char).len();
+                let before = &code[..start];
+                if before.ends_with('.') || BLOCKING_MODULES.iter().any(|m| before.ends_with(m)) {
+                    continue;
+                }
+                if let Some((name, _)) = helpers.get_key_value(&code[start..open]) {
+                    called.insert(name.as_str());
+                }
+            }
+            called
+        }
+
+        let mut targets = Vec::new();
+        let mut defined = BTreeSet::new();
+        let mut helpers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (path, source) in SOURCES {
+            let code = without_test_modules(&code_only(source));
+            for (name, is_async, body) in command_fns(&code) {
+                if is_async {
+                    targets.push((format!("`{name}` command ({path})"), body));
+                }
+                defined.insert(name);
+            }
+            for (name, body) in async_fns(&code) {
+                helpers.entry(name).or_default().push(body);
+            }
+        }
+        let unscanned: Vec<String> = extract_generate_handler_commands(include_str!("lib.rs"))
+            .difference(&defined)
+            .cloned()
+            .collect();
+        assert!(
+            unscanned.is_empty(),
+            "add the files that define these commands to SOURCES: {unscanned:#?}"
+        );
+        for (commands, body) in dispatch_arms(include_str!("web_server.rs")) {
+            let target = format!("`{}` dispatch arm", commands.join(" | "));
+            targets.push((target, code_only(&body)));
+        }
+        for expected in [
+            "`setup_worktree` command (branches.rs)",
+            "`setup_worktree` dispatch arm",
+        ] {
+            assert!(
+                targets.iter().any(|(target, _)| target == expected),
+                "the scan should reach the {expected}"
+            );
+        }
+
+        let mut offences = BTreeSet::new();
+        for (target, body) in &targets {
+            for call in blocking_calls(body) {
+                offences.insert(format!("{target}: {call}"));
+            }
+            for helper in called_helpers(body, &helpers) {
+                for helper_body in &helpers[helper] {
+                    for call in blocking_calls(helper_body) {
+                        offences.insert(format!("{target}, via `{helper}`: {call}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            offences.is_empty(),
+            "these async commands and dispatch arms wait on a child process on the tokio \
+             runtime; run the call through `spawn_blocking` (`blocking_json` in `dispatch`), \
+             or add a function that does no I/O to PURE:\n{}",
+            offences.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+
     /// The web rename arm has no git to run, so the checkout's upstream —
     /// and with it where the branch pushes — is untouched by construction.
     /// What it must still do is record the name through the shared helper,
@@ -4682,6 +4756,192 @@ mod tests {
         }
 
         arms
+    }
+
+    /// `source` with its comments dropped and its string and char literals
+    /// emptied, so a marker can't match prose and brackets can be matched by
+    /// plain counting. Lifetimes are kept.
+    fn code_only(source: &str) -> String {
+        let chars: Vec<char> = source.chars().collect();
+        let mut code = String::with_capacity(source.len());
+        let mut i = 0;
+        while i < chars.len() {
+            let rest = &chars[i..];
+            let after_ident = i > 0 && is_ident_char(chars[i - 1]);
+            if rest.starts_with(&['/', '/']) {
+                i += rest.iter().position(|&c| c == '\n').unwrap_or(rest.len());
+            } else if rest.starts_with(&['/', '*']) {
+                i += rest
+                    .windows(2)
+                    .position(|w| w == ['*', '/'])
+                    .map_or(rest.len(), |at| at + 2);
+            } else if let Some(len) = string_literal_len(rest, after_ident) {
+                code.push_str("\"\"");
+                i += len;
+            } else if let Some(len) = char_literal_len(rest) {
+                code.push_str("' '");
+                i += len;
+            } else {
+                code.push(rest[0]);
+                i += 1;
+            }
+        }
+        code
+    }
+
+    /// The length of the string literal, raw or not, that `rest` starts with.
+    fn string_literal_len(rest: &[char], after_ident: bool) -> Option<usize> {
+        match rest {
+            ['"', ..] => {
+                let mut i = 1;
+                while i < rest.len() && rest[i] != '"' {
+                    i += if rest[i] == '\\' { 2 } else { 1 };
+                }
+                Some(i + 1)
+            }
+            ['r', ..] if !after_ident => {
+                let hashes = rest[1..].iter().take_while(|&&c| c == '#').count();
+                if rest.get(1 + hashes) != Some(&'"') {
+                    return None;
+                }
+                let close: Vec<char> = std::iter::once('"')
+                    .chain(std::iter::repeat_n('#', hashes))
+                    .collect();
+                let body = 2 + hashes;
+                let end = rest[body..]
+                    .windows(close.len())
+                    .position(|w| w == close.as_slice())?;
+                Some(body + end + close.len())
+            }
+            _ => None,
+        }
+    }
+
+    /// The length of the char literal `rest` starts with; `None` for a
+    /// lifetime.
+    fn char_literal_len(rest: &[char]) -> Option<usize> {
+        match rest {
+            ['\'', '\\', ..] => Some(3 + rest.get(3..)?.iter().position(|&c| c == '\'')? + 1),
+            ['\'', _, '\'', ..] => Some(3),
+            _ => None,
+        }
+    }
+
+    fn is_ident_char(c: char) -> bool {
+        c.is_alphanumeric() || c == '_'
+    }
+
+    /// The index of the bracket that closes the one at `open`, in code
+    /// `code_only` has already cleared of literals and comments.
+    fn closing_bracket(code: &str, open: usize) -> usize {
+        let bytes = code.as_bytes();
+        let close = match bytes[open] {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            other => panic!("no bracket at {open}: {:?}", other as char),
+        };
+        let mut depth = 0usize;
+        for (i, &byte) in bytes.iter().enumerate().skip(open) {
+            if byte == bytes[open] {
+                depth += 1;
+            } else if byte == close {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+        }
+        panic!("unbalanced {:?} at {open}", bytes[open] as char)
+    }
+
+    /// `code` without its `#[cfg(test)] mod … { … }` blocks.
+    fn without_test_modules(code: &str) -> String {
+        const CFG_TEST: &str = "#[cfg(test)]";
+        let mut code = code.to_string();
+        let mut from = 0;
+        while let Some(at) = code[from..].find(CFG_TEST).map(|i| from + i) {
+            // Step over any further attributes to the item itself.
+            let mut item = at + CFG_TEST.len();
+            loop {
+                item = code.len() - code[item..].trim_start().len();
+                if !code[item..].starts_with("#[") {
+                    break;
+                }
+                item = closing_bracket(&code, item + 1) + 1;
+            }
+            let open = code[item..]
+                .strip_prefix("mod ")
+                .and_then(|module| module.find(['{', ';']))
+                .map(|i| item + "mod ".len() + i)
+                .filter(|&open| code.as_bytes()[open] == b'{');
+            match open {
+                Some(open) => {
+                    let close = closing_bracket(&code, open);
+                    code.replace_range(at..=close, "");
+                    from = at;
+                }
+                None => from = at + 1,
+            }
+        }
+        code
+    }
+
+    /// The identifier starting at `at`, and the index just past it.
+    fn ident_at(code: &str, at: usize) -> (&str, usize) {
+        let end = code[at..]
+            .find(|c: char| !is_ident_char(c))
+            .map_or(code.len(), |i| at + i);
+        (&code[at..end], end)
+    }
+
+    /// The body, braces included, of the `fn` whose name ends at
+    /// `after_name`; `None` for a declaration without one.
+    fn fn_body(code: &str, after_name: usize) -> Option<&str> {
+        let params = after_name + code[after_name..].find('(')?;
+        let signature_rest = closing_bracket(code, params) + 1;
+        let open = signature_rest + code[signature_rest..].find(['{', ';'])?;
+        (code.as_bytes()[open] == b'{').then(|| &code[open..=closing_bracket(code, open)])
+    }
+
+    /// Every `#[tauri::command]` fn in `code` as (name, is `async`, body).
+    fn command_fns(code: &str) -> Vec<(String, bool, String)> {
+        code.match_indices("#[tauri::command")
+            .filter_map(|(at, _)| {
+                let fn_at = at + code[at..].find("fn ")?;
+                let is_async = code[at..fn_at].split_whitespace().any(|w| w == "async");
+                let (name, after_name) = ident_at(code, fn_at + "fn ".len());
+                Some((
+                    name.to_string(),
+                    is_async,
+                    fn_body(code, after_name)?.to_string(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Every `async fn` in `code` as (name, body).
+    fn async_fns(code: &str) -> Vec<(String, String)> {
+        code.match_indices("async fn ")
+            .filter(|(at, _)| !code[..*at].ends_with(is_ident_char))
+            .filter_map(|(at, marker)| {
+                let (name, after_name) = ident_at(code, at + marker.len());
+                Some((name.to_string(), fn_body(code, after_name)?.to_string()))
+            })
+            .collect()
+    }
+
+    /// `code` with the argument list of every call to one of `offloaders`
+    /// cut out, since that code runs on another thread.
+    fn cut_offloaded(code: &str, offloaders: &[&str]) -> String {
+        let mut code = code.to_string();
+        for offloader in offloaders {
+            while let Some(at) = code.find(offloader) {
+                let close = closing_bracket(&code, at + offloader.len() - 1);
+                code.replace_range(at..=close, "");
+            }
+        }
+        code
     }
 
     fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {

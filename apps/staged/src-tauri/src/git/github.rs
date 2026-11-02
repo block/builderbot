@@ -1577,6 +1577,20 @@ fn get_github_token() -> Result<String, GitError> {
     }
 }
 
+/// The token plus origin `(owner, repo)` the REST and GraphQL calls below
+/// need. Both lookups shell out (`gh auth token`, `git remote get-url`), so
+/// they run on the blocking pool instead of the async caller's worker.
+async fn github_api_credentials(repo: &Path) -> Result<(String, String, String), GitError> {
+    let repo = repo.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let token = get_github_token()?;
+        let (owner, repo_name) = get_github_repo(&repo)?;
+        Ok((token, owner, repo_name))
+    })
+    .await
+    .map_err(|e| GitError::CommandFailed(format!("GitHub credentials task failed: {e}")))?
+}
+
 /// Get the GitHub owner/repo from the repo's origin remote.
 pub fn get_github_repo(repo: &Path) -> Result<(String, String), GitError> {
     use super::cli;
@@ -2226,8 +2240,7 @@ pub async fn post_single_comment_to_github(
     comment: &Comment,
     current_head_sha: &str,
 ) -> Result<GitHubCommentResult, GitError> {
-    let token = get_github_token()?;
-    let (owner, repo_name) = get_github_repo(repo)?;
+    let (token, owner, repo_name) = github_api_credentials(repo).await?;
     let client = reqwest::Client::new();
 
     // Validate the branch HEAD matches the PR HEAD before creating comments.
@@ -2426,8 +2439,7 @@ pub async fn update_comment_on_github(
     github_comment_type: &str,
     body: &str,
 ) -> Result<GitHubCommentResult, GitError> {
-    let token = get_github_token()?;
-    let (owner, repo_name) = get_github_repo(repo)?;
+    let (token, owner, repo_name) = github_api_credentials(repo).await?;
     let client = reqwest::Client::new();
 
     let url = match github_comment_type {
@@ -2851,8 +2863,7 @@ pub async fn update_pull_request(
         return Ok(());
     }
 
-    let token = get_github_token()?;
-    let (owner, repo_name) = get_github_repo(repo)?;
+    let (token, owner, repo_name) = github_api_credentials(repo).await?;
 
     // Use GraphQL API directly to avoid the deprecated projectCards field
     // that gh pr edit queries by default

@@ -4,7 +4,7 @@
  * MoveBranchDialog's list and its disabled Move button both read from here, so
  * the rules the backend enforces have exactly one frontend statement.
  */
-import { matchesRepoSearch } from '../../shared/repoSearch';
+import { searchTerms } from '../../shared/repoSearch';
 import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
 import { projectDisplayName } from '../../shared/utils';
 import type { Project, ProjectRepo } from '../../types';
@@ -57,9 +57,11 @@ export function projectSearchName(project: Project): string {
 }
 
 /**
- * Match projects on their name or on any attached repo path. Every
- * whitespace-separated term of the query must match, in any order: all
- * somewhere in the name, or all against one attached repo.
+ * Match projects on their name and their attached repo paths. Every
+ * whitespace-separated term of the query must match, in any order, and the
+ * terms may span fields — "alpha widgets" finds a project named "Alpha" with
+ * "acme/widgets" attached — the same rule the sidebar and All repos searches
+ * follow, so a query that works there works here.
  */
 export function filterMoveTargets(
   candidates: Project[],
@@ -68,12 +70,15 @@ export function filterMoveTargets(
 ): Project[] {
   const terms = queryTerms(query);
   if (terms.length === 0) return candidates;
-  return candidates.filter((project) => {
-    if (matchesAllTerms(terms, projectSearchName(project))) return true;
-    return (reposByProject.get(project.id) ?? []).some((repo) =>
-      matchesRepoSearch(repo.githubRepo, repo.subpath, query)
-    );
-  });
+  return candidates.filter((project) =>
+    matchesAllTerms(
+      terms,
+      projectSearchName(project),
+      ...(reposByProject.get(project.id) ?? []).flatMap((repo) =>
+        searchTerms(repo.githubRepo, repo.subpath)
+      )
+    )
+  );
 }
 
 /**

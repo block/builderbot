@@ -28,8 +28,3 @@ export function matchesAllTerms(
   const haystacks = fields.filter((f): f is string => !!f).map((f) => f.toLowerCase());
   return terms.every((term) => haystacks.some((h) => h.includes(term)));
 }
-
-/** `matchesAllTerms` on the terms of a raw query string. */
-export function matchesQuery(query: string, ...fields: Array<string | null | undefined>): boolean {
-  return matchesAllTerms(queryTerms(query), ...fields);
-}

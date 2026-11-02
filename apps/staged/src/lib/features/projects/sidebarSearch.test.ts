@@ -4,7 +4,6 @@ import { repoKey } from './repoReorder';
 import {
   matchingProjectIds,
   matchingRepoKeys,
-  normalizeQuery,
   resultsLabel,
   searchRepos,
   sidebarPinnedRepos,
@@ -69,13 +68,6 @@ function project(overrides: Partial<Project> = {}): Project {
     ...overrides,
   };
 }
-
-describe('normalizeQuery', () => {
-  it('trims and lower-cases, treating whitespace as empty', () => {
-    expect(normalizeQuery('  Cash ')).toBe('cash');
-    expect(normalizeQuery('   ')).toBe('');
-  });
-});
 
 describe('searchRepos', () => {
   it('returns the same array for an empty or whitespace query', () => {

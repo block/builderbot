@@ -98,6 +98,12 @@ describe('filterMoveTargets', () => {
     expect(filterMoveTargets(all, repos, 'Three ONE')).toEqual([oneTwoThree]);
     expect(filterMoveTargets(all, repos, 'one four')).toEqual([]);
   });
+
+  it('lets terms span the project name and an attached repo', () => {
+    expect(filterMoveTargets([alpha, beta], repos, 'alpha widgets')).toEqual([alpha]);
+    expect(filterMoveTargets([alpha, beta], repos, 'web beta')).toEqual([beta]);
+    expect(filterMoveTargets([alpha, beta], repos, 'alpha gadgets')).toEqual([]);
+  });
 });
 
 describe('moveTargetInvalidReason', () => {

@@ -582,6 +582,8 @@
 <style>
   .projects-sidebar {
     --projects-sidebar-hover-bg: color-mix(in srgb, var(--text-primary) 4%, transparent);
+    --projects-sidebar-field-bg: color-mix(in srgb, var(--text-primary) 5%, transparent);
+    --projects-sidebar-field-bg-hover: color-mix(in srgb, var(--text-primary) 7%, transparent);
 
     position: relative;
     flex-shrink: 0;

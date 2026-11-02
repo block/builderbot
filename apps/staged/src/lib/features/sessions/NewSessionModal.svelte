@@ -55,6 +55,7 @@
   import { createImage } from '../../commands';
   import { readClipboardText } from '../../transport';
   import { viewport } from '../../shared/viewport.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import { isMac } from '../keyboard/shortcuts';
 
   interface Props {
@@ -283,12 +284,13 @@
     if (modePrefill && !userDraft) {
       prompt = modePrefill;
       const modeSelection = modePrefill.includes('\n') ? 'last-line' : prefillSelection;
-      tick().then(() => {
-        if (textareaEl && textareaEl.textContent) {
-          selectPromptContent(textareaEl, modeSelection);
-          textareaEl.focus();
-        }
-      });
+      tick().then(() =>
+        focusAfterDialogEnter(textareaEl, (el) => {
+          if (!el.textContent) return;
+          selectPromptContent(el, modeSelection);
+          el.focus();
+        })
+      );
     } else {
       prompt = userDraft;
     }
@@ -384,14 +386,16 @@
     if (textareaEl) {
       const el = textareaEl;
       const shouldSelect = prefilled;
-      tick().then(() => {
-        el.focus();
-        if (shouldSelect && el.textContent) {
-          selectPromptContent(el, prefillSelection);
-        } else {
-          placeCursorAtEnd(el);
-        }
-      });
+      tick().then(() =>
+        focusAfterDialogEnter(el, (target) => {
+          target.focus();
+          if (shouldSelect && target.textContent) {
+            selectPromptContent(target, prefillSelection);
+          } else {
+            placeCursorAtEnd(target);
+          }
+        })
+      );
     }
   });
 

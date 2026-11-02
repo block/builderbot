@@ -173,6 +173,7 @@
   } from './acpTranscript';
   import PlanCard from './PlanCard.svelte';
   import { viewport } from '../../shared/viewport.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -776,9 +777,7 @@
       // after it, once the restore has already paid the frame's style and
       // layout — a focus from `tick()` landed between the mount flush and
       // that frame and forced a style pass of its own over the new dialog.
-      requestAnimationFrame(() => {
-        if (!closed && active && sessionId === id) inputEl?.focus();
-      });
+      requestAnimationFrame(() => focusComposerWhileOpen(id));
     }
     loadSession(mode).then(() => {
       if (closed || !active || sessionId !== id) return;
@@ -786,9 +785,18 @@
         startPolling();
       }
       // Focus input on open
-      if (mode === 'full') tick().then(() => inputEl?.focus());
+      if (mode === 'full') tick().then(() => focusComposerWhileOpen(id));
     });
   });
+
+  // The focus can wait out a full-screen dialog's enter animation, and the
+  // pane may be parked or retargeted by then, so the open is re-checked when
+  // the focus lands rather than when it was asked for.
+  function focusComposerWhileOpen(id: string) {
+    focusAfterDialogEnter(inputEl, (el) => {
+      if (!closed && active && sessionId === id) el.focus();
+    });
+  }
 
   $effect(() => {
     onSessionChange?.(session);
@@ -2467,7 +2475,7 @@
   function insertSlashCommand(command: AcpCommand) {
     inputText = `/${command.name}${command.inputHint ? ' ' : ''}`;
     tick().then(() => {
-      inputEl?.focus();
+      focusAfterDialogEnter(inputEl);
       autoResize();
     });
   }

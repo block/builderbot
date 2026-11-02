@@ -22,6 +22,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import Spinner from '../../shared/Spinner.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import * as commands from '../../api/commands';
@@ -72,7 +73,7 @@
       error = null;
       working = false;
       void projectsDataStore.ensureProjectsHydrated();
-      void tick().then(() => searchElement?.focus());
+      void tick().then(() => focusAfterDialogEnter(searchElement));
     }
     wasOpen = open;
   });

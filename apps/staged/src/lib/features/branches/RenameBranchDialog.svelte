@@ -9,6 +9,7 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import Spinner from '../../shared/Spinner.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
 
   interface Props {
     open: boolean;
@@ -36,10 +37,12 @@
       draft = branchName;
       error = null;
       renaming = false;
-      void tick().then(() => {
-        inputElement?.focus();
-        inputElement?.select();
-      });
+      void tick().then(() =>
+        focusAfterDialogEnter(inputElement, (el) => {
+          el.focus();
+          el.select();
+        })
+      );
     }
     wasOpen = open;
   });

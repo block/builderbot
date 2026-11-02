@@ -49,7 +49,10 @@
   // goes. Tailwind v4 translate utilities use the individual `translate`
   // property, so reset that alongside `transform` to prevent desktop centering
   // from shifting the mobile panel offscreen. `top` and `height` track the
-  // visual viewport, pinning the footer to the keyboard's top edge.
+  // visual viewport, pinning the footer to the keyboard's top edge. Rows
+  // pack at the top (`align-content: start`) instead of stretching over the
+  // full height, so a short form starts under the header rather than
+  // spreading down the screen to where the keyboard will open.
   const fullScreenStyle = $derived.by(() => {
     const { top, height, keyboardOpen } = visibleViewport;
     return [
@@ -65,6 +68,7 @@
       'transform:none',
       'translate:none',
       'border-radius:0',
+      'align-content:start',
       'padding-top:env(safe-area-inset-top)',
       `padding-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
     ].join(';');
@@ -138,6 +142,7 @@
       className
     )}
     style={contentStyle}
+    data-full-screen={fullScreen ? '' : undefined}
     onOpenAutoFocus={(e) => e.preventDefault()}
     onpointerdown={handlePointerDown}
     preventOverflowTextSelection={false}

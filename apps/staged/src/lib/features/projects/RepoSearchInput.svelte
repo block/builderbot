@@ -22,6 +22,7 @@
   import { matchesRepoSearch } from '../../shared/repoSearch';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import { viewport } from '../../shared/viewport.svelte';
+  import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import * as badge from '../../shared/badgeColors';
@@ -127,7 +128,7 @@
       // before we open the dropdown. Otherwise the trailing window-level
       // handleClickOutside (registered when this component mounted) sees a
       // target outside our wrapper and closes the dropdown we just opened.
-      setTimeout(() => inputEl?.focus(), 0);
+      setTimeout(() => focusAfterDialogEnter(inputEl), 0);
     }
     try {
       recentRepos = await commands.listRecentRepos(10);

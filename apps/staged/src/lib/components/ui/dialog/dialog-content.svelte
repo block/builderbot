@@ -9,7 +9,7 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import XIcon from '@lucide/svelte/icons/x';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
-  import { watchKeyboardInset } from '$lib/shared/keyboardInset.svelte';
+  import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
   import { getWindowSync } from '$lib/transport';
 
   let {
@@ -29,31 +29,46 @@
     fullScreenOnMobile?: boolean;
   } = $props();
 
-  // Keep `viewport.isMobile` live even when the host screen never subscribed,
-  // and keep `--keyboard-inset` updated so the full-screen height shrinks to
-  // the space above the on-screen keyboard.
-  onMount(() => {
-    const unwatchViewport = watchViewport();
-    const unwatchKeyboard = watchKeyboardInset();
-    return () => {
-      unwatchViewport();
-      unwatchKeyboard();
-    };
-  });
+  // Keep `viewport.isMobile` live even when the host screen never subscribed.
+  onMount(() => watchViewport());
 
   const fullScreen = $derived(fullScreenOnMobile && viewport.isMobile);
+
+  // A full-screen dialog covers the visual viewport — the part of the page
+  // actually on screen — so the on-screen keyboard shrinks it rather than
+  // scrolling it away.
+  $effect(() => {
+    if (fullScreen) return watchVisualViewport();
+  });
 
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
   // `max-h-[calc(100vh-16vh)]`) without specificity fights. Safe-area padding
-  // keeps the header/footer clear of notches and home indicators. Tailwind v4
-  // translate utilities use the individual `translate` property, so reset that
-  // alongside `transform` to prevent desktop centering from shifting the mobile
-  // panel offscreen. The height subtracts `--keyboard-inset` so the dialog
-  // shrinks to the space above the on-screen keyboard, pinning its footer to
-  // the keyboard's top edge.
-  const fullScreenStyle =
-    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:calc(100dvh - var(--keyboard-inset, 0px));max-height:none;transform:none;translate:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+  // keeps the header/footer clear of notches and home indicators; with the
+  // keyboard up the footer sits on the keyboard instead, so the bottom inset
+  // goes. Tailwind v4 translate utilities use the individual `translate`
+  // property, so reset that alongside `transform` to prevent desktop centering
+  // from shifting the mobile panel offscreen. `top` and `height` track the
+  // visual viewport, pinning the footer to the keyboard's top edge.
+  const fullScreenStyle = $derived.by(() => {
+    const { top, height, keyboardOpen } = visibleViewport;
+    return [
+      'position:fixed',
+      'left:0',
+      'right:0',
+      'bottom:auto',
+      `top:${top}px`,
+      'width:100%',
+      'max-width:none',
+      `height:${height === null ? '100dvh' : `${height}px`}`,
+      'max-height:none',
+      'transform:none',
+      'translate:none',
+      'border-radius:0',
+      'padding-top:env(safe-area-inset-top)',
+      `padding-bottom:${keyboardOpen ? '0px' : 'env(safe-area-inset-bottom)'}`,
+    ].join(';');
+  });
 
   const contentStyle = $derived(
     fullScreen ? `${styleProp ? `${styleProp};` : ''}${fullScreenStyle}` : styleProp

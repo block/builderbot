@@ -731,28 +731,46 @@ impl Store {
         Ok(sessions)
     }
 
-    /// Sessions that ended `completed`/[`CompletionReason::HoldStopped`]
-    /// with their note still empty: the user stopped the wait on the agent's
-    /// background work before it called `write_note`. For a remote note
-    /// session the agent carries on regardless (Blox keeps the turn alive),
-    /// so the dead-owner sweep polls these rows' workstation outboxes for a
+    /// Remote note sessions that ended
+    /// `completed`/[`CompletionReason::HoldStopped`] with their note still
+    /// empty and that the dead-owner sweep still has to visit: the user
+    /// stopped the wait on the agent's background work before it called
+    /// `write_note`, and the agent carries on regardless (Blox keeps the turn
+    /// alive), so the sweep polls these rows' workstation outboxes for a
     /// bounded window (`session_runner::poll_detached_remote_note_sessions`)
-    /// and fills the note in when it lands. Oldest write first; the caller
-    /// applies the window from `updated_at` and tells a remote session from
-    /// a local one.
-    pub fn get_hold_stopped_sessions_awaiting_note(&self) -> Result<Vec<Session>, StoreError> {
+    /// and fills the note in when it lands. Oldest write first.
+    ///
+    /// Only sessions on a branch with a Blox workspace qualify: a local
+    /// session's agent stops with its run, so a local `hold_stopped` row with
+    /// an empty note is a settled end state, not one to poll. Only rows no
+    /// sweep has settled qualify: no message yet, or a storing claim (one
+    /// ending in `storing_claim_suffix`) whose staleness the caller judges.
+    /// Every other message the sweep writes here (expired window,
+    /// unreachable workstation, note that could not be stored) settles the
+    /// row, so a row past the window drops out once its one last poll has
+    /// written one. The window itself is not applied here because that last
+    /// poll must still see a row that went past the window while no Staged
+    /// instance was running.
+    pub fn get_hold_stopped_sessions_awaiting_note(
+        &self,
+        storing_claim_suffix: &str,
+    ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
              FROM sessions s
+             INNER JOIN branches b ON b.id = s.branch_id
              WHERE s.status = 'completed' AND s.completion_reason = ?1
+               AND b.workspace_name IS NOT NULL
+               AND (s.error_message IS NULL
+                    OR substr(s.error_message, -length(?2)) = ?2)
                AND (EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.content = '')
                     OR EXISTS (SELECT 1 FROM project_notes p WHERE p.session_id = s.id AND p.content = ''))
              ORDER BY s.updated_at ASC"
         ))?;
         let sessions = stmt
             .query_map(
-                params![CompletionReason::HoldStopped.as_str()],
+                params![CompletionReason::HoldStopped.as_str(), storing_claim_suffix],
                 Self::row_to_session,
             )?
             .collect::<Result<Vec<_>, _>>()?;

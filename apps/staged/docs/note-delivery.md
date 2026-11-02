@@ -515,11 +515,16 @@ The sweep therefore polls these rows with the same machinery as detached
 ones (`RemoteNoteParkedState::HoldStopped`), with these differences:
 
 - **Which rows.** `Store::get_hold_stopped_sessions_awaiting_note`:
-  `completed` / `hold_stopped` sessions whose repo or project note still has
-  empty content. The sweep keeps only those on a branch with a Blox
-  workspace. The row is due while it carries no message at all (no sweep
-  has touched it yet), or a storing claim older than
-  `DETACHED_NOTE_STORING_STALE`.
+  `completed` / `hold_stopped` sessions on a branch with a Blox workspace
+  (joined in SQL) whose repo note still has empty content, and that carry
+  no message (no sweep has touched them yet) or a storing claim. A local
+  `hold_stopped` row with an empty note is a settled end state (its agent
+  stopped with the run) and is never returned. Every other message the sweep
+  writes settles the row, so a row drops out of the query once its last poll
+  past the window records the expiry. The query applies no clock: a row
+  that went past the window while no Staged instance was running must still
+  get that last poll. The poll action then makes the row due when it has no
+  message, or a storing claim older than `DETACHED_NOTE_STORING_STALE`.
 - **Same window, same claim.** 30 minutes from the `hold_stopped` write
   (`DETACHED_NOTE_POLL_WINDOW`), one last poll past it, at most two in
   flight, oldest-unpolled first. A poll that finds `done` first claims the
@@ -537,8 +542,10 @@ ones (`RemoteNoteParkedState::HoldStopped`), with these differences:
   took under a millisecond. A note that cannot be stored leaves
   `hold_stopped_note_unstored_message` and the outbox for a Resume. This is the one place an `error_message` is written on a
   completed row; the chat pane shows a completed row's message only for
-  `error` / `cancelled` rows, so the marker is invisible there, and any
-  later status write (a resume) clears it.
+  `error` / `cancelled` rows, so the marker is invisible there, the
+  child-session status a project agent reads (`repo_session_payload`) omits
+  `error_message` for a completed child, and any later status write (a
+  resume) clears it.
 - **The row stays `completed`.** A found note fills the note in; the row's
   status and `hold_stopped` reason do not change, the timeline never shows
   it as "polling" (`isPollingForNote` is for detached rows), and the chat
@@ -740,7 +747,10 @@ treating the connection as lost and completing from the outbox`, and the
    `Hold-stopped remote note session <id>: note "<title>" appeared in the
 workstation outbox; storing it`, the note fills in on the timeline, the
    row stays `completed` / `hold_stopped`, and `~/.staged/sessions/<id>/`
-   is gone from the workstation.
+   is gone from the workstation. Expected: the chat pane keeps the
+   hold-stopped copy ("The wait for this session's background work was
+   stopped") and its Resume button after the sweep fills the note in; only
+   the note content changes.
 4. Run two Staged builds against the same data dir and repeat step 3: only
    one of them logs `note "<title>" found in the workstation outbox` (or
    `appeared in the workstation outbox`); the other logs nothing for the
@@ -765,7 +775,8 @@ write is refused; a note that cannot be stored stays on the workstation in
 both sweep paths; polls that find nothing write nothing; a row past the
 window gets one last poll before the guarded expiry; an unreadable outbox
 past the window is retried five times, then expired as unreachable; a
-hold-stopped row with an empty note is polled while the note is empty, a
+hold-stopped row with an empty note is polled while the note is empty and
+only when it is remote, and drops out of the query once settled, a
 late note fills it in under a storing claim without changing its status,
 a poll without a note writes nothing and a resume wins the row, an expired
 window settles it once and clears the outbox, an unstorable note keeps the
@@ -780,7 +791,8 @@ frontend marker parity for both suffixes and the Stop marker),
 pending until its stamp or content changes),
 `session_runner::remote_note_watchdog::tests` (interval parsing, one probe
 per silent interval until the note appears, an active agent is never
-probed), `agent::activity::tests`,
+probed), `project_mcp::tests` (a completed child's status omits the sweep's
+marker), `agent::activity::tests`,
 `acp-client` driver tests (stdio injection and unattended mode for the
 `goose` and `claude` providers, `initialize` capabilities; the transport-loss
 phrase list in both directions; a Stop the fake agent never acknowledges

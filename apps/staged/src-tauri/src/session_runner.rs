@@ -7075,7 +7075,7 @@ fn poll_detached_remote_note_sessions(store: &Arc<Store>, app_handle: &AppHandle
             return;
         }
     };
-    match store.get_hold_stopped_sessions_awaiting_note() {
+    match store.get_hold_stopped_sessions_awaiting_note(STORING_REMOTE_NOTE_SUFFIX) {
         Ok(hold_stopped) => sessions.extend(hold_stopped),
         Err(e) => {
             log::warn!(

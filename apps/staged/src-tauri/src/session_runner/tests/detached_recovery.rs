@@ -14,7 +14,8 @@ fn remote_note_session(store: &Arc<Store>) -> (String, String) {
     store.create_project(&project).unwrap();
     let branch = Branch::new_remote(&project.id, "notes", "main", "ws-1");
     store.create_branch(&branch).unwrap();
-    let session = Session::new_running("write a note", std::path::Path::new("."));
+    let session =
+        Session::new_running("write a note", std::path::Path::new(".")).with_branch(&branch.id);
     store.create_session(&session).unwrap();
     let note = Note::new(&branch.id, "", "").with_session(&session.id);
     store.create_note(&note).unwrap();
@@ -1564,7 +1565,7 @@ fn hold_stop_without_note(store: &Arc<Store>, session_id: &str) {
 
 fn hold_stopped_rows(store: &Arc<Store>) -> Vec<String> {
     store
-        .get_hold_stopped_sessions_awaiting_note()
+        .get_hold_stopped_sessions_awaiting_note(STORING_REMOTE_NOTE_SUFFIX)
         .unwrap()
         .into_iter()
         .map(|s| s.id)
@@ -1582,9 +1583,9 @@ fn hold_stopped_rows_are_polled_only_while_their_note_is_empty() {
     hold_stop_without_note(&store, &session_id);
     assert_eq!(hold_stopped_rows(&store), vec![session_id.clone()]);
 
-    // A project note session with an empty note qualifies the same way; a
-    // hold-stopped session without a note artifact, or with a filled note,
-    // does not.
+    // A project note session always runs locally, so its empty note is not
+    // awaited; neither is a hold-stopped session without a note artifact, or
+    // one with a filled note.
     let project = Project::new("test/project-notes");
     store.create_project(&project).unwrap();
     let project_session = Session::new_running("project note", std::path::Path::new("."));
@@ -1595,19 +1596,18 @@ fn hold_stopped_rows_are_polled_only_while_their_note_is_empty() {
         )
         .unwrap();
     hold_stop_without_note(&store, &project_session.id);
-    let bare_session = Session::new_running("no note", std::path::Path::new("."));
+    let branch_id = store.get_note(&note_id).unwrap().unwrap().branch_id;
+    let bare_session =
+        Session::new_running("no note", std::path::Path::new(".")).with_branch(&branch_id);
     store.create_session(&bare_session).unwrap();
     hold_stop_without_note(&store, &bare_session.id);
-    let filled_session = Session::new_running("filled", std::path::Path::new("."));
+    let filled_session =
+        Session::new_running("filled", std::path::Path::new(".")).with_branch(&branch_id);
     store.create_session(&filled_session).unwrap();
-    let branch_id = store.get_note(&note_id).unwrap().unwrap().branch_id;
     let filled_note = Note::new(&branch_id, "Title", "Body").with_session(&filled_session.id);
     store.create_note(&filled_note).unwrap();
     hold_stop_without_note(&store, &filled_session.id);
-    assert_eq!(
-        hold_stopped_rows(&store),
-        vec![session_id.clone(), project_session.id.clone()]
-    );
+    assert_eq!(hold_stopped_rows(&store), vec![session_id.clone()]);
 
     // The poll action: a hold-stopped row no sweep has written to is due
     // inside the window and gets one last poll past it; a hold-stopped row
@@ -1635,7 +1635,69 @@ fn hold_stopped_rows_are_polled_only_while_their_note_is_empty() {
     store
         .update_note_title_and_content(&note_id, "Plan", "Body", None, None)
         .unwrap();
-    assert_eq!(hold_stopped_rows(&store), vec![project_session.id]);
+    assert!(hold_stopped_rows(&store).is_empty());
+}
+
+/// A local `hold_stopped` row with an empty note is a settled end state (its
+/// agent stopped with the run), so the query never returns it and the sweep
+/// never touches it. A remote row is returned while it is due and drops out
+/// once the sweep writes a settled message, so nothing is re-polled forever.
+#[test]
+fn only_remote_hold_stopped_rows_are_returned_and_only_until_settled() {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (remote_id, _) = remote_note_session(&store);
+    hold_stop_without_note(&store, &remote_id);
+
+    let project = Project::new("test/local-notes");
+    store.create_project(&project).unwrap();
+    let local_branch = Branch::new(&project.id, "notes", "main");
+    store.create_branch(&local_branch).unwrap();
+    let local = Session::new_running("write a note", std::path::Path::new("."))
+        .with_branch(&local_branch.id);
+    store.create_session(&local).unwrap();
+    store
+        .create_note(&Note::new(&local_branch.id, "", "").with_session(&local.id))
+        .unwrap();
+    hold_stop_without_note(&store, &local.id);
+
+    assert_eq!(hold_stopped_rows(&store), vec![remote_id.clone()]);
+
+    // A storing claim keeps the row: whether it is stale is the poll
+    // action's call (`DETACHED_NOTE_STORING_STALE`).
+    let row = store.get_session(&remote_id).unwrap().unwrap();
+    let storing = hold_stopped_note_storing_message("ws-1");
+    let claimed_at = store
+        .mark_hold_stopped_note_recovery_observed(&remote_id, row.updated_at, None, Some(&storing))
+        .unwrap()
+        .expect("the claim lands on the observed row");
+    assert_eq!(hold_stopped_rows(&store), vec![remote_id.clone()]);
+
+    // The expired window settles it, and it drops out.
+    store
+        .mark_hold_stopped_note_recovery_observed(
+            &remote_id,
+            claimed_at,
+            Some(&storing),
+            Some(&hold_stopped_note_expired_message("ws-1")),
+        )
+        .unwrap()
+        .expect("the expiry lands on the claimed row");
+    assert!(hold_stopped_rows(&store).is_empty());
+
+    let local_row = store.get_session(&local.id).unwrap().unwrap();
+    assert_eq!(
+        (
+            local_row.status,
+            local_row.completion_reason,
+            local_row.error_message
+        ),
+        (
+            SessionStatus::Completed,
+            Some(CompletionReason::HoldStopped),
+            None
+        ),
+        "the local row is left as the run ended it"
+    );
 }
 
 #[test]
@@ -1858,10 +1920,9 @@ fn an_expired_hold_stopped_row_is_settled_once_and_its_outbox_cleared() {
         detached_note_poll_action(&session, session.updated_at),
         DetachedNotePollAction::Skip
     );
-    assert_eq!(
-        hold_stopped_rows(&store),
-        vec![session_id.clone()],
-        "the query is content-based; the message is what stops the polling"
+    assert!(
+        hold_stopped_rows(&store).is_empty(),
+        "a settled row drops out of the query"
     );
     assert!(
         !note_recovery_is_pending(Some("hold_stopped"), session.error_message.as_deref()),
@@ -1876,7 +1937,8 @@ fn an_expired_hold_stopped_row_is_settled_once_and_its_outbox_cleared() {
     // A hold-stopped row whose workstation cannot be reached past the
     // window is given up on with its own message, and no clear is attempted.
     let branch_id = store.get_note(&note_id).unwrap().unwrap().branch_id;
-    let unreachable = Session::new_running("another note", std::path::Path::new("."));
+    let unreachable =
+        Session::new_running("another note", std::path::Path::new(".")).with_branch(&branch_id);
     store.create_session(&unreachable).unwrap();
     store
         .create_note(&Note::new(&branch_id, "", "").with_session(&unreachable.id))

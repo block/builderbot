@@ -481,7 +481,15 @@ impl ProjectToolsHandler {
         if let Some(reason) = session.completion_reason.as_ref() {
             payload["completion_reason"] = serde_json::Value::String(reason.as_str().to_string());
         }
-        if let Some(error) = session.error_message.as_ref() {
+        // A completed child has no error to report. The only message a
+        // completed row carries is the hold-stopped note sweep's own marker
+        // (`Store::mark_hold_stopped_note_recovery_observed`), which the
+        // parent agent would read as the child having failed.
+        if let Some(error) = session
+            .error_message
+            .as_ref()
+            .filter(|_| session_status != SessionStatus::Completed)
+        {
             payload["error_message"] = serde_json::Value::String(error.clone());
         }
 
@@ -2283,5 +2291,74 @@ mod tests {
             PNG,
             "parent must be able to open the path"
         );
+    }
+
+    /// The hold-stopped note sweep writes its markers into `error_message`
+    /// on a row that stays `completed`/`hold_stopped`. A parent checking the
+    /// child must see a completed session, not one that reports an error;
+    /// a child that actually failed still hands over its message.
+    #[test]
+    fn completed_child_status_never_carries_the_sweep_marker() {
+        use crate::store::{CompletionReason, Note};
+
+        let store = Store::in_memory().unwrap();
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new_remote(&project.id, "notes", "main", "ws-1");
+        store.create_branch(&branch).unwrap();
+        let session =
+            Session::new_running("investigate", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&session).unwrap();
+        let note = Note::new(&branch.id, "", "").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        assert!(store
+            .transition_from_running(
+                &session.id,
+                SessionStatus::Completed,
+                None,
+                Some(&CompletionReason::HoldStopped),
+            )
+            .unwrap());
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        let marker = "The wait for this session's background work was stopped before the \
+                      agent on ws-1 wrote its note; storing the note it finished on the \
+                      workstation.";
+        assert!(store
+            .mark_hold_stopped_note_recovery_observed(
+                &session.id,
+                row.updated_at,
+                None,
+                Some(marker),
+            )
+            .unwrap()
+            .is_some());
+        let handle = RepoSessionHandle {
+            session_id: session.id.clone(),
+            artifact_kind: RepoArtifactKind::Note,
+            artifact_id: note.id.clone(),
+        };
+
+        let payload =
+            ProjectToolsHandler::repo_session_payload(&store, "repo-session", &handle).unwrap();
+
+        assert_eq!(payload["state"], "completed");
+        assert_eq!(payload["completion_reason"], "hold_stopped");
+        assert!(
+            payload.get("error_message").is_none(),
+            "a completed child must not report an error: {payload}"
+        );
+
+        store
+            .update_session_status(
+                &session.id,
+                SessionStatus::Error,
+                Some("agent crashed"),
+                None,
+            )
+            .unwrap();
+        let payload =
+            ProjectToolsHandler::repo_session_payload(&store, "repo-session", &handle).unwrap();
+        assert_eq!(payload["state"], "failed");
+        assert_eq!(payload["error_message"], "agent crashed");
     }
 }

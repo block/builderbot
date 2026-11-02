@@ -17,6 +17,7 @@
 //! helper there passes and one that spawns git fails. Plain method calls are
 //! not followed, which keeps store reads and other in-process work out of it.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
 
@@ -146,6 +147,16 @@ fn async_commands_and_arms_keep_blocking_calls_off_the_runtime() {
          or add it to ALLOWED with why it stays:\n{}",
         offences.into_iter().collect::<Vec<_>>().join("\n")
     );
+    let used = src.used.borrow();
+    let dead: Vec<String> = (ALLOWED.iter())
+        .filter(|entry| !used.contains(entry))
+        .map(|(file, owner, call)| format!("{file}: `{call}` in `{owner}`"))
+        .collect();
+    assert!(
+        dead.is_empty(),
+        "these ALLOWED entries no longer match a call their fn makes; remove them:\n{}",
+        dead.join("\n")
+    );
 }
 
 /// The crate's source, test code removed, and every fn in it.
@@ -157,6 +168,8 @@ struct Crate {
     modules: BTreeMap<String, Vec<usize>>,
     /// Per file: the name each `use` binds → the path it imports.
     imports: Vec<BTreeMap<String, String>>,
+    /// The `ALLOWED` entries a scan has matched, so a dead one can fail.
+    used: RefCell<BTreeSet<(&'static str, &'static str, &'static str)>>,
 }
 
 struct FnItem {
@@ -187,6 +200,7 @@ impl Crate {
             modules: BTreeMap::new(),
             imports: files.iter().map(|(_, code)| imports(code)).collect(),
             files,
+            used: RefCell::default(),
         };
         for (file, (path, code)) in src.files.iter().enumerate() {
             for module in module_names(path) {
@@ -209,7 +223,14 @@ impl Crate {
 
     /// `owner` names the fn `body` belongs to, for `ALLOWED`.
     fn scan(&self, file: usize, owner: &str, body: &str) -> Scan {
-        let allowed = |call: &str| ALLOWED.contains(&(self.files[file].0.as_str(), owner, call));
+        let allowed = |call: &str| {
+            let entry = (self.files[file].0.as_str(), owner, call);
+            let hit = ALLOWED.iter().find(|&&allowed| allowed == entry);
+            if let Some(&allowed) = hit {
+                self.used.borrow_mut().insert(allowed);
+            }
+            hit.is_some()
+        };
         // A file that imports tokio's `Command` spawns async children, and
         // one that uses `tokio::process` at all waits on them asynchronously.
         let tokio_command =

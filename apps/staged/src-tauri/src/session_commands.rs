@@ -1617,6 +1617,8 @@ async fn prepare_resume(
 
     // `git config --global`, on the blocking pool. Read here so that
     // `resume_session_for_store` has no await between its claim and the launch.
+    // The continue path claims before this preparation, so there it is one
+    // more await after the claim, like `branch_head_sha` above.
     let extra_env = if linked_commit.is_some() {
         session_runner::git_identity_env_off_runtime().await
     } else {

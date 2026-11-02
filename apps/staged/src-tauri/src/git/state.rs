@@ -2,6 +2,7 @@ use super::cli::{self, EnvSource, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
 use super::status_parse::is_conflicted_status;
 use super::upstream::upstream_branch_name_from_config;
+use super::worktree::BRANCH_COMMIT_LOG_FORMAT;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -242,16 +243,41 @@ fn refspecs_to_fetch(
     }
 }
 
-fn refresh_refs_if_needed<F>(
+/// What a build will fetch, decided from the caches before any git runs.
+struct FetchPlan {
+    now: i64,
+    previous: Option<FetchCacheEntry>,
+    repo_key: Option<String>,
+    base_refspec: String,
+    /// Every refspec the branch needs current (base, plus the branch's own
+    /// when it differs), whether or not this build fetches them.
+    needed: Vec<String>,
+    /// Refspecs to send over the wire; `None` when nothing is fetched —
+    /// `FetchMode::Never`, or the caches say the refs are fresh enough.
+    refspecs: Option<Vec<String>>,
+}
+
+impl FetchPlan {
+    fn will_fetch(&self) -> bool {
+        self.refspecs.is_some()
+    }
+
+    /// What the last fetch learned about the upstream, which is all a build
+    /// that fetches nothing has to go on.
+    fn cached_upstream_known_missing(&self) -> bool {
+        self.previous
+            .as_ref()
+            .map(|entry| entry.upstream_known_missing)
+            .unwrap_or(false)
+    }
+}
+
+fn plan_fetch(
     cache_key: &str,
-    run_git: &F,
     remote_branch: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
-) -> RefreshOutcome
-where
-    F: Fn(&[&str]) -> Result<String, String>,
-{
+) -> FetchPlan {
     let now = now_ms();
     let previous = fetch_cache()
         .lock()
@@ -262,16 +288,17 @@ where
     let branch_refspec = refspec_for(remote_branch);
 
     // Build the list of needed refspecs (deduplicated).
-    let needed: Vec<&str> = if branch_refspec != base_refspec {
-        vec![base_refspec.as_str(), branch_refspec.as_str()]
+    let needed: Vec<String> = if branch_refspec != base_refspec {
+        vec![base_refspec.clone(), branch_refspec]
     } else {
-        vec![base_refspec.as_str()]
+        vec![base_refspec.clone()]
     };
 
     // For local keys, consult the repo-level cache to avoid redundant fetches
     // when multiple branches share the same repo.
     let repo_key = repo_key_from_local_cache_key(cache_key);
-    let to_fetch = refspecs_to_fetch(repo_key.as_deref(), &needed, fetch_mode, now);
+    let needed_refs: Vec<&str> = needed.iter().map(String::as_str).collect();
+    let to_fetch = refspecs_to_fetch(repo_key.as_deref(), &needed_refs, fetch_mode, now);
 
     // Also check the per-branch cache for the legacy should_fetch decision
     // (used when there's no repo key, i.e. remote branches).
@@ -285,12 +312,31 @@ where
             (FetchMode::Ttl, None) => true,
         }
     };
+    // Fallback for remote keys (no repo-level cache) — fetch all needed.
+    let refspecs = should_fetch.then(|| to_fetch.unwrap_or_else(|| needed.clone()));
 
-    if !should_fetch {
-        let fetched_at = previous.as_ref().map(|entry| entry.fetched_at).or_else(|| {
+    FetchPlan {
+        now,
+        previous,
+        repo_key,
+        base_refspec,
+        needed,
+        refspecs,
+    }
+}
+
+/// Run the fetch a [`FetchPlan`] calls for, or report the cached freshness
+/// when it calls for none. Spawns nothing in the latter case.
+fn run_planned_fetch<F>(cache_key: &str, plan: &FetchPlan, run_git: &F) -> RefreshOutcome
+where
+    F: Fn(&[&str]) -> Result<String, String>,
+{
+    let previous = plan.previous.as_ref();
+    let Some(fetch_refspecs) = plan.refspecs.as_ref() else {
+        let fetched_at = previous.map(|entry| entry.fetched_at).or_else(|| {
             // For local keys the repo-level cache may have a timestamp even
             // if the per-branch cache doesn't yet.
-            repo_key.as_deref().and_then(|key| {
+            plan.repo_key.as_deref().and_then(|key| {
                 repo_fetch_cache()
                     .lock()
                     .ok()
@@ -307,21 +353,20 @@ where
                 fetched_at,
                 error: None,
             },
-            upstream_known_missing: previous
-                .as_ref()
-                .map(|entry| entry.upstream_known_missing)
-                .unwrap_or(false),
+            upstream_known_missing: plan.cached_upstream_known_missing(),
         };
-    }
-
-    // Determine refspecs to actually send over the wire.
-    let fetch_refspecs: Vec<String> = to_fetch.unwrap_or_else(|| {
-        // Fallback for remote keys (no repo-level cache) — fetch all needed.
-        needed.iter().map(|s| s.to_string()).collect()
-    });
+    };
 
     // Is this a narrow supplemental fetch (repo fresh, just filling in gaps)?
-    let is_narrow = repo_key.is_some() && fetch_refspecs.len() < needed.len();
+    let is_narrow = plan.repo_key.is_some() && fetch_refspecs.len() < plan.needed.len();
+    let failed = |error: String| RefreshOutcome {
+        fetch: FetchGitState {
+            status: FetchStatus::Failed,
+            fetched_at: previous.map(|entry| entry.fetched_at),
+            error: Some(error.trim().to_string()),
+        },
+        upstream_known_missing: false,
+    };
 
     let mut upstream_known_missing = false;
 
@@ -342,36 +387,20 @@ where
                     retry_args.push("--prune");
                 }
                 retry_args.push("origin");
-                retry_args.push(base_refspec.as_str());
+                retry_args.push(plan.base_refspec.as_str());
                 if let Err(base_err) = run_git(&retry_args) {
-                    return RefreshOutcome {
-                        fetch: FetchGitState {
-                            status: FetchStatus::Failed,
-                            fetched_at: previous.map(|entry| entry.fetched_at),
-                            error: Some(base_err.trim().to_string()),
-                        },
-                        upstream_known_missing: false,
-                    };
+                    return failed(base_err);
                 }
                 upstream_known_missing = true;
             }
-            Err(error) => {
-                return RefreshOutcome {
-                    fetch: FetchGitState {
-                        status: FetchStatus::Failed,
-                        fetched_at: previous.map(|entry| entry.fetched_at),
-                        error: Some(error.trim().to_string()),
-                    },
-                    upstream_known_missing: false,
-                };
-            }
+            Err(error) => return failed(error),
             Ok(_) => {}
         }
     } else {
         let refspec = fetch_refspecs
             .first()
             .map(String::as_str)
-            .unwrap_or(base_refspec.as_str());
+            .unwrap_or(plan.base_refspec.as_str());
         let mut args = vec!["fetch"];
         if !is_narrow {
             args.push("--prune");
@@ -382,14 +411,7 @@ where
             if is_missing_remote_ref(&error) {
                 upstream_known_missing = true;
             } else {
-                return RefreshOutcome {
-                    fetch: FetchGitState {
-                        status: FetchStatus::Failed,
-                        fetched_at: previous.map(|entry| entry.fetched_at),
-                        error: Some(error.trim().to_string()),
-                    },
-                    upstream_known_missing: false,
-                };
+                return failed(error);
             }
         }
     }
@@ -399,26 +421,26 @@ where
         cache.insert(
             cache_key.to_string(),
             FetchCacheEntry {
-                fetched_at: now,
+                fetched_at: plan.now,
                 upstream_known_missing,
             },
         );
     }
 
     // Update repo-level cache for local keys.
-    if let Some(ref rk) = repo_key {
+    if let Some(ref rk) = plan.repo_key {
         if let Ok(mut cache) = repo_fetch_cache().lock() {
             let entry = cache.entry(rk.clone()).or_insert_with(|| RepoFetchEntry {
-                fetched_at: now,
+                fetched_at: plan.now,
                 fetched_refspecs: HashSet::new(),
             });
-            entry.fetched_at = now;
+            entry.fetched_at = plan.now;
             if is_narrow {
-                for rs in &fetch_refspecs {
+                for rs in fetch_refspecs {
                     entry.fetched_refspecs.insert(rs.clone());
                 }
             } else {
-                entry.fetched_refspecs = needed.iter().map(|s| s.to_string()).collect();
+                entry.fetched_refspecs = plan.needed.iter().cloned().collect();
             }
         }
     }
@@ -426,7 +448,7 @@ where
     RefreshOutcome {
         fetch: FetchGitState {
             status: FetchStatus::Fresh,
-            fetched_at: Some(now),
+            fetched_at: Some(plan.now),
             error: None,
         },
         upstream_known_missing,
@@ -457,15 +479,6 @@ where
         .and_then(trim_non_empty)
 }
 
-fn resolve_ref<F>(run_git: &F, reference: &str) -> Option<String>
-where
-    F: Fn(&[&str]) -> Result<String, String>,
-{
-    run_git(&["rev-parse", "--verify", reference])
-        .ok()
-        .and_then(trim_non_empty)
-}
-
 fn merge_base<F>(run_git: &F, left: &str, right: &str) -> Option<String>
 where
     F: Fn(&[&str]) -> Result<String, String>,
@@ -475,91 +488,165 @@ where
         .and_then(trim_non_empty)
 }
 
-fn compute_upstream_state<F>(
-    run_git: &F,
-    upstream_ref: String,
-    base_ref: &str,
-    head_sha: Option<&str>,
-    upstream_known_missing: bool,
-) -> UpstreamGitState
-where
-    F: Fn(&[&str]) -> Result<String, String>,
-{
-    let sha = if upstream_known_missing {
-        None
-    } else {
-        resolve_ref(run_git, &upstream_ref)
-    };
-    let exists = sha.is_some();
-
-    if !exists || head_sha.is_none() {
-        return UpstreamGitState {
-            r#ref: upstream_ref,
-            exists,
-            sha,
-            relation: UpstreamRelation::Missing,
-            ahead: 0,
-            behind: 0,
-            merge_base_sha: None,
-            behind_base: 0,
-        };
-    }
-
-    let counts_range = format!("HEAD...{upstream_ref}");
-    let (ahead, behind) = run_git(&["rev-list", "--left-right", "--count", counts_range.as_str()])
-        .ok()
-        .map(|output| {
-            let mut parts = output.split_whitespace();
-            (parse_u32(parts.next()), parse_u32(parts.next()))
-        })
-        .unwrap_or((0, 0));
-    let relation = match (ahead, behind) {
+fn upstream_relation(ahead: u32, behind: u32) -> UpstreamRelation {
+    match (ahead, behind) {
         (0, 0) => UpstreamRelation::InSync,
         (_, 0) => UpstreamRelation::LocalAhead,
         (0, _) => UpstreamRelation::OriginAhead,
         _ => UpstreamRelation::Diverged,
-    };
-    let merge_base_sha = merge_base(run_git, "HEAD", &upstream_ref);
-
-    // How many commits `origin/{base}` is ahead of `origin/{branch}`. When the
-    // upstream ref *is* the base ref this is always 0, which is the correct
-    // signal for "branch tracking its own base" workflows.
-    let behind_base = if upstream_ref == base_ref {
-        0
-    } else {
-        rev_count(run_git, &format!("{upstream_ref}..{base_ref}"))
-    };
-
-    UpstreamGitState {
-        r#ref: upstream_ref,
-        exists,
-        sha,
-        relation,
-        ahead,
-        behind,
-        merge_base_sha,
-        behind_base,
     }
 }
 
-fn compute_base_state<F>(run_git: &F, base_ref: String, head_sha: Option<&str>) -> BaseGitState
+/// `HEAD` from one spawn: the commit it points at and the branch it is on.
+struct HeadInfo {
+    sha: Option<String>,
+    branch: Option<String>,
+}
+
+fn read_head<F>(run_git: &F) -> HeadInfo
 where
     F: Fn(&[&str]) -> Result<String, String>,
 {
-    let sha = resolve_ref(run_git, &base_ref);
-    let commits_since_fork = if sha.is_some() && head_sha.is_some() {
-        merge_base(run_git, "HEAD", &base_ref)
-            .map(|base| rev_count(run_git, &format!("{base}..{base_ref}")))
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    BaseGitState {
-        r#ref: base_ref,
-        sha,
-        commits_since_fork,
+    match run_git(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"]) {
+        Ok(output) => parse_head_output(&output),
+        // An unborn branch has a name but no commit: `rev-parse HEAD` fails
+        // outright, so ask for the name on its own. This is the only case
+        // that costs a second spawn.
+        Err(_) => HeadInfo {
+            sha: None,
+            branch: current_branch(run_git),
+        },
     }
+}
+
+/// `git rev-parse HEAD --symbolic-full-name HEAD` prints the sha, then
+/// `refs/heads/<branch>` — or `HEAD` itself when detached, which (like any
+/// symref outside `refs/heads/`) is no branch, as `branch --show-current`
+/// would also say.
+fn parse_head_output(raw: &str) -> HeadInfo {
+    let mut lines = raw.lines().map(str::trim);
+    let sha = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string);
+    let branch = lines
+        .next()
+        .and_then(|line| line.strip_prefix("refs/heads/"))
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    HeadInfo { sha, branch }
+}
+
+const FOR_EACH_REF_FORMAT: &str = "--format=%(refname) %(objectname)";
+
+/// Parse `for-each-ref --format='%(refname) %(objectname)'` output into a
+/// refname → sha map. Ref names cannot contain spaces, so the first space is
+/// the separator; lines without both parts are skipped.
+fn parse_for_each_ref_output(raw: &str) -> HashMap<String, String> {
+    raw.lines()
+        .filter_map(|line| {
+            let (refname, sha) = line.trim().split_once(' ')?;
+            let sha = sha.trim();
+            (!refname.is_empty() && !sha.is_empty()).then(|| (refname.to_string(), sha.to_string()))
+        })
+        .collect()
+}
+
+/// The remote-side refs a build compares against, read once per build.
+struct RemoteRefs {
+    upstream_sha: Option<String>,
+    base_sha: Option<String>,
+    /// `merge-base HEAD origin/<base>`: the fork point both the base count
+    /// and the commit log start from. `None` when either side is missing or
+    /// the histories are unrelated.
+    base_merge_base: Option<String>,
+}
+
+/// Resolve `origin/<upstream>` and `origin/<base>` with one `for-each-ref`,
+/// and the fork point from `origin/<base>` with one `merge-base`, in
+/// parallel.
+///
+/// A ref `for-each-ref` cannot find is simply not listed, which is what makes
+/// this one spawn instead of a `rev-parse --verify` per ref. Its patterns
+/// match whole path components, so `refs/remotes/origin/main` would also
+/// list `refs/remotes/origin/main/<x>` were `origin/main` itself missing; the
+/// output is matched on the exact refname. The `merge-base` runs without
+/// first checking that `origin/<base>` exists: when it doesn't, that is one
+/// failing spawn git rejects immediately ("Not a valid object name"), which
+/// the cli layer knows not to retry.
+fn read_remote_refs<F>(
+    run_git: &F,
+    upstream_ref: &str,
+    base_ref: &str,
+    upstream_known_missing: bool,
+) -> RemoteRefs
+where
+    F: Fn(&[&str]) -> Result<String, String> + Sync,
+{
+    std::thread::scope(|s| {
+        let refs_handle = s.spawn(|| {
+            let upstream_full = format!("refs/remotes/{upstream_ref}");
+            let base_full = format!("refs/remotes/{base_ref}");
+            let mut args = vec!["for-each-ref", FOR_EACH_REF_FORMAT, base_full.as_str()];
+            // The fetch cache already knows the upstream is not on origin:
+            // don't look for it, and don't report a stale local copy.
+            let want_upstream = !upstream_known_missing;
+            if want_upstream && upstream_full != base_full {
+                args.push(upstream_full.as_str());
+            }
+            let mut resolved = run_git(&args)
+                .map(|output| parse_for_each_ref_output(&output))
+                .unwrap_or_default();
+            let base_sha = resolved.remove(&base_full);
+            let upstream_sha = match (want_upstream, upstream_full == base_full) {
+                (false, _) => None,
+                (true, true) => base_sha.clone(),
+                (true, false) => resolved.remove(&upstream_full),
+            };
+            (upstream_sha, base_sha)
+        });
+        let merge_base_handle = s.spawn(|| merge_base(run_git, "HEAD", base_ref));
+
+        let (upstream_sha, base_sha) = refs_handle.join().expect("remote refs thread panicked");
+        RemoteRefs {
+            upstream_sha,
+            base_sha,
+            base_merge_base: merge_base_handle
+                .join()
+                .expect("base merge-base thread panicked"),
+        }
+    })
+}
+
+/// Ahead/behind against the upstream, and their merge base.
+///
+/// `rev-list --left-right --count` settles the relation, and the merge base
+/// follows from it in every case but one: a branch in sync with, ahead of,
+/// or behind its upstream has one tip as an ancestor of the other, and the
+/// merge base is that tip. Only a diverged pair needs git to find it.
+fn upstream_counts_and_merge_base<F>(
+    run_git: &F,
+    upstream_ref: &str,
+    upstream_sha: &str,
+    head_sha: &str,
+) -> (u32, u32, Option<String>)
+where
+    F: Fn(&[&str]) -> Result<String, String>,
+{
+    let counts_range = format!("HEAD...{upstream_ref}");
+    let counts = run_git(&["rev-list", "--left-right", "--count", counts_range.as_str()])
+        .ok()
+        .map(|output| {
+            let mut parts = output.split_whitespace();
+            (parse_u32(parts.next()), parse_u32(parts.next()))
+        });
+    let merge_base_sha = match counts {
+        Some((_, 0)) => Some(upstream_sha.to_string()),
+        Some((0, _)) => Some(head_sha.to_string()),
+        _ => merge_base(run_git, "HEAD", upstream_ref),
+    };
+    let (ahead, behind) = counts.unwrap_or((0, 0));
+    (ahead, behind, merge_base_sha)
 }
 
 fn compute_worktree_state<F>(run_git: &F, scope: WorktreeStatusScope) -> WorktreeGitState
@@ -580,13 +667,24 @@ where
     parse_worktree_from_status(&output)
 }
 
-/// Compute the git state of a checkout.
+/// What to compute the state of.
 ///
 /// `branch_name` is the local branch HEAD is expected to be on (drives
 /// `expected_branch_matches`); `remote_branch` is the branch on `origin` the
 /// checkout pushes to and is compared against (drives the fetch refspec and
 /// `upstream`). They differ for a PR import whose local name was
 /// de-duplicated (`feature-x-2` tracking `origin/feature-x`).
+#[derive(Debug, Clone, Copy)]
+pub struct BranchGitStateQuery<'a> {
+    pub branch_name: &'a str,
+    pub remote_branch: &'a str,
+    pub base_branch: &'a str,
+    pub fetch_mode: FetchMode,
+    pub worktree_scope: WorktreeStatusScope,
+}
+
+/// Compute the git state of a checkout. See [`BranchGitStateQuery`] for the
+/// `branch_name` / `remote_branch` split.
 pub fn compute_branch_git_state<F>(
     cache_key: &str,
     run_git: F,
@@ -599,73 +697,172 @@ pub fn compute_branch_git_state<F>(
 where
     F: Fn(&[&str]) -> Result<String, String> + Sync,
 {
-    // Phase 1: Fetch runs in parallel with local-only commands (HEAD, branch
-    // name, worktree status) since those read local state unaffected by fetch.
-    let (refresh, head_sha, branch, worktree) = std::thread::scope(|s| {
-        let fetch_handle = s.spawn(|| {
-            refresh_refs_if_needed(cache_key, &run_git, remote_branch, base_branch, fetch_mode)
+    let query = BranchGitStateQuery {
+        branch_name,
+        remote_branch,
+        base_branch,
+        fetch_mode,
+        worktree_scope,
+    };
+    compute_branch_git_state_with(cache_key, run_git, query, |_| ()).0
+}
+
+/// [`compute_branch_git_state`] with a companion read that needs the fork
+/// point from `origin/<base>`.
+///
+/// `with_base_merge_base` runs on its own thread in the final phase, next to
+/// the ahead/behind counts, and is handed `merge-base HEAD origin/<base>` as
+/// this build computed it (`None` when there is none). The branch timeline
+/// passes its `git log` here: the log starts at the same fork point the
+/// `commitsSinceFork` count does, so the merge base is computed once and the
+/// two reads overlap instead of running back to back.
+///
+/// Spawns, when nothing is fetched: `rev-parse`, `status`, `for-each-ref`
+/// and `merge-base` in parallel, then `rev-list --count` for the base, the
+/// upstream counts when the upstream exists (plus a second `merge-base` only
+/// when the two have diverged), and the companion — two sequential spawns on
+/// the critical path. With a fetch, the remote-ref reads wait for it and add
+/// a phase.
+pub fn compute_branch_git_state_with<F, T>(
+    cache_key: &str,
+    run_git: F,
+    query: BranchGitStateQuery<'_>,
+    with_base_merge_base: impl FnOnce(Option<&str>) -> T + Send,
+) -> (BranchGitState, T)
+where
+    F: Fn(&[&str]) -> Result<String, String> + Sync,
+    T: Send,
+{
+    let run_git = &run_git;
+    let plan = plan_fetch(
+        cache_key,
+        query.remote_branch,
+        query.base_branch,
+        query.fetch_mode,
+    );
+    let upstream_ref_name = origin_ref_for_branch(query.remote_branch);
+    let base_ref_name = origin_ref_for_branch(query.base_branch);
+    let (upstream_ref, base_ref) = (upstream_ref_name.as_str(), base_ref_name.as_str());
+
+    // Phase 1: the fetch (when planned) alongside the local reads that don't
+    // depend on it. When nothing is fetched the remote-ref reads join this
+    // phase too, since nothing could move the refs under them.
+    let (refresh, head, worktree, remote_refs) = std::thread::scope(|s| {
+        let fetch_handle = s.spawn(|| run_planned_fetch(cache_key, &plan, run_git));
+        let head_handle = s.spawn(|| read_head(run_git));
+        let worktree_handle = s.spawn(|| compute_worktree_state(run_git, query.worktree_scope));
+        let refs_handle = (!plan.will_fetch()).then(|| {
+            s.spawn(|| {
+                read_remote_refs(
+                    run_git,
+                    upstream_ref,
+                    base_ref,
+                    plan.cached_upstream_known_missing(),
+                )
+            })
         });
-        let head_handle = s.spawn(|| {
-            run_git(&["rev-parse", "HEAD"])
-                .ok()
-                .and_then(trim_non_empty)
-        });
-        let branch_handle = s.spawn(|| current_branch(&run_git));
-        let worktree_handle = s.spawn(|| compute_worktree_state(&run_git, worktree_scope));
 
         (
             fetch_handle.join().expect("fetch thread panicked"),
             head_handle.join().expect("head thread panicked"),
-            branch_handle.join().expect("branch thread panicked"),
             worktree_handle.join().expect("worktree thread panicked"),
+            refs_handle.map(|handle| handle.join().expect("remote refs thread panicked")),
+        )
+    });
+    // Only after a fetch: the refs it may have moved.
+    let remote_refs = remote_refs.unwrap_or_else(|| {
+        read_remote_refs(
+            run_git,
+            upstream_ref,
+            base_ref,
+            refresh.upstream_known_missing,
         )
     });
 
-    let detached_head = head_sha.is_some() && branch.is_none();
-    let expected_branch = branch_name_without_origin(branch_name);
-    let expected_branch_matches = branch
+    let detached_head = head.sha.is_some() && head.branch.is_none();
+    let expected_branch = branch_name_without_origin(query.branch_name);
+    let expected_branch_matches = head
+        .branch
         .as_deref()
         .map(|current| current == expected_branch)
         .unwrap_or(false);
-    let upstream_ref = origin_ref_for_branch(remote_branch);
-    let base_ref = origin_ref_for_branch(base_branch);
-    let base_ref_for_upstream = base_ref.clone();
 
-    // Phase 2: Upstream and base state computations are independent of each
-    // other but both need fetch to have completed (for up-to-date remote refs)
-    // and head_sha.
-    let (upstream, base) = std::thread::scope(|s| {
-        let upstream_handle = s.spawn(|| {
-            compute_upstream_state(
-                &run_git,
-                upstream_ref,
-                &base_ref_for_upstream,
-                head_sha.as_deref(),
-                refresh.upstream_known_missing,
-            )
+    // Phase 2: the counts the refs feed, in parallel with the companion.
+    let base_merge_base = remote_refs.base_merge_base.as_deref();
+    let upstream_pair = match (remote_refs.upstream_sha.as_deref(), head.sha.as_deref()) {
+        (Some(upstream_sha), Some(head_sha)) => Some((upstream_sha, head_sha)),
+        _ => None,
+    };
+    let (commits_since_fork, upstream_counts, behind_base, companion) = std::thread::scope(|s| {
+        let base_handle = s.spawn(move || {
+            base_merge_base
+                .map(|mb| rev_count(run_git, &format!("{mb}..{base_ref}")))
+                .unwrap_or(0)
         });
-        let base_handle = s.spawn(|| compute_base_state(&run_git, base_ref, head_sha.as_deref()));
+        let counts_handle = upstream_pair.map(|(upstream_sha, head_sha)| {
+            s.spawn(move || {
+                upstream_counts_and_merge_base(run_git, upstream_ref, upstream_sha, head_sha)
+            })
+        });
+        // How many commits `origin/{base}` is ahead of `origin/{branch}`.
+        // When the upstream ref *is* the base ref this is always 0, which
+        // is the correct signal for "branch tracking its own base"
+        // workflows.
+        let behind_base_handle = (upstream_pair.is_some() && upstream_ref != base_ref)
+            .then(|| s.spawn(move || rev_count(run_git, &format!("{upstream_ref}..{base_ref}"))));
+        let companion_handle = s.spawn(move || with_base_merge_base(base_merge_base));
 
         (
-            upstream_handle.join().expect("upstream thread panicked"),
-            base_handle.join().expect("base thread panicked"),
+            base_handle.join().expect("base count thread panicked"),
+            counts_handle.map(|handle| handle.join().expect("upstream counts thread panicked")),
+            behind_base_handle
+                .map(|handle| handle.join().expect("behind-base thread panicked"))
+                .unwrap_or(0),
+            companion_handle.join().expect("companion thread panicked"),
         )
     });
 
-    BranchGitState {
+    let upstream = match upstream_counts {
+        Some((ahead, behind, merge_base_sha)) => UpstreamGitState {
+            r#ref: upstream_ref_name,
+            exists: true,
+            sha: remote_refs.upstream_sha,
+            relation: upstream_relation(ahead, behind),
+            ahead,
+            behind,
+            merge_base_sha,
+            behind_base,
+        },
+        None => UpstreamGitState {
+            r#ref: upstream_ref_name,
+            exists: remote_refs.upstream_sha.is_some(),
+            sha: remote_refs.upstream_sha,
+            relation: UpstreamRelation::Missing,
+            ahead: 0,
+            behind: 0,
+            merge_base_sha: None,
+            behind_base: 0,
+        },
+    };
+
+    let state = BranchGitState {
         upstream,
-        base,
+        base: BaseGitState {
+            r#ref: base_ref_name,
+            sha: remote_refs.base_sha,
+            commits_since_fork,
+        },
         worktree,
         fetch: refresh.fetch,
-        head_sha,
-        current_branch: branch,
+        head_sha: head.sha,
+        current_branch: head.branch,
         detached_head,
         expected_branch_matches,
-    }
+    };
+    (state, companion)
 }
 
-/// See [`compute_branch_git_state`] for the `branch_name` / `remote_branch`
-/// split.
+/// See [`BranchGitStateQuery`] for the `branch_name` / `remote_branch` split.
 pub fn compute_local_branch_git_state(
     repo: &Path,
     branch_name: &str,
@@ -675,18 +872,37 @@ pub fn compute_local_branch_git_state(
     worktree_scope: WorktreeStatusScope,
     env_source: EnvSource,
 ) -> BranchGitState {
-    let cache_key = format!("local:{}:{}:{}", repo.display(), branch_name, base_branch);
-    compute_branch_git_state(
-        &cache_key,
-        |args| match env_source {
-            EnvSource::Lite => cli::run_smart(repo, args).map_err(|e| e.to_string()),
-            EnvSource::Captured => cli::run(repo, args).map_err(|e| e.to_string()),
-        },
+    let query = BranchGitStateQuery {
         branch_name,
         remote_branch,
         base_branch,
         fetch_mode,
         worktree_scope,
+    };
+    compute_local_branch_git_state_with(repo, query, env_source, |_| ()).0
+}
+
+/// [`compute_branch_git_state_with`] against a local checkout.
+pub fn compute_local_branch_git_state_with<T: Send>(
+    repo: &Path,
+    query: BranchGitStateQuery<'_>,
+    env_source: EnvSource,
+    with_base_merge_base: impl FnOnce(Option<&str>) -> T + Send,
+) -> (BranchGitState, T) {
+    let cache_key = format!(
+        "local:{}:{}:{}",
+        repo.display(),
+        query.branch_name,
+        query.base_branch
+    );
+    compute_branch_git_state_with(
+        &cache_key,
+        |args| match env_source {
+            EnvSource::Lite => cli::run_smart(repo, args).map_err(|e| e.to_string()),
+            EnvSource::Captured => cli::run(repo, args).map_err(|e| e.to_string()),
+        },
+        query,
+        with_base_merge_base,
     )
 }
 
@@ -714,6 +930,8 @@ pub fn compute_local_branch_git_state(
 ///   $7 = "uno" (no untracked enumeration) or "uall" (full enumeration)
 ///   $8 = "upstream_missing" when the fetch cache already knows the branch
 ///        is not on origin, so upstream state is skipped
+///   $9 = the `git log --format=…` argument to print the commits since the
+///        fork point with, after the user identity; empty to print neither
 const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
     // --- Which branch on origin $3 pushes to ---
@@ -793,6 +1011,7 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "  fi\n",
     "fi\n",
     // --- Base state ---
+    "mb=''\n",
     "base_sha=$(git rev-parse --verify \"$5\" 2>/dev/null || true)\n",
     "printf 'BASE_SHA=%s\\n' \"$base_sha\"\n",
     "if [ -n \"$base_sha\" ] && [ -n \"$head_sha\" ]; then\n",
@@ -801,6 +1020,20 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "  if [ -n \"$mb\" ]; then\n",
     "    printf 'BASE_BEHIND=%s\\n' \"$(git rev-list --count \"$mb\"..\"$5\" 2>/dev/null || echo 0)\"\n",
     "  fi\n",
+    "fi\n",
+    // --- Identity and commit log (only when $9 names a log format) ---
+    // The log reuses the merge base above and goes last: everything after
+    // LOG_START is one commit per line, so a subject that reads like one of
+    // the keys above cannot be mistaken for one. A failed `git log` (no
+    // base, no HEAD) is reported through LOG_OK rather than by exiting.
+    "if [ -n \"$9\" ]; then\n",
+    "  printf 'USER_NAME=%s\\n' \"$(git config user.name 2>/dev/null || true)\"\n",
+    "  printf 'USER_EMAIL=%s\\n' \"$(git config user.email 2>/dev/null || true)\"\n",
+    "  if [ -n \"$mb\" ]; then log_range=\"$mb..HEAD\"; else log_range=\"$5..HEAD\"; fi\n",
+    "  if log_out=$(git log \"$9\" \"$log_range\" 2>/dev/null); then log_ok=true; else log_ok=''; fi\n",
+    "  printf 'LOG_OK=%s\\n' \"$log_ok\"\n",
+    "  echo LOG_START\n",
+    "  [ -n \"$log_out\" ] && printf '%s\\n' \"$log_out\"\n",
     "fi\n",
     "exit 0\n",
 );
@@ -822,26 +1055,46 @@ struct BatchGitStateOutput {
     up_behind_base: u32,
     base_sha: Option<String>,
     base_behind: u32,
+    /// `user.name` / `user.email`, when the script was asked for them.
+    user_name: Option<String>,
+    user_email: Option<String>,
+    /// Whether `git log` ran and succeeded; `None` when the script was not
+    /// asked for a log.
+    log_ok: Option<bool>,
+    /// The log lines, newest first, as `git log` printed them.
+    log_lines: Vec<String>,
+}
+
+fn non_empty_value(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
-    let mut upstream_remote = None;
-    let mut upstream_merge = None;
-    let mut head_sha = None;
-    let mut branch = None;
-    let mut upstream_missing = false;
-    let mut fetch_error = None;
-    let mut status_lines = String::new();
+    let mut out = BatchGitStateOutput {
+        upstream_remote: None,
+        upstream_merge: None,
+        head_sha: None,
+        branch: None,
+        status_lines: String::new(),
+        upstream_missing: false,
+        fetch_error: None,
+        up_sha: None,
+        up_ahead: 0,
+        up_behind: 0,
+        up_merge_base: None,
+        up_behind_base: 0,
+        base_sha: None,
+        base_behind: 0,
+        user_name: None,
+        user_email: None,
+        log_ok: None,
+        log_lines: Vec::new(),
+    };
     let mut in_status = false;
-    let mut up_sha = None;
-    let mut up_ahead = 0u32;
-    let mut up_behind = 0u32;
-    let mut up_merge_base = None;
-    let mut up_behind_base = 0u32;
-    let mut base_sha = None;
-    let mut base_behind = 0u32;
 
-    for line in raw.lines() {
+    let mut lines = raw.lines();
+    for line in lines.by_ref() {
         if line == "STATUS_START" {
             in_status = true;
             continue;
@@ -851,83 +1104,61 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
             continue;
         }
         if in_status {
-            if !status_lines.is_empty() {
-                status_lines.push('\n');
+            if !out.status_lines.is_empty() {
+                out.status_lines.push('\n');
             }
-            status_lines.push_str(line);
+            out.status_lines.push_str(line);
             continue;
         }
+        // Everything after LOG_START is the log, one commit per line. The
+        // script puts it last so a subject that happens to read like one of
+        // the keys below cannot be taken for one.
+        if line == "LOG_START" {
+            break;
+        }
         if let Some(val) = line.strip_prefix("UP_REMOTE=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                upstream_remote = Some(v.to_string());
-            }
+            out.upstream_remote = non_empty_value(val);
         } else if let Some(val) = line.strip_prefix("UP_MERGE=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                upstream_merge = Some(v.to_string());
-            }
+            out.upstream_merge = non_empty_value(val);
         } else if let Some(val) = line.strip_prefix("HEAD=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                head_sha = Some(v.to_string());
-            }
+            out.head_sha = non_empty_value(val);
         } else if let Some(val) = line.strip_prefix("BRANCH=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                branch = Some(v.to_string());
-            }
+            out.branch = non_empty_value(val);
         } else if line.starts_with("UPSTREAM_MISSING=") {
-            upstream_missing = true;
+            out.upstream_missing = true;
         } else if let Some(val) = line.strip_prefix("FETCH_ERR=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                fetch_error = Some(v.to_string());
-            }
+            out.fetch_error = non_empty_value(val);
         } else if let Some(val) = line.strip_prefix("UP_SHA=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                up_sha = Some(v.to_string());
-            }
+            out.up_sha = non_empty_value(val);
         } else if let Some(val) = line.strip_prefix("UP_COUNTS=") {
             let mut parts = val.split_whitespace();
-            up_ahead = parse_u32(parts.next());
-            up_behind = parse_u32(parts.next());
+            out.up_ahead = parse_u32(parts.next());
+            out.up_behind = parse_u32(parts.next());
         } else if let Some(val) = line.strip_prefix("UP_MB=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                up_merge_base = Some(v.to_string());
-            }
+            out.up_merge_base = non_empty_value(val);
         } else if let Some(val) = line.strip_prefix("UP_BEHIND_BASE=") {
-            up_behind_base = parse_u32(Some(val.trim()));
+            out.up_behind_base = parse_u32(Some(val.trim()));
         } else if let Some(val) = line.strip_prefix("BASE_SHA=") {
-            let v = val.trim();
-            if !v.is_empty() {
-                base_sha = Some(v.to_string());
-            }
+            out.base_sha = non_empty_value(val);
         } else if line.starts_with("BASE_MB=") {
-            // Used internally by the script to compute BASE_BEHIND.
+            // Used internally by the script to compute BASE_BEHIND and to
+            // start the log.
         } else if let Some(val) = line.strip_prefix("BASE_BEHIND=") {
-            base_behind = parse_u32(Some(val.trim()));
+            out.base_behind = parse_u32(Some(val.trim()));
+        } else if let Some(val) = line.strip_prefix("USER_NAME=") {
+            out.user_name = non_empty_value(val);
+        } else if let Some(val) = line.strip_prefix("USER_EMAIL=") {
+            out.user_email = non_empty_value(val);
+        } else if let Some(val) = line.strip_prefix("LOG_OK=") {
+            out.log_ok = Some(val.trim() == "true");
         }
     }
+    out.log_lines = lines
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
 
-    BatchGitStateOutput {
-        upstream_remote,
-        upstream_merge,
-        head_sha,
-        branch,
-        status_lines,
-        upstream_missing,
-        fetch_error,
-        up_sha,
-        up_ahead,
-        up_behind,
-        up_merge_base,
-        up_behind_base,
-        base_sha,
-        base_behind,
-    }
+    out
 }
 
 fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
@@ -982,6 +1213,32 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
     state
 }
 
+/// Everything the branch timeline needs from a Blox workspace, from one
+/// round trip: the git state, the user's identity and the commit log.
+pub struct BatchedBranchGitSnapshot {
+    pub state: BranchGitState,
+    /// `user.name` / `user.email` as the workspace resolves them; both `None`
+    /// when the script did not run.
+    pub user_name: Option<String>,
+    pub user_email: Option<String>,
+    /// [`BRANCH_COMMIT_LOG_FORMAT`] lines, newest first, for the commits on
+    /// HEAD since it forked from `origin/<base>` — the same fork point
+    /// `base.commits_since_fork` counts from. `Err` when the script did not
+    /// run or `git log` failed inside it.
+    pub commit_lines: Result<Vec<String>, String>,
+}
+
+struct BatchedQuery<'a> {
+    repo_path: &'a str,
+    branch_name: &'a str,
+    base_branch: &'a str,
+    fetch_mode: FetchMode,
+    worktree_scope: WorktreeStatusScope,
+    /// The `git log --format=…` argument to run after the state, or `None`
+    /// to leave identity and log out of the script.
+    log_format: Option<&'a str>,
+}
+
 /// Compute branch git state using a single batched shell script.
 ///
 /// This is the remote-optimised counterpart of `compute_branch_git_state`.
@@ -1007,10 +1264,68 @@ pub fn compute_branch_git_state_batched<F>(
 where
     F: Fn(&str, &[&str]) -> Result<String, String>,
 {
-    let base_refspec = refspec_for(base_branch);
-    let base_ref = origin_ref_for_branch(base_branch);
-    let base_short = branch_name_without_origin(base_branch);
-    let expected_branch = branch_name_without_origin(branch_name);
+    compute_batched(
+        cache_key,
+        run_script,
+        BatchedQuery {
+            repo_path,
+            branch_name,
+            base_branch,
+            fetch_mode,
+            worktree_scope,
+            log_format: None,
+        },
+    )
+    .state
+}
+
+/// [`compute_branch_git_state_batched`] plus the user identity and the commit
+/// log the branch timeline shows, still in one round trip.
+///
+/// On a Blox workspace every `ws_exec` costs about three seconds of transport
+/// while all the git work inside it takes tens of milliseconds, so the
+/// timeline's five execs per build (three once the identity was cached) were
+/// almost entirely round-trip time. The script now also prints `user.name`,
+/// `user.email` and `git log <format> <merge-base>..HEAD`, reusing the
+/// merge base it already computed for `commits_since_fork`.
+pub fn compute_branch_git_snapshot_batched<F>(
+    cache_key: &str,
+    run_script: F,
+    repo_path: &str,
+    branch_name: &str,
+    base_branch: &str,
+    fetch_mode: FetchMode,
+    worktree_scope: WorktreeStatusScope,
+) -> BatchedBranchGitSnapshot
+where
+    F: Fn(&str, &[&str]) -> Result<String, String>,
+{
+    compute_batched(
+        cache_key,
+        run_script,
+        BatchedQuery {
+            repo_path,
+            branch_name,
+            base_branch,
+            fetch_mode,
+            worktree_scope,
+            log_format: Some(BRANCH_COMMIT_LOG_FORMAT),
+        },
+    )
+}
+
+fn compute_batched<F>(
+    cache_key: &str,
+    run_script: F,
+    query: BatchedQuery<'_>,
+) -> BatchedBranchGitSnapshot
+where
+    F: Fn(&str, &[&str]) -> Result<String, String>,
+{
+    let base_refspec = refspec_for(query.base_branch);
+    let base_ref = origin_ref_for_branch(query.base_branch);
+    let base_short = branch_name_without_origin(query.base_branch);
+    let expected_branch = branch_name_without_origin(query.branch_name);
 
     // Check fetch cache to decide whether we need the fetch phase.
     let now = now_ms();
@@ -1019,7 +1334,7 @@ where
         .ok()
         .and_then(|cache| cache.get(cache_key).cloned());
 
-    let should_fetch = match (fetch_mode, &previous) {
+    let should_fetch = match (query.fetch_mode, &previous) {
         (FetchMode::Never, _) => false,
         (FetchMode::Force, _) => true,
         (FetchMode::Ttl, Some(entry)) => now.saturating_sub(entry.fetched_at) > FETCH_TTL_MS,
@@ -1042,14 +1357,15 @@ where
     let raw = run_script(
         BATCH_GIT_STATE_SCRIPT,
         &[
-            repo_path,
+            query.repo_path,
             &base_refspec,
             expected_branch,
             base_short,
             &base_ref,
             skip_fetch_arg,
-            worktree_scope.script_arg(),
+            query.worktree_scope.script_arg(),
             upstream_missing_arg,
+            query.log_format.unwrap_or(""),
         ],
     );
 
@@ -1060,7 +1376,7 @@ where
                 parsed.upstream_remote.as_deref(),
                 parsed.upstream_merge.as_deref(),
                 expected_branch,
-                base_branch,
+                query.base_branch,
             ));
 
             let upstream_known_missing = if should_fetch {
@@ -1119,12 +1435,7 @@ where
             let relation = if !up_exists || parsed.head_sha.is_none() {
                 UpstreamRelation::Missing
             } else {
-                match (parsed.up_ahead, parsed.up_behind) {
-                    (0, 0) => UpstreamRelation::InSync,
-                    (_, 0) => UpstreamRelation::LocalAhead,
-                    (0, _) => UpstreamRelation::OriginAhead,
-                    _ => UpstreamRelation::Diverged,
-                }
+                upstream_relation(parsed.up_ahead, parsed.up_behind)
             };
 
             let upstream = UpstreamGitState {
@@ -1144,22 +1455,33 @@ where
                 commits_since_fork: parsed.base_behind,
             };
 
-            BranchGitState {
-                upstream,
-                base,
-                worktree,
-                fetch: fetch_state,
-                head_sha: parsed.head_sha,
-                current_branch: parsed.branch,
-                detached_head,
-                expected_branch_matches,
+            let commit_lines = match parsed.log_ok {
+                Some(true) => Ok(parsed.log_lines),
+                Some(false) => Err("git log failed in the workspace".to_string()),
+                None => Err("the workspace script produced no commit log".to_string()),
+            };
+
+            BatchedBranchGitSnapshot {
+                state: BranchGitState {
+                    upstream,
+                    base,
+                    worktree,
+                    fetch: fetch_state,
+                    head_sha: parsed.head_sha,
+                    current_branch: parsed.branch,
+                    detached_head,
+                    expected_branch_matches,
+                },
+                user_name: parsed.user_name,
+                user_email: parsed.user_email,
+                commit_lines,
             }
         }
         Err(err) => {
             // Script execution itself failed; the upstream could not be read
             // either, so name the branch's own remote-tracking ref.
             let fetched_at = previous.as_ref().map(|e| e.fetched_at);
-            BranchGitState {
+            let state = BranchGitState {
                 upstream: UpstreamGitState {
                     r#ref: origin_ref_for_branch(expected_branch),
                     exists: false,
@@ -1187,7 +1509,7 @@ where
                     FetchGitState {
                         status: FetchStatus::Failed,
                         fetched_at,
-                        error: Some(err),
+                        error: Some(err.clone()),
                     }
                 } else {
                     FetchGitState {
@@ -1204,6 +1526,12 @@ where
                 current_branch: None,
                 detached_head: false,
                 expected_branch_matches: false,
+            };
+            BatchedBranchGitSnapshot {
+                state,
+                user_name: None,
+                user_email: None,
+                commit_lines: Err(err),
             }
         }
     }
@@ -1362,6 +1690,377 @@ mod tests {
         let state = batched_state(repo, "feature-loose", FetchMode::Never);
         assert_eq!(state.upstream.r#ref, "origin/feature-loose");
         assert!(!state.upstream.exists);
+    }
+
+    fn batched_snapshot(repo: &Path, branch: &str) -> BatchedBranchGitSnapshot {
+        let repo_str = repo.to_str().unwrap();
+        compute_branch_git_snapshot_batched(
+            &format!("{repo_str}#{branch}#snapshot"),
+            run_batch_script_locally,
+            repo_str,
+            branch,
+            "main",
+            FetchMode::Never,
+            WorktreeStatusScope::Full,
+        )
+    }
+
+    fn log_shas(lines: &[String]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                crate::git::parse_branch_commit_line(line)
+                    .unwrap_or_else(|| panic!("not a commit line: {line:?}"))
+                    .sha
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The one round trip also carries the identity and the commit log, the
+    /// log starting at the merge base the state already computed — and a
+    /// subject that spells the delimiter is still just a subject.
+    #[test]
+    fn batched_snapshot_carries_identity_and_commit_log() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        let base = repo.commit("base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base]);
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("file.txt", "base\none\n");
+        let first = repo.commit("feat: one");
+        repo.write_file("file.txt", "base\none\ntwo\n");
+        let second = repo.commit("LOG_START");
+
+        let snapshot = batched_snapshot(repo.path(), "feature");
+        assert_eq!(snapshot.user_name.as_deref(), Some("Test"));
+        assert_eq!(snapshot.user_email.as_deref(), Some("test@example.com"));
+        let lines = snapshot.commit_lines.unwrap();
+        assert_eq!(log_shas(&lines), vec![second.clone(), first.clone()]);
+        assert_eq!(
+            crate::git::parse_branch_commit_line(&lines[0])
+                .unwrap()
+                .subject,
+            "LOG_START"
+        );
+        assert_eq!(snapshot.state.head_sha.as_deref(), Some(second.as_str()));
+        assert_eq!(snapshot.state.base.sha.as_deref(), Some(base.as_str()));
+        assert_eq!(snapshot.state.base.commits_since_fork, 0);
+        assert!(!snapshot.state.upstream.exists);
+
+        // The base moves on: the count sees its new commit, the log still
+        // starts at the fork point.
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("other.txt", "moved\n");
+        let moved = repo.commit("base moved");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &moved]);
+        repo.run_git(&["checkout", "feature"]);
+        let snapshot = batched_snapshot(repo.path(), "feature");
+        assert_eq!(snapshot.state.base.commits_since_fork, 1);
+        assert_eq!(
+            log_shas(&snapshot.commit_lines.unwrap()),
+            vec![second, first]
+        );
+    }
+
+    /// Zero commits ahead is an empty, successful log. A missing base is a
+    /// log that could not run, which the snapshot reports rather than guesses.
+    #[test]
+    fn batched_snapshot_handles_no_commits_and_no_base() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        let base = repo.commit("base");
+        repo.run_git(&["checkout", "-b", "feature"]);
+
+        // No origin/main yet.
+        let snapshot = batched_snapshot(repo.path(), "feature");
+        assert!(snapshot.state.base.sha.is_none());
+        assert!(
+            snapshot.commit_lines.is_err(),
+            "{:?}",
+            snapshot.commit_lines
+        );
+        assert_eq!(snapshot.user_name.as_deref(), Some("Test"));
+
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base]);
+        let snapshot = batched_snapshot(repo.path(), "feature");
+        assert_eq!(snapshot.commit_lines.unwrap(), Vec::<String>::new());
+        assert_eq!(snapshot.state.base.sha.as_deref(), Some(base.as_str()));
+        assert_eq!(snapshot.state.head_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(snapshot.state.base.commits_since_fork, 0);
+    }
+
+    /// The state-only entry point leaves `$9` empty so the refresh path's
+    /// script prints exactly what it did before; the snapshot passes the log
+    /// format through.
+    #[test]
+    fn only_the_snapshot_asks_the_script_for_a_log() {
+        let state_calls = std::cell::RefCell::new(Vec::new());
+        let state = compute_branch_git_state_batched(
+            "state-only",
+            |_script, args| {
+                state_calls
+                    .borrow_mut()
+                    .push(args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+                Ok("HEAD=abc\nBRANCH=feature\nSTATUS_START\nSTATUS_END\nBASE_SHA=def\n".into())
+            },
+            ".",
+            "feature",
+            "main",
+            FetchMode::Never,
+            WorktreeStatusScope::Indexed,
+        );
+        assert_eq!(state.head_sha.as_deref(), Some("abc"));
+        let args = state_calls.borrow();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].len(), 9);
+        assert_eq!(args[0][5], "skip_fetch");
+        assert_eq!(args[0][8], "");
+
+        let snapshot_calls = std::cell::RefCell::new(Vec::new());
+        let snapshot = compute_branch_git_snapshot_batched(
+            "snapshot",
+            |_script, args| {
+                snapshot_calls
+                    .borrow_mut()
+                    .push(args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+                Err("ssh: connection closed".into())
+            },
+            ".",
+            "feature",
+            "main",
+            FetchMode::Never,
+            WorktreeStatusScope::Indexed,
+        );
+        assert_eq!(snapshot_calls.borrow()[0][8], BRANCH_COMMIT_LOG_FORMAT);
+        assert_eq!(snapshot_calls.borrow()[0][5], "skip_fetch");
+        assert_eq!(
+            snapshot.commit_lines,
+            Err("ssh: connection closed".to_string())
+        );
+        assert!(snapshot.user_name.is_none());
+        assert!(snapshot.state.head_sha.is_none());
+    }
+
+    /// The fetch cache already knows the branch is not on origin: the script
+    /// is told to skip the upstream (`upstream_missing`), and the identity
+    /// and commit log still ride along in the same round trip.
+    #[test]
+    fn batched_snapshot_with_a_known_missing_upstream_still_carries_the_log() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        let base = repo.commit("base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base]);
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("file.txt", "base\none\n");
+        let first = repo.commit("feat: one");
+        repo.write_file("file.txt", "base\none\ntwo\n");
+        let second = repo.commit("feat: two");
+        // origin/feature does exist here, so only the cached verdict can
+        // make the script leave it alone.
+        repo.run_git(&["update-ref", "refs/remotes/origin/feature", &second]);
+        let repo_str = repo.path().to_str().unwrap();
+
+        let key = format!("{repo_str}#feature#known-missing");
+        fetch_cache().lock().unwrap().insert(
+            key.clone(),
+            FetchCacheEntry {
+                fetched_at: now_ms(),
+                upstream_known_missing: true,
+            },
+        );
+        let snapshot = compute_branch_git_snapshot_batched(
+            &key,
+            run_batch_script_locally,
+            repo_str,
+            "feature",
+            "main",
+            FetchMode::Never,
+            WorktreeStatusScope::Full,
+        );
+        assert!(!snapshot.state.upstream.exists);
+        assert!(snapshot.state.upstream.sha.is_none());
+        assert!(matches!(
+            snapshot.state.upstream.relation,
+            UpstreamRelation::Missing
+        ));
+        assert!(matches!(snapshot.state.fetch.status, FetchStatus::Fresh));
+        assert_eq!(snapshot.user_name.as_deref(), Some("Test"));
+        assert_eq!(snapshot.user_email.as_deref(), Some("test@example.com"));
+        assert_eq!(
+            log_shas(&snapshot.commit_lines.unwrap()),
+            vec![second.clone(), first.clone()]
+        );
+        assert_eq!(snapshot.state.base.sha.as_deref(), Some(base.as_str()));
+        assert_eq!(snapshot.state.head_sha.as_deref(), Some(second.as_str()));
+        assert_eq!(snapshot.state.base.commits_since_fork, 0);
+
+        // Without the cached verdict the same repo reads its upstream.
+        let plain = batched_snapshot(repo.path(), "feature");
+        assert!(plain.state.upstream.exists);
+        assert!(matches!(
+            plain.state.upstream.relation,
+            UpstreamRelation::InSync
+        ));
+        assert_eq!(log_shas(&plain.commit_lines.unwrap()), vec![second, first]);
+    }
+
+    /// The upstream merge base is derived from the `rev-list` counts; when
+    /// that count fails there is nothing to derive it from, so the counts
+    /// read as zero and git is asked for the merge base — `None` when it
+    /// cannot answer that either.
+    #[test]
+    fn failed_upstream_counts_fall_back_to_a_merge_base_spawn() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let failing_counts = |args: &[&str]| -> Result<String, String> {
+            calls.lock().unwrap().push(args.join(" "));
+            match args[0] {
+                "rev-list" => Err("fatal: bad revision 'HEAD...origin/feature'".to_string()),
+                "merge-base" => Ok("3333\n".to_string()),
+                other => panic!("unexpected git {other}"),
+            }
+        };
+        assert_eq!(
+            upstream_counts_and_merge_base(&failing_counts, "origin/feature", "2222", "1111"),
+            (0, 0, Some("3333".to_string()))
+        );
+        assert_eq!(
+            calls.into_inner().unwrap(),
+            vec![
+                "rev-list --left-right --count HEAD...origin/feature",
+                "merge-base HEAD origin/feature"
+            ]
+        );
+
+        let nothing_works = |_: &[&str]| -> Result<String, String> { Err("boom".to_string()) };
+        assert_eq!(
+            upstream_counts_and_merge_base(&nothing_works, "origin/feature", "2222", "1111"),
+            (0, 0, None)
+        );
+
+        // For contrast, a count that settles the relation needs no second spawn.
+        let behind = |args: &[&str]| -> Result<String, String> {
+            assert_eq!(args[0], "rev-list", "{args:?}");
+            Ok("0\t2\n".to_string())
+        };
+        assert_eq!(
+            upstream_counts_and_merge_base(&behind, "origin/feature", "2222", "1111"),
+            (0, 2, Some("1111".to_string()))
+        );
+    }
+
+    const FULL_SNAPSHOT_OUTPUT: &str = "UP_REMOTE=origin\nUP_MERGE=refs/heads/feature\nHEAD=1111\nBRANCH=feature\nSTATUS_START\n M file.txt\nSTATUS_END\nUP_SHA=2222\nUP_COUNTS=1\t2\nUP_MB=3333\nUP_BEHIND_BASE=4\nBASE_SHA=5555\nBASE_MB=3333\nBASE_BEHIND=6\nUSER_NAME=Matt Toohey\nUSER_EMAIL=matt@example.com\nLOG_OK=true\nLOG_START\n1111\x1f1111\x1fMatt\x1fmatt@example.com\x1f10\x1f9\x1fUSER_NAME=not a key\n\n0aaa\x1f0aaa\x1fMatt\x1fmatt@example.com\x1f8\x1f7\x1fSTATUS_END\n";
+
+    #[test]
+    fn parses_the_full_snapshot_output() {
+        let out = parse_batch_git_state_output(FULL_SNAPSHOT_OUTPUT);
+        assert_eq!(out.upstream_remote.as_deref(), Some("origin"));
+        assert_eq!(out.upstream_merge.as_deref(), Some("refs/heads/feature"));
+        assert_eq!(out.head_sha.as_deref(), Some("1111"));
+        assert_eq!(out.branch.as_deref(), Some("feature"));
+        assert_eq!(out.status_lines, " M file.txt");
+        assert_eq!(out.up_sha.as_deref(), Some("2222"));
+        assert_eq!((out.up_ahead, out.up_behind), (1, 2));
+        assert_eq!(out.up_merge_base.as_deref(), Some("3333"));
+        assert_eq!(out.up_behind_base, 4);
+        assert_eq!(out.base_sha.as_deref(), Some("5555"));
+        assert_eq!(out.base_behind, 6);
+        assert_eq!(out.user_name.as_deref(), Some("Matt Toohey"));
+        assert_eq!(out.user_email.as_deref(), Some("matt@example.com"));
+        assert_eq!(out.log_ok, Some(true));
+        // Two commits, blank line dropped, subjects that look like keys or
+        // delimiters left alone.
+        assert_eq!(out.log_lines.len(), 2);
+        assert!(out.log_lines[0].ends_with("\x1fUSER_NAME=not a key"));
+        assert!(out.log_lines[1].ends_with("\x1fSTATUS_END"));
+    }
+
+    #[test]
+    fn parses_snapshot_output_without_an_upstream() {
+        let raw = "UP_REMOTE=\nUP_MERGE=\nHEAD=1111\nBRANCH=feature\nSTATUS_START\nSTATUS_END\nUP_SHA=\nBASE_SHA=5555\nBASE_MB=1111\nBASE_BEHIND=0\nUSER_NAME=Matt\nUSER_EMAIL=\nLOG_OK=true\nLOG_START\n";
+        let out = parse_batch_git_state_output(raw);
+        assert!(out.upstream_remote.is_none());
+        assert!(out.up_sha.is_none());
+        assert_eq!((out.up_ahead, out.up_behind, out.up_behind_base), (0, 0, 0));
+        assert!(out.up_merge_base.is_none());
+        assert_eq!(out.base_sha.as_deref(), Some("5555"));
+        assert_eq!(out.user_name.as_deref(), Some("Matt"));
+        assert!(out.user_email.is_none());
+        // Zero commits ahead: a successful, empty log.
+        assert_eq!(out.log_ok, Some(true));
+        assert!(out.log_lines.is_empty());
+    }
+
+    #[test]
+    fn parses_a_failed_log_and_a_missing_log_section() {
+        let failed = parse_batch_git_state_output(
+            "HEAD=1111\nBRANCH=feature\nSTATUS_START\nSTATUS_END\nBASE_SHA=\nUSER_NAME=Matt\nUSER_EMAIL=m@example.com\nLOG_OK=\nLOG_START\n",
+        );
+        assert_eq!(failed.log_ok, Some(false));
+        assert!(failed.log_lines.is_empty());
+        assert_eq!(failed.user_email.as_deref(), Some("m@example.com"));
+
+        // The state-only script: no identity, no log, nothing misread.
+        let state_only = parse_batch_git_state_output(
+            "HEAD=1111\nBRANCH=feature\nSTATUS_START\n?? new.txt\nSTATUS_END\nBASE_SHA=5555\nBASE_MB=1111\nBASE_BEHIND=2\n",
+        );
+        assert_eq!(state_only.log_ok, None);
+        assert!(state_only.log_lines.is_empty());
+        assert!(state_only.user_name.is_none());
+        assert_eq!(state_only.status_lines, "?? new.txt");
+        assert_eq!(state_only.base_behind, 2);
+    }
+
+    #[test]
+    fn malformed_snapshot_output_is_tolerated() {
+        let out = parse_batch_git_state_output(
+            "garbage\nUP_COUNTS=x y\nUP_BEHIND_BASE=\nBASE_BEHIND=-3\nHEAD=\nLOG_OK=maybe\n=\n",
+        );
+        assert!(out.head_sha.is_none());
+        assert_eq!((out.up_ahead, out.up_behind, out.up_behind_base), (0, 0, 0));
+        assert_eq!(out.base_behind, 0);
+        assert_eq!(out.log_ok, Some(false));
+        assert!(out.log_lines.is_empty());
+        assert!(parse_batch_git_state_output("").head_sha.is_none());
+    }
+
+    #[test]
+    fn head_output_names_the_branch_or_nothing() {
+        let on_branch = parse_head_output("1111\nrefs/heads/team/feature\n");
+        assert_eq!(on_branch.sha.as_deref(), Some("1111"));
+        assert_eq!(on_branch.branch.as_deref(), Some("team/feature"));
+
+        let detached = parse_head_output("1111\nHEAD\n");
+        assert_eq!(detached.sha.as_deref(), Some("1111"));
+        assert!(detached.branch.is_none());
+
+        let elsewhere = parse_head_output("1111\nrefs/remotes/origin/main\n");
+        assert!(elsewhere.branch.is_none());
+
+        let empty = parse_head_output("");
+        assert!(empty.sha.is_none() && empty.branch.is_none());
+    }
+
+    #[test]
+    fn for_each_ref_output_maps_exact_refnames() {
+        let map = parse_for_each_ref_output(
+            "refs/remotes/origin/main 1111\nrefs/remotes/origin/main/nested 2222\n\nno-sha\n 3333\nrefs/remotes/origin/feature 4444 extra\n",
+        );
+        assert_eq!(
+            map.get("refs/remotes/origin/main").map(String::as_str),
+            Some("1111")
+        );
+        assert_eq!(
+            map.get("refs/remotes/origin/main/nested")
+                .map(String::as_str),
+            Some("2222")
+        );
+        assert_eq!(
+            map.get("refs/remotes/origin/feature").map(String::as_str),
+            Some("4444 extra")
+        );
+        assert_eq!(map.len(), 3);
+        assert!(parse_for_each_ref_output("").is_empty());
     }
 
     fn assert_worktree(

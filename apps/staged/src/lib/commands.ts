@@ -13,6 +13,7 @@ import {
   invalidateCache,
   CACHE_SCHEMA_VERSION,
   type SwrResult,
+  readCachedEntries,
 } from './cache';
 import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
 import type {
@@ -104,11 +105,33 @@ export interface ForceRefreshOptions {
   force?: boolean;
 }
 
-export function listProjects(options: ForceRefreshOptions = {}): Promise<SwrResult<Project[]>> {
-  return cachedCommand('list_projects', undefined, {
+export async function listProjects(
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<Project[]>> {
+  const result = await cachedCommand<Project[]>('list_projects', undefined, {
     ttl: 5 * 60_000,
     bypassRead: options.force,
   });
+  return observeListResult(result, noteProjects);
+}
+
+/**
+ * Pass a list through `observe` as it lands — the immediate value and, when
+ * there is one, the revalidated value — so persisted-timeline bookkeeping
+ * sees every branch and project list the app receives without the callers
+ * having to know about it.
+ */
+function observeListResult<T>(result: SwrResult<T>, observe: (value: T) => void): SwrResult<T> {
+  observe(result.data);
+  return {
+    data: result.data,
+    revalidating: result.revalidating
+      ? result.revalidating.then((fresh) => {
+          observe(fresh);
+          return fresh;
+        })
+      : null,
+  };
 }
 
 export async function createProject(
@@ -340,11 +363,11 @@ export function startProjectSession(
 // Branches
 // =============================================================================
 
-export function listBranchesForProject(
+export async function listBranchesForProject(
   projectId: string,
   options: ForceRefreshOptions = {}
 ): Promise<SwrResult<Branch[]>> {
-  return cachedCommand(
+  const result = await cachedCommand<Branch[]>(
     'list_branches_for_project',
     { projectId },
     {
@@ -352,6 +375,7 @@ export function listBranchesForProject(
       bypassRead: options.force,
     }
   );
+  return observeListResult(result, (branches) => noteProjectBranches(projectId, branches));
 }
 
 /** Get a single branch by ID. */
@@ -500,7 +524,190 @@ const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 /** Cap snapshot size so it stays comfortably under the localStorage quota. */
 const MAX_SNAPSHOT_TIMELINES = 40;
 
+/**
+ * Cap on timelines kept in IndexedDB across launches, on both platforms. Each
+ * is a few KB to a few tens of KB; the desktop boot seed reads them all in one
+ * request, so the cap bounds both the store and the time to first cached
+ * paint, and on the web it bounds a store that previously grew until the
+ * seven-day sweep. Oldest fetched go first, and every card view refetches, so
+ * this is "least recently viewed": a web card beyond the cap misses IndexedDB
+ * and fetches, exactly as it did before anything was persisted for it.
+ */
+const MAX_PERSISTED_TIMELINES = 200;
+
+/**
+ * Oldest persisted timeline the desktop boot seed will paint. Older entries
+ * are dropped at boot instead: the card would refetch anyway, and a day-old
+ * commit list is more misleading than "Looking for changes…" for the second
+ * or two the rebuild takes.
+ */
+const MAX_SEED_AGE_MS = 24 * 60 * 60 * 1000;
+
 type TimelineCacheEntry = { timeline: BranchTimeline; fetchedAt: number };
+
+// -----------------------------------------------------------------------------
+// Persisted timelines (desktop)
+//
+// Under Tauri the IndexedDB layer in `cache.ts` is used for one command,
+// `get_branch_timeline`, so a card's last timeline can paint on launch while
+// git rebuilds it. Each persisted entry is stamped with the branch's identity
+// at write time (`timelineScopeOf`) and is only ever shown again if the branch
+// still exists with that identity; the backend's branch and project lists are
+// the authority, observed as they arrive. A seeded entry keeps its original
+// `fetchedAt`, so `getBranchTimelineWithRevalidation` reads it as stale and
+// issues the one forced refetch that overwrites it.
+//
+// A seeded entry is a paint, never an answer: while it is still the seeded
+// one, a plain `getBranchTimeline` read treats it as a miss (joining the
+// card's refetch when one is in flight), so no caller resolves with a
+// previous launch's timeline. Entries older than `MAX_SEED_AGE_MS` are not
+// seeded at all. The web's localStorage snapshot is a separate, older
+// mechanism and is not covered by either rule.
+// -----------------------------------------------------------------------------
+
+type TimelineScopeBranch = Pick<
+  Branch,
+  | 'projectId'
+  | 'projectRepoId'
+  | 'branchType'
+  | 'branchName'
+  | 'baseBranch'
+  | 'workspaceName'
+  | 'worktreePath'
+>;
+
+/**
+ * The identity a persisted timeline is bound to: everything that decides
+ * which git history the timeline describes. A rename, a move to another
+ * project, a recreated worktree or a different Blox workspace all change it,
+ * and the old entry is dropped rather than painted. The project id leads so
+ * `projectIdOfScope` can read it back without a full parse.
+ */
+function timelineScopeOf(branch: TimelineScopeBranch): string {
+  return JSON.stringify({
+    projectId: branch.projectId,
+    projectRepoId: branch.projectRepoId ?? null,
+    branchType: branch.branchType,
+    branchName: branch.branchName,
+    baseBranch: branch.baseBranch,
+    workspaceName: branch.workspaceName ?? null,
+    worktreePath: branch.worktreePath ?? null,
+  });
+}
+
+function projectIdOfScope(scope: string): string | null {
+  try {
+    const parsed = JSON.parse(scope) as { projectId?: unknown };
+    return typeof parsed.projectId === 'string' ? parsed.projectId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Current identity of every branch the backend has listed this session. */
+const branchScopes = new Map<string, string>();
+/** Branch ids per project, from the latest list the backend returned for it. */
+const listedProjectBranches = new Map<string, Set<string>>();
+/** Project ids from the latest project list, or null until the first one lands. */
+let listedProjectIds: Set<string> | null = null;
+/** Entries the boot seed placed in `timelineCache`, with the scope each was written under. */
+const seededTimelines = new Map<string, { entry: TimelineCacheEntry; scope: string }>();
+
+/**
+ * Whether a persisted entry written under `scope` may still be shown for
+ * `branchId`, given what the backend has told us so far. Unknown is allowed:
+ * an entry is only dropped once a list that should contain its branch or
+ * project has arrived without it.
+ */
+function isSeedScopeValid(branchId: string, scope: string): boolean {
+  const projectId = projectIdOfScope(scope);
+  if (!projectId) return false;
+  if (listedProjectIds && !listedProjectIds.has(projectId)) return false;
+  const listed = listedProjectBranches.get(projectId);
+  if (listed) {
+    if (!listed.has(branchId)) return false;
+    if (branchScopes.get(branchId) !== scope) return false;
+  }
+  return true;
+}
+
+/**
+ * Remove a seeded entry from memory (only while it is still the seeded one,
+ * never a timeline fetched since) and from IndexedDB.
+ */
+function dropSeededTimeline(branchId: string): void {
+  const seeded = seededTimelines.get(branchId);
+  if (!seeded) return;
+  seededTimelines.delete(branchId);
+  if (timelineCache.get(branchId) === seeded.entry) {
+    timelineCache.delete(branchId);
+  }
+  void invalidateCache('get_branch_timeline', { branchId });
+}
+
+function dropInvalidSeededTimelines(): void {
+  for (const [branchId, { scope }] of seededTimelines) {
+    if (!isSeedScopeValid(branchId, scope)) dropSeededTimeline(branchId);
+  }
+}
+
+function noteProjects(projects: ReadonlyArray<Pick<Project, 'id'>>): void {
+  listedProjectIds = new Set(projects.map((p) => p.id));
+  dropInvalidSeededTimelines();
+}
+
+function noteProjectBranches(
+  projectId: string,
+  branches: ReadonlyArray<Pick<Branch, 'id'> & TimelineScopeBranch>
+): void {
+  for (const branch of branches) {
+    branchScopes.set(branch.id, timelineScopeOf(branch));
+  }
+  listedProjectBranches.set(projectId, new Set(branches.map((b) => b.id)));
+  dropInvalidSeededTimelines();
+}
+
+/**
+ * Seed the in-memory timeline cache from the previous launch's IndexedDB
+ * entries. Desktop only — on the web the localStorage snapshot below and the
+ * per-card SWR reads already cover a cold boot. Runs once at module init and
+ * resolves without throwing whatever IndexedDB does; a failure is a cold
+ * cache, never a blocked paint.
+ *
+ * An entry is skipped when a fetch for its branch is already in memory or in
+ * flight (the seed lost the race to a card and must not roll a fresher
+ * timeline back). It is skipped and removed when its identity has already
+ * been contradicted by a list, when it carries no identity at all, or when it
+ * is older than `MAX_SEED_AGE_MS`.
+ */
+async function seedTimelineCacheFromIndexedDb(): Promise<void> {
+  if (!isTauri) return;
+  const entries = await readCachedEntries<BranchTimeline>('get_branch_timeline');
+  const now = Date.now();
+  for (const { args, data, fetchedAt, scope } of entries) {
+    const branchId = args?.branchId;
+    if (typeof branchId !== 'string') continue;
+    if (!scope || !isSeedScopeValid(branchId, scope) || now - fetchedAt > MAX_SEED_AGE_MS) {
+      void invalidateCache('get_branch_timeline', { branchId });
+      continue;
+    }
+    if (timelineCache.has(branchId) || inFlightTimelines.has(branchId)) continue;
+    const entry: TimelineCacheEntry = { timeline: data, fetchedAt };
+    timelineCache.set(branchId, entry);
+    seededTimelines.set(branchId, { entry, scope });
+  }
+}
+
+const timelineCacheSeeded: Promise<void> = seedTimelineCacheFromIndexedDb().catch(() => {});
+
+/**
+ * Resolves once the desktop boot seed has settled (immediately on the web).
+ * Cards do not wait on this — a card that mounts first simply fetches — but
+ * tests and boot diagnostics can.
+ */
+export function whenTimelineCacheSeeded(): Promise<void> {
+  return timelineCacheSeeded;
+}
 
 /**
  * Persisted shape of the boot snapshot. Stamped with the shared
@@ -518,6 +725,9 @@ type TimelineSnapshot = {
  * so cached timelines can paint on the first frame of a cold iOS reload, instead
  * of each card awaiting its own asynchronous IndexedDB read. IndexedDB remains
  * the source of truth; the snapshot is only a paint-on-first-frame accelerator.
+ * The desktop app has no such snapshot: `seedTimelineCacheFromIndexedDb` reads
+ * the IndexedDB entries directly, which it can afford because the native
+ * window is never torn down and reloaded the way an iOS tab is.
  * The seeded entries carry their original `fetchedAt`, so an older snapshot
  * reads as stale and `getBranchTimelineWithRevalidation` still kicks off a
  * fresh fetch.
@@ -596,6 +806,7 @@ export async function warmProjectTimelines(projectId: string): Promise<void> {
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
   inFlightTimelines.delete(branchId);
+  seededTimelines.delete(branchId);
   invalidateCache('get_branch_timeline', { branchId });
   window.dispatchEvent(
     new CustomEvent('timeline-invalidated', { detail: { branchIds: [branchId] } })
@@ -611,6 +822,7 @@ export function invalidateBranchTimeline(branchId: string): void {
 export function invalidateAllBranchTimelines(): void {
   timelineCache.clear();
   inFlightTimelines.clear();
+  seededTimelines.clear();
   invalidateCacheByCommand('get_branch_timeline');
   // `branchIds: null` means "all" — every listening card reloads.
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds: null } }));
@@ -620,13 +832,28 @@ interface GetBranchTimelineOptions {
   force?: boolean;
 }
 
+/**
+ * Whether `entry` is still the one the desktop boot seed placed for
+ * `branchId`: a previous launch's timeline, kept only to paint while this
+ * launch's refetch runs. False once any fetch has replaced it.
+ */
+function isSeededTimeline(branchId: string, entry: TimelineCacheEntry | undefined): boolean {
+  return entry !== undefined && seededTimelines.get(branchId)?.entry === entry;
+}
+
 export function getBranchTimeline(
   branchId: string,
   { force = false }: GetBranchTimelineOptions = {}
 ): Promise<BranchTimeline> {
+  // A seeded entry is a miss for a plain read: `getBranchTimelineWithRevalidation`
+  // paints it, but a caller that wants the timeline (hashtag items, the diff
+  // session launcher) must not resolve with a previous launch's. It joins the
+  // card's forced refetch when one is in flight, and otherwise bypasses the
+  // IndexedDB read, which holds the very entry being skipped.
+  const seeded = isSeededTimeline(branchId, timelineCache.get(branchId));
   if (!force) {
     const cached = timelineCache.get(branchId);
-    if (cached) {
+    if (cached && !seeded) {
       return Promise.resolve(cached.timeline);
     }
 
@@ -638,14 +865,24 @@ export function getBranchTimeline(
 
   // Use cachedInvoke so IndexedDB serves data on cold start while the network
   // fetch runs in parallel (SWR). The first yield may be cached; the last is
-  // always the freshest available value.
+  // always the freshest available value. The write is stamped with the
+  // branch's current identity so the next launch can tell whether the entry
+  // still describes this branch (see "Persisted timelines" above).
   let request: Promise<BranchTimeline> | undefined;
   const timelineRequest = (async () => {
     let timeline: BranchTimeline | undefined;
     for await (const { data, fetchedAt } of cachedInvoke<BranchTimeline>(
       'get_branch_timeline',
       { branchId },
-      { ttl: TIMELINE_CACHE_TTL, bypassRead: force }
+      {
+        ttl: TIMELINE_CACHE_TTL,
+        bypassRead: force || seeded,
+        maxEntries: MAX_PERSISTED_TIMELINES,
+        // Before the first branch list of a launch, the refetch of a seeded
+        // entry inherits the identity it was persisted under; a list that
+        // contradicts it later drops the entry either way.
+        scope: branchScopes.get(branchId) ?? seededTimelines.get(branchId)?.scope,
+      }
     )) {
       timeline = data;
       if (request && inFlightTimelines.get(branchId) === request) {
@@ -673,7 +910,11 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
   if (!entry) {
     return { cached: null, fresh: getBranchTimeline(branchId) };
   }
-  const isFresh = Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
+  // A seeded entry is never fresh, whatever its fetchedAt says: it is a
+  // previous launch's timeline, and the backend map that would otherwise
+  // refresh it is per process, so the paint must always come with a refetch.
+  const isFresh =
+    Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS && !isSeededTimeline(branchId, entry);
   return {
     cached: entry.timeline,
     fresh: isFresh ? null : getBranchTimeline(branchId, { force: true }),
@@ -707,6 +948,7 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   for (const id of branchIds) {
     timelineCache.delete(id);
     inFlightTimelines.delete(id);
+    seededTimelines.delete(id);
     invalidateCache('get_branch_timeline', { branchId: id });
   }
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));

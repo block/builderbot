@@ -41,36 +41,78 @@ fn git_user_identity_cache() -> &'static Mutex<HashMap<String, GitUserIdentityCa
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cached_git_user_identity<F>(cache_key: &str, fetch: F) -> GitUserIdentity
-where
-    F: FnOnce() -> GitUserIdentity,
-{
+/// The identity a build just read, remembered for the next one.
+///
+/// Every build reads `user.name` / `user.email` inside a git call it makes
+/// anyway — the one `git config` read locally, the batch script on a
+/// workspace — so the cache no longer saves a spawn or a round trip. It
+/// stands in when that read fails (`read` is `None`), so a transient failure
+/// doesn't un-mark the user's commits for one paint.
+fn remember_git_user_identity(cache_key: &str, read: Option<GitUserIdentity>) -> GitUserIdentity {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
 
-    if let Ok(cache) = git_user_identity_cache().lock() {
-        if let Some(entry) = cache.get(cache_key) {
-            if now.saturating_sub(entry.fetched_at) < GIT_USER_IDENTITY_TTL_MS {
-                return entry.identity.clone();
-            }
+    if let Some(identity) = read {
+        if let Ok(mut cache) = git_user_identity_cache().lock() {
+            cache.insert(
+                cache_key.to_string(),
+                GitUserIdentityCacheEntry {
+                    identity: identity.clone(),
+                    fetched_at: now,
+                },
+            );
         }
+        return identity;
     }
 
-    let identity = fetch();
+    git_user_identity_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .get(cache_key)
+                .filter(|entry| now.saturating_sub(entry.fetched_at) < GIT_USER_IDENTITY_TTL_MS)
+                .map(|entry| entry.identity.clone())
+        })
+        .unwrap_or(GitUserIdentity {
+            name: None,
+            email: None,
+        })
+}
 
-    if let Ok(mut cache) = git_user_identity_cache().lock() {
-        cache.insert(
-            cache_key.to_string(),
-            GitUserIdentityCacheEntry {
-                identity: identity.clone(),
-                fetched_at: now,
-            },
-        );
-    }
-
-    identity
+/// What the local arm takes from its one config read: the branch on origin
+/// to compare against and the identity to mark the user's commits with.
+///
+/// A successful read is authoritative, an empty one included — a repo with no
+/// `user.*` set has no own commits to mark, and the remembered identity is
+/// replaced. A failed read (an unreadable config file, a killed child: git's
+/// silent "no match" is a successful empty read, not a failure) falls back to
+/// the branch's own name — the answer for a branch with no upstream — and to
+/// the identity the last successful build remembered, which it leaves in
+/// place.
+fn local_identity_and_remote_branch(
+    cache_key: &str,
+    branch_name: &str,
+    base_branch: &str,
+    config: Result<git::BranchConfigSnapshot, git::GitError>,
+) -> (String, GitUserIdentity) {
+    let config = config
+        .map_err(|e| log::warn!("[timeline] config read failed for {cache_key}: {e}"))
+        .ok();
+    let remote_branch = config
+        .as_ref()
+        .map(|config| config.upstream_branch_name(branch_name, base_branch))
+        .unwrap_or_else(|| branch_name.to_string());
+    let identity = remember_git_user_identity(
+        cache_key,
+        config.map(|config| GitUserIdentity {
+            name: config.user_name,
+            email: config.user_email,
+        }),
+    );
+    (remote_branch, identity)
 }
 
 /// Extract the GitHub username from a noreply email address.
@@ -214,36 +256,6 @@ fn parse_commit_lines(
     commits
 }
 
-/// Fetch commits from a remote workspace using merge-base + git log.
-fn fetch_remote_commits(
-    ws_name: &str,
-    repo_subpath: Option<&str>,
-    store: &Arc<Store>,
-    branch_id: &str,
-    base_ref: &str,
-) -> Result<Vec<CommitTimelineItem>, String> {
-    let range = if let Ok(mb_output) =
-        branches::run_workspace_git(ws_name, repo_subpath, &["merge-base", base_ref, "HEAD"])
-    {
-        let mb = mb_output.trim().to_string();
-        format!("{mb}..HEAD")
-    } else {
-        format!("{base_ref}..HEAD")
-    };
-    let output = branches::run_workspace_git(
-        ws_name,
-        repo_subpath,
-        &["log", git::BRANCH_COMMIT_LOG_FORMAT, &range],
-    )
-    .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
-    let lines: Vec<String> = output
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
-    Ok(parse_commit_lines(store, branch_id, &lines))
-}
-
 /// Map local CommitInfo entries to CommitTimelineItems with DB metadata.
 fn map_local_commits(
     store: &Arc<Store>,
@@ -344,13 +356,16 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             &branch.base_branch,
         );
         let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
-        let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
+        // One workspace exec for everything: git state, identity and the
+        // commit log. Each exec costs seconds of transport, so this is the
+        // whole cost of a remote timeline.
+        //
         // Foreground: skip untracked enumeration so first paint isn't blocked
         // by a recursive working-tree walk on huge monorepos. The background
         // refresh re-runs with `Full` and emits the corrected counts via
         // `git-state-updated`.
-        git_state = Some(git::compute_branch_git_state_batched(
+        let snapshot = git::compute_branch_git_snapshot_batched(
             &cache_key,
             |script, args| {
                 branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
@@ -360,55 +375,59 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             &branch.base_branch,
             git::FetchMode::Never,
             git::WorktreeStatusScope::Indexed,
-        ));
-
-        {
-            let ws = ws_name.clone();
-            let sub = repo_subpath.clone();
-            identity = cached_git_user_identity(
-                &format!("remote:{ws}:{}", sub.as_deref().unwrap_or("")),
-                || {
-                    let name =
-                        branches::run_workspace_git(&ws, sub.as_deref(), &["config", "user.name"])
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty());
-                    let email =
-                        branches::run_workspace_git(&ws, sub.as_deref(), &["config", "user.email"])
-                            .ok()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty());
-                    GitUserIdentity { name, email }
-                },
-            );
-        }
-
-        commits = fetch_remote_commits(
-            ws_name,
-            repo_subpath.as_deref(),
-            store,
-            branch_id,
-            &base_ref,
-        )?;
+        );
+        git_state = Some(snapshot.state);
+        identity = remember_git_user_identity(
+            &format!("remote:{ws_name}:{}", repo_subpath.as_deref().unwrap_or("")),
+            // The script ran: its identity lines are the answer, even when
+            // they are empty.
+            snapshot.commit_lines.is_ok().then_some(GitUserIdentity {
+                name: snapshot.user_name,
+                email: snapshot.user_email,
+            }),
+        );
+        let lines = snapshot
+            .commit_lines
+            .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
+        commits = parse_commit_lines(store, branch_id, &lines);
     } else if let Some(ref wd) = workdir {
         // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
+            // One `git config` read covers the branch's upstream entries and
+            // the user identity; `local_identity_and_remote_branch` says what
+            // a failed read falls back to.
+            let (remote_branch, read_identity) = local_identity_and_remote_branch(
+                &format!("local:{}", wd.path),
+                &branch.branch_name,
+                &branch.base_branch,
+                git::read_branch_config_snapshot(worktree_path, &branch.branch_name),
+            );
+            identity = read_identity;
+
             // Foreground: `Indexed` skips the untracked-file walk and lite-env
             // skips the per-project `$SHELL -ils` capture. A captured-env
             // warm-up still fires in the background so the next non-foreground
             // op (refresh, pull, discard) finds a ready snapshot.
-            git_state = Some(git::compute_local_branch_git_state(
+            //
+            // The commit log runs inside the state build: it starts at the
+            // fork point the build already found for `commitsSinceFork`, and
+            // overlaps the build's own counts instead of following them.
+            let (state, git_commits) = git::compute_local_branch_git_state_with(
                 worktree_path,
-                &branch.branch_name,
-                &git::upstream_branch_name(worktree_path, &branch.branch_name, &branch.base_branch),
-                &branch.base_branch,
-                git::FetchMode::Never,
-                git::WorktreeStatusScope::Indexed,
+                git::BranchGitStateQuery {
+                    branch_name: &branch.branch_name,
+                    remote_branch: &remote_branch,
+                    base_branch: &branch.base_branch,
+                    fetch_mode: git::FetchMode::Never,
+                    worktree_scope: git::WorktreeStatusScope::Indexed,
+                },
                 git::EnvSource::Lite,
-            ));
+                |merge_base| git::get_commits_since_base(worktree_path, &base_ref, merge_base),
+            );
+            git_state = Some(state);
 
             if let Ok(Some(project)) = store.get_project(&branch.project_id) {
                 let session_working_dir = branches::local_branch_session_working_dir(
@@ -422,29 +441,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 }
             }
 
-            {
-                let path_str = wd.path.clone();
-                // `git config user.{name,email}` reads `.git/config` + `~/.gitconfig`
-                // — env-independent — so the lite path is enough and we don't
-                // want to block first paint on the per-project `$SHELL -ils`
-                // capture (~8.5s on cold cache).
-                identity = cached_git_user_identity(&format!("local:{path_str}"), || {
-                    let name = git::cli_run_smart(worktree_path, &["config", "user.name"])
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    let email = git::cli_run_smart(worktree_path, &["config", "user.email"])
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty());
-                    GitUserIdentity { name, email }
-                });
-            }
-
-            let git_commits =
-                git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
-                    format!("Failed to get commits since base for branch {branch_id}: {e:?}")
-                })?;
+            let git_commits = git_commits.map_err(|e| {
+                format!("Failed to get commits since base for branch {branch_id}: {e:?}")
+            })?;
             commits = map_local_commits(store, branch_id, &git_commits);
         }
     }
@@ -2114,6 +2113,206 @@ mod tests {
         assert_eq!(landed.subject, "visible change");
         assert_eq!(timeline.notes[0].title, "Final note title");
         assert_eq!(timeline.reviews[0].title, None);
+    }
+
+    // ── local arm: one config read, one state build, one log ───────────
+
+    /// The local arm reads the user identity with the branch's upstream in
+    /// one config call and marks the user's commits from it.
+    #[test]
+    fn build_branch_timeline_marks_own_commits_from_the_config_read() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        assert_eq!(timeline.commits.len(), 1);
+        assert_eq!(timeline.commits[0].sha, visible_sha);
+        assert!(timeline.commits[0].is_own_commit);
+        let state = timeline.git_state.unwrap();
+        assert_eq!(state.base.commits_since_fork, 0);
+        assert_eq!(state.upstream.r#ref, "origin/feature");
+        assert!(!state.upstream.exists);
+        assert!(state.expected_branch_matches);
+
+        repo.run_git(&[
+            "-c",
+            "user.name=Other",
+            "-c",
+            "user.email=other@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "theirs",
+        ]);
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        assert_eq!(timeline.commits.len(), 2);
+        assert_eq!(timeline.commits[0].subject, "theirs");
+        assert!(!timeline.commits[0].is_own_commit);
+        assert!(timeline.commits[1].is_own_commit);
+    }
+
+    /// An upstream on another remote, or on the base, is not compared
+    /// against; an upstream on origin under another name is.
+    #[test]
+    fn build_branch_timeline_takes_the_upstream_from_the_same_config_read() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        repo.run_git(&["config", "branch.feature.remote", "fork"]);
+        repo.run_git(&["config", "branch.feature.merge", "refs/heads/feature"]);
+        let state = build_branch_timeline(&store, &branch.id)
+            .unwrap()
+            .git_state
+            .unwrap();
+        assert_eq!(state.upstream.r#ref, "origin/feature");
+        assert!(!state.upstream.exists);
+
+        repo.run_git(&["config", "branch.feature.remote", "origin"]);
+        repo.run_git(&["config", "branch.feature.merge", "refs/heads/main"]);
+        let state = build_branch_timeline(&store, &branch.id)
+            .unwrap()
+            .git_state
+            .unwrap();
+        assert_eq!(state.upstream.r#ref, "origin/feature");
+
+        repo.run_git(&["config", "branch.feature.merge", "refs/heads/feature-x"]);
+        repo.run_git(&["update-ref", "refs/remotes/origin/feature-x", &visible_sha]);
+        let state = build_branch_timeline(&store, &branch.id)
+            .unwrap()
+            .git_state
+            .unwrap();
+        assert_eq!(state.upstream.r#ref, "origin/feature-x");
+        assert!(state.upstream.exists);
+        assert_eq!(state.upstream.relation, git::UpstreamRelation::InSync);
+    }
+
+    /// Nothing on the branch yet: an empty commit list, not an error.
+    #[test]
+    fn build_branch_timeline_with_no_commits_ahead_is_empty() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        let base_sha = repo.commit("base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base_sha]);
+        repo.run_git(&["checkout", "-b", "feature"]);
+        let (store, branch) = store_with_branch(&repo);
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        assert!(timeline.commits.is_empty());
+        let state = timeline.git_state.unwrap();
+        assert_eq!(state.head_sha.as_deref(), Some(base_sha.as_str()));
+        assert_eq!(state.base.sha.as_deref(), Some(base_sha.as_str()));
+    }
+
+    /// Without `origin/main` the commit log has no range to run over, which
+    /// fails the build the way it always has.
+    #[test]
+    fn build_branch_timeline_without_the_base_ref_fails() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["checkout", "-b", "feature"]);
+        let (store, branch) = store_with_branch(&repo);
+
+        let err = build_branch_timeline(&store, &branch.id).unwrap_err();
+        assert!(
+            err.contains("Failed to get commits since base"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A detached checkout still lists its commits and reports the state.
+    #[test]
+    fn build_branch_timeline_on_a_detached_head_lists_commits() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        repo.run_git(&["checkout", "--detach", &visible_sha]);
+        let (store, branch) = store_with_branch(&repo);
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        assert_eq!(timeline.commits.len(), 1);
+        let state = timeline.git_state.unwrap();
+        assert!(state.detached_head);
+        assert!(!state.expected_branch_matches);
+    }
+
+    /// The identity cache is refreshed by every build and only answers when
+    /// a build could not read the identity itself.
+    #[test]
+    fn remembered_identity_is_refreshed_and_only_fills_a_failed_read() {
+        let key = format!("test:{}", Uuid::new_v4());
+        let unread = remember_git_user_identity(&key, None);
+        assert!(unread.name.is_none() && unread.email.is_none());
+
+        let read = remember_git_user_identity(
+            &key,
+            Some(GitUserIdentity {
+                name: Some("Matt".into()),
+                email: None,
+            }),
+        );
+        assert_eq!(read.name.as_deref(), Some("Matt"));
+
+        let fallback = remember_git_user_identity(&key, None);
+        assert_eq!(fallback.name.as_deref(), Some("Matt"));
+
+        let cleared = remember_git_user_identity(
+            &key,
+            Some(GitUserIdentity {
+                name: None,
+                email: None,
+            }),
+        );
+        assert!(cleared.name.is_none());
+        assert!(remember_git_user_identity(&key, None).name.is_none());
+    }
+
+    /// A config read that fails outright — git complaining on stderr, not its
+    /// silent "no match" — keeps the identity the last build read and
+    /// compares against the branch's own name. Only a successful read may
+    /// replace the remembered identity, and a successful empty read does.
+    #[test]
+    fn failed_config_read_keeps_the_remembered_identity_and_the_local_name() {
+        let key = format!("test:{}", Uuid::new_v4());
+        let (remote_branch, identity) = local_identity_and_remote_branch(
+            &key,
+            "feature-x-2",
+            "main",
+            Ok(git::BranchConfigSnapshot {
+                upstream_remote: Some("origin".into()),
+                upstream_merge: Some("refs/heads/feature-x".into()),
+                user_name: Some("Matt".into()),
+                user_email: Some("matt@example.com".into()),
+            }),
+        );
+        assert_eq!(remote_branch, "feature-x");
+        assert_eq!(identity.name.as_deref(), Some("Matt"));
+        assert_eq!(identity.email.as_deref(), Some("matt@example.com"));
+
+        let (remote_branch, identity) = local_identity_and_remote_branch(
+            &key,
+            "feature-x-2",
+            "main",
+            Err(git::GitError::CommandFailed(
+                "fatal: bad config line 1 in file .git/config\n".into(),
+            )),
+        );
+        assert_eq!(remote_branch, "feature-x-2");
+        assert_eq!(identity.name.as_deref(), Some("Matt"));
+        assert_eq!(identity.email.as_deref(), Some("matt@example.com"));
+        // The cache was left as it was, not overwritten with an empty identity.
+        assert_eq!(
+            remember_git_user_identity(&key, None).email.as_deref(),
+            Some("matt@example.com")
+        );
+
+        let (remote_branch, identity) = local_identity_and_remote_branch(
+            &key,
+            "feature-x-2",
+            "main",
+            Ok(git::BranchConfigSnapshot::default()),
+        );
+        assert_eq!(remote_branch, "feature-x-2");
+        assert!(identity.name.is_none() && identity.email.is_none());
+        assert!(remember_git_user_identity(&key, None).email.is_none());
     }
 
     // ── timeline ordering across a rebase ───────────────────────────────

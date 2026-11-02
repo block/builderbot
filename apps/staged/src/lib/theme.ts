@@ -26,6 +26,7 @@ export interface Theme {
     elevated: string; // Floating elements (cards, dialogs)
     alertDialog: string; // Compact confirmation surfaces
     menu: string; // Menu/popover surfaces (context menu, dropdown, select, popover)
+    input: string; // Text input fields (search boxes)
     hover: string; // Hover states
   };
 
@@ -454,6 +455,11 @@ export function createAdaptiveTheme(
       // background) and lean on the shadcn ring/shadow for the lift, restoring
       // the white menus that predated the elevated-surface tinting.
       menu: isDark ? elevate(0.08) : primaryBg,
+      // Text inputs (the list-view search fields) read as a crisp white well in
+      // light themes, standing out from the gray chrome page like the white
+      // project cards beside them rather than the off-white elevated tint.
+      // Dark themes use the same lifted surface as other raised controls.
+      input: isDark ? elevate(0.08) : '#ffffff',
       hover: elevate(0.06), // Hover state
     },
 
@@ -580,6 +586,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--bg-elevated': t.bg.elevated,
     '--bg-alert-dialog': t.bg.alertDialog,
     '--bg-menu': t.bg.menu,
+    '--bg-input': t.bg.input,
     '--bg-hover': t.bg.hover,
 
     '--border-subtle': t.border.subtle,

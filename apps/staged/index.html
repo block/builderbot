@@ -12,7 +12,8 @@
          iOS 27 draws the page under the status bar but keeps the layout
          viewport the height below it, so the page ends 62 px above the bottom
          of the screen. iOS reads this tag only when the app is added to the
-         Home Screen. -->
+         Home Screen; apps added while it said black-translucent keep that,
+         and src/lib/shared/viewportFit.ts drops cover for them. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta
       name="viewport"

@@ -23,7 +23,15 @@ let body: { scrollTop: number; scrollLeft: number };
 let fakeDocument: EventTarget & { activeElement: unknown };
 let rafCallbacks: Array<() => void>;
 
-const composer = { tagName: 'TEXTAREA' };
+/** A stand-in element; `inFullScreen` places it inside a full-screen dialog. */
+function element(props: Record<string, unknown>, inFullScreen = true) {
+  return {
+    ...props,
+    closest: (selector: string) => (selector === '[data-full-screen]' && inFullScreen ? {} : null),
+  };
+}
+
+const composer = element({ tagName: 'TEXTAREA' });
 
 function flushFrames(): void {
   const pending = rafCallbacks;
@@ -154,19 +162,47 @@ describe('watchVisualViewport', () => {
     flushFrames();
     expect(visibleViewport.height).toBeNull();
 
-    fakeDocument.activeElement = { tagName: 'INPUT', type: 'search' };
+    fakeDocument.activeElement = element({ tagName: 'INPUT', type: 'search' });
     fakeDocument.dispatchEvent(new Event('focusin'));
     expect(visibleViewport.height).toBe(484);
   });
 
   it('follows a focused contenteditable', async () => {
     const { visibleViewport, watchVisualViewport } = await importModule();
-    fakeDocument.activeElement = { tagName: 'DIV', isContentEditable: true };
+    fakeDocument.activeElement = element({ tagName: 'DIV', isContentEditable: true });
     viewport.height = 384;
     watchVisualViewport();
     flushFrames();
 
     expect(visibleViewport.keyboardOpen).toBe(true);
+  });
+
+  it('keeps the page scroll that reveals an input outside the full-screen layout', async () => {
+    // A popover's search field portalled over the dialog. guardDocumentScroll
+    // keeps Safari's scroll for it, so the layout stays at the layout
+    // viewport and scrolls with the page, popover and all, rather than
+    // following the visual viewport back over the input.
+    const { visibleViewport, watchVisualViewport } = await importModule();
+    watchVisualViewport();
+    flushFrames();
+
+    fakeDocument.activeElement = element({ tagName: 'INPUT', type: 'text' }, false);
+    viewport.height = 384;
+    viewport.offsetTop = 330;
+    fakeWindow.scrollY = 330;
+    viewport.dispatchEvent(new Event('resize'));
+
+    expect(fakeWindow.scrollTo).not.toHaveBeenCalled();
+    expect(fakeWindow.scrollY).toBe(330);
+    expect(visibleViewport).toEqual({ top: 0, height: null, keyboardOpen: false, zoomed: false });
+
+    // Back in the dialog's own composer, the dialog fits above the keyboard
+    // again and the scroll goes.
+    fakeDocument.activeElement = composer;
+    fakeDocument.dispatchEvent(new Event('focusin'));
+
+    expect(fakeWindow.scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(visibleViewport).toEqual({ top: 0, height: 384, keyboardOpen: true, zoomed: false });
   });
 
   it('leaves a pinch-zoomed page where the user panned it', async () => {

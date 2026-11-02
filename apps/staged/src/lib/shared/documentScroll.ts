@@ -19,7 +19,12 @@ export function resetDocumentScroll(): void {
   if (body.scrollLeft !== 0) body.scrollLeft = 0;
 }
 
-function shouldKeepDocumentScroll(): boolean {
+/**
+ * Whether the document's current scroll is meant to stay. Shared by this
+ * guard and the full-screen layout's visual viewport tracking
+ * (visualViewport.svelte.ts), so the two never undo each other's choice.
+ */
+export function shouldKeepDocumentScroll(): boolean {
   // A pinch-zoomed page is panned by the user; leave it where they put it.
   if (isPinchZoomed(window.visualViewport?.scale ?? 1)) return true;
   // Safari's scroll is what keeps a focused input above the keyboard. A

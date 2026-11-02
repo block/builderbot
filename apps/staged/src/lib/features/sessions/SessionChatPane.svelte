@@ -2475,7 +2475,7 @@
   function insertSlashCommand(command: AcpCommand) {
     inputText = `/${command.name}${command.inputHint ? ' ' : ''}`;
     tick().then(() => {
-      focusAfterDialogEnter(inputEl);
+      inputEl?.focus();
       autoResize();
     });
   }

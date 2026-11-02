@@ -18,12 +18,17 @@
 // While anything is subscribed, the page scroll iOS Safari adds to reveal a
 // focused input is undone on every viewport change. The subscriber's layout
 // already keeps the input on screen, and a scrolled page would leave the
-// rest of the shell (the TopBar, every hit target) offset under it.
+// rest of the shell (the TopBar, every hit target) offset under it. Where
+// guardDocumentScroll keeps the scroll instead (shouldKeepDocumentScroll: a
+// pinch-zoomed page, or a focused input outside the full-screen layout, such
+// as a popover's search field over a dialog), so does this module, and the
+// state stays at the layout viewport's geometry so the layout scrolls with
+// the page and the input stays where Safari revealed it.
 //
 // Older webviews have no `visualViewport`; the state then stays at the
 // layout viewport's geometry and behaviour is unchanged.
 
-import { resetDocumentScroll } from './documentScroll';
+import { resetDocumentScroll, shouldKeepDocumentScroll } from './documentScroll';
 import { isTextInput } from './textInput';
 import {
   computeViewportGeometry,
@@ -37,25 +42,28 @@ let trackedViewport: VisualViewport | null = null;
 let subscriberCount = 0;
 let initialSyncFrame = 0;
 
-function measure(vv: VisualViewport): ViewportGeometry {
+function measure(vv: VisualViewport, keepScroll: boolean): ViewportGeometry {
   return computeViewportGeometry({
     height: vv.height,
     offsetTop: vv.offsetTop,
     scale: vv.scale,
     layoutHeight: document.documentElement.clientHeight,
-    textInputFocused: isTextInput(document.activeElement),
+    // A kept scroll is what reveals the focused input; following the visual
+    // viewport would carry the layout, and anything anchored in it, along
+    // with the scroll and undo that.
+    textInputFocused: !keepScroll && isTextInput(document.activeElement),
   });
 }
 
 function syncVisualViewport() {
   const vv = trackedViewport;
   if (!vv) return;
-  let geometry = measure(vv);
-  // A pinch-zoomed viewport is panned over the page on purpose; leave it.
-  if (!geometry.zoomed) {
+  const keepScroll = shouldKeepDocumentScroll();
+  let geometry = measure(vv, keepScroll);
+  if (!keepScroll) {
     resetDocumentScroll();
     // The visual viewport moves with the page; read where it landed.
-    if (geometry.top !== 0) geometry = measure(vv);
+    if (geometry.top !== 0) geometry = measure(vv, keepScroll);
   }
   // Unchanged fields are no-op writes on `$state`, so subscribers only
   // restyle when something actually moved.

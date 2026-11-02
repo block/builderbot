@@ -195,11 +195,23 @@
     onLongPress: openMoreMenu,
   });
 
+  // A press on the ⋮ trigger is the trigger's own: bits-ui toggles the menu
+  // on its touch pointerup, so a long press there that had already opened
+  // the menu would close it again on release. Left alone, the release opens
+  // it, like a tap.
+  function isOnMoreTrigger(e: Event): boolean {
+    return !!moreTrigger && moreTrigger.contains(e.target as Node);
+  }
+
+  function handleTouchStart(e: TouchEvent) {
+    if (!isOnMoreTrigger(e)) longPress.ontouchstart(e);
+  }
+
   function handleContextMenu(e: MouseEvent) {
     if (longPress.oncontextmenu(e)) return;
     // Android Chrome raises its own contextmenu for a touch hold. A
     // right-click with a mouse keeps the browser's default.
-    if (reorderable || !viewport.hasCoarsePointer) return;
+    if (reorderable || !viewport.hasCoarsePointer || isOnMoreTrigger(e)) return;
     e.preventDefault();
     openMoreMenu();
   }
@@ -383,7 +395,7 @@
   ondragleave={reorderable ? handleDragLeave : undefined}
   ondrop={reorderable ? handleDrop : undefined}
   ondragend={reorderable ? handleDragEnd : undefined}
-  ontouchstart={longPress.ontouchstart}
+  ontouchstart={handleTouchStart}
   oncontextmenu={handleContextMenu}
   data-repo={repo.githubRepo}
   data-subpath={repo.subpath}

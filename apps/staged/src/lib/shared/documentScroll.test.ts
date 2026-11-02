@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { guardDocumentScroll, resetDocumentScroll } from './documentScroll';
+import {
+  guardDocumentScroll,
+  resetDocumentScroll,
+  shouldKeepDocumentScroll,
+} from './documentScroll';
 
 // vitest runs in node: `window`, `document` and `<body>` are stubbed down to
 // what the module touches. Numbers are iOS 27.2 Safari's: closing a dialog
@@ -67,6 +71,26 @@ describe('resetDocumentScroll', () => {
   it('writes nothing at the origin', () => {
     resetDocumentScroll();
     expect(fakeWindow.scrollTo).not.toHaveBeenCalled();
+  });
+});
+
+describe('shouldKeepDocumentScroll', () => {
+  it('keeps the scroll for a focused input outside a full-screen dialog', () => {
+    fakeDocument.activeElement = element('INPUT');
+    expect(shouldKeepDocumentScroll()).toBe(true);
+  });
+
+  it('gives it up for an input in a full-screen dialog, or with nothing to type into', () => {
+    fakeDocument.activeElement = element('TEXTAREA', true);
+    expect(shouldKeepDocumentScroll()).toBe(false);
+
+    fakeDocument.activeElement = element('BUTTON');
+    expect(shouldKeepDocumentScroll()).toBe(false);
+  });
+
+  it('keeps a pinch-zoomed page', () => {
+    fakeWindow.visualViewport = { scale: 2 };
+    expect(shouldKeepDocumentScroll()).toBe(true);
   });
 });
 

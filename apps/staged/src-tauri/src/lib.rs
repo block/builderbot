@@ -2342,6 +2342,8 @@ pub fn run() {
             session_commands::list_queued_session_messages,
             session_commands::delete_queued_session_message,
             session_commands::send_queued_session_message,
+            session_commands::send_session_message_now,
+            session_commands::get_session_live_delivery,
             session_commands::build_note_followup_message,
             session_commands::cancel_session,
             session_commands::stop_session_async_task,

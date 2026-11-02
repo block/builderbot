@@ -13,6 +13,11 @@
     a labeled Stop button; once messages exist, Stop lives on the Thinking row
     and the composer queues follow-ups as usual
   - Message queue: sending while running persists a follow-up for backend drain
+  - Live send: when the backend reports the running session can take a message
+    now (`get_session_live_delivery`), the composer offers "Send" beside
+    "Queue"; "Send" goes through `send_session_message_now`, the live path the
+    `continue_repo_session` MCP tool uses (steer, else interrupt-and-reprompt);
+    a session that stopped meanwhile falls back to the idle resume path
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
   - Fixed-size modal with proper scrolling
@@ -49,6 +54,7 @@
     Session,
     SessionBackgroundHoldPayload,
     SessionMessage,
+    SessionStatus,
     QueuedSessionMessage,
     HashtagItem,
     ProjectRepo,
@@ -65,6 +71,7 @@
     getSession,
     getSessionAcpMetadataMessages,
     getSessionBackgroundHold,
+    getSessionLiveDelivery,
     getLatestSessionMessages,
     getOlderSessionMessages,
     handleExternalLinkClick,
@@ -74,6 +81,7 @@
     queueSessionMessage,
     resumeSession,
     sendQueuedSessionMessage,
+    sendSessionMessageNow,
     stopSessionAsyncTask,
     type AcpConfigDiscovery,
     type AcpConfigSelector,
@@ -90,8 +98,20 @@
     defaultSelectorValue,
     selectorHasValue,
   } from '../agents/acpConfigSelection';
-  import { setAcpConfigPref } from '../settings/preferences.svelte';
+  import {
+    preferences,
+    setAcpConfigPref,
+    setComposerSendMode,
+  } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
+  import ComposerError from './ComposerError.svelte';
+  import { composerSendControl, composerSessionBlock } from './composerSendControl';
+  import {
+    LIVE_DELIVERY_UNKNOWN,
+    liveDeliveryKnowledge,
+    shouldAskLiveDelivery,
+    type LiveDeliveryKnowledge,
+  } from './liveDelivery';
   import {
     backgroundHoldTaskRows,
     isTaskHeld,
@@ -271,6 +291,16 @@
   /** Latest background hold reported for this session; null when not holding. */
   let backgroundHold = $state<SessionBackgroundHold | null>(null);
   /**
+   * What the backend has said about this running session taking a message
+   * now (owned by this process, agent connection up). Asked on each poll tick
+   * until the answer is settled: a yes, or a no that cannot change during this
+   * run (another Staged instance owns the row). A retryable no — the
+   * connection comes up a few seconds into a run — is asked again. Forgotten
+   * whenever the status leaves `running` or the pane changes session.
+   */
+  let liveDelivery = $state<LiveDeliveryKnowledge>(LIVE_DELIVERY_UNKNOWN);
+  let liveDeliveryInFlight = false;
+  /**
    * Counts hold reports received by event, so the mount-time snapshot can tell
    * whether a newer report landed while it was in flight.
    */
@@ -327,6 +357,10 @@
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
+  let canSendLive = $derived(isLive && liveDelivery.supported);
+  let sendControl = $derived(
+    composerSendControl({ isLive, canSendLive, mode: preferences.composerSendMode })
+  );
   // Holding is a sub-state of running, so the session stays live and only the
   // activity row changes: the wait plus its live task count, and a Stop that
   // says what it stops.
@@ -569,6 +603,8 @@
   async function handleAttachFiles(files: File[]) {
     if (!projectId) return;
     attachError = null;
+    // Attaching is a draft edit: the last failure line has been read.
+    sendError = null;
     const rejections: AttachRejection[] = [];
     for (const file of files) {
       const reason = await addImageFile(file);
@@ -626,6 +662,8 @@
     imagePreviews = new Map(imagePreviews);
     imagePreviews.delete(imageId);
     attachError = null;
+    // Removing an attachment is a draft edit too.
+    sendError = null;
     deleteImage(imageId).catch((err) => {
       console.error('Failed to delete image:', err);
     });
@@ -642,6 +680,7 @@
     // Surface rejection reasons (signature, size) as paste does, reporting
     // the whole batch once so a later success cannot hide an earlier one.
     attachError = null;
+    sendError = null;
     const rejections: AttachRejection[] = [];
     for (const path of imagePaths) {
       try {
@@ -783,6 +822,7 @@
       } else {
         // A terminal status ends any wait: the agent has been torn down.
         clearBackgroundHold();
+        liveDelivery = LIVE_DELIVERY_UNKNOWN;
         finishPolling();
       }
     });
@@ -802,6 +842,7 @@
     if (!isActive || !id) return;
 
     backgroundHold = null;
+    liveDelivery = LIVE_DELIVERY_UNKNOWN;
     stoppingTaskIds = new Set();
     taskStopNotices = new Map();
     const unlisten = listenToEvent<SessionBackgroundHoldPayload>(
@@ -915,6 +956,8 @@
       hasOlderMessages = false;
       acpMetadataMessages = [];
       queuedMessages = [];
+      // A failure line is about the session that was shown when it happened.
+      sendError = null;
     }
     loading = true;
     error = null;
@@ -1093,6 +1136,7 @@
       if (JSON.stringify(result.queuedMessages) !== JSON.stringify(queuedMessages)) {
         queuedMessages = result.queuedMessages;
       }
+      refreshLiveDelivery(s?.status ?? session?.status);
 
       applyAcpMetadataUpdates(result.acpMetadataMessages);
       const merged = mergeSinceMessages(messages, result.messages, request.sinceId);
@@ -1144,6 +1188,35 @@
     }
     if (!changed) return;
     acpMetadataMessages = [...byId.values()].sort((a, b) => a.id - b.id);
+  }
+
+  /**
+   * Learn whether the running session can take a message now. One cheap
+   * registry lookup per poll tick while the answer is a retryable no; nothing
+   * once it is settled (see `liveDelivery`). A status other than `running`
+   * forgets the answer at once, so the next run asks afresh.
+   */
+  function refreshLiveDelivery(status: SessionStatus | undefined) {
+    if (status !== 'running') {
+      liveDelivery = LIVE_DELIVERY_UNKNOWN;
+      return;
+    }
+    if (!shouldAskLiveDelivery(status, liveDelivery) || liveDeliveryInFlight || !sessionId) {
+      return;
+    }
+    const id = sessionId;
+    liveDeliveryInFlight = true;
+    getSessionLiveDelivery(id)
+      .then((capability) => {
+        if (closed || sessionId !== id || session?.status !== 'running') return;
+        liveDelivery = liveDeliveryKnowledge(capability);
+      })
+      .catch(() => {
+        // Best-effort: the next tick asks again.
+      })
+      .finally(() => {
+        liveDeliveryInFlight = false;
+      });
   }
 
   async function refreshQueuedMessages() {
@@ -1205,8 +1278,46 @@
 
   let sending = $state(false);
   let noteFollowupSending = $state(false);
+  /**
+   * Why the last composer action failed (a refused or failed send, a queue
+   * change or cancel that failed). Shown on a line inside the composer, not in
+   * `error`: that state replaces the whole transcript with a centered card,
+   * which hides the very conversation the user is trying to continue, and
+   * (see `reopenMode`) would turn the next reopen into a full reload.
+   * Cleared when the next action starts, when the draft is edited (text,
+   * attachments), and when the pane moves to another session. Rendered by
+   * `ChatComposer`, or by the pipeline stop area that stands in for it.
+   */
+  let sendError = $state<string | null>(null);
+
+  /**
+   * A composer action is starting: drop the previous action's failure line,
+   * and a stale load error with it — the action's outcome is what the pane
+   * should show now, and the poll a successful one starts refreshes the
+   * transcript anyway.
+   */
+  function beginComposerAction() {
+    sendError = null;
+    error = null;
+  }
+
+  /**
+   * Why the composer has no session row to submit to (loading, or the load
+   * settled without one), or `null`. The submit control is disabled while
+   * set, with a title saying which.
+   */
+  let composerBlock = $derived(composerSessionBlock({ loading, hasSession: session !== null }));
 
   async function handleSend() {
+    // Without a row there is nothing to send to; the control is disabled, and
+    // Cmd+Enter keeps the draft rather than taking it out of the box only to
+    // put it back.
+    if (composerBlock) return;
+    // A send still in flight (a live send can take a few seconds: steer
+    // acknowledgement, interrupt-and-reprompt, or a resume) owns the composer
+    // until it settles; a second Cmd+Enter meanwhile must not clear the draft
+    // typed since, so the guard comes before anything is taken out of the box.
+    if (sending) return;
     const text = inputText.trim();
     if (!text) return;
     inputText = '';
@@ -1217,39 +1328,148 @@
     // Reset textarea height after clearing (oninput won't fire for programmatic changes)
     tick().then(() => autoResize());
 
+    if (sendControl.action === 'send-now') {
+      await sendMessageNow(text, imageIdsToSend);
+      return;
+    }
+
     if (isLive) {
+      beginComposerAction();
       try {
         await queueSessionMessage(sessionId, text, imageIdsToSend, branchId ?? null);
         await refreshQueuedMessages();
       } catch (e) {
-        error = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
+        sendError = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
         inputText = text;
         replyImageIds = imageIdsToSend ?? [];
       }
       return;
     }
 
-    // Session is idle — send immediately
-    await sendMessage(text, imageIdsToSend);
+    // Session is idle — send immediately. `sendMessage` reports the failure
+    // itself; the draft goes back in the box so it can be retried.
+    if (!(await sendMessage(text, imageIdsToSend))) {
+      inputText = text;
+      replyImageIds = imageIdsToSend ?? [];
+    }
   }
 
-  /** Actually send a message to the backend and start the agent. */
+  /**
+   * Deliver a message to the running session now — the composer's "Send"
+   * mode. The backend steers it into the turn in flight, or interrupts the
+   * turn and re-prompts when the agent cannot steer. It never resumes: a
+   * session that stopped between the last poll and the click comes back
+   * `not_running`, and the message goes through `sendMessage` instead — the
+   * idle path, which applies this pane's branch override and follow-up
+   * config (the note chat pane's branch would otherwise be lost). Anything
+   * not delivered (`blocked`, `rejected_queued`, `not_resumable`, or a kind
+   * this pane does not know) is reported and the draft restored — never
+   * re-queued behind the user's back, since a blocked steer may already have
+   * landed.
+   */
+  async function sendMessageNow(text: string, imageIds?: string[]) {
+    if (!session || sending) return;
+    const id = session.id;
+    sending = true;
+    beginComposerAction();
+    try {
+      const result = await sendSessionMessageNow(id, text, imageIds);
+      if (session?.id !== id) return;
+      switch (result.delivery) {
+        case 'injected':
+        case 'interrupted_and_reprompted':
+        case 'started_new_turn':
+          // The user row is persisted by the delivery itself; the poll picks
+          // it up.
+          startPolling();
+          scrollToBottom();
+          return;
+        case 'resumed':
+          // The command does not resume (see `not_running`); the kind belongs
+          // to the shared MCP spelling. Should it ever arrive, the row is
+          // running again on a fresh connection.
+          session = { ...session, status: 'running' };
+          clearBackgroundHold();
+          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          startPolling();
+          scrollToBottom();
+          return;
+        case 'not_running':
+          // Stopped since the last poll: resume it the way the idle composer
+          // does, with the branch override and follow-up config. `sending` is
+          // already held here, so the lock is passed through. A resume that
+          // fails (worktree gone, or the queue drain re-ran the session first
+          // so the row is already running) has set `sendError`; fall through
+          // to the draft restore below without overwriting it.
+          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          if (await sendMessage(text, imageIds, true)) return;
+          break;
+        case 'rejected_queued':
+          sendError = 'The session has not started yet; queue the message instead.';
+          break;
+        case 'blocked':
+          // The connection may have gone under the request: ask again before
+          // offering "Send" next time.
+          liveDelivery = LIVE_DELIVERY_UNKNOWN;
+          sendError = `Not delivered: ${result.reason ?? result.delivery}`;
+          break;
+        case 'not_resumable':
+          // Defensive: the command refuses a stopped session before the
+          // resume gate (`not_running`), so this kind only reaches the MCP
+          // tool. Kept because the shared union still spells it.
+          sendError = `Not delivered: ${result.reason ?? result.delivery}`;
+          break;
+        default: {
+          // A delivery kind the backend added that this hand-maintained union
+          // does not know: say so rather than restoring the draft in silence.
+          const unknownKind: never = result.delivery;
+          sendError = `Not delivered: ${String(unknownKind)}`;
+          break;
+        }
+      }
+      inputText = text;
+      replyImageIds = imageIds ?? [];
+    } catch (e) {
+      sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      inputText = text;
+      replyImageIds = imageIds ?? [];
+    } finally {
+      sending = false;
+    }
+  }
+
+  /**
+   * Actually send a message to the backend and start the agent. Resolves
+   * `true` once the backend accepted the message (even if the pane has moved
+   * to another session since), `false` when nothing was sent, and the caller
+   * decides whether to restore its draft. `sendError` says why on `false` in
+   * every case but two: when nothing could be targeted (defensive — the
+   * composer is disabled until the row has loaded, and a targeted send checks
+   * its target before calling), and when another send already holds
+   * `sending`, since the spinner already explains the wait.
+   */
   async function sendMessage(
     text: string,
     imageIds?: string[],
     sendingLocked = false,
     target: SendMessageTarget | null = null
-  ) {
+  ): Promise<boolean> {
     const targetSessionId = target?.sessionId ?? session?.id;
     const targetBranchId = target ? target.branchId : (branchId ?? null);
-    if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) return;
+    if (!targetSessionId || session?.id !== targetSessionId) {
+      // The row is not loaded, or the pane moved on before a targeted send
+      // ran. Nothing is said: a message here would be about a session this
+      // pane no longer shows.
+      return false;
+    }
+    if (!sendingLocked && sending) return false;
     if (!sendingLocked) sending = true;
-    error = null;
+    beginComposerAction();
     const acpConfigSelection: AcpConfigSelection | undefined =
       followupAcpConfigSelection ?? undefined;
     try {
       await resumeSession(targetSessionId, text, imageIds, targetBranchId, acpConfigSelection);
-      if (session?.id !== targetSessionId) return;
+      if (session?.id !== targetSessionId) return true;
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = {
@@ -1259,15 +1479,19 @@
       };
       // A new turn is starting: any hold reported belonged to the previous
       // one, so drop it rather than letting this local flip back to `running`
-      // re-render the old wait in place of "Thinking…".
+      // re-render the old wait in place of "Thinking…". Likewise whatever was
+      // known about live delivery was about the previous run.
       clearBackgroundHold();
+      liveDelivery = LIVE_DELIVERY_UNKNOWN;
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
       startPolling();
       scrollToBottom();
+      return true;
     } catch (e) {
-      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      return false;
     } finally {
       if (!sendingLocked) sending = false;
     }
@@ -1279,7 +1503,7 @@
     const hasParsedNote = noteInfo.hasParsedNote;
     sending = true;
     noteFollowupSending = true;
-    error = null;
+    beginComposerAction();
     try {
       const prompt = await buildNoteFollowupMessage(
         target.sessionId,
@@ -1289,7 +1513,7 @@
       if (session?.id !== target.sessionId || (branchId ?? null) !== target.branchId) return;
       await sendMessage(prompt, undefined, true, target);
     } catch (e) {
-      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       noteFollowupSending = false;
       sending = false;
@@ -1299,11 +1523,12 @@
   async function handleDeleteQueuedMessage(id: string) {
     if (queueActionIds.has(id)) return;
     queueActionIds = new Set(queueActionIds).add(id);
+    beginComposerAction();
     try {
       await deleteQueuedSessionMessage(id);
       await refreshQueuedMessages();
     } catch (e) {
-      error = `Failed to remove queued message: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to remove queued message: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       const next = new Set(queueActionIds);
       next.delete(id);
@@ -1314,7 +1539,7 @@
   async function handleSendQueuedMessage(id: string) {
     if (isLive || sending || queueActionIds.has(id)) return;
     queueActionIds = new Set(queueActionIds).add(id);
-    error = null;
+    beginComposerAction();
     try {
       await sendQueuedSessionMessage(id);
       await refreshQueuedMessages();
@@ -1324,7 +1549,7 @@
       startPolling();
       scrollToBottom();
     } catch (e) {
-      error = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
       await refreshQueuedMessages();
     } finally {
       const next = new Set(queueActionIds);
@@ -1336,10 +1561,11 @@
   async function handleCancel() {
     if (!session || cancelling) return;
     cancelling = true;
+    beginComposerAction();
     try {
       await cancelSession(session.id);
     } catch (e) {
-      error = `Failed to cancel: ${e instanceof Error ? e.message : String(e)}`;
+      sendError = `Failed to cancel: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       cancelling = false;
     }
@@ -1420,6 +1646,12 @@
       e.preventDefault();
       handleSend();
     }
+  }
+
+  /** The draft changed: the last failure line has been read, so drop it. */
+  function handleInput() {
+    sendError = null;
+    autoResize();
   }
 
   function autoResize() {
@@ -2755,8 +2987,11 @@
   <!-- Input area with queued messages and image previews -->
   <div class="input-wrapper">
     {#if isPipelineRunning && grouped.length === 0}
+      <!-- Stands in for the composer, so it shows the composer's failure
+           line too: a failed Stop has nowhere else to appear. -->
       <div class="pipeline-stop-area">
-        <span class="inline-flex" title="Stop workflow">
+        <ComposerError message={sendError} />
+        <span class="inline-flex pipeline-stop-button" title="Stop workflow">
           <Button
             variant="destructive"
             size="sm"
@@ -2844,10 +3079,10 @@
       <ChatComposer
         bind:textareaEl={inputEl}
         bind:value={inputText}
-        placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
+        placeholder={sendControl.placeholder}
         {hashtagItems}
         onkeydown={handleInputKeydown}
-        oninput={autoResize}
+        oninput={handleInput}
         {canAttachImages}
         attachedImageIds={replyImageIds}
         {imagePreviews}
@@ -2855,7 +3090,12 @@
         onRemoveImage={removeReplyImage}
         {attachError}
         {isLive}
+        {canSendLive}
+        sendMode={preferences.composerSendMode}
+        onSendModeChange={setComposerSendMode}
         {sending}
+        sessionBlock={composerBlock}
+        {sendError}
         onSend={handleSend}
       >
         {#snippet configPicker()}
@@ -3460,13 +3700,20 @@
 
   /* ----- Pipeline stop area ---------------------------------------------- */
 
+  /* Same chrome as .chat-composer: the error line (if any) above, the
+     button right-aligned beneath it. */
   .pipeline-stop-area {
     display: flex;
-    justify-content: flex-end;
+    flex-direction: column;
+    gap: 8px;
     padding: 10px 14px;
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
+  }
+
+  .pipeline-stop-button {
+    align-self: flex-end;
   }
 
   /* ======================================================================= */

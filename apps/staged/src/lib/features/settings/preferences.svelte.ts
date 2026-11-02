@@ -34,9 +34,15 @@ import {
   normalizeProjectStatusOptions,
   type ProjectStatusOption,
 } from '../projects/projectStatusDisplay';
+import {
+  DEFAULT_COMPOSER_SEND_MODE,
+  normalizeComposerSendMode,
+  type ComposerSendMode,
+} from '../sessions/composerSendControl';
 
 // Re-export so picker code can import the type alongside the actions.
 export type { AcpConfigPref, AcpConfigPrefPatch };
+export type { ComposerSendMode };
 
 /**
  * The agent/model/effort the `generate_pikchr` diagram sub-session runs under,
@@ -84,6 +90,12 @@ const DIAGRAM_SUBSESSION_CONFIG_STORE_KEY = 'diagram-subsession-config';
 const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
 /** The statuses a project can be manually set to (frontend-only). */
 const PROJECT_STATUS_OPTIONS_STORE_KEY = 'project-status-options';
+/**
+ * How the chat composer submits to a running session that can take a message
+ * now: queue it for after the turn, or send it live. Global, not per session
+ * or repo (frontend-only).
+ */
+const COMPOSER_SEND_MODE_STORE_KEY = 'composer-send-mode';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -191,6 +203,11 @@ export const preferences = $state({
   projectStatusOptions: DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({
     ...o,
   })) as ProjectStatusOption[],
+  /**
+   * The chat composer's last-used submit mode for running sessions whose
+   * agent can take a message now. Remembered globally; defaults to queueing.
+   */
+  composerSendMode: DEFAULT_COMPOSER_SEND_MODE as ComposerSendMode,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -266,30 +283,67 @@ function ensureSystemModeListener() {
 // Initialization
 // =============================================================================
 
-let unlistenStatusOptions: (() => void) | undefined;
-let statusOptionsRevision = 0;
+/**
+ * A preference every client (Tauri window or web tab) keeps in step: any
+ * client's write, this one's included, arrives as a store-change event and
+ * goes through `apply`, which must normalize missing or malformed values.
+ */
+function syncedPreference(key: string, apply: (value: unknown) => void) {
+  let unlisten: (() => void) | undefined;
+  let revision = 0;
 
-function applyProjectStatusOptions(value: unknown): void {
-  statusOptionsRevision += 1;
+  function receive(value: unknown): void {
+    revision += 1;
+    apply(value);
+  }
+
+  async function refresh(): Promise<void> {
+    const current = ++revision;
+    try {
+      const value = await getStoreValue<unknown>(key);
+      // A notification, local edit, or newer refresh wins over an older snapshot.
+      if (current === revision) apply(value);
+    } catch (error) {
+      console.error(`[Preferences] Failed to refresh ${key}:`, error);
+    }
+  }
+
+  return {
+    /** Subscribe (once) and load the current value. */
+    start(): Promise<void> {
+      unlisten ??= listenToStoreKeyChange(key, receive, {
+        // Close the initial registration gap and recover missed web events on reconnect.
+        onEstablished: () => void refresh(),
+      });
+      return refresh();
+    },
+    /** Persist a value the caller has already applied locally. */
+    save(value: unknown): void {
+      revision += 1;
+      setStoreValue(key, value);
+    },
+    dispose(): void {
+      unlisten?.();
+      revision += 1;
+    },
+  };
+}
+
+const projectStatusOptionsSync = syncedPreference(PROJECT_STATUS_OPTIONS_STORE_KEY, (value) => {
   preferences.projectStatusOptions =
     normalizeProjectStatusOptions(value) ?? DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o }));
-}
+});
 
-async function refreshProjectStatusOptions(): Promise<void> {
-  const revision = ++statusOptionsRevision;
-  try {
-    const value = await getStoreValue<unknown>(PROJECT_STATUS_OPTIONS_STORE_KEY);
-    // A notification, local edit, or newer refresh wins over an older snapshot.
-    if (revision === statusOptionsRevision) applyProjectStatusOptions(value);
-  } catch (error) {
-    console.error('[Preferences] Failed to refresh project status options:', error);
-  }
-}
+// Global, so a mode picked in one window must reach the others: a stale `send`
+// would deliver into (or interrupt) a running turn the user meant to queue behind.
+const composerSendModeSync = syncedPreference(COMPOSER_SEND_MODE_STORE_KEY, (value) => {
+  preferences.composerSendMode = normalizeComposerSendMode(value);
+});
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    unlistenStatusOptions?.();
-    statusOptionsRevision += 1;
+    projectStatusOptionsSync.dispose();
+    composerSendModeSync.dispose();
   });
 }
 
@@ -300,17 +354,9 @@ if (import.meta.hot) {
 export async function initPreferences(): Promise<void> {
   await initPersistentStore();
 
-  unlistenStatusOptions ??= listenToStoreKeyChange(
-    PROJECT_STATUS_OPTIONS_STORE_KEY,
-    applyProjectStatusOptions,
-    {
-      // Close the initial registration gap and recover missed web events on reconnect.
-      onEstablished: () => void refreshProjectStatusOptions(),
-    }
-  );
-  // Also load without waiting for the web event socket to connect. Statuses
+  // Loads without waiting for the web event socket to connect. Statuses
   // belong to the first project paint, ahead of the slower diff-theme loading.
-  await refreshProjectStatusOptions();
+  await projectStatusOptionsSync.start();
 
   const [savedSize, savedMode] = await Promise.all([
     getStoreValue<number>(SIZE_STORE_KEY),
@@ -404,6 +450,9 @@ export async function initPreferences(): Promise<void> {
   if (typeof savedBranchPrefix === 'string') {
     preferences.branchPrefix = savedBranchPrefix;
   }
+
+  // Load and follow the composer's last-used submit mode (malformed values fall back to queue)
+  await composerSendModeSync.start();
 }
 
 // =============================================================================
@@ -456,14 +505,26 @@ export function setBranchPrefix(prefix: string): void {
 }
 
 // =============================================================================
+// Composer Send Mode Actions
+// =============================================================================
+
+/**
+ * Remember how the chat composer submits to a running session: `queue` (after
+ * the turn) or `send` (deliver now). One global setting for every session.
+ */
+export function setComposerSendMode(mode: ComposerSendMode): void {
+  preferences.composerSendMode = mode;
+  composerSendModeSync.save(mode);
+}
+
+// =============================================================================
 // Project Status Option Actions
 // =============================================================================
 
 /** Replace the list of statuses a project can be set to. */
 export function setProjectStatusOptions(options: ProjectStatusOption[]): void {
-  statusOptionsRevision += 1;
   preferences.projectStatusOptions = options;
-  setStoreValue(PROJECT_STATUS_OPTIONS_STORE_KEY, options);
+  projectStatusOptionsSync.save(options);
 }
 
 /** Restore the built-in project statuses. */

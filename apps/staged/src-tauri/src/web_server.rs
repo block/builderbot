@@ -3687,6 +3687,36 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .await?;
             Ok(Value::Null)
         }
+        "send_session_message_now" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let content: String = arg(&args, "content")?;
+            let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
+            let session_registry = Arc::clone(session_registry);
+            // Detached: interrupt-and-reprompt is two agent round trips, and
+            // a client that disconnects between them must not leave the turn
+            // cancelled with the re-prompt never sent.
+            let delivery = detached(async move {
+                let outcome = session_commands::send_session_message_now_for_store(
+                    &store,
+                    &session_registry,
+                    &session_id,
+                    &content,
+                    &image_ids.unwrap_or_default(),
+                )
+                .await?;
+                Ok(session_commands::SessionMessageDelivery::from(&outcome))
+            })
+            .await?;
+            Ok(serde_json::to_value(delivery).unwrap())
+        }
+        "get_session_live_delivery" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let capability =
+                session_commands::live_delivery_for_session(&store, session_registry, &session_id)?;
+            Ok(serde_json::to_value(capability).unwrap())
+        }
         "build_note_followup_message" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

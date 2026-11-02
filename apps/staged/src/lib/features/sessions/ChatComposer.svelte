@@ -6,6 +6,19 @@
   SessionChatPane, which backs both the session dialog and the note dialog's
   chat pane, so the composer looks and behaves identically everywhere: the
   text input gets its own full-width row with the controls beneath it.
+
+  The submit control follows `composerSendControl`: a plain "Send" on an idle
+  session, a plain "Queue" on a running one — and, when the backend reports
+  the running session can take a message now (`canSendLive`), a split button
+  whose primary segment performs the remembered mode (Queue / Send) and whose
+  dropdown switches it. While the pane has no session row to submit to
+  (`sessionBlock`: still loading, or the load settled without one) the
+  control is disabled with a title saying which, but the draft can be typed.
+
+  Failures of the composer's own actions (`sendError`: a refused send, a
+  queue change that failed) are shown on a `ComposerError` line inside the
+  composer, next to the attachment error, rather than in the pane's
+  transcript slot — the transcript stays readable behind them.
 -->
 <script lang="ts" module>
   // min-h instead of h so the vertical model/effort label can grow the button.
@@ -25,10 +38,22 @@
   import type { Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Paperclip from '@lucide/svelte/icons/paperclip';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Spinner from '../../shared/Spinner.svelte';
-  import { Button } from '$lib/components/ui/button';
+  import { Button, buttonVariants } from '$lib/components/ui/button';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { cn } from '$lib/components/utils';
+  import {
+    COMPOSER_SEND_MODE_OPTIONS,
+    composerSendControl,
+    composerSubmitBlock,
+    composerSubmitBlockTitle,
+    type ComposerSendMode,
+    type ComposerSessionBlock,
+  } from './composerSendControl';
   import { ATTACHMENT_ACCEPT } from './attachErrors';
   import AttachmentThumb from './AttachmentThumb.svelte';
+  import ComposerError from './ComposerError.svelte';
   import type { AttachmentPreview } from './attachmentPreview';
   import HashtagInput from './HashtagInput.svelte';
   import type { HashtagItem } from '../../types';
@@ -54,7 +79,29 @@
     attachError?: string | null;
     /** Session is running — attach/remove disabled, send queues instead. */
     isLive?: boolean;
+    /**
+     * The running session can take a message now (backend-reported), so the
+     * submit control offers "Send" beside "Queue". Ignored unless `isLive`.
+     */
+    canSendLive?: boolean;
+    /** The remembered submit mode for live-capable sessions. */
+    sendMode?: ComposerSendMode;
+    /** The user picked a mode from the split button's menu. */
+    onSendModeChange?: (mode: ComposerSendMode) => void;
     sending?: boolean;
+    /**
+     * Why there is no session row to submit to — still loading, or the load
+     * settled without one — or `null` once the row is in. While set, submit
+     * is disabled with a title saying which (and Cmd+Enter is the parent's
+     * no-op) while the draft can still be typed.
+     */
+    sessionBlock?: ComposerSessionBlock | null;
+    /**
+     * Why the last composer action failed (send refused, queue change
+     * failed), shown inline until the parent clears it — on the next
+     * successful action or when the draft is edited.
+     */
+    sendError?: string | null;
     onSend?: () => void;
     /** Agent config picker rendered at the start of the control row. */
     configPicker?: Snippet;
@@ -74,12 +121,28 @@
     onRemoveImage,
     attachError = null,
     isLive = false,
+    canSendLive = false,
+    sendMode = 'queue',
+    onSendModeChange,
     sending = false,
+    sessionBlock = null,
+    sendError = null,
     onSend,
     configPicker,
   }: Props = $props();
 
   let fileInputEl = $state<HTMLInputElement>();
+
+  let sendControl = $derived(composerSendControl({ isLive, canSendLive, mode: sendMode }));
+  let submitBlock = $derived(
+    composerSubmitBlock({ sessionBlock, sending, hasText: value.trim().length > 0 })
+  );
+  let sendDisabled = $derived(submitBlock !== null);
+  let sendTitle = $derived(composerSubmitBlockTitle(submitBlock) ?? sendControl.title);
+
+  function handleSendModeChange(value: string) {
+    if (value === 'queue' || value === 'send') onSendModeChange?.(value);
+  }
 
   function openImagePicker() {
     fileInputEl?.click();
@@ -115,9 +178,10 @@
       {/each}
     </div>
   {/if}
-  {#if canAttachImages && attachError}
-    <p class="attach-error" role="alert">{attachError}</p>
+  {#if canAttachImages}
+    <ComposerError message={attachError} />
   {/if}
+  <ComposerError message={sendError} />
   <HashtagInput
     bind:textareaEl
     bind:value
@@ -152,25 +216,65 @@
         </Button>
       </span>
     {/if}
-    <span class="inline-flex composer-send" title={isLive ? 'Queue message' : 'Send message'}>
-      <Button
-        variant="accent"
-        class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
-        onclick={onSend}
-        disabled={sending || !value.trim()}
-      >
-        {#if sending}
-          <Spinner size={14} />
-          Sending…
-        {:else if isLive}
-          Queue
-        {:else}
-          Send
-        {/if}
-      </Button>
-    </span>
+    {#if sendControl.split}
+      <span class="inline-flex composer-send composer-send-split" title={sendTitle}>
+        <Button
+          variant="accent"
+          class="composer-send-primary h-auto min-h-9 gap-1.5 rounded-r-none px-4 py-1 text-sm max-[640px]:min-h-11"
+          onclick={onSend}
+          disabled={sendDisabled}
+        >
+          {@render sendLabel()}
+        </Button>
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger
+            class={cn(
+              buttonVariants({ variant: 'accent' }),
+              'composer-send-menu-trigger -ml-px h-auto min-h-9 w-8 rounded-l-none px-0 max-[640px]:min-h-11'
+            )}
+            title="Change how messages are delivered"
+            aria-label="Change how messages are delivered"
+            disabled={sending || sessionBlock !== null}
+          >
+            <ChevronDown size={14} />
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Content align="end" side="top" sideOffset={4} class="min-w-[220px]">
+            <DropdownMenu.RadioGroup value={sendMode} onValueChange={handleSendModeChange}>
+              {#each COMPOSER_SEND_MODE_OPTIONS as option (option.mode)}
+                <DropdownMenu.RadioItem value={option.mode}>
+                  <span class="flex min-w-0 flex-col">
+                    <span>{option.label}</span>
+                    <span class="truncate text-xs text-muted-foreground">{option.description}</span>
+                  </span>
+                </DropdownMenu.RadioItem>
+              {/each}
+            </DropdownMenu.RadioGroup>
+          </DropdownMenu.Content>
+        </DropdownMenu.Root>
+      </span>
+    {:else}
+      <span class="inline-flex composer-send" title={sendTitle}>
+        <Button
+          variant="accent"
+          class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
+          onclick={onSend}
+          disabled={sendDisabled}
+        >
+          {@render sendLabel()}
+        </Button>
+      </span>
+    {/if}
   </div>
 </div>
+
+{#snippet sendLabel()}
+  {#if sending}
+    <Spinner size={14} />
+    Sending…
+  {:else}
+    {sendControl.label}
+  {/if}
+{/snippet}
 
 <style>
   .chat-composer {
@@ -194,12 +298,6 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-  }
-
-  .attach-error {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--ui-danger);
   }
 
   .reply-image-thumb {
@@ -258,5 +356,33 @@
 
   .composer-controls .composer-send {
     margin-left: auto;
+  }
+
+  /* A hairline between the split button's two accent segments, exactly the
+     height of the fills. Every button paints a 1px transparent border with
+     bg-clip-padding, so its fill is inset 1px from the border box on all
+     sides. The trigger's -ml-px overlaps the primary's transparent right
+     border column; with no left border of its own the trigger's fill paints
+     over that column and the two fills meet with no seam. The divider is then
+     drawn on top as a 1px ::before spanning the trigger's padding box (the
+     containing block of an absolutely positioned child), which is the fill's
+     extent, so it neither overshoots the fills nor notches them. A tinted
+     border-left would instead span the border box and mitre into the
+     transparent top and bottom borders, poking 1px past the fills at each
+     end. The colour mixes --bg-primary into the accent so the line is an
+     opaque tint of the fill rather than a wash over the chrome behind it. */
+  .composer-send-split :global(.composer-send-menu-trigger) {
+    position: relative;
+    border-left-width: 0;
+  }
+
+  .composer-send-split :global(.composer-send-menu-trigger::before) {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 1px;
+    background: color-mix(in srgb, var(--bg-primary) 35%, var(--ui-accent));
   }
 </style>

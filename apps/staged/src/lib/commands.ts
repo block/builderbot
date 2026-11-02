@@ -37,6 +37,8 @@ import type {
   SessionPollRequest,
   ToolCallBody,
   SessionBackgroundHoldSnapshot,
+  SessionLiveDelivery,
+  SessionMessageDelivery,
   QueuedSessionMessage,
   DiffFilesResponse,
   FileDiff,
@@ -1403,6 +1405,34 @@ export function getSessionBackgroundHold(
   sessionId: string
 ): Promise<SessionBackgroundHoldSnapshot> {
   return invokeCommand('get_session_background_hold', { sessionId });
+}
+
+/**
+ * Whether the session can take a message right now (composer "Send" mode).
+ * Cheap: a registry lookup, no agent round trip.
+ */
+export function getSessionLiveDelivery(sessionId: string): Promise<SessionLiveDelivery> {
+  return invokeCommand('get_session_live_delivery', { sessionId });
+}
+
+/**
+ * Deliver a message to the running session now instead of queueing it:
+ * steered into the running turn (or interrupting it) over the live
+ * connection, as the `continue_repo_session` MCP tool does. Unlike the tool
+ * it does not resume a stopped session: that comes back `not_running`, and
+ * the caller resumes through `resumeSession` so the branch override and
+ * follow-up config apply.
+ */
+export function sendSessionMessageNow(
+  sessionId: string,
+  content: string,
+  imageIds?: string[]
+): Promise<SessionMessageDelivery> {
+  return invokeCommand('send_session_message_now', {
+    sessionId,
+    content,
+    imageIds: imageIds ?? null,
+  });
 }
 
 export function deleteSession(sessionId: string): Promise<void> {

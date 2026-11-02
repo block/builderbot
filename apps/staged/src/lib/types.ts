@@ -673,6 +673,50 @@ export interface SessionPoll {
   acpMetadataMessages: SessionMessage[];
 }
 
+/**
+ * Whether a message typed for a session can reach its agent now (the chat
+ * composer's "Send" mode) instead of waiting in the queue. Computed by the
+ * backend from the same gate `continue_repo_session` applies before delivering
+ * to a running session; `reason` says why not.
+ */
+export interface SessionLiveDelivery {
+  supported: boolean;
+  /**
+   * When `supported` is false, whether asking again while the session stays
+   * running could get a yes: true while the agent's connection is still coming
+   * up, false when another Staged instance owns the session or it is not
+   * running. Always false when `supported` is true.
+   */
+  retryable: boolean;
+  reason?: string;
+}
+
+/**
+ * How `send_session_message_now` delivered a message, or why it did not.
+ * Mirrors the Rust `ContinueOutcome::delivery()` spellings, which the
+ * `continue_repo_session` MCP tool shares; `resumed` and `not_resumable` are
+ * only reached through the tool, since the command never resumes a stopped
+ * session (it answers `not_running` instead).
+ */
+export type SessionMessageDeliveryKind =
+  | 'injected'
+  | 'interrupted_and_reprompted'
+  | 'started_new_turn'
+  | 'resumed'
+  | 'rejected_queued'
+  | 'blocked'
+  | 'not_resumable'
+  | 'not_running';
+
+export interface SessionMessageDelivery {
+  delivery: SessionMessageDeliveryKind;
+  /**
+   * Set when the message was not delivered (`blocked`, `not_resumable`,
+   * `not_running`).
+   */
+  reason?: string;
+}
+
 // =============================================================================
 // Branch sessions
 // =============================================================================

@@ -1771,6 +1771,7 @@ mod tests {
                 crate::session_commands::ContinueWaits::uniform(std::time::Duration::from_millis(
                     200,
                 )),
+                crate::session_commands::StoppedSessionPolicy::Resume,
             )
             .await
             .unwrap();

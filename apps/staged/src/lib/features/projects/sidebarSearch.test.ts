@@ -98,6 +98,12 @@ describe('searchRepos', () => {
     expect(searchRepos(all, 'g2/web')).toEqual([g2]);
   });
 
+  it('matches every term across the path and short name, in any order', () => {
+    expect(searchRepos(all, 'staged block')).toEqual([staged]);
+    expect(searchRepos(all, 'BLOCK apps')).toEqual([staged, differ]);
+    expect(searchRepos(all, 'staged cash')).toEqual([]);
+  });
+
   it('does not invent a trailing slash for repos without a subpath', () => {
     expect(searchRepos(all, 'cash-ios/')).toEqual([]);
   });

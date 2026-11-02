@@ -5,6 +5,7 @@
  * the rules the backend enforces have exactly one frontend statement.
  */
 import { matchesRepoSearch } from '../../shared/repoSearch';
+import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
 import { projectDisplayName } from '../../shared/utils';
 import type { Project, ProjectRepo } from '../../types';
 
@@ -55,19 +56,22 @@ export function projectSearchName(project: Project): string {
   return projectDisplayName(project).trim().toLowerCase();
 }
 
-/** Match projects on their name or on any attached repo path. */
+/**
+ * Match projects on their name or on any attached repo path. Every
+ * whitespace-separated term of the query must match, in any order: all
+ * somewhere in the name, or all against one attached repo.
+ */
 export function filterMoveTargets(
   candidates: Project[],
   reposByProject: Map<string, ProjectRepo[]>,
   query: string
 ): Project[] {
-  const trimmed = query.trim();
-  if (!trimmed) return candidates;
-  const lower = trimmed.toLowerCase();
+  const terms = queryTerms(query);
+  if (terms.length === 0) return candidates;
   return candidates.filter((project) => {
-    if (projectSearchName(project).includes(lower)) return true;
+    if (matchesAllTerms(terms, projectSearchName(project))) return true;
     return (reposByProject.get(project.id) ?? []).some((repo) =>
-      matchesRepoSearch(repo.githubRepo, repo.subpath, trimmed)
+      matchesRepoSearch(repo.githubRepo, repo.subpath, query)
     );
   });
 }

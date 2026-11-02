@@ -18,6 +18,7 @@
  */
 
 import type { Project, RepoHomeItem } from '../../types';
+import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
 import { searchProjects } from './projectSearch';
 import { repoKey } from './repoReorder';
 
@@ -27,17 +28,18 @@ export function normalizeQuery(query: string): string {
 }
 
 /**
- * Case-insensitive substring match against the repo's full path
- * (`githubRepo/subpath`) and its short name, so "builderbot", "apps/staged"
- * and "staged" all find the same card. An empty query returns the input
- * array unchanged.
+ * Case-insensitive match against the repo's full path (`githubRepo/subpath`)
+ * and its short name, so "builderbot", "apps/staged" and "staged" all find
+ * the same card. Every whitespace-separated term of the query must appear in
+ * one of the two, in any order ("staged block" finds block/builderbot/apps/
+ * staged). An empty query returns the input array unchanged.
  */
 export function searchRepos(repos: RepoHomeItem[], query: string): RepoHomeItem[] {
-  const q = normalizeQuery(query);
-  if (!q) return repos;
+  const terms = queryTerms(query);
+  if (terms.length === 0) return repos;
   return repos.filter((r) => {
     const path = r.subpath ? `${r.githubRepo}/${r.subpath}` : r.githubRepo;
-    return path.toLowerCase().includes(q) || r.shortName.toLowerCase().includes(q);
+    return matchesAllTerms(terms, path, r.shortName);
   });
 }
 

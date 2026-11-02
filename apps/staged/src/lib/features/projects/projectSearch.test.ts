@@ -47,9 +47,23 @@ describe('searchProjects', () => {
     expect(searchProjects(all, '  beta ')).toEqual([beta]);
   });
 
-  it('matches interior whitespace literally', () => {
+  it('matches every whitespace-separated term, in any order', () => {
+    const oneTwoThree = project({ id: 'p4', name: 'one two three' });
+    const list = [...all, oneTwoThree];
+    expect(searchProjects(list, 'one three')).toEqual([oneTwoThree]);
+    expect(searchProjects(list, 'three one')).toEqual([oneTwoThree]);
+    expect(searchProjects(list, 'one four')).toEqual([]);
+    expect(searchProjects(list, 'two')).toEqual([oneTwoThree]);
+  });
+
+  it('is case-insensitive across every term', () => {
+    const oneTwoThree = project({ id: 'p4', name: 'One Two THREE' });
+    expect(searchProjects([...all, oneTwoThree], 'oNe tHree')).toEqual([oneTwoThree]);
+  });
+
+  it('ignores how the query and name space their words', () => {
     expect(searchProjects(all, 'gamma  web')).toEqual([gamma]);
-    expect(searchProjects(all, 'gamma web')).toEqual([]);
+    expect(searchProjects(all, 'gamma web')).toEqual([gamma]);
   });
 
   it('returns an empty list when nothing matches', () => {

@@ -34,6 +34,7 @@
   import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
   import { portal } from '../../shared/portal';
+  import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import RepoLabel from '../../shared/RepoLabel.svelte';
 
   type DropdownIconComponent = typeof FileText;
@@ -117,12 +118,12 @@
 
   let filteredSections = $derived.by((): HashtagSection[] => {
     if (!showDropdown) return [];
-    const filter = filterText.toLowerCase();
+    const terms = queryTerms(filterText);
     const sectionsByKey = new Map<string, Omit<HashtagSection, 'startIndex'>>();
 
     for (const item of items) {
       if (selectedTokenKeys.has(`${item.type}:${item.id}`)) continue;
-      if (!item.title.toLowerCase().includes(filter)) continue;
+      if (!matchesAllTerms(terms, item.title)) continue;
 
       const sectionKey = hashtagSectionKey(item);
       const section = sectionsByKey.get(sectionKey);

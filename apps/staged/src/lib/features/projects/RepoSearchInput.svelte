@@ -20,6 +20,7 @@
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
   import { matchesRepoSearch } from '../../shared/repoSearch';
+  import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import { viewport } from '../../shared/viewport.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
@@ -82,14 +83,11 @@
       }
     }
 
-    const q = query.toLowerCase().trim();
-    const filtered = q
-      ? repos.filter(
-          (r) =>
-            r.nameWithOwner.toLowerCase().includes(q) ||
-            (r.description && r.description.toLowerCase().includes(q))
-        )
-      : repos;
+    const terms = queryTerms(query);
+    const filtered =
+      terms.length > 0
+        ? repos.filter((r) => matchesAllTerms(terms, r.nameWithOwner, r.description))
+        : repos;
 
     for (const r of filtered) {
       if (!seen.has(r.nameWithOwner)) {

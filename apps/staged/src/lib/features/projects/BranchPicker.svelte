@@ -11,6 +11,7 @@
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import type { PullRequest, BranchRef } from '../../types';
+  import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
   import * as commands from '../../api/commands';
   import { Input } from '$lib/components/ui/input';
 
@@ -290,13 +291,10 @@
 
   /** Filter items by the current input value. */
   let filteredItems = $derived.by((): PickerItem[] => {
-    const query = value.trim().toLowerCase();
-    if (!query) return allItems.slice(0, 50);
+    const terms = queryTerms(value);
+    if (terms.length === 0) return allItems.slice(0, 50);
     return allItems
-      .filter(
-        (item) =>
-          item.label.toLowerCase().includes(query) || item.branchName.toLowerCase().includes(query)
-      )
+      .filter((item) => matchesAllTerms(terms, item.label, item.branchName))
       .slice(0, 50);
   });
 

@@ -150,6 +150,18 @@ fn spawn_git(
     })
 }
 
+/// Set up a `git` command the way [`run`] does — `repo`'s captured
+/// login-shell env, non-interactive, detached from the controlling TTY — for
+/// callers that spawn it themselves to stream its output. `repo` only keys
+/// the env snapshot; the command's working directory is left alone.
+///
+/// Blocks on the shell-env capture, so call it from the blocking pool.
+pub(crate) fn configure_captured(command: &mut Command, repo: &Path) {
+    apply_env(command, repo, EnvSource::Captured);
+    force_non_interactive(command);
+    detach_from_ctty(command);
+}
+
 fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String, GitError> {
     let output = spawn_git(repo, args, source)?;
 

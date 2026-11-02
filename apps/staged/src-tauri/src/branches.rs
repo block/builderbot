@@ -56,9 +56,10 @@ pub(crate) fn cached_workstation_id(workspace_name: &str) -> Option<u64> {
         .and_then(|cache| cache.get(workspace_name).copied())
 }
 
-/// Per-branch lock that serializes worktree setup so that `setup_worktree`
-/// (frontend) and `setup_worktree_sync` (backend/MCP) do not race each other.
-/// Follows the same pattern as `REPO_CLONE_LOCKS` in `git/github.rs`.
+/// Per-branch lock that serializes concurrent [`setup_worktree_sync`] calls
+/// for the same branch — e.g. the branch card's Retry racing the background
+/// project setup, or MCP `add_project_repo`. Follows the same pattern as
+/// `REPO_CLONE_LOCKS` in `git/github.rs`.
 static WORKTREE_SETUP_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn worktree_setup_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
@@ -1329,8 +1330,7 @@ pub fn create_branch(
     Ok(to_branch_with_workdir(branch, None))
 }
 
-/// Core worktree creation + DB linkage logic shared by [`setup_worktree`] and
-/// [`setup_worktree_sync`].
+/// Core worktree creation + DB linkage logic behind [`setup_worktree_sync`].
 ///
 /// Acquires the per-branch worktree lock, creates (or reuses) a git worktree,
 /// sets upstream tracking for PR branches, persists any branch-name changes,
@@ -1348,8 +1348,8 @@ pub(crate) fn create_and_link_worktree<R: tauri::Runtime>(
     repo_path: &std::path::Path,
     desired_worktree_path: &std::path::Path,
 ) -> Result<String, String> {
-    // Serialize worktree creation per branch so that concurrent callers
-    // (frontend `setup_worktree` vs backend `setup_worktree_sync`) do not race.
+    // Serialize worktree creation per branch so that concurrent
+    // `setup_worktree_sync` callers do not race.
     let lock = worktree_setup_lock_for(&branch.id);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
 
@@ -3160,10 +3160,12 @@ fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
 
 /// Set up a git worktree for a branch synchronously.
 ///
-/// Like [`setup_worktree`] but callable without Tauri state (e.g. from the
-/// MCP server). Handles cloning with optional progress reporting, then
+/// Every worktree setup goes through here: both transports'
+/// [`setup_worktree`] (via [`setup_worktree_impl`]), project creation, the
+/// add-repo setup pass and MCP. Handles cloning with progress reporting, then
 /// delegates to [`create_and_link_worktree`] for worktree creation and DB
-/// linkage.
+/// linkage. It clones, fetches and creates the worktree inline, so call it
+/// from the blocking pool.
 pub(crate) fn setup_worktree_sync(
     store: &Arc<Store>,
     branch_id: &str,

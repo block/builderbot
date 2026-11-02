@@ -1194,7 +1194,11 @@ async fn ai_generate_short_names(
     new_repos: &[(String, String)],
     provider: Option<&str>,
 ) -> Option<std::collections::HashMap<String, String>> {
-    let agent = find_badge_agent(provider)?;
+    // Agent lookup goes through login shells, so it runs on the blocking pool.
+    let provider = provider.map(str::to_owned);
+    let agent = tauri::async_runtime::spawn_blocking(move || find_badge_agent(provider.as_deref()))
+        .await
+        .ok()??;
     let prompt = build_badge_prompt(existing_badges, new_repos);
     let working_dir = std::env::temp_dir();
     let interpreter_env_snapshot = crate::shell_env::home_env_vars_with_extended_path(

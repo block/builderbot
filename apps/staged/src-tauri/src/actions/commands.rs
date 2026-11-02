@@ -50,14 +50,21 @@ struct DetectingActionsEvent {
 /// Falls back to [`AcpAiProvider::new`] (first installed agent) only when no
 /// provider can be resolved at all — i.e. no agents are installed, in which
 /// case construction would fail regardless.
+///
+/// Discovery and construction both resolve agent binaries through a login
+/// shell, so they run on the blocking pool.
 pub(crate) async fn build_action_provider(
     provider_id: Option<&str>,
     working_dir: PathBuf,
 ) -> Result<AcpAiProvider> {
-    let provider = match crate::session_commands::discover_preferred_provider_id(provider_id) {
-        Some(id) => AcpAiProvider::with_agent(&id, working_dir),
-        None => AcpAiProvider::new(working_dir),
-    }?;
+    let provider_id = provider_id.map(str::to_owned);
+    let provider = tauri::async_runtime::spawn_blocking(move || {
+        match crate::session_commands::discover_preferred_provider_id(provider_id.as_deref()) {
+            Some(id) => AcpAiProvider::with_agent(&id, working_dir),
+            None => AcpAiProvider::new(working_dir),
+        }
+    })
+    .await??;
     let home_snapshot = crate::shell_env::home_env_vars_with_extended_path(
         crate::session_runner::shell_env_cache().as_ref(),
     )

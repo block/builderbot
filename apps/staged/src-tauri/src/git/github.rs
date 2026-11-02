@@ -1110,76 +1110,117 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     Ok(clone_path)
 }
 
-/// Spawn a command and stream its stderr line-by-line to a callback.
+/// How many trailing stderr lines a failed [`spawn_streaming`] reports.
+const STREAMED_ERROR_TAIL_LINES: usize = 20;
+
+/// Spawn `command` and stream its stderr line-by-line to a callback.
 ///
 /// Git (and gh) write progress output to stderr using `\r` for in-place
 /// updates, so we split on both `\r` and `\n`.
 ///
-/// Stderr is also accumulated so that callers can inspect error output on
-/// failure (e.g. for auth-specific error detection).
-fn spawn_streaming<F>(
-    program: &str,
-    args: &[&str],
-    envs: &[(&str, &str)],
-    on_line: &mut F,
-) -> Result<(), GitError>
+/// On failure the error carries the tail of stderr (see
+/// [`read_streamed_stderr`]) so callers can inspect it, e.g. for
+/// auth-specific error detection.
+fn spawn_streaming<F>(mut command: Command, on_line: &mut F) -> Result<(), GitError>
 where
     F: FnMut(&str),
 {
-    use std::io::{BufReader, Read};
     use std::process::Stdio;
 
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args).stdout(Stdio::null()).stderr(Stdio::piped());
-    for &(key, val) in envs {
-        cmd.env(key, val);
-    }
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| {
+        GitError::CommandFailed(format!(
+            "Failed to run {}: {e}",
+            command.get_program().to_string_lossy()
+        ))
+    })?;
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| GitError::CommandFailed(format!("Failed to run {program}: {e}")))?;
-
-    let mut all_stderr = String::new();
-
-    if let Some(stderr) = child.stderr.take() {
-        let mut buf = Vec::new();
-        for byte in BufReader::new(stderr).bytes() {
-            let byte = byte.map_err(|e| GitError::CommandFailed(e.to_string()))?;
-            if byte == b'\r' || byte == b'\n' {
-                if !buf.is_empty() {
-                    if let Ok(line) = std::str::from_utf8(&buf) {
-                        all_stderr.push_str(line);
-                        all_stderr.push('\n');
-                        on_line(line);
-                    }
-                    buf.clear();
-                }
-            } else {
-                buf.push(byte);
-            }
-        }
-        if !buf.is_empty() {
-            if let Ok(line) = std::str::from_utf8(&buf) {
-                all_stderr.push_str(line);
-                all_stderr.push('\n');
-                on_line(line);
-            }
-        }
-    }
+    let stderr_tail = match child.stderr.take() {
+        Some(stderr) => read_streamed_stderr(stderr, on_line)
+            .map_err(|e| GitError::CommandFailed(e.to_string()))?,
+        None => String::new(),
+    };
 
     let status = child
         .wait()
         .map_err(|e| GitError::CommandFailed(e.to_string()))?;
     if !status.success() {
-        return Err(GitError::CommandFailed(all_stderr));
+        return Err(GitError::CommandFailed(stderr_tail));
     }
     Ok(())
+}
+
+/// Read `stderr` to EOF, passing every `\r`- or `\n`-terminated line to
+/// `on_line`, and return the last [`STREAMED_ERROR_TAIL_LINES`] lines for an
+/// error message.
+///
+/// Progress updates — lines ended by a bare `\r` — are left out of the
+/// returned text: a clone that dies mid-transfer writes hundreds of them, and
+/// the message is shown to the user. Git ends each progress phase with a
+/// `\n` line, and its error lines are `\n`-terminated too, so those are kept.
+fn read_streamed_stderr<F>(stderr: impl std::io::Read, on_line: &mut F) -> std::io::Result<String>
+where
+    F: FnMut(&str),
+{
+    use std::collections::VecDeque;
+    use std::io::{BufReader, Read};
+
+    let mut tail: VecDeque<String> = VecDeque::new();
+    let mut keep = |line: &str| {
+        if tail.len() == STREAMED_ERROR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line.to_string());
+    };
+    let mut buf = Vec::new();
+    // The last `\r` line, kept only if a `\n` follows straight after (CRLF).
+    let mut progress: Option<String> = None;
+    for byte in BufReader::new(stderr).bytes() {
+        let byte = byte?;
+        if byte != b'\r' && byte != b'\n' {
+            buf.push(byte);
+            continue;
+        }
+        let line = std::str::from_utf8(&buf)
+            .ok()
+            .filter(|line| !line.is_empty());
+        match (byte, line) {
+            (b'\r', Some(line)) => {
+                on_line(line);
+                progress = Some(line.to_string());
+            }
+            (b'\r', None) => {}
+            (_, Some(line)) => {
+                on_line(line);
+                keep(line);
+                progress = None;
+            }
+            (_, None) => {
+                if let Some(line) = progress.take() {
+                    keep(&line);
+                }
+            }
+        }
+        buf.clear();
+    }
+    if let Some(line) = std::str::from_utf8(&buf)
+        .ok()
+        .filter(|line| !line.is_empty())
+    {
+        on_line(line);
+        keep(line);
+    }
+
+    Ok(tail.into_iter().map(|line| line + "\n").collect())
 }
 
 /// Like [`ensure_local_clone`] but streams stderr progress lines to a callback.
 ///
 /// This allows callers to report detailed clone progress (e.g.
 /// "Receiving objects — 27%") to the UI.
+///
+/// Waits on `gh` and git, and its HTTPS fallback on the shell-env capture,
+/// so call it from the blocking pool.
 pub fn ensure_local_clone_with_progress<F>(
     github_repo: &str,
     mut on_stderr_line: F,
@@ -1221,13 +1262,16 @@ where
     let gh_clone_result = (|| -> Result<(), GitError> {
         let gh_path = find_gh().ok_or_else(|| GitError::CommandFailed(GH_NOT_FOUND.to_string()))?;
 
-        let gh_str = gh_path.to_string_lossy().to_string();
-        let result = spawn_streaming(
-            &gh_str,
-            &["repo", "clone", github_repo, &clone_str, "--", "--progress"],
-            &[("GH_GIT_PROTOCOL", "https")],
-            &mut on_stderr_line,
-        );
+        let mut gh = Command::new(&gh_path);
+        gh.env("GH_GIT_PROTOCOL", "https").args([
+            "repo",
+            "clone",
+            github_repo,
+            &clone_str,
+            "--",
+            "--progress",
+        ]);
+        let result = spawn_streaming(gh, &mut on_stderr_line);
 
         // Surface auth-specific errors with a helpful message instead of
         // falling through to the generic HTTPS fallback.
@@ -1251,12 +1295,13 @@ where
                 GitError::CommandFailed(format!("Failed to create clone directory: {e}"))
             })?;
         }
-        spawn_streaming(
-            "git",
-            &["clone", "--progress", &https_url, &clone_str],
-            &[],
-            &mut on_stderr_line,
-        )?;
+        // Same env as `ensure_local_clone`'s fallback: the login-shell
+        // snapshot for `repos/<owner>`, which carries the PATH, proxy / CA
+        // settings and git-lfs a Finder-launched app doesn't inherit.
+        let mut git = Command::new("git");
+        git.args(["clone", "--progress", &https_url, &clone_str]);
+        super::cli::configure_captured(&mut git, clone_path.parent().unwrap_or(Path::new("/")));
+        spawn_streaming(git, &mut on_stderr_line)?;
     }
 
     super::config_apply::apply_to_clone(&clone_path);
@@ -3761,5 +3806,50 @@ mod tests {
 
         assert_eq!(lines, vec![1, 2, 3]);
         assert!(valid_lines_from_patch(None).is_empty());
+    }
+
+    /// A clone that dies mid-transfer: every progress update still reaches the
+    /// callback, but the error text keeps only the `\n` lines, so the git
+    /// error survives and the hundreds of `\r` updates don't.
+    #[test]
+    fn streamed_stderr_drops_progress_updates_from_the_error_text() {
+        let mut stderr = String::from("Cloning into 'widgets'...\n");
+        for pct in 0..300 {
+            stderr.push_str(&format!("Receiving objects:  {}% ({pct}/900)\r", pct / 3));
+        }
+        stderr.push_str("error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly\n");
+        stderr.push_str("fatal: early EOF\n");
+
+        let mut streamed = 0;
+        let tail = read_streamed_stderr(stderr.as_bytes(), &mut |_| streamed += 1).unwrap();
+
+        assert_eq!(streamed, 303);
+        assert_eq!(
+            tail,
+            "Cloning into 'widgets'...\n\
+             error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly\n\
+             fatal: early EOF\n"
+        );
+    }
+
+    /// The error text is bounded to the last lines, which hold git's verdict,
+    /// and a `\r\n`-terminated line or an unterminated last line still counts.
+    #[test]
+    fn streamed_stderr_keeps_the_tail_and_crlf_lines() {
+        let mut stderr = String::new();
+        for n in 0..50 {
+            stderr.push_str(&format!("remote: line {n}\n"));
+        }
+        stderr.push_str("remote: crlf line\r\nfatal: no newline");
+
+        let tail = read_streamed_stderr(stderr.as_bytes(), &mut |_| {}).unwrap();
+        let lines: Vec<&str> = tail.lines().collect();
+
+        assert_eq!(lines.len(), STREAMED_ERROR_TAIL_LINES);
+        assert_eq!(lines[0], "remote: line 32");
+        assert_eq!(
+            &lines[STREAMED_ERROR_TAIL_LINES - 2..],
+            ["remote: crlf line", "fatal: no newline"]
+        );
     }
 }

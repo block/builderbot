@@ -1171,13 +1171,18 @@ fn an_unreadable_outbox_past_the_window_is_retried_before_the_row_expires_as_unr
 #[test]
 fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_agent() {
     use acp_client::SessionSettleReason;
+    assert!(
+        UNACKNOWLEDGED_STOP_DETAIL_MARKER.contains("did not acknowledge the stop"),
+        "the frontend sniffs this phrase"
+    );
     let transport_error = Err(AgentRunError::Other(PROXY_TRANSPORT_CLOSED.to_string()));
     assert_eq!(
         lost_remote_agent_detail(
             &transport_error,
             Some(SessionSettleReason::Failed),
             false,
-            None
+            None,
+            STOPPED
         )
         .as_deref(),
         Some("incoming transport closed")
@@ -1186,10 +1191,18 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
     // The user pressed Stop, the proxy never answered: the Stop is not one
     // the agent honoured, so the row must not end `cancelled`.
     let cancelled = Ok(AgentRunOutcome::Cancelled);
-    let detail =
-        lost_remote_agent_detail(&cancelled, Some(SessionSettleReason::Cancelled), true, None)
-            .expect("an unacknowledged stop is a lost agent");
-    assert!(detail.contains("did not acknowledge the stop"), "{detail}");
+    let detail = lost_remote_agent_detail(
+        &cancelled,
+        Some(SessionSettleReason::Cancelled),
+        true,
+        None,
+        STOPPED,
+    )
+    .expect("an unacknowledged stop is a lost agent");
+    assert!(
+        detail.contains(UNACKNOWLEDGED_STOP_DETAIL_MARKER),
+        "{detail}"
+    );
     let (status, error, reason) = lost_remote_agent_terminal_state(&detail, "ws-1", None);
     assert_eq!(
         (status, reason.clone()),
@@ -1197,9 +1210,10 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
     );
     let error = error.unwrap();
     assert!(
-        error.contains("did not acknowledge the stop")
+        error.contains(UNACKNOWLEDGED_STOP_DETAIL_MARKER)
+            && error.contains("may or may not appear")
             && error.ends_with(AWAITING_REMOTE_NOTE_SUFFIX),
-        "{error}"
+        "the copy does not promise a note: {error}"
     );
     assert!(
         !remote_outbox_is_cleared_at_run_end(SETTLED_RUN, &reason, Some(&error)),
@@ -1212,7 +1226,8 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
             &cancelled,
             Some(SessionSettleReason::Cancelled),
             false,
-            None
+            None,
+            STOPPED
         ),
         None
     );
@@ -1224,6 +1239,7 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
         Some(SessionSettleReason::Cancelled),
         false,
         Some(Duration::from_secs(10 * 60)),
+        STOPPED,
     )
     .expect("a silent connection with a finished note is a lost agent");
     assert!(detail.contains("10 minutes"), "{detail}");
@@ -1265,11 +1281,63 @@ fn a_stop_the_agent_never_acknowledged_or_a_silent_connection_count_as_a_lost_ag
         ),
     ] {
         assert_eq!(
-            lost_remote_agent_detail(&result, settle, false, None),
+            lost_remote_agent_detail(&result, settle, false, None, STOPPED),
             None,
             "{result:?} / {settle:?}"
         );
     }
+}
+
+/// The context of a user Stop: the session's cancel token fired. The agent's
+/// silence is irrelevant there — the proxy answered nothing for the deadline.
+const STOPPED: UnacknowledgedCancelContext = UnacknowledgedCancelContext {
+    stop_requested: true,
+    agent_idle: Some(Duration::from_secs(10)),
+};
+
+/// An interrupt-and-reprompt whose cancel went unanswered is a lost agent
+/// only when the connection relayed nothing for the whole ack wait. A remote
+/// agent that kept streaming while a long tool call wound down was merely
+/// slow to answer, and parking it `detached` for half an hour would tell the
+/// user Staged lost a session that was just stopping.
+#[test]
+fn an_unacknowledged_interrupt_is_lost_only_when_the_agent_was_silent_throughout() {
+    use acp_client::{SessionSettleReason, INTERRUPT_ACK_TIMEOUT};
+    let cancelled = Ok(AgentRunOutcome::Cancelled);
+    let unacknowledged = Some(SessionSettleReason::Cancelled);
+
+    // Still streaming 5 s ago: a slow agent, so the plain cancelled arm.
+    let streaming = UnacknowledgedCancelContext {
+        stop_requested: false,
+        agent_idle: Some(Duration::from_secs(5)),
+    };
+    assert_eq!(
+        lost_remote_agent_detail(&cancelled, unacknowledged, true, None, streaming),
+        None
+    );
+
+    // Nothing for the whole ack wait: the connection is presumed lost.
+    let silent = UnacknowledgedCancelContext {
+        stop_requested: false,
+        agent_idle: Some(INTERRUPT_ACK_TIMEOUT),
+    };
+    let detail = lost_remote_agent_detail(&cancelled, unacknowledged, true, None, silent)
+        .expect("a silent unacknowledged interrupt is a lost agent");
+    assert!(detail.contains("interrupt"), "{detail}");
+    assert!(
+        !detail.contains(UNACKNOWLEDGED_STOP_DETAIL_MARKER),
+        "not the Stop copy: {detail}"
+    );
+
+    // A user Stop is lost whatever the agent was doing a moment before.
+    let stop_while_streaming = UnacknowledgedCancelContext {
+        stop_requested: true,
+        agent_idle: Some(Duration::from_secs(1)),
+    };
+    assert!(
+        lost_remote_agent_detail(&cancelled, unacknowledged, true, None, stop_while_streaming)
+            .is_some_and(|detail| detail.contains(UNACKNOWLEDGED_STOP_DETAIL_MARKER))
+    );
 }
 
 #[test]
@@ -1378,6 +1446,11 @@ fn the_frontend_mirrors_the_polling_marker() {
     assert!(
         helpers.contains(&format!("'{STORING_REMOTE_NOTE_SUFFIX}'")),
         "REMOTE_NOTE_STORING_SUFFIX in sessionModalHelpers.ts must equal STORING_REMOTE_NOTE_SUFFIX"
+    );
+    assert!(
+        helpers.contains(&format!("'{UNACKNOWLEDGED_STOP_DETAIL_MARKER}'")),
+        "REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER in sessionModalHelpers.ts must equal \
+         UNACKNOWLEDGED_STOP_DETAIL_MARKER"
     );
 }
 

@@ -85,6 +85,20 @@ export interface ToolDisplay {
 export const REMOTE_NOTE_POLL_SUFFIX =
   'the workstation agent may still be running, so Staged keeps checking for its note.';
 
+/**
+ * Phrase in the detail of a `detached` row whose connection was given up on
+ * after a Stop the remote agent never acknowledged
+ * (`UNACKNOWLEDGED_STOP_DETAIL_MARKER` in `src-tauri/src/session_runner.rs`,
+ * pinned by the same backend test). Whether that Stop reached the agent is
+ * unknowable, so the copy must not promise a note.
+ */
+export const REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER = 'did not acknowledge the stop';
+
+/** Whether this detached row came from a Stop the remote agent never acknowledged. */
+export function isUnacknowledgedRemoteStop(errorMessage: string | null | undefined): boolean {
+  return !!errorMessage?.includes(REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER);
+}
+
 /** Whether the backend's dead-session sweep is still polling the workstation for this row's note. */
 export function isAwaitingRemoteNote(errorMessage: string | null | undefined): boolean {
   return !!errorMessage?.trimEnd().endsWith(REMOTE_NOTE_POLL_SUFFIX);
@@ -164,6 +178,13 @@ export function sessionEndMessage(
  */
 function detachedEndMessage(errorMessage: string | null | undefined): string {
   if (isAwaitingRemoteNote(errorMessage)) {
+    if (isUnacknowledgedRemoteStop(errorMessage)) {
+      return (
+        'You stopped this remote session, but the workstation did not confirm it in time. ' +
+        'The stop may still have reached the agent, so a note may or may not appear; ' +
+        'Staged is checking the workstation and will complete the session if one does.'
+      );
+    }
     return (
       'Staged lost the connection to this remote session. The workstation agent may still ' +
       'be running; Staged is checking for its note and will complete the session when it ' +

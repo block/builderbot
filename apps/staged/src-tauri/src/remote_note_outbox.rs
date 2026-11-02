@@ -399,12 +399,25 @@ pub(crate) fn collect_classified(
     session_id: &str,
     expected_turn: Option<&str>,
 ) -> Result<OutboxState, CollectError> {
+    collect_with_written_at(exec, session_id, expected_turn).map(|(state, _)| state)
+}
+
+/// [`collect_classified`], also returning the `writtenAt` stamp of a complete
+/// note (the helper writes whole seconds), for callers that need to tell one
+/// `done` from the next ([`CollectedNote`]).
+fn collect_with_written_at(
+    exec: RemoteExec,
+    session_id: &str,
+    expected_turn: Option<&str>,
+) -> Result<(OutboxState, Option<i64>), CollectError> {
     validate_session_id(session_id).map_err(CollectError::Transport)?;
     let output = exec(&["sh", "-c", &collect_script(session_id)]).map_err(|e| {
         CollectError::Transport(format!("failed to read the remote note outbox: {e}"))
     })?;
     let snapshot = parse_collect_output(&output).map_err(CollectError::Content)?;
-    outbox_state(snapshot, expected_turn).map_err(CollectError::Content)
+    let written_at = snapshot.meta.as_ref().and_then(|meta| meta.written_at);
+    let state = outbox_state(snapshot, expected_turn).map_err(CollectError::Content)?;
+    Ok((state, written_at))
 }
 
 /// [`collect_classified`] for callers that treat every failure alike.
@@ -416,24 +429,95 @@ pub(crate) fn collect(
     collect_classified(exec, session_id, expected_turn).map_err(|e| e.message().to_string())
 }
 
+/// The note a run's per-turn collector last pulled from the outbox: the
+/// helper's `writtenAt` stamp and the submission itself. Enough to recognise
+/// the same `done` on a later read.
+///
+/// One run shares one turn id across all its prompt turns (the helper is
+/// attached once), and the outbox is cleared at the end of the run, not
+/// between turns. So during a repair or follow-up turn the previous turn's
+/// finished note is still on the workstation, marked `done` for this run's
+/// turn id, and a probe that could not tell it from a fresh one would end
+/// the live turn on a note already collected and rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CollectedNote {
+    pub written_at: Option<i64>,
+    pub submission: NoteSubmission,
+}
+
+/// Shared memory of the last [`CollectedNote`] within one run.
+pub(crate) type CollectedNoteMemory = std::sync::Arc<std::sync::Mutex<Option<CollectedNote>>>;
+
+pub(crate) fn new_collected_note_memory() -> CollectedNoteMemory {
+    std::sync::Arc::new(std::sync::Mutex::new(None))
+}
+
 /// Collect the outbox right after a turn settled and, when it holds this
 /// run's note, record it in the run's [`NoteSubmissionSlot`] — the same slot
 /// the local tool fills. From there the post-turn Pikchr validation, the
 /// "did the turn deliver a note" check behind the `write_note` follow-up and
 /// the post-completion hooks all read it, so one `ws exec` round trip serves
 /// all three and remote notes get the checks local ones do. Anything other
-/// than this turn's completed note leaves the slot untouched.
+/// than this turn's completed note leaves the slot untouched. The note is
+/// also remembered in `memory` so a later probe can recognise it
+/// ([`probe_turn_into_slot`]).
 pub(crate) fn collect_turn_into_slot(
     exec: RemoteExec,
     session_id: &str,
     turn_id: &str,
     slot: &NoteSubmissionSlot,
+    memory: &CollectedNoteMemory,
 ) -> Result<OutboxState, String> {
-    let state = collect(exec, session_id, Some(turn_id))?;
+    let (state, written_at) = collect_with_written_at(exec, session_id, Some(turn_id))
+        .map_err(|e| e.message().to_string())?;
     if let OutboxState::Delivered(submission) = &state {
         crate::note_tool::store_submission(slot, submission.clone());
+        *memory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(CollectedNote {
+            written_at,
+            submission: submission.clone(),
+        });
     }
     Ok(state)
+}
+
+/// [`collect_turn_into_slot`] for a probe made *during* a turn (the inactivity
+/// watchdog): a `done` identical to the note this run already collected — same
+/// `writtenAt`, same title, body and next steps — is the previous turn's, not
+/// a sign that the agent has finished this one, and is reported `Pending`
+/// with the slot left alone. A note that differs in any of those is new and
+/// is collected as usual.
+pub(crate) fn probe_turn_into_slot(
+    exec: RemoteExec,
+    session_id: &str,
+    turn_id: &str,
+    slot: &NoteSubmissionSlot,
+    memory: &CollectedNoteMemory,
+) -> Result<OutboxState, String> {
+    let (state, written_at) = collect_with_written_at(exec, session_id, Some(turn_id))
+        .map_err(|e| e.message().to_string())?;
+    let OutboxState::Delivered(submission) = state else {
+        return Ok(state);
+    };
+    let found = CollectedNote {
+        written_at,
+        submission,
+    };
+    let mut remembered = memory
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if remembered.as_ref() == Some(&found) {
+        log::info!(
+            "Session {session_id}: the workstation outbox still holds the note \"{}\" this \
+             run already collected; not a new delivery",
+            found.submission.title
+        );
+        return Ok(OutboxState::Pending);
+    }
+    crate::note_tool::store_submission(slot, found.submission.clone());
+    *remembered = Some(found.clone());
+    Ok(OutboxState::Delivered(found.submission))
 }
 
 /// What [`recover_uncollected_outbox`] found at session start.
@@ -864,21 +948,99 @@ mod tests {
         format!("done\n{}\n{}\n", b64(meta.as_bytes()), b64(b"Body"))
     }
 
+    /// The inactivity watchdog probes the outbox mid-turn with the same turn
+    /// id every turn of the run carries. During a repair turn the previous
+    /// turn's `done` is still there (the outbox is cleared at the end of the
+    /// run, not between turns), and the probe must not read it as the agent
+    /// having finished the repair.
+    #[test]
+    fn a_probe_treats_the_note_already_collected_as_pending_until_it_changes() {
+        let slot = crate::note_tool::new_submission_slot();
+        let memory = new_collected_note_memory();
+        let log = RefCell::new(Vec::new());
+        let done = |written_at: u64, body: &str| {
+            let meta = format!(
+                r#"{{"title":"Plan","suggestedNextSteps":null,"turn":"t1","writtenAt":{written_at},"helperVersion":2}}"#
+            );
+            format!("done\n{}\n{}\n", b64(meta.as_bytes()), b64(body.as_bytes()))
+        };
+
+        // Nothing collected yet: a probe that finds `done` is a delivery.
+        let exec = collecting_exec(&done(1, "First"), &log);
+        assert!(matches!(
+            probe_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+        assert_eq!(
+            crate::note_tool::current_submission(&slot).unwrap().body,
+            "First"
+        );
+
+        // The per-turn collector pulled the same note after the turn (say the
+        // body failed Pikchr and a repair turn is now running); the probe
+        // sees the identical `done` and reports nothing new.
+        let exec = collecting_exec(&done(1, "First"), &log);
+        assert!(matches!(
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+        let exec = collecting_exec(&done(1, "First"), &log);
+        assert_eq!(
+            probe_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Pending
+        );
+        assert_eq!(
+            crate::note_tool::current_submission(&slot).unwrap().body,
+            "First",
+            "the slot is left alone"
+        );
+
+        // A rewrite — new stamp or new content — is a delivery again.
+        let exec = collecting_exec(&done(2, "First"), &log);
+        assert!(matches!(
+            probe_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+        let exec = collecting_exec(&done(2, "Second"), &log);
+        assert!(matches!(
+            probe_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Delivered(_)
+        ));
+        assert_eq!(
+            crate::note_tool::current_submission(&slot).unwrap().body,
+            "Second"
+        );
+        // And the probe remembers what it delivered, like the collector.
+        let exec = collecting_exec(&done(2, "Second"), &log);
+        assert_eq!(
+            probe_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Pending
+        );
+
+        // Other states pass through untouched.
+        let exec = collecting_exec("pending\n\n\n", &log);
+        assert_eq!(
+            probe_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
+            OutboxState::Pending
+        );
+    }
+
     #[test]
     fn collecting_a_turn_fills_the_slot_only_for_this_turns_note() {
         let slot = crate::note_tool::new_submission_slot();
+        let memory = new_collected_note_memory();
 
         let log = RefCell::new(Vec::new());
         let exec = collecting_exec("pending\n\n\n", &log);
         assert_eq!(
-            collect_turn_into_slot(&exec, "sess-1", "t1", &slot).unwrap(),
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
             OutboxState::Pending
         );
         assert!(!crate::note_tool::has_submission(&slot));
 
         let exec = collecting_exec(&done_output("t0"), &log);
         assert_eq!(
-            collect_turn_into_slot(&exec, "sess-1", "t1", &slot).unwrap(),
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
             OutboxState::StaleTurn {
                 found: Some("t0".into())
             }
@@ -890,7 +1052,7 @@ mod tests {
 
         let exec = collecting_exec(&done_output("t1"), &log);
         assert!(matches!(
-            collect_turn_into_slot(&exec, "sess-1", "t1", &slot).unwrap(),
+            collect_turn_into_slot(&exec, "sess-1", "t1", &slot, &memory).unwrap(),
             OutboxState::Delivered(_)
         ));
         let submission = crate::note_tool::current_submission(&slot).unwrap();

@@ -6401,7 +6401,7 @@ fn serve_steer(
 /// was made for. claude-agent-acp 0.95 answered the cancel of a turn with a
 /// `sleep 1` shell call in flight only after ~4 s — it lets the tool wind
 /// down first — and real tool calls run longer than that.
-const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+pub const INTERRUPT_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a steer waits for the agent's `_session/steering` answer before
 /// the request fails as [`SteerError::Unacknowledged`]. The same bound as

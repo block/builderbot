@@ -76,12 +76,17 @@ pub(crate) struct RemoteNoteWatchdog {
 
 impl RemoteNoteWatchdog {
     /// A watchdog over `session_id`'s turn `turn_id` on `workspace_name`,
-    /// probing the outbox into `slot` with the per-turn collector.
+    /// probing the outbox into `slot` with the per-turn collector's probe
+    /// variant: a `done` identical to the note this run already collected
+    /// (`memory`, filled by the per-turn collector) is the previous turn's
+    /// and reads as `Pending`, so a repair or follow-up turn is never ended
+    /// on a note that was already pulled and rejected.
     pub(crate) fn new(
         session_id: String,
         workspace_name: String,
         turn_id: String,
         slot: NoteSubmissionSlot,
+        memory: remote_note_outbox::CollectedNoteMemory,
         activity: Arc<ActivityClock>,
         interval: Duration,
     ) -> Self {
@@ -92,11 +97,12 @@ impl RemoteNoteWatchdog {
             interval,
             Arc::new(move || {
                 let exec = remote_note_outbox::workspace_exec(&workspace_name);
-                remote_note_outbox::collect_turn_into_slot(
+                remote_note_outbox::probe_turn_into_slot(
                     &exec,
                     &probe_session_id,
                     &turn_id,
                     &slot,
+                    &memory,
                 )
             }),
         )

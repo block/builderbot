@@ -237,20 +237,61 @@ Two mechanisms cover that:
 - **Stop has a deadline.** A user Stop sends `session/cancel` and waits for
   the agent to answer the in-flight `session/prompt`. A bridge that honours
   the cancel answers within a few seconds; a hung proxy never does. After
-  `acp_client::CANCEL_ACK_TIMEOUT` (10 s) the driver settles the turn
-  `Cancelled` with reason `CancelUnacknowledged` instead of a plain
-  `Cancelled`, and for a remote note session the runner reads that as a lost
-  agent: it collects the outbox once more, and the row ends `completed` from
-  this run's note if it is there, otherwise `error` / `detached` with the
-  "keeps checking" marker and the detail "the agent did not acknowledge the
-  stop within 10 seconds, so the connection is presumed lost". The outbox is
-  kept either way, so a note the agent finishes a minute later is picked up
-  by the sweep. A Stop the agent _did_ acknowledge is still a plain Stop
-  (see _Design decisions_). The same deadline applies to the cancel that
-  precedes an interrupt-and-reprompt: a wedged bridge gets no second prompt
-  and the session settles `CancelUnacknowledged` too. `graceful_stop` then
-  SIGINTs the proxy's process group and SIGKILLs it after 5 s, so a stopped
-  proxy does not outlive the session.
+  `acp_client::REMOTE_CANCEL_ACK_TIMEOUT` (10 s; `CANCEL_ACK_TIMEOUT` is the
+  local agent's, the same figure) the driver settles the turn `Cancelled`
+  with reason `CancelUnacknowledged` instead of a plain `Cancelled`, and for
+  a remote note session the runner reads that as a lost agent: it collects
+  the outbox once more, and the row ends `completed` from this run's note if
+  it is there, otherwise `error` / `detached` with the "keeps checking"
+  marker and the detail "the agent did not acknowledge the stop within 10
+  seconds; the stop may still have reached it, so a note may or may not
+  appear". The copy is deliberately uncommitted: the cancel was written to
+  a proxy that answered nothing, and whether it got through before the proxy
+  was killed is unknowable from here (the chat pane says the same, keyed on
+  `UNACKNOWLEDGED_STOP_DETAIL_MARKER`). The outbox is kept either way, so a
+  note the agent finishes a minute later is picked up by the sweep. A Stop
+  the agent _did_ acknowledge is still a plain Stop (see _Design
+  decisions_). The deadline was measured on Blox: against a silent 90 s
+  shell loop both the Claude and the Goose bridge acknowledged a Stop in
+  0.6 s (three runs, 2026-11-01), so 10 s leaves a wide margin over the
+  proxy and orchestrator hops.
+
+  The cancel that precedes an interrupt-and-reprompt has its own, longer
+  deadline (`acp_client::INTERRUPT_ACK_TIMEOUT`, 30 s): a wedged bridge gets
+  no second prompt and the session settles `CancelUnacknowledged` too. For a
+  remote note session that is a lost agent _only if the connection relayed
+  nothing from the agent for the whole wait_ (`lost_remote_agent_detail`
+  reads the writer's `ActivityClock`); an agent that kept streaming while a
+  long tool call wound down was slow, not lost, and the run ends `cancelled`
+  as a local one would.
+
+  `graceful_stop` then kills the proxy. After an unacknowledged cancel the
+  proxy is known to answer nothing, so its whole process group is SIGKILLed
+  at once, with no SIGINT grace; otherwise the group gets SIGINT and five
+  seconds, then SIGKILL — again to the _group_, not the `sq` wrapper pid
+  alone. `sq blox acp` wraps a `blox.exoskeleton` child, and killing only
+  the wrapper left a frozen child orphaned: the kernel SIGCONTs a stopped
+  process whose group has lost its last running member, and the revived
+  proxy then relayed the queued cancel to the workstation and ended the turn
+  the user had been told might still finish. SIGKILL is delivered to a
+  stopped process, so the group kill reaches the frozen child (verified on
+  macOS by `acp-client`'s `session_isolation` tests with a SIGSTOPped
+  grandchild). Cost of an unacknowledged Stop on a remote note session: the
+  10 s deadline plus one `ws exec` outbox read, about 13 s to the row
+  settling (it was 17 to 18 s while the five-second grace was still offered
+  to a proxy that could not use it).
+
+- **One connection, one session.** The Blox proxy reuses a long-lived
+  workstation bridge process, which relays _every_ session's
+  `session/update`, async-task and raw SDK frames down every open
+  connection. The driver records the ACP session id each connection serves
+  (before `session/load`, whose replay streams updates ahead of its
+  response, or right after `session/new`) and drops frames stamped with
+  another session id at debug level before they reach the message writer,
+  the task sets or the activity signal — so an older session finishing its
+  turn on the workstation is neither rendered in the wrong chat pane nor
+  counted as activity by the wrong session's holding debounce or inactivity
+  watchdog.
 - **Silence triggers a probe.** Each connection of a remote note session with
   the helper attached runs an inactivity watchdog
   (`session_runner::remote_note_watchdog`) against the turn. The message
@@ -269,6 +310,20 @@ Two mechanisms cover that:
   agent that is merely quiet costs one round trip per ten minutes and is
   never interrupted. The watchdog races the prompt only; it is dropped the
   moment the turn ends on its own.
+
+  "A `done` for this turn" is read strictly. Every prompt turn of a run
+  shares one turn id (the helper is attached once) and the outbox is cleared
+  at the end of the run, not between turns, so during a Pikchr repair or a
+  `write_note` follow-up turn the previous turn's `done` is still on the
+  workstation. The per-turn collector remembers the note it last pulled
+  (`remote_note_outbox::CollectedNote`: the helper's `writtenAt` plus title,
+  body and next steps) and the watchdog's probe
+  (`probe_turn_into_slot`) reports an identical snapshot as `pending`; only
+  a note that differs — a rewrite — ends the turn. Without that, a quiet
+  repair turn would be cancelled on the very body the collector had already
+  rejected, and the run would end `detached` with "that note was not
+  stored". The watchdog's own completion costs the same 10 s cancel deadline
+  as a Stop before the row settles.
 
 ### Background hold ends late for remote note sessions
 
@@ -458,8 +513,20 @@ them by accident:
   exact loss the outbox exists to prevent. So an unacknowledged cancel
   (10 s) is treated like a transport loss: `detached` with the polling
   marker, outbox kept, sweep polling. The deadline is short because a bridge
-  that honours a cancel answers within a few seconds, and a user staring at
-  a Stop that does not stop gains nothing from a longer wait.
+  that honours a cancel answers within a few seconds (0.6 s measured on
+  Blox), and a user staring at a Stop that does not stop gains nothing from
+  a longer wait. The row's copy does not promise a note, because the Stop
+  may have reached the agent after all; and an interrupt's unacknowledged
+  cancel counts as lost only when the agent was silent for the whole 30 s
+  wait, since an interrupt is not the user giving up on the session.
+- **A stopped background hold still collects the outbox once.** A remote
+  note turn that completed and was then stopped during its background hold
+  (`HoldStopped`) skips the in-loop collection, like any cancel. The agent
+  may have called `write_note` from the background work the hold was
+  waiting on, so the end of the run reads the outbox once more and stores a
+  note it finds through the normal hooks (the row is `completed` /
+  `hold_stopped` either way). A note the agent writes _after_ that read is
+  picked up by the next run's start-of-run recovery.
 - **The inactivity watchdog probes, it does not time out.** Ten minutes of
   silence is a reason to _look_ at the outbox, not to end the turn: an agent
   thinking through a large diff is quiet for that long legitimately. Only a
@@ -555,20 +622,32 @@ before this run starts`, the note row fills in before the new turn, and
    Hung-proxy test: start a remote note session with a long prompt, find the
    proxy process (`pgrep -fl 'blox.exoskeleton acp'` — `sq blox acp` is a
    wrapper around it) and freeze it with `kill -STOP <pid>`. The transport
-   stays open, so nothing happens on its own. Press Stop: the chat pane's
-   Stop takes about 10 s, the log shows `Timed out waiting for ACP prompt
-response 10s after session/cancel … the agent is unresponsive` followed
-   by `lost the remote agent (the agent did not acknowledge the stop within
-10 seconds, so the connection is presumed lost)`, and the row must be
-   `error` / `detached` with the "keeps checking" message (informational
-   alert with Resume, timeline row "no note created yet"), _not_
-   `cancelled`. `~/.staged/sessions/<session-id>/` on the workstation must
-   still exist, and `graceful_stop` must have SIGKILLed the frozen proxy
-   within ~5 s (`pgrep` finds nothing). When the agent finishes on the
-   workstation the next sweep tick completes the row from the outbox. Run it
-   again with the agent allowed to finish _before_ the Stop (`done` present
-   in the outbox): the Stop must end the row `completed` with the note
-   stored, because the unacknowledged stop collects the outbox first.
+   stays open, so nothing happens on its own. Press Stop: the row settles
+   about 13 s later (the 10 s deadline, then one outbox read; it was 17 to
+   18 s before the immediate group kill), the log shows `Timed out waiting
+for ACP prompt response 10s after session/cancel … the agent is
+unresponsive` followed by `lost the remote agent (the agent did not
+acknowledge the stop within 10 seconds; the stop may still have reached
+it, so a note may or may not appear)`, and the row must be `error` /
+   `detached` with the "keeps checking" message (informational alert with
+   Resume whose copy says the stop may still have reached the agent,
+   timeline row "no note created yet"), _not_ `cancelled`.
+   `~/.staged/sessions/<session-id>/` on the workstation must still exist,
+   and _both_ local proxy processes must be gone the moment the row settles
+   (`pgrep -fl 'blox.exoskeleton'` finds nothing — in particular no `SN`
+   continued orphan reparented to pid 1). Because the frozen proxy is
+   killed, not continued, the workstation agent's loop keeps running and
+   its `done` appears on schedule. When it does, the next sweep tick
+   completes the row from the outbox. Run it again with the agent allowed
+   to finish _before_ the Stop (`done` present in the outbox): the Stop must
+   end the row `completed` with the note stored, because the unacknowledged
+   stop collects the outbox first.
+   Shared-bridge test: with one remote session detached and still running on
+   the workstation, start a second remote session in the same workspace (the
+   log shows `Found existing ACP process, reusing`) and let the first one
+   finish meanwhile. Its `write_note` call and final text must appear in the
+   first session's row only; the second session's log shows the frames
+   `dropping a session update for another session` at debug level.
    Watchdog test: `STAGED_REMOTE_NOTE_INACTIVITY_PROBE_SECS=30`, start a
    remote note session, freeze the proxy as above and leave it. Within ~30 s
    of the last agent event the log shows `no activity from the remote agent
@@ -605,16 +684,24 @@ window gets one last poll before the guarded expiry; an unreadable outbox
 past the window is retried five times, then expired as unreachable; only a
 transport loss detaches, with bridge subprocess-exit wording excluded and the
 innermost error in the message; an unacknowledged Stop and a watchdog hit
-count as a lost agent, an acknowledged Stop does not; the crashed row's
-innermost sentence; the timeline flag; frontend marker parity for both
-suffixes), `session_runner::remote_note_watchdog::tests` (interval parsing,
-one probe per silent interval until the note appears, an active agent is
-never probed), `agent::activity::tests`,
+count as a lost agent, an acknowledged Stop does not, and an unacknowledged
+interrupt counts only when the agent was silent throughout; the Stop copy
+promises no note; the crashed row's innermost sentence; the timeline flag;
+frontend marker parity for both suffixes and the Stop marker),
+`remote_note_outbox::tests` (a probe reports the note already collected as
+pending until its stamp or content changes),
+`session_runner::remote_note_watchdog::tests` (interval parsing, one probe
+per silent interval until the note appears, an active agent is never
+probed), `agent::activity::tests`,
 `acp-client` driver tests (stdio injection and unattended mode for the
 `goose` and `claude` providers, `initialize` capabilities; the transport-loss
 phrase list in both directions; a Stop the fake agent never acknowledges
 settles `CancelUnacknowledged` at the deadline while an acknowledged one
-settles `Cancelled`), `blox-cli`
+settles `Cancelled`; `session_isolation`: frames for another ACP session are
+dropped by all three notification handlers and are not activity, and a
+remote proxy group with a SIGINT-ignoring wrapper and a SIGSTOPped child is
+killed whole — at once after an unacknowledged cancel, after the grace
+otherwise), `blox-cli`
 (`--env-vars`), the session runner and prompt tests for the fallback and
 follow-up paths, and on the frontend `toolCallViewModel.test.ts` /
 `acpTranscript.test.ts` (the `write_note` row for both agents, interrupted

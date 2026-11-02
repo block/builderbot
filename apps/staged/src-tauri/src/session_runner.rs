@@ -1809,6 +1809,16 @@ pub fn start_session(
         // sat in the workstation outbox, so the turn is settled from the
         // outbox as a lost connection would be, not as a Stop.
         let inactivity_probe_found_note: Cell<Option<Duration>> = Cell::new(None);
+        // The note the per-turn collector last pulled from the workstation
+        // outbox. All prompt turns of a run share one turn id and the outbox
+        // is only cleared at the end of the run, so during a repair or
+        // follow-up turn the previous turn's `done` is still there; the
+        // watchdog's probe uses this to tell it from a fresh delivery.
+        let remote_note_memory = remote_note_outbox::new_collected_note_memory();
+        // How long the agent had been silent when the last turn settled. An
+        // unacknowledged cancel on a connection that was still relaying
+        // events is a slow agent, not a lost one (`lost_remote_agent_detail`).
+        let remote_agent_idle_at_settle: Cell<Option<Duration>> = Cell::new(None);
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
@@ -2187,6 +2197,7 @@ pub fn start_session(
                             ws_name,
                             turn_id.clone(),
                             Arc::clone(&note_slot),
+                            Arc::clone(&remote_note_memory),
                             Arc::clone(&activity),
                             remote_note_watchdog::inactivity_probe_interval(),
                         ))
@@ -2343,6 +2354,8 @@ pub fn start_session(
                     Err(e) => Err(e),
                 };
 
+                remote_agent_idle_at_settle.set(Some(activity.idle_for()));
+
                 if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
                     return turn_result.map_err(AgentRunError::from);
                 }
@@ -2362,6 +2375,7 @@ pub fn start_session(
                     let session_id = config.session_id.clone();
                     let turn_id = turn_id.clone();
                     let slot = Arc::clone(&note_slot);
+                    let memory = Arc::clone(&remote_note_memory);
                     let collected = tokio::task::spawn_blocking(move || {
                         let exec = remote_note_outbox::workspace_exec(&ws_name);
                         remote_note_outbox::collect_turn_into_slot(
@@ -2369,6 +2383,7 @@ pub fn start_session(
                             &session_id,
                             &turn_id,
                             &slot,
+                            &memory,
                         )
                     })
                     .await
@@ -2527,35 +2542,52 @@ pub fn start_session(
                 settle_reason.get(),
                 cancel_unacknowledged.get(),
                 inactivity_probe_found_note.get(),
+                UnacknowledgedCancelContext {
+                    stop_requested: cancel_token.is_cancelled(),
+                    agent_idle: remote_agent_idle_at_settle.get(),
+                },
             ),
             _ => None,
         };
         // The settled turn's collection (inside the loop) already pulled a
-        // remote note into the slot. The one case it could not cover is a
-        // turn that never settled cleanly — the connection to the remote
-        // agent failed — whose `write_note` call may still be sitting in the
-        // workstation outbox: collect once more for that, and only then. A
-        // slot already holding an earlier turn's note does not skip this: the
-        // failed turn may have been the repair that rewrote it. A Stop the
-        // agent never acknowledged collects too: the agent may have finished
-        // the note just before the proxy went dark, and a Stop that threw
-        // that away would be the one outcome the outbox exists to prevent.
+        // remote note into the slot. Two cases it could not cover: a turn
+        // that never settled cleanly — the connection to the remote agent
+        // failed — whose `write_note` call may still be sitting in the
+        // workstation outbox, and a completed turn whose background hold the
+        // user stopped (`HoldStopped`, which skips the in-loop collection as
+        // a cancel): the agent may have called `write_note` from the
+        // background work the hold was waiting on. Collect once more for
+        // those, and only those. A slot already holding an earlier turn's
+        // note does not skip this: the failed turn may have been the repair
+        // that rewrote it. A Stop the agent never acknowledged collects too:
+        // the agent may have finished the note just before the proxy went
+        // dark, and a Stop that threw that away would be the one outcome the
+        // outbox exists to prevent.
+        let hold_stopped = settle_reason.get() == Some(SessionSettleReason::HoldStopped);
         if let (Some(turn_id), Some(ws_name)) =
             (remote_note_turn.get(), config.workspace_name.as_deref())
         {
-            if lost_remote_agent.is_some() && !remote_outbox_collected_for_turn.get() {
+            if (lost_remote_agent.is_some() || hold_stopped)
+                && !remote_outbox_collected_for_turn.get()
+            {
+                let why = if lost_remote_agent.is_some() {
+                    "after the connection failed"
+                } else {
+                    "after the background hold was stopped"
+                };
                 let exec = remote_note_outbox::workspace_exec(ws_name);
                 match remote_note_outbox::collect_turn_into_slot(
                     &exec,
                     &session_id_for_status,
                     turn_id,
                     &note_slot,
+                    &remote_note_memory,
                 ) {
                     Ok(OutboxState::Delivered(submission)) => {
                         remote_outbox_own_note_collected.set(true);
                         log::info!(
                             "Session {session_id_for_status}: collected note \"{}\" from the \
-                             workstation outbox after the connection failed",
+                             workstation outbox {why}",
                             submission.title
                         )
                     }
@@ -2664,6 +2696,10 @@ pub fn start_session(
                     settlement.settle_reason,
                     settlement.cancel_unacknowledged,
                     inactivity_probe_found_note.get(),
+                    UnacknowledgedCancelContext {
+                        stop_requested: cancel_token.is_cancelled(),
+                        agent_idle: remote_agent_idle_at_settle.get(),
+                    },
                 )
             } else {
                 None
@@ -3609,11 +3645,26 @@ fn lost_remote_agent_terminal_state(
 ///   behind a silent connection and ended the turn itself.
 ///
 /// The string is the parenthetical detail of the row's message.
+///
+/// An unacknowledged cancel is read two ways, by what asked for it
+/// (`context`):
+///
+/// - a user Stop (`stop_requested`): lost, always. The cancel was sent, the
+///   proxy answered nothing for the deadline, and the proxy has since been
+///   killed outright; whether the cancel reached the agent before that is
+///   unknowable from here, so the detail says so
+///   ([`UNACKNOWLEDGED_STOP_DETAIL_MARKER`]) rather than promising a note;
+/// - an interrupt-and-reprompt that expired (`INTERRUPT_ACK_TIMEOUT`, with
+///   no Stop): lost only when the connection relayed nothing from the agent
+///   for the whole ack wait (`agent_idle`). A remote agent that kept
+///   streaming while it let a long tool call wind down is slow, not lost,
+///   and the run ends `cancelled` as a local session would.
 fn lost_remote_agent_detail(
     result: &Result<AgentRunOutcome, AgentRunError>,
     settle_reason: Option<SessionSettleReason>,
     cancel_unacknowledged: bool,
     inactivity_probe_found_note: Option<Duration>,
+    context: UnacknowledgedCancelContext,
 ) -> Option<String> {
     match result {
         Err(AgentRunError::Other(message))
@@ -3624,13 +3675,46 @@ fn lost_remote_agent_detail(
         Ok(AgentRunOutcome::Cancelled) if inactivity_probe_found_note.is_some() => {
             inactivity_probe_found_note.map(remote_note_watchdog::inactivity_detail)
         }
-        Ok(AgentRunOutcome::Cancelled) if cancel_unacknowledged => Some(
-            "the agent did not acknowledge the stop, so the connection is presumed lost"
-                .to_string(),
-        ),
+        Ok(AgentRunOutcome::Cancelled) if cancel_unacknowledged => {
+            if context.stop_requested {
+                Some(format!(
+                    "the agent {UNACKNOWLEDGED_STOP_DETAIL_MARKER}; the stop may still have \
+                     reached it, so a note may or may not appear"
+                ))
+            } else if context
+                .agent_idle
+                .is_some_and(|idle| idle >= acp_client::INTERRUPT_ACK_TIMEOUT)
+            {
+                Some(format!(
+                    "the agent did not acknowledge an interrupt within {} seconds and sent \
+                     nothing meanwhile, so the connection is presumed lost",
+                    acp_client::INTERRUPT_ACK_TIMEOUT.as_secs()
+                ))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
+
+/// What asked for the `session/cancel` an unacknowledged settle refers to,
+/// for [`lost_remote_agent_detail`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnacknowledgedCancelContext {
+    /// The session's cancel token was fired: the user pressed Stop (or the
+    /// app is quitting). False for an interrupt-and-reprompt's cancel.
+    stop_requested: bool,
+    /// How long the connection had relayed nothing from the agent when the
+    /// turn settled (`None` when the turn never ran).
+    agent_idle: Option<Duration>,
+}
+
+/// Phrase inside the detail of a `detached` row whose connection was given up
+/// on after an unacknowledged Stop; mirrored by the frontend
+/// (`sessionModalHelpers.ts`, pinned by a test) so the chat pane can say the
+/// Stop may still have reached the agent instead of promising a note.
+pub(crate) const UNACKNOWLEDGED_STOP_DETAIL_MARKER: &str = "did not acknowledge the stop";
 
 /// Whether a remote note session's failure is the connection to the agent
 /// going away mid-turn, as opposed to the agent refusing or the run failing

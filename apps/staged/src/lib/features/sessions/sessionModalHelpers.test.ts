@@ -9,6 +9,8 @@ import {
   newestUserMessageId,
   reconnectedOutcomeMessage,
   REMOTE_NOTE_POLL_SUFFIX,
+  REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER,
+  isUnacknowledgedRemoteStop,
   REMOTE_NOTE_STORING_SUFFIX,
   sessionEndMessage,
   sessionErrorMessage,
@@ -420,6 +422,24 @@ describe('newestUserMessageId', () => {
 });
 
 describe('detached remote note sessions', () => {
+  it('does not promise a note after a Stop the remote agent never acknowledged', () => {
+    const stopped = `Staged lost the connection to this session while the agent was running on ws-1 (the agent ${REMOTE_NOTE_UNACKNOWLEDGED_STOP_MARKER} within 10 seconds; the stop may still have reached it, so a note may or may not appear); ${REMOTE_NOTE_POLL_SUFFIX}`;
+    expect(isUnacknowledgedRemoteStop(stopped)).toBe(true);
+    expect(isAwaitingRemoteNote(stopped)).toBe(true);
+    expect(isUnacknowledgedRemoteStop(null)).toBe(false);
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: stopped })).toBe(
+      'You stopped this remote session, but the workstation did not confirm it in time. ' +
+        'The stop may still have reached the agent, so a note may or may not appear; ' +
+        'Staged is checking the workstation and will complete the session if one does.'
+    );
+    // Once the sweep gives up the backend's own copy is shown, Stop or not.
+    const expired =
+      'Staged lost this session while the agent was running on ws-1, and no completed note appeared on the workstation within 30 minutes. Resume to check again and continue.';
+    expect(sessionEndMessage({ completionReason: 'detached', errorMessage: expired })).toBe(
+      expired
+    );
+  });
+
   it('tells a detached session whose note is being stored', () => {
     const storing = `Staged lost this session while the agent was running on ws-1; ${REMOTE_NOTE_STORING_SUFFIX}`;
     expect(isStoringRemoteNote(storing)).toBe(true);

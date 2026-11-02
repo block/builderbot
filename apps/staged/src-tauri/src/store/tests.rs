@@ -916,9 +916,9 @@ fn child_session(store: &Store, parent_id: &str, branch_id: &str, kind: &str) ->
 }
 
 #[test]
-fn test_list_active_child_sessions_projects_each_kind_to_its_repo() {
+fn test_list_active_child_sessions_orders_children_by_start_and_links_their_branch() {
     let store = Store::in_memory().unwrap();
-    let (_project, branch, repo, parent) = child_session_fixture(&store);
+    let (_project, branch, _repo, parent) = child_session_fixture(&store);
 
     for kind in ["commit", "note", "review"] {
         let child = child_session(&store, &parent.id, &branch.id, kind);
@@ -934,11 +934,6 @@ fn test_list_active_child_sessions_projects_each_kind_to_its_repo() {
     for child in &children {
         assert_eq!(child.status, "running");
         assert_eq!(child.branch_id, branch.id);
-        assert_eq!(
-            child.github_repo.as_deref(),
-            Some(repo.github_repo.as_str())
-        );
-        assert!(child.subpath.is_none());
     }
 }
 

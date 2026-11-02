@@ -14,8 +14,6 @@ function child(overrides: Partial<ChildSessionInfo> = {}): ChildSessionInfo {
     status: 'running',
     title: 'Fix the login flow',
     branchId: 'branch-1',
-    githubRepo: 'block/staged',
-    subpath: null,
     ...overrides,
   };
 }

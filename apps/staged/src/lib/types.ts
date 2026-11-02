@@ -747,12 +747,10 @@ export interface ActiveSessionInfo {
 }
 
 /**
- * One running repo session spawned by a project session, projected to the
- * repo it is working in. Backs the in-flight badges shown under a running
+ * One in-flight repo session spawned by a project session: the branch it
+ * works on and the title the branch timeline would give it. Queued children
+ * are returned alongside running ones. Backs the badges shown under a running
  * project session's timeline row.
- *
- * `githubRepo`/`subpath` are the repo badge lookup key; both are null when the
- * branch has no project repo, which just costs the badge its repo tint.
  */
 export interface ChildSessionInfo {
   sessionId: string;
@@ -768,8 +766,6 @@ export interface ChildSessionInfo {
    */
   title: string | null;
   branchId: string;
-  githubRepo: string | null;
-  subpath: string | null;
 }
 
 /**

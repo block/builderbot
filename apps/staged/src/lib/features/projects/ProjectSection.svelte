@@ -152,14 +152,14 @@
     return Array.from(ids);
   });
 
-  // Running children ride along: the poller's `getSession` round trip is
-  // what carries a live ACP title to the branch card's row for the same
-  // session, so it is what keeps a child badge's label current too.
+  // Running children ride along for their ACP title only: a child badge
+  // reads `liveSessionTitles`, nothing reads a child's hint, so each child
+  // costs one `getSession` per tick and never a transcript poll.
   $effect(() => {
-    liveSessionHintPoller.syncRunningSessionIds([
-      ...runningNoteSessionIds,
-      ...runningChildSessionIds(childSessionsBySession),
-    ]);
+    liveSessionHintPoller.syncRunningSessionIds(
+      runningNoteSessionIds,
+      runningChildSessionIds(childSessionsBySession)
+    );
   });
 
   // This section stays mounted while home covers its project (and while the

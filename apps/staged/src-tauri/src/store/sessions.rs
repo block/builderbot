@@ -8,11 +8,9 @@ use super::models::{
 };
 use super::{now_timestamp, Store, StoreChange, StoreError};
 
-/// An in-flight session spawned by another session, projected to the repo it
-/// is working in.
-///
-/// `githubRepo`/`subpath` identify that repo; both are absent for a branch
-/// whose `project_repo_id` was cleared.
+/// An in-flight session spawned by another session: the branch it works on
+/// and the title the branch timeline would give it. `status` is `"queued"` or
+/// `"running"`.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChildSessionInfo {
@@ -28,8 +26,6 @@ pub struct ChildSessionInfo {
     /// stored title and no ACP title yet.
     pub title: Option<String>,
     pub branch_id: String,
-    pub github_repo: Option<String>,
-    pub subpath: Option<String>,
 }
 
 impl Store {
@@ -418,15 +414,12 @@ impl Store {
                     s.acp_title,
                     n.title AS note_title,
                     r.title AS review_title,
-                    b.id AS branch_id,
-                    pr.github_repo,
-                    pr.subpath
+                    b.id AS branch_id
              FROM sessions s
              LEFT JOIN commits c ON c.session_id = s.id
              LEFT JOIN notes n ON n.session_id = s.id
              LEFT JOIN reviews r ON r.session_id = s.id
              JOIN branches b ON b.id = COALESCE(c.branch_id, n.branch_id, r.branch_id)
-             LEFT JOIN project_repos pr ON pr.id = b.project_repo_id
              WHERE s.parent_session_id = ?1 AND s.status IN ('queued', 'running')
              GROUP BY s.id
              ORDER BY s.created_at ASC, s.rowid ASC",
@@ -459,8 +452,6 @@ impl Store {
                     status,
                     title,
                     branch_id: row.get(7)?,
-                    github_repo: row.get(8)?,
-                    subpath: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

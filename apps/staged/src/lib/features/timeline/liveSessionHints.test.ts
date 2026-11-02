@@ -171,6 +171,102 @@ describe('createLiveSessionHints titles', () => {
   });
 });
 
+describe('createLiveSessionHints title-only sessions', () => {
+  let getSession: ReturnType<typeof vi.fn>;
+  let getSessionMessages: ReturnType<typeof vi.fn>;
+  let getSessionMessagesSince: ReturnType<typeof vi.fn>;
+  let createLiveSessionHints: LiveSessionHintsModule['createLiveSessionHints'];
+  let poller: LiveSessionHintPoller | null;
+  let latestTitles: Record<string, string>;
+  let hintsCallbackIds: Set<string>;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    getSession = vi
+      .fn()
+      .mockImplementation((sessionId: string) =>
+        Promise.resolve(session({ id: sessionId, acpTitle: `Title ${sessionId}` }))
+      );
+    getSessionMessages = vi.fn().mockResolvedValue({
+      data: [{ id: 1, role: 'tool_call', content: 'Read the config', createdAt: 1 }],
+    });
+    getSessionMessagesSince = vi.fn().mockResolvedValue([]);
+    vi.doMock('../../api/commands', () => ({
+      getSession,
+      getSessionMessages,
+      getSessionMessagesSince,
+      resolvePathAliases: vi.fn().mockResolvedValue([]),
+    }));
+    ({ createLiveSessionHints } = await import('./liveSessionHints'));
+    poller = null;
+    latestTitles = {};
+    hintsCallbackIds = new Set();
+  });
+
+  afterEach(() => {
+    poller?.destroy();
+    vi.doUnmock('../../api/commands');
+  });
+
+  function createPoller(): LiveSessionHintPoller {
+    poller = createLiveSessionHints(
+      (hints) => {
+        for (const id of Object.keys(hints)) hintsCallbackIds.add(id);
+      },
+      undefined,
+      (titles) => {
+        latestTitles = titles;
+      }
+    );
+    return poller;
+  }
+
+  function messageCallIds(): string[] {
+    return [...getSessionMessages.mock.calls, ...getSessionMessagesSince.mock.calls].map(
+      (call) => call[0] as string
+    );
+  }
+
+  it('surfaces the ACP title of a title-only session without fetching its transcript', async () => {
+    const p = createPoller();
+    p.syncRunningSessionIds([], ['child']);
+    await flushAsync();
+    p.syncRunningSessionIds([], ['child']);
+    await flushAsync();
+
+    expect(getSession).toHaveBeenCalledWith('child');
+    expect(latestTitles).toEqual({ child: 'Title child' });
+    expect(messageCallIds()).not.toContain('child');
+    expect(hintsCallbackIds.has('child')).toBe(false);
+  });
+
+  it('keeps fetching messages for a full session synced alongside a title-only one', async () => {
+    const p = createPoller();
+    p.syncRunningSessionIds(['parent'], ['child']);
+    await flushAsync();
+
+    expect(getSessionMessages).toHaveBeenCalledWith('parent');
+    expect(messageCallIds()).not.toContain('child');
+    expect(latestTitles).toEqual({ parent: 'Title parent', child: 'Title child' });
+    expect(hintsCallbackIds.has('parent')).toBe(true);
+    expect(hintsCallbackIds.has('child')).toBe(false);
+  });
+
+  it('fetches the whole transcript once when a title-only session is promoted to full', async () => {
+    const p = createPoller();
+    p.syncRunningSessionIds([], ['s1']);
+    await flushAsync();
+    expect(messageCallIds()).toEqual([]);
+
+    p.syncRunningSessionIds(['s1']);
+    await flushAsync();
+
+    expect(getSessionMessages).toHaveBeenCalledTimes(1);
+    expect(getSessionMessages).toHaveBeenCalledWith('s1');
+    expect(hintsCallbackIds.has('s1')).toBe(true);
+  });
+});
+
 describe('createLiveSessionHints setPaused', () => {
   let getSession: ReturnType<typeof vi.fn>;
   let getSessionMessages: ReturnType<typeof vi.fn>;

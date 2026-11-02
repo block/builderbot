@@ -59,8 +59,9 @@ export function buildChildSessionBadges(
 
 /**
  * The children whose titles can still change: the hint poller tracks these
- * alongside their parents so a badge picks up an ACP title the way the branch
- * card's row does. Queued children have no agent yet, so nothing to poll.
+ * title-only (one `getSession` per tick, no transcript fetch) alongside their
+ * parents so a badge picks up an ACP title the way the branch card's row
+ * does. Queued children have no agent yet, so nothing to poll.
  */
 export function runningChildSessionIds(childrenBySession: Record<string, ChildSessionInfo[]>) {
   const ids: string[] = [];

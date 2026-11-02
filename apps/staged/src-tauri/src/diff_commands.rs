@@ -498,7 +498,11 @@ pub async fn get_diff_files(
     scope: String,
 ) -> Result<DiffFilesResponse, String> {
     let store = crate::get_store(&store)?;
-    get_diff_files_impl(store, branch_id, commit_sha, scope)
+    tauri::async_runtime::spawn_blocking(move || {
+        get_diff_files_impl(store, branch_id, commit_sha, scope)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub(crate) fn get_diff_files_impl(
@@ -604,7 +608,11 @@ pub async fn get_file_diff(
     path: String,
 ) -> Result<git::FileDiff, String> {
     let store = crate::get_store(&store)?;
-    get_file_diff_impl(store, branch_id, commit_sha, scope, path)
+    tauri::async_runtime::spawn_blocking(move || {
+        get_file_diff_impl(store, branch_id, commit_sha, scope, path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub(crate) fn get_file_diff_impl(
@@ -706,7 +714,11 @@ pub async fn get_file_at_ref(
     path: String,
 ) -> Result<git::File, String> {
     let store = crate::get_store(&store)?;
-    get_file_at_ref_impl(store, branch_id, ref_name, path)
+    tauri::async_runtime::spawn_blocking(move || {
+        get_file_at_ref_impl(store, branch_id, ref_name, path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 pub(crate) fn get_file_at_ref_impl(

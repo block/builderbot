@@ -24,6 +24,23 @@ pub(crate) async fn add_project_repo_impl(
     default_branch: Option<String>,
     head_repo: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
+    // Use the frontend-prefetched default branch when available to avoid
+    // a ~500ms-2s GitHub API round-trip. The fallback runs `gh`, so it goes
+    // to the blocking pool. It is resolved before the project's repos are
+    // read: a `gh` wait between that read and the writes below would let a
+    // parallel add of the same repo (MCP tool calls, typically) miss this
+    // one and pick the same branch name. It also keeps the wait away from
+    // the writes, since the web transport drops a request future at its
+    // next await when the client goes away.
+    let effective_base = {
+        let github_repo = github_repo.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            git::resolve_default_branch(default_branch, &github_repo)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
+
     let project = store
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
@@ -141,9 +158,6 @@ pub(crate) async fn add_project_repo_impl(
         repo.is_primary = true;
     }
 
-    // Use the frontend-prefetched default branch when available to avoid
-    // a ~500ms-2s GitHub API round-trip.
-    let effective_base = git::resolve_default_branch(default_branch, &repo.github_repo);
     let branch = match project.location {
         store::ProjectLocation::Local => {
             let mut b = store::Branch::new(&project_id, &repo.branch_name, &effective_base)

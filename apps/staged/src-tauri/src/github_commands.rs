@@ -9,20 +9,30 @@ use std::sync::{Arc, Mutex};
 /// List the authenticated user's GitHub organization memberships.
 #[tauri::command]
 pub async fn list_github_orgs() -> Result<Vec<String>, String> {
-    git::list_github_orgs().map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(|| git::list_github_orgs().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// List GitHub repositories for the authenticated user or a specific owner.
 #[tauri::command]
 pub async fn list_github_repos(owner: Option<String>) -> Result<Vec<git::GitHubRepo>, String> {
-    git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// List repositories the authenticated user has recently pushed to.
 /// Returns repos across all orgs, sorted by most recently pushed.
 #[tauri::command]
 pub async fn list_user_repos(limit: Option<u32>) -> Result<Vec<git::GitHubRepo>, String> {
-    git::list_user_repos(limit.unwrap_or(30)).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_user_repos(limit.unwrap_or(30)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Fetch a single GitHub repository by owner/repo.
@@ -32,7 +42,11 @@ pub async fn get_github_repo(
     owner: String,
     repo: String,
 ) -> Result<Option<git::GitHubRepo>, String> {
-    git::fetch_github_repo(&owner, &repo).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::fetch_github_repo(&owner, &repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Search GitHub repositories for the authenticated user or a specific owner.
@@ -41,20 +55,32 @@ pub async fn search_github_repos(
     query: String,
     owner: Option<String>,
 ) -> Result<Vec<git::GitHubRepo>, String> {
-    git::search_github_repos(&query, owner.as_deref()).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::search_github_repos(&query, owner.as_deref()).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Check if a repository is likely a monorepo by counting modules in MODULES.yaml.
 /// Returns the module count (0 if file doesn't exist).
 #[tauri::command]
 pub async fn check_monorepo_modules(github_repo: String) -> Result<u32, String> {
-    git::check_monorepo_modules(&github_repo).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::check_monorepo_modules(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Validate that a subpath exists as a directory in a GitHub repository.
 #[tauri::command]
 pub async fn validate_subpath(github_repo: String, subpath: String) -> Result<(), String> {
-    git::validate_subpath_in_repo(&github_repo, &subpath).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::validate_subpath_in_repo(&github_repo, &subpath).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// List directories at a given path in a GitHub repository.
@@ -64,26 +90,42 @@ pub async fn list_repo_directories(
     github_repo: String,
     path: String,
 ) -> Result<Vec<String>, String> {
-    git::list_repo_directories(&github_repo, &path).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_repo_directories(&github_repo, &path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// List branches for a repo via GitHub API (no local clone needed).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn list_git_branches(github_repo: String) -> Result<Vec<git::BranchRef>, String> {
-    git::list_branches_for_repo(&github_repo).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_branches_for_repo(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Detect default branch via GitHub API (no local clone needed).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn detect_default_branch_cmd(github_repo: String) -> Result<String, String> {
-    git::detect_default_branch_for_repo(&github_repo).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::detect_default_branch_for_repo(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Prune stale remote-tracking refs. With GitHub-repo-based projects,
 /// branch listing uses the API directly, so this is a no-op.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn prune_remote_refs(github_repo: String) -> Result<(), String> {
-    git::prune_remote_for_repo(&github_repo).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        git::prune_remote_for_repo(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Check if a local branch already exists in the project's local clone.
@@ -115,7 +157,12 @@ pub async fn check_existing_local_branch(
         return Ok(false);
     }
 
-    match git::branch_exists(&repo_path, branch_name) {
+    let branch_name = branch_name.to_owned();
+    let exists =
+        tauri::async_runtime::spawn_blocking(move || git::branch_exists(&repo_path, &branch_name))
+            .await
+            .map_err(|e| e.to_string())?;
+    match exists {
         Ok(exists) => Ok(exists),
         Err(e) => {
             log::debug!(

@@ -67,6 +67,14 @@ use crate::store::{
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
 const PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS: usize = 2;
 
+/// [`git_identity_env_from_global_config`] on the blocking pool, for async
+/// callers: it runs `git config --global` twice.
+pub async fn git_identity_env_off_runtime() -> Vec<(String, String)> {
+    tauri::async_runtime::spawn_blocking(git_identity_env_from_global_config)
+        .await
+        .unwrap_or_default()
+}
+
 pub fn git_identity_env_from_global_config() -> Vec<(String, String)> {
     let Some(name) = global_git_config_value("user.name") else {
         return vec![];

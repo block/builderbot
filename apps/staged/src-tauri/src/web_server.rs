@@ -814,8 +814,22 @@ async fn blocking_store_json<T>(
 where
     T: serde::Serialize + Send + 'static,
 {
+    blocking_json(read).await
+}
+
+/// Run a blocking call and its JSON serialization on the blocking pool. For
+/// arms that wait on `gh`, git or another child process: run inline, the
+/// call holds its tokio worker for its whole duration, and with it the timers
+/// and sockets every other request and `/api/events` depend on.
+async fn blocking_json<T, E>(
+    call: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<Value, String>
+where
+    T: serde::Serialize + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
     tokio::task::spawn_blocking(move || {
-        let value = read().map_err(|e| e.to_string())?;
+        let value = call().map_err(|e| e.to_string())?;
         Ok(serde_json::to_value(value).unwrap())
     })
     .await
@@ -958,6 +972,21 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             if let Some(ref sub) = subpath {
                 project = project.with_subpath(sub.clone());
             }
+
+            // Without a prefetched default branch this asks `gh`, so it runs on
+            // the blocking pool, and before the first write so no await falls
+            // between the writes below (see the module docs).
+            let effective_base = match github_repo.clone() {
+                Some(repo) => Some(
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::git::resolve_default_branch(default_branch, &repo)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?,
+                ),
+                None => None,
+            };
+
             store.create_project(&project).map_err(|e| e.to_string())?;
 
             if let Ok(project_dir) = crate::git::project_worktree_root_for(&project.id) {
@@ -976,7 +1005,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     .map_err(|e| e.to_string())?;
             }
 
-            if let Some(repo) = github_repo {
+            if let (Some(repo), Some(effective_base)) = (github_repo, effective_base) {
                 let mut project_repo = crate::store::ProjectRepo::new(
                     &project.id,
                     &repo,
@@ -988,8 +1017,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 store
                     .create_project_repo(&project_repo)
                     .map_err(|e| e.to_string())?;
-
-                let effective_base = crate::git::resolve_default_branch(default_branch, &repo);
 
                 match project.location {
                     crate::store::ProjectLocation::Local => {
@@ -1275,20 +1302,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            store
-                .pin_repo(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?;
-            // Backfill default_branch if not yet detected
-            if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
-                if badge.default_branch.is_none() {
-                    if let Err(e) =
-                        crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
-                    {
-                        log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+            // The backfill may ask `gh` or git for the default branch, so the
+            // whole arm runs on the blocking pool.
+            blocking_json(move || {
+                store
+                    .pin_repo(&github_repo, &subpath)
+                    .map_err(|e| e.to_string())?;
+                // Backfill default_branch if not yet detected
+                if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+                    if badge.default_branch.is_none() {
+                        if let Err(e) =
+                            crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
+                        {
+                            log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+                        }
                     }
                 }
-            }
-            Ok(Value::Null)
+                Ok::<_, String>(())
+            })
+            .await
         }
         "unpin_repo" => {
             let store = get_store(store_mutex)?;
@@ -1338,8 +1370,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            let branch = crate::detect_and_store_default_branch(&store, &github_repo, &subpath)?;
-            Ok(serde_json::to_value(branch).unwrap())
+            blocking_json(move || {
+                crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
+            })
+            .await
         }
         "get_repo_default_branch_timeline" => {
             let store = get_store(store_mutex)?;
@@ -1444,71 +1478,51 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // =====================================================================
         // GitHub commands
         // =====================================================================
-        "list_github_orgs" => {
-            let orgs = crate::git::list_github_orgs().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(orgs).unwrap())
-        }
+        "list_github_orgs" => blocking_json(crate::git::list_github_orgs).await,
         "list_github_repos" => {
             let owner: Option<String> = opt_arg(&args, "owner")?;
-            let repos =
-                crate::git::list_github_repos(owner.as_deref()).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || crate::git::list_github_repos(owner.as_deref())).await
         }
         "list_user_repos" => {
             let limit: Option<u32> = opt_arg(&args, "limit")?;
-            let repos =
-                crate::git::list_user_repos(limit.unwrap_or(30)).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || crate::git::list_user_repos(limit.unwrap_or(30))).await
         }
         "get_github_repo" => {
             let owner: String = arg(&args, "owner")?;
             let repo: String = arg(&args, "repo")?;
-            let result = crate::git::fetch_github_repo(&owner, &repo).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(result).unwrap())
+            blocking_json(move || crate::git::fetch_github_repo(&owner, &repo)).await
         }
         "search_github_repos" => {
             let query: String = arg(&args, "query")?;
             let owner: Option<String> = opt_arg(&args, "owner")?;
-            let repos = crate::git::search_github_repos(&query, owner.as_deref())
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(repos).unwrap())
+            blocking_json(move || crate::git::search_github_repos(&query, owner.as_deref())).await
         }
         "check_monorepo_modules" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            let count =
-                crate::git::check_monorepo_modules(&github_repo).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(count).unwrap())
+            blocking_json(move || crate::git::check_monorepo_modules(&github_repo)).await
         }
         "validate_subpath" => {
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: String = arg(&args, "subpath")?;
-            crate::git::validate_subpath_in_repo(&github_repo, &subpath)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || crate::git::validate_subpath_in_repo(&github_repo, &subpath))
+                .await
         }
         "list_repo_directories" => {
             let github_repo: String = arg(&args, "githubRepo")?;
             let path: String = arg(&args, "path")?;
-            let dirs = crate::git::list_repo_directories(&github_repo, &path)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(dirs).unwrap())
+            blocking_json(move || crate::git::list_repo_directories(&github_repo, &path)).await
         }
         "list_git_branches" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            let branches =
-                crate::git::list_branches_for_repo(&github_repo).map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(branches).unwrap())
+            blocking_json(move || crate::git::list_branches_for_repo(&github_repo)).await
         }
         "detect_default_branch_cmd" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            let branch = crate::git::detect_default_branch_for_repo(&github_repo)
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(branch).unwrap())
+            blocking_json(move || crate::git::detect_default_branch_for_repo(&github_repo)).await
         }
         "prune_remote_refs" => {
             let github_repo: String = arg(&args, "githubRepo")?;
-            crate::git::prune_remote_for_repo(&github_repo).map_err(|e| e.to_string())?;
-            Ok(Value::Null)
+            blocking_json(move || crate::git::prune_remote_for_repo(&github_repo)).await
         }
         "check_existing_local_branch" => {
             let store = get_store(store_mutex)?;
@@ -1522,12 +1536,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .get_project(&project_id)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Project not found: {project_id}"))?;
-            let result = project
+            let repo_path = project
                 .primary_repo()
                 .and_then(crate::paths::clone_path_for)
-                .filter(|p| p.exists())
-                .map(|repo_path| crate::git::branch_exists(&repo_path, trimmed).unwrap_or(false))
-                .unwrap_or(false);
+                .filter(|p| p.exists());
+            let branch_name = trimmed.to_owned();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                repo_path
+                    .map(|repo_path| {
+                        crate::git::branch_exists(&repo_path, &branch_name).unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(result).unwrap())
         }
         "get_pr_for_repo" => {
@@ -1977,118 +1999,38 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "setup_worktree" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-            // Fast-path: already has a workdir
-            if let Some(existing) = store
-                .get_workdir_for_branch(&branch.id)
-                .map_err(|e| e.to_string())?
-            {
-                return Ok(
-                    serde_json::to_value(crate::branches::to_branch_with_workdir(
-                        branch,
-                        Some(existing.path),
-                    ))
-                    .unwrap(),
-                );
-            }
-
-            let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
-            let repo_path =
-                crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-            crate::branches::fetch_for_worktree_with_offline_fallback(
-                &repo_path,
-                &repo_slug,
-                &branch.branch_name,
-                &branch.base_branch,
-            )?;
-            let desired_worktree_path = crate::git::project_worktree_path_for(
-                &branch.project_id,
-                &repo_slug,
-                &branch.branch_name,
-            )
-            .map_err(|e| e.to_string())?;
-
-            let worktree_str = crate::branches::create_and_link_worktree(
-                &store,
-                app_handle,
-                &branch,
-                &repo_path,
-                &desired_worktree_path,
-            )?;
-
-            Ok(
-                serde_json::to_value(crate::branches::to_branch_with_workdir(
-                    branch,
-                    Some(worktree_str),
-                ))
-                .unwrap(),
-            )
+            let result =
+                crate::branches::setup_worktree_impl(store, app_handle.clone(), branch_id).await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "setup_worktree_and_run_prerun" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
+            let app_handle = app_handle.clone();
 
-            // Reuse setup_worktree logic inline
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-            let worktree_str = if let Some(existing) = store
-                .get_workdir_for_branch(&branch.id)
-                .map_err(|e| e.to_string())?
-            {
-                existing.path
-            } else {
-                let repo_slug =
-                    crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
-                let repo_path =
-                    crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-                crate::branches::fetch_for_worktree_with_offline_fallback(
-                    &repo_path,
-                    &repo_slug,
-                    &branch.branch_name,
-                    &branch.base_branch,
-                )?;
-                let desired_worktree_path = crate::git::project_worktree_path_for(
-                    &branch.project_id,
-                    &repo_slug,
-                    &branch.branch_name,
+            // Detached so prerun is still kicked off when the client goes away
+            // while the worktree is being set up.
+            let result = detached(async move {
+                let result = crate::branches::setup_worktree_impl(
+                    Arc::clone(&store),
+                    app_handle.clone(),
+                    branch_id.clone(),
                 )
-                .map_err(|e| e.to_string())?;
-                crate::branches::create_and_link_worktree(
-                    &store,
+                .await?;
+
+                // Prerun runs detached: this is an HTTP request with no timeout
+                // layer in front of it, and prerun can take minutes.
+                crate::branches::spawn_prerun_actions(
+                    store,
                     app_handle,
-                    &branch,
-                    &repo_path,
-                    &desired_worktree_path,
-                )?
-            };
-
-            let result = crate::branches::to_branch_with_workdir(branch, Some(worktree_str));
-
-            // Prerun runs detached: this is an HTTP request with no timeout
-            // layer in front of it, and prerun can take minutes.
-            crate::branches::spawn_prerun_actions(
-                store,
-                app_handle.clone(),
-                branch_id,
-                provider,
-                "setup_worktree_and_run_prerun",
-            );
+                    branch_id,
+                    provider,
+                    "setup_worktree_and_run_prerun",
+                );
+                Ok(result)
+            })
+            .await?;
 
             Ok(serde_json::to_value(result).unwrap())
         }
@@ -2099,57 +2041,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let head_ref: String = arg(&args, "headRef")?;
             let base_ref: String = arg(&args, "baseRef")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
-
-            let target_repo = match project_repo_id {
-                Some(repo_id) => store
-                    .get_project_repo(&repo_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-                None => store
-                    .get_primary_project_repo(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-            };
-
-            let repo_path = crate::git::ensure_local_clone(&target_repo.github_repo)
-                .map_err(|e| e.to_string())?;
-            let desired_worktree_path = crate::git::project_worktree_path_for(
-                &project_id,
-                &target_repo.github_repo,
-                &head_ref,
+            let result = crate::branches::setup_worktree_from_pr_impl(
+                store,
+                project_id,
+                pr_number,
+                head_ref,
+                base_ref,
+                project_repo_id,
             )
-            .map_err(|e| e.to_string())?;
-
-            let (worktree_path, branch_name, base_branch) =
-                crate::git::create_worktree_from_pr_at_path(
-                    &repo_path,
-                    pr_number,
-                    &head_ref,
-                    &base_ref,
-                    &desired_worktree_path,
-                )
-                .map_err(|e| e.to_string())?;
-
-            let worktree_str = worktree_path
-                .to_str()
-                .ok_or("Invalid worktree path")?
-                .to_string();
-
-            let branch = store::Branch::new(&project_id, &branch_name, &base_branch)
-                .with_project_repo(&target_repo.id)
-                .with_pr(pr_number);
-            store.create_branch(&branch).map_err(|e| e.to_string())?;
-
-            let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
-            store.create_workdir(&workdir).map_err(|e| e.to_string())?;
-
-            Ok(
-                serde_json::to_value(crate::branches::to_branch_with_workdir(
-                    branch,
-                    Some(worktree_str),
-                ))
-                .unwrap(),
-            )
+            .await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "create_remote_branch" => {
             let store = get_store(store_mutex)?;
@@ -2158,51 +2059,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let base_branch: Option<String> = opt_arg(&args, "baseBranch")?;
             let workspace_name: String = arg(&args, "workspaceName")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
-
-            let project = store
-                .get_project(&project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {project_id}"))?;
-            let resolved_workspace_name = crate::branches::resolve_project_workspace_name(
-                &store,
-                &project,
-                Some(&workspace_name),
-            )?;
-
-            let target_repo = match project_repo_id {
-                Some(repo_id) => store
-                    .get_project_repo(&repo_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-                None => store
-                    .get_primary_project_repo(&project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-            };
-            let effective_base = match base_branch {
-                Some(b) => b,
-                None => crate::git::detect_default_branch_for_repo(&target_repo.github_repo)
-                    .map_err(|e| e.to_string())?,
-            };
-            let effective_base = if effective_base.starts_with("origin/") {
-                effective_base
-            } else {
-                format!("origin/{effective_base}")
-            };
-
-            let branch = store::Branch::new_remote(
-                &project_id,
-                &branch_name,
-                &effective_base,
-                &resolved_workspace_name,
+            let result = crate::branches::create_remote_branch_impl(
+                store,
+                project_id,
+                branch_name,
+                base_branch,
+                workspace_name,
+                project_repo_id,
             )
-            .with_project_repo(&target_repo.id);
-            store.create_branch(&branch).map_err(|e| e.to_string())?;
-
-            Ok(
-                serde_json::to_value(crate::branches::to_branch_with_workdir(branch, None))
-                    .unwrap(),
-            )
+            .await?;
+            Ok(serde_json::to_value(result).unwrap())
         }
         "start_workspace" => {
             let store = get_store(store_mutex)?;
@@ -3071,9 +2937,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let commit_sha: Option<String> = opt_arg(&args, "commitSha")?;
             let scope: String = arg(&args, "scope")?;
-            let response =
-                crate::diff_commands::get_diff_files_impl(store, branch_id, commit_sha, scope)?;
-            Ok(serde_json::to_value(response).unwrap())
+            blocking_json(move || {
+                crate::diff_commands::get_diff_files_impl(store, branch_id, commit_sha, scope)
+            })
+            .await
         }
         "get_file_diff" => {
             let store = get_store(store_mutex)?;
@@ -3081,19 +2948,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let commit_sha: String = arg(&args, "commitSha")?;
             let scope: String = arg(&args, "scope")?;
             let path: String = arg(&args, "path")?;
-            let result = crate::diff_commands::get_file_diff_impl(
-                store, branch_id, commit_sha, scope, path,
-            )?;
-            Ok(serde_json::to_value(result).unwrap())
+            blocking_json(move || {
+                crate::diff_commands::get_file_diff_impl(store, branch_id, commit_sha, scope, path)
+            })
+            .await
         }
         "get_file_at_ref" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let ref_name: String = arg(&args, "refName")?;
             let path: String = arg(&args, "path")?;
-            let file =
-                crate::diff_commands::get_file_at_ref_impl(store, branch_id, ref_name, path)?;
-            Ok(serde_json::to_value(file).unwrap())
+            blocking_json(move || {
+                crate::diff_commands::get_file_at_ref_impl(store, branch_id, ref_name, path)
+            })
+            .await
         }
 
         // =====================================================================
@@ -3778,8 +3646,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-            let project_context =
-                session_commands::build_project_session_context(&store, &project, None);
+            let project_context = {
+                let store = Arc::clone(&store);
+                let project = project.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    session_commands::build_project_session_context(&store, &project, None)
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            };
 
             let is_remote = project.location == store::ProjectLocation::Remote;
             let pikchr_grammar_reference =
@@ -3866,18 +3741,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let acp_config_selection: Option<store::AcpConfigSelection> =
                 opt_arg(&args, "acpConfigSelection")?;
 
-            let result = session_commands::queue_branch_session_for_store(
-                store,
-                branch_id,
-                prompt,
-                session_type,
-                provider,
-                image_ids,
-                launch_context,
-                acp_config_selection,
-            )?;
-
-            Ok(serde_json::to_value(result).unwrap())
+            // A review without a provider discovers the installed agents.
+            blocking_json(move || {
+                session_commands::queue_branch_session_for_store(
+                    store,
+                    branch_id,
+                    prompt,
+                    session_type,
+                    provider,
+                    image_ids,
+                    launch_context,
+                    acp_config_selection,
+                )
+            })
+            .await
         }
         "start_queued_session_now" => {
             let store = get_store(store_mutex)?;
@@ -4222,7 +4099,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // In web mode, the browser handles URL opening
             Err("open_url is handled by the browser in web mode".to_string())
         }
-        "is_sq_available" => Ok(serde_json::to_value(crate::blox::is_sq_available()).unwrap()),
+        "is_sq_available" => {
+            // The first call looks `sq` up through a login shell.
+            let available = tauri::async_runtime::spawn_blocking(crate::blox::is_sq_available)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(available).unwrap())
+        }
         "read_text_file" => {
             let file_path: String = arg(&args, "filePath")?;
             let path = std::path::Path::new(&file_path);
@@ -4342,10 +4225,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 }
 
 #[cfg(test)]
+#[path = "web_server/blocking_guard_tests.rs"]
+mod blocking_guard_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{event_gap_payload, normalize_ws_client_id, web_client_id};
     use serde_json::{json, Value};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[test]
     fn ws_client_id_drops_blank_and_reserved_ids() {
@@ -4504,10 +4391,14 @@ mod tests {
             "create_pr",
         ];
         /// Arms that write only after their last await, with the kick in the
-        /// same synchronous stretch: a drop before the write loses nothing the
-        /// next poll won't redo, and nothing is left half-written.
-        const WRITES_AFTER_LAST_AWAIT: &[&str] =
-            &["poll_workspace_status", "poll_all_workspace_statuses"];
+        /// same synchronous stretch: a drop before the write has written
+        /// nothing (the polls redo it next tick), and nothing is left
+        /// half-written.
+        const WRITES_AFTER_LAST_AWAIT: &[&str] = &[
+            "poll_workspace_status",
+            "poll_all_workspace_statuses",
+            "start_project_session",
+        ];
 
         let source = include_str!("web_server.rs");
         for (commands, arm) in dispatch_arms(source) {
@@ -4677,7 +4568,7 @@ mod tests {
 
     /// Every arm of the dispatch match as (its command patterns, its body),
     /// including the `"a" | "b" =>` arms `dispatch_arm_body` can't address.
-    fn dispatch_arms(source: &str) -> Vec<(Vec<String>, String)> {
+    pub(super) fn dispatch_arms(source: &str) -> Vec<(Vec<String>, String)> {
         let marker = "match command {";
         let start = source
             .find(marker)
@@ -4714,7 +4605,7 @@ mod tests {
         arms
     }
 
-    fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {
+    pub(super) fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {
         let marker = "tauri::generate_handler![";
         let start = source
             .find(marker)

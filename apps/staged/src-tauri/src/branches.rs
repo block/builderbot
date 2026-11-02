@@ -56,9 +56,10 @@ pub(crate) fn cached_workstation_id(workspace_name: &str) -> Option<u64> {
         .and_then(|cache| cache.get(workspace_name).copied())
 }
 
-/// Per-branch lock that serializes worktree setup so that `setup_worktree`
-/// (frontend) and `setup_worktree_sync` (backend/MCP) do not race each other.
-/// Follows the same pattern as `REPO_CLONE_LOCKS` in `git/github.rs`.
+/// Per-branch lock that serializes concurrent [`setup_worktree_sync`] calls
+/// for the same branch — e.g. the branch card's Retry racing the background
+/// project setup, or MCP `add_project_repo`. Follows the same pattern as
+/// `REPO_CLONE_LOCKS` in `git/github.rs`.
 static WORKTREE_SETUP_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 
 fn worktree_setup_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
@@ -1329,8 +1330,7 @@ pub fn create_branch(
     Ok(to_branch_with_workdir(branch, None))
 }
 
-/// Core worktree creation + DB linkage logic shared by [`setup_worktree`] and
-/// [`setup_worktree_sync`].
+/// Core worktree creation + DB linkage logic behind [`setup_worktree_sync`].
 ///
 /// Acquires the per-branch worktree lock, creates (or reuses) a git worktree,
 /// sets upstream tracking for PR branches, persists any branch-name changes,
@@ -1348,8 +1348,8 @@ pub(crate) fn create_and_link_worktree<R: tauri::Runtime>(
     repo_path: &std::path::Path,
     desired_worktree_path: &std::path::Path,
 ) -> Result<String, String> {
-    // Serialize worktree creation per branch so that concurrent callers
-    // (frontend `setup_worktree` vs backend `setup_worktree_sync`) do not race.
+    // Serialize worktree creation per branch so that concurrent
+    // `setup_worktree_sync` callers do not race.
     let lock = worktree_setup_lock_for(&branch.id);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
 
@@ -1635,47 +1635,30 @@ pub async fn setup_worktree(
     branch_id: String,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
+    setup_worktree_impl(store, app_handle, branch_id).await
+}
 
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-    // Idempotent fast-path: if this branch already has a workdir, reuse it.
-    if let Some(existing) = store
-        .get_workdir_for_branch(&branch.id)
-        .map_err(|e| e.to_string())?
-    {
-        return Ok(to_branch_with_workdir(branch, Some(existing.path)));
-    }
-
-    // Ensure we have a local clone, then fetch the specific refs we need.
-    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
-    let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-    fetch_for_worktree_with_offline_fallback(
-        &repo_path,
-        &repo_slug,
-        &branch.branch_name,
-        &branch.base_branch,
-    )?;
-    let desired_worktree_path =
-        git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
-            .map_err(|e| e.to_string())?;
-
-    let worktree_str = create_and_link_worktree(
-        &store,
-        &app_handle,
-        &branch,
-        &repo_path,
-        &desired_worktree_path,
-    )?;
-
-    Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+/// The body of [`setup_worktree`], shared with the web transport.
+///
+/// Runs [`setup_worktree_sync`] on the blocking pool: it may clone, and it
+/// fetches and creates the worktree, all of which wait on git or `gh`.
+/// The branch is read back afterwards so a local name de-duplicated by
+/// [`create_and_link_worktree`] is what the caller sees.
+pub(crate) async fn setup_worktree_impl(
+    store: Arc<Store>,
+    app_handle: AppHandle,
+    branch_id: String,
+) -> Result<BranchWithWorkdir, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let worktree_str = setup_worktree_sync(&store, &branch_id, &app_handle)?;
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+        Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Like [`setup_worktree`], but also runs prerun actions after the worktree is
@@ -1693,11 +1676,12 @@ pub async fn setup_worktree_and_run_prerun(
     branch_id: String,
     provider: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
-    // Delegate to the existing setup_worktree command for worktree creation.
-    let result = setup_worktree(store.clone(), app_handle.clone(), branch_id.clone()).await?;
+    let store = get_store(&store)?;
+    let result =
+        setup_worktree_impl(Arc::clone(&store), app_handle.clone(), branch_id.clone()).await?;
 
     spawn_prerun_actions(
-        get_store(&store)?,
+        store,
         app_handle,
         branch_id,
         provider,
@@ -1723,49 +1707,75 @@ pub async fn setup_worktree_from_pr(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
-
-    let target_repo = match project_repo_id {
-        Some(repo_id) => store
-            .get_project_repo(&repo_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-        None => store
-            .get_primary_project_repo(&project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-    };
-    // Ensure we have a local clone
-    let repo_path = git::ensure_local_clone(&target_repo.github_repo).map_err(|e| e.to_string())?;
-    let desired_worktree_path =
-        git::project_worktree_path_for(&project_id, &target_repo.github_repo, &head_ref)
-            .map_err(|e| e.to_string())?;
-
-    // Fetch PR head and create worktree
-    let (worktree_path, branch_name, base_branch) = git::create_worktree_from_pr_at_path(
-        &repo_path,
+    setup_worktree_from_pr_impl(
+        store,
+        project_id,
         pr_number,
-        &head_ref,
-        &base_ref,
-        &desired_worktree_path,
+        head_ref,
+        base_ref,
+        project_repo_id,
     )
-    .map_err(|e| e.to_string())?;
+    .await
+}
 
-    let worktree_str = worktree_path
-        .to_str()
-        .ok_or("Invalid worktree path")?
-        .to_string();
+/// The body of [`setup_worktree_from_pr`], shared with the web transport. Runs
+/// on the blocking pool: it may clone, and it fetches the PR head and creates
+/// the worktree.
+pub(crate) async fn setup_worktree_from_pr_impl(
+    store: Arc<Store>,
+    project_id: String,
+    pr_number: u64,
+    head_ref: String,
+    base_ref: String,
+    project_repo_id: Option<String>,
+) -> Result<BranchWithWorkdir, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target_repo = match project_repo_id {
+            Some(repo_id) => store
+                .get_project_repo(&repo_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
+            None => store
+                .get_primary_project_repo(&project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
+        };
+        // Ensure we have a local clone
+        let repo_path =
+            git::ensure_local_clone(&target_repo.github_repo).map_err(|e| e.to_string())?;
+        let desired_worktree_path =
+            git::project_worktree_path_for(&project_id, &target_repo.github_repo, &head_ref)
+                .map_err(|e| e.to_string())?;
 
-    // Create branch record with PR number
-    let branch = store::Branch::new(&project_id, &branch_name, &base_branch)
-        .with_project_repo(&target_repo.id)
-        .with_pr(pr_number);
-    store.create_branch(&branch).map_err(|e| e.to_string())?;
+        // Fetch PR head and create worktree
+        let (worktree_path, branch_name, base_branch) = git::create_worktree_from_pr_at_path(
+            &repo_path,
+            pr_number,
+            &head_ref,
+            &base_ref,
+            &desired_worktree_path,
+        )
+        .map_err(|e| e.to_string())?;
 
-    // Create workdir record
-    let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
-    store.create_workdir(&workdir).map_err(|e| e.to_string())?;
+        let worktree_str = worktree_path
+            .to_str()
+            .ok_or("Invalid worktree path")?
+            .to_string();
 
-    Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+        // Create branch record with PR number
+        let branch = store::Branch::new(&project_id, &branch_name, &base_branch)
+            .with_project_repo(&target_repo.id)
+            .with_pr(pr_number);
+        store.create_branch(&branch).map_err(|e| e.to_string())?;
+
+        // Create workdir record
+        let workdir = store::Workdir::new(&project_id, &worktree_str).with_branch(&branch.id);
+        store.create_workdir(&workdir).map_err(|e| e.to_string())?;
+
+        Ok(to_branch_with_workdir(branch, Some(worktree_str)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Create a remote branch record.
@@ -1782,49 +1792,75 @@ pub async fn create_remote_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-    let resolved_workspace_name =
-        resolve_project_workspace_name(&store, &project, Some(&workspace_name))?;
-
-    // Detect default branch if none specified (via GitHub API, no local clone needed)
-    let target_repo = match project_repo_id {
-        Some(repo_id) => store
-            .get_project_repo(&repo_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
-        None => store
-            .get_primary_project_repo(&project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
-    };
-    let effective_base = match base_branch {
-        Some(b) => b,
-        None => git::detect_default_branch_for_repo(&target_repo.github_repo)
-            .map_err(|e| e.to_string())?,
-    };
-
-    // Normalise to "origin/<branch>" so diffs and worktree creation always
-    // use the remote-tracking ref rather than a stale local branch.
-    let effective_base = if effective_base.starts_with("origin/") {
-        effective_base
-    } else {
-        format!("origin/{effective_base}")
-    };
-
-    // Create the branch record (starts in Starting status)
-    let branch = store::Branch::new_remote(
-        &project_id,
-        &branch_name,
-        &effective_base,
-        &resolved_workspace_name,
+    create_remote_branch_impl(
+        store,
+        project_id,
+        branch_name,
+        base_branch,
+        workspace_name,
+        project_repo_id,
     )
-    .with_project_repo(&target_repo.id);
-    store.create_branch(&branch).map_err(|e| e.to_string())?;
+    .await
+}
 
-    Ok(to_branch_with_workdir(branch, None))
+/// The body of [`create_remote_branch`], shared with the web transport. Runs
+/// on the blocking pool: with no `base_branch` it asks GitHub for the default
+/// branch.
+pub(crate) async fn create_remote_branch_impl(
+    store: Arc<Store>,
+    project_id: String,
+    branch_name: String,
+    base_branch: Option<String>,
+    workspace_name: String,
+    project_repo_id: Option<String>,
+) -> Result<BranchWithWorkdir, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let project = store
+            .get_project(&project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Project not found: {project_id}"))?;
+        let resolved_workspace_name =
+            resolve_project_workspace_name(&store, &project, Some(&workspace_name))?;
+
+        // Detect default branch if none specified (via GitHub API, no local clone needed)
+        let target_repo = match project_repo_id {
+            Some(repo_id) => store
+                .get_project_repo(&repo_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project repo not found: {repo_id}"))?,
+            None => store
+                .get_primary_project_repo(&project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project '{project_id}' has no repository attached"))?,
+        };
+        let effective_base = match base_branch {
+            Some(b) => b,
+            None => git::detect_default_branch_for_repo(&target_repo.github_repo)
+                .map_err(|e| e.to_string())?,
+        };
+
+        // Normalise to "origin/<branch>" so diffs and worktree creation always
+        // use the remote-tracking ref rather than a stale local branch.
+        let effective_base = if effective_base.starts_with("origin/") {
+            effective_base
+        } else {
+            format!("origin/{effective_base}")
+        };
+
+        // Create the branch record (starts in Starting status)
+        let branch = store::Branch::new_remote(
+            &project_id,
+            &branch_name,
+            &effective_base,
+            &resolved_workspace_name,
+        )
+        .with_project_repo(&target_repo.id);
+        store.create_branch(&branch).map_err(|e| e.to_string())?;
+
+        Ok(to_branch_with_workdir(branch, None))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Start the Blox workspace for a remote branch.
@@ -3020,7 +3056,16 @@ pub async fn rename_branch(
     }
 
     match branch.branch_type {
-        store::BranchType::Local => rename_local_branch(&store, &branch, new_name)?,
+        store::BranchType::Local => {
+            let store = Arc::clone(&store);
+            let branch = branch.clone();
+            let new_name = new_name.to_owned();
+            tauri::async_runtime::spawn_blocking(move || {
+                rename_local_branch(&store, &branch, &new_name)
+            })
+            .await
+            .map_err(|e| e.to_string())??
+        }
         store::BranchType::Remote => {
             // `git branch -m` carries the upstream across the rename, so the
             // branch keeps pushing where it did — the PR head, for a PR
@@ -3115,10 +3160,12 @@ fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
 
 /// Set up a git worktree for a branch synchronously.
 ///
-/// Like [`setup_worktree`] but callable without Tauri state (e.g. from the
-/// MCP server). Handles cloning with optional progress reporting, then
+/// Every worktree setup goes through here: both transports'
+/// [`setup_worktree`] (via [`setup_worktree_impl`]), project creation, the
+/// add-repo setup pass and MCP. Handles cloning with progress reporting, then
 /// delegates to [`create_and_link_worktree`] for worktree creation and DB
-/// linkage.
+/// linkage. It clones, fetches and creates the worktree inline, so call it
+/// from the blocking pool.
 pub(crate) fn setup_worktree_sync(
     store: &Arc<Store>,
     branch_id: &str,

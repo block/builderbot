@@ -1481,7 +1481,8 @@ struct ResumePlan {
     effective_acp_config_selection: Option<store::AcpConfigSelection>,
     parent_project_note_id: Option<String>,
     mcp_project_id: Option<String>,
-    linked_commit: bool,
+    /// The global git identity, for a session whose commit it authors.
+    extra_env: Vec<(String, String)>,
     linked_note: bool,
     session_type: Option<String>,
     event_branch_id: Option<String>,
@@ -1614,6 +1615,16 @@ async fn prepare_resume(
         None
     };
 
+    // `git config --global`, on the blocking pool. Read here so that
+    // `resume_session_for_store` has no await between its claim and the launch.
+    // The continue path claims before this preparation, so there it is one
+    // more await after the claim, like `branch_head_sha` above.
+    let extra_env = if linked_commit.is_some() {
+        session_runner::git_identity_env_off_runtime().await
+    } else {
+        vec![]
+    };
+
     Ok(ResumePlan {
         provider,
         pending_start_agent_id,
@@ -1622,7 +1633,7 @@ async fn prepare_resume(
         effective_acp_config_selection,
         parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
         mcp_project_id,
-        linked_commit: linked_commit.is_some(),
+        extra_env,
         linked_note: linked_note.is_some(),
         session_type,
         event_branch_id,
@@ -1660,7 +1671,7 @@ async fn launch_resume(
         effective_acp_config_selection,
         parent_project_note_id,
         mcp_project_id,
-        linked_commit,
+        extra_env,
         linked_note,
         session_type,
         event_branch_id,
@@ -1718,11 +1729,7 @@ async fn launch_resume(
                 pre_head_sha,
                 provider,
                 workspace_name,
-                extra_env: if linked_commit {
-                    session_runner::git_identity_env_from_global_config()
-                } else {
-                    vec![]
-                },
+                extra_env,
                 mcp_project_id: mcp_project_id.clone(),
                 action_executor: if mcp_project_id.is_some() {
                     Some(Arc::clone(&action_executor))
@@ -2991,9 +2998,9 @@ impl BranchSessionType {
     }
 }
 
-fn extra_env_for_branch_session(session_type: &BranchSessionType) -> Vec<(String, String)> {
+async fn extra_env_for_branch_session(session_type: &BranchSessionType) -> Vec<(String, String)> {
     if matches!(session_type, BranchSessionType::Commit) {
-        session_runner::git_identity_env_from_global_config()
+        session_runner::git_identity_env_off_runtime().await
     } else {
         vec![]
     }
@@ -4152,8 +4159,17 @@ pub async fn start_project_session(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
 
-    // Build project context for the prompt
-    let project_context = build_project_session_context(&store, &project, None);
+    // Build project context for the prompt. It reads each local branch's
+    // commit log with git, so it runs on the blocking pool.
+    let project_context = {
+        let store = Arc::clone(&store);
+        let project = project.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            build_project_session_context(&store, &project, None)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
 
     let is_remote = project.location == store::ProjectLocation::Remote;
     let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, None);
@@ -4329,6 +4345,7 @@ struct PreparedBranchSessionStart {
     pre_head_sha: Option<String>,
     review_tip_sha: Option<String>,
     remote_working_dir: Option<PathBuf>,
+    extra_env: Vec<(String, String)>,
 }
 
 struct CreatedBranchSession {
@@ -4536,6 +4553,8 @@ async fn prepare_branch_session_start(
         None
     };
 
+    let extra_env = extra_env_for_branch_session(&session_type).await;
+
     Ok(PreparedBranchSessionStart {
         branch: branch.clone(),
         session_type,
@@ -4545,6 +4564,7 @@ async fn prepare_branch_session_start(
         pre_head_sha,
         review_tip_sha,
         remote_working_dir,
+        extra_env,
     })
 }
 
@@ -4706,7 +4726,7 @@ fn launch_running_branch_session(
             pre_head_sha: prepared.pre_head_sha,
             provider: prepared.provider,
             workspace_name,
-            extra_env: extra_env_for_branch_session(&session_type),
+            extra_env: prepared.extra_env,
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
@@ -5052,7 +5072,18 @@ pub async fn start_or_queue_branch_session_for_store(
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
-    let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
+    // A review without a provider discovers the installed agents through
+    // login shells, so this runs on the blocking pool.
+    let provider = {
+        let store = Arc::clone(&store);
+        let branch_id = branch_id.clone();
+        let session_type = session_type.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            resolve_branch_session_provider(&store, &branch_id, &session_type, provider)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    };
     let launch_lock = branch_session_launch_lock_for(&branch_id);
 
     let (target, created) = {
@@ -5835,7 +5866,14 @@ async fn start_queued_session_for_branch(
 
     let is_remote = branch.workspace_name.is_some();
     let effective_provider = if matches!(session_type, BranchSessionType::Review) {
-        let resolved = resolve_review_provider(session.provider.clone().or(provider), is_remote)?;
+        // Discovers the installed agents through login shells when no
+        // provider is set, so it runs on the blocking pool.
+        let requested = session.provider.clone().or(provider);
+        let resolved = tauri::async_runtime::spawn_blocking(move || {
+            resolve_review_provider(requested, is_remote)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
         if session.provider.as_deref() != Some(resolved.as_str()) {
             store
                 .set_session_provider(&session_id, &resolved)
@@ -5973,6 +6011,8 @@ async fn start_queued_session_for_branch(
     let image_ids = store
         .get_image_ids_for_session(&session_id)
         .unwrap_or_default();
+    // Before the claim, so no await falls between it and the handoff.
+    let extra_env = extra_env_for_branch_session(&session_type).await;
 
     // Live from before the claim flips the row to `running` until
     // `start_session` has registered it (see `SessionRegistry::hold`);
@@ -6054,7 +6094,7 @@ async fn start_queued_session_for_branch(
             pre_head_sha,
             provider: effective_provider,
             workspace_name: branch.workspace_name.clone(),
-            extra_env: extra_env_for_branch_session(&session_type),
+            extra_env,
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,

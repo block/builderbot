@@ -144,7 +144,8 @@ describe.each([true, false])('project status synchronization (native=%s)', (nati
     const client = await newClient(native);
     await client.initPreferences();
     await client.initPreferences();
-    expect(listeners).toHaveLength(1);
+    // One listener per synced key (project statuses first, then composer send mode).
+    expect(listeners).toHaveLength(2);
 
     values.set(key, [custom]);
     listeners[0].options?.onEstablished?.();
@@ -224,5 +225,57 @@ describe.each([true, false])('composer send mode (native=%s)', (native) => {
     await client.initPreferences();
     expect(client.preferences.composerSendMode).toBe('queue');
     expect(set).not.toHaveBeenCalledWith(modeKey, expect.anything());
+  });
+
+  it('follows a mode picked in another client without echoing it back', async () => {
+    const a = await newClient(native);
+    await a.initPreferences();
+    const b = await newClient(!native);
+    await b.initPreferences();
+
+    a.setComposerSendMode('send');
+    expect(b.preferences.composerSendMode).toBe('send');
+    b.setComposerSendMode('queue');
+    expect(a.preferences.composerSendMode).toBe('queue');
+    expect(set).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to queue when another client deletes or corrupts the mode', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    emit('send', { key: modeKey });
+    emit(null, { key: modeKey, exists: false });
+    expect(client.preferences.composerSendMode).toBe('queue');
+    emit('send', { key: modeKey });
+    emit('later', { key: modeKey });
+    expect(client.preferences.composerSendMode).toBe('queue');
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('refreshes on reconnection to recover a missed change', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    values.set(modeKey, 'send');
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(client.preferences.composerSendMode).toBe('send'));
+  });
+
+  it('keeps a mode picked while the initial read is in flight', async () => {
+    let resolve!: (value: unknown) => void;
+    get.mockImplementation(async (changedKey: string) =>
+      changedKey === modeKey
+        ? new Promise((done) => (resolve = done))
+        : structuredClone(values.get(changedKey))
+    );
+    const client = await newClient(native);
+    const initialized = client.initPreferences();
+    await vi.waitFor(() => expect(get).toHaveBeenCalledWith(modeKey));
+
+    // The local write's event has not arrived yet either.
+    set.mockResolvedValueOnce(undefined);
+    client.setComposerSendMode('send');
+    resolve('queue');
+    await initialized;
+    expect(client.preferences.composerSendMode).toBe('send');
   });
 });

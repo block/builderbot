@@ -283,30 +283,67 @@ function ensureSystemModeListener() {
 // Initialization
 // =============================================================================
 
-let unlistenStatusOptions: (() => void) | undefined;
-let statusOptionsRevision = 0;
+/**
+ * A preference every client (Tauri window or web tab) keeps in step: any
+ * client's write, this one's included, arrives as a store-change event and
+ * goes through `apply`, which must normalize missing or malformed values.
+ */
+function syncedPreference(key: string, apply: (value: unknown) => void) {
+  let unlisten: (() => void) | undefined;
+  let revision = 0;
 
-function applyProjectStatusOptions(value: unknown): void {
-  statusOptionsRevision += 1;
+  function receive(value: unknown): void {
+    revision += 1;
+    apply(value);
+  }
+
+  async function refresh(): Promise<void> {
+    const current = ++revision;
+    try {
+      const value = await getStoreValue<unknown>(key);
+      // A notification, local edit, or newer refresh wins over an older snapshot.
+      if (current === revision) apply(value);
+    } catch (error) {
+      console.error(`[Preferences] Failed to refresh ${key}:`, error);
+    }
+  }
+
+  return {
+    /** Subscribe (once) and load the current value. */
+    start(): Promise<void> {
+      unlisten ??= listenToStoreKeyChange(key, receive, {
+        // Close the initial registration gap and recover missed web events on reconnect.
+        onEstablished: () => void refresh(),
+      });
+      return refresh();
+    },
+    /** Persist a value the caller has already applied locally. */
+    save(value: unknown): void {
+      revision += 1;
+      setStoreValue(key, value);
+    },
+    dispose(): void {
+      unlisten?.();
+      revision += 1;
+    },
+  };
+}
+
+const projectStatusOptionsSync = syncedPreference(PROJECT_STATUS_OPTIONS_STORE_KEY, (value) => {
   preferences.projectStatusOptions =
     normalizeProjectStatusOptions(value) ?? DEFAULT_PROJECT_STATUS_OPTIONS.map((o) => ({ ...o }));
-}
+});
 
-async function refreshProjectStatusOptions(): Promise<void> {
-  const revision = ++statusOptionsRevision;
-  try {
-    const value = await getStoreValue<unknown>(PROJECT_STATUS_OPTIONS_STORE_KEY);
-    // A notification, local edit, or newer refresh wins over an older snapshot.
-    if (revision === statusOptionsRevision) applyProjectStatusOptions(value);
-  } catch (error) {
-    console.error('[Preferences] Failed to refresh project status options:', error);
-  }
-}
+// Global, so a mode picked in one window must reach the others: a stale `send`
+// would deliver into (or interrupt) a running turn the user meant to queue behind.
+const composerSendModeSync = syncedPreference(COMPOSER_SEND_MODE_STORE_KEY, (value) => {
+  preferences.composerSendMode = normalizeComposerSendMode(value);
+});
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
-    unlistenStatusOptions?.();
-    statusOptionsRevision += 1;
+    projectStatusOptionsSync.dispose();
+    composerSendModeSync.dispose();
   });
 }
 
@@ -317,17 +354,9 @@ if (import.meta.hot) {
 export async function initPreferences(): Promise<void> {
   await initPersistentStore();
 
-  unlistenStatusOptions ??= listenToStoreKeyChange(
-    PROJECT_STATUS_OPTIONS_STORE_KEY,
-    applyProjectStatusOptions,
-    {
-      // Close the initial registration gap and recover missed web events on reconnect.
-      onEstablished: () => void refreshProjectStatusOptions(),
-    }
-  );
-  // Also load without waiting for the web event socket to connect. Statuses
+  // Loads without waiting for the web event socket to connect. Statuses
   // belong to the first project paint, ahead of the slower diff-theme loading.
-  await refreshProjectStatusOptions();
+  await projectStatusOptionsSync.start();
 
   const [savedSize, savedMode] = await Promise.all([
     getStoreValue<number>(SIZE_STORE_KEY),
@@ -422,10 +451,8 @@ export async function initPreferences(): Promise<void> {
     preferences.branchPrefix = savedBranchPrefix;
   }
 
-  // Load the composer's last-used submit mode (malformed values fall back to queue)
-  preferences.composerSendMode = normalizeComposerSendMode(
-    await getStoreValue<unknown>(COMPOSER_SEND_MODE_STORE_KEY)
-  );
+  // Load and follow the composer's last-used submit mode (malformed values fall back to queue)
+  await composerSendModeSync.start();
 }
 
 // =============================================================================
@@ -487,7 +514,7 @@ export function setBranchPrefix(prefix: string): void {
  */
 export function setComposerSendMode(mode: ComposerSendMode): void {
   preferences.composerSendMode = mode;
-  setStoreValue(COMPOSER_SEND_MODE_STORE_KEY, mode);
+  composerSendModeSync.save(mode);
 }
 
 // =============================================================================
@@ -496,9 +523,8 @@ export function setComposerSendMode(mode: ComposerSendMode): void {
 
 /** Replace the list of statuses a project can be set to. */
 export function setProjectStatusOptions(options: ProjectStatusOption[]): void {
-  statusOptionsRevision += 1;
   preferences.projectStatusOptions = options;
-  setStoreValue(PROJECT_STATUS_OPTIONS_STORE_KEY, options);
+  projectStatusOptionsSync.save(options);
 }
 
 /** Restore the built-in project statuses. */

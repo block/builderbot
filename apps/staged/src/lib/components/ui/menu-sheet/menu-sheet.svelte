@@ -23,6 +23,12 @@
   back while a touch is in progress, and for a quick tap the click can land
   before bits-ui is listening.
 
+  Only a tap that went down on the scrim closes it (see scrimDismiss.ts).
+  bits-ui opens a menu on the trigger's touch `pointerup`, so the sheet
+  mounts before the opening tap's click is dispatched, and WebKit sometimes
+  delivers that click to the scrim now under the finger; dismissing on it
+  would close the sheet the moment it opened.
+
   Sub-menus (SubContentStatic) reuse the frame as a second sheet stacked over
   the parent's, with a Back row in the `cancel` slot that closes only the sub.
 -->
@@ -30,6 +36,7 @@
   import type { Snippet } from 'svelte';
   import type { ClassValue } from 'clsx';
   import { cn } from '$lib/components/utils.js';
+  import { createScrimDismiss } from './scrimDismiss.js';
 
   let {
     props,
@@ -47,6 +54,8 @@
   } = $props();
 
   let state = $derived(props['data-state']);
+
+  const scrim = createScrimDismiss(() => onDismiss?.());
 </script>
 
 <div
@@ -58,7 +67,9 @@
     class="menu-sheet-scrim pointer-events-auto data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 absolute inset-0 bg-[var(--shadow-overlay)] duration-200"
     data-state={state}
     aria-hidden="true"
-    onclick={onDismiss}
+    onpointerdown={scrim.onpointerdown}
+    onpointercancel={scrim.onpointercancel}
+    onclick={scrim.onclick}
   ></div>
   <div
     {...props}

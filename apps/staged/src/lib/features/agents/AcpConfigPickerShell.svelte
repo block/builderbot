@@ -151,7 +151,7 @@
       align="start"
       side={dropUp ? 'top' : 'bottom'}
       sideOffset={4}
-      class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
+      class="max-h-[min(360px,calc(100dvh-48px))] max-w-[calc(100vw-16px)]"
       onOpenAutoFocus={(event) => handleAcpPickerOpenAutoFocus(event, contentEl)}
       onkeydowncapture={handlePickerKeydown}
     >

@@ -145,7 +145,7 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && closeViewer()}>
   <Dialog.Content
-    class="h-screen max-h-none w-screen max-w-none sm:max-w-none rounded-none border-0 bg-background p-0 gap-0 overflow-hidden flex flex-col"
+    class="h-dvh max-h-none w-screen max-w-none sm:max-w-none rounded-none border-0 bg-background p-0 gap-0 overflow-hidden flex flex-col"
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >

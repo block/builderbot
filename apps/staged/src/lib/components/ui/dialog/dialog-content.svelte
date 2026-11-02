@@ -46,7 +46,7 @@
 
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
-  // `max-h-[calc(100vh-16vh)]`) without specificity fights. Safe-area padding
+  // `max-h-[calc(100dvh-16dvh)]`) without specificity fights. Safe-area padding
   // keeps the header/footer clear of notches and home indicators; with the
   // keyboard up the footer sits on the keyboard instead, so the bottom inset
   // goes. Tailwind v4 translate utilities use the individual `translate`

@@ -32,12 +32,17 @@
   import { HASHTAG_TOKEN_RE, createExtractedValueBuilder } from './hashtagItems';
   import { createBadgeElement, hashtagContentFragment } from './hashtagEditorContent';
   import { readReferenceClipboard, writeReferenceClipboard } from './referenceClipboard';
+  import { placeHashtagDropdown } from './hashtagDropdownPlacement';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
   import { portal } from '../../shared/portal';
   import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
+  import { visibleViewportRect } from '../../shared/visibleViewportRect';
   import RepoLabel from '../../shared/RepoLabel.svelte';
 
   type DropdownIconComponent = typeof FileText;
+
+  /** Keep in sync with `.hashtag-dropdown { width; max-height }`. */
+  const DROPDOWN_SIZE = { width: 420, maxHeight: 280 };
 
   /** Component lookup map for dropdown icons — keep in sync with hashtagTypeIconSvg SVG strings. */
   const dropdownIconMap: Record<string, DropdownIconComponent> = {
@@ -354,17 +359,18 @@
     const caretBottom = rect.bottom || editorRect.top + 20;
     const caretLeft = rect.left || editorRect.left;
 
-    const maxHeight = 280;
-    const spaceBelow = window.innerHeight - caretBottom;
-    const spaceAbove = caretTop;
-
-    if (spaceBelow >= maxHeight || spaceBelow > spaceAbove) {
-      dropdownPosition = 'below';
-      dropdownStyle = `position:fixed; top:${caretBottom + 4}px; left:${caretLeft}px;`;
-    } else {
-      dropdownPosition = 'above';
-      dropdownStyle = `position:fixed; bottom:${window.innerHeight - caretTop + 4}px; left:${caretLeft}px;`;
-    }
+    // Measured against what is on screen, so with the iOS keyboard up the
+    // list opens in the space left above it.
+    const placement = placeHashtagDropdown(
+      { top: caretTop, bottom: caretBottom, left: caretLeft },
+      visibleViewportRect(),
+      DROPDOWN_SIZE
+    );
+    dropdownPosition = placement.side;
+    dropdownStyle =
+      `position:fixed; top:${placement.top}px; left:${placement.left}px;` +
+      ` width:${placement.width}px; max-height:${placement.maxHeight}px;` +
+      (placement.side === 'above' ? ' translate:0 -100%;' : '');
   }
 
   function closeDropdown() {

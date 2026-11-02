@@ -551,7 +551,7 @@
 <Dialog.Root {open} onOpenChange={(v) => !v && handleClose()}>
   <Dialog.Content
     bind:ref={modalElement}
-    class={`max-h-[calc(100vh-16vh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
+    class={`max-h-[calc(100dvh-16dvh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
     style={dialogWidth.style}
     showCloseButton={false}
   >

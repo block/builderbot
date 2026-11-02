@@ -358,14 +358,31 @@
     margin-left: auto;
   }
 
-  /* A hairline between the split button's two accent segments. Every button
-     paints a 1px transparent border with bg-clip-padding, so without the
-     trigger's -ml-px overlap the primary's right border and the trigger's left
-     border sit side by side as a 2px seam of composer background. With the
-     overlap only this border column remains; it is mixed into the accent fill
-     (not transparent) so it renders as an opaque tint of the fill rather than
-     a near-invisible wash over the chrome background behind the control. */
+  /* A hairline between the split button's two accent segments, exactly the
+     height of the fills. Every button paints a 1px transparent border with
+     bg-clip-padding, so its fill is inset 1px from the border box on all
+     sides. The trigger's -ml-px overlaps the primary's transparent right
+     border column; with no left border of its own the trigger's fill paints
+     over that column and the two fills meet with no seam. The divider is then
+     drawn on top as a 1px ::before spanning the trigger's padding box (the
+     containing block of an absolutely positioned child), which is the fill's
+     extent, so it neither overshoots the fills nor notches them. A tinted
+     border-left would instead span the border box and mitre into the
+     transparent top and bottom borders, poking 1px past the fills at each
+     end. The colour mixes --bg-primary into the accent so the line is an
+     opaque tint of the fill rather than a wash over the chrome behind it. */
   .composer-send-split :global(.composer-send-menu-trigger) {
-    border-left-color: color-mix(in srgb, var(--bg-primary) 35%, var(--ui-accent));
+    position: relative;
+    border-left-width: 0;
+  }
+
+  .composer-send-split :global(.composer-send-menu-trigger::before) {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 1px;
+    background: color-mix(in srgb, var(--bg-primary) 35%, var(--ui-accent));
   }
 </style>

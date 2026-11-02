@@ -24,6 +24,7 @@
 // layout viewport's geometry and behaviour is unchanged.
 
 import { resetDocumentScroll } from './documentScroll';
+import { isTextInput } from './textInput';
 import {
   computeViewportGeometry,
   LAYOUT_VIEWPORT_GEOMETRY,
@@ -35,28 +36,6 @@ export const visibleViewport = $state<ViewportGeometry>({ ...LAYOUT_VIEWPORT_GEO
 let trackedViewport: VisualViewport | null = null;
 let subscriberCount = 0;
 let initialSyncFrame = 0;
-
-// Input types that open no keyboard (buttons, toggles, pickers iOS draws in
-// its own popover).
-const NON_TEXT_INPUT_TYPES = new Set([
-  'button',
-  'checkbox',
-  'color',
-  'file',
-  'hidden',
-  'image',
-  'radio',
-  'range',
-  'reset',
-  'submit',
-]);
-
-function isTextInput(el: Element | null): boolean {
-  if (!el) return false;
-  if (el.tagName === 'TEXTAREA') return true;
-  if (el.tagName === 'INPUT') return !NON_TEXT_INPUT_TYPES.has((el as HTMLInputElement).type);
-  return (el as HTMLElement).isContentEditable === true;
-}
 
 function measure(vv: VisualViewport): ViewportGeometry {
   return computeViewportGeometry({

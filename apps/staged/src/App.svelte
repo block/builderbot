@@ -27,6 +27,7 @@
   import { setDragDropCoveredElement } from './lib/features/branches/dragDrop';
   import WorkspaceLayer from './lib/features/layout/WorkspaceLayer.svelte';
   import { tabDirection } from './lib/shared/tabDirection';
+  import { guardDocumentScroll } from './lib/shared/documentScroll';
   import { firstTabbableWithin, lastTabbableBefore } from './lib/shared/tabbable';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
@@ -86,6 +87,7 @@
   let unlistenStoreReset: UnlistenFn | undefined;
   let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
+  let unguardDocumentScroll: (() => void) | undefined;
   let stopUpdaterLoop: (() => void) | null = null;
   let updaterStartPending = false;
   let updaterStartQueued = false;
@@ -391,6 +393,7 @@
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
+    unguardDocumentScroll = guardDocumentScroll();
 
     // Web resume accelerator: the restored project id is available synchronously
     // (navigation seeds it from localStorage at module load). Warm that project's
@@ -647,6 +650,7 @@
     destroyed = true;
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
+    unguardDocumentScroll?.();
     unregisterShortcuts?.();
     unlistenMenu?.();
     unlistenReferenceCopy?.();
@@ -861,10 +865,16 @@
     color: var(--text-primary);
   }
 
+  /* The dynamic viewport, not 100vh: iOS Safari's 100vh is the viewport with
+     its toolbar hidden, 40 px taller than <body>, and that overflow is what
+     focus restoring scrolled <body> by (issue 02) and what hid the bottom of
+     every pane under the toolbar (issue 08). 100vh stays as the fallback for
+     webviews without dynamic units. */
   main {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     background-color: var(--bg-chrome);
   }

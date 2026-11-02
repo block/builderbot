@@ -64,8 +64,13 @@ export const LAYOUT_VIEWPORT_GEOMETRY: Readonly<ViewportGeometry> = {
   zoomed: false,
 };
 
+/** The user has pinch-zoomed the page (`visualViewport.scale`). */
+export function isPinchZoomed(scale: number): boolean {
+  return scale > MAX_UNZOOMED_SCALE;
+}
+
 export function computeViewportGeometry(sample: ViewportSample): ViewportGeometry {
-  if (sample.scale > MAX_UNZOOMED_SCALE) {
+  if (isPinchZoomed(sample.scale)) {
     return { ...LAYOUT_VIEWPORT_GEOMETRY, zoomed: true };
   }
   if (!sample.textInputFocused) return { ...LAYOUT_VIEWPORT_GEOMETRY };

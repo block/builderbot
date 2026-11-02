@@ -10,6 +10,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { visibleViewport, watchVisualViewport } from '$lib/shared/visualViewport.svelte';
+  import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
   import { getWindowSync } from '$lib/transport';
 
   let {
@@ -21,6 +22,8 @@
     showCloseButton = true,
     fullScreenOnMobile = true,
     onpointerdown: onPointerDown,
+    onOpenAutoFocus,
+    onCloseAutoFocus,
     ...restProps
   }: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof DialogPortal>>;
@@ -77,6 +80,23 @@
   const contentStyle = $derived(
     fullScreen ? `${styleProp ? `${styleProp};` : ''}${fullScreenStyle}` : styleProp
   );
+
+  // On touch screens, focus goes back to the dialog's trigger without
+  // scrolling it into view; see restoreFocusWithoutScroll. With a mouse and
+  // keyboard, bits-ui's restore (which shows the trigger) is kept.
+  const focusRestore = restoreFocusWithoutScroll(() => viewport.hasCoarsePointer);
+
+  function handleOpenAutoFocus(event: Event) {
+    focusRestore.capture();
+    // Nothing is focused on open unless the caller says otherwise.
+    if (onOpenAutoFocus) onOpenAutoFocus(event);
+    else event.preventDefault();
+  }
+
+  function handleCloseAutoFocus(event: Event) {
+    onCloseAutoFocus?.(event);
+    focusRestore.restore(event);
+  }
 
   const dragRegionSelector =
     '[data-dialog-drag-region], [data-slot="dialog-header"], .modal-header, .diagram-viewer-header';
@@ -143,7 +163,8 @@
     )}
     style={contentStyle}
     data-full-screen={fullScreen ? '' : undefined}
-    onOpenAutoFocus={(e) => e.preventDefault()}
+    onOpenAutoFocus={handleOpenAutoFocus}
+    onCloseAutoFocus={handleCloseAutoFocus}
     onpointerdown={handlePointerDown}
     preventOverflowTextSelection={false}
     preventScroll={false}

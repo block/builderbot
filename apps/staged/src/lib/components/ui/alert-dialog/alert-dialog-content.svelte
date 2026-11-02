@@ -4,17 +4,38 @@
   import AlertDialogOverlay from './alert-dialog-overlay.svelte';
   import { cn, type WithoutChild, type WithoutChildrenOrChild } from '$lib/components/utils.js';
   import type { ComponentProps } from 'svelte';
+  import { onMount } from 'svelte';
+  import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
+  import { restoreFocusWithoutScroll } from '$lib/shared/restoreFocusWithoutScroll';
 
   let {
     ref = $bindable(null),
     class: className,
     size = 'default',
     portalProps,
+    onOpenAutoFocus,
+    onCloseAutoFocus,
     ...restProps
   }: WithoutChild<AlertDialogPrimitive.ContentProps> & {
     size?: 'default' | 'sm';
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof AlertDialogPortal>>;
   } = $props();
+
+  onMount(() => watchViewport());
+
+  // Focus goes back to the trigger without scrolling on touch screens, as in
+  // dialog-content.
+  const focusRestore = restoreFocusWithoutScroll(() => viewport.hasCoarsePointer);
+
+  function handleOpenAutoFocus(event: Event) {
+    focusRestore.capture();
+    onOpenAutoFocus?.(event);
+  }
+
+  function handleCloseAutoFocus(event: Event) {
+    onCloseAutoFocus?.(event);
+    focusRestore.restore(event);
+  }
 </script>
 
 <AlertDialogPortal {...portalProps}>
@@ -35,6 +56,8 @@
       'data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 bg-[var(--bg-alert-dialog)] text-[var(--text-primary)] ring-foreground/10 gap-6 rounded-xl p-6 ring-1 duration-100 data-[size=default]:max-w-xs data-[size=sm]:max-w-xs data-[size=default]:sm:max-w-lg group/alert-dialog-content fixed top-1/2 left-1/2 z-(--z-index-overlay) grid w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 outline-none',
       className
     )}
+    onOpenAutoFocus={handleOpenAutoFocus}
+    onCloseAutoFocus={handleCloseAutoFocus}
     preventOverflowTextSelection={false}
     preventScroll={false}
     {...restProps}

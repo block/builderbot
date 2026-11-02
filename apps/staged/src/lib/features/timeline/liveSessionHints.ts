@@ -17,6 +17,11 @@ type HintTracker = {
   messages: SessionMessage[];
   rootKey: string;
   displayRoots: string[];
+  /**
+   * Poll only `getSession` for this id — its ACP title — and never its
+   * transcript. A child badge reads the title but nothing reads a child's hint.
+   */
+  titleOnly: boolean;
 };
 
 export type PendingHintItemType = 'pending-commit' | 'generating-note' | 'generating-review';
@@ -253,6 +258,14 @@ export function createLiveSessionHints(
         clearTitle(sessionId);
       }
 
+      if (tracker.titleOnly) {
+        // The display roots below exist only to format tool-call hints, so a
+        // title-only tracker stops here. `clearHint` covers a full-to-title-only
+        // flip; otherwise it is a no-op.
+        clearHint(sessionId);
+        return;
+      }
+
       const rootCandidates: DisplayRootInput = [getDisplayRootCandidates?.(), session.workingDir];
       const nextRootKey = displayRootKey(rootCandidates);
       if (tracker.rootKey !== nextRootKey) {
@@ -327,17 +340,30 @@ export function createLiveSessionHints(
   }
 
   return {
-    syncRunningSessionIds(runningSessionIds: string[]) {
+    /**
+     * Track `runningSessionIds` for hints and titles, and `titleOnlySessionIds`
+     * for their ACP title alone (one `getSession` per tick, no transcript
+     * fetch). An id in both lists is tracked in full. A tracker's mode follows
+     * the lists on every sync: promoting an id to full leaves `lastMessageId`
+     * at `null`, so its next tick fetches the whole transcript.
+     */
+    syncRunningSessionIds(runningSessionIds: string[], titleOnlySessionIds: string[] = []) {
       if (destroyed) return;
-      const activeIds = new Set(runningSessionIds);
+      const fullIds = new Set(runningSessionIds);
+      const activeIds = new Set([...runningSessionIds, ...titleOnlySessionIds]);
 
       for (const sessionId of activeIds) {
-        if (!hintTrackers.has(sessionId)) {
+        const titleOnly = !fullIds.has(sessionId);
+        const tracker = hintTrackers.get(sessionId);
+        if (tracker) {
+          tracker.titleOnly = titleOnly;
+        } else {
           hintTrackers.set(sessionId, {
             lastMessageId: null,
             messages: [],
             rootKey: '',
             displayRoots: [],
+            titleOnly,
           });
         }
       }

@@ -191,9 +191,32 @@ pub(super) fn insert_running_commit_pipeline_session(
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
     }
+    insert_running_pending_commit_session(
+        store,
+        registry,
+        ctx,
+        pipeline,
+        prompt.to_string(),
+        provider,
+        false,
+    )
+}
 
+/// The rows every commit-producing run-now pipeline inserts: a `running`
+/// session on the branch, under a liveness hold taken before the write, and
+/// the pending commit it will fill in. Same locking contract as
+/// [`insert_running_commit_pipeline_session`].
+pub(super) fn insert_running_pending_commit_session(
+    store: &Arc<Store>,
+    registry: &Arc<session_runner::SessionRegistry>,
+    ctx: &BranchPipelineContext,
+    pipeline: PipelineExecution,
+    prompt: String,
+    provider: Option<&str>,
+    capture_pre_head: bool,
+) -> Result<RunningPipelineSession, String> {
     let mut session =
-        store::Session::new_running(prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
+        store::Session::new_running(&prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
@@ -207,8 +230,8 @@ pub(super) fn insert_running_commit_pipeline_session(
     Ok(RunningPipelineSession {
         session_id: session.id,
         pipeline,
-        prompt: prompt.to_string(),
-        pre_head_sha: None,
+        prompt,
+        capture_pre_head,
         _liveness: liveness,
     })
 }
@@ -581,6 +604,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
             pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
+            capture_pre_head: false,
             provider: effective_provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,

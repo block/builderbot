@@ -4145,8 +4145,7 @@ pub(crate) async fn dispatch(
                 branch_id,
                 commit_sha,
                 provider,
-            )
-            .await?;
+            )?;
             Ok(serde_json::to_value(response).unwrap())
         }
         "get_pr_url" => {

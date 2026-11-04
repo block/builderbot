@@ -435,13 +435,6 @@
     projectSessions: projectSessionsInFlight,
   });
   let workInFlight = $derived(branchSessionsInFlight > 0 || projectSessionsInFlight > 0);
-  let revertCommitDisabledReason = $derived(
-    commandPipelinePending
-      ? 'Starting command...'
-      : branchSessionBusy
-        ? 'Wait for the current branch work to finish'
-        : undefined
-  );
 
   /** Timeline label the backend gives a queued rebase/squash pipeline session. */
   const branchCommandLabels = { rebase: 'Rebase branch', squash: 'Squash commits' } as const;
@@ -492,12 +485,21 @@
   }
 
   async function handleRevertCommit(commitSha: string) {
-    if (commandPipelinePending || branchSessionBusy) return;
+    // Unlike rebase/squash, gated on a busy branch: the backend never queues a
+    // revert (a queued row would have to persist the target SHA), it refuses one.
+    if (immediateGitActionDisabledReason) return;
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
+    const pendingKey = `pipeline-revert-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      await commands.revertCommit(branch.id, commitSha, provider);
+      const sessionId = await commands.revertCommit(branch.id, commitSha, provider);
+      addPendingSession(branch.id, {
+        key: pendingKey,
+        type: 'pending-commit',
+        title: 'Reverting…',
+        sessionId,
+      });
       await loadTimeline();
     } catch (e) {
       notifyError('Revert failed', e);
@@ -2298,7 +2300,7 @@
               onDeleteCommit={handleDeleteCommit}
               onDeletePendingCommit={handleDeletePendingCommit}
               onRevertCommit={handleRevertCommit}
-              {revertCommitDisabledReason}
+              revertCommitDisabledReason={immediateGitActionDisabledReason ?? undefined}
               onDeleteNote={handleDeleteNote}
               onSetNoteRead={(noteId, read) =>
                 void setNoteReadState({ kind: 'branch', noteId }, read)}

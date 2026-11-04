@@ -318,5 +318,4 @@ pub async fn revert_commit(
         commit_sha,
         provider,
     )
-    .await
 }

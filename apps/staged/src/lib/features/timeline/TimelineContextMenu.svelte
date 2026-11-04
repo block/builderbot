@@ -181,8 +181,16 @@
           </ContextMenu.Item>
         {/if}
         {#if activeAction.commitSha && onRevertCommit}
+          <!-- The reason is shown inline, not as a title: a disabled item takes
+               no pointer events, so it never gets the hover a tooltip needs. -->
           <ContextMenu.Item disabled={!!revertCommitDisabledReason} onSelect={handleRevertCommit}>
-            <RotateCcw size={14} /> Revert
+            <RotateCcw size={14} />
+            <span class="flex flex-col">
+              Revert
+              {#if revertCommitDisabledReason}
+                <span class="text-xs text-muted-foreground">{revertCommitDisabledReason}</span>
+              {/if}
+            </span>
           </ContextMenu.Item>
         {/if}
         {#if activeAction.commitSha}

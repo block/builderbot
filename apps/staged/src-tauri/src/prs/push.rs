@@ -153,7 +153,7 @@ pub(super) fn insert_running_push_pipeline_session(
         session_id: session.id,
         pipeline,
         prompt: prompt.to_string(),
-        pre_head_sha: None,
+        capture_pre_head: false,
         _liveness: liveness,
     })
 }

@@ -9,10 +9,13 @@
 use std::sync::Arc;
 
 use crate::session_runner;
-use crate::store::{self, FailureStrategy, PipelineExecution, PipelineStep, Store};
+use crate::store::{FailureStrategy, PipelineExecution, PipelineStep, Store};
 
+use super::commit::insert_running_pending_commit_session;
 use super::context::{resolve_branch_pipeline_context, BranchPipelineContext};
-use super::pipeline::{launch_running_pipeline_session, RunningPipelineSession};
+use super::pipeline::{
+    branch_has_work_in_flight, launch_running_pipeline_session, RunningPipelineSession,
+};
 
 pub(super) fn validate_commit_sha(commit_sha: &str) -> Result<String, String> {
     let sha = commit_sha.trim();
@@ -56,59 +59,44 @@ pub(super) fn build_revert_pipeline_steps(commit_sha: &str) -> Result<Vec<Pipeli
     }])
 }
 
-/// HEAD of the checkout the pipeline will run in, read off a blocking thread
-/// because on a remote branch it is a `ws exec` round trip.
-async fn current_head_for_pipeline_context(ctx: &BranchPipelineContext) -> Result<String, String> {
-    let working_dir = ctx.working_dir.clone();
-    let workspace_name = ctx.workspace_name.clone();
-    let remote_dir = ctx
-        .remote_working_dir
-        .as_deref()
-        .and_then(|dir| dir.to_str())
-        .map(str::to_string);
-    tauri::async_runtime::spawn_blocking(move || {
-        let git = crate::branches::git_runner(&working_dir, workspace_name.as_deref(), remote_dir);
-        crate::branches::head_sha(&git)
-    })
-    .await
-    .map_err(|e| format!("HEAD lookup task failed: {e}"))?
-    .map_err(|e| format!("Failed to get HEAD SHA: {e}"))
-}
+pub(super) const REVERT_BRANCH_BUSY: &str =
+    "Revert is unavailable while this branch has queued or running work";
 
-async fn start_running_revert_pipeline_for_branch(
-    ctx: BranchPipelineContext,
-    commit_sha: String,
-    provider: Option<String>,
-    store: Arc<Store>,
-    app_handle: &tauri::AppHandle,
+/// Insert the rows for a revert that runs now, or refuse it on a busy branch.
+///
+/// A revert is never queued: a queued row would have to carry the target SHA
+/// for the drain to rebuild its step from. So where a rebase or squash would
+/// queue behind work in flight, this errors — under the branch launch lock,
+/// with the insert in the same critical section, so two rapid clicks (or a
+/// click racing a session start) cannot both observe an idle branch. This
+/// stays synchronous on purpose: the lock must not be held across an await.
+///
+/// HEAD is not read here. The runner reads it before the revert step (see
+/// [`session_runner::PipelineConfig::capture_pre_head`]), by which point this
+/// row has made the branch busy, so nothing else can move HEAD in between.
+pub(super) fn insert_running_revert_pipeline_session_if_idle(
+    store: &Arc<Store>,
     registry: &Arc<session_runner::SessionRegistry>,
-) -> Result<String, String> {
-    let steps = build_revert_pipeline_steps(&commit_sha)?;
-    let prompt = format!("Revert commit {}", &commit_sha[..7.min(commit_sha.len())]);
-    let pre_head_sha = Some(current_head_for_pipeline_context(&ctx).await?);
-    let pipeline = PipelineExecution::from_steps(&steps);
-
-    let mut session =
-        store::Session::new_running(&prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
-    if let Some(ref p) = provider {
-        session = session.with_provider(p);
+    ctx: &BranchPipelineContext,
+    steps: &[PipelineStep],
+    commit_sha: &str,
+    provider: Option<&str>,
+) -> Result<RunningPipelineSession, String> {
+    let launch_lock = crate::session_commands::branch_session_launch_lock_for(&ctx.branch.id);
+    let _guard = launch_lock.lock().unwrap();
+    if branch_has_work_in_flight(store, &ctx.branch.id)? {
+        return Err(REVERT_BRANCH_BUSY.to_string());
     }
-    session.pipeline = Some(pipeline.clone());
-    let liveness = registry.hold(&session.id);
-    store.create_session(&session).map_err(|e| e.to_string())?;
 
-    let commit = store::Commit::new_pending(&ctx.branch.id).with_session(&session.id);
-    store.create_commit(&commit).map_err(|e| e.to_string())?;
-
-    let running = RunningPipelineSession {
-        session_id: session.id,
-        pipeline,
+    let prompt = format!("Revert commit {}", &commit_sha[..7.min(commit_sha.len())]);
+    insert_running_pending_commit_session(
+        store,
+        registry,
+        ctx,
+        PipelineExecution::from_steps(steps),
         prompt,
-        pre_head_sha,
-        _liveness: liveness,
-    };
-    launch_running_pipeline_session(
-        ctx, running, steps, "commit", provider, store, app_handle, registry,
+        provider,
+        true,
     )
 }
 
@@ -120,7 +108,7 @@ async fn start_running_revert_pipeline_for_branch(
 ///
 /// Shared by the Tauri command and the web dispatch arm so both gates behave
 /// identically.
-pub(crate) async fn revert_commit_for_branch(
+pub(crate) fn revert_commit_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
@@ -129,29 +117,25 @@ pub(crate) async fn revert_commit_for_branch(
     provider: Option<String>,
 ) -> Result<String, String> {
     let commit_sha = validate_commit_sha(&commit_sha)?;
+    let steps = build_revert_pipeline_steps(&commit_sha)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
 
-    let branch_has_running_session = store
-        .has_running_session_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?;
-    let branch_has_queued_session = !store
-        .get_queued_sessions_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .is_empty();
-
-    if branch_has_running_session || branch_has_queued_session {
-        return Err(
-            "Revert is unavailable while this branch has queued or running work".to_string(),
-        );
-    }
-
-    start_running_revert_pipeline_for_branch(
+    let running = insert_running_revert_pipeline_session_if_idle(
+        &store,
+        &registry,
+        &ctx,
+        &steps,
+        &commit_sha,
+        provider.as_deref(),
+    )?;
+    launch_running_pipeline_session(
         ctx,
-        commit_sha,
+        running,
+        steps,
+        "commit",
         provider,
         store,
         &app_handle,
         &registry,
     )
-    .await
 }

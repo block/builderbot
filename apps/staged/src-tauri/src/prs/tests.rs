@@ -29,7 +29,9 @@ use super::push::{
     build_push_pipeline_steps, insert_running_push_pipeline_session,
     queue_push_pipeline_if_branch_busy, queue_push_pipeline_locked, PushVariant,
 };
-use super::revert::build_revert_pipeline_steps;
+use super::revert::{
+    build_revert_pipeline_steps, insert_running_revert_pipeline_session_if_idle, REVERT_BRANCH_BUSY,
+};
 use crate::git;
 use crate::session_commands::BranchSessionLaunchStatus;
 use crate::session_runner;

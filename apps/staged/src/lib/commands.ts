@@ -2187,7 +2187,7 @@ export function revertCommit(
   commitSha: string,
   provider?: string
 ): Promise<string> {
-  return invoke('revert_commit', {
+  return invokeCommand('revert_commit', {
     branchId,
     commitSha,
     provider: provider ?? null,

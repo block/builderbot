@@ -2974,6 +2974,12 @@ pub struct PipelineConfig {
     /// HEAD before the deterministic pipeline began. Used by rebase pipelines
     /// when they hand off to AI after conflicts.
     pub pre_head_sha: Option<String>,
+    /// Read `pre_head_sha` before the first step, the way a rebase always
+    /// does, for a pipeline whose kind doesn't say so (a revert). Its
+    /// completion is judged by whether HEAD moved, so the read has to come
+    /// after its row already makes the branch busy, and through the same
+    /// runner as the read it is compared against.
+    pub capture_pre_head: bool,
     /// ACP provider ID (e.g. "goose", "claude").
     pub provider: Option<String>,
     /// Workspace name for remote branches.
@@ -3719,6 +3725,23 @@ pub(crate) fn drain_queued_after_terminal_state(
     });
 }
 
+/// Capture HEAD before the first step for rebase pipelines and any other that
+/// asks (see [`PipelineConfig::capture_pre_head`]). This is deferred from
+/// session creation so the (potentially slow) remote HEAD lookup doesn't block
+/// session visibility in the UI.
+fn capture_pipeline_pre_head(config: &mut PipelineConfig) {
+    if config.pre_head_sha.is_some()
+        || !(config.capture_pre_head
+            || config.pipeline.kind.as_ref() == Some(&PipelineKind::Rebase))
+    {
+        return;
+    }
+    match current_pipeline_head(config) {
+        Ok(head) => config.pre_head_sha = Some(head),
+        Err(e) => log::warn!("Failed to capture pre-pipeline HEAD: {e}"),
+    }
+}
+
 /// Execute pipeline steps sequentially, emitting events as each step progresses.
 async fn run_pipeline(
     config: &mut PipelineConfig,
@@ -3726,16 +3749,7 @@ async fn run_pipeline(
     app_handle: &AppHandle,
     cancel_token: &CancellationToken,
 ) -> PipelineOutcome {
-    // Capture HEAD before the first step for rebase pipelines. This is deferred
-    // from session creation so the (potentially slow) remote HEAD lookup doesn't
-    // block session visibility in the UI.
-    if config.pre_head_sha.is_none() && config.pipeline.kind.as_ref() == Some(&PipelineKind::Rebase)
-    {
-        match current_pipeline_head(config) {
-            Ok(head) => config.pre_head_sha = Some(head),
-            Err(e) => log::warn!("Failed to capture pre-rebase HEAD: {e}"),
-        }
-    }
+    capture_pipeline_pre_head(config);
 
     // Use the pipeline execution state that was already persisted with the
     // session, rather than reconstructing from step definitions. This keeps
@@ -7989,6 +8003,7 @@ mod tests {
             pipeline,
             working_dir: PathBuf::from("/tmp"),
             pre_head_sha: None,
+            capture_pre_head: false,
             provider: None,
             workspace_name: None,
             remote_working_dir: None,
@@ -9305,6 +9320,7 @@ mod tests {
             pipeline,
             working_dir: repo.to_path_buf(),
             pre_head_sha: Some(pre_head.to_string()),
+            capture_pre_head: false,
             provider: None,
             workspace_name: None,
             remote_working_dir: None,
@@ -9367,6 +9383,7 @@ mod tests {
             pipeline,
             working_dir: PathBuf::from("/tmp"),
             pre_head_sha: None,
+            capture_pre_head: false,
             provider: None,
             workspace_name: None,
             remote_working_dir: None,
@@ -9886,6 +9903,37 @@ mod tests {
         let config = head_moving_pipeline_config("session-1", &repo, &pre_head, None);
 
         assert_eq!(pre_head_for_pipeline_handoff(&config), Some(pre_head));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A revert has no kind, so it is the flag that makes the runner read HEAD
+    /// at start; without it a kind-less pipeline reads nothing, and a HEAD the
+    /// caller already supplied is never re-read.
+    #[test]
+    fn pipeline_start_captures_pre_head_only_when_asked() {
+        let repo = make_git_repo("capture-pre-head-when-asked");
+        let head = run_git(&repo, &["rev-parse", "HEAD"]);
+
+        let mut asked = head_moving_pipeline_config("session-1", &repo, &head, None);
+        asked.pre_head_sha = None;
+        asked.capture_pre_head = true;
+        capture_pipeline_pre_head(&mut asked);
+        assert_eq!(asked.pre_head_sha.as_deref(), Some(head.as_str()));
+
+        let mut not_asked = head_moving_pipeline_config("session-2", &repo, &head, None);
+        not_asked.pre_head_sha = None;
+        capture_pipeline_pre_head(&mut not_asked);
+        assert_eq!(not_asked.pre_head_sha, None);
+
+        let mut rebase = rebase_pipeline_config("session-3", &repo, &head);
+        rebase.pre_head_sha = None;
+        capture_pipeline_pre_head(&mut rebase);
+        assert_eq!(rebase.pre_head_sha.as_deref(), Some(head.as_str()));
+
+        let mut supplied = head_moving_pipeline_config("session-4", &repo, "supplied", None);
+        supplied.capture_pre_head = true;
+        capture_pipeline_pre_head(&mut supplied);
+        assert_eq!(supplied.pre_head_sha.as_deref(), Some("supplied"));
         let _ = std::fs::remove_dir_all(repo);
     }
 

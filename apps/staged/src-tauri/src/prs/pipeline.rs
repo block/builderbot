@@ -106,6 +106,7 @@ pub(super) fn start_pipeline_for_branch(
             pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
+            capture_pre_head: false,
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
@@ -229,10 +230,10 @@ pub(super) struct RunningPipelineSession {
     pub(super) session_id: String,
     pub(super) pipeline: PipelineExecution,
     pub(super) prompt: String,
-    /// HEAD captured before the insert, for a pipeline whose completion is
-    /// judged against it up front (a revert). A rebase leaves this `None` and
-    /// the runner captures it at start.
-    pub(super) pre_head_sha: Option<String>,
+    /// Passed on as [`session_runner::PipelineConfig::capture_pre_head`]: set
+    /// for a revert, whose pipeline has no kind that would make the runner
+    /// read HEAD at start the way it does for a rebase.
+    pub(super) capture_pre_head: bool,
     pub(super) _liveness: session_runner::LivenessHold,
 }
 
@@ -266,7 +267,7 @@ pub(super) fn launch_running_pipeline_session(
         session_id,
         pipeline,
         prompt,
-        pre_head_sha,
+        capture_pre_head,
         _liveness: liveness,
     } = running;
     let started = session_runner::start_pipeline_session(
@@ -276,7 +277,8 @@ pub(super) fn launch_running_pipeline_session(
             steps,
             pipeline,
             working_dir: ctx.working_dir,
-            pre_head_sha,
+            pre_head_sha: None,
+            capture_pre_head,
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,

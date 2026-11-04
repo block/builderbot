@@ -6,15 +6,13 @@
 -->
 <script lang="ts">
   import { slide } from 'svelte/transition';
-  import Monitor from '@lucide/svelte/icons/monitor';
-  import Cloud from '@lucide/svelte/icons/cloud';
   import type { Project } from '../../types';
   import * as commands from '../../api/commands';
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
   import { Label } from '$lib/components/ui/label';
-  import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import Spinner from '../../shared/Spinner.svelte';
+  import ProjectLocationPicker from './ProjectLocationPicker.svelte';
   import RepoConfigForm from './RepoConfigForm.svelte';
   import type { BranchSelection } from './RepoConfigForm.svelte';
   import { parseGitHubUrl } from '../../shared/githubUrl';
@@ -207,27 +205,7 @@
   {#if remoteProjectsAvailable}
     <div class="form-group">
       <div class="field-label">Location</div>
-      <ToggleGroup.Root
-        type="single"
-        orientation="vertical"
-        bind:value={location}
-        disabled={saving}
-        spacing={2}
-        class="w-full"
-      >
-        {#each [{ value: 'local', label: 'Local', description: 'Run agents on your machine', icon: Monitor }, { value: 'remote', label: 'Remote', description: 'Run agents in the cloud', icon: Cloud }] as option}
-          <ToggleGroup.Item
-            value={option.value}
-            class="flex h-auto w-full items-center justify-start gap-3 rounded-[10px] border-[1.5px] border-border bg-background px-4 py-3.5 text-left text-muted-foreground hover:border-ring hover:bg-background hover:text-foreground data-[state=on]:border-foreground data-[state=on]:bg-foreground data-[state=on]:text-background"
-          >
-            <option.icon size={22} class="shrink-0" />
-            <span class="flex min-w-0 flex-col gap-0.5">
-              <span class="text-sm font-medium">{option.label}</span>
-              <span class="text-xs opacity-70">{option.description}</span>
-            </span>
-          </ToggleGroup.Item>
-        {/each}
-      </ToggleGroup.Root>
+      <ProjectLocationPicker bind:value={location} disabled={saving} />
     </div>
   {/if}
 

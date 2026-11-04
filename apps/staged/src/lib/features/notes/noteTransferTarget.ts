@@ -48,6 +48,19 @@ export function createProjectOption(query: string, projects: Project[]): string 
   return name;
 }
 
+/**
+ * Why a project created for this note can't be remote, or `null` when it can.
+ * A remote project's workspace is provisioned from the repo it is created
+ * with, and adding a repo afterwards needs that workspace running already, so
+ * a new remote project starts from the note's repo — and project notes have
+ * none.
+ */
+export function newRemoteProjectBlocker(
+  repo: { githubRepo: string; subpath: string | null } | null | undefined
+): string | null {
+  return repo ? null : 'Needs a repo; this note has none';
+}
+
 /** What the picker has settled on: an existing project or a name to create. */
 export type NoteTransferSelection =
   { kind: 'existing'; projectId: string } | { kind: 'new'; name: string };

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createProjectOption,
   noteTransferCandidates,
+  newRemoteProjectBlocker,
   noteTransferLabels,
   repoAddedHint,
 } from './noteTransferTarget';
@@ -103,5 +104,15 @@ describe('repoAddedHint', () => {
 
   it('says nothing for a project note', () => {
     expect(repoAddedHint(null)).toBeNull();
+  });
+});
+
+describe('newRemoteProjectBlocker', () => {
+  it('lets a repo note start a remote project from its repo', () => {
+    expect(newRemoteProjectBlocker({ githubRepo: 'acme/widgets', subpath: null })).toBeNull();
+  });
+
+  it('keeps a project note, which has no repo, to a local project', () => {
+    expect(newRemoteProjectBlocker(null)).toBe('Needs a repo; this note has none');
   });
 });

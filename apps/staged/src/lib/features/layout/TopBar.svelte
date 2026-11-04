@@ -287,11 +287,17 @@
       position: static;
       flex: 1 1 0;
       width: auto;
+      /* Cancel the gap (the child re-adds it) so a squeezed slot takes no room. */
+      margin-left: -8px;
       transform: none;
       container-type: inline-size;
     }
 
-    @container (width < 6em) {
+    .center-content > :global(*) {
+      margin-left: 8px;
+    }
+
+    @container (width < calc(6em + 8px)) {
       .center-content > :global(*) {
         visibility: hidden;
       }

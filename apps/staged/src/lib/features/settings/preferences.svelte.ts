@@ -302,54 +302,54 @@ function ensureSystemModeListener() {
 function syncedPreference(key: string, apply: (value: unknown) => void) {
   let unlisten: (() => void) | undefined;
   let revision = 0;
-  // The newest refresh: the only one whose snapshot can still apply.
-  let latestRefresh: Promise<void> = Promise.resolve();
+  // Whether a value has landed (a notification, local edit, or applied read).
+  let hasValue = false;
 
   function receive(value: unknown): void {
     revision += 1;
+    hasValue = true;
     apply(value);
   }
 
-  function refresh(): void {
+  async function refresh(): Promise<void> {
     const current = ++revision;
-    latestRefresh = (async () => {
-      try {
-        const value = await getStoreValue<unknown>(key);
-        // A notification, local edit, or newer refresh wins over an older snapshot.
-        if (current === revision) apply(value);
-      } catch (error) {
-        console.error(`[Preferences] Failed to refresh ${key}:`, error);
+    try {
+      const value = await getStoreValue<unknown>(key);
+      // A notification, local edit, or newer refresh wins over an older
+      // snapshot. Until one lands, though, the older snapshot is still the
+      // freshest value, and a newer refresh overwrites it when it arrives.
+      if (current === revision || !hasValue) {
+        hasValue = true;
+        apply(value);
       }
-    })();
+    } catch (error) {
+      console.error(`[Preferences] Failed to refresh ${key}:`, error);
+    }
   }
 
   return {
     /**
-     * Subscribe (once) and load the current value, resolving once it is
-     * applied (or its read failed).
+     * Subscribe (once) and load the current value, resolving once a value
+     * has landed (or this read failed). It doesn't wait on a newer refresh.
      */
-    async start(): Promise<void> {
+    start(): Promise<void> {
       unlisten ??= listenToStoreKeyChange(key, receive, {
         // Close the initial registration gap and recover missed web events on reconnect.
-        onEstablished: refresh,
+        onEstablished: () => void refresh(),
       });
-      refresh();
-      // The subscription's refresh can supersede this one mid-read, leaving
-      // it nothing to apply, so settle with whichever refresh is newest.
-      let newest: Promise<void>;
-      do {
-        newest = latestRefresh;
-        await newest;
-      } while (newest !== latestRefresh);
+      return refresh();
     },
     /** Persist a value the caller has already applied locally. */
     save(value: unknown): void {
       revision += 1;
+      hasValue = true;
       setStoreValue(key, value);
     },
     dispose(): void {
       unlisten?.();
+      // No in-flight read applies after this, not even a first one.
       revision += 1;
+      hasValue = true;
     },
   };
 }

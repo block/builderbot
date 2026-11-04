@@ -344,17 +344,34 @@ describe.each([true, false])('new project location (native=%s)', (native) => {
     await vi.waitFor(() => expect(reads).toHaveLength(1));
     expect(client.preferences.loaded).toBe(false);
 
-    // The subscription is established mid-read, and its refresh supersedes the
-    // first: that read lands with nothing to apply, so it must not unblock the UI.
-    listeners[1].options?.onEstablished?.();
-    await vi.waitFor(() => expect(reads).toHaveLength(2));
     reads[0]('remote');
-    await new Promise((done) => setTimeout(done, 0));
-    expect(client.preferences.loaded).toBe(false);
-
-    reads[1]('remote');
     await vi.waitFor(() => expect(client.preferences.loaded).toBe(true));
     expect(client.preferences.newProjectLocation).toBe('remote');
     await initialized;
+  });
+
+  it('loads a superseded first read when nothing newer has landed, then takes the newer one', async () => {
+    const reads: ((value: unknown) => void)[] = [];
+    get.mockImplementation(async (changedKey: string) =>
+      changedKey === locationKey
+        ? new Promise((done) => reads.push(done))
+        : structuredClone(values.get(changedKey))
+    );
+    const client = await newClient(native);
+    const initialized = client.initPreferences();
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+
+    // The subscription is established mid-read and its refresh supersedes the
+    // first. The first read is still the freshest value when it lands, so it
+    // applies and unblocks the UI without waiting on the second.
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    reads[0]('remote');
+    await initialized;
+    expect(client.preferences.loaded).toBe(true);
+    expect(client.preferences.newProjectLocation).toBe('remote');
+
+    reads[1]('local');
+    await vi.waitFor(() => expect(client.preferences.newProjectLocation).toBe('local'));
   });
 });

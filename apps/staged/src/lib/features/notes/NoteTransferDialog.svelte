@@ -265,6 +265,10 @@
     // repo lookup the picker is waiting on, and that landing would otherwise
     // turn the Local on screen into a remembered Remote.
     const newLocation = effectiveLocation;
+    // Whether Remote was on offer, making the location a choice to remember.
+    // A Local clicked while the lookup is pending and confirmed before it
+    // lands therefore commits Local for this project only: the preference is
+    // left alone, so a remembered Remote survives.
     const rememberLocation = remoteSelectable;
 
     working = true;

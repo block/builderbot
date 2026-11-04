@@ -11,7 +11,8 @@
 //! bundles on this machine always stay, as the backup. After the commit
 //! nothing is undone: tearing the source down is best-effort — and refused
 //! for a source that changed after its snapshot — and what it leaves comes
-//! back as warnings on a successful transfer (see [`teardown`]).
+//! back as warnings on a successful transfer (see [`teardown`]), or on the
+//! result [`TransferStopped::AfterSwitch`] carries when it panics part way.
 //!
 //! Synchronous, for the blocking pool; [`super::commands`] wraps it.
 
@@ -123,6 +124,25 @@ pub struct ProjectTransferResult {
     pub backup_dir: Option<String>,
 }
 
+/// How a transfer that [`run_transfer`] did not see through ended.
+#[derive(Debug)]
+pub enum TransferStopped {
+    /// Before the database switched: everything was undone, and the project
+    /// is where it was.
+    Failed(String),
+    /// After it switched, tearing the source down stopped unexpectedly. The
+    /// project is at the result's `location`: the result is what the switch
+    /// made, with a warning saying what may be left, and what follows a
+    /// switch still has to happen.
+    AfterSwitch(Box<ProjectTransferResult>),
+}
+
+impl From<String> for TransferStopped {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
 /// Move the project `guard` registered to the other location.
 pub(super) fn run_transfer(
     store: &Store,
@@ -130,7 +150,7 @@ pub(super) fn run_transfer(
     guard: &TransferGuard,
     include_uncommitted: bool,
     on_progress: &dyn Fn(&TransferProgress),
-) -> Result<ProjectTransferResult, String> {
+) -> Result<ProjectTransferResult, TransferStopped> {
     let project = store
         .get_project(guard.project_id())
         .map_err(|e| e.to_string())?
@@ -156,7 +176,7 @@ pub(super) fn run_transfer(
             ..TransferManifest::default()
         }),
         journaled: Cell::new(false),
-        committed: Cell::new(false),
+        switched: Cell::new(None),
     };
     match catch_unwind(AssertUnwindSafe(|| run.execute())) {
         Ok(Ok(result)) => {
@@ -164,13 +184,14 @@ pub(super) fn run_transfer(
             Ok(result)
         }
         // Only the steps up to the commit can fail.
-        Ok(Err(Failure { message })) => Err(run.fail(message)),
+        Ok(Err(Failure { message })) => Err(TransferStopped::Failed(run.fail(message))),
         Err(panic) => {
             let what = panic_message(panic.as_ref());
             run.clear_poisoned_launch_locks();
-            if !run.committed.get() {
-                return Err(run.fail(format!("The transfer stopped unexpectedly: {what}")));
-            }
+            let Some(mut result) = run.switched.take() else {
+                let message = format!("The transfer stopped unexpectedly: {what}");
+                return Err(TransferStopped::Failed(run.fail(message)));
+            };
             // The database has switched: the destination is the project now,
             // so there is nothing to roll back to.
             let message = format!(
@@ -183,8 +204,11 @@ pub(super) fn run_transfer(
                 guard.project_id()
             );
             run.close_journal(backups::COMPLETED, None, Some(message.clone()));
-            run.emit(TransferPhase::Failed, None, Some(message.clone()), None);
-            Err(message)
+            run.emit(TransferPhase::Completed, None, Some(message.clone()), None);
+            result
+                .warnings
+                .push(TransferIssue::new("teardown_interrupted", message));
+            Err(TransferStopped::AfterSwitch(Box::new(result)))
         }
     }
 }
@@ -211,6 +235,7 @@ impl<E: ToString> From<E> for Failure {
 }
 
 /// One branch's progress through the transfer.
+#[derive(Clone)]
 struct Leg {
     source: BranchSource,
     row: RepoPreflight,
@@ -241,8 +266,9 @@ struct Run<'a> {
     journal: RefCell<TransferManifest>,
     /// Whether the manifest has been written.
     journaled: Cell<bool>,
-    /// Whether the database has switched.
-    committed: Cell<bool>,
+    /// Once the database has switched, the result as it switched: what a
+    /// panic while the source comes down reports.
+    switched: Cell<Option<ProjectTransferResult>>,
 }
 
 fn path_str(path: &Path) -> Result<String, String> {
@@ -357,8 +383,11 @@ impl Run<'_> {
         }
 
         self.checkpoint(TransferPhase::Committing, None, None)?;
+        // Made first, so that nothing between the switch and noting it can
+        // panic.
+        let switched = self.result(&inspection, legs.clone(), Vec::new());
         self.commit(&inspection, &legs)?;
-        self.committed.set(true);
+        self.switched.set(Some(switched));
         self.close_journal(backups::COMMITTED, None, None);
         // The rows describe the destination now, and setup may provision them
         // while the source comes down.
@@ -648,6 +677,7 @@ impl Run<'_> {
             landing,
             include_uncommitted: self.include_uncommitted,
             exclude_tips: leg.exclude_tips.clone(),
+            origin_branches: origin_tip_names(leg),
             local_bundle: self.transfer_dir.join(&bundle_name),
             bundle_name,
             repo_bytes: leg.source.repo_bytes,

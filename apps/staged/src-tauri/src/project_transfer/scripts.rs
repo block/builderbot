@@ -62,8 +62,16 @@ macro_rules! prelude {
 ///
 /// Arguments: `$1` the checkout, `$2` the branch it must have checked out,
 /// `$3` the bundle to write (absolute; its directory is created), `$4` the
-/// transfer id, `$5…` commits the destination already has (its origin tips).
-/// Tips this repository also has are excluded from the bundle.
+/// transfer id, `$5…` commits the destination already has (its origin tips),
+/// then `--` and the branch names on origin those are the tips of. The bundle
+/// leaves out the tips this repository also has, and its own
+/// remote-tracking refs for those names: a destination that fetched origin
+/// after this repository last did has newer tips, which this one lacks, but
+/// almost always has these too, as their ancestors. When it doesn't, the
+/// apply says so and the caller re-bundles without exclusions. With nothing
+/// to leave out the bundle would be the whole history, which takes time in
+/// proportion to the repository rather than to what changed, so it is left
+/// to [`REBUNDLE_SCRIPT`], in a run given that long (`bundle=deferred`).
 ///
 /// Refuses a detached `HEAD`, the wrong branch, an unborn branch, unresolved
 /// conflicts, and an in-progress merge, rebase, cherry-pick, revert or bisect.
@@ -110,17 +118,33 @@ pub const SNAPSHOT_SCRIPT: &str = concat!(
     // The snapshot commits are always new, so the bundle is never empty, even
     // for a clean branch whose HEAD is one of the excluded tips.
     "not=''\n",
-    "for tip; do\n",
-    "  case $tip in ''|*[!0-9a-f]*) continue ;; esac\n",
-    "  G cat-file -e \"$tip^{commit}\" 2>/dev/null && not=\"$not $tip\"\n",
+    "exclude() { case \" $not \" in *\" $1 \"*) ;; *) not=\"$not $1\" ;; esac; }\n",
+    "names=0\n",
+    "for arg; do\n",
+    "  if [ \"$names\" = 1 ]; then\n",
+    "    [ -n \"$arg\" ] || continue\n",
+    "    tip=$(G rev-parse -q --verify \"refs/remotes/origin/$arg^{commit}\") && exclude \"$tip\"\n",
+    "    continue\n",
+    "  fi\n",
+    "  case $arg in\n",
+    "    --) names=1 ;;\n",
+    "    ''|*[!0-9a-f]*) ;;\n",
+    "    *) G cat-file -e \"$arg^{commit}\" 2>/dev/null && exclude \"$arg\" ;;\n",
+    "  esac\n",
     "done\n",
     "rm -f -- \"$bundle\"\n",
-    "err=$(G bundle create \"$bundle\" \"$snap_ref\" ${not:+--not} $not 2>&1) || fail \"git bundle create failed: $err\"\n",
+    "if [ -n \"$not\" ]; then\n",
+    "  err=$(G bundle create \"$bundle\" \"$snap_ref\" --not $not 2>&1) || fail \"git bundle create failed: $err\"\n",
+    "fi\n",
     "printf 'head=%s\\nhead_tree=%s\\n' \"$head\" \"$(G rev-parse \"$head^{tree}\")\"\n",
     "printf 'index_commit=%s\\ntree_i=%s\\n' \"$index_commit\" \"$tree_i\"\n",
     "printf 'snapshot=%s\\ntree_w=%s\\n' \"$snapshot\" \"$tree_w\"\n",
     "printf 'excluded=%s\\n' \"$(printf '%s' \"$not\" | wc -w | tr -d ' \\t')\"\n",
-    "printf 'bundle_size=%s\\nbundle_sha256=%s\\n' \"$(size_of \"$bundle\")\" \"$(sha256_of \"$bundle\")\"\n",
+    "if [ -n \"$not\" ]; then\n",
+    "  printf 'bundle_size=%s\\nbundle_sha256=%s\\n' \"$(size_of \"$bundle\")\" \"$(sha256_of \"$bundle\")\"\n",
+    "else\n",
+    "  printf 'bundle=deferred\\n'\n",
+    "fi\n",
     // --- What the destination needs to track the same upstream ---
     "printf 'branch_config=%s\\n' \"$(G config --local -z --get-regexp \"^branch\\\\.$(esc \"$branch\")\\\\.\" | hex)\"\n",
     "seen=' origin . '\n",
@@ -137,8 +161,9 @@ pub const SNAPSHOT_SCRIPT: &str = concat!(
     "exit 0\n",
 );
 
-/// Re-bundle an existing snapshot with no exclusions, for a destination that
-/// turned out to lack the commits the first bundle was cut against.
+/// Bundle an existing snapshot with no exclusions: for a destination that
+/// turned out to lack the commits the first bundle was cut against, or a
+/// snapshot that had nothing to cut it against.
 ///
 /// Arguments: `$1` the checkout, `$2` the bundle to write, `$3` the transfer id.
 pub const REBUNDLE_SCRIPT: &str = concat!(
@@ -613,7 +638,9 @@ pub struct Snapshot {
     /// `W`: the working tree as a commit on `I`, and the bundle's only ref.
     pub snapshot: String,
     pub tree_w: String,
-    /// How many destination tips the bundle was cut against.
+    /// How many commits the bundle was cut against: the destination's tips
+    /// the source has, and the source's own origin tips for the same names.
+    /// None, and the bundle holds the whole history.
     pub excluded: u32,
     pub bundle: BundleFile,
     pub branch_config: Vec<ConfigEntry>,
@@ -827,6 +854,7 @@ pub fn snapshot_args(
     bundle_path: &str,
     transfer_id: &str,
     exclude_tips: &[String],
+    origin_branches: &[String],
 ) -> Vec<String> {
     let mut args = vec![
         repo_dir.to_string(),
@@ -835,6 +863,8 @@ pub fn snapshot_args(
         transfer_id.to_string(),
     ];
     args.extend(exclude_tips.iter().filter(|t| is_object_id(t)).cloned());
+    args.push("--".to_string());
+    args.extend(origin_branches.iter().filter(|b| !b.is_empty()).cloned());
     args
 }
 
@@ -1125,8 +1155,9 @@ mod tests {
             "/t/x.bundle",
             "tid",
             &[OID_A.to_string(), "; rm -rf /".to_string(), String::new()],
+            &["main".to_string(), String::new()],
         );
-        assert_eq!(args, ["/r", "b", "/t/x.bundle", "tid", OID_A]);
+        assert_eq!(args, ["/r", "b", "/t/x.bundle", "tid", OID_A, "--", "main"]);
     }
 
     #[test]

@@ -10,7 +10,9 @@ use crate::store::{ProjectLocation, Store};
 
 use super::backups;
 use super::host::{LiveHost, TransferHost};
-use super::orchestrator::{run_transfer, ProjectTransferResult, TransferProgress};
+use super::orchestrator::{
+    run_transfer, ProjectTransferResult, RepoTransferResult, TransferProgress, TransferStopped,
+};
 use super::preflight::{inspect, ProjectTransferPreflight, TransferDirection, TransferIssue};
 use super::{recovery, registry};
 
@@ -55,7 +57,8 @@ pub(crate) async fn get_project_transfer_preflight_impl(
 
 /// Move the project to its other location, emitting
 /// `project-transfer-progress` as it goes. Resolves once the project has
-/// switched (or failed, with everything undone).
+/// switched (or failed, with everything undone). A transfer that stopped
+/// unexpectedly after the switch resolves too, with a warning saying so.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn transfer_project(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -104,7 +107,7 @@ pub(crate) async fn transfer_project_impl(
     let ids: Vec<&str> = branch_ids.iter().map(String::as_str).collect();
     crate::actions::commands::stop_actions_for_branches(&executor, &act_registry, &ids);
 
-    let result = {
+    let outcome = {
         let store = Arc::clone(&store);
         let app = app_handle.clone();
         tauri::async_runtime::spawn_blocking(move || {
@@ -116,17 +119,34 @@ pub(crate) async fn transfer_project_impl(
             run_transfer(&store, &LiveHost, &guard, include_uncommitted, &emit)
         })
         .await
-        .map_err(|e| format!("The transfer stopped unexpectedly: {e}"))??
+        .map_err(|e| format!("The transfer stopped unexpectedly: {e}"))?
     };
 
-    after_transfer(
-        &store,
-        &app_handle,
-        &executor,
-        &act_registry,
-        project.location,
-        &result,
-    );
+    settle(outcome, |result| {
+        after_transfer(
+            &store,
+            &app_handle,
+            &executor,
+            &act_registry,
+            project.location,
+            result,
+        )
+    })
+}
+
+/// What a run comes to for the caller: its result, once `after_switch` has
+/// run on it, whenever the project moved — including a run that stopped
+/// unexpectedly after the switch, whose result says so in a warning.
+pub(super) fn settle(
+    outcome: Result<ProjectTransferResult, TransferStopped>,
+    after_switch: impl FnOnce(&ProjectTransferResult),
+) -> Result<ProjectTransferResult, String> {
+    let result = match outcome {
+        Ok(result) => result,
+        Err(TransferStopped::AfterSwitch(result)) => *result,
+        Err(TransferStopped::Failed(message)) => return Err(message),
+    };
+    after_switch(&result);
     Ok(result)
 }
 
@@ -164,7 +184,7 @@ fn after_transfer(
                 repo.branch_id
             );
         }
-        if result.location == ProjectLocation::Local && repo.carried {
+        if runs_prerun(result, repo) {
             let store = Arc::clone(store);
             let app = app_handle.clone();
             let executor = Arc::clone(executor);
@@ -194,6 +214,12 @@ fn after_transfer(
             crate::session_queue::KickSource::ProjectTransferred,
         );
     }
+}
+
+/// Whether `repo`'s prerun actions run after the transfer: it was carried
+/// into a new local worktree.
+pub(super) fn runs_prerun(result: &ProjectTransferResult, repo: &RepoTransferResult) -> bool {
+    result.location == ProjectLocation::Local && repo.carried
 }
 
 /// Roll back, or mark for the user, each transfer a Staged that is no

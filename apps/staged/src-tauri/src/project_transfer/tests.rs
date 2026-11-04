@@ -184,6 +184,7 @@ impl World {
             landing,
             include_uncommitted,
             exclude_tips,
+            origin_branches: Vec::new(),
             bundle_name: "repo.bundle".to_string(),
             local_bundle: PathBuf::from(local_bundle),
             repo_bytes: 0,
@@ -191,12 +192,25 @@ impl World {
         }
     }
 
-    /// The destination's origin tips for `base` and `upstream`, the way the
+    /// [`Self::plan`] cut against the destination's origin tips for `names`
+    /// (the base and the upstream), and the source's own, the way the
     /// orchestrator asks for them before snapshotting.
-    fn dest_tips(&self, dest: &LocalEndpoint, names: &[&str]) -> Vec<String> {
-        origin_tips(dest, self.dest.to_str().unwrap(), names)
+    fn origin_plan(
+        &self,
+        source: &LocalEndpoint,
+        dest: &LocalEndpoint,
+        landing: Landing,
+        branches: (&str, &str),
+        include_uncommitted: bool,
+        names: &[&str],
+    ) -> CarryPlan {
+        let tips = origin_tips(dest, self.dest.to_str().unwrap(), names)
             .unwrap()
-            .tips
+            .tips;
+        CarryPlan {
+            origin_branches: names.iter().map(|n| n.to_string()).collect(),
+            ..self.plan(source, landing, branches, include_uncommitted, tips)
+        }
     }
 
     /// Local worktree → workspace: snapshot here, land with `checkout -B` in
@@ -209,13 +223,13 @@ impl World {
     ) -> Result<(CarryOutcome, PathBuf), TransferError> {
         let source = self.endpoint(&self.local_scratch);
         let dest = self.endpoint(&self.remote_scratch);
-        let tips = self.dest_tips(&dest, &["main", upstream]);
-        let plan = self.plan(
+        let plan = self.origin_plan(
             &source,
+            &dest,
             Landing::Checkout,
             (branch, branch),
             include_uncommitted,
-            tips,
+            &["main", upstream],
         );
         carry_repo(&source, &dest, &plan).map(|outcome| (outcome, self.dest.clone()))
     }
@@ -230,13 +244,13 @@ impl World {
     ) -> Result<(CarryOutcome, PathBuf), TransferError> {
         let source = self.endpoint(&self.remote_scratch);
         let dest = self.endpoint(&self.local_scratch);
-        let tips = self.dest_tips(&dest, &["main", upstream]);
-        let plan = self.plan(
+        let plan = self.origin_plan(
             &source,
+            &dest,
             Landing::Branch,
             branches,
             include_uncommitted,
-            tips,
+            &["main", upstream],
         );
         let outcome = carry_repo(&source, &dest, &plan)?;
         let worktree = self.root.join(format!("wt-{}", branches.1));
@@ -710,6 +724,7 @@ fn a_bundle_missing_prerequisites_is_refused_as_such() {
                     bundle,
                     TID,
                     &[first],
+                    &[],
                 ),
             )
             .unwrap();
@@ -1391,6 +1406,78 @@ fn each_step_is_sized_by_what_it_reads_and_writes() {
             ("apply", 10 + whole)
         ]
     );
+}
+
+/// A destination that fetched origin after the source last did has tips the
+/// source never saw. For a never-pushed branch the bundle is then cut
+/// against the source's own origin tips; a source without those has nothing
+/// to cut against, and the whole history is bundled by the step given time
+/// for it.
+#[test]
+fn a_never_pushed_branch_is_cut_against_the_sources_origin_tips() {
+    for shell in shells() {
+        for source_has_origin_main in [true, false] {
+            let w = World::new(shell);
+            git(&w.source, &["checkout", "-q", "-b", "feature"]);
+            write(&w.source, "new.txt", "new\n");
+            commit(&w.source, "one");
+            write(&w.source, "new.txt", "uncommitted\n");
+            let other = w.other_clone("other");
+            write(&other, "later.txt", "later\n");
+            commit(&other, "later");
+            git(&other, &["push", "-q", "origin", "main"]);
+            if !source_has_origin_main {
+                git(
+                    &w.source,
+                    &["symbolic-ref", "-d", "refs/remotes/origin/HEAD"],
+                );
+                git(&w.source, &["update-ref", "-d", "refs/remotes/origin/main"]);
+            }
+            let source = Recording::new(w.endpoint(&w.local_scratch));
+            let dest = w.endpoint(&w.remote_scratch);
+            let plan = CarryPlan {
+                repo_bytes: 1_000_000,
+                untracked_bytes: 10,
+                ..w.origin_plan(
+                    &source.inner,
+                    &dest,
+                    Landing::Checkout,
+                    ("feature", "feature"),
+                    true,
+                    &["main", "feature"],
+                )
+            };
+            let new_main = rev(&w.origin, "main");
+            assert_eq!(plan.exclude_tips, [new_main.as_str()]);
+            assert!(try_git(&w.source, &["cat-file", "-e", &new_main]).is_err());
+
+            let outcome = carry_repo(&source, &dest, &plan).unwrap();
+
+            let what = format!("{shell}, origin/main at the source: {source_has_origin_main}");
+            assert!(!outcome.retried_without_exclusions, "{what}");
+            assert_eq!(outcome.bundle, outcome.snapshot.bundle, "{what}");
+            assert_same_checkout(&w.source, &w.dest);
+            let bundle = PathBuf::from(&plan.local_bundle);
+            let verified = git(&w.dest, &["bundle", "verify", bundle.to_str().unwrap()]);
+            if source_has_origin_main {
+                assert_eq!(outcome.snapshot.excluded, 1, "{what}");
+                assert_eq!(source.runs(), vec![("snapshot", 10)], "{what}");
+                let old_main = rev(&w.source, "refs/remotes/origin/main");
+                assert!(verified.contains(&old_main), "{what}: {verified}");
+            } else {
+                assert_eq!(outcome.snapshot.excluded, 0, "{what}");
+                assert_eq!(
+                    source.runs(),
+                    vec![("snapshot", 10), ("rebundle", 1_000_000)],
+                    "{what}"
+                );
+                assert!(
+                    verified.contains("records a complete history"),
+                    "{what}: {verified}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

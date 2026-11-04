@@ -3,12 +3,15 @@
 //!
 //! A transfer's manifest records what it makes before making it (see
 //! [`super::undo`]), so one still `carrying` or `committed` when no running
-//! Staged owns it says what is left. Where the project is still at its
-//! source the database never switched, and the transfer is rolled back: the
+//! Staged owns it says what is left. One still `carrying` whose project is
+//! at its source never switched the database, and is rolled back: the
 //! orphan workspace, the worktrees, branches and remotes it created, its
-//! temporary refs. Anywhere else (it switched, or the project is gone) the
-//! destination is what the project has, so nothing is undone; the manifest
-//! says what may be left, for the user.
+//! temporary refs. Anything else is only marked, with what may be left, for
+//! the user. A `carrying` one whose project is elsewhere (or gone) switched
+//! before it could say so. A `committed` one switched, wherever the project
+//! is now: back at its source means a later transfer moved it back, and the
+//! undo list names what the project then used, perhaps the workspace or
+//! worktree that transfer kept because it changed.
 
 use std::path::Path;
 
@@ -26,7 +29,8 @@ use super::undo;
 pub enum Recovered {
     /// The project was still at its source: rolled back, leaving these.
     RolledBack { left: Vec<String> },
-    /// It had switched, or is gone: left for the user, as this says.
+    /// It had switched (wherever it is now), or is gone: left for the user,
+    /// as this says.
     Marked(String),
 }
 
@@ -79,7 +83,8 @@ fn recover_one(
         .ok()
         .flatten()
         .map(|project| project.location);
-    let outcome = if source.is_some() && location == source {
+    let outcome = if manifest.status == backups::CARRYING && source.is_some() && location == source
+    {
         let left = undo::roll_back(&manifest.undo, host, &tid);
         log::warn!(
             "[project_transfer] transfer {tid} of {} was cut off before the project switched; \

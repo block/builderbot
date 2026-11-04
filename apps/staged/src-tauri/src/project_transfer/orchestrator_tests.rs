@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::backups;
-use super::commands::preflight_for;
+use super::commands::{preflight_for, runs_prerun, settle};
 use super::host::{BloxUnavailable, TransferHost, WorkspaceState};
 use super::orchestrator::{run_transfer, ProjectTransferResult, TransferPhase, TransferProgress};
 use super::preflight::{
@@ -480,7 +480,11 @@ struct Fixture {
 
 /// One transfer's outcome and everything it reported.
 struct Transfer {
+    /// As the command reports it.
     result: Result<ProjectTransferResult, String>,
+    /// What the command's after-transfer work (diff caches, prerun actions,
+    /// queue kicks) was run on, if it ran.
+    after_switch: Option<ProjectTransferResult>,
     events: Vec<TransferProgress>,
     transfer_id: String,
 }
@@ -602,7 +606,7 @@ impl Fixture {
         )
         .unwrap();
         let events = Mutex::new(Vec::new());
-        let result = run_transfer(
+        let outcome = run_transfer(
             &self.store,
             &self.host,
             &guard,
@@ -620,8 +624,11 @@ impl Fixture {
         );
         drop(guard);
         assert!(!registry::is_project_transferring(&self.project.id));
+        let mut after_switch = None;
+        let result = settle(outcome, |result| after_switch = Some(result.clone()));
         Transfer {
             result,
+            after_switch,
             events: events.into_inner().unwrap(),
             transfer_id,
         }
@@ -1426,6 +1433,7 @@ fn fail_with(f: &Fixture, case: &Case) -> Transfer {
     assert!(fired, "{}: the trigger never fired", case.name);
     let err = transfer.result.as_ref().err().map(String::as_str);
     assert!(err.is_some(), "{}: the transfer succeeded", case.name);
+    assert!(transfer.after_switch.is_none(), "{}", case.name);
     let phases = phases(&transfer.events);
     assert_eq!(phases.last(), Some(&TransferPhase::Failed), "{}", case.name);
     assert!(
@@ -1956,8 +1964,10 @@ fn a_resume_honours_cancel_and_leaves_the_rows_running() {
 // ---------------------------------------------------------------------------
 
 /// Past the switch there is nothing to roll back to: a panic while the
-/// source comes down fails the transfer but leaves the project where it
-/// went, says so, and frees everything it held.
+/// source comes down leaves the project where it went, and frees everything
+/// it held. The transfer is reported as one that moved, with a warning
+/// saying it stopped, and what follows a switch — prerun actions in new
+/// local worktrees, among the rest — still runs on every branch.
 #[test]
 fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
     let f = two_repo_project();
@@ -1968,11 +1978,24 @@ fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
     let transfer = f.transfer(true);
 
     assert!(f.host.fired());
-    let err = transfer.result.unwrap_err();
-    assert!(err.contains("The project moved"), "{err}");
-    assert!(err.contains("injected panic"), "{err}");
+    let result = transfer.result.expect("reported as moved");
+    assert_eq!(result.location, ProjectLocation::Remote);
+    assert_eq!(codes(&result.warnings), vec!["teardown_interrupted"]);
+    let warning = &result.warnings[0].message;
+    assert!(warning.contains("The project moved"), "{warning}");
+    assert!(warning.contains("injected panic"), "{warning}");
+    let after = transfer.after_switch.expect("the after-transfer work ran");
+    let ids = |r: &ProjectTransferResult| -> Vec<String> {
+        r.repos.iter().map(|r| r.branch_id.clone()).collect()
+    };
+    assert_eq!(ids(&after), branch_ids_of(&f));
+    assert!(after.repos.iter().all(|r| r.carried));
+    assert!(
+        !after.repos.iter().any(|r| runs_prerun(&after, r)),
+        "remote"
+    );
     let phases = phases(&transfer.events);
-    assert_eq!(phases.last(), Some(&TransferPhase::Failed));
+    assert_eq!(phases.last(), Some(&TransferPhase::Completed));
     assert!(!phases.contains(&TransferPhase::RollingBack), "{phases:?}");
     let project = f.store.get_project(&f.project.id).unwrap().unwrap();
     assert_eq!(project.location, ProjectLocation::Remote);
@@ -1989,6 +2012,35 @@ fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
         assert!(lock.lock().is_ok());
     }
     assert!(recovery::recover(&f.store, &f.host, &|_| false).is_empty());
+
+    // To local, the carried branches have their new worktrees, so their
+    // prerun actions run.
+    let f = two_repo_project();
+    f.transfer(true).result.expect("to remote");
+    // The workspace's checks before it is deleted.
+    f.host.arm(Fault::Panic(Side::Workspace, VERIFY_SCRIPT, 1));
+
+    let transfer = f.transfer(true);
+
+    assert!(f.host.fired());
+    let result = transfer.result.expect("reported as moved");
+    assert_eq!(result.location, ProjectLocation::Local);
+    assert_eq!(codes(&result.warnings), vec!["teardown_interrupted"]);
+    let after = transfer.after_switch.expect("the after-transfer work ran");
+    assert_eq!(ids(&after), branch_ids_of(&f));
+    assert!(after.repos.iter().all(|r| runs_prerun(&after, r)));
+    for i in 0..f.branches.len() {
+        assert!(f.worktree(i).is_dir());
+    }
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()], "kept");
+    assert_eq!(
+        transfer.events.last().map(|e| e.phase),
+        Some(TransferPhase::Completed)
+    );
+}
+
+fn branch_ids_of(f: &Fixture) -> Vec<String> {
+    f.branches.iter().map(|b| b.id.clone()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2147,6 +2199,59 @@ fn a_transfer_cut_off_after_the_switch_is_left_for_the_user() {
     // Another Staged still running it is left alone.
     manifest.owner_pid = Some(std::os::unix::process::parent_id());
     assert!(recovery::is_running(&manifest));
+}
+
+/// A `committed` manifest switched the database, so a project back at its
+/// source got there by a later transfer, and the undo list names what that
+/// one kept: here the workspace it left because it changed. Only marked.
+#[test]
+fn a_committed_transfer_whose_project_moved_back_is_not_undone() {
+    let f = two_repo_project();
+    let first = f.transfer(true);
+    first.result.expect("to remote");
+    let dir = f.host.root.join("transfers").join(&first.transfer_id);
+    let mut manifest = backups::read_manifest(&dir).unwrap();
+    assert_eq!(manifest.undo.workspace.as_deref(), Some(WORKSPACE));
+    // As if Staged had died while the worktrees came down.
+    manifest.status = backups::COMMITTED.to_string();
+    manifest.owner_pid = Some(dead_pid());
+    backups::write_manifest(&dir, &manifest).unwrap();
+    // Moved back before any restart, keeping the workspace that changed.
+    let gadgets = f.checkout(1);
+    let back = f.transfer_with(true, &|progress| {
+        if progress.phase == TransferPhase::Committing {
+            write(&gadgets, "late.txt", "saved late\n");
+        }
+    });
+    let back = back.result.expect("to local");
+    assert_eq!(codes(&back.warnings), vec!["workspace_left"]);
+    let project = f.store.get_project(&f.project.id).unwrap().unwrap();
+    assert_eq!(
+        project.location,
+        ProjectLocation::Local,
+        "the first's source"
+    );
+    let worktrees = [f.worktree(0), f.worktree(1)];
+    let calls = f.host.calls();
+
+    let recovered = recovery::recover(&f.store, &f.host, &recovery::is_running);
+
+    let [(tid, Recovered::Marked(warning))] = recovered.as_slice() else {
+        panic!("{recovered:?}");
+    };
+    assert_eq!(tid, &first.transfer_id);
+    assert!(
+        warning.contains("after the project had switched over"),
+        "{warning}"
+    );
+    assert_eq!(f.host.calls(), calls, "nothing deleted");
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert!(gadgets.join("late.txt").exists());
+    assert!(worktrees.iter().all(|wt| wt.is_dir()));
+    assert_eq!(
+        backups::read_manifest(&dir).unwrap().status,
+        backups::COMPLETED
+    );
 }
 
 /// A process id no process has.

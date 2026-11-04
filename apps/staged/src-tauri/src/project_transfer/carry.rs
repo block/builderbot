@@ -51,11 +51,16 @@ pub struct CarryPlan {
     pub include_uncommitted: bool,
     /// The destination's [`origin_tips`], left out of the bundle.
     pub exclude_tips: Vec<String>,
+    /// The names on origin `exclude_tips` are the tips of. The source's own
+    /// remote-tracking refs for them are left out too, so a destination that
+    /// fetched origin after the source last did still gets a bundle cut
+    /// against what they share.
+    pub origin_branches: Vec<String>,
     /// The bundle's file name at each end, unique within the transfer.
     pub bundle_name: String,
     /// Where the bundle is kept on this machine.
     pub local_bundle: PathBuf,
-    /// The source repository's object store: what re-bundling the whole
+    /// The source repository's object store: what bundling the whole
     /// history takes time in proportion to.
     pub repo_bytes: u64,
     /// The source's untracked files. Snapshotting, applying and verifying
@@ -321,7 +326,7 @@ fn snapshot(
     plan: &CarryPlan,
     source_bundle: &str,
 ) -> Result<Snapshot, TransferError> {
-    let report = run_step_sized(
+    let mut report = run_step_sized(
         source,
         "snapshot",
         scripts::SNAPSHOT_SCRIPT,
@@ -331,9 +336,16 @@ fn snapshot(
             source_bundle,
             &plan.transfer_id,
             &plan.exclude_tips,
+            &plan.origin_branches,
         ),
         plan.untracked_bytes,
     )?;
+    // Nothing to cut the bundle against: it is the whole history, which the
+    // rebundle step writes in a run given time by the repository's size. Its
+    // report completes the snapshot's.
+    if ScriptReport::parse(&report).get("bundle") == Some("deferred") {
+        report.push_str(&rebundle_report(source, plan, source_bundle)?);
+    }
     Snapshot::parse(&report, &plan.source_branch)
 }
 
@@ -342,14 +354,22 @@ fn rebundle(
     plan: &CarryPlan,
     source_bundle: &str,
 ) -> Result<BundleFile, TransferError> {
-    let report = run_step_sized(
+    scripts::parse_rebundle(&rebundle_report(source, plan, source_bundle)?)
+}
+
+/// Bundle the whole of the snapshot's history, without exclusions.
+fn rebundle_report(
+    source: &dyn TransferEndpoint,
+    plan: &CarryPlan,
+    source_bundle: &str,
+) -> Result<String, TransferError> {
+    run_step_sized(
         source,
         "rebundle",
         scripts::REBUNDLE_SCRIPT,
         &scripts::rebundle_args(&plan.source_dir, source_bundle, &plan.transfer_id),
         plan.repo_bytes,
-    )?;
-    scripts::parse_rebundle(&report)
+    )
 }
 
 fn land(

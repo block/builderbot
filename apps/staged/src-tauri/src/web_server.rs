@@ -5096,6 +5096,7 @@ mod tests {
             "update_branch_workspace_status(",
             "update_workspace_status_by_workspace_name(",
             "_pipeline_for_branch(",
+            "revert_commit_for_branch(",
             "pull_or_queue_branch_for_branch(",
             "start_queued_session_now_for_branch(",
             "resume_session_for_store(",

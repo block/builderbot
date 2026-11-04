@@ -3481,10 +3481,11 @@ fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
         // left HEAD where it started (see `PipelineConfig::capture_pre_head`),
         // so HEAD now is the HEAD that read would have returned.
         None => config.capture_pre_head,
-        // A rebase always carries its pre-pipeline HEAD explicitly, so the early
-        // return above already answered for it. A push never rewrites local
-        // history and a pull never hands off, so neither has a pre-pipeline HEAD
-        // to compare against.
+        // A rebase only gets here when its up-front read failed, and it must
+        // not read HEAD now: it may be detached on a partially applied commit,
+        // and nothing may claim that SHA. A push never rewrites local history
+        // and a pull never hands off, so neither has a pre-pipeline HEAD to
+        // compare against.
         Some(PipelineKind::Rebase | PipelineKind::Push | PipelineKind::Pull) => false,
     };
     if !read_head_at_handoff {
@@ -3580,43 +3581,30 @@ fn reassociate_rebased_commits(
 }
 
 fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store, completed: bool) {
-    let linked_commit = match store.get_commit_by_session(&config.session_id) {
-        Ok(Some(commit)) => commit,
-        Ok(None) => return,
-        Err(e) => {
-            log::warn!(
-                "Failed to load linked commit for terminal pipeline session {}: {e}",
-                config.session_id
-            );
-            return;
-        }
-    };
-
+    // A run that didn't complete, or completed with no pre-pipeline HEAD to
+    // tell a no-op from a commit by, has nothing to claim. Its pending row
+    // goes; a row that already landed stays, since the delete only matches
+    // `sha IS NULL`.
     if completed && (config.pre_head_sha.is_some() || config.capture_pre_head) {
         finalize_head_moving_commit_pipeline_without_ai(config, store);
-        return;
-    }
-
-    if linked_commit.sha.is_none() {
-        if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
-            log::warn!(
-                "Failed to resolve pending commit for terminal pipeline session {}: {e}",
-                config.session_id
-            );
-        }
+    } else if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
+        log::warn!(
+            "Failed to resolve pending commit for terminal pipeline session {}: {e}",
+            config.session_id
+        );
     }
 }
 
 fn finalize_head_moving_commit_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
-    // With no pre-pipeline HEAD there is nothing to tell a no-op from a commit
-    // by, unless the pipeline asked for one up front: that promises a completed
-    // run moved HEAD (see `PipelineConfig::capture_pre_head`), so HEAD is its
-    // commit even when the read it would be compared against failed.
+    // A pipeline with no pre-pipeline HEAD only gets here if it asked for one
+    // up front: that promises a completed run moved HEAD (see
+    // `PipelineConfig::capture_pre_head`), so HEAD is its commit even when the
+    // read it would be compared against failed.
     let pre_head_sha = config.pre_head_sha.as_deref();
-    if pre_head_sha.is_none() && !config.capture_pre_head {
-        let _ = store.delete_pending_commit_for_session(&config.session_id);
-        return;
-    }
+    debug_assert!(
+        pre_head_sha.is_some() || config.capture_pre_head,
+        "no pre-pipeline HEAD to tell a no-op from a commit by"
+    );
 
     let commit = match store.get_commit_by_session(&config.session_id) {
         Ok(Some(commit)) => commit,
@@ -10000,6 +9988,46 @@ mod tests {
         not_asked.pre_head_sha = None;
         resolve_pipeline_artifacts_without_ai(&not_asked, &store, true);
         assert!(store.get_commit(&other_commit).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A run that didn't complete drops its pending row, but a row that
+    /// already landed keeps its SHA, and a session with no row is a no-op.
+    #[test]
+    fn unfinished_pipeline_drops_only_an_unlanded_commit_row() {
+        let repo = make_git_repo("unfinished-pipeline-drops-pending");
+        let head = run_git(&repo, &["rev-parse", "HEAD"]);
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let session_with = |commit: Option<crate::store::Commit>| {
+            let mut session = crate::store::Session::new_running("Revert commit", &repo);
+            session.pipeline = Some(PipelineExecution::from_steps(&[]));
+            store.create_session(&session).unwrap();
+            let commit_id = commit.map(|commit| {
+                let commit = commit.with_session(&session.id);
+                store.create_commit(&commit).unwrap();
+                commit.id
+            });
+            (session.id, commit_id)
+        };
+        let (pending_session, pending_commit) =
+            session_with(Some(crate::store::Commit::new_pending(&branch.id)));
+        let (landed_session, landed_commit) =
+            session_with(Some(crate::store::Commit::new_with_sha(&branch.id, &head)));
+        let (bare_session, _) = session_with(None);
+
+        for session_id in [&pending_session, &landed_session, &bare_session] {
+            let config = head_moving_pipeline_config(session_id, &repo, &head, None);
+            resolve_pipeline_artifacts_without_ai(&config, &store, false);
+        }
+
+        let pending = store.get_commit(&pending_commit.unwrap()).unwrap();
+        assert!(pending.is_none());
+        let landed = store.get_commit(&landed_commit.unwrap()).unwrap().unwrap();
+        assert_eq!(landed.sha.as_deref(), Some(head.as_str()));
         let _ = std::fs::remove_dir_all(repo);
     }
 

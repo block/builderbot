@@ -1,0 +1,58 @@
+//! Moving a project between local worktrees and a Blox workspace.
+//!
+//! Each repository's branch travels as a git bundle holding the branch tip and
+//! two snapshot commits — the index, and the working tree including untracked
+//! files — built with plumbing so the source is never written to (see
+//! [`scripts`]). The bundle comes through this machine, where it stays as the
+//! backup, is applied at the destination and checked against tree hashes.
+//! Only then does [`crate::store::Store::apply_project_transfer`] switch the
+//! project's location, in one transaction.
+//!
+//! This module is the transport: the scripts, the two [`TransferEndpoint`]s,
+//! and the per-repository pipeline in [`carry_repo`].
+
+mod carry;
+mod endpoint;
+mod scripts;
+#[cfg(test)]
+mod tests;
+
+pub use carry::{carry_repo, cleanup, finish, origin_tips, CarryOutcome, CarryPlan, Landing};
+pub use endpoint::{BloxEndpoint, LocalEndpoint, ScriptOutput, TransferEndpoint};
+pub use scripts::{
+    ApplyReport, BundleFile, ConfigEntry, OriginTips, RemoteConfig, Snapshot, SnapshotWarning,
+};
+
+/// Why a transfer step failed.
+#[derive(Debug, thiserror::Error)]
+pub enum TransferError {
+    /// A script ran and reported a failure: a blocker at the source, a
+    /// verification mismatch at the destination.
+    #[error("{step} failed on {endpoint}: {message}")]
+    Script {
+        step: &'static str,
+        endpoint: String,
+        message: String,
+    },
+    /// The destination lacks commits the bundle was cut against.
+    #[error("{endpoint} is missing commits the bundle needs: {message}")]
+    MissingPrerequisites { endpoint: String, message: String },
+    /// A script could not be run, or a file could not be moved, at all.
+    #[error("cannot reach {endpoint}: {message}")]
+    Exec { endpoint: String, message: String },
+    /// The bundle that arrived is not the bundle that was made.
+    #[error("the bundle changed in transit (expected sha256 {expected}, got {actual})")]
+    Checksum { expected: String, actual: String },
+    /// The caller asked for something the transfer cannot do safely.
+    #[error("invalid transfer plan: {0}")]
+    InvalidPlan(String),
+    /// A script's output did not say what it should have.
+    #[error("unexpected output from {step}: {message}")]
+    Protocol { step: &'static str, message: String },
+}
+
+/// Whether `id` can name a transfer: it becomes a ref component and a
+/// directory name at both ends, so nothing but ASCII letters, digits and `-`.
+pub fn is_valid_transfer_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}

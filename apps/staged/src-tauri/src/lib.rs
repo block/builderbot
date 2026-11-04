@@ -39,6 +39,7 @@ mod preference_events;
 pub mod project_commands;
 pub mod project_mcp;
 pub mod project_search;
+pub mod project_transfer;
 pub mod prs;
 pub mod review_commands;
 pub mod session_commands;

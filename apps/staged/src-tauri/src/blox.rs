@@ -3,9 +3,12 @@
 //! Thin wrappers around shared `blox-cli` helpers so existing Staged code can
 //! keep using `crate::blox::*`.
 
+use std::path::Path;
 use std::sync::OnceLock;
 
-pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput};
+pub use blox_cli::{
+    BloxError, FileRoute, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput,
+};
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -139,4 +142,22 @@ pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
 /// Runs: `sq blox ws resume <name>`
 pub fn ws_resume(name: &str) -> Result<(), BloxError> {
     blox_cli::ws_resume(name)
+}
+
+/// Copy a local file to an absolute path under the workspace's home, creating
+/// its directory: streamed over `ws ssh`, or in parts through `ws upload` when
+/// ssh cannot reach the workstation.
+pub fn ws_put_file(name: &str, local: &Path, remote_path: &str) -> Result<FileRoute, BloxError> {
+    blox_cli::ws_put_file(name, local, remote_path)
+}
+
+/// Copy a workspace file of `size` bytes to `local`: streamed over `ws ssh`,
+/// or in parts through `ws download` when ssh cannot reach the workstation.
+pub fn ws_get_file(
+    name: &str,
+    remote_path: &str,
+    local: &Path,
+    size: u64,
+) -> Result<FileRoute, BloxError> {
+    blox_cli::ws_get_file(name, remote_path, local, size)
 }

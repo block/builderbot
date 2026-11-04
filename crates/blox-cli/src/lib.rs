@@ -1,6 +1,7 @@
 //! Shared Blox CLI integration.
 //!
-//! Thin wrappers around `sq blox` subcommands plus common command discovery.
+//! Thin wrappers around `sq blox` subcommands plus common command discovery,
+//! and file transfer to and from a workstation (see [`ws_put_file`]).
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Read;
@@ -11,10 +12,16 @@ use thiserror::Error;
 use wait_timeout::ChildExt;
 
 mod commands;
+mod transfer;
 
 pub use commands::{
     find_acp_process, find_ended_acp_process, ws_command_list, ws_output, CommandFilter,
     CommandStatus, WorkstationCommand,
+};
+pub use transfer::{
+    download_in_parts, get_file_with, put_file_with, transfer_timeout, upload_in_parts,
+    ws_download, ws_download_args, ws_get_file, ws_put_file, ws_ssh_args, ws_ssh_get, ws_ssh_put,
+    ws_upload, ws_upload_args, FileRoute, SqWorkspace, WsTransport, MAX_PART_BYTES,
 };
 
 const COMMON_PATHS: &[&str] = &[

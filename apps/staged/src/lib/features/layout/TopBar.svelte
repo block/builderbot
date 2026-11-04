@@ -45,15 +45,14 @@
   style={`--traffic-light-spacer-width: ${trafficLightSpacerWidth}px`}
   onpointerdown={startDrag}
 >
-  <div class="traffic-light-spacer"></div>
+  <div class="traffic-light-spacer" class:collapsed={trafficLightSpacerWidth === 0}></div>
   <div class="left-actions">
     {#if navigation.canGoBack}
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
+        class="top-bar-action h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
         title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
-        aria-label="Back"
         onclick={popDetailRoute}
       >
         <ArrowLeft size={14} />
@@ -217,29 +216,119 @@
     -webkit-app-region: no-drag;
   }
 
-  :global(.top-bar-action) {
-    height: 28px;
-    min-width: 0;
+  /* Labels for buttons that are icon-only on desktop (New project). */
+  .top-bar :global(.top-bar-action-label.mobile-only) {
+    display: none;
   }
 
   @media (max-width: 768px) {
     .top-bar {
-      padding: 6px 8px;
-      padding-top: calc(6px + env(safe-area-inset-top));
-    }
-    .title-content {
-      max-width: min(46vw, 420px);
+      --top-bar-action-size: 44px;
+      padding: 2px 8px;
+      padding-top: calc(2px + env(safe-area-inset-top));
     }
 
+    /* The labelled buttons need the room, so drop the spacers (and their flex
+       gaps) and push the right actions over instead. The traffic-light spacer
+       goes only when `getTrafficLightSpacerWidth` reserves nothing, so a
+       window with traffic lights keeps its room. The bar itself still starts
+       window drags through its gaps and the auto margin. */
+    .traffic-light-spacer.collapsed,
+    .drag-spacer {
+      display: none;
+    }
+
+    .top-bar-actions {
+      margin-left: auto;
+    }
+
+    /* Between labelled buttons the title area is narrow, so anything that
+       can't fit usefully wraps onto a second line that is clipped away rather
+       than leaving a sliver. Badges (status pills, the diff route's RepoLabel)
+       are atomic: full width or gone, so a pill is never cut. The title
+       ellipsizes down to 4em (`.title-text`'s flex-basis) and only then wraps
+       away. The height cap stops the hidden line from growing the bar at
+       larger font sizes, and `clip` (unlike `hidden`) can't be scrolled to
+       reveal it. */
+    .title-content {
+      max-width: min(46vw, 420px);
+      max-height: var(--top-bar-action-size);
+      flex-wrap: wrap;
+      overflow: clip;
+    }
+
+    /* Zero-width, full-height first item: whatever wraps after it, including
+       the title, starts below the clip. The margin cancels its flex gap. */
+    .title-content::before {
+      content: '';
+      height: var(--top-bar-action-size);
+      margin-right: -8px;
+    }
+
+    /* The 4em basis is the wrap threshold; the title grows back to its natural
+       width when there's room. */
+    .title-text:has(.title) {
+      flex: 1 1 4em;
+      max-width: max-content;
+    }
+
+    /* A title-less route (the project view) leaves `.title-text` empty, and
+       the project view's centre slot stays empty until its heading scrolls
+       away. Drop both so their flex gaps don't take room from the badges. */
+    .title-text:not(:has(.title)),
+    .center-content:not(:has(> *)) {
+      display: none;
+    }
+
+    /* Centred over the whole bar, the project name would run under the
+       labelled buttons; take the space between them instead, and hide it
+       once that space is too narrow to read. */
     .center-content {
-      width: min(34vw, 240px);
+      position: static;
+      flex: 1 1 0;
+      width: auto;
+      /* Cancel the gap (the child re-adds it) so a squeezed slot takes no room. */
+      margin-left: -8px;
+      transform: none;
+      container-type: inline-size;
+    }
+
+    .center-content > :global(*) {
+      margin-left: 8px;
+    }
+
+    @container (width < calc(6em + 8px)) {
+      .center-content > :global(*) {
+        visibility: hidden;
+      }
     }
 
     .subtitle {
       display: none;
     }
 
-    .top-bar-action-label {
+    /* Every `.top-bar-action` button is a 44px-tall touch target that keeps
+       its label and grows to fit it; icon-only ones are 44px square. Sized in
+       px, not rem, so the 13px root font size and the font-size preference
+       can't shrink it; unlayered, so it also beats the Button size utilities.
+       The icon keeps the desktop labelled buttons' 1rem. */
+    .top-bar :global(.top-bar-action) {
+      width: auto;
+      min-width: var(--top-bar-action-size);
+      height: var(--top-bar-action-size);
+      padding-inline: 12px;
+    }
+
+    .top-bar :global(.top-bar-action svg) {
+      width: 1rem;
+      height: 1rem;
+    }
+
+    .top-bar :global(.top-bar-action-label.mobile-only) {
+      display: inline;
+    }
+
+    .top-bar :global(.top-bar-action-label.desktop-only) {
       display: none;
     }
   }

@@ -752,7 +752,7 @@
       {:else if workspaceStatus === 'error'}
         <AlertCircle size={12} />
       {/if}
-      <span>{statusLabel(workspaceStatus)}</span>
+      <span class="status-label">{statusLabel(workspaceStatus)}</span>
       {#if workspaceStatus === 'suspended' && workstationName && selectedProject}
         <Button
           variant="ghost"
@@ -768,18 +768,19 @@
 
 {#snippet projectTopBarRightActions()}
   {#if selectedProject && !selectedProjectDeleting}
-    <span class="inline-flex" title={selectedProjectAddRepoHint ?? 'Add repo'}>
+    <span class="add-repo-action inline-flex" title={selectedProjectAddRepoHint ?? 'Add repo'}>
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0"
+        class="top-bar-action group h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
+        aria-label="Add Repo"
         onclick={() => {
           showAddRepoModal = true;
         }}
         disabled={selectedProjectAddRepoDisabled}
       >
         <span
-          class="flex size-4 shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
+          class="flex shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
         >
           <Plus size={12} />
         </span>
@@ -791,10 +792,11 @@
       variant="ghost"
       size="sm"
       class={[
-        'top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:size-10 max-md:p-0',
+        'top-bar-action group h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive',
         selectedProjectSafeToDelete && 'border border-destructive text-destructive',
       ]}
       title="Remove project"
+      aria-label="Remove project"
       onclick={() => projectActions.requestRemoveProject(selectedProject)}
     >
       <span
@@ -807,7 +809,7 @@
       >
         <Trash2 size={14} />
       </span>
-      <span class="top-bar-action-label">Remove Project</span>
+      <span class="top-bar-action-label desktop-only">Remove Project</span>
     </Button>
   {/if}
 {/snippet}
@@ -1001,13 +1003,22 @@
     color: var(--ui-danger);
   }
 
-  :global(.top-bar-action) {
-    height: 28px;
-    min-width: 0;
-  }
-
+  /* On phones the pill shares the bar with the labelled Back and Add Repo
+     buttons, and its Resume is the only way to resume the workspace. To fit
+     it, "Suspended" is hidden visually (the pause icon shows the state and
+     screen readers still read it), and Add Repo, disabled until the workspace
+     is running, drops its label (its aria-label still names it). */
   @media (max-width: 768px) {
-    .top-bar-action-label {
+    .workspace-badge.suspended .status-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    .add-repo-action :global(.top-bar-action:disabled .top-bar-action-label) {
       display: none;
     }
   }

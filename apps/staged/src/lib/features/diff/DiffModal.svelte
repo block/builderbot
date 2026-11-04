@@ -1612,7 +1612,7 @@
     <Button
       variant="ghost"
       size="icon-xs"
-      class="max-md:size-10 [&_svg]:size-3.5"
+      class="top-bar-action"
       title="Show changed files"
       aria-label="Show changed files"
       onclick={() => (showMobileSidebar = true)}

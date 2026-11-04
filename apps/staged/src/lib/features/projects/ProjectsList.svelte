@@ -396,18 +396,19 @@
     <Button
       variant="ghost"
       size="icon-xs"
-      class="max-md:size-10 [&_svg]:size-3.5"
+      class="top-bar-action gap-1.5"
       aria-label="New project"
       onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
     >
       <Plus size={14} />
+      <span class="top-bar-action-label mobile-only">New project</span>
     </Button>
   </span>
 
   <Button
     variant="ghost"
     size="icon-xs"
-    class="max-md:size-10 [&_svg]:size-3.5"
+    class="top-bar-action"
     title={viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
     aria-label="Settings"
     onclick={() => openSettings()}

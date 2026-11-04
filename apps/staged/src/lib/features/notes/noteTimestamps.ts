@@ -29,3 +29,27 @@ export function formatNoteTimestamp(note: NoteTimestamps, nowMs: number): string
   const relative = formatRelativeTime(noteLastWrittenAt(note), nowMs);
   return isNoteRevised(note) ? `Updated ${relative}` : relative;
 }
+
+/**
+ * Is the note unread? A note is unread from the moment its content lands
+ * (`completedAt`) until the user opens it after that, so one still being
+ * written is neither, and a revision doesn't make a read note unread again.
+ * "Mark as unread" clears `readAt`.
+ */
+export function isNoteUnread(note: NoteReadTimestamps): boolean {
+  return note.completedAt !== null && (note.readAt === null || note.readAt < note.completedAt);
+}
+
+/** The timestamp columns a note's read state comes from (both in ms). */
+export interface NoteReadTimestamps {
+  completedAt: number | null;
+  readAt: number | null;
+}
+
+export type NoteReadState = 'read' | 'unread';
+
+/** The read state a note row offers to toggle; `null` while it is still being written. */
+export function noteReadState(note: NoteReadTimestamps): NoteReadState | null {
+  if (note.completedAt === null) return null;
+  return isNoteUnread(note) ? 'unread' : 'read';
+}

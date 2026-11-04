@@ -124,6 +124,7 @@ const completedNote: ProjectNote = {
   completionReason: null,
   lastChatMessageAt: null,
   chatReadAt: null,
+  readAt: null,
 };
 
 const REF = `#project-note:${completedNote.id}`;

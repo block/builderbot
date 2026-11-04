@@ -114,7 +114,7 @@ impl Store {
         let tx = conn.transaction()?;
         let existing = tx
             .query_row(
-                "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+                "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
                  FROM notes WHERE id = ?1",
                 params![note_id],
                 Self::row_to_note,
@@ -221,7 +221,7 @@ impl Store {
         let tx = conn.transaction()?;
         let existing = tx
             .query_row(
-                "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+                "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
                  FROM project_notes WHERE id = ?1",
                 params![note_id],
                 Self::row_to_project_note,

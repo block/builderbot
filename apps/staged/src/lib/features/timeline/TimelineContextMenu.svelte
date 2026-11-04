@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Copy from '@lucide/svelte/icons/copy';
+  import Mail from '@lucide/svelte/icons/mail';
+  import MailOpen from '@lucide/svelte/icons/mail-open';
   import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
   import Play from '@lucide/svelte/icons/play';
   import Trash2 from '@lucide/svelte/icons/trash-2';
@@ -12,6 +14,10 @@
     hashtagRef?: string;
     /** Start this queued session ahead of the branch queue. */
     onStartNow?: () => void;
+    /** Mark this unread note read. */
+    onMarkRead?: () => void;
+    /** Mark this read note unread. */
+    onMarkUnread?: () => void;
     onDelete?: (opts?: { altKey: boolean }) => void;
   };
 
@@ -31,6 +37,8 @@
       !!action.commitSha ||
       (!!action.hashtagRef && !!onNewSessionReferring) ||
       !!action.onStartNow ||
+      !!action.onMarkRead ||
+      !!action.onMarkUnread ||
       !!action.onDelete
     );
   }
@@ -110,6 +118,14 @@
     activeAction?.onStartNow?.();
   }
 
+  function handleMarkRead() {
+    activeAction?.onMarkRead?.();
+  }
+
+  function handleMarkUnread() {
+    activeAction?.onMarkUnread?.();
+  }
+
   function handleDelete() {
     activeAction?.onDelete?.({ altKey: false });
   }
@@ -133,6 +149,16 @@
     </ContextMenu.Trigger>
     <ContextMenu.Content class="min-w-[180px]">
       {#if activeAction}
+        {#if activeAction.onMarkUnread}
+          <ContextMenu.Item onSelect={handleMarkUnread}>
+            <Mail size={14} /> Mark as unread
+          </ContextMenu.Item>
+        {/if}
+        {#if activeAction.onMarkRead}
+          <ContextMenu.Item onSelect={handleMarkRead}>
+            <MailOpen size={14} /> Mark as read
+          </ContextMenu.Item>
+        {/if}
         {#if activeAction.onStartNow}
           <ContextMenu.Item onSelect={handleStartNow}>
             <Play size={14} /> Start now

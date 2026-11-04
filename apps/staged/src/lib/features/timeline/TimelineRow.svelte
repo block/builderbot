@@ -3,7 +3,8 @@
 
   Icon + title + meta. Compact. The whole row is clickable to view the item.
   Hover reveals session and delete actions on the right; a note's chat button
-  stays visible while its chat has replies since the note.
+  stays visible while its chat has replies since the note. An unread note
+  carries a dot on its icon.
 -->
 <script lang="ts">
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
@@ -78,6 +79,8 @@
     sessionId?: string;
     /** Whether a note's chat has read or unread replies since the note. */
     chatState?: NoteChatState;
+    /** The note landed and the user hasn't opened it since (see `isNoteUnread`). */
+    unread?: boolean;
     onItemClick?: () => void;
     onSessionClick?: (sessionId: string) => void;
     onDeleteClick?: (opts?: { altKey: boolean }) => void;
@@ -128,6 +131,7 @@
     isLast = false,
     sessionId,
     chatState = 'none',
+    unread = false,
     onItemClick,
     onSessionClick,
     onDeleteClick,
@@ -364,6 +368,9 @@
           <ImageLucide size={12} />
         {:else if isGitState}
           <GitBranch size={12} />
+        {/if}
+        {#if unread}
+          <span class="unread-dot" role="img" aria-label="Unread" title="Unread"></span>
         {/if}
       </div>
       {#if showConnector && !isLast}
@@ -721,6 +728,19 @@
     flex-shrink: 0;
     background-color: var(--bg-elevated);
     border: 1px solid var(--border-subtle);
+    position: relative;
+  }
+
+  /* The project list's unread dot, on the note icon's top-right corner. */
+  .unread-dot {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: var(--ui-accent);
+    pointer-events: none;
   }
 
   .timeline-icon.commit-icon {

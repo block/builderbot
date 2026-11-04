@@ -77,6 +77,7 @@ function projectNote(overrides: Partial<ProjectNote> = {}): ProjectNote {
     completionReason: null,
     lastChatMessageAt: null,
     chatReadAt: null,
+    readAt: null,
     ...overrides,
   };
 }
@@ -138,6 +139,7 @@ describe('timelineToHashtagItems', () => {
           subtype: null,
           lastChatMessageAt: null,
           chatReadAt: null,
+          readAt: null,
         },
         {
           id: 'new-note',
@@ -154,6 +156,7 @@ describe('timelineToHashtagItems', () => {
           subtype: null,
           lastChatMessageAt: null,
           chatReadAt: null,
+          readAt: null,
         },
       ],
       commits: [
@@ -274,6 +277,7 @@ describe('timelineToHashtagItems', () => {
       subtype: null,
       lastChatMessageAt: null,
       chatReadAt: null,
+      readAt: null,
     };
     const timeline = emptyTimeline({
       notes: [

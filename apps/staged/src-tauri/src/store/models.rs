@@ -970,6 +970,10 @@ pub struct Note {
     /// [`Note::SUBTYPE_WRITTEN`] means the user authored it directly and it can
     /// be edited in place.
     pub subtype: Option<String>,
+    /// When the user last opened the note. Once `completed_at` is set the note
+    /// reads as unread while this is unset or older than it; see
+    /// `Store::set_note_read`.
+    pub read_at: Option<i64>,
 }
 
 impl Note {
@@ -993,6 +997,7 @@ impl Note {
             suggested_next_note_step: None,
             parent_project_note_id: None,
             subtype: None,
+            read_at: None,
         }
     }
 
@@ -1056,6 +1061,8 @@ pub struct ProjectNote {
     pub suggested_next_commit_step: Option<String>,
     /// AI-suggested prompt for a follow-up note session.
     pub suggested_next_note_step: Option<String>,
+    /// When the user last opened the note; see [`Note::read_at`].
+    pub read_at: Option<i64>,
     /// Resolved session status (e.g. "running", "completed", "cancelled").
     /// Populated at query time via `resolve_session_status()`.
     #[serde(skip_deserializing)]
@@ -1087,6 +1094,7 @@ impl ProjectNote {
             completed_at: if has_content { Some(now) } else { None },
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
+            read_at: None,
             session_status: None,
             completion_reason: None,
             last_chat_message_at: None,

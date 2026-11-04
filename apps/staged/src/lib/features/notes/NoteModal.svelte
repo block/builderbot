@@ -9,12 +9,17 @@
   touch this note — the session runner rewriting it, an edit in another window,
   a delete-and-rewrite. Nothing here is editable, so a refresh can't clobber
   user input.
+
+  Showing a note marks it read, and the header's toggle marks it read or
+  unread; see `NoteReadTracker` for when the viewer marks it on its own.
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
+  import Mail from '@lucide/svelte/icons/mail';
+  import MailOpen from '@lucide/svelte/icons/mail-open';
   import MessageCircle from '@lucide/svelte/icons/message-circle';
   import FileText from '@lucide/svelte/icons/file-text';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
@@ -39,6 +44,7 @@
   } from '../../api/commands';
   import { listenToEvent } from '../../transport';
   import { notesChangeAffectsNote } from './noteRefresh';
+  import { NoteReadTracker } from './noteReadTracker.svelte';
   import { formatChatButtonLabel, type LinkedNoteContext } from '../sessions/noteFreshness';
   import PooledSessionChatPane from '../sessions/PooledSessionChatPane.svelte';
   import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
@@ -156,6 +162,8 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
   let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
+  const readTracker = new NoteReadTracker();
+  let readToggleLabel = $derived(readTracker.unread ? 'Mark as read' : 'Mark as unread');
 
   // Only the note column's width is persisted — shared with WriteNoteModal,
   // since editing opens from here.
@@ -322,7 +330,19 @@
       pikchrRendererLoadFailedKey = null;
       chatAutoOpenDecisionKey = null;
       previousSessionStatus = null;
+      readTracker.reset();
     }
+  });
+
+  // Showing the note marks it read: on open, and when reference navigation
+  // swaps in another note. Only those — not refreshes or pane toggles — so a
+  // manual "Mark as unread" sticks while the note stays open. A chat-only view
+  // hasn't shown the note yet, so it waits for the note pane.
+  $effect(() => {
+    const id = open && !chatOnly ? displayNoteId : null;
+    if (!id) return;
+    const kind = noteKind;
+    untrack(() => readTracker.show(kind, id));
   });
 
   // Fresh props supersede the override — and any refresh still in flight for
@@ -452,6 +472,7 @@
         content: refreshed.content,
         updatedAt: refreshed.updatedAt,
       };
+      readTracker.observe(refreshed);
     } catch {
       // The next notes-changed event or reopen will try again.
     }
@@ -629,6 +650,26 @@
   </Button>
 {/snippet}
 
+{#snippet readToggleButton()}
+  {#if readTracker.canToggle}
+    <Button
+      variant="outline"
+      size="sm"
+      class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+      title={readToggleLabel}
+      aria-label={readToggleLabel}
+      disabled={readTracker.toggling}
+      onclick={() => readTracker.toggle(projectId)}
+    >
+      {#if readTracker.unread}
+        <MailOpen size={16} />
+      {:else}
+        <Mail size={16} />
+      {/if}
+    </Button>
+  {/if}
+{/snippet}
+
 {#snippet chatToggleButton()}
   {#if canOpenSession}
     <Button
@@ -717,6 +758,7 @@
                 onMoved={onClose}
               />
             {/if}
+            {@render readToggleButton()}
             {#if hasNoteContent}
               {@render copyButton()}
             {/if}

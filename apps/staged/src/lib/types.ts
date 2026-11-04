@@ -204,6 +204,8 @@ export interface NoteTimelineItem {
   lastChatMessageAt: number | null;
   /** When the user last read the session's chat. */
   chatReadAt: number | null;
+  /** When the user last opened the note; see `isNoteUnread`. */
+  readAt: number | null;
 }
 
 /**
@@ -228,7 +230,11 @@ export interface BranchNote {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  /** Set on a child note aggregated under a project note, which branch timelines hide. */
+  parentProjectNoteId: string | null;
   subtype: NoteSubtype;
+  /** When the user last opened the note; see `isNoteUnread`. */
+  readAt: number | null;
 }
 
 export interface ReviewTimelineItem {
@@ -413,6 +419,8 @@ export interface ProjectNote {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  /** When the user last opened the note; see `isNoteUnread`. */
+  readAt: number | null;
   sessionStatus: string | null;
   completionReason: string | null;
   /** When the session's chat last got a reply it shows. */

@@ -198,6 +198,8 @@ pub struct NoteTimelineItem {
     pub last_chat_message_at: Option<i64>,
     /// When the user last read the session's chat (`sessions.chat_read_at`).
     pub chat_read_at: Option<i64>,
+    /// When the user last opened the note (`notes.read_at`).
+    pub read_at: Option<i64>,
 }
 
 /// Review with session status resolved.
@@ -2212,12 +2214,14 @@ pub fn run() {
             note_commands::update_note,
             note_commands::delete_note,
             note_commands::get_note,
+            note_commands::set_note_read,
             note_commands::list_child_notes,
             note_commands::create_project_note,
             note_commands::list_project_notes,
             note_commands::get_project_note,
             note_commands::get_project_note_by_session,
             note_commands::get_branch_note_by_session,
+            note_commands::set_project_note_read,
             note_commands::delete_project_note,
             // Project search
             project_search::get_project_search_index,

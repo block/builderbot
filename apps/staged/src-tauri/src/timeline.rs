@@ -530,6 +530,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 subtype: n.subtype,
                 last_chat_message_at,
                 chat_read_at,
+                read_at: n.read_at,
             }
         })
         .collect();

@@ -2263,6 +2263,7 @@ pub fn run() {
             note_commands::get_project_note_by_session,
             note_commands::get_branch_note_by_session,
             note_commands::delete_project_note,
+            note_transfer::get_note_repo,
             note_transfer::move_note_to_project,
             note_transfer::copy_note_to_project,
             note_transfer::move_project_note_to_project,

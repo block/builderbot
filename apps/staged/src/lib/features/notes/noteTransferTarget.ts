@@ -48,17 +48,41 @@ export function createProjectOption(query: string, projects: Project[]): string 
   return name;
 }
 
+/** The repo + subpath a branch note is bound to. */
+export interface NoteRepo {
+  githubRepo: string;
+  subpath: string | null;
+}
+
+/**
+ * The picker's lookup of the stored note's repo, made each time it opens.
+ * `repo` is `null` for a note bound to none: every project note, and a branch
+ * note whose branch tracks no repo.
+ */
+export type NoteRepoLookup =
+  { status: 'loading' } | { status: 'resolved'; repo: NoteRepo | null } | { status: 'failed' };
+
+/** The looked-up repo, or `null` while there isn't one to act on. */
+export function lookedUpRepo(lookup: NoteRepoLookup): NoteRepo | null {
+  return lookup.status === 'resolved' ? lookup.repo : null;
+}
+
 /**
  * Why a project created for this note can't be remote, or `null` when it can.
  * A remote project's workspace is provisioned from the repo it is created
  * with, and adding a repo afterwards needs that workspace running already, so
- * a new remote project starts from the note's repo — and project notes have
- * none.
+ * a new remote project starts from the note's repo — which has to be known
+ * first, and which project notes don't have.
  */
-export function newRemoteProjectBlocker(
-  repo: { githubRepo: string; subpath: string | null } | null | undefined
-): string | null {
-  return repo ? null : 'Needs a repo; this note has none';
+export function newRemoteProjectBlocker(lookup: NoteRepoLookup): string | null {
+  switch (lookup.status) {
+    case 'loading':
+      return "Checking this note's repo…";
+    case 'failed':
+      return "Couldn't look up this note's repo";
+    case 'resolved':
+      return lookup.repo ? null : 'Needs a repo; this note has none';
+  }
 }
 
 /**
@@ -99,12 +123,27 @@ export type NoteTransferSelection =
   { kind: 'existing'; projectId: string } | { kind: 'new'; name: string };
 
 /**
+ * What confirming (Move/Copy, or Enter in the search box) acts on: the picked
+ * row or, when nothing is picked, the "Create project" row if it is the only
+ * row on offer, else the single remaining match. `null` when that leaves
+ * nothing to act on, which keeps the confirm button disabled.
+ */
+export function noteTransferTarget(
+  selected: NoteTransferSelection | null,
+  filtered: Project[],
+  createName: string | null
+): NoteTransferSelection | null {
+  if (selected) return selected;
+  if (filtered.length === 1 && !createName) return { kind: 'existing', projectId: filtered[0].id };
+  if (filtered.length === 0 && createName) return { kind: 'new', name: createName };
+  return null;
+}
+
+/**
  * Explains, for a repo note, what the destination will gain. Project notes
  * carry no repo, so there is nothing to say.
  */
-export function repoAddedHint(
-  repo: { githubRepo: string; subpath: string | null } | null | undefined
-): string | null {
+export function repoAddedHint(repo: NoteRepo | null | undefined): string | null {
   if (!repo) return null;
   const path = repo.subpath ? `${repo.githubRepo} (${repo.subpath})` : repo.githubRepo;
   return `${path} is added to the project if it isn't there yet.`;

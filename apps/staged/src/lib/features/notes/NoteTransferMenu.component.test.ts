@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface DialogProps {
+  loadNoteRepo?: () => Promise<{ githubRepo: string; subpath: string | null } | null>;
   onPrepare?: () => Promise<void>;
   onConfirm: (targetProjectId: string) => Promise<void>;
 }
@@ -10,6 +11,7 @@ const { dialog, commands } = vi.hoisted(() => ({
   dialog: { props: null as DialogProps | null },
   commands: {
     getNote: vi.fn(),
+    getNoteRepo: vi.fn(),
     getProjectNote: vi.fn(),
     moveNoteToProject: vi.fn(),
     moveProjectNoteToProject: vi.fn(),
@@ -100,5 +102,50 @@ describe('NoteTransferMenu pre-transfer checks', () => {
     await expect(picker.onPrepare!()).rejects.toThrow('still being generated');
     expect(commands.getProjectNote).toHaveBeenCalledWith('note-1');
     expect(commands.getNote).not.toHaveBeenCalled();
+  });
+});
+
+describe("NoteTransferMenu note's repo", () => {
+  beforeEach(() => {
+    dialog.props = null;
+    for (const command of Object.values(commands)) command.mockReset();
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = null;
+    document.body.innerHTML = '';
+  });
+
+  it("reads a branch note's repo from the stored note's branch", async () => {
+    commands.getNoteRepo.mockResolvedValue({
+      id: 'repo-1',
+      projectId: 'here',
+      githubRepo: 'acme/widgets',
+      branchName: 'feature',
+      subpath: 'apps/web',
+      isPrimary: true,
+    });
+    const { picker } = mountMenu('branch');
+
+    await expect(picker.loadNoteRepo!()).resolves.toEqual({
+      githubRepo: 'acme/widgets',
+      subpath: 'apps/web',
+    });
+    expect(commands.getNoteRepo).toHaveBeenCalledWith('note-1');
+  });
+
+  it('passes on a branch bound to no repo', async () => {
+    commands.getNoteRepo.mockResolvedValue(null);
+    const { picker } = mountMenu('branch');
+
+    await expect(picker.loadNoteRepo!()).resolves.toBeNull();
+  });
+
+  it('gives a project note, which has no repo, nothing to look up', () => {
+    const { picker } = mountMenu('project');
+
+    expect(picker.loadNoteRepo).toBeUndefined();
+    expect(commands.getNoteRepo).not.toHaveBeenCalled();
   });
 });

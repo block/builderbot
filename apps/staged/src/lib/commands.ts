@@ -1554,6 +1554,15 @@ export function deleteNote(noteId: string, deleteSession = true): Promise<void> 
 }
 
 /**
+ * The repo a branch note is bound to, read from the stored note's branch:
+ * the repo {@link moveNoteToProject} and {@link copyNoteToProject} add to the
+ * destination. `null` when the branch is bound to none.
+ */
+export function getNoteRepo(noteId: string): Promise<ProjectRepo | null> {
+  return invokeCommand('get_note_repo', { noteId });
+}
+
+/**
  * Move a branch note into another project. The note lands on that project's
  * branch for the same repo + subpath; when the project doesn't track the repo
  * yet it is added first, through the regular add-repo path. Rejects a move

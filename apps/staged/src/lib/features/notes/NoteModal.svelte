@@ -714,7 +714,6 @@
                 {noteKind}
                 noteTitle={displayTitle}
                 {projectId}
-                {repoLabel}
                 onMoved={onClose}
               />
             {/if}

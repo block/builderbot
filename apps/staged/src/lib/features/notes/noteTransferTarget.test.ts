@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createProjectOption,
+  lookedUpRepo,
   noteTransferCandidates,
   newRemoteProjectBlocker,
   noteTransferBlocker,
   noteTransferLabels,
+  noteTransferTarget,
   repoAddedHint,
   transferFailedAfterCreate,
 } from './noteTransferTarget';
@@ -110,12 +112,52 @@ describe('repoAddedHint', () => {
 });
 
 describe('newRemoteProjectBlocker', () => {
+  const repo = { githubRepo: 'acme/widgets', subpath: null };
+
   it('lets a repo note start a remote project from its repo', () => {
-    expect(newRemoteProjectBlocker({ githubRepo: 'acme/widgets', subpath: null })).toBeNull();
+    expect(newRemoteProjectBlocker({ status: 'resolved', repo })).toBeNull();
   });
 
-  it('keeps a project note, which has no repo, to a local project', () => {
-    expect(newRemoteProjectBlocker(null)).toBe('Needs a repo; this note has none');
+  it('keeps a note with no repo, like every project note, to a local project', () => {
+    expect(newRemoteProjectBlocker({ status: 'resolved', repo: null })).toBe(
+      'Needs a repo; this note has none'
+    );
+  });
+
+  it('waits for the lookup rather than claiming the note has no repo', () => {
+    expect(newRemoteProjectBlocker({ status: 'loading' })).toBe("Checking this note's repo…");
+    expect(newRemoteProjectBlocker({ status: 'failed' })).toBe("Couldn't look up this note's repo");
+  });
+});
+
+describe('lookedUpRepo', () => {
+  it('is the repo only once the lookup has found one', () => {
+    const repo = { githubRepo: 'acme/widgets', subpath: 'apps/web' };
+    expect(lookedUpRepo({ status: 'resolved', repo })).toBe(repo);
+    expect(lookedUpRepo({ status: 'resolved', repo: null })).toBeNull();
+    expect(lookedUpRepo({ status: 'loading' })).toBeNull();
+    expect(lookedUpRepo({ status: 'failed' })).toBeNull();
+  });
+});
+
+describe('noteTransferTarget', () => {
+  it('is whatever was picked', () => {
+    const picked = { kind: 'existing', projectId: 'here' } as const;
+    expect(noteTransferTarget(picked, [here, there], 'Fresh')).toBe(picked);
+  });
+
+  it('falls back to the only row on offer', () => {
+    expect(noteTransferTarget(null, [there], null)).toEqual({
+      kind: 'existing',
+      projectId: 'there',
+    });
+    expect(noteTransferTarget(null, [], 'Fresh')).toEqual({ kind: 'new', name: 'Fresh' });
+  });
+
+  it('is nothing while more than one row is on offer, or none', () => {
+    expect(noteTransferTarget(null, [here, there], null)).toBeNull();
+    expect(noteTransferTarget(null, [there], 'Fresh')).toBeNull();
+    expect(noteTransferTarget(null, [], null)).toBeNull();
   });
 });
 

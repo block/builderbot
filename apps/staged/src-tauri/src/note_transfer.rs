@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::note_media::{cleanup_unreferenced, files, refs};
 use crate::store::images::image_file_path;
-use crate::store::models::{Image, Note, ProjectNote, NOTE_MEDIA_SESSION_ID};
+use crate::store::models::{Branch, Image, Note, ProjectNote, ProjectRepo, NOTE_MEDIA_SESSION_ID};
 use crate::store::{Store, StoreError};
 use crate::NoteTimelineItem;
 
@@ -126,7 +126,7 @@ where
             target.name
         ));
     }
-    let repo_id = source_branch.project_repo_id.as_deref().ok_or_else(|| {
+    let repo = bound_repo(store, &source_branch)?.ok_or_else(|| {
         format!(
             "Branch '{}' is not bound to a repository, so its notes cannot be {} to another project.",
             source_branch.branch_name,
@@ -136,10 +136,6 @@ where
             }
         )
     })?;
-    let repo = store
-        .get_project_repo(repo_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Repository not found: {repo_id}"))?;
     let key = RepoKey {
         github_repo: repo.github_repo,
         subpath: repo.subpath,
@@ -206,6 +202,35 @@ where
         }
     };
     finish(store, mode, &note.content, media, result)
+}
+
+/// The repo a branch note's branch is bound to — the one
+/// [`transfer_branch_note`] needs its destination to track — or `None` when
+/// the branch is bound to none (such a note can't be transferred).
+pub(crate) fn branch_note_repo(
+    store: &Store,
+    note_id: &str,
+) -> Result<Option<ProjectRepo>, String> {
+    let note = store
+        .get_note(note_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Note not found: {note_id}"))?;
+    let branch = store
+        .get_branch(&note.branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {}", note.branch_id))?;
+    bound_repo(store, &branch)
+}
+
+fn bound_repo(store: &Store, branch: &Branch) -> Result<Option<ProjectRepo>, String> {
+    let Some(repo_id) = branch.project_repo_id.as_deref() else {
+        return Ok(None);
+    };
+    store
+        .get_project_repo(repo_id)
+        .map_err(|e| e.to_string())?
+        .map(Some)
+        .ok_or_else(|| format!("Repository not found: {repo_id}"))
 }
 
 /// Move or copy a project note into `target_project_id`.
@@ -484,6 +509,18 @@ fn stage_media_copies(
 // =============================================================================
 // Tauri commands
 // =============================================================================
+
+/// The repo a branch note is bound to, read from the stored note's branch, so
+/// the picker can create a remote destination from the repo the transfer will
+/// look for. `None` when the branch is bound to none.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_note_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+) -> Result<Option<ProjectRepo>, String> {
+    let store = crate::get_store(&store)?;
+    branch_note_repo(&store, &note_id)
+}
 
 /// Move a branch note into another project, adding the note's repo + subpath
 /// to that project first if it is not tracked there yet.
@@ -1173,6 +1210,35 @@ mod tests {
         .unwrap();
 
         assert_eq!(copy.content, note.content);
+    }
+
+    #[test]
+    fn note_repo_is_the_one_its_branch_is_bound_to() {
+        let f = fixture();
+        let note = f.note("Findings", "body");
+
+        let repo = branch_note_repo(&f.store, &note.id).unwrap().unwrap();
+        assert_eq!(repo.id, f.source_branch.project_repo_id.clone().unwrap());
+        assert_eq!(repo.github_repo, "acme/widgets");
+        assert_eq!(repo.subpath.as_deref(), Some("apps/web"));
+    }
+
+    #[test]
+    fn note_repo_is_none_for_a_branch_bound_to_no_repo() {
+        let f = fixture();
+        let unbound = Branch::new(&f.source.id, "loose", "origin/main");
+        f.store.create_branch(&unbound).unwrap();
+        let note = f.note_on(&unbound.id, "Findings", "body");
+
+        assert!(branch_note_repo(&f.store, &note.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn note_repo_of_a_missing_note_is_an_error() {
+        let f = fixture();
+
+        let err = branch_note_repo(&f.store, "gone").unwrap_err();
+        assert_eq!(err, "Note not found: gone");
     }
 
     #[test]

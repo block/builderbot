@@ -34,11 +34,9 @@
     onClose: () => void;
     /** The project the note is in, for the move/copy menu when editing. */
     projectId?: string | null;
-    /** The repo the note's branch is bound to, for the move/copy picker's hint. */
-    repoLabel?: { githubRepo: string; subpath: string | null } | null;
   }
 
-  let { open, note = null, onSave, onClose, projectId = null, repoLabel = null }: Props = $props();
+  let { open, note = null, onSave, onClose, projectId = null }: Props = $props();
 
   let editor = $state<ReturnType<typeof MarkdownWysiwygEditor> | null>(null);
   let markdown = $state('');
@@ -154,7 +152,6 @@
               noteKind="branch"
               noteTitle={note.title}
               {projectId}
-              {repoLabel}
               beforeTransfer={saveBeforeTransfer}
               onMoved={onClose}
             />

@@ -2733,6 +2733,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
 
+        "get_note_repo" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            let repo = crate::note_transfer::branch_note_repo(&store, &note_id)?;
+            Ok(serde_json::to_value(repo).unwrap())
+        }
         "move_note_to_project" | "copy_note_to_project" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;

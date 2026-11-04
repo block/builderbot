@@ -333,18 +333,26 @@ describe.each([true, false])('new project location (native=%s)', (native) => {
   });
 
   it('loads before enabling the UI, since forms in the first paint start on it', async () => {
-    let resolve!: (value: unknown) => void;
+    const reads: ((value: unknown) => void)[] = [];
     get.mockImplementation(async (changedKey: string) =>
       changedKey === locationKey
-        ? new Promise((done) => (resolve = done))
+        ? new Promise((done) => reads.push(done))
         : structuredClone(values.get(changedKey))
     );
     const client = await newClient(native);
     const initialized = client.initPreferences();
-    await vi.waitFor(() => expect(get).toHaveBeenCalledWith(locationKey));
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
     expect(client.preferences.loaded).toBe(false);
 
-    resolve('remote');
+    // The subscription is established mid-read, and its refresh supersedes the
+    // first: that read lands with nothing to apply, so it must not unblock the UI.
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    reads[0]('remote');
+    await new Promise((done) => setTimeout(done, 0));
+    expect(client.preferences.loaded).toBe(false);
+
+    reads[1]('remote');
     await vi.waitFor(() => expect(client.preferences.loaded).toBe(true));
     expect(client.preferences.newProjectLocation).toBe('remote');
     await initialized;

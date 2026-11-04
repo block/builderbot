@@ -102,8 +102,9 @@
   // Bumped per lookup, so one from an earlier open that lands late is dropped.
   let noteRepoLookupId = 0;
   // The default branch for a new remote project, fetched once per open from
-  // the moment Remote is picked (as the new-project form prefetches when a
-  // repo is chosen) and awaited on confirm, so creating doesn't wait on GitHub.
+  // the moment the location picker shows Remote (as the new-project form
+  // prefetches when a repo is chosen) and awaited on confirm, so creating
+  // doesn't wait on GitHub. A transfer into an existing project never fetches.
   let defaultBranchPrefetch: { githubRepo: string; branch: Promise<string | undefined> } | null =
     null;
 
@@ -149,10 +150,11 @@
   let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
   let remoteSelectable = $derived(remoteProjectsAvailable && !remoteBlocker);
   // The picker shows this, so a remembered Remote doesn't sit selected on a
-  // disabled tile while it is blocked; it applies once the blocker clears.
+  // disabled tile while it is blocked; it applies once the blocker clears,
+  // unless the Local shown meanwhile was clicked (which commits it).
   let effectiveLocation = $derived<ProjectLocation>(remoteSelectable ? location : 'local');
   $effect(() => {
-    if (open && effectiveLocation === 'remote' && repo) {
+    if (open && target?.kind === 'new' && effectiveLocation === 'remote' && repo) {
       void defaultBranchFor(repo.githubRepo);
     }
   });
@@ -216,11 +218,17 @@
     return defaultBranchPrefetch.branch;
   }
 
-  async function createTargetProject(name: string): Promise<Project> {
-    // Only a location picked with Remote on offer is a choice to remember.
-    const chosenLocation = remoteSelectable ? effectiveLocation : null;
+  /**
+   * Create `name` at `at`, remembering that location only when `remember`
+   * (Remote was on offer): otherwise Local was the only option, not a choice.
+   */
+  async function createTargetProject(
+    name: string,
+    at: ProjectLocation,
+    remember: boolean
+  ): Promise<Project> {
     let project: Project;
-    if (effectiveLocation === 'remote' && repo) {
+    if (at === 'remote' && repo) {
       // Its workspace is provisioned from the repo it is created with; the
       // transfer then finds that repo tracked and adds nothing.
       const defaultBranch = await defaultBranchFor(repo.githubRepo);
@@ -236,7 +244,7 @@
     } else {
       project = await commands.createProject(name, 'local');
     }
-    if (chosenLocation) setNewProjectLocation(chosenLocation);
+    if (remember) setNewProjectLocation(at);
     return project;
   }
 
@@ -253,6 +261,11 @@
     e.preventDefault();
     const chosen = target;
     if (working || !chosen) return;
+    // The location as the picker shows it now. `onPrepare` can await the same
+    // repo lookup the picker is waiting on, and that landing would otherwise
+    // turn the Local on screen into a remembered Remote.
+    const newLocation = effectiveLocation;
+    const rememberLocation = remoteSelectable;
 
     working = true;
     error = null;
@@ -261,7 +274,7 @@
       await onPrepare?.();
       let projectId: string;
       if (chosen.kind === 'new') {
-        created = await createTargetProject(chosen.name);
+        created = await createTargetProject(chosen.name, newLocation, rememberLocation);
         projectsDataStore.projectCreated(created);
         projectId = created.id;
         // Keep the created project selected so a transfer failure retries

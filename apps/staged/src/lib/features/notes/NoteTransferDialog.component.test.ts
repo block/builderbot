@@ -425,6 +425,19 @@ describe('NoteTransferDialog new project location', () => {
     );
   });
 
+  it('fetches no default branch for a move into an existing project', async () => {
+    prefs.newProjectLocation = 'remote';
+    store.projects = [{ id: 'widgets', name: 'Widgets' } as Project];
+    const { target, onConfirm } = await open(branchRepo);
+    existingRow(target).click();
+    flushSync();
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('widgets'));
+    expect(detectDefaultBranch).not.toHaveBeenCalled();
+    expect(createProject).not.toHaveBeenCalled();
+  });
+
   it('leaves the default branch to create_project when the prefetch fails', async () => {
     detectDefaultBranch.mockRejectedValue(new Error('GitHub is down'));
     const { target, onConfirm } = await open(branchRepo);
@@ -512,6 +525,48 @@ describe("NoteTransferDialog note's repo", () => {
       undefined,
       'main'
     );
+  });
+
+  it('creates the Local it showed when the lookup lands while confirming', async () => {
+    prefs.newProjectLocation = 'remote';
+    const { lookup, calls } = deferredLookup();
+    const { target, onConfirm } = await open(lookup, {
+      // As NoteTransferMenu's checks do, wait on the lookup the picker is
+      // waiting on, which lands for the picker first.
+      onPrepare: async () => {
+        calls[0].land(branchRepo);
+        await lookup.mock.results[0].value;
+      },
+    });
+    pickCreateRow(target, 'Fresh');
+    expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
+    // Remote wasn't on offer when it was confirmed, so it stays remembered.
+    expect(setNewProjectLocation).not.toHaveBeenCalled();
+  });
+
+  it('keeps a Local clicked while the lookup is pending once it lands', async () => {
+    prefs.newProjectLocation = 'remote';
+    const { lookup, calls } = deferredLookup();
+    const { target, onConfirm } = await open(lookup);
+    pickCreateRow(target, 'Fresh');
+    expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
+    locationTile(target, 'Local')!.click();
+    flushSync();
+
+    calls[0].land(branchRepo);
+    await settle();
+    expect(locationTile(target, 'Remote')!.disabled).toBe(false);
+    expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
+    expect(detectDefaultBranch).not.toHaveBeenCalled();
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
+    expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('local');
   });
 
   it('keeps a branch note bound to no repo local', async () => {

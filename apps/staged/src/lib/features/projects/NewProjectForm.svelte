@@ -93,6 +93,12 @@
 
   async function handleCreate() {
     if (!canCreate) return;
+    // The location as submitted: the `sq` check landing during the subpath
+    // validation below must not turn a create made with no picker on screen
+    // into a remote one, nor remember a location that wasn't created with.
+    const createLocation = effectiveLocation;
+    // Only a location picked with Remote on offer is a choice to remember.
+    const rememberLocation = remoteProjectsAvailable;
 
     saving = true;
     error = null;
@@ -117,7 +123,7 @@
 
       const project = await commands.createProject(
         name.trim(),
-        effectiveLocation,
+        createLocation,
         selectedRepo ?? undefined,
         normalizedSubpath,
         normalizedBranch,
@@ -125,8 +131,7 @@
         matchedPr?.baseRef ?? defaultBranch ?? undefined,
         headRepo ?? undefined
       );
-      // Only a location picked with Remote on offer is a choice to remember.
-      if (remoteProjectsAvailable) setNewProjectLocation(effectiveLocation);
+      if (rememberLocation) setNewProjectLocation(createLocation);
       if (matchedPr) {
         const noteTitle = `PR #${matchedPr.number}: ${matchedPr.title}`;
         await commands.createProjectNote(project.id, noteTitle, matchedPr.body ?? '');

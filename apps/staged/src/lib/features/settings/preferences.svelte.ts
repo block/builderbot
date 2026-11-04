@@ -302,31 +302,45 @@ function ensureSystemModeListener() {
 function syncedPreference(key: string, apply: (value: unknown) => void) {
   let unlisten: (() => void) | undefined;
   let revision = 0;
+  // The newest refresh: the only one whose snapshot can still apply.
+  let latestRefresh: Promise<void> = Promise.resolve();
 
   function receive(value: unknown): void {
     revision += 1;
     apply(value);
   }
 
-  async function refresh(): Promise<void> {
+  function refresh(): void {
     const current = ++revision;
-    try {
-      const value = await getStoreValue<unknown>(key);
-      // A notification, local edit, or newer refresh wins over an older snapshot.
-      if (current === revision) apply(value);
-    } catch (error) {
-      console.error(`[Preferences] Failed to refresh ${key}:`, error);
-    }
+    latestRefresh = (async () => {
+      try {
+        const value = await getStoreValue<unknown>(key);
+        // A notification, local edit, or newer refresh wins over an older snapshot.
+        if (current === revision) apply(value);
+      } catch (error) {
+        console.error(`[Preferences] Failed to refresh ${key}:`, error);
+      }
+    })();
   }
 
   return {
-    /** Subscribe (once) and load the current value. */
-    start(): Promise<void> {
+    /**
+     * Subscribe (once) and load the current value, resolving once it is
+     * applied (or its read failed).
+     */
+    async start(): Promise<void> {
       unlisten ??= listenToStoreKeyChange(key, receive, {
         // Close the initial registration gap and recover missed web events on reconnect.
-        onEstablished: () => void refresh(),
+        onEstablished: refresh,
       });
-      return refresh();
+      refresh();
+      // The subscription's refresh can supersede this one mid-read, leaving
+      // it nothing to apply, so settle with whichever refresh is newest.
+      let newest: Promise<void>;
+      do {
+        newest = latestRefresh;
+        await newest;
+      } while (newest !== latestRefresh);
     },
     /** Persist a value the caller has already applied locally. */
     save(value: unknown): void {

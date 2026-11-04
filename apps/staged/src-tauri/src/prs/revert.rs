@@ -81,7 +81,11 @@ pub(super) const REVERT_WORKTREE_BUSY: &str =
 ///
 /// HEAD is not read here. The runner reads it before the revert step (see
 /// [`session_runner::PipelineConfig::capture_pre_head`]), by which point this
-/// row has made the branch busy, so nothing else can move HEAD in between.
+/// row has made the branch busy, so nothing that goes through the branch queue
+/// can move HEAD in between. Reset-to-origin, discard and delete-commit run
+/// outside the queue: the marker above only stops a revert starting under a
+/// reset or discard, only the frontend's busy-branch gates keep those two from
+/// starting beside a running revert, and nothing gates a delete-commit then.
 pub(super) fn insert_running_revert_pipeline_session_if_idle(
     store: &Arc<Store>,
     registry: &Arc<session_runner::SessionRegistry>,

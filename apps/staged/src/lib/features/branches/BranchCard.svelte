@@ -852,11 +852,13 @@
    * the backend refuses rather than queues (a queued row would have to persist the
    * target SHA).
    *
-   * A reset or discard in flight blocks them too: neither has a session row, and
-   * both move HEAD or the tree under anything that starts beside them. The
-   * backend checks the same thing for a revert from another client. Reset to
-   * origin shows its own "Resetting..." ahead of this reason, so it never reads
-   * as blocked by itself.
+   * A reset, discard or commit delete in flight blocks them too: none has a
+   * session row, and each moves HEAD or the tree under anything that starts
+   * beside them. The backend checks the same thing for a revert from another
+   * client during a reset or discard, but not during a delete. Reset to origin
+   * shows its own "Resetting..." ahead of this reason, so it never reads as
+   * blocked by itself. A pending-commit delete also counts, which over-blocks
+   * only briefly.
    *
    * `branchSessionBusy` misses branch work with no timeline artifact, such as a
    * create-PR session; a Revert clicked then gets the backend's refusal as a toast.
@@ -867,9 +869,11 @@
         ? 'Resetting to origin'
         : discardingWorktreeChanges
           ? 'Discarding changes'
-          : branchSessionBusy
-            ? 'Session in progress'
-            : null)
+          : deletingCommitKeys.size > 0
+            ? 'Deleting commit'
+            : branchSessionBusy
+              ? 'Session in progress'
+              : null)
   );
 
   // =========================================================================

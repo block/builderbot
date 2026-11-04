@@ -768,11 +768,12 @@
 
 {#snippet projectTopBarRightActions()}
   {#if selectedProject && !selectedProjectDeleting}
-    <span class="inline-flex" title={selectedProjectAddRepoHint ?? 'Add repo'}>
+    <span class="add-repo-action inline-flex" title={selectedProjectAddRepoHint ?? 'Add repo'}>
       <Button
         variant="ghost"
         size="sm"
         class="top-bar-action group h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
+        aria-label="Add Repo"
         onclick={() => {
           showAddRepoModal = true;
         }}
@@ -1003,10 +1004,21 @@
   }
 
   /* On phones the pill shares the bar with the labelled Back and Add Repo
-     buttons, where "Suspended" plus Resume doesn't fit; the pause icon carries
-     the state so Resume stays reachable. */
+     buttons, and its Resume is the only way to resume the workspace. To fit
+     it, "Suspended" is hidden visually (the pause icon shows the state and
+     screen readers still read it), and Add Repo, disabled until the workspace
+     is running, drops its label (its aria-label still names it). */
   @media (max-width: 768px) {
     .workspace-badge.suspended .status-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    .add-repo-action :global(.top-bar-action:disabled .top-bar-action-label) {
       display: none;
     }
   }

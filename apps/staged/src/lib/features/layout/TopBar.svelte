@@ -45,7 +45,7 @@
   style={`--traffic-light-spacer-width: ${trafficLightSpacerWidth}px`}
   onpointerdown={startDrag}
 >
-  <div class="traffic-light-spacer"></div>
+  <div class="traffic-light-spacer" class:collapsed={trafficLightSpacerWidth === 0}></div>
   <div class="left-actions">
     {#if navigation.canGoBack}
       <Button
@@ -228,10 +228,12 @@
       padding-top: calc(2px + env(safe-area-inset-top));
     }
 
-    /* Phones have no traffic lights and no window to drag, and the labelled
-       buttons need the room: drop both spacers (and their flex gaps) and
-       push the right actions over instead. */
-    .traffic-light-spacer,
+    /* The labelled buttons need the room, so drop the spacers (and their flex
+       gaps) and push the right actions over instead. The traffic-light spacer
+       goes only when `getTrafficLightSpacerWidth` reserves nothing, so a
+       window with traffic lights keeps its room. The bar itself still starts
+       window drags through its gaps and the auto margin. */
+    .traffic-light-spacer.collapsed,
     .drag-spacer {
       display: none;
     }
@@ -251,7 +253,6 @@
     .title-content {
       max-width: min(46vw, 420px);
       max-height: var(--top-bar-action-size);
-      align-self: stretch;
       flex-wrap: wrap;
       overflow: clip;
     }
@@ -265,11 +266,18 @@
     }
 
     /* The 4em basis is the wrap threshold; the title grows back to its natural
-       width when there's room. The empty `.title-text` of a title-less route
-       (the project view) keeps its zero width. */
+       width when there's room. */
     .title-text:has(.title) {
       flex: 1 1 4em;
       max-width: max-content;
+    }
+
+    /* A title-less route (the project view) leaves `.title-text` empty, and
+       the project view's centre slot stays empty until its heading scrolls
+       away. Drop both so their flex gaps don't take room from the badges. */
+    .title-text:not(:has(.title)),
+    .center-content:not(:has(> *)) {
+      display: none;
     }
 
     /* Centred over the whole bar, the project name would run under the

@@ -12,7 +12,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::store::{Branch, BranchType, Project, ProjectLocation, ProjectRepo, Store};
+use crate::store::{
+    Branch, BranchType, Project, ProjectLocation, ProjectRepo, Store, WorkspaceStatus,
+};
 
 use super::host::{TransferHost, WorkspaceState};
 use super::scripts::{self, ScriptReport, PREFLIGHT_SCRIPT};
@@ -80,10 +82,11 @@ impl TransferIssue {
 pub enum RepoTransferState {
     /// A checkout to snapshot and carry.
     Carry,
-    /// No checkout (no worktree, a stopped workspace, no clone there): the
-    /// branch starts from origin at the destination.
+    /// No checkout (no worktree, no workspace, no clone there): the branch
+    /// starts from origin at the destination.
     NothingToCarry,
-    /// Not known until the transfer resumes the suspended workspace.
+    /// Not known until the transfer resumes the workspace (suspended,
+    /// stopped or failed).
     Unknown,
 }
 
@@ -110,6 +113,8 @@ pub struct RepoPreflight {
     pub untracked: u32,
     pub conflicted: u32,
     pub untracked_bytes: u64,
+    /// Ignored files (outside ignored directories), none of which is carried.
+    pub ignored_files: u32,
     pub has_uncommitted_changes: bool,
     pub blockers: Vec<TransferIssue>,
     pub warnings: Vec<TransferIssue>,
@@ -158,6 +163,9 @@ pub(super) struct BranchSource {
     pub source_dir: Option<String>,
     /// The source workspace, for a remote source.
     pub workspace: Option<String>,
+    /// The size of the source repository's object store, which a snapshot
+    /// or clone of it takes time in proportion to.
+    pub repo_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +187,18 @@ pub(super) fn inspect(
     store: &Store,
     host: &dyn TransferHost,
     project_id: &str,
+) -> Result<Inspection, String> {
+    inspect_after_resuming(store, host, project_id, &BTreeMap::new())
+}
+
+/// [`inspect`], once the transfer has tried to resume the source workspaces
+/// in `resumed` (with the error, when resuming failed): one of them that is
+/// still not running is a blocker rather than something to resume.
+pub(super) fn inspect_after_resuming(
+    store: &Store,
+    host: &dyn TransferHost,
+    project_id: &str,
+    resumed: &BTreeMap<String, Option<String>>,
 ) -> Result<Inspection, String> {
     let project = store
         .get_project(project_id)
@@ -217,12 +237,13 @@ pub(super) fn inspect(
         preflight.add_blocker(TransferIssue::new(unavailable.code, unavailable.message));
     }
     if direction == TransferDirection::ToRemote {
-        remote_layout_blockers(&repos, &branches, &mut preflight);
+        remote_layout_blockers(&project, &repos_by_id, &repos, &branches, &mut preflight);
     }
     if project_session_running(store, project_id)? {
         preflight.warnings.push(TransferIssue::new(
             "project_session_running",
-            "A project session is running. Branches it creates during the transfer stay behind.",
+            "A project session is running. If it adds a branch before the transfer finishes, \
+             the transfer stops and nothing changes.",
         ));
     }
 
@@ -232,14 +253,8 @@ pub(super) fn inspect(
     };
     let mut sources = Vec::new();
     for branch in branches {
-        let repo = branch
-            .project_repo_id
-            .as_deref()
-            .and_then(|id| repos_by_id.get(id).copied());
-        let github_repo = match repo {
-            Some(repo) => repo.github_repo.clone(),
-            None => project.primary_repo().unwrap_or_default().to_string(),
-        };
+        let repo = branch_repo(&repos_by_id, &branch);
+        let github_repo = branch_github_repo(&project, &repos_by_id, &branch);
         let mut row = RepoPreflight {
             branch_id: branch.id.clone(),
             project_repo_id: branch.project_repo_id.clone(),
@@ -256,6 +271,7 @@ pub(super) fn inspect(
             untracked: 0,
             conflicted: 0,
             untracked_bytes: 0,
+            ignored_files: 0,
             has_uncommitted_changes: false,
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -277,12 +293,25 @@ pub(super) fn inspect(
                 ),
             ));
         }
+        // The database's own status, whatever Blox says by now: the branch is
+        // still being provisioned, and that would land on rows the transfer
+        // has just rewritten.
+        if branch.workspace_status == Some(WorkspaceStatus::Starting) {
+            row.blockers.push(TransferIssue::new(
+                "workspace_starting",
+                format!(
+                    "{}'s workspace is still starting; wait for it to finish.",
+                    branch.branch_name
+                ),
+            ));
+        }
         session_blockers(store, &branch, &mut row)?;
         sources.push(BranchSource {
             branch,
             github_repo,
             source_dir: None,
             workspace: None,
+            repo_bytes: 0,
         });
         preflight.repos.push(row);
     }
@@ -293,7 +322,8 @@ pub(super) fn inspect(
             inspect_local_sources(store, host, &mut sources, &mut preflight)?
         }
         TransferDirection::ToLocal => {
-            running_workspaces = inspect_remote_sources(host, &mut sources, &mut preflight);
+            running_workspaces =
+                inspect_remote_sources(host, resumed, &mut sources, &mut preflight);
             plan_local_names(host, &sources, &mut preflight);
         }
     }
@@ -306,10 +336,35 @@ pub(super) fn inspect(
     })
 }
 
+fn branch_repo<'a>(
+    repos_by_id: &HashMap<&str, &'a ProjectRepo>,
+    branch: &Branch,
+) -> Option<&'a ProjectRepo> {
+    branch
+        .project_repo_id
+        .as_deref()
+        .and_then(|id| repos_by_id.get(id).copied())
+}
+
+/// The repository a branch is on: its project repo's, or — with none, or
+/// one that is gone — the project's primary repository.
+fn branch_github_repo(
+    project: &Project,
+    repos_by_id: &HashMap<&str, &ProjectRepo>,
+    branch: &Branch,
+) -> String {
+    match branch_repo(repos_by_id, branch) {
+        Some(repo) => repo.github_repo.clone(),
+        None => project.primary_repo().unwrap_or_default().to_string(),
+    }
+}
+
 /// A Blox workspace has one clone per repo at `~/<repo name>`, so a remote
 /// project can hold each repo once, under a name no other repo has, with
 /// one branch on it.
 fn remote_layout_blockers(
+    project: &Project,
+    repos_by_id: &HashMap<&str, &ProjectRepo>,
     repos: &[ProjectRepo],
     branches: &[Branch],
     preflight: &mut ProjectTransferPreflight,
@@ -338,14 +393,14 @@ fn remote_layout_blockers(
             ));
         }
     }
-    let mut per_repo: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    // By the repository each branch resolves to, so a branch with no project
+    // repo counts against the primary one.
+    let mut per_repo: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for branch in branches {
-        if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            per_repo
-                .entry(repo_id)
-                .or_default()
-                .push(branch.branch_name.as_str());
-        }
+        per_repo
+            .entry(branch_github_repo(project, repos_by_id, branch))
+            .or_default()
+            .push(branch.branch_name.as_str());
     }
     for names in per_repo.values().filter(|names| names.len() > 1) {
         preflight.add_blocker(TransferIssue::new(
@@ -438,6 +493,7 @@ fn inspect_local_sources(
                 Some(section) => {
                     if read_checkout(row, &section, "worktree") {
                         source.source_dir = Some(dir);
+                        source.repo_bytes = repo_bytes(&section);
                     }
                 }
                 None => row
@@ -450,9 +506,12 @@ fn inspect_local_sources(
     Ok(())
 }
 
-/// Inspect each source workspace that is running; returns those.
+/// Inspect each source workspace that is running; returns those. One that is
+/// suspended, stopped or failed is for the transfer to resume — unless it is
+/// in `resumed` already, when it is a blocker.
 fn inspect_remote_sources(
     host: &dyn TransferHost,
+    resumed: &BTreeMap<String, Option<String>>,
     sources: &mut [BranchSource],
     preflight: &mut ProjectTransferPreflight,
 ) -> Vec<String> {
@@ -495,27 +554,8 @@ fn inspect_remote_sources(
                 continue;
             }
         };
-        let left_behind = |code: &str, why: &str| {
-            TransferIssue::new(
-                code,
-                format!(
-                    "Workspace {workspace} is {why}, so there is nothing to carry; branches start \
-                     from origin and the workspace is left as it is."
-                ),
-            )
-        };
-        match state {
-            WorkspaceState::Running => running.push(workspace.clone()),
-            WorkspaceState::Suspended => {
-                preflight.warnings.push(TransferIssue::new(
-                    "workspace_suspended",
-                    format!("Workspace {workspace} is suspended; the transfer resumes it first."),
-                ));
-                for &i in &indexes {
-                    preflight.repos[i].state = RepoTransferState::Unknown;
-                }
-                continue;
-            }
+        let not_running = match state {
+            WorkspaceState::Running => None,
             WorkspaceState::Starting => {
                 preflight.add_blocker(TransferIssue::new(
                     "workspace_starting",
@@ -523,18 +563,11 @@ fn inspect_remote_sources(
                 ));
                 continue;
             }
-            WorkspaceState::Stopped => {
-                preflight
-                    .warnings
-                    .push(left_behind("workspace_stopped", "stopped"));
-                continue;
-            }
-            WorkspaceState::Error => {
-                preflight
-                    .warnings
-                    .push(left_behind("workspace_error", "in an error state"));
-                continue;
-            }
+            // Not running, but it may still hold work: resume it and read it,
+            // or stop rather than leave that work behind.
+            WorkspaceState::Suspended => Some(("workspace_suspended", "suspended")),
+            WorkspaceState::Stopped => Some(("workspace_stopped", "stopped")),
+            WorkspaceState::Error => Some(("workspace_error", "in an error state")),
             WorkspaceState::NotFound => {
                 preflight.warnings.push(TransferIssue::new(
                     "workspace_missing",
@@ -545,7 +578,36 @@ fn inspect_remote_sources(
                 ));
                 continue;
             }
+        };
+        if let Some((code, why)) = not_running {
+            match resumed.get(&workspace) {
+                None => {
+                    preflight.warnings.push(TransferIssue::new(
+                        code,
+                        format!(
+                            "Workspace {workspace} is {why}; the transfer resumes it first, and \
+                             stops if it can't."
+                        ),
+                    ));
+                    for &i in &indexes {
+                        preflight.repos[i].state = RepoTransferState::Unknown;
+                    }
+                }
+                Some(error) => preflight.add_blocker(TransferIssue::new(
+                    "workspace_unreachable",
+                    format!(
+                        "Workspace {workspace} is still {why}{}, so the work in it can't be \
+                         read. Resume it from Blox, then try again.",
+                        match error {
+                            Some(e) => format!(" after trying to resume it ({})", e.trim()),
+                            None => " after resuming it".to_string(),
+                        }
+                    ),
+                )),
+            }
+            continue;
         }
+        running.push(workspace.clone());
 
         let mut dirs = Vec::new();
         for &i in &indexes {
@@ -570,6 +632,7 @@ fn inspect_remote_sources(
                         Some(section) => {
                             if read_checkout(row, section, "clone") {
                                 sources[i].source_dir = Some(dir);
+                                sources[i].repo_bytes = repo_bytes(section);
                             }
                         }
                         None => row
@@ -700,6 +763,15 @@ fn inspect_failed(message: &str) -> TransferIssue {
     )
 }
 
+/// The source repository's size, from its section of the report.
+fn repo_bytes(report: &ScriptReport) -> u64 {
+    report
+        .get("repo_kib")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_mul(1024)
+}
+
 /// Fill `row` from its section of the report. Returns whether there is a
 /// checkout to carry (blocked or not).
 fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> bool {
@@ -733,6 +805,7 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         .get("untracked_bytes")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    row.ignored_files = count("ignored");
     row.has_uncommitted_changes = row.staged + row.unstaged + row.untracked + row.conflicted > 0;
 
     if report.get("detached").is_some() {
@@ -767,6 +840,18 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         row.blockers.push(TransferIssue::new(
             "conflicts",
             format!("{} has unresolved conflicts.", row.branch_name),
+        ));
+    }
+    // A snapshot would record a repository inside the checkout as a bare
+    // commit id, and its contents would be lost with the source.
+    for path in report.all("nested_repo") {
+        row.blockers.push(TransferIssue::new(
+            "nested_repo",
+            format!(
+                "{path} in the {kind} for {} is a separate git repository, which can't be \
+                 carried. Move it out of the checkout, or delete it, first.",
+                row.branch_name
+            ),
         ));
     }
     for warning in report.all("warning") {

@@ -892,6 +892,7 @@ pub(crate) fn list_parent_branch_commits_impl(
 /// between pulling now and queueing behind in-flight branch sessions. Callers run
 /// this inside `spawn_blocking`.
 pub(crate) fn pull_branch_ff_only_impl(store: &Arc<Store>, branch_id: &str) -> Result<(), String> {
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -1043,6 +1044,7 @@ pub(crate) fn reset_branch_to_remote_impl(
     // clears it.
     let _worktree_operation =
         crate::session_commands::BranchWorktreeOperationGuard::acquire(branch_id);
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
 
     let branch = store
         .get_branch(branch_id)
@@ -1218,6 +1220,7 @@ pub(crate) fn discard_worktree_changes_impl(
     // rewrites the tree outside the session queue.
     let _worktree_operation =
         crate::session_commands::BranchWorktreeOperationGuard::acquire(branch_id);
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
 
     let branch = store
         .get_branch(branch_id)
@@ -1456,6 +1459,7 @@ pub(crate) async fn delete_commit_impl(
     commit_sha: String,
     delete_session: Option<bool>,
 ) -> Result<(), String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let branch = store
             .get_branch(&branch_id)

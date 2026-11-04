@@ -1116,6 +1116,7 @@ pub(crate) fn cleanup_branch_resources(
                 if workspace_outlives(store, branch, &[branch.id.as_str()])? {
                     return Ok(());
                 }
+                crate::project_transfer::ensure_workspace_not_transferring(ws_name)?;
                 match blox::ws_delete(ws_name) {
                     Ok(_) => {}
                     Err(blox::BloxError::CommandFailed(msg))
@@ -2631,6 +2632,7 @@ pub async fn resume_workspace(
     workspace_name: String,
 ) -> Result<Vec<String>, String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_workspace_not_transferring(&workspace_name)?;
 
     // Transition all peer branches to Starting so the UI begins polling.
     let branch_ids = store
@@ -3314,6 +3316,12 @@ pub(crate) async fn claim_and_run_prerun_actions(
     provider: Option<&str>,
     tag: &str,
 ) -> PrerunOutcome {
+    // Before the claim, which a refused run would otherwise use up. The
+    // transfer resets the claim when it switches the branch over.
+    if crate::project_transfer::is_branch_transferring(branch_id) {
+        log::info!("[{tag}] branch {branch_id} is being transferred, skipping prerun");
+        return PrerunOutcome::NotRun;
+    }
     match store.mark_branch_setup_complete(branch_id) {
         Ok(true) => {
             emit_setup_progress(app_handle, branch_id, "running_setup_actions", None);

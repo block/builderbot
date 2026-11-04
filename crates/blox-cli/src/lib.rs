@@ -36,6 +36,17 @@ const START_TIMEOUT: Duration = Duration::from_secs(120);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Slowest rate a `ws exec` whose work grows with its payload may go at
+/// before it is treated as hung, as for file transfers.
+const EXEC_MIN_BYTES_PER_SEC: u64 = 1_000_000;
+
+/// How long a `ws exec` whose work grows with `bytes` (hashing a working tree,
+/// writing or indexing a bundle, cloning) may run: the usual 300 s, plus one
+/// second per megabyte.
+pub fn exec_timeout(bytes: u64) -> Duration {
+    EXEC_TIMEOUT + Duration::from_secs(bytes / EXEC_MIN_BYTES_PER_SEC)
+}
+
 /// Structured errors from Blox CLI operations.
 #[derive(Error, Debug)]
 pub enum BloxError {
@@ -583,9 +594,20 @@ pub struct WsExecOutput {
 /// still return `Err`, but a non-zero exit from the remote command returns
 /// `Ok(WsExecOutput { success: false, .. })`.
 pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+    ws_exec_output_with_timeout(name, args, EXEC_TIMEOUT)
+}
+
+/// [`ws_exec_output`] with its own timeout, for a command whose running time
+/// grows with what it works on (see [`exec_timeout`]). Past the timeout `sq`
+/// is killed here; the remote command may still be running.
+pub fn ws_exec_output_with_timeout(
+    name: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<WsExecOutput, BloxError> {
     let mut full_args = vec!["ws", "exec", name, "--"];
     full_args.extend_from_slice(args);
-    run_bytes_full(&full_args, EXEC_TIMEOUT)
+    run_bytes_full(&full_args, timeout)
 }
 
 /// A bootstrap command returned by `sq blox ws commands <name> --json`.
@@ -630,6 +652,16 @@ pub fn check_auth() -> Result<(), BloxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_timeout_keeps_the_floor_and_grows_a_second_per_megabyte() {
+        assert_eq!(exec_timeout(0), EXEC_TIMEOUT);
+        assert_eq!(exec_timeout(999_999), EXEC_TIMEOUT);
+        assert_eq!(
+            exec_timeout(4_000_000_000),
+            EXEC_TIMEOUT + Duration::from_secs(4_000)
+        );
+    }
 
     #[test]
     fn acp_proxy_args_without_command_or_env_is_bare() {

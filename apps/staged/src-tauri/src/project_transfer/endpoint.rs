@@ -33,6 +33,19 @@ pub trait TransferEndpoint: Send + Sync {
     /// back with `success: false`.
     fn run_script(&self, script: &str, args: &[String]) -> Result<ScriptOutput, TransferError>;
 
+    /// [`Self::run_script`] for a script whose run time grows with
+    /// `payload_bytes` (a snapshot, a bundle, a clone), so an end that gives
+    /// up on a slow script waits long enough for this one.
+    fn run_script_sized(
+        &self,
+        script: &str,
+        args: &[String],
+        payload_bytes: u64,
+    ) -> Result<ScriptOutput, TransferError> {
+        let _ = payload_bytes;
+        self.run_script(script, args)
+    }
+
     /// Where this end keeps the transfer's files: one directory per transfer.
     fn scratch_dir(&self, transfer_id: &str) -> Result<String, TransferError>;
 
@@ -184,10 +197,21 @@ impl TransferEndpoint for BloxEndpoint {
     }
 
     fn run_script(&self, script: &str, args: &[String]) -> Result<ScriptOutput, TransferError> {
+        self.run_script_sized(script, args, 0)
+    }
+
+    /// `ws exec` gives up after a fixed time; that time grows a second per
+    /// megabyte of `payload_bytes`.
+    fn run_script_sized(
+        &self,
+        script: &str,
+        args: &[String],
+        payload_bytes: u64,
+    ) -> Result<ScriptOutput, TransferError> {
         let mut argv = vec!["sh", "-c", script, "staged-transfer"];
         argv.extend(args.iter().map(String::as_str));
-        let output =
-            blox::ws_exec_output(&self.workspace, &argv).map_err(|e| self.exec_error(e))?;
+        let output = blox::ws_exec_output_sized(&self.workspace, &argv, payload_bytes)
+            .map_err(|e| self.exec_error(e))?;
         Ok(ScriptOutput {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

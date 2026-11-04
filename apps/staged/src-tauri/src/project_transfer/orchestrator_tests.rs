@@ -60,6 +60,8 @@ enum Fault {
     StartWorkspace,
     /// The local clone cannot be made.
     EnsureClone,
+    /// Resuming a workspace fails, leaving it as it was.
+    ResumeWorkspace,
 }
 
 #[derive(Default)]
@@ -375,6 +377,14 @@ impl TransferHost for FakeHost {
 
     fn resume_workspace(&self, name: &str) -> Result<(), String> {
         self.calls.lock().unwrap().push(format!("resume {name}"));
+        if self
+            .faults
+            .lock()
+            .unwrap()
+            .hit(|f| matches!(f, Fault::ResumeWorkspace))
+        {
+            return Err("injected failure".to_string());
+        }
         self.set_state(name, WorkspaceState::Running);
         Ok(())
     }
@@ -707,9 +717,10 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
 
     let expected: Vec<Observed> = vec![observe(&widgets_wt), observe(&gadgets_wt)];
     let guarded = Mutex::new(false);
+    let released = Mutex::new(false);
     let ids: Vec<String> = f.branches.iter().map(|b| b.id.clone()).collect();
-    let to_remote = f.transfer_with(true, &|progress| {
-        if progress.phase == TransferPhase::Snapshotting {
+    let to_remote = f.transfer_with(true, &|progress| match progress.phase {
+        TransferPhase::Snapshotting => {
             // Everything that would start work on the project refuses.
             assert!(registry::ensure_project_not_transferring(&f.project.id).is_err());
             for id in &ids {
@@ -717,9 +728,20 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
             }
             *guarded.lock().unwrap() = true;
         }
+        TransferPhase::TearingDown => {
+            // Switched over: the branches are free for setup to provision,
+            // while the project stays registered until the source is down.
+            assert!(registry::ensure_project_not_transferring(&f.project.id).is_err());
+            for id in &ids {
+                assert!(registry::ensure_branch_not_transferring(id).is_ok());
+            }
+            *released.lock().unwrap() = true;
+        }
+        _ => {}
     });
     let result = to_remote.result.expect("to remote");
     assert!(*guarded.lock().unwrap());
+    assert!(*released.lock().unwrap());
 
     // The database points at the workspace.
     assert_eq!(result.location, ProjectLocation::Remote);
@@ -814,8 +836,26 @@ fn a_two_repo_project_goes_to_a_workspace_and_back() {
     assert_eq!(preflight.workspace_name.as_deref(), Some(WORKSPACE));
     assert_eq!(preflight.repos[0].untracked, 5);
 
-    let result = f.transfer(true).result.expect("to local");
+    let workspace_guarded = Mutex::new(false);
+    let to_local = f.transfer_with(true, &|progress| {
+        if progress.phase == TransferPhase::Snapshotting {
+            assert!(registry::ensure_workspace_not_transferring(WORKSPACE).is_err());
+            *workspace_guarded.lock().unwrap() = true;
+        }
+    });
+    let result = to_local.result.expect("to local");
+    assert!(*workspace_guarded.lock().unwrap());
     assert_eq!(result.location, ProjectLocation::Local);
+    // The workspace's snapshots stay under backup refs in the local clones.
+    let manifest = f.manifest(&to_local.transfer_id).expect("manifest");
+    for (i, repo) in result.repos.iter().enumerate() {
+        let clone = f.host.clone_of(&f.repo(i));
+        let backup_ref = repo.backup_ref.as_deref().expect("backup ref");
+        assert_eq!(manifest.repos[i].backup_ref.as_deref(), Some(backup_ref));
+        assert_eq!(manifest.repos[i].local_clone.as_deref(), Some(path(&clone)));
+        assert_eq!(rev(&clone, backup_ref), manifest.repos[i].snapshot);
+    }
+    assert!(!manifest.keep_until_removed, "everything was restored");
     for (i, expected) in expected.iter().enumerate() {
         let branch = f.store.get_branch(&f.branches[i].id).unwrap().unwrap();
         assert_eq!(branch.branch_type, BranchType::Local);
@@ -852,6 +892,8 @@ fn unchecked_uncommitted_changes_stay_behind_in_the_backup() {
     assert_eq!(git(&clone, &["status", "--porcelain"]), "", "arrives clean");
     assert!(result.repos[0].uncommitted_left_behind);
     assert!(!result.repos[0].uncommitted_restored);
+    let manifest = f.manifest(&to_remote.transfer_id).unwrap();
+    assert!(manifest.keep_until_removed, "the only copy is never pruned");
     // The changes are in the backup ref (and bundle), not lost.
     let backup_ref = result.repos[0].backup_ref.clone().unwrap();
     let local_clone = f.host.clone_of(WIDGETS);
@@ -872,6 +914,12 @@ fn unchecked_uncommitted_changes_stay_behind_in_the_backup() {
     let manifest = f.manifest(&to_local.transfer_id).unwrap();
     assert!(!manifest.include_uncommitted);
     assert!(manifest.repos[0].has_uncommitted_changes);
+    assert!(manifest.keep_until_removed);
+    let backup_ref = result.repos[0].backup_ref.clone().unwrap();
+    git(
+        &local_clone,
+        &["cat-file", "-e", &format!("{backup_ref}:remote.txt")],
+    );
     assert_eq!(f.bundles(&to_local.transfer_id), 1);
 }
 
@@ -896,6 +944,20 @@ fn branches_with_nothing_to_carry_land_unprovisioned() {
         Some(WorkspaceStatus::Starting),
         "workspace setup provisions it"
     );
+
+    // Until setup has provisioned it, it can't go back: the database's
+    // `Starting` is enough, whatever Blox says (here: no workspace at all).
+    let preflight = f.preflight();
+    assert!(!preflight.can_transfer);
+    assert_eq!(
+        codes(&preflight.repos[0].blockers),
+        vec!["workspace_starting"]
+    );
+    let err = f.transfer(true).result.unwrap_err();
+    assert!(err.contains("still starting"), "{err}");
+    f.store
+        .update_branch_workspace_status(&f.branches[0].id, &WorkspaceStatus::Error)
+        .unwrap();
 
     // The workspace was never created, so back to local there is nothing
     // to carry either.
@@ -955,27 +1017,140 @@ fn a_taken_local_name_lands_deduplicated_after_resuming_the_workspace() {
 }
 
 #[test]
-fn a_stopped_workspace_is_left_and_its_branches_start_from_origin() {
+fn a_stopped_workspace_is_resumed_or_else_blocks_the_transfer() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let worktree = f.worktree(0);
+    write(&worktree, "ahead.txt", "ahead\n");
+    let head = commit(&worktree, "ahead");
     f.transfer(true).result.expect("to remote");
-    f.host.set_state(WORKSPACE, WorkspaceState::Stopped);
+    write(&f.checkout(0), "remote-only.txt", "made remotely\n");
 
-    let preflight = f.preflight();
-    assert!(preflight.can_transfer);
-    assert_eq!(codes(&preflight.warnings), vec!["workspace_stopped"]);
-    assert_eq!(preflight.repos[0].state, RepoTransferState::NothingToCarry);
+    // Stopped or failed, it may still hold work: resumed first.
+    for (state, code) in [
+        (WorkspaceState::Error, "workspace_error"),
+        (WorkspaceState::Stopped, "workspace_stopped"),
+    ] {
+        f.host.set_state(WORKSPACE, state);
+        let preflight = f.preflight();
+        assert!(preflight.can_transfer, "{:?}", preflight.blockers);
+        assert_eq!(codes(&preflight.warnings), vec![code]);
+        assert_eq!(preflight.repos[0].state, RepoTransferState::Unknown);
+    }
 
-    let result = f.transfer(true).result.expect("to local");
-    assert!(!result.repos[0].carried);
-    let branch = f.store.get_branch(&f.branches[0].id).unwrap().unwrap();
-    assert_eq!(branch.branch_type, BranchType::Local);
-    assert!(f
-        .store
-        .get_workdir_for_branch(&branch.id)
-        .unwrap()
-        .is_none());
+    // It won't come back: the transfer stops rather than leave its work.
+    f.host.arm(Fault::ResumeWorkspace);
+    let db = f.db_state();
+    let err = f.transfer(true).result.unwrap_err();
+    assert!(f.host.fired());
+    assert!(err.contains("still stopped"), "{err}");
+    assert!(err.contains("injected failure"), "{err}");
+    assert_eq!(f.db_state(), db);
     assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
-    assert!(!f.host.calls().contains(&format!("delete {WORKSPACE}")));
+
+    // It comes back: carried like any other, then deleted.
+    let result = f.transfer(true).result.expect("to local");
+    assert!(result.repos[0].carried);
+    let worktree = f.worktree(0);
+    assert_eq!(rev(&worktree, "HEAD"), head);
+    assert!(worktree.join("remote-only.txt").exists());
+    assert!(f.host.workspaces().is_empty());
+    let resume = format!("resume {WORKSPACE}");
+    assert_eq!(f.host.calls().iter().filter(|c| **c == resume).count(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Tearing down
+// ---------------------------------------------------------------------------
+
+/// A worktree touched between its snapshot and the teardown is kept, with a
+/// warning saying why; the transfer still succeeds.
+#[test]
+fn a_worktree_that_changed_after_its_snapshot_is_kept() {
+    type Mutation = (&'static str, fn(&Path));
+    let mutations: [Mutation; 4] = [
+        ("files changed", |wt| write(wt, "late.txt", "saved late\n")),
+        ("the index changed", |wt| {
+            git(wt, &["add", "notes.txt"]);
+        }),
+        ("HEAD moved", |wt| {
+            git(wt, &["commit", "-q", "--allow-empty", "-m", "late"]);
+        }),
+        ("is no longer checked out", |wt| {
+            git(wt, &["checkout", "-q", "-b", "elsewhere"]);
+        }),
+    ];
+    for (what, mutate) in mutations {
+        let f = Fixture::new(&[(WIDGETS, "feature")]);
+        let worktree = f.worktree(0);
+        write(&worktree, "notes.txt", "untracked\n");
+        let result = f
+            .transfer_with(true, &|progress| {
+                if progress.phase == TransferPhase::Committing {
+                    mutate(&worktree);
+                }
+            })
+            .result
+            .expect("the transfer succeeds");
+
+        assert_eq!(result.location, ProjectLocation::Remote, "{what}");
+        assert_eq!(codes(&result.warnings), vec!["worktree_left"], "{what}");
+        assert!(
+            result.warnings[0].message.contains(what),
+            "{what}: {}",
+            result.warnings[0].message
+        );
+        assert!(worktree.is_dir(), "{what}: the worktree is kept");
+        assert_eq!(temp_refs(&worktree), "", "{what}");
+        // The snapshot is kept too, as for any carried worktree.
+        let backup_ref = result.repos[0].backup_ref.clone().expect("backup ref");
+        git(
+            &f.host.clone_of(WIDGETS),
+            &["cat-file", "-e", &format!("{backup_ref}:notes.txt")],
+        );
+        assert!(
+            !f.host
+                .root
+                .join("transfers")
+                .join(&result.transfer_id)
+                .join("0-widgets.bundle.index")
+                .exists(),
+            "{what}: the scratch index is removed"
+        );
+    }
+}
+
+#[test]
+fn a_workspace_that_changed_after_its_snapshot_is_kept() {
+    let f = two_repo_project();
+    f.transfer(true).result.expect("to remote");
+    let gadgets = f.checkout(1);
+    let calls = f.host.calls();
+
+    let to_local = f.transfer_with(true, &|progress| {
+        if progress.phase == TransferPhase::Committing {
+            write(&gadgets, "late.txt", "saved late\n");
+        }
+    });
+    let result = to_local.result.expect("the transfer succeeds");
+
+    assert_eq!(result.location, ProjectLocation::Local);
+    assert_eq!(codes(&result.warnings), vec!["workspace_left"]);
+    let message = &result.warnings[0].message;
+    assert!(message.contains("gizmo: files changed"), "{message}");
+    assert_eq!(f.host.calls(), calls, "not deleted");
+    assert!(gadgets.join("late.txt").exists());
+    assert_eq!(temp_refs(&gadgets), "");
+    assert!(!f
+        .host
+        .workspace_dir(WORKSPACE)
+        .join(".staged-transfer")
+        .join(&to_local.transfer_id)
+        .exists());
+    // Both snapshots are kept in the local clones all the same.
+    for (i, repo) in result.repos.iter().enumerate() {
+        let backup_ref = repo.backup_ref.as_deref().expect("backup ref");
+        rev(&f.host.clone_of(&f.repo(i)), backup_ref);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1181,11 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
     );
     commit(&gadgets, "attributes");
     git(&gadgets, &["checkout", "-q", "--detach"]);
+    // A clone inside the checkout: a snapshot could only record its commit.
+    let vendored = gadgets.join("vendor").join("lib");
+    fs::create_dir_all(&vendored).unwrap();
+    git(&vendored, &["init", "-q"]);
+    write(&vendored, "lib.txt", "vendored\n");
 
     let sprockets = f.worktree(2);
     git(&sprockets, &["checkout", "-q", "-b", "side"]);
@@ -1033,6 +1213,7 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
         (6, 3, 4, 0)
     );
     assert!(widgets.untracked_bytes >= 1000);
+    assert_eq!(widgets.ignored_files, 1, "debug.log");
     assert_eq!(widgets.unpushed_commits, 2);
     assert_eq!(widgets.upstream.as_deref(), Some("origin/feature"));
     assert_eq!(widgets.head, Some(rev(&f.worktree(0), "HEAD")));
@@ -1040,9 +1221,15 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
     assert!(widgets.blockers.is_empty(), "{:?}", widgets.blockers);
 
     let gadgets = &preflight.repos[1];
-    assert_eq!(codes(&gadgets.blockers), vec!["detached_head"]);
+    assert_eq!(
+        codes(&gadgets.blockers),
+        vec!["detached_head", "nested_repo"]
+    );
+    assert!(gadgets.blockers[1].message.starts_with("vendor/lib/ "));
     assert_eq!(codes(&gadgets.warnings), vec!["submodules", "lfs"]);
+    // The nested repository is the blocker, not an untracked file.
     assert!(!gadgets.has_uncommitted_changes);
+    assert_eq!(gadgets.ignored_files, 0);
 
     let sprockets = &preflight.repos[2];
     assert_eq!(sprockets.conflicted, 1);
@@ -1085,6 +1272,28 @@ fn a_remote_project_needs_one_branch_per_repository() {
     let transfer = f.transfer(true);
     assert!(transfer.result.unwrap_err().contains("same repository"));
     assert!(f.host.calls().is_empty());
+}
+
+/// A branch with no project repo is on the primary repository, so it counts
+/// against the branch that names that repository.
+#[test]
+fn a_branch_without_a_project_repo_counts_against_the_primary_one() {
+    let f = Fixture::new(&[(WIDGETS, "feature"), (GADGETS, "gizmo")]);
+    let loose = Branch::new(&f.project.id, "loose", "origin/main");
+    f.store.create_branch(&loose).unwrap();
+
+    let preflight = f.preflight();
+
+    assert!(!preflight.can_transfer);
+    assert_eq!(
+        codes(&preflight.blockers),
+        vec!["multiple_branches_per_repo"]
+    );
+    assert!(
+        preflight.blockers[0].message.starts_with("feature, loose "),
+        "{}",
+        preflight.blockers[0].message
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,4 +1621,44 @@ fn a_failed_transfer_to_local_rolls_back_from_every_phase() {
     ] {
         assert_to_local_rolls_back(case);
     }
+}
+
+/// A local branch the transfer reused (already at the carried tip) is left
+/// where it was on rollback, with its config as it had it.
+#[test]
+fn a_rolled_back_transfer_to_local_keeps_a_branch_it_reused() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let worktree = f.worktree(0);
+    write(&worktree, "ahead.txt", "ahead\n");
+    let head = commit(&worktree, "ahead");
+    git(&worktree, &["push", "-q", "-u", "origin", "feature"]);
+    f.transfer(true).result.expect("to remote");
+
+    // Meanwhile `feature` was made locally again, at the same commit, with
+    // config of its own.
+    let clone = f.host.clone_of(WIDGETS);
+    git(&clone, &["fetch", "-q", "origin"]);
+    git(&clone, &["branch", "--no-track", "feature", &head]);
+    git(&clone, &["config", "branch.feature.description", "mine"]);
+    git(
+        &clone,
+        &["config", "branch.feature.pushRemote", "elsewhere"],
+    );
+    let config = || {
+        git(
+            &clone,
+            &["config", "--local", "--get-regexp", "^branch\\.feature\\."],
+        )
+    };
+    let (refs, before) = (clone_state(&clone), config());
+    assert_eq!(f.preflight().repos[0].dest_branch_name, "feature", "reused");
+
+    // Fail in the worktree, after the branch's config was replaced.
+    f.host.arm(Fault::Script(Side::Local, APPLY_SCRIPT, 2));
+    let err = f.transfer(true).result.unwrap_err();
+    assert!(f.host.fired(), "{err}");
+
+    assert_eq!(rev(&clone, "refs/heads/feature"), head, "still there");
+    assert_eq!(config(), before);
+    assert_eq!(clone_state(&clone), refs);
 }

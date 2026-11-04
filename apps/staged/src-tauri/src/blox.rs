@@ -122,6 +122,16 @@ fn reachable_on_success<T>(name: &str, result: Result<T, BloxError>) -> Result<T
     result
 }
 
+/// [`ws_exec_output`] for a command whose work grows with `payload_bytes`:
+/// it may run for [`blox_cli::exec_timeout`] of them rather than 300 s.
+pub fn ws_exec_output_sized(
+    name: &str,
+    args: &[&str],
+    payload_bytes: u64,
+) -> Result<WsExecOutput, BloxError> {
+    blox_cli::ws_exec_output_with_timeout(name, args, blox_cli::exec_timeout(payload_bytes))
+}
+
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
 ///
 /// Returns `Ok(())` if the user appears to be authenticated, or

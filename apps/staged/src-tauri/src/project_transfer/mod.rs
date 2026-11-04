@@ -30,8 +30,8 @@ mod scripts;
 mod tests;
 
 pub use carry::{
-    carry_repo, carry_repo_with, cleanup, finish, origin_tips, CarryOutcome, CarryPlan, CarryStep,
-    Landing,
+    carry_repo, carry_repo_with, cleanup, finish, origin_tips, unchanged, CarryOutcome, CarryPlan,
+    CarryStep, Landing,
 };
 pub(crate) use commands::{
     cancel_project_transfer, get_project_transfer_preflight_impl, prune_backups,
@@ -45,8 +45,8 @@ pub use preflight::{
     ProjectTransferPreflight, RepoPreflight, RepoTransferState, TransferDirection, TransferIssue,
 };
 pub use registry::{
-    ensure_branch_not_transferring, ensure_project_not_transferring, is_branch_transferring,
-    TRANSFER_IN_PROGRESS,
+    ensure_branch_not_transferring, ensure_project_not_transferring,
+    ensure_workspace_not_transferring, is_branch_transferring, TRANSFER_IN_PROGRESS,
 };
 pub use scripts::{
     ApplyReport, BundleFile, ConfigEntry, OriginTips, RemoteConfig, Snapshot, SnapshotWarning,

@@ -4,14 +4,18 @@
 //! Until [`Store::apply_project_transfer`] commits, the source and the
 //! database are untouched and every step is undone on failure (or on
 //! cancel, checked between steps): the workspace or the worktrees, branches
-//! and remotes the transfer created are removed, and the temporary refs at
-//! both ends. The bundles on this machine always stay, as the backup. After
-//! the commit nothing is undone: tearing the source down is best-effort, and
-//! what fails there comes back as warnings on a successful transfer.
+//! and remotes the transfer created are removed, branch config it replaced is
+//! put back, and the temporary refs at both ends are dropped. The bundles on
+//! this machine always stay, as the backup. After the commit nothing is
+//! undone: tearing the source down is best-effort — and refused for a source
+//! that changed after its snapshot — and what it leaves comes back as
+//! warnings on a successful transfer (see [`teardown`]).
 //!
 //! Synchronous, for the blocking pool; [`super::commands`] wraps it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+mod teardown;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -23,7 +27,7 @@ use crate::store::{
 
 use super::backups::{self, ManifestRepo, TransferManifest};
 use super::carry::{
-    carry_repo_with, cleanup, finish, origin_tips, run_step, CarryOutcome, CarryPlan, CarryStep,
+    carry_repo_with, finish, origin_tips, run_step_sized, CarryOutcome, CarryPlan, CarryStep,
     Landing,
 };
 use super::endpoint::TransferEndpoint;
@@ -89,8 +93,7 @@ pub struct RepoTransferResult {
     /// Uncommitted changes stayed behind, in the backup only.
     pub uncommitted_left_behind: bool,
     pub retried_without_exclusions: bool,
-    /// The ref holding the source's snapshot in the local clone, for a
-    /// transfer to remote.
+    /// The ref holding the source's snapshot in the shared local clone.
     pub backup_ref: Option<String>,
     pub warnings: Vec<TransferIssue>,
 }
@@ -178,8 +181,12 @@ struct Undo {
     sources: Vec<SourceCheckout>,
     /// Local clones a transfer to local fetched bundles into.
     clones: Vec<PathBuf>,
-    /// Local branches it created, `(clone, branch)`.
-    branches: Vec<(PathBuf, String)>,
+    /// Local branches the apply created, `(clone, branch, tip)`: deleted
+    /// while they are still at that tip.
+    branches: Vec<(PathBuf, String, String)>,
+    /// Every local branch's `branch.<b>.*` config before the apply replaced
+    /// it, `(clone, branch, entries)`: put back as it was.
+    branch_configs: Vec<(PathBuf, String, teardown::BranchConfig)>,
     /// Worktrees it added, `(clone, worktree)`.
     worktrees: Vec<(PathBuf, PathBuf)>,
     /// Remotes the apply added to a local clone, `(clone, remote)`.
@@ -288,6 +295,12 @@ impl Run<'_> {
         let inspection = self.inspect()?;
         self.guard
             .cover_branches(inspection.branches.iter().map(|b| b.branch.id.as_str()));
+        self.guard.cover_workspaces(
+            inspection
+                .branches
+                .iter()
+                .filter_map(|b| b.workspace.as_deref()),
+        );
         self.check_sessions(&inspection)?;
 
         let mut legs: Vec<Leg> = inspection
@@ -328,6 +341,9 @@ impl Run<'_> {
 
         self.checkpoint(TransferPhase::Committing, None, None)?;
         self.commit(&inspection, &legs)?;
+        // The rows describe the destination now, and setup may provision them
+        // while the source comes down.
+        self.guard.release_branches();
 
         let warnings = self.tear_down(&inspection, &mut legs);
         if legs.iter().any(|l| l.outcome.is_some()) {
@@ -342,26 +358,39 @@ impl Run<'_> {
     }
 
     /// The preflight, again, now that the transfer is registered — with any
-    /// suspended source workspace resumed first, so its checkouts can be read.
+    /// suspended, stopped or failed source workspace resumed first, so its
+    /// checkouts can be read. One that won't come back blocks the transfer.
     fn inspect(&self) -> Result<Inspection, Failure> {
-        let mut inspection = preflight::inspect(self.store, self.host, self.guard.project_id())?;
-        let suspended: BTreeSet<String> = inspection
+        let project_id = self.guard.project_id();
+        let mut inspection = preflight::inspect(self.store, self.host, project_id)?;
+        let to_resume: BTreeSet<String> = inspection
             .branches
             .iter()
             .zip(&inspection.preflight.repos)
             .filter(|(_, row)| row.state == RepoTransferState::Unknown)
             .filter_map(|(source, _)| source.workspace.clone())
             .collect();
-        if !suspended.is_empty() {
-            for workspace in &suspended {
+        if !to_resume.is_empty() {
+            let mut resumed = BTreeMap::new();
+            for workspace in to_resume {
                 self.checkpoint(
                     TransferPhase::Checking,
                     None,
                     Some(format!("Resuming workspace {workspace}")),
                 )?;
-                self.host.resume_workspace(workspace)?;
+                let error = self.host.resume_workspace(&workspace).err();
+                let failed = error.is_some();
+                if let Some(e) = &error {
+                    log::warn!("[project_transfer] cannot resume {workspace}: {e}");
+                }
+                resumed.insert(workspace, error);
+                // One is enough to block the transfer: spare the others.
+                if failed {
+                    break;
+                }
             }
-            inspection = preflight::inspect(self.store, self.host, self.guard.project_id())?;
+            inspection =
+                preflight::inspect_after_resuming(self.store, self.host, project_id, &resumed)?;
         }
         let preflight = &inspection.preflight;
         if !preflight.can_transfer {
@@ -474,7 +503,7 @@ impl Run<'_> {
             let dir = self
                 .host
                 .workspace_repo_dir(&workspace, &leg.source.github_repo)?;
-            run_step(
+            run_step_sized(
                 endpoint.as_ref(),
                 "clone",
                 CLONE_SCRIPT,
@@ -482,6 +511,7 @@ impl Run<'_> {
                     dir.clone(),
                     self.host.workspace_clone_url(&leg.source.github_repo),
                 ],
+                leg.source.repo_bytes,
             )?;
             self.host.configure_workspace_clone(&workspace, &dir);
             let names = origin_tip_names(leg);
@@ -524,15 +554,14 @@ impl Run<'_> {
                 .map(|b| b.branch.branch_name.clone())
                 .collect();
             taken.extend(chosen.get(&clone).into_iter().flatten().cloned());
-            let (name, created) = preflight::local_branch_name(
+            // Whether the name is new or reused, the apply says which (it is
+            // what rolls back); the name is all that is needed here.
+            let (name, _) = preflight::local_branch_name(
                 &clone,
                 &leg.row.branch_name,
                 leg.row.head.as_deref(),
                 &taken,
             )?;
-            if created {
-                self.undo.branches.push((clone.clone(), name.clone()));
-            }
             if !self.undo.clones.contains(&clone) {
                 self.undo.clones.push(clone.clone());
             }
@@ -592,8 +621,22 @@ impl Run<'_> {
             exclude_tips: leg.exclude_tips.clone(),
             local_bundle: self.transfer_dir.join(&bundle_name),
             bundle_name,
+            source_bytes: leg.source.repo_bytes + leg.row.untracked_bytes,
         };
 
+        if self.direction == TransferDirection::ToLocal {
+            // Before the apply replaces it, even for a branch it reuses.
+            let clone = PathBuf::from(&plan.dest_dir);
+            let config = teardown::branch_config(&clone, &plan.dest_branch).map_err(|e| {
+                format!(
+                    "Cannot read {}'s config in {}: {e}",
+                    plan.dest_branch, plan.dest_dir
+                )
+            })?;
+            self.undo
+                .branch_configs
+                .push((clone, plan.dest_branch.clone(), config));
+        }
         self.undo.sources.push(SourceCheckout {
             workspace: match self.direction {
                 TransferDirection::ToRemote => None,
@@ -611,6 +654,13 @@ impl Run<'_> {
             self.guard_not_cancelled()
         })?;
         if self.direction == TransferDirection::ToLocal {
+            if outcome.applied.created_branch {
+                self.undo.branches.push((
+                    PathBuf::from(&plan.dest_dir),
+                    plan.dest_branch.clone(),
+                    outcome.snapshot.head.clone(),
+                ));
+            }
             for remote in &outcome.applied.added_remotes {
                 self.undo
                     .remotes
@@ -735,161 +785,6 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// Remove the source: the worktrees (after keeping each snapshot under
-    /// a backup ref) or the workspace. Never fails; returns what went wrong.
-    fn tear_down(&self, inspection: &Inspection, legs: &mut [Leg]) -> Vec<TransferIssue> {
-        self.emit(TransferPhase::TearingDown, None, None, None);
-        let mut warnings = Vec::new();
-        let tid = self.guard.transfer_id();
-        match self.direction {
-            TransferDirection::ToRemote => {
-                for leg in legs.iter_mut() {
-                    let (Some(outcome), Some(worktree)) = (&leg.outcome, &leg.source.source_dir)
-                    else {
-                        continue;
-                    };
-                    let worktree_path = PathBuf::from(worktree);
-                    let removed = self.remove_local_source(leg, outcome, &worktree_path);
-                    match removed {
-                        Ok(backup_ref) => leg.backup_ref = Some(backup_ref),
-                        Err(e) => warnings.push(TransferIssue::new(
-                            "worktree_left",
-                            format!(
-                                "Transferred, but couldn't remove the old worktree {worktree}: {e}"
-                            ),
-                        )),
-                    }
-                }
-                // The bundles at the destination have served their purpose.
-                if let (Some(workspace), Some(dir)) = (
-                    self.workspace_name.as_deref(),
-                    legs.iter().find_map(|l| l.dest_dir.as_deref()),
-                ) {
-                    let endpoint = self.host.workspace_endpoint(workspace);
-                    if let Err(e) = cleanup(endpoint.as_ref(), dir, tid, true) {
-                        log::warn!("[project_transfer] cannot clear {workspace}'s scratch: {e}");
-                    }
-                }
-            }
-            TransferDirection::ToLocal => {
-                for workspace in &inspection.running_workspaces {
-                    if let Err(e) = self.host.delete_workspace(workspace) {
-                        warnings.push(TransferIssue::new(
-                            "workspace_left",
-                            format!("Transferred, but couldn't delete workspace {workspace}: {e}"),
-                        ));
-                        let endpoint = self.host.workspace_endpoint(workspace);
-                        for leg in legs
-                            .iter()
-                            .filter(|l| l.source.workspace.as_deref() == Some(workspace))
-                        {
-                            if let Some(dir) = &leg.source.source_dir {
-                                let _ = cleanup(endpoint.as_ref(), dir, tid, true);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        warnings
-    }
-
-    /// Keep the snapshot under a backup ref in the shared clone, drop the
-    /// temporary ref, and remove the worktree (and its branch).
-    fn remove_local_source(
-        &self,
-        leg: &Leg,
-        outcome: &CarryOutcome,
-        worktree: &Path,
-    ) -> Result<String, String> {
-        let clone = self.host.local_clone_path(&leg.source.github_repo)?;
-        if clone.canonicalize().ok() == worktree.canonicalize().ok() {
-            return Err("it is the shared clone itself".to_string());
-        }
-        let backup_ref = backups::backup_ref(self.guard.transfer_id(), &leg.row.branch_name);
-        crate::git::cli_run(
-            &clone,
-            &["update-ref", &backup_ref, &outcome.snapshot.snapshot],
-        )
-        .map_err(|e| format!("cannot keep the backup ref: {e}"))?;
-        let endpoint = self.host.local_endpoint(worktree)?;
-        if let Err(e) = cleanup(
-            endpoint.as_ref(),
-            &path_str(worktree)?,
-            self.guard.transfer_id(),
-            false,
-        ) {
-            log::warn!("[project_transfer] cannot drop the temporary ref: {e}");
-        }
-        crate::git::remove_worktree(&clone, worktree).map_err(|e| e.to_string())?;
-        Ok(backup_ref)
-    }
-
-    /// Undo everything in [`Undo`], best-effort: destination first, then the
-    /// source's temporary refs. The bundles on this machine stay.
-    fn roll_back(&self) {
-        self.emit(TransferPhase::RollingBack, None, None, None);
-        let tid = self.guard.transfer_id();
-        if let Some(workspace) = &self.undo.workspace {
-            if let Err(e) = self.host.delete_workspace(workspace) {
-                log::warn!("[project_transfer] rollback: cannot delete workspace {workspace}: {e}");
-            }
-        }
-        for (clone, worktree) in self.undo.worktrees.iter().rev() {
-            remove_worktree_keeping_branch(clone, worktree);
-        }
-        for (clone, branch) in &self.undo.branches {
-            if crate::git::branch_exists(clone, branch).unwrap_or(false) {
-                if let Err(e) = crate::git::cli_run(clone, &["branch", "-D", branch]) {
-                    log::warn!("[project_transfer] rollback: cannot delete {branch}: {e}");
-                }
-            }
-        }
-        for (clone, remote) in &self.undo.remotes {
-            let _ = crate::git::cli_run(clone, &["remote", "remove", remote]);
-        }
-        for clone in &self.undo.clones {
-            let result = self
-                .host
-                .local_endpoint(clone)
-                .map_err(|e| e.to_string())
-                .and_then(|endpoint| {
-                    cleanup(endpoint.as_ref(), &path_str(clone)?, tid, false)
-                        .map_err(|e| e.to_string())
-                });
-            if let Err(e) = result {
-                log::warn!("[project_transfer] rollback: {e}");
-            }
-        }
-        for source in &self.undo.sources {
-            let result = match &source.workspace {
-                Some(workspace) => cleanup(
-                    self.host.workspace_endpoint(workspace).as_ref(),
-                    &source.dir,
-                    tid,
-                    true,
-                )
-                .map_err(|e| e.to_string()),
-                None => self
-                    .host
-                    .local_endpoint(Path::new(&source.dir))
-                    .and_then(|endpoint| {
-                        cleanup(endpoint.as_ref(), &source.dir, tid, false)
-                            .map_err(|e| e.to_string())
-                    }),
-            };
-            if let Err(e) = result {
-                log::warn!("[project_transfer] rollback: {e}");
-            }
-        }
-        if self.transfer_dir.join(backups::MANIFEST_FILE).exists() {
-            if let Some(mut manifest) = backups::read_manifest(&self.transfer_dir) {
-                manifest.status = "rolledBack".to_string();
-                let _ = backups::write_manifest(&self.transfer_dir, &manifest);
-            }
-        }
-    }
-
     fn manifest(&self, inspection: &Inspection, legs: &[Leg], status: &str) -> TransferManifest {
         let repos = legs
             .iter()
@@ -913,7 +808,7 @@ impl Run<'_> {
                 })
             })
             .collect();
-        TransferManifest {
+        let mut manifest = TransferManifest {
             transfer_id: self.guard.transfer_id().to_string(),
             project_id: inspection.project.id.clone(),
             direction: self.direction.as_str().to_string(),
@@ -924,8 +819,11 @@ impl Run<'_> {
                 .workspace_name
                 .clone()
                 .or_else(|| inspection.preflight.workspace_name.clone()),
+            keep_until_removed: false,
             repos,
-        }
+        };
+        manifest.keep_until_removed = manifest.holds_left_behind_changes();
+        manifest
     }
 
     fn result(
@@ -985,21 +883,5 @@ impl Run<'_> {
             warnings,
             backup_dir: carried_any.then(|| self.transfer_dir.to_string_lossy().into_owned()),
         }
-    }
-}
-
-/// Remove a worktree the transfer added, without `remove_worktree`'s branch
-/// deletion: the branch is the rollback's to decide about.
-fn remove_worktree_keeping_branch(clone: &Path, worktree: &Path) {
-    let Some(path) = worktree.to_str() else {
-        return;
-    };
-    if crate::git::cli_run(clone, &["worktree", "remove", "--force", path]).is_err() {
-        if worktree.exists() {
-            if let Err(e) = std::fs::remove_dir_all(worktree) {
-                log::warn!("[project_transfer] rollback: cannot remove {path}: {e}");
-            }
-        }
-        let _ = crate::git::cli_run(clone, &["worktree", "prune"]);
     }
 }

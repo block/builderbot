@@ -206,6 +206,27 @@ impl Store {
             )?;
         }
 
+        // All or nothing: a branch the transfer didn't cover (one added while
+        // it ran, say) would be left describing the other location.
+        let left_out: Option<String> = tx
+            .query_row(
+                "SELECT branch_name FROM branches WHERE project_id = ?1 AND branch_type != ?2
+                  ORDER BY created_at LIMIT 1",
+                params![transfer.project_id, landing_type.as_str()],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                e => Err(e),
+            })?;
+        if let Some(name) = left_out {
+            return Err(StoreError(format!(
+                "Branch {name} isn't part of the transfer (was it added while the transfer ran?); \
+                 every branch moves with the project, so nothing was changed."
+            )));
+        }
+
         tx.commit()?;
         for branch in &transfer.branches {
             self.publish(StoreChange::Branch {
@@ -366,13 +387,15 @@ mod tests {
         assert_eq!(session.agent_id, None);
     }
 
-    /// Remote sessions share one placeholder `working_dir` per repo, so a
-    /// sibling branch's session there must not move with this branch.
+    /// Remote sessions share one placeholder `working_dir` per repo, so
+    /// another branch's session there — in another project on the same repo —
+    /// must not move with this branch.
     #[test]
     fn rewrites_only_the_transferred_branches_sessions() {
         let f = local_fixture(Store::in_memory().unwrap());
-        let sibling =
-            Branch::new(&f.project.id, "other", "origin/main").with_project_repo(&f.repo.id);
+        let other = Project::named("other").with_primary_repo("acme/widgets");
+        f.store.create_project(&other).unwrap();
+        let sibling = Branch::new(&other.id, "other", "origin/main");
         f.store.create_branch(&sibling).unwrap();
         let mut theirs = Session::new_running("sibling", Path::new("/wt/acme-widgets--feature"))
             .with_branch(&sibling.id)
@@ -540,12 +563,13 @@ mod tests {
     #[test]
     fn a_colliding_name_is_refused_readably() {
         let f = local_fixture(Store::in_memory().unwrap());
-        let taken =
-            Branch::new(&f.project.id, "feature-2", "origin/main").with_project_repo(&f.repo.id);
-        f.store.create_branch(&taken).unwrap();
         f.store
             .apply_project_transfer(&to_remote(&f, "ws-feature"))
             .unwrap();
+        // Local, so the all-or-nothing check passes and the index decides.
+        let taken =
+            Branch::new(&f.project.id, "feature-2", "origin/main").with_project_repo(&f.repo.id);
+        f.store.create_branch(&taken).unwrap();
 
         let err = f
             .store
@@ -556,5 +580,37 @@ mod tests {
         let branch = f.store.get_branch(&f.branch.id).unwrap().unwrap();
         assert_eq!(branch.branch_type, BranchType::Remote);
         assert_eq!(branch.branch_name, "feature");
+    }
+
+    /// A branch that joined the project after the transfer looked fails the
+    /// whole transfer rather than staying behind at the old location.
+    #[test]
+    fn a_branch_left_out_of_the_transfer_fails_it_and_changes_nothing() {
+        let (sender, mut rx) = tokio::sync::broadcast::channel(64);
+        let f = local_fixture(Store::in_memory().unwrap().with_change_sender(sender));
+        let late = Branch::new(&f.project.id, "late", "origin/main").with_project_repo(&f.repo.id);
+        f.store.create_branch(&late).unwrap();
+        while rx.try_recv().is_ok() {}
+
+        let err = f
+            .store
+            .apply_project_transfer(&to_remote(&f, "ws-feature"))
+            .unwrap_err();
+
+        assert!(
+            err.0.contains("Branch late isn't part of the transfer"),
+            "{err}"
+        );
+        let project = f.store.get_project(&f.project.id).unwrap().unwrap();
+        assert_eq!(project.location, ProjectLocation::Local);
+        let branch = f.store.get_branch(&f.branch.id).unwrap().unwrap();
+        assert_eq!(branch.branch_type, BranchType::Local);
+        assert_eq!(branch.workspace_name, None);
+        assert!(f
+            .store
+            .get_workdir_for_branch(&f.branch.id)
+            .unwrap()
+            .is_some());
+        assert!(rx.try_recv().is_err());
     }
 }

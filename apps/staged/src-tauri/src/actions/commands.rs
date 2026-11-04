@@ -837,6 +837,7 @@ pub(crate) async fn run_branch_action_impl(
     executor: Arc<ActionExecutor>,
     registry: Arc<ActionRegistry>,
 ) -> Result<String, String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     // Get the action
     let action = store
         .get_repo_action(&action_id)
@@ -960,6 +961,9 @@ pub(crate) async fn run_branch_action_impl(
             shell_command,
         ];
 
+        // Again, after the awaits: a transfer that began meanwhile has
+        // already stopped the branch's actions, and this one must not start.
+        crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
         let eid = executor
             .execute_remote(sq_binary, args, listener)
             .await
@@ -984,6 +988,7 @@ pub(crate) async fn run_branch_action_impl(
         };
 
         let wd = working_dir.clone();
+        crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
         let eid = executor
             .execute(action.command.clone(), working_dir, listener)
             .await
@@ -1351,6 +1356,7 @@ pub(crate) async fn run_prerun_actions_impl(
     executor: Arc<ActionExecutor>,
     registry: Arc<ActionRegistry>,
 ) -> Result<Vec<String>, String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     // Get the branch and project (for repo context + subpath)
     let branch = store
         .get_branch(&branch_id)
@@ -1395,6 +1401,8 @@ pub(crate) async fn run_prerun_actions_impl(
     // before starting the next one
     let mut execution_ids = Vec::new();
     for action in prerun_actions {
+        // Each action waits on the last, so a transfer can begin in between.
+        crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
         let listener = Arc::new(TauriExecutionListener::new(
             app.clone(),
             branch_id.clone(),

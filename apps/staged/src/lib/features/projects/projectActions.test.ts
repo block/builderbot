@@ -94,6 +94,7 @@ function repoPreflight(
     untracked: 0,
     conflicted: 0,
     untrackedBytes: 0,
+    ignoredFiles: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],

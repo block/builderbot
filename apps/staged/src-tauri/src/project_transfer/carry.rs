@@ -4,7 +4,8 @@
 //! (where it stays as the backup), sends it on to the destination, and lands
 //! it there. The steps either side of it — preparing the destination and
 //! reporting its [`origin_tips`] first, adding a local worktree and running
-//! [`finish`] in it after, [`cleanup`] on failure — are the orchestrator's.
+//! [`finish`] in it after, [`cleanup`] on failure, and checking the source is
+//! [`unchanged`] before deleting it — are the orchestrator's.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,10 @@ pub struct CarryPlan {
     pub bundle_name: String,
     /// Where the bundle is kept on this machine.
     pub local_bundle: PathBuf,
+    /// The source repository's object store plus its untracked files: what
+    /// snapshotting and applying take time in proportion to, so a Blox end
+    /// waits long enough for them.
+    pub source_bytes: u64,
 }
 
 /// A repository carried to the destination.
@@ -194,7 +199,34 @@ pub fn finish(
             snapshot: &outcome.snapshot,
             restore: plan.include_uncommitted,
         },
+        plan.source_bytes + outcome.bundle.size,
     )
+}
+
+/// Whether `plan`'s source checkout is still what `snapshot` captured: on
+/// its branch at the same `HEAD`, with the same index and working tree. Read
+/// only. `None` when it is; otherwise what changed.
+pub fn unchanged(
+    source: &dyn TransferEndpoint,
+    plan: &CarryPlan,
+    snapshot: &Snapshot,
+) -> Result<Option<String>, TransferError> {
+    check_transfer_id(&plan.transfer_id)?;
+    let scratch_index =
+        source.scratch_path(&plan.transfer_id, &format!("{}.index", plan.bundle_name))?;
+    let report = run_step_sized(
+        source,
+        "verify",
+        scripts::VERIFY_SCRIPT,
+        &scripts::verify_args(
+            &plan.source_dir,
+            &plan.source_branch,
+            snapshot,
+            &scratch_index,
+        ),
+        plan.source_bytes,
+    )?;
+    scripts::parse_verify(&report)
 }
 
 /// Remove the transfer's temporary refs from `repo_dir` at `endpoint`, and
@@ -238,7 +270,7 @@ fn snapshot(
     plan: &CarryPlan,
     source_bundle: &str,
 ) -> Result<Snapshot, TransferError> {
-    let report = run_step(
+    let report = run_step_sized(
         source,
         "snapshot",
         scripts::SNAPSHOT_SCRIPT,
@@ -249,6 +281,7 @@ fn snapshot(
             &plan.transfer_id,
             &plan.exclude_tips,
         ),
+        plan.source_bytes,
     )?;
     Snapshot::parse(&report, &plan.source_branch)
 }
@@ -258,11 +291,12 @@ fn rebundle(
     plan: &CarryPlan,
     source_bundle: &str,
 ) -> Result<BundleFile, TransferError> {
-    let report = run_step(
+    let report = run_step_sized(
         source,
         "rebundle",
         scripts::REBUNDLE_SCRIPT,
         &scripts::rebundle_args(&plan.source_dir, source_bundle, &plan.transfer_id),
+        plan.source_bytes,
     )?;
     scripts::parse_rebundle(&report)
 }
@@ -290,14 +324,25 @@ fn land(
             snapshot,
             restore,
         },
+        plan.source_bytes + bundle.size,
     )
 }
 
+/// Run [`scripts::APPLY_SCRIPT`] for `request`, whose work (verifying and
+/// indexing the bundle, restoring the working tree) grows with
+/// `payload_bytes`.
 fn apply(
     dest: &dyn TransferEndpoint,
     request: &ApplyRequest<'_>,
+    payload_bytes: u64,
 ) -> Result<ApplyReport, TransferError> {
-    let report = run_step(dest, "apply", scripts::APPLY_SCRIPT, &request.args())?;
+    let report = run_step_sized(
+        dest,
+        "apply",
+        scripts::APPLY_SCRIPT,
+        &request.args(),
+        payload_bytes,
+    )?;
     let applied = ApplyReport::parse(&report, &request.snapshot.head)?;
     for warning in &applied.warnings {
         log::warn!(
@@ -356,7 +401,19 @@ pub(super) fn run_step(
     script: &str,
     args: &[String],
 ) -> Result<String, TransferError> {
-    let output = endpoint.run_script(script, args)?;
+    run_step_sized(endpoint, step, script, args, 0)
+}
+
+/// [`run_step`] for a step whose running time grows with `payload_bytes`;
+/// see [`TransferEndpoint::run_script_sized`].
+pub(super) fn run_step_sized(
+    endpoint: &dyn TransferEndpoint,
+    step: &'static str,
+    script: &str,
+    args: &[String],
+    payload_bytes: u64,
+) -> Result<String, TransferError> {
+    let output = endpoint.run_script_sized(script, args, payload_bytes)?;
     let report = ScriptReport::parse(&output.stdout);
     if let Some(message) = report.get("error") {
         let message = message.trim().to_string();

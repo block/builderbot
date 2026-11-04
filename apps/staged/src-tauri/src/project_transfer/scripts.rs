@@ -7,8 +7,9 @@
 //! `local`, no arrays, no `[[`, no `pipefail`, no prefix assignments on shell
 //! functions. Every git call goes through `G`, which turns hooks off — Blox
 //! clones install lefthook, and a transfer must never run project code — and
-//! the snapshot is built with plumbing in a copy of the index, so the source's
-//! working tree, index and branch are never written.
+//! runs in the C locale, so the git messages a script matches on read the same
+//! whatever the user's `LANG`. The snapshot is built with plumbing in a copy of
+//! the index, so the source's working tree, index and branch are never written.
 //!
 //! The working state travels as two commits on top of `HEAD`:
 //!
@@ -33,11 +34,14 @@ macro_rules! prelude {
     () => {
         concat!(
             "set -u\n",
-            "G() { git -c core.hooksPath=/dev/null \"$@\"; }\n",
+            // A prefix assignment on an external command is plain POSIX.
+            "G() { LC_ALL=C git -c core.hooksPath=/dev/null \"$@\"; }\n",
             // `G` against another index file. A prefix assignment on a shell
             // function is unspecified in POSIX, so this calls git directly.
-            "GI() { _gi_index=$1; shift; GIT_INDEX_FILE=$_gi_index git -c core.hooksPath=/dev/null \"$@\"; }\n",
-            "fail() { printf 'error=%s\\n' \"$(printf '%s' \"$*\" | tr '\\n' ' ')\"; exit 1; }\n",
+            "GI() { _gi_index=$1; shift; GIT_INDEX_FILE=$_gi_index LC_ALL=C git -c core.hooksPath=/dev/null \"$@\"; }\n",
+            // `on_fail` is a script's chance to undo what it has done so far.
+            "on_fail() { :; }\n",
+            "fail() { on_fail; printf 'error=%s\\n' \"$(printf '%s' \"$*\" | tr '\\n' ' ')\"; exit 1; }\n",
             "sha256_of() {\n",
             "  if command -v sha256sum >/dev/null 2>&1; then sha256sum < \"$1\"\n",
             "  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < \"$1\"\n",
@@ -148,6 +152,41 @@ pub const REBUNDLE_SCRIPT: &str = concat!(
     "exit 0\n",
 );
 
+/// Check, without writing to it, that a checkout is still what its snapshot
+/// captured — before the checkout is deleted on the strength of that snapshot.
+///
+/// Arguments: `$1` the checkout, `$2` the branch it must have checked out,
+/// `$3` the snapshot's `head`, `$4` its `tree_i`, `$5` its `tree_w`, `$6` a
+/// scratch file (outside the checkout) for the copy of the index.
+///
+/// Prints `unchanged=1`, or `changed=<what>` for the first difference. The
+/// index and working tree are read the way [`SNAPSHOT_SCRIPT`] read them, in
+/// a copy of the index, so not even the real index's stat cache is touched.
+pub const VERIFY_SCRIPT: &str = concat!(
+    prelude!(),
+    "cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
+    "branch=$2 head=$3 tree_i=$4 tree_w=$5 tmp_index=$6\n",
+    "top=$(G rev-parse --show-toplevel 2>/dev/null) || fail \"not a git checkout: $PWD\"\n",
+    "cd -- \"$top\" || fail \"cannot enter $top\"\n",
+    "on_fail() { rm -f -- \"$tmp_index\"; }\n",
+    "changed() { rm -f -- \"$tmp_index\"; printf 'changed=%s\\n' \"$*\"; exit 0; }\n",
+    "[ \"$(G symbolic-ref -q HEAD)\" = \"refs/heads/$branch\" ] || changed \"$branch is no longer checked out\"\n",
+    "now=$(G rev-parse -q --verify 'HEAD^{commit}')\n",
+    "[ \"$now\" = \"$head\" ] || changed \"HEAD moved from $head to ${now:-nothing}\"\n",
+    "mkdir -p -- \"$(dirname -- \"$tmp_index\")\" || fail \"cannot create the directory for $tmp_index\"\n",
+    "rm -f -- \"$tmp_index\"\n",
+    "real_index=$(G rev-parse --git-path index)\n",
+    "if [ -f \"$real_index\" ]; then cp -p -- \"$real_index\" \"$tmp_index\" || fail 'cannot copy the index'; fi\n",
+    "t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the index'\n",
+    "[ \"$t\" = \"$tree_i\" ] || changed 'the index changed'\n",
+    "err=$(GI \"$tmp_index\" add -A 2>&1) || fail \"cannot read the working tree: $err\"\n",
+    "t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the working tree'\n",
+    "[ \"$t\" = \"$tree_w\" ] || changed 'files changed'\n",
+    "rm -f -- \"$tmp_index\"\n",
+    "printf 'unchanged=1\\n'\n",
+    "exit 0\n",
+);
+
 /// Fetch branches from origin at the destination and report their tips, so
 /// the source can leave out of its bundle what the destination already has.
 ///
@@ -184,8 +223,15 @@ pub const ORIGIN_TIPS_SCRIPT: &str = concat!(
 ///
 /// The branch's config is replaced wholesale, so a branch the source tracked
 /// nothing for tracks nothing here. A non-origin remote the source used is
-/// added when the destination lacks it, and the upstream's remote-tracking ref
-/// is fetched when it is missing, so ahead/behind counts come out the same.
+/// added when the destination lacks it (`added_remote=<name>`), and a
+/// `warning=` says so when the destination's has another URL; the upstream's
+/// remote-tracking ref is fetched when it is missing, so ahead/behind counts
+/// come out the same.
+///
+/// `branch` creates the branch only when no ref has the name, atomically, and
+/// says so with `created_branch=1`; a branch already at `head` is reused. A
+/// failure after that undoes the branch it created and the remotes it added,
+/// so what the caller rolls back is only what a successful run reported.
 pub const APPLY_SCRIPT: &str = concat!(
     prelude!(),
     "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0\n",
@@ -226,17 +272,36 @@ pub const APPLY_SCRIPT: &str = concat!(
     "  [ \"$(G rev-parse \"$w^{tree}\")\" = \"$tree_w\" ] || fail 'the working tree snapshot is corrupt'\n",
     "  [ \"$(G rev-parse \"$w^1^{tree}\")\" = \"$tree_i\" ] || fail 'the index snapshot is corrupt'\n",
     // --- The branch ---
+    // What a failure from here on takes back. Remote names are refname
+    // components, so they hold no spaces or glob characters.
+    "  created=0 added=''\n",
+    "  on_fail() {\n",
+    "    for r in $added; do G config --local --remove-section \"remote.$r\" >/dev/null 2>&1; done\n",
+    "    if [ \"$created\" = 1 ]; then\n",
+    "      G update-ref -d \"refs/heads/$branch\" \"$head\" >/dev/null 2>&1\n",
+    "      G config --local --remove-section \"branch.$branch\" >/dev/null 2>&1\n",
+    "    fi\n",
+    "  }\n",
     "  if [ \"$mode\" = checkout ]; then\n",
-    "    [ -z \"$(G status --porcelain --untracked-files=no)\" ] || fail 'the destination checkout has uncommitted changes'\n",
+    // Untracked files too: they would stay behind in the checkout and be
+    // taken for the branch's own.
+    "    [ -z \"$(G status --porcelain)\" ] || fail 'the destination checkout has uncommitted changes or untracked files'\n",
     "    err=$(G checkout -q --no-track -B \"$branch\" \"$head\" 2>&1) || fail \"cannot check out $branch: $err\"\n",
     "  else\n",
     "    cur=$(G rev-parse -q --verify \"refs/heads/$branch\")\n",
-    "    [ -z \"$cur\" ] || [ \"$cur\" = \"$head\" ] || fail \"$branch already exists at $cur\"\n",
-    "    G update-ref \"refs/heads/$branch\" \"$head\" || fail \"cannot create $branch\"\n",
+    "    if [ -z \"$cur\" ]; then\n",
+    // An empty old value makes this a create: it fails if the branch has
+    // appeared since the check.
+    "      err=$(G update-ref \"refs/heads/$branch\" \"$head\" '' 2>&1) || fail \"cannot create $branch: $err\"\n",
+    "      created=1\n",
+    "      printf 'created_branch=1\\n'\n",
+    "    elif [ \"$cur\" != \"$head\" ]; then\n",
+    "      fail \"$branch already exists at $cur\"\n",
+    "    fi\n",
     "  fi\n",
     // --- Its config, replaced wholesale ---
     "  G config --local --remove-section \"branch.$branch\" >/dev/null 2>&1\n",
-    "  rname='' rskip=1\n",
+    "  rname='' rskip=1 rurl=''\n",
     "  while [ $# -gt 0 ]; do\n",
     "    case $1 in\n",
     "      b) [ $# -ge 3 ] || fail 'truncated branch config'\n",
@@ -244,10 +309,19 @@ pub const APPLY_SCRIPT: &str = concat!(
     "         shift 3 ;;\n",
     "      R) [ $# -ge 2 ] || fail 'truncated remote'\n",
     "         rname=$2 rskip=0\n",
-    "         if G config --local --get \"remote.$rname.url\" >/dev/null 2>&1; then rskip=1; else printf 'added_remote=%s\\n' \"$rname\"; fi\n",
+    "         if rurl=$(G config --local --get \"remote.$rname.url\" 2>/dev/null); then\n",
+    "           rskip=1\n",
+    "         else\n",
+    "           printf 'added_remote=%s\\n' \"$rname\"\n",
+    "           added=\"$added $rname\"\n",
+    "         fi\n",
     "         shift 2 ;;\n",
     "      r) [ $# -ge 3 ] || fail 'truncated remote config'\n",
-    "         [ \"$rskip\" = 1 ] || G config --local --add \"remote.$rname.$2\" \"$3\" || fail \"cannot set remote.$rname.$2\"\n",
+    "         if [ \"$rskip\" = 0 ]; then\n",
+    "           G config --local --add \"remote.$rname.$2\" \"$3\" || fail \"cannot set remote.$rname.$2\"\n",
+    "         elif [ \"$2\" = url ] && [ \"$3\" != \"$rurl\" ]; then\n",
+    "           printf 'warning=remote %s here points at %s, not %s as at the source; %s tracks it as it is here\\n' \"$rname\" \"$rurl\" \"$3\" \"$branch\"\n",
+    "         fi\n",
     "         shift 3 ;;\n",
     "      *) fail \"unknown config record: $1\" ;;\n",
     "    esac\n",
@@ -303,11 +377,15 @@ pub const CLONE_SCRIPT: &str = concat!(
 /// directory) or `not_a_checkout=1` and nothing else; otherwise `head_ref`
 /// (or `detached=1`), `head` (absent on an unborn branch), any
 /// `operation=` in progress, `staged`/`unstaged`/`untracked`/`conflicted`
-/// counts, `untracked_bytes` when there are untracked files, `unpushed`
-/// (commits on no remote-tracking ref), `upstream`, and the same `warning=`s
-/// as [`SNAPSHOT_SCRIPT`]. `status` runs with `--no-optional-locks`, so even
-/// the index's stat cache is left alone. `$branch` is only echoed back; the
-/// caller compares `head_ref` against it.
+/// counts, a `nested_repo=<path>` per untracked git repository inside the
+/// checkout (which a snapshot could only record as a commit id, and which
+/// `untracked` leaves out), `untracked_bytes` when there are untracked files,
+/// `ignored` (ignored files outside ignored directories: none of them is
+/// carried), `repo_kib` (the object store's size), `unpushed` (commits on no
+/// remote-tracking ref), `upstream`, and the same `warning=`s as
+/// [`SNAPSHOT_SCRIPT`]. `status` runs with `--no-optional-locks`, so even the
+/// index's stat cache is left alone. `$branch` is only echoed back; the caller
+/// compares `head_ref` against it.
 pub const PREFLIGHT_SCRIPT: &str = concat!(
     prelude!(),
     "i=0\n",
@@ -325,8 +403,11 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "  done\n",
     // Porcelain v1 is one line per path (odd names come quoted), `XY path`:
     // `??` untracked, an unmerged pair conflicted, else X staged and Y not.
+    // With every untracked file listed, the only directories left are the
+    // ones git won't descend into: nested repositories.
     "  counts=$(G --no-optional-locks status --porcelain=v1 --untracked-files=all 2>/dev/null | awk '\n",
     "    { xy = substr($0, 1, 2) }\n",
+    "    xy == \"??\" && /\\/\"?$/ { print \"nested_repo=\" substr($0, 4); next }\n",
     "    xy == \"??\" { u++; next }\n",
     "    xy ~ /^(DD|AU|UD|UA|DU|AA|UU)$/ { c++; next }\n",
     "    { if (substr(xy, 1, 1) != \" \") s++; if (substr(xy, 2, 1) != \" \") w++ }\n",
@@ -334,8 +415,12 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "  printf '%s\\n' \"$counts\"\n",
     "  case $counts in\n",
     "    *untracked=0*) ;;\n",
-    "    *) printf 'untracked_bytes=%s\\n' \"$(G ls-files -z --others --exclude-standard | xargs -0 ls -ln -- 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')\" ;;\n",
+    "    *) printf 'untracked_bytes=%s\\n' \"$(G ls-files -z --others --exclude-standard | xargs -0 ls -lnd -- 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')\" ;;\n",
     "  esac\n",
+    // `--directory` stops at an ignored directory (`node_modules/`), which
+    // would otherwise be walked file by file; only plain files are counted.
+    "  printf 'ignored=%s\\n' \"$(G ls-files -z --others --ignored --exclude-standard --directory 2>/dev/null | tr '\\0' '\\n' | grep -vc '/$')\"\n",
+    "  printf 'repo_kib=%s\\n' \"$(G count-objects -v 2>/dev/null | awk '$1 == \"size:\" || $1 == \"size-pack:\" { s += $2 } END { print s + 0 }')\"\n",
     "  if [ -n \"${head:-}\" ]; then\n",
     "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
     "    up=$(G rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) && printf 'upstream=%s\\n' \"$up\"\n",
@@ -631,6 +716,9 @@ impl OriginTips {
 /// What [`APPLY_SCRIPT`] reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplyReport {
+    /// Whether this run created the branch (`branch` mode), rather than
+    /// reusing one already at `head`.
+    pub created_branch: bool,
     /// Remotes the destination did not have and now does.
     pub added_remotes: Vec<String>,
     /// Non-fatal problems, such as an upstream that could not be fetched.
@@ -648,9 +736,26 @@ impl ApplyReport {
             });
         }
         Ok(Self {
+            created_branch: report.get("created_branch") == Some("1"),
             added_remotes: report.all("added_remote").map(str::to_string).collect(),
             warnings: report.all("warning").map(str::to_string).collect(),
         })
+    }
+}
+
+/// What [`VERIFY_SCRIPT`] reports: `None` when the checkout is still what its
+/// snapshot captured, else what changed.
+pub fn parse_verify(stdout: &str) -> Result<Option<String>, TransferError> {
+    let report = ScriptReport::parse(stdout);
+    if let Some(what) = report.get("changed") {
+        return Ok(Some(what.to_string()));
+    }
+    match report.get("unchanged") {
+        Some("1") => Ok(None),
+        _ => Err(TransferError::Protocol {
+            step: "verify",
+            message: "missing unchanged".to_string(),
+        }),
     }
 }
 
@@ -685,6 +790,25 @@ pub fn rebundle_args(repo_dir: &str, bundle_path: &str, transfer_id: &str) -> Ve
     ]
 }
 
+/// Arguments for [`VERIFY_SCRIPT`].
+pub fn verify_args(
+    repo_dir: &str,
+    branch: &str,
+    snapshot: &Snapshot,
+    scratch_index: &str,
+) -> Vec<String> {
+    [
+        repo_dir,
+        branch,
+        &snapshot.head,
+        &snapshot.tree_i,
+        &snapshot.tree_w,
+        scratch_index,
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
 /// Arguments for [`ORIGIN_TIPS_SCRIPT`].
 pub fn origin_tips_args(repo_dir: &str, branches: &[&str]) -> Vec<String> {
     std::iter::once(repo_dir)
@@ -693,7 +817,7 @@ pub fn origin_tips_args(repo_dir: &str, branches: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Arguments for [`CLEANUP_SCRIPT`].
+/// Arguments for [`PREFLIGHT_SCRIPT`].
 pub fn preflight_args<'a>(checkouts: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
     checkouts
         .into_iter()
@@ -701,6 +825,7 @@ pub fn preflight_args<'a>(checkouts: impl IntoIterator<Item = (&'a str, &'a str)
         .collect()
 }
 
+/// Arguments for [`CLEANUP_SCRIPT`].
 pub fn cleanup_args(repo_dir: &str, transfer_id: &str, scratch_dir: Option<&str>) -> Vec<String> {
     vec![
         repo_dir.to_string(),
@@ -908,8 +1033,24 @@ mod tests {
         .unwrap();
         assert_eq!(ok.added_remotes, ["fork"]);
         assert_eq!(ok.warnings, ["cannot fetch"]);
+        assert!(!ok.created_branch);
+        let created =
+            ApplyReport::parse(&format!("created_branch=1\napplied={OID_A}\n"), OID_A).unwrap();
+        assert!(created.created_branch);
         assert!(ApplyReport::parse(&format!("applied={OID_B}\n"), OID_A).is_err());
         assert!(ApplyReport::parse("", OID_A).is_err());
+    }
+
+    #[test]
+    fn a_verify_report_names_the_change_or_says_unchanged() {
+        assert_eq!(parse_verify("unchanged=1\n").unwrap(), None);
+        assert_eq!(
+            parse_verify("changed=files changed\n").unwrap().as_deref(),
+            Some("files changed")
+        );
+        // A script that died before saying either is not "unchanged".
+        assert!(parse_verify("").is_err());
+        assert!(parse_verify("error=cannot enter /x\n").is_err());
     }
 
     #[test]

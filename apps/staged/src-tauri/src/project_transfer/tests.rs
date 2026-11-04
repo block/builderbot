@@ -186,6 +186,7 @@ impl World {
             exclude_tips,
             bundle_name: "repo.bundle".to_string(),
             local_bundle: PathBuf::from(local_bundle),
+            source_bytes: 0,
         }
     }
 
@@ -330,6 +331,8 @@ pub(super) fn observe(repo: &Path) -> Observed {
             Ok(meta) if meta.file_type().is_symlink() => {
                 format!("link:{}", fs::read_link(&full).unwrap().display())
             }
+            // A repository inside the checkout, listed as `path/`.
+            Ok(meta) if meta.is_dir() => "dir".to_string(),
             Ok(meta) => {
                 use std::os::unix::fs::PermissionsExt;
                 let exec = meta.permissions().mode() & 0o111 != 0;
@@ -981,6 +984,206 @@ fn a_checkout_landing_refuses_a_dirty_destination() {
         assert_eq!(
             fs::read_to_string(w.dest.join("a.txt")).unwrap(),
             "someone's edit\n"
+        );
+
+        // An untracked file would stay behind and pass for the branch's own.
+        git(&w.dest, &["checkout", "-q", "--", "a.txt"]);
+        write(&w.dest, "stray.txt", "not the branch's\n");
+        let err = w.to_remote("feature", "feature", true).unwrap_err();
+        assert!(err.to_string().contains("untracked files"), "{err}");
+        assert_eq!(rev(&w.dest, "HEAD"), rev(&w.dest, "origin/main"));
+    }
+}
+
+/// `created_branch` is what a rollback deletes, so a branch the apply only
+/// reused must not be reported — and a failed apply takes back the branch and
+/// remotes it did add.
+#[test]
+fn a_branch_landing_reports_only_a_branch_it_created_and_undoes_it_on_failure() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let fork = w.root.join("fork.git");
+        git(
+            &w.root,
+            &["init", "-q", "--bare", "--initial-branch=main", "fork.git"],
+        );
+        git(
+            &w.source,
+            &["remote", "add", "fork", fork.to_str().unwrap()],
+        );
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, "f.txt", "x\n");
+        let head = commit(&w.source, "x");
+        git(&w.source, &["push", "-q", "-u", "fork", "feature"]);
+        let source = w.endpoint(&w.remote_scratch);
+        let dest = w.endpoint(&w.local_scratch);
+        let plan = w.plan(
+            &source,
+            Landing::Branch,
+            ("feature", "feature"),
+            true,
+            vec![],
+        );
+
+        let created = carry_repo(&source, &dest, &plan).unwrap();
+        assert!(created.applied.created_branch);
+        assert_eq!(rev(&w.dest, "refs/heads/feature"), head);
+
+        // The same tip again: reused, so not reported.
+        git(&w.dest, &["remote", "remove", "fork"]);
+        let reused = carry_repo(&source, &dest, &plan).unwrap();
+        assert!(!reused.applied.created_branch);
+        assert_eq!(reused.applied.added_remotes, ["fork"]);
+
+        // An apply that fails after creating the branch and adding the
+        // remote leaves neither.
+        git(&w.dest, &["branch", "-q", "-D", "feature"]);
+        git(&w.dest, &["remote", "remove", "fork"]);
+        let request = scripts::ApplyRequest {
+            mode: scripts::ApplyMode::Branch,
+            repo_dir: w.dest.to_str().unwrap(),
+            bundle_path: &reused.dest_bundle,
+            bundle: &reused.bundle,
+            transfer_id: TID,
+            branch: "feature",
+            snapshot: &reused.snapshot,
+            restore: false,
+        };
+        let mut args = request.args();
+        args.push("bogus".to_string());
+        let output = dest.run_script(scripts::APPLY_SCRIPT, &args).unwrap();
+        assert!(!output.success);
+        assert!(
+            output.stdout.contains("created_branch=1"),
+            "{}",
+            output.stdout
+        );
+        assert!(
+            output.stdout.contains("added_remote=fork"),
+            "{}",
+            output.stdout
+        );
+        assert!(
+            output.stdout.contains("unknown config record"),
+            "{}",
+            output.stdout
+        );
+        assert!(try_git(&w.dest, &["rev-parse", "--verify", "refs/heads/feature"]).is_err());
+        assert!(try_git(
+            &w.dest,
+            &[
+                "config",
+                "--get-regexp",
+                "^(branch\\.feature|remote\\.fork)\\."
+            ]
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn a_same_named_remote_elsewhere_is_kept_with_a_warning() {
+    for shell in shells() {
+        let w = World::new(shell);
+        for name in ["fork.git", "theirs.git"] {
+            git(
+                &w.root,
+                &["init", "-q", "--bare", "--initial-branch=main", name],
+            );
+        }
+        let (fork, theirs) = (w.root.join("fork.git"), w.root.join("theirs.git"));
+        git(
+            &w.source,
+            &["remote", "add", "fork", fork.to_str().unwrap()],
+        );
+        git(
+            &w.dest,
+            &["remote", "add", "fork", theirs.to_str().unwrap()],
+        );
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, "f.txt", "x\n");
+        commit(&w.source, "x");
+        git(&w.source, &["push", "-q", "-u", "fork", "feature"]);
+
+        let (outcome, dest) = w.to_remote("feature", "feature", true).unwrap();
+
+        assert!(outcome.applied.added_remotes.is_empty());
+        let expected = format!(
+            "remote fork here points at {}, not {} as at the source; feature tracks it as it is here",
+            theirs.display(),
+            fork.display()
+        );
+        assert!(
+            outcome.applied.warnings.contains(&expected),
+            "{:?}",
+            outcome.applied.warnings
+        );
+        assert_eq!(
+            git(&dest, &["config", "remote.fork.url"]).trim(),
+            theirs.to_str().unwrap(),
+            "theirs is left alone"
+        );
+    }
+}
+
+#[test]
+fn verify_says_whether_a_checkout_is_still_its_snapshot_and_writes_nothing() {
+    for shell in shells() {
+        let w = World::new(shell);
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, "f.txt", "x\n");
+        commit(&w.source, "x");
+        make_a_mess(&w.source);
+        let (outcome, _) = w.to_remote("feature", "feature", true).unwrap();
+        let source = w.endpoint(&w.local_scratch);
+        let plan = w.plan(
+            &source,
+            Landing::Checkout,
+            ("feature", "feature"),
+            true,
+            vec![],
+        );
+        let check = || unchanged(&source, &plan, &outcome.snapshot).unwrap();
+
+        let before = source_fingerprint(&w.source);
+        assert_eq!(check(), None);
+        assert_eq!(source_fingerprint(&w.source), before, "read only");
+        assert!(!w.local_scratch.join(TID).join("repo.bundle.index").exists());
+
+        write(&w.source, "late.txt", "late\n");
+        assert_eq!(check().as_deref(), Some("files changed"));
+        fs::remove_file(w.source.join("late.txt")).unwrap();
+        // Ignored files are not part of the snapshot, so not a change.
+        write(&w.source, "late.log", "ignored\n");
+        assert_eq!(check(), None);
+
+        git(&w.source, &["add", "untracked.bin"]);
+        assert_eq!(check().as_deref(), Some("the index changed"));
+        git(&w.source, &["rm", "-q", "--cached", "untracked.bin"]);
+        assert_eq!(check(), None);
+
+        git(&w.source, &["checkout", "-q", "-b", "elsewhere"]);
+        assert_eq!(check().as_deref(), Some("feature is no longer checked out"));
+        git(&w.source, &["checkout", "-q", "feature"]);
+        let head = outcome.snapshot.head.clone();
+        let moved = git(
+            &w.source,
+            &[
+                "commit-tree",
+                "-m",
+                "moved",
+                "-p",
+                &head,
+                &format!("{head}^{{tree}}"),
+            ],
+        );
+        git(
+            &w.source,
+            &["update-ref", "refs/heads/feature", moved.trim()],
+        );
+        assert_eq!(
+            check(),
+            Some(format!("HEAD moved from {head} to {}", moved.trim()))
         );
     }
 }

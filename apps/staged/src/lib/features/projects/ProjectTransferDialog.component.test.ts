@@ -51,6 +51,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     untracked: 0,
     conflicted: 0,
     untrackedBytes: 0,
+    ignoredFiles: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],

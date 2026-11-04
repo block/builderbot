@@ -459,6 +459,8 @@ export interface ProjectTransferRepoPreflight {
   untracked: number;
   conflicted: number;
   untrackedBytes: number;
+  /** Ignored files (outside ignored directories); none of them is carried. */
+  ignoredFiles: number;
   hasUncommittedChanges: boolean;
   blockers: ProjectTransferIssue[];
   warnings: ProjectTransferIssue[];

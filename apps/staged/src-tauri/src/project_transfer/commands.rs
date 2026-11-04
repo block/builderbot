@@ -89,14 +89,13 @@ pub(crate) async fn transfer_project_impl(
         .get_project(&project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
-    let branch_ids: Vec<String> = store
+    let branches = store
         .list_branches_for_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|b| b.id)
-        .collect();
+        .map_err(|e| e.to_string())?;
+    let branch_ids: Vec<String> = branches.iter().map(|b| b.id.clone()).collect();
     let transfer_id = uuid::Uuid::new_v4().to_string();
     let guard = registry::begin(&project_id, &transfer_id, branch_ids.clone())?;
+    guard.cover_workspaces(branches.iter().filter_map(|b| b.workspace_name.as_deref()));
     let ids: Vec<&str> = branch_ids.iter().map(String::as_str).collect();
     crate::actions::commands::stop_actions_for_branches(&executor, &act_registry, &ids);
 

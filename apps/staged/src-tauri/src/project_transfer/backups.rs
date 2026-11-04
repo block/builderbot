@@ -2,11 +2,13 @@
 //!
 //! Each transfer has `~/.staged/transfers/<transfer id>/`: every repository's
 //! bundle (the branch tip plus the index and working-tree snapshots) and a
-//! `manifest.json` saying what they are. A transfer away from this machine
-//! also leaves `refs/staged-transfer-backup/<transfer id>/<branch>` in the
-//! shared clone, pointing at the working-tree snapshot, whose history holds
-//! the index snapshot and the branch tip. [`prune`] removes both after
-//! [`RETENTION`].
+//! `manifest.json` saying what they are. Each carried branch also leaves
+//! `refs/staged-transfer-backup/<transfer id>/<branch>` (the source's name)
+//! in the shared local clone, pointing at the working-tree snapshot, whose
+//! history holds the index snapshot and the branch tip. [`prune`] removes
+//! both after [`RETENTION`] — except a transfer that left uncommitted changes
+//! behind, for which this backup is the only copy: that one is kept until it
+//! is removed by hand.
 //!
 //! Recovering is plain git: `git fetch <bundle> refs/staged-transfer/<id>/snapshot`
 //! (or check out the backup ref), then `read-tree` the snapshot or its parent.
@@ -42,7 +44,23 @@ pub struct TransferManifest {
     pub status: String,
     /// The workspace on the remote side.
     pub workspace_name: Option<String>,
+    /// Some repo's uncommitted changes stayed behind and exist only in this
+    /// backup, so [`prune`] never removes it: delete the directory (and its
+    /// backup refs) by hand once they are no longer wanted.
+    #[serde(default)]
+    pub keep_until_removed: bool,
     pub repos: Vec<ManifestRepo>,
+}
+
+impl TransferManifest {
+    /// Whether this backup holds uncommitted changes the transfer did not
+    /// restore at the destination, and that a completed transfer may have
+    /// deleted at the source.
+    pub fn holds_left_behind_changes(&self) -> bool {
+        self.status != "rolledBack"
+            && !self.include_uncommitted
+            && self.repos.iter().any(|r| r.has_uncommitted_changes)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +75,7 @@ pub struct ManifestRepo {
     /// The working-tree snapshot commit: the bundle's one ref.
     pub snapshot: String,
     pub has_uncommitted_changes: bool,
-    /// The shared clone holding [`Self::backup_ref`], for a local source.
+    /// The shared local clone holding [`Self::backup_ref`].
     pub local_clone: Option<String>,
     pub backup_ref: Option<String>,
 }
@@ -81,7 +99,8 @@ pub fn read_manifest(dir: &Path) -> Option<TransferManifest> {
 /// Remove every transfer directory under `transfers_dir` older than
 /// `retention` as of `now`, and the backup refs its manifest names. Returns
 /// the directories removed. Age comes from the manifest, or the directory's
-/// mtime without one; only directories named like a transfer id are touched.
+/// mtime without one; only directories named like a transfer id are touched,
+/// and never one whose manifest keeps it until it is removed by hand.
 pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(transfers_dir) else {
         return Vec::new();
@@ -95,6 +114,12 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<
             continue;
         }
         let manifest = read_manifest(&dir);
+        if manifest
+            .as_ref()
+            .is_some_and(|m| m.keep_until_removed || m.holds_left_behind_changes())
+        {
+            continue;
+        }
         let created = match &manifest {
             Some(m) => SystemTime::UNIX_EPOCH + Duration::from_millis(m.created_at.max(0) as u64),
             None => match entry.metadata().and_then(|m| m.modified()) {
@@ -140,6 +165,7 @@ mod tests {
             include_uncommitted: true,
             status: "completed".to_string(),
             workspace_name: Some("stg-x".to_string()),
+            keep_until_removed: false,
             repos: vec![ManifestRepo {
                 github_repo: "acme/widgets".to_string(),
                 branch: "feature".to_string(),
@@ -208,5 +234,43 @@ mod tests {
             "refs/staged-transfer-backup/",
         ]);
         assert_eq!(refs.trim(), new_ref);
+    }
+
+    #[test]
+    fn keeps_a_backup_holding_changes_left_behind_whatever_its_age() {
+        let root = crate::test_utils::TempDir::new("transfer-prune-keep");
+        let clone = root.path().join("clone");
+        let transfers = root.path().join("transfers");
+        let now = SystemTime::now();
+        let old_ms = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 30 * 24 * 60 * 60 * 1000;
+        let left_behind = |id: &str, status: &str, flagged: bool| {
+            let mut m = manifest(id, old_ms, &clone, &backup_ref(id, "feature"));
+            m.include_uncommitted = false;
+            m.status = status.to_string();
+            m.keep_until_removed = flagged;
+            write_manifest(&transfers.join(id), &m).unwrap();
+        };
+        left_behind("flagged", "completed", true);
+        // Without the flag (it was never written, say), the rule still holds.
+        left_behind("unflagged", "completed", false);
+        // A rolled-back transfer deleted nothing, so its backup can go.
+        left_behind("rolled-back", "rolledBack", false);
+        let mut carried = manifest("carried", old_ms, &clone, &backup_ref("carried", "f"));
+        carried.include_uncommitted = true;
+        write_manifest(&transfers.join("carried"), &carried).unwrap();
+
+        let mut removed = prune(&transfers, RETENTION, now);
+        removed.sort();
+
+        assert_eq!(
+            removed,
+            vec![transfers.join("carried"), transfers.join("rolled-back")]
+        );
+        assert!(transfers.join("flagged").join(MANIFEST_FILE).exists());
+        assert!(transfers.join("unflagged").join(MANIFEST_FILE).exists());
     }
 }

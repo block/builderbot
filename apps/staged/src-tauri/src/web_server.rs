@@ -2284,6 +2284,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "resume_workspace" => {
             let store = get_store(store_mutex)?;
             let workspace_name: String = arg(&args, "workspaceName")?;
+            crate::project_transfer::ensure_workspace_not_transferring(&workspace_name)?;
             detached(async move {
                 let branch_ids = store
                     .update_workspace_status_by_workspace_name(

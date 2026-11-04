@@ -61,6 +61,39 @@ export function newRemoteProjectBlocker(
   return repo ? null : 'Needs a repo; this note has none';
 }
 
+/**
+ * Why the stored note can't be moved or copied right now, or `null` when it
+ * can. This is the backend's own refusal (`ensure_settled` in
+ * note_transfer.rs: a session still writing the note) plus a note that no
+ * longer exists, checked before the picker creates a project for the note so
+ * a refused transfer leaves no project behind. The backend checks again.
+ */
+export function noteTransferBlocker(
+  note: { title: string; sessionId: string | null; completedAt: number | null } | null,
+  mode: NoteTransferMode
+): string | null {
+  if (!note) return 'This note no longer exists.';
+  if (note.sessionId && note.completedAt === null) {
+    const name = note.title.trim() ? `"${note.title}"` : 'This note';
+    const gerund = mode === 'move' ? 'moving' : 'copying';
+    return `${name} is still being generated; wait for its session to finish before ${gerund} it.`;
+  }
+  return null;
+}
+
+/**
+ * The inline error for a transfer that failed after the picker created its
+ * destination. The project stays (and stays picked, so a retry goes there),
+ * so the error says it exists rather than reading as if nothing happened.
+ */
+export function transferFailedAfterCreate(
+  mode: NoteTransferMode,
+  projectName: string,
+  reason: string
+): string {
+  return `Created ${projectName}, but the note wasn't ${mode === 'move' ? 'moved' : 'copied'}: ${reason}`;
+}
+
 /** What the picker has settled on: an existing project or a name to create. */
 export type NoteTransferSelection =
   { kind: 'existing'; projectId: string } | { kind: 'new'; name: string };

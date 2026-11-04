@@ -33,12 +33,21 @@ const branchRepo = { githubRepo: 'acme/widgets', subpath: 'apps/web' };
 
 let component: ReturnType<typeof mount> | null = null;
 
-function open(repoLabel: typeof branchRepo | null, onConfirm = vi.fn(async () => {})) {
+function open(
+  repoLabel: typeof branchRepo | null,
+  {
+    onConfirm = vi.fn(async (_projectId: string) => {}),
+    onPrepare,
+  }: {
+    onConfirm?: (projectId: string) => Promise<void>;
+    onPrepare?: () => Promise<void>;
+  } = {}
+) {
   const target = document.createElement('div');
   document.body.appendChild(target);
   component = mount(NoteTransferDialog, {
     target,
-    props: { open: true, mode: 'move', noteTitle: 'Plan', repoLabel, onConfirm },
+    props: { open: true, mode: 'move', noteTitle: 'Plan', repoLabel, onPrepare, onConfirm },
   });
   flushSync();
   return { target, onConfirm };
@@ -63,6 +72,10 @@ function locationTile(target: HTMLElement, label: 'Local' | 'Remote') {
 
 function confirm(target: HTMLElement) {
   target.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+}
+
+function errorText(target: HTMLElement) {
+  return target.querySelector('[role="alert"]')?.textContent?.trim();
 }
 
 describe('NoteTransferDialog new project location', () => {
@@ -102,6 +115,7 @@ describe('NoteTransferDialog new project location', () => {
 
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(detectDefaultBranch).toHaveBeenCalledOnce();
     expect(detectDefaultBranch).toHaveBeenCalledWith('acme/widgets');
     expect(createProject).toHaveBeenCalledWith(
       'Fresh',
@@ -143,5 +157,142 @@ describe('NoteTransferDialog new project location', () => {
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
     expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
+  });
+
+  it('fetches the default branch once Remote is picked and awaits that fetch on confirm', async () => {
+    let resolveBranch!: (branch: string) => void;
+    detectDefaultBranch.mockReturnValue(new Promise((resolve) => (resolveBranch = resolve)));
+    const { target, onConfirm } = open(branchRepo);
+    pickCreateRow(target, 'Fresh');
+    expect(detectDefaultBranch).not.toHaveBeenCalled();
+
+    locationTile(target, 'Remote')!.click();
+    flushSync();
+    expect(detectDefaultBranch).toHaveBeenCalledWith('acme/widgets');
+
+    // Switching away and back again reuses the fetch already made.
+    locationTile(target, 'Local')!.click();
+    flushSync();
+    locationTile(target, 'Remote')!.click();
+    flushSync();
+
+    confirm(target);
+    await Promise.resolve();
+    expect(createProject).not.toHaveBeenCalled();
+
+    resolveBranch('trunk');
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(detectDefaultBranch).toHaveBeenCalledOnce();
+    expect(createProject).toHaveBeenCalledWith(
+      'Fresh',
+      'remote',
+      'acme/widgets',
+      'apps/web',
+      undefined,
+      undefined,
+      'trunk'
+    );
+  });
+
+  it('leaves the default branch to create_project when the prefetch fails', async () => {
+    detectDefaultBranch.mockRejectedValue(new Error('GitHub is down'));
+    const { target, onConfirm } = open(branchRepo);
+    pickCreateRow(target, 'Fresh');
+    locationTile(target, 'Remote')!.click();
+    flushSync();
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith(
+      'Fresh',
+      'remote',
+      'acme/widgets',
+      'apps/web',
+      undefined,
+      undefined,
+      undefined
+    );
+    expect(errorText(target)).toBeUndefined();
+  });
+});
+
+describe('NoteTransferDialog pre-transfer checks', () => {
+  beforeEach(() => {
+    sq.loaded = true;
+    sq.available = true;
+    createProject.mockReset().mockResolvedValue(created);
+    detectDefaultBranch.mockReset().mockResolvedValue('main');
+  });
+
+  afterEach(() => {
+    if (component) unmount(component);
+    component = null;
+    document.body.innerHTML = '';
+  });
+
+  it('runs them before creating the project', async () => {
+    const calls: string[] = [];
+    createProject.mockImplementation(async () => {
+      calls.push('create');
+      return created;
+    });
+    const { target, onConfirm } = open(branchRepo, {
+      onPrepare: async () => {
+        calls.push('prepare');
+      },
+      onConfirm: vi.fn(async () => {
+        calls.push('transfer');
+      }),
+    });
+    pickCreateRow(target, 'Fresh');
+    locationTile(target, 'Remote')!.click();
+    flushSync();
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(calls).toEqual(['prepare', 'create', 'transfer']);
+  });
+
+  it('creates nothing when they refuse the transfer', async () => {
+    const { target, onConfirm } = open(branchRepo, {
+      onPrepare: async () => {
+        throw new Error('"Plan" is still being generated');
+      },
+    });
+    pickCreateRow(target, 'Fresh');
+    locationTile(target, 'Remote')!.click();
+    flushSync();
+
+    confirm(target);
+    await vi.waitFor(() => expect(errorText(target)).toBe('"Plan" is still being generated'));
+    expect(createProject).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('says the project was created when the transfer fails after it', async () => {
+    const { target, onConfirm } = open(branchRepo, {
+      onConfirm: vi.fn(async () => {
+        throw new Error('disk full');
+      }),
+    });
+    pickCreateRow(target, 'Fresh');
+    locationTile(target, 'Remote')!.click();
+    flushSync();
+
+    confirm(target);
+    await vi.waitFor(() =>
+      expect(errorText(target)).toBe("Created Fresh, but the note wasn't moved: disk full")
+    );
+    expect(onConfirm).toHaveBeenCalledWith('created');
+  });
+
+  it('reports a failure to create the project as it is', async () => {
+    createProject.mockRejectedValue(new Error('name taken'));
+    const { target, onConfirm } = open(null);
+    pickCreateRow(target, 'Fresh');
+
+    confirm(target);
+    await vi.waitFor(() => expect(errorText(target)).toBe('name taken'));
+    expect(onConfirm).not.toHaveBeenCalled();
   });
 });

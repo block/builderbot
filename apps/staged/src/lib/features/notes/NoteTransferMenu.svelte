@@ -17,7 +17,7 @@
   import * as commands from '../../api/commands';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import NoteTransferDialog from './NoteTransferDialog.svelte';
-  import type { NoteTransferMode } from './noteTransferTarget';
+  import { noteTransferBlocker, type NoteTransferMode } from './noteTransferTarget';
 
   interface Props {
     noteId: string;
@@ -28,9 +28,10 @@
     /** The repo a branch note is bound to; shown in the picker's hint. */
     repoLabel?: { githubRepo: string; subpath: string | null } | null;
     /**
-     * Runs after the picker confirms and before the command. The transfer acts
-     * on the stored note, so a host that is editing it saves here first; a
-     * rejection is shown in the picker and the transfer does not happen.
+     * Runs after the picker confirms, before it creates a project for the note
+     * and before the command. The transfer acts on the stored note, so a host
+     * that is editing it saves here first; a rejection is shown in the picker
+     * and the transfer does not happen.
      */
     beforeTransfer?: () => Promise<void>;
     /** The note left this project; the host should close. */
@@ -59,8 +60,22 @@
     return projectsDataStore.projects.find((p) => p.id === targetProjectId)?.name ?? 'the project';
   }
 
-  async function transfer(targetProjectId: string) {
+  /**
+   * What can refuse the transfer before it starts: the stored note is checked
+   * for the backend's own refusals, then the host saves. The picker runs this
+   * before creating a project for the note, so a refusal leaves none behind.
+   */
+  async function prepare() {
+    const stored =
+      noteKind === 'project'
+        ? await commands.getProjectNote(noteId)
+        : await commands.getNote(noteId);
+    const blocker = noteTransferBlocker(stored, mode);
+    if (blocker) throw new Error(blocker);
     await beforeTransfer?.();
+  }
+
+  async function transfer(targetProjectId: string) {
     if (mode === 'move') {
       if (noteKind === 'project') {
         await commands.moveProjectNoteToProject(noteId, targetProjectId);
@@ -107,5 +122,6 @@
   {noteTitle}
   currentProjectId={projectId}
   repoLabel={noteKind === 'branch' ? repoLabel : null}
+  onPrepare={prepare}
   onConfirm={transfer}
 />

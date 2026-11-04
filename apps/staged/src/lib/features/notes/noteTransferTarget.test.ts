@@ -3,8 +3,10 @@ import {
   createProjectOption,
   noteTransferCandidates,
   newRemoteProjectBlocker,
+  noteTransferBlocker,
   noteTransferLabels,
   repoAddedHint,
+  transferFailedAfterCreate,
 } from './noteTransferTarget';
 import { filterMoveTargets } from '../branches/moveBranchTarget';
 import type { Project } from '../../types';
@@ -114,5 +116,40 @@ describe('newRemoteProjectBlocker', () => {
 
   it('keeps a project note, which has no repo, to a local project', () => {
     expect(newRemoteProjectBlocker(null)).toBe('Needs a repo; this note has none');
+  });
+});
+
+describe('noteTransferBlocker', () => {
+  const settled = { title: 'Plan', sessionId: 'session', completedAt: 1 };
+
+  it('lets a settled note or one with no session go', () => {
+    expect(noteTransferBlocker(settled, 'move')).toBeNull();
+    expect(noteTransferBlocker({ ...settled, sessionId: null, completedAt: null }, 'copy')).toBe(
+      null
+    );
+  });
+
+  it('refuses a note its session is still writing, as the backend would', () => {
+    expect(noteTransferBlocker({ ...settled, completedAt: null }, 'move')).toBe(
+      '"Plan" is still being generated; wait for its session to finish before moving it.'
+    );
+    expect(noteTransferBlocker({ ...settled, title: ' ', completedAt: null }, 'copy')).toBe(
+      'This note is still being generated; wait for its session to finish before copying it.'
+    );
+  });
+
+  it('refuses a note that is no longer stored', () => {
+    expect(noteTransferBlocker(null, 'move')).toBe('This note no longer exists.');
+  });
+});
+
+describe('transferFailedAfterCreate', () => {
+  it('says the project was created before naming what failed', () => {
+    expect(transferFailedAfterCreate('move', 'Fresh', 'disk full')).toBe(
+      "Created Fresh, but the note wasn't moved: disk full"
+    );
+    expect(transferFailedAfterCreate('copy', 'Fresh', 'disk full')).toBe(
+      "Created Fresh, but the note wasn't copied: disk full"
+    );
   });
 });

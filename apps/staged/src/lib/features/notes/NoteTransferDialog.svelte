@@ -8,9 +8,12 @@
   before the note goes there. While that row is picked, a Local / Remote
   choice is offered for the new project when remote projects are available
   (the `sq` CLI is installed), defaulting to local like the new-project form.
-  Failures — from creating the project, adding the note's repo, or the
-  transfer itself — stay inline so the choice can be retried; the backend
-  guarantees a failed transfer left the note where it was.
+  `onPrepare` runs before anything is created, so a transfer refused up front
+  leaves no project behind — a remote one starts provisioning its workspace
+  as soon as it exists. Failures — from those checks, creating the project,
+  adding the note's repo, or the transfer itself — stay inline so the choice
+  can be retried, and one that comes after the project was created says so;
+  the backend guarantees a failed transfer left the note where it was.
 -->
 <script lang="ts" module>
   let inputCounter = 0;
@@ -38,6 +41,7 @@
     noteTransferCandidates,
     noteTransferLabels,
     repoAddedHint,
+    transferFailedAfterCreate,
     type NoteTransferMode,
     type NoteTransferSelection,
   } from './noteTransferTarget';
@@ -54,6 +58,12 @@
      * new remote project is created with it.
      */
     repoLabel?: { githubRepo: string; subpath: string | null } | null;
+    /**
+     * The checks and saves that can refuse the transfer on their own. Runs on
+     * confirm before a new project is created, so a rejection (shown inline)
+     * creates nothing.
+     */
+    onPrepare?: () => Promise<void>;
     /** Perform the transfer into an existing (or just-created) project. */
     onConfirm: (targetProjectId: string) => Promise<void>;
   }
@@ -64,6 +74,7 @@
     noteTitle,
     currentProjectId = null,
     repoLabel = null,
+    onPrepare,
     onConfirm,
   }: Props = $props();
 
@@ -75,6 +86,11 @@
   let working = $state(false);
   let searchElement = $state<HTMLInputElement | null>(null);
   let wasOpen = false;
+  // The default branch for a new remote project, fetched once per open from
+  // the moment Remote is picked (as the new-project form prefetches when a
+  // repo is chosen) and awaited on confirm, so creating doesn't wait on GitHub.
+  let defaultBranchPrefetch: { githubRepo: string; branch: Promise<string | undefined> } | null =
+    null;
 
   $effect(() => {
     if (open && !wasOpen) {
@@ -83,6 +99,7 @@
       location = 'local';
       error = null;
       working = false;
+      defaultBranchPrefetch = null;
       void projectsDataStore.ensureProjectsHydrated();
       void tick().then(() => focusAfterDialogEnter(searchElement));
     }
@@ -113,6 +130,11 @@
   let effectiveLocation = $derived<ProjectLocation>(
     remoteProjectsAvailable && !remoteBlocker ? location : 'local'
   );
+  $effect(() => {
+    if (open && effectiveLocation === 'remote' && repoLabel) {
+      void defaultBranchFor(repoLabel.githubRepo);
+    }
+  });
   let highlightedIndex = $derived.by(() => {
     const current = selected;
     return current?.kind === 'existing'
@@ -141,15 +163,26 @@
     error = null;
   }
 
+  /**
+   * The prefetched default branch for `githubRepo`, starting the fetch if it
+   * hasn't been. A failed fetch resolves to `undefined` and `create_project`
+   * resolves the branch itself, as it does for the new-project form.
+   */
+  function defaultBranchFor(githubRepo: string): Promise<string | undefined> {
+    if (defaultBranchPrefetch?.githubRepo !== githubRepo) {
+      defaultBranchPrefetch = {
+        githubRepo,
+        branch: commands.detectDefaultBranch(githubRepo).catch(() => undefined),
+      };
+    }
+    return defaultBranchPrefetch.branch;
+  }
+
   async function createTargetProject(name: string): Promise<Project> {
     if (effectiveLocation === 'remote' && repoLabel) {
       // Its workspace is provisioned from the repo it is created with; the
-      // transfer then finds that repo tracked and adds nothing. The default
-      // branch is fetched first, as the new-project form prefetches it, so
-      // creating doesn't wait on GitHub.
-      const defaultBranch = await commands
-        .detectDefaultBranch(repoLabel.githubRepo)
-        .catch(() => undefined);
+      // transfer then finds that repo tracked and adds nothing.
+      const defaultBranch = await defaultBranchFor(repoLabel.githubRepo);
       return commands.createProject(
         name,
         'remote',
@@ -187,12 +220,14 @@
 
     working = true;
     error = null;
+    let created: Project | null = null;
     try {
+      await onPrepare?.();
       let projectId: string;
       if (target.kind === 'new') {
-        const project = await createTargetProject(target.name);
-        projectsDataStore.projectCreated(project);
-        projectId = project.id;
+        created = await createTargetProject(target.name);
+        projectsDataStore.projectCreated(created);
+        projectId = created.id;
         // Keep the created project selected so a transfer failure retries
         // into it rather than creating another.
         selection = { kind: 'existing', projectId };
@@ -203,7 +238,9 @@
       await onConfirm(projectId);
       open = false;
     } catch (e) {
-      error = errorMessage(e);
+      error = created
+        ? transferFailedAfterCreate(mode, created.name, errorMessage(e))
+        : errorMessage(e);
     } finally {
       working = false;
     }

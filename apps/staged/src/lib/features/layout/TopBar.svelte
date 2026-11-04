@@ -219,6 +219,7 @@
 
   @media (max-width: 768px) {
     .top-bar {
+      --top-bar-action-size: 44px;
       padding: 2px 8px;
       padding-top: calc(2px + env(safe-area-inset-top));
     }
@@ -227,12 +228,15 @@
        beside the right actions, so the badges give way first: they ellipsize
        while the title keeps its width, and once there's no room for a few
        characters they wrap onto a second line that is clipped away, rather
-       than leaving a sliver. Only then does the title itself ellipsize. */
+       than leaving a sliver. Only then does the title itself ellipsize. The
+       height cap stops that hidden line from growing the bar at larger font
+       sizes, and `clip` (unlike `hidden`) can't be scrolled to reveal it. */
     .title-content {
       max-width: min(46vw, 420px);
+      max-height: var(--top-bar-action-size);
       align-self: stretch;
       flex-wrap: wrap;
-      overflow: hidden;
+      overflow: clip;
     }
 
     /* Fill the bar's height, so a wrapped line starts below the clip. */
@@ -258,8 +262,8 @@
        font-size preference can't shrink it; unlayered, so it also beats the
        Button size and icon utilities. */
     .top-bar :global(.top-bar-action) {
-      width: 44px;
-      height: 44px;
+      width: var(--top-bar-action-size);
+      height: var(--top-bar-action-size);
       padding: 0;
     }
 

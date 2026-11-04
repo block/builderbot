@@ -121,13 +121,17 @@ describe('newRemoteProjectBlocker', () => {
 
   it('keeps a note with no repo, like every project note, to a local project', () => {
     expect(newRemoteProjectBlocker({ status: 'resolved', repo: null })).toBe(
-      'Needs a repo; this note has none'
+      'Remote needs a repo, and this note has none'
     );
   });
 
   it('waits for the lookup rather than claiming the note has no repo', () => {
-    expect(newRemoteProjectBlocker({ status: 'loading' })).toBe("Checking this note's repo…");
-    expect(newRemoteProjectBlocker({ status: 'failed' })).toBe("Couldn't look up this note's repo");
+    expect(newRemoteProjectBlocker({ status: 'loading' })).toBe(
+      "Checking this note's repo for Remote…"
+    );
+    expect(newRemoteProjectBlocker({ status: 'failed' })).toBe(
+      "Remote is unavailable: couldn't look up this note's repo"
+    );
   });
 });
 

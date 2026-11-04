@@ -212,7 +212,7 @@ describe('NoteTransferDialog new project location', () => {
   it('disables remote for a project note, which has no repo to start from', async () => {
     const { target, onConfirm } = await open('project');
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, 'Needs a repo; this note has none');
+    expectRemoteBlocked(target, 'Remote needs a repo, and this note has none');
 
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
@@ -385,13 +385,13 @@ describe("NoteTransferDialog note's repo", () => {
     const { lookup, calls } = deferredLookup();
     const { target, onConfirm } = await open(lookup);
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, "Checking this note's repo…");
+    expectRemoteBlocked(target, "Checking this note's repo for Remote…");
 
     calls[0].land({ githubRepo: 'acme/gadgets', subpath: null });
     await settle();
     expect(locationTile(target, 'Remote')!.disabled).toBe(false);
     expect(locationTile(target, 'Remote')!.hasAttribute('aria-describedby')).toBe(false);
-    expect(target.textContent).not.toContain("Checking this note's repo…");
+    expect(target.textContent).not.toContain("Checking this note's repo for Remote…");
     chooseRemote(target);
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
@@ -410,7 +410,7 @@ describe("NoteTransferDialog note's repo", () => {
   it('keeps a branch note bound to no repo local', async () => {
     const { target } = await open(null);
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, 'Needs a repo; this note has none');
+    expectRemoteBlocked(target, 'Remote needs a repo, and this note has none');
   });
 
   it('says the lookup failed rather than that the note has no repo', async () => {
@@ -419,7 +419,7 @@ describe("NoteTransferDialog note's repo", () => {
     calls[0].fail(new Error('Note not found: note-1'));
     await settle();
     pickCreateRow(target, 'Fresh');
-    expectRemoteBlocked(target, "Couldn't look up this note's repo");
+    expectRemoteBlocked(target, "Remote is unavailable: couldn't look up this note's repo");
 
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));

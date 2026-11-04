@@ -77,11 +77,11 @@ export function lookedUpRepo(lookup: NoteRepoLookup): NoteRepo | null {
 export function newRemoteProjectBlocker(lookup: NoteRepoLookup): string | null {
   switch (lookup.status) {
     case 'loading':
-      return "Checking this note's repo…";
+      return "Checking this note's repo for Remote…";
     case 'failed':
-      return "Couldn't look up this note's repo";
+      return "Remote is unavailable: couldn't look up this note's repo";
     case 'resolved':
-      return lookup.repo ? null : 'Needs a repo; this note has none';
+      return lookup.repo ? null : 'Remote needs a repo, and this note has none';
   }
 }
 

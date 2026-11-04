@@ -16,6 +16,7 @@ import type {
   BranchSessionType,
 } from '../../types';
 import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
+import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
 import { shouldQueueBranchSession } from './branchSessionQueue';
 import {
   getPendingSessionItems,
@@ -36,6 +37,8 @@ export default class BranchCardSessionManager {
   private loadTimeline: (opts?: { timelineKey?: string | null; force?: boolean }) => void =
     undefined!;
   private getTimeline: () => BranchTimelineData | null = () => null;
+  private draftWriter = createDraftWriteScheduler();
+  private openNewSessionRequest = 0;
 
   // New session modal state
   showNewSession = $state(false);
@@ -98,6 +101,10 @@ export default class BranchCardSessionManager {
     });
   }
 
+  private draftKeyForMode(mode: BranchSessionType): string {
+    return `draft:branch-session:${this.getBranch().id}:${mode}`;
+  }
+
   async startOrQueueSession(
     mode: BranchSessionType,
     prompt: string,
@@ -125,17 +132,55 @@ export default class BranchCardSessionManager {
       void this.startReviewSessionWithoutDialog();
       return;
     }
+    // Supersede any in-flight referring open so it can't clobber this one.
+    ++this.openNewSessionRequest;
+    // Open synchronously — the modal fetches the stored draft itself (via
+    // loadDraftForMode) so the click isn't gated on store IPC. Seed it with
+    // the draft held in memory only when that draft belongs to the mode being
+    // opened, or another mode's text or images would leak in.
+    if (mode !== this.newSessionMode) {
+      this.draftPrompt = '';
+      this.draftImageIds = [];
+    }
     this.newSessionMode = mode;
     this.showNewSession = true;
   }
 
-  openNewSessionReferring(hashtagRef: string) {
-    const hadContent = this.showNewSession && this.draftPrompt.trim();
+  async openNewSessionReferring(hashtagRef: string) {
+    const request = ++this.openNewSessionRequest;
+    const wasOpen = this.showNewSession;
+    const hadContent = wasOpen && this.draftPrompt.trim();
+    if (!wasOpen) {
+      const heldMode = this.newSessionMode;
+      const heldPrompt = this.draftPrompt;
+      // newSessionMode is only assigned after the generation guard below:
+      // setting it to 'commit' before the awaited read would let a concurrent
+      // openNewSession('commit') see mode === newSessionMode and keep a
+      // draftPrompt that actually belongs to heldMode, seeding commit mode
+      // with another mode's text.
+      const draft = await this.loadNewSessionDraftForMode('commit');
+      if (request !== this.openNewSessionRequest) return;
+      this.draftPrompt = this.resolveOpenPrompt('commit', draft, heldMode, heldPrompt);
+      // Images aren't persisted to the store, so the held ones survive only
+      // when they already belong to commit mode — same rule as the prompt.
+      if (heldMode !== 'commit') {
+        this.draftImageIds = [];
+      }
+    }
     this.draftPrompt = buildReferringPrompt(this.draftPrompt, hashtagRef);
-    if (!hadContent) {
+    if (!wasOpen || !hadContent) {
       this.newSessionMode = 'commit';
       this.showNewSession = true;
     }
+    // Keep this save in the same tick as opening the modal so its
+    // loadInitialDraft hits the equality fast path (stored draft === seed)
+    // and the ref is preserved exactly. An await here wouldn't lose the ref,
+    // but the open would then depend on the insertedText prefix/suffix
+    // heuristic instead.
+    this.handleNewSessionDraftChange(
+      { prompt: this.draftPrompt, mode: this.newSessionMode, imageIds: this.draftImageIds },
+      { immediate: true }
+    );
   }
 
   async startReviewSessionWithoutDialog() {
@@ -143,15 +188,63 @@ export default class BranchCardSessionManager {
     this.showNewSession = false;
     this.draftPrompt = '';
     this.draftImageIds = [];
+    void this.draftWriter.clearNow(this.draftKeyForMode('review'));
 
     const reviewPrompt = 'Review the code changes on this branch.';
     await this.startOrQueueSession('review', reviewPrompt);
   }
 
-  handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) {
+  async loadNewSessionDraftForMode(mode: BranchSessionType): Promise<string | null> {
+    // Never reject: the modal calls this fire-and-forget on mount and on mode
+    // switch, so a failed store read should degrade to keeping the seeded
+    // draft instead of blocking the modal.
+    try {
+      // Settle queued writes first. Closing the modal and switching modes both
+      // save immediately, so reading the store straight away can return the
+      // value from before that write landed.
+      await this.draftWriter.flush();
+      return await loadDraft(this.draftKeyForMode(mode));
+    } catch (e) {
+      console.error('[BranchCard] Failed to load session draft:', e);
+      return null;
+    }
+  }
+
+  /**
+   * Prompt to show when opening the modal for `mode`.
+   *
+   * `loadNewSessionDraftForMode` returns null both when nothing is stored and
+   * when the store read fails, so fall back to the draft this manager still
+   * holds in memory rather than blanking it — but only when that draft belongs
+   * to the mode being opened, or another mode's text would leak in.
+   */
+  private resolveOpenPrompt(
+    mode: BranchSessionType,
+    loaded: string | null,
+    heldMode: BranchSessionType,
+    heldPrompt: string
+  ): string {
+    if (loaded !== null) return loaded;
+    return mode === heldMode ? heldPrompt : '';
+  }
+
+  handleNewSessionDraftChange(
+    draft: { prompt: string; mode: BranchSessionType; imageIds: string[] },
+    opts: { immediate?: boolean } = {}
+  ) {
     this.draftPrompt = draft.prompt;
     this.newSessionMode = draft.mode;
     this.draftImageIds = draft.imageIds;
+    const key = this.draftKeyForMode(draft.mode);
+    if (opts.immediate) {
+      void this.draftWriter.saveNow(key, draft.prompt);
+    } else {
+      this.draftWriter.scheduleSave(key, draft.prompt);
+    }
+  }
+
+  handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) {
+    this.handleNewSessionDraftChange(draft, { immediate: true });
     this.showNewSession = false;
   }
 
@@ -166,6 +259,7 @@ export default class BranchCardSessionManager {
     this.showNewSession = false;
     this.draftPrompt = '';
     this.draftImageIds = [];
+    void this.draftWriter.clearNow(this.draftKeyForMode(data.mode));
 
     const prompt =
       data.prompt.trim() === '' && data.mode === 'review'

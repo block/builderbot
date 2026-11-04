@@ -65,6 +65,7 @@
     type ReferenceDiffContext,
     type ReferenceHistoryEntry,
   } from '../references/referenceHistory.svelte';
+  import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
 
   interface Props {
     project: Project;
@@ -121,9 +122,17 @@
   let showProjectSessionModal = $state(false);
   let draftProjectPrompt = $state('');
   let draftProjectImageIds = $state<string[]>([]);
+  const projectDraftWriter = createDraftWriteScheduler();
+  let projectDraftLoadGeneration = 0;
+  /** Bumped by every open so a referring open can tell when a plain open overtook it. */
+  let projectSessionOpenRequest = 0;
   let preferredProvider = $derived(getPreferredAgent(agentState.providers) ?? undefined);
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
+
+  function projectDraftKey(projectId: string): string {
+    return `draft:project-session:${projectId}`;
+  }
 
   // ── Live session hints/titles (latest agent message + ACP title for running notes) ──
   let liveSessionHints = $state<Record<string, string>>({});
@@ -173,6 +182,7 @@
 
   onDestroy(() => {
     liveSessionHintPoller.destroy();
+    void projectDraftWriter.flush();
   });
 
   // ── In-flight repo sessions spawned by running project sessions ────────
@@ -309,9 +319,61 @@
     void ensureHashtagItems();
   });
 
+  /**
+   * Read the stored project draft, settling queued writes first: submit
+   * clears the stored draft and close saves immediately through the writer,
+   * so reading the store straight away could return the value from before
+   * that write lands and resurrect a just-cleared prompt.
+   *
+   * Never rejects — the modal calls this fire-and-forget on mount, so a
+   * failed store read degrades to keeping the seeded draft.
+   */
+  async function loadStoredProjectDraft(): Promise<string | null> {
+    const projectId = project.id;
+    try {
+      await projectDraftWriter.flush();
+      return await loadDraft(projectDraftKey(projectId));
+    } catch (err) {
+      console.error('[ProjectSection] Failed to load project draft:', err);
+      return null;
+    }
+  }
+
+  async function loadProjectSessionDraft() {
+    const promptWhenLoadStarted = draftProjectPrompt;
+    if (promptWhenLoadStarted.trim()) return;
+
+    const projectId = project.id;
+    const generation = ++projectDraftLoadGeneration;
+    const draft = await loadStoredProjectDraft();
+    if (generation !== projectDraftLoadGeneration || project.id !== projectId) return;
+    if (draftProjectPrompt === promptWhenLoadStarted) {
+      draftProjectPrompt = draft ?? '';
+    }
+  }
+
   function openProjectSessionModal() {
+    // Supersede any in-flight referring open so it can't clobber this one.
+    ++projectSessionOpenRequest;
+    // Open synchronously seeded with the held draft — the modal fetches the
+    // authoritative stored draft itself (via loadDraftForMode) so the click
+    // isn't gated on store IPC (a flush plus a read; HTTP hops in web mode).
     showProjectSessionModal = true;
     void ensureHashtagItems();
+  }
+
+  function handleProjectSessionDraftChange(
+    draft: { prompt: string; imageIds: string[] },
+    opts: { immediate?: boolean } = {}
+  ) {
+    draftProjectPrompt = draft.prompt;
+    draftProjectImageIds = draft.imageIds;
+    const key = projectDraftKey(project.id);
+    if (opts.immediate) {
+      void projectDraftWriter.saveNow(key, draft.prompt);
+    } else {
+      projectDraftWriter.scheduleSave(key, draft.prompt);
+    }
   }
 
   async function handleSubmitProjectSession(data: {
@@ -325,6 +387,7 @@
     if (!text || !provider) return;
 
     const imageIdsToSend = data.imageIds.length > 0 ? [...data.imageIds] : undefined;
+    void projectDraftWriter.clearNow(projectDraftKey(project.id));
     try {
       const response = await commands.startProjectSession(
         project.id,
@@ -482,9 +545,23 @@
     return `project-note-${note.id}`;
   }
 
-  function handleProjectNoteNewSessionReferring(ref: string) {
+  async function handleProjectNoteNewSessionReferring(ref: string) {
+    const request = ++projectSessionOpenRequest;
+    await loadProjectSessionDraft();
+    // A plain open landed during the read: the modal is already up without
+    // the ref and only reads initialPrompt once, so saving the ref-appended
+    // prompt would just be overwritten by its next keystroke. Drop the ref,
+    // as BranchCardSessionManager.openNewSessionReferring does.
+    if (request !== projectSessionOpenRequest) return;
     draftProjectPrompt = buildReferringPrompt(draftProjectPrompt, ref);
-    openProjectSessionModal();
+    showProjectSessionModal = true;
+    void ensureHashtagItems();
+    // Keep this save in the same tick as opening the modal so its
+    // loadInitialDraft hits the equality fast path (stored draft === seed)
+    // and the ref is preserved exactly. An await here wouldn't lose the ref,
+    // but the open would then depend on the insertedText prefix/suffix
+    // heuristic instead.
+    void projectDraftWriter.saveNow(projectDraftKey(project.id), draftProjectPrompt);
   }
 
   function projectNoteToOpenState(note: ProjectNote, chatOpen = false): OpenProjectNoteState {
@@ -802,9 +879,12 @@
     initialImageIds={draftProjectImageIds}
     {hashtagItems}
     submitDisabledReason={preferredProvider ? null : 'No AI agent available'}
+    loadDraftForMode={() => loadStoredProjectDraft()}
+    onDraftChange={(draft, opts) => {
+      handleProjectSessionDraftChange(draft, opts);
+    }}
     onClose={(draft) => {
-      draftProjectPrompt = draft.prompt;
-      draftProjectImageIds = draft.imageIds;
+      handleProjectSessionDraftChange(draft, { immediate: true });
       showProjectSessionModal = false;
     }}
     onSubmit={(data) => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   foldSnippetsIntoPrompt,
   formatToolDisplay,
+  insertedText,
   makePathsRelative,
   sessionEndMessage,
   snippetLabel,
@@ -26,6 +27,37 @@ describe('foldSnippetsIntoPrompt', () => {
     expect(foldSnippetsIntoPrompt('', [{ text: 'just context' }])).toBe(
       '\n\n<attached-snippet>\njust context\n</attached-snippet>'
     );
+  });
+});
+
+describe('insertedText', () => {
+  it('returns text appended to the end', () => {
+    expect(insertedText('commit text', 'commit text typed')).toBe(' typed');
+  });
+
+  it('returns text inserted in the middle', () => {
+    expect(insertedText('abc', 'abXYc')).toBe('XY');
+  });
+
+  it('returns everything when starting from an empty prompt', () => {
+    expect(insertedText('', 'typed')).toBe('typed');
+  });
+
+  it('returns the replacement when a selection is overwritten', () => {
+    expect(insertedText('hello world', 'hello there world')).toBe('there ');
+  });
+
+  it("returns '' for unchanged text and pure deletions", () => {
+    expect(insertedText('same', 'same')).toBe('');
+    expect(insertedText('commit text', 'commit')).toBe('');
+    expect(insertedText('commit', '')).toBe('');
+  });
+
+  it('drops boundary characters a replacement shares with the replaced text (known limitation)', () => {
+    // A prefix/suffix diff can't tell a shared boundary character apart from
+    // untouched text; accepted for the one-round-trip window it covers.
+    expect(insertedText('note text', 'new')).toBe('ew');
+    expect(insertedText('fix bug', 'fix bag')).toBe('a');
   });
 });
 

@@ -796,6 +796,7 @@
         selectedProjectSafeToDelete && 'border border-destructive text-destructive',
       ]}
       title="Remove project"
+      aria-label="Remove project"
       onclick={() => projectActions.requestRemoveProject(selectedProject)}
     >
       <span

@@ -226,6 +226,13 @@
       max-width: min(46vw, 420px);
     }
 
+    /* Narrow bars can't fit the badges at full width next to the right
+       actions (the diff route's RepoLabel beside its context switcher), so
+       let them shrink and ellipsize instead of painting under the actions. */
+    .badge-slot {
+      flex-shrink: 1;
+    }
+
     .center-content {
       width: min(34vw, 240px);
     }

@@ -1,9 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createProjectOption,
+  lookedUpRepo,
   noteTransferCandidates,
+  newRemoteProjectBlocker,
+  noteTransferBlocker,
   noteTransferLabels,
+  noteTransferTarget,
   repoAddedHint,
+  transferFailedAfterCreate,
+  unboundBranchNoteBlocker,
 } from './noteTransferTarget';
 import { filterMoveTargets } from '../branches/moveBranchTarget';
 import type { Project } from '../../types';
@@ -103,5 +109,117 @@ describe('repoAddedHint', () => {
 
   it('says nothing for a project note', () => {
     expect(repoAddedHint(null)).toBeNull();
+  });
+});
+
+describe('newRemoteProjectBlocker', () => {
+  const repo = { githubRepo: 'acme/widgets', subpath: null };
+
+  it('lets a repo note start a remote project from its repo', () => {
+    expect(newRemoteProjectBlocker({ status: 'resolved', repo })).toBeNull();
+  });
+
+  it('keeps a note with no repo, like every project note, to a local project', () => {
+    expect(newRemoteProjectBlocker({ status: 'resolved', repo: null })).toBe(
+      'Remote needs a repo, and this note has none'
+    );
+  });
+
+  it('waits for the lookup rather than claiming the note has no repo', () => {
+    expect(newRemoteProjectBlocker({ status: 'loading' })).toBe(
+      "Checking this note's repo for Remote…"
+    );
+    expect(newRemoteProjectBlocker({ status: 'failed' })).toBe(
+      "Remote is unavailable: couldn't look up this note's repo"
+    );
+  });
+});
+
+describe('lookedUpRepo', () => {
+  it('is the repo only once the lookup has found one', () => {
+    const repo = { githubRepo: 'acme/widgets', subpath: 'apps/web' };
+    expect(lookedUpRepo({ status: 'resolved', repo })).toBe(repo);
+    expect(lookedUpRepo({ status: 'resolved', repo: null })).toBeNull();
+    expect(lookedUpRepo({ status: 'loading' })).toBeNull();
+    expect(lookedUpRepo({ status: 'failed' })).toBeNull();
+  });
+});
+
+describe('noteTransferTarget', () => {
+  it('is whatever was picked', () => {
+    const picked = { kind: 'existing', projectId: 'here' } as const;
+    expect(noteTransferTarget(picked, 'Fresh', [here, there], 'Fresh')).toBe(picked);
+    expect(noteTransferTarget(picked, '', [here, there], null)).toBe(picked);
+  });
+
+  it('falls back to the only row the query leaves on offer', () => {
+    expect(noteTransferTarget(null, 'There', [there], null)).toEqual({
+      kind: 'existing',
+      projectId: 'there',
+    });
+    expect(noteTransferTarget(null, 'Fresh', [], 'Fresh')).toEqual({ kind: 'new', name: 'Fresh' });
+  });
+
+  it('assumes nothing before anything is typed, even with one project on offer', () => {
+    expect(noteTransferTarget(null, '', [there], null)).toBeNull();
+    expect(noteTransferTarget(null, '  ', [there], null)).toBeNull();
+  });
+
+  it('is nothing while more than one row is on offer, or none', () => {
+    expect(noteTransferTarget(null, 'e', [here, there], null)).toBeNull();
+    expect(noteTransferTarget(null, 'The', [there], 'The')).toBeNull();
+    expect(noteTransferTarget(null, 'Here', [], null)).toBeNull();
+  });
+});
+
+describe('noteTransferBlocker', () => {
+  const settled = { title: 'Plan', sessionId: 'session', completedAt: 1 };
+
+  it('lets a settled note or one with no session go', () => {
+    expect(noteTransferBlocker(settled, 'move')).toBeNull();
+    expect(noteTransferBlocker({ ...settled, sessionId: null, completedAt: null }, 'copy')).toBe(
+      null
+    );
+  });
+
+  it('refuses a note its session is still writing, as the backend would', () => {
+    expect(noteTransferBlocker({ ...settled, completedAt: null }, 'move')).toBe(
+      '"Plan" is still being generated; wait for its session to finish before moving it.'
+    );
+    expect(noteTransferBlocker({ ...settled, title: ' ', completedAt: null }, 'copy')).toBe(
+      'This note is still being generated; wait for its session to finish before copying it.'
+    );
+  });
+
+  it('refuses a note that is no longer stored', () => {
+    expect(noteTransferBlocker(null, 'move')).toBe('This note no longer exists.');
+  });
+});
+
+describe('unboundBranchNoteBlocker', () => {
+  it('lets a note bound to a repo go', () => {
+    expect(unboundBranchNoteBlocker({ githubRepo: 'acme/widgets', subpath: null }, 'move')).toBe(
+      null
+    );
+  });
+
+  it('refuses a note whose branch has no repo, as the backend would', () => {
+    expect(unboundBranchNoteBlocker(null, 'move')).toBe(
+      "This note's branch is not bound to a repository, so the note cannot be moved to another project."
+    );
+    expect(unboundBranchNoteBlocker(null, 'copy')).toBe(
+      "This note's branch is not bound to a repository, so the note cannot be copied to another project."
+    );
+  });
+});
+
+describe('transferFailedAfterCreate', () => {
+  it('says the project was created before naming what failed', () => {
+    expect(transferFailedAfterCreate('move', 'Fresh', 'disk full')).toBe(
+      "Created Fresh, but the note wasn't moved: disk full"
+    );
+    expect(transferFailedAfterCreate('copy', 'Fresh', 'disk full')).toBe(
+      "Created Fresh, but the note wasn't copied: disk full"
+    );
   });
 });

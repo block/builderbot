@@ -2300,7 +2300,6 @@
     open={true}
     note={openWriteNote.note}
     projectId={branch.projectId}
-    {repoLabel}
     onSave={handleSaveWrittenNote}
     onClose={() => (openWriteNote = null)}
   />

@@ -48,17 +48,124 @@ export function createProjectOption(query: string, projects: Project[]): string 
   return name;
 }
 
+/** The repo + subpath a branch note is bound to. */
+export interface NoteRepo {
+  githubRepo: string;
+  subpath: string | null;
+}
+
+/**
+ * The picker's lookup of the stored note's repo, made each time it opens.
+ * `repo` is `null` for a note bound to none: every project note, and a branch
+ * note whose branch tracks no repo.
+ */
+export type NoteRepoLookup =
+  { status: 'loading' } | { status: 'resolved'; repo: NoteRepo | null } | { status: 'failed' };
+
+/** The looked-up repo, or `null` while there isn't one to act on. */
+export function lookedUpRepo(lookup: NoteRepoLookup): NoteRepo | null {
+  return lookup.status === 'resolved' ? lookup.repo : null;
+}
+
+/**
+ * Why a project created for this note can't be remote, or `null` when it can.
+ * A remote project's workspace is provisioned from the repo it is created
+ * with, and adding a repo afterwards needs that workspace running already, so
+ * a new remote project starts from the note's repo — which has to be known
+ * first, and which project notes don't have.
+ */
+export function newRemoteProjectBlocker(lookup: NoteRepoLookup): string | null {
+  switch (lookup.status) {
+    case 'loading':
+      return "Checking this note's repo for Remote…";
+    case 'failed':
+      return "Remote is unavailable: couldn't look up this note's repo";
+    case 'resolved':
+      return lookup.repo ? null : 'Remote needs a repo, and this note has none';
+  }
+}
+
+/**
+ * Why the stored note can't be moved or copied right now, or `null` when it
+ * can. This is the backend's own refusal (`ensure_settled` in
+ * note_transfer.rs: a session still writing the note) plus a note that no
+ * longer exists, checked before the picker creates a project for the note so
+ * a refused transfer leaves no project behind. The backend checks again.
+ */
+export function noteTransferBlocker(
+  note: { title: string; sessionId: string | null; completedAt: number | null } | null,
+  mode: NoteTransferMode
+): string | null {
+  if (!note) return 'This note no longer exists.';
+  if (note.sessionId && note.completedAt === null) {
+    const name = note.title.trim() ? `"${note.title}"` : 'This note';
+    const gerund = mode === 'move' ? 'moving' : 'copying';
+    return `${name} is still being generated; wait for its session to finish before ${gerund} it.`;
+  }
+  return null;
+}
+
+/**
+ * Why a branch note can't be moved or copied for want of a repo, or `null`
+ * when `repo` (the stored note's, `null` for none) is there. The transfer adds
+ * the note's repo to the destination, so the backend refuses a note whose
+ * branch is bound to none (`transfer_branch_note` in note_transfer.rs); this
+ * is its wording, short of the branch name the picker doesn't have. Checked
+ * before the picker creates a project, like `noteTransferBlocker`.
+ */
+export function unboundBranchNoteBlocker(
+  repo: NoteRepo | null,
+  mode: NoteTransferMode
+): string | null {
+  if (repo) return null;
+  const participle = mode === 'move' ? 'moved' : 'copied';
+  return `This note's branch is not bound to a repository, so the note cannot be ${participle} to another project.`;
+}
+
+/**
+ * The inline error for a transfer that failed after the picker created its
+ * destination. The project stays (and stays picked, so a retry goes there),
+ * so the error says it exists rather than reading as if nothing happened.
+ */
+export function transferFailedAfterCreate(
+  mode: NoteTransferMode,
+  projectName: string,
+  reason: string
+): string {
+  return `Created ${projectName}, but the note wasn't ${mode === 'move' ? 'moved' : 'copied'}: ${reason}`;
+}
+
 /** What the picker has settled on: an existing project or a name to create. */
 export type NoteTransferSelection =
   { kind: 'existing'; projectId: string } | { kind: 'new'; name: string };
 
 /**
+ * What confirming (Move/Copy, or Enter in the search box) acts on: the picked
+ * row or, when nothing is picked, the "Create project" row if it is the only
+ * row on offer, else the single match left by what was typed. With nothing
+ * typed nothing is assumed, even when only one project is on offer, so Enter
+ * straight after opening can't send the note somewhere the user never chose.
+ * `null` when that leaves nothing to act on, which keeps the confirm button
+ * disabled.
+ */
+export function noteTransferTarget(
+  selected: NoteTransferSelection | null,
+  query: string,
+  filtered: Project[],
+  createName: string | null
+): NoteTransferSelection | null {
+  if (selected) return selected;
+  if (!query.trim()) return null;
+  if (filtered.length === 1 && !createName) return { kind: 'existing', projectId: filtered[0].id };
+  if (filtered.length === 0 && createName) return { kind: 'new', name: createName };
+  return null;
+}
+
+/**
  * Explains, for a repo note, what the destination will gain. Project notes
  * carry no repo, so there is nothing to say.
  */
-export function repoAddedHint(
-  repo: { githubRepo: string; subpath: string | null } | null | undefined
-): string | null {
+export function repoAddedHint(repo: NoteRepo | null | undefined): string | null {
   if (!repo) return null;
   const path = repo.subpath ? `${repo.githubRepo} (${repo.subpath})` : repo.githubRepo;
   return `${path} is added to the project if it isn't there yet.`;

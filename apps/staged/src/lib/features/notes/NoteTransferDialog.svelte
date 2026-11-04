@@ -5,9 +5,19 @@
   search box doubles as the way to create a project: when what's typed names
   no existing project, a "Create project" row is offered at the end of the
   list, and confirming creates it (through the regular create-project path)
-  before the note goes there. Failures — from creating the project, adding
-  the note's repo, or the transfer itself — stay inline so the choice can be
-  retried; the backend guarantees a failed transfer left the note where it was.
+  before the note goes there. Whenever confirming would create a project —
+  that row picked, or the only row left for Enter — a Local / Remote choice
+  is offered for it when remote projects are available (the `sq` CLI is
+  installed), defaulting to local like the new-project form. A remote project
+  starts from the note's repo, looked up from the stored note on each open
+  through `loadNoteRepo` (the host's idea of the repo can be missing or
+  stale), so Remote waits on that lookup.
+  `onPrepare` runs before anything is created, so a transfer refused up front
+  leaves no project behind — a remote one starts provisioning its workspace
+  as soon as it exists. Failures — from those checks, creating the project,
+  adding the note's repo, or the transfer itself — stay inline so the choice
+  can be retried, and one that comes after the project was created says so;
+  the backend guarantees a failed transfer left the note where it was.
 -->
 <script lang="ts" module>
   let inputCounter = 0;
@@ -23,19 +33,27 @@
   import { Input } from '$lib/components/ui/input';
   import Spinner from '../../shared/Spinner.svelte';
   import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
+  import ProjectLocationPicker from '../projects/ProjectLocationPicker.svelte';
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { sqState } from '../settings/sq.svelte';
   import * as commands from '../../api/commands';
   import { filterMoveTargets, nextMoveTargetIndex } from '../branches/moveBranchTarget';
   import {
     createProjectOption,
+    lookedUpRepo,
+    newRemoteProjectBlocker,
     noteTransferCandidates,
     noteTransferLabels,
+    noteTransferTarget,
     repoAddedHint,
+    transferFailedAfterCreate,
+    type NoteRepo,
+    type NoteRepoLookup,
     type NoteTransferMode,
     type NoteTransferSelection,
   } from './noteTransferTarget';
-  import type { Project } from '../../types';
+  import type { Project, ProjectLocation } from '../../types';
 
   interface Props {
     open: boolean;
@@ -43,8 +61,18 @@
     noteTitle: string;
     /** The project the note is in now; left off the list for a move. */
     currentProjectId?: string | null;
-    /** The repo a branch note is bound to, for the "added if missing" hint. */
-    repoLabel?: { githubRepo: string; subpath: string | null } | null;
+    /**
+     * Looks up the repo the stored note is bound to (`null` for none), for the
+     * "added if missing" hint and the repo a new remote project is created
+     * with. Runs on each open; without it the note has no repo.
+     */
+    loadNoteRepo?: () => Promise<NoteRepo | null>;
+    /**
+     * The checks and saves that can refuse the transfer on their own. Runs on
+     * confirm before a new project is created, so a rejection (shown inline)
+     * creates nothing.
+     */
+    onPrepare?: () => Promise<void>;
     /** Perform the transfer into an existing (or just-created) project. */
     onConfirm: (targetProjectId: string) => Promise<void>;
   }
@@ -54,24 +82,37 @@
     mode,
     noteTitle,
     currentProjectId = null,
-    repoLabel = null,
+    loadNoteRepo,
+    onPrepare,
     onConfirm,
   }: Props = $props();
 
   const searchId = `note-transfer-search-${++inputCounter}`;
   let query = $state('');
   let selection = $state<NoteTransferSelection | null>(null);
+  let location = $state<ProjectLocation>('local');
   let error = $state<string | null>(null);
   let working = $state(false);
   let searchElement = $state<HTMLInputElement | null>(null);
+  let noteRepo = $state<NoteRepoLookup>({ status: 'resolved', repo: null });
   let wasOpen = false;
+  // Bumped per lookup, so one from an earlier open that lands late is dropped.
+  let noteRepoLookupId = 0;
+  // The default branch for a new remote project, fetched once per open from
+  // the moment Remote is picked (as the new-project form prefetches when a
+  // repo is chosen) and awaited on confirm, so creating doesn't wait on GitHub.
+  let defaultBranchPrefetch: { githubRepo: string; branch: Promise<string | undefined> } | null =
+    null;
 
   $effect(() => {
     if (open && !wasOpen) {
       query = '';
       selection = null;
+      location = 'local';
       error = null;
       working = false;
+      defaultBranchPrefetch = null;
+      lookUpNoteRepo();
       void projectsDataStore.ensureProjectsHydrated();
       void tick().then(() => focusAfterDialogEnter(searchElement));
     }
@@ -79,7 +120,8 @@
   });
 
   let labels = $derived(noteTransferLabels(mode));
-  let hint = $derived(repoAddedHint(repoLabel));
+  let repo = $derived(lookedUpRepo(noteRepo));
+  let hint = $derived(repoAddedHint(repo));
   let candidates = $derived(
     noteTransferCandidates(projectsDataStore.projects, currentProjectId, mode)
   );
@@ -97,8 +139,21 @@
     }
     return filtered.some((p) => p.id === current.projectId) ? current : null;
   });
+  // What confirming acts on, picked or not: it is the row shown as chosen, and
+  // when it is a project to create, its location is on screen to change.
+  let target = $derived(noteTransferTarget(selected, query, filtered, createName));
+  let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
+  let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
+  let effectiveLocation = $derived<ProjectLocation>(
+    remoteProjectsAvailable && !remoteBlocker ? location : 'local'
+  );
+  $effect(() => {
+    if (open && effectiveLocation === 'remote' && repo) {
+      void defaultBranchFor(repo.githubRepo);
+    }
+  });
   let highlightedIndex = $derived.by(() => {
-    const current = selected;
+    const current = target;
     return current?.kind === 'existing'
       ? filtered.findIndex((p) => p.id === current.projectId)
       : -1;
@@ -119,10 +174,60 @@
     error = null;
   }
 
+  function lookUpNoteRepo() {
+    const lookupId = ++noteRepoLookupId;
+    if (!loadNoteRepo) {
+      noteRepo = { status: 'resolved', repo: null };
+      return;
+    }
+    noteRepo = { status: 'loading' };
+    loadNoteRepo().then(
+      (found) => {
+        if (lookupId === noteRepoLookupId) noteRepo = { status: 'resolved', repo: found };
+      },
+      () => {
+        if (lookupId === noteRepoLookupId) noteRepo = { status: 'failed' };
+      }
+    );
+  }
+
   function selectCreate() {
     if (!createName) return;
     selection = { kind: 'new', name: createName };
     error = null;
+  }
+
+  /**
+   * The prefetched default branch for `githubRepo`, starting the fetch if it
+   * hasn't been. A failed fetch resolves to `undefined` and `create_project`
+   * resolves the branch itself, as it does for the new-project form.
+   */
+  function defaultBranchFor(githubRepo: string): Promise<string | undefined> {
+    if (defaultBranchPrefetch?.githubRepo !== githubRepo) {
+      defaultBranchPrefetch = {
+        githubRepo,
+        branch: commands.detectDefaultBranch(githubRepo).catch(() => undefined),
+      };
+    }
+    return defaultBranchPrefetch.branch;
+  }
+
+  async function createTargetProject(name: string): Promise<Project> {
+    if (effectiveLocation === 'remote' && repo) {
+      // Its workspace is provisioned from the repo it is created with; the
+      // transfer then finds that repo tracked and adds nothing.
+      const defaultBranch = await defaultBranchFor(repo.githubRepo);
+      return commands.createProject(
+        name,
+        'remote',
+        repo.githubRepo,
+        repo.subpath ?? undefined,
+        undefined,
+        undefined,
+        defaultBranch
+      );
+    }
+    return commands.createProject(name, 'local');
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
@@ -136,36 +241,32 @@
 
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
-    // Enter in the search box with nothing picked: take the create row if
-    // that is the only thing on offer, else the single remaining match.
-    const target =
-      selected ??
-      (filtered.length === 1 && !createName
-        ? ({ kind: 'existing', projectId: filtered[0].id } satisfies NoteTransferSelection)
-        : filtered.length === 0 && createName
-          ? ({ kind: 'new', name: createName } satisfies NoteTransferSelection)
-          : null);
-    if (working || !target) return;
+    const chosen = target;
+    if (working || !chosen) return;
 
     working = true;
     error = null;
+    let created: Project | null = null;
     try {
+      await onPrepare?.();
       let projectId: string;
-      if (target.kind === 'new') {
-        const project = await commands.createProject(target.name, 'local');
-        projectsDataStore.projectCreated(project);
-        projectId = project.id;
+      if (chosen.kind === 'new') {
+        created = await createTargetProject(chosen.name);
+        projectsDataStore.projectCreated(created);
+        projectId = created.id;
         // Keep the created project selected so a transfer failure retries
         // into it rather than creating another.
         selection = { kind: 'existing', projectId };
         query = '';
       } else {
-        projectId = target.projectId;
+        projectId = chosen.projectId;
       }
       await onConfirm(projectId);
       open = false;
     } catch (e) {
-      error = errorMessage(e);
+      error = created
+        ? transferFailedAfterCreate(mode, created.name, errorMessage(e))
+        : errorMessage(e);
     } finally {
       working = false;
     }
@@ -221,9 +322,9 @@
           <button
             type="button"
             class="project-row"
-            class:selected={selected?.kind === 'existing' && selected.projectId === project.id}
+            class:selected={target?.kind === 'existing' && target.projectId === project.id}
             role="radio"
-            aria-checked={selected?.kind === 'existing' && selected.projectId === project.id}
+            aria-checked={target?.kind === 'existing' && target.projectId === project.id}
             disabled={working}
             onclick={() => selectProject(project)}
           >
@@ -244,9 +345,9 @@
           <button
             type="button"
             class="project-row create-row"
-            class:selected={selected?.kind === 'new'}
+            class:selected={target?.kind === 'new'}
             role="radio"
-            aria-checked={selected?.kind === 'new'}
+            aria-checked={target?.kind === 'new'}
             disabled={working}
             onclick={selectCreate}
           >
@@ -257,6 +358,18 @@
           </button>
         {/if}
       </div>
+
+      {#if remoteProjectsAvailable && target?.kind === 'new'}
+        <div class="location-field">
+          <span class="field-label">New project location</span>
+          <ProjectLocationPicker
+            bind:value={location}
+            orientation="horizontal"
+            disabled={working}
+            remoteDisabledReason={remoteBlocker}
+          />
+        </div>
+      {/if}
 
       {#if error}
         <p class="transfer-error" role="alert">{error}</p>
@@ -276,7 +389,7 @@
           type="submit"
           variant="accent"
           class="gap-1.5 px-4 py-2 text-sm max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
-          disabled={!selected || working}
+          disabled={!target || working}
         >
           {#if working}
             <Spinner size={14} />
@@ -393,6 +506,17 @@
   .create-label strong {
     color: var(--text-primary);
     font-weight: 600;
+  }
+
+  .location-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .field-label {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
   }
 
   .empty-state {

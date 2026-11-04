@@ -17,7 +17,12 @@
   import * as commands from '../../api/commands';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import NoteTransferDialog from './NoteTransferDialog.svelte';
-  import type { NoteTransferMode } from './noteTransferTarget';
+  import {
+    noteTransferBlocker,
+    unboundBranchNoteBlocker,
+    type NoteRepo,
+    type NoteTransferMode,
+  } from './noteTransferTarget';
 
   interface Props {
     noteId: string;
@@ -25,30 +30,24 @@
     noteTitle: string;
     /** The project the note is in now. */
     projectId?: string | null;
-    /** The repo a branch note is bound to; shown in the picker's hint. */
-    repoLabel?: { githubRepo: string; subpath: string | null } | null;
     /**
-     * Runs after the picker confirms and before the command. The transfer acts
-     * on the stored note, so a host that is editing it saves here first; a
-     * rejection is shown in the picker and the transfer does not happen.
+     * Runs after the picker confirms, before it creates a project for the note
+     * and before the command. The transfer acts on the stored note, so a host
+     * that is editing it saves here first; a rejection is shown in the picker
+     * and the transfer does not happen.
      */
     beforeTransfer?: () => Promise<void>;
     /** The note left this project; the host should close. */
     onMoved?: () => void;
   }
 
-  let {
-    noteId,
-    noteKind,
-    noteTitle,
-    projectId = null,
-    repoLabel = null,
-    beforeTransfer,
-    onMoved,
-  }: Props = $props();
+  let { noteId, noteKind, noteTitle, projectId = null, beforeTransfer, onMoved }: Props = $props();
 
   let mode = $state<NoteTransferMode>('move');
   let dialogOpen = $state(false);
+  // The picker's lookup from its latest open, which `prepare` reuses rather
+  // than asking again on confirm.
+  let repoLookup: { noteId: string; repo: Promise<NoteRepo | null> } | null = null;
 
   function openPicker(next: NoteTransferMode) {
     mode = next;
@@ -59,8 +58,48 @@
     return projectsDataStore.projects.find((p) => p.id === targetProjectId)?.name ?? 'the project';
   }
 
-  async function transfer(targetProjectId: string) {
+  /**
+   * What can refuse the transfer before it starts: the stored note is checked
+   * for the backend's own refusals (for a branch note, that includes being
+   * bound to no repo), then the host saves. The picker runs this before
+   * creating a project for the note, so a refusal leaves none behind.
+   */
+  async function prepare() {
+    const stored =
+      noteKind === 'project'
+        ? await commands.getProjectNote(noteId)
+        : await commands.getNote(noteId);
+    const blocker =
+      noteTransferBlocker(stored, mode) ??
+      (noteKind === 'branch' ? unboundBranchNoteBlocker(await noteRepo(), mode) : null);
+    if (blocker) throw new Error(blocker);
     await beforeTransfer?.();
+  }
+
+  /**
+   * The repo the stored note's branch is bound to: the one the transfer adds
+   * to the destination, and so the one a new remote destination starts from.
+   * Read from the note rather than taken from the host, which may have been
+   * opened by reference without knowing the note's repo, or with another's.
+   */
+  function loadRepo(): Promise<NoteRepo | null> {
+    const lookup = {
+      noteId,
+      repo: commands
+        .getNoteRepo(noteId)
+        .then((repo) => repo && { githubRepo: repo.githubRepo, subpath: repo.subpath }),
+    };
+    repoLookup = lookup;
+    return lookup.repo;
+  }
+
+  /** The picker's lookup for this note, or a new one if it failed or is missing. */
+  function noteRepo(): Promise<NoteRepo | null> {
+    const lookup = repoLookup?.noteId === noteId ? repoLookup.repo : null;
+    return lookup ? lookup.catch(() => loadRepo()) : loadRepo();
+  }
+
+  async function transfer(targetProjectId: string) {
     if (mode === 'move') {
       if (noteKind === 'project') {
         await commands.moveProjectNoteToProject(noteId, targetProjectId);
@@ -106,6 +145,7 @@
   {mode}
   {noteTitle}
   currentProjectId={projectId}
-  repoLabel={noteKind === 'branch' ? repoLabel : null}
+  loadNoteRepo={noteKind === 'branch' ? loadRepo : undefined}
+  onPrepare={prepare}
   onConfirm={transfer}
 />

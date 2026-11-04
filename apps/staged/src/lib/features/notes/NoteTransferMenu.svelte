@@ -17,7 +17,12 @@
   import * as commands from '../../api/commands';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import NoteTransferDialog from './NoteTransferDialog.svelte';
-  import { noteTransferBlocker, type NoteRepo, type NoteTransferMode } from './noteTransferTarget';
+  import {
+    noteTransferBlocker,
+    unboundBranchNoteBlocker,
+    type NoteRepo,
+    type NoteTransferMode,
+  } from './noteTransferTarget';
 
   interface Props {
     noteId: string;
@@ -40,6 +45,9 @@
 
   let mode = $state<NoteTransferMode>('move');
   let dialogOpen = $state(false);
+  // The picker's lookup from its latest open, which `prepare` reuses rather
+  // than asking again on confirm.
+  let repoLookup: { noteId: string; repo: Promise<NoteRepo | null> } | null = null;
 
   function openPicker(next: NoteTransferMode) {
     mode = next;
@@ -52,15 +60,18 @@
 
   /**
    * What can refuse the transfer before it starts: the stored note is checked
-   * for the backend's own refusals, then the host saves. The picker runs this
-   * before creating a project for the note, so a refusal leaves none behind.
+   * for the backend's own refusals (for a branch note, that includes being
+   * bound to no repo), then the host saves. The picker runs this before
+   * creating a project for the note, so a refusal leaves none behind.
    */
   async function prepare() {
     const stored =
       noteKind === 'project'
         ? await commands.getProjectNote(noteId)
         : await commands.getNote(noteId);
-    const blocker = noteTransferBlocker(stored, mode);
+    const blocker =
+      noteTransferBlocker(stored, mode) ??
+      (noteKind === 'branch' ? unboundBranchNoteBlocker(await noteRepo(), mode) : null);
     if (blocker) throw new Error(blocker);
     await beforeTransfer?.();
   }
@@ -71,9 +82,21 @@
    * Read from the note rather than taken from the host, which may have been
    * opened by reference without knowing the note's repo, or with another's.
    */
-  async function loadRepo(): Promise<NoteRepo | null> {
-    const repo = await commands.getNoteRepo(noteId);
-    return repo && { githubRepo: repo.githubRepo, subpath: repo.subpath };
+  function loadRepo(): Promise<NoteRepo | null> {
+    const lookup = {
+      noteId,
+      repo: commands
+        .getNoteRepo(noteId)
+        .then((repo) => repo && { githubRepo: repo.githubRepo, subpath: repo.subpath }),
+    };
+    repoLookup = lookup;
+    return lookup.repo;
+  }
+
+  /** The picker's lookup for this note, or a new one if it failed or is missing. */
+  function noteRepo(): Promise<NoteRepo | null> {
+    const lookup = repoLookup?.noteId === noteId ? repoLookup.repo : null;
+    return lookup ? lookup.catch(() => loadRepo()) : loadRepo();
   }
 
   async function transfer(targetProjectId: string) {

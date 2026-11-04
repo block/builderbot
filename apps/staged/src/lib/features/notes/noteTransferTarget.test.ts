@@ -9,6 +9,7 @@ import {
   noteTransferTarget,
   repoAddedHint,
   transferFailedAfterCreate,
+  unboundBranchNoteBlocker,
 } from './noteTransferTarget';
 import { filterMoveTargets } from '../branches/moveBranchTarget';
 import type { Project } from '../../types';
@@ -143,21 +144,27 @@ describe('lookedUpRepo', () => {
 describe('noteTransferTarget', () => {
   it('is whatever was picked', () => {
     const picked = { kind: 'existing', projectId: 'here' } as const;
-    expect(noteTransferTarget(picked, [here, there], 'Fresh')).toBe(picked);
+    expect(noteTransferTarget(picked, 'Fresh', [here, there], 'Fresh')).toBe(picked);
+    expect(noteTransferTarget(picked, '', [here, there], null)).toBe(picked);
   });
 
-  it('falls back to the only row on offer', () => {
-    expect(noteTransferTarget(null, [there], null)).toEqual({
+  it('falls back to the only row the query leaves on offer', () => {
+    expect(noteTransferTarget(null, 'There', [there], null)).toEqual({
       kind: 'existing',
       projectId: 'there',
     });
-    expect(noteTransferTarget(null, [], 'Fresh')).toEqual({ kind: 'new', name: 'Fresh' });
+    expect(noteTransferTarget(null, 'Fresh', [], 'Fresh')).toEqual({ kind: 'new', name: 'Fresh' });
+  });
+
+  it('assumes nothing before anything is typed, even with one project on offer', () => {
+    expect(noteTransferTarget(null, '', [there], null)).toBeNull();
+    expect(noteTransferTarget(null, '  ', [there], null)).toBeNull();
   });
 
   it('is nothing while more than one row is on offer, or none', () => {
-    expect(noteTransferTarget(null, [here, there], null)).toBeNull();
-    expect(noteTransferTarget(null, [there], 'Fresh')).toBeNull();
-    expect(noteTransferTarget(null, [], null)).toBeNull();
+    expect(noteTransferTarget(null, 'e', [here, there], null)).toBeNull();
+    expect(noteTransferTarget(null, 'The', [there], 'The')).toBeNull();
+    expect(noteTransferTarget(null, 'Here', [], null)).toBeNull();
   });
 });
 
@@ -182,6 +189,23 @@ describe('noteTransferBlocker', () => {
 
   it('refuses a note that is no longer stored', () => {
     expect(noteTransferBlocker(null, 'move')).toBe('This note no longer exists.');
+  });
+});
+
+describe('unboundBranchNoteBlocker', () => {
+  it('lets a note bound to a repo go', () => {
+    expect(unboundBranchNoteBlocker({ githubRepo: 'acme/widgets', subpath: null }, 'move')).toBe(
+      null
+    );
+  });
+
+  it('refuses a note whose branch has no repo, as the backend would', () => {
+    expect(unboundBranchNoteBlocker(null, 'move')).toBe(
+      "This note's branch is not bound to a repository, so the note cannot be moved to another project."
+    );
+    expect(unboundBranchNoteBlocker(null, 'copy')).toBe(
+      "This note's branch is not bound to a repository, so the note cannot be copied to another project."
+    );
   });
 });
 

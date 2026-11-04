@@ -106,6 +106,23 @@ export function noteTransferBlocker(
 }
 
 /**
+ * Why a branch note can't be moved or copied for want of a repo, or `null`
+ * when `repo` (the stored note's, `null` for none) is there. The transfer adds
+ * the note's repo to the destination, so the backend refuses a note whose
+ * branch is bound to none (`transfer_branch_note` in note_transfer.rs); this
+ * is its wording, short of the branch name the picker doesn't have. Checked
+ * before the picker creates a project, like `noteTransferBlocker`.
+ */
+export function unboundBranchNoteBlocker(
+  repo: NoteRepo | null,
+  mode: NoteTransferMode
+): string | null {
+  if (repo) return null;
+  const participle = mode === 'move' ? 'moved' : 'copied';
+  return `This note's branch is not bound to a repository, so the note cannot be ${participle} to another project.`;
+}
+
+/**
  * The inline error for a transfer that failed after the picker created its
  * destination. The project stays (and stays picked, so a retry goes there),
  * so the error says it exists rather than reading as if nothing happened.
@@ -125,15 +142,20 @@ export type NoteTransferSelection =
 /**
  * What confirming (Move/Copy, or Enter in the search box) acts on: the picked
  * row or, when nothing is picked, the "Create project" row if it is the only
- * row on offer, else the single remaining match. `null` when that leaves
- * nothing to act on, which keeps the confirm button disabled.
+ * row on offer, else the single match left by what was typed. With nothing
+ * typed nothing is assumed, even when only one project is on offer, so Enter
+ * straight after opening can't send the note somewhere the user never chose.
+ * `null` when that leaves nothing to act on, which keeps the confirm button
+ * disabled.
  */
 export function noteTransferTarget(
   selected: NoteTransferSelection | null,
+  query: string,
   filtered: Project[],
   createName: string | null
 ): NoteTransferSelection | null {
   if (selected) return selected;
+  if (!query.trim()) return null;
   if (filtered.length === 1 && !createName) return { kind: 'existing', projectId: filtered[0].id };
   if (filtered.length === 0 && createName) return { kind: 'new', name: createName };
   return null;

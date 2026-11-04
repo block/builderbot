@@ -141,7 +141,7 @@
   });
   // What confirming acts on, picked or not: it is the row shown as chosen, and
   // when it is a project to create, its location is on screen to change.
-  let target = $derived(noteTransferTarget(selected, filtered, createName));
+  let target = $derived(noteTransferTarget(selected, query, filtered, createName));
   let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
   let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
   let effectiveLocation = $derived<ProjectLocation>(

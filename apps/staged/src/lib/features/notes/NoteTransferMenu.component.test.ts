@@ -36,6 +36,14 @@ vi.mock('../../api/commands', () => commands);
 import NoteTransferMenu from './NoteTransferMenu.svelte';
 
 const settled = { title: 'Plan', sessionId: 'session', completedAt: 1 };
+const storedRepo = {
+  id: 'repo-1',
+  projectId: 'here',
+  githubRepo: 'acme/widgets',
+  branchName: 'feature',
+  subpath: 'apps/web',
+  isPrimary: true,
+};
 
 let component: ReturnType<typeof mount> | null = null;
 
@@ -56,6 +64,7 @@ describe('NoteTransferMenu pre-transfer checks', () => {
     for (const command of Object.values(commands)) command.mockReset();
     commands.getNote.mockResolvedValue(settled);
     commands.getProjectNote.mockResolvedValue(settled);
+    commands.getNoteRepo.mockResolvedValue(storedRepo);
   });
 
   afterEach(() => {
@@ -103,6 +112,45 @@ describe('NoteTransferMenu pre-transfer checks', () => {
     expect(commands.getProjectNote).toHaveBeenCalledWith('note-1');
     expect(commands.getNote).not.toHaveBeenCalled();
   });
+
+  it('refuses a branch note bound to no repo, reusing the lookup the picker made', async () => {
+    commands.getNoteRepo.mockResolvedValue(null);
+    const { picker, beforeTransfer } = mountMenu('branch');
+    await picker.loadNoteRepo!();
+
+    await expect(picker.onPrepare!()).rejects.toThrow(
+      "This note's branch is not bound to a repository, so the note cannot be moved to another project."
+    );
+    expect(commands.getNoteRepo).toHaveBeenCalledOnce();
+    expect(beforeTransfer).not.toHaveBeenCalled();
+  });
+
+  it("lets a branch note with a repo go on the picker's lookup", async () => {
+    const { picker, beforeTransfer } = mountMenu('branch');
+    await picker.loadNoteRepo!();
+
+    await picker.onPrepare!();
+    expect(commands.getNoteRepo).toHaveBeenCalledOnce();
+    expect(beforeTransfer).toHaveBeenCalledOnce();
+  });
+
+  it("looks the repo up again when the picker's lookup failed", async () => {
+    commands.getNoteRepo.mockRejectedValueOnce(new Error('database is locked'));
+    const { picker, beforeTransfer } = mountMenu('branch');
+    await expect(picker.loadNoteRepo!()).rejects.toThrow('database is locked');
+
+    await picker.onPrepare!();
+    expect(commands.getNoteRepo).toHaveBeenCalledTimes(2);
+    expect(beforeTransfer).toHaveBeenCalledOnce();
+  });
+
+  it('asks a project note for no repo', async () => {
+    const { picker, beforeTransfer } = mountMenu('project');
+
+    await picker.onPrepare!();
+    expect(commands.getNoteRepo).not.toHaveBeenCalled();
+    expect(beforeTransfer).toHaveBeenCalledOnce();
+  });
 });
 
 describe("NoteTransferMenu note's repo", () => {
@@ -118,14 +166,7 @@ describe("NoteTransferMenu note's repo", () => {
   });
 
   it("reads a branch note's repo from the stored note's branch", async () => {
-    commands.getNoteRepo.mockResolvedValue({
-      id: 'repo-1',
-      projectId: 'here',
-      githubRepo: 'acme/widgets',
-      branchName: 'feature',
-      subpath: 'apps/web',
-      isPrimary: true,
-    });
+    commands.getNoteRepo.mockResolvedValue(storedRepo);
     const { picker } = mountMenu('branch');
 
     await expect(picker.loadNoteRepo!()).resolves.toEqual({

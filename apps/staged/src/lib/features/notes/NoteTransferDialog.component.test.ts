@@ -259,11 +259,30 @@ describe('NoteTransferDialog new project location', () => {
     expect(confirmButton(target).disabled).toBe(true);
     expect(target.querySelector('[aria-label="Project location"]')).toBeNull();
 
-    // The only project left is what Move acts on, and it already exists.
-    type(target, '');
+    // Typed in full, Widgets is the only row left: Move acts on it, and it
+    // already exists.
+    type(target, 'Widgets');
     expect(existingRow(target).getAttribute('aria-checked')).toBe('true');
     expect(confirmButton(target).disabled).toBe(false);
     expect(target.querySelector('[aria-label="Project location"]')).toBeNull();
+  });
+
+  it('acts on nothing until something is picked or typed, even with one project on offer', async () => {
+    store.projects = [{ id: 'widgets', name: 'Widgets' } as Project];
+    const { target, onConfirm } = await open(branchRepo);
+    expect(existingRow(target).getAttribute('aria-checked')).toBe('false');
+    expect(confirmButton(target).disabled).toBe(true);
+
+    // Enter straight after opening submits the form with nothing to act on.
+    target.querySelector('form')!.requestSubmit();
+    await settle();
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // Clearing a query leaves nothing assumed either.
+    type(target, 'Widgets');
+    type(target, '');
+    expect(existingRow(target).getAttribute('aria-checked')).toBe('false');
+    expect(confirmButton(target).disabled).toBe(true);
   });
 
   it('offers no choice when remote projects are unavailable', async () => {

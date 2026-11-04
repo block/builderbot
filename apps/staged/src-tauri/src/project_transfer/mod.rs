@@ -11,9 +11,11 @@
 //! The transport is the scripts, the two [`TransferEndpoint`]s, and the
 //! per-repository pipeline in [`carry_repo`]. Around it: [`preflight`] says
 //! what a transfer would carry and what stops it, [`orchestrator`] moves the
-//! whole project (rolling back on failure), [`registry`] keeps one transfer
-//! per project and refuses conflicting work meanwhile, [`backups`] describes
-//! and prunes what is kept, and [`commands`] is the Tauri and web surface.
+//! whole project (rolling back on failure, with [`undo`] recording what to
+//! take back), [`recovery`] finishes off at startup a transfer Staged never
+//! did, [`registry`] keeps one transfer per project and refuses conflicting
+//! work meanwhile, [`backups`] describes and prunes what is kept, and
+//! [`commands`] is the Tauri and web surface.
 
 mod backups;
 mod carry;
@@ -24,18 +26,20 @@ mod orchestrator;
 #[cfg(test)]
 mod orchestrator_tests;
 mod preflight;
+mod recovery;
 mod registry;
 mod scripts;
 #[cfg(test)]
 mod tests;
+mod undo;
 
 pub use carry::{
-    carry_repo, carry_repo_with, cleanup, finish, origin_tips, unchanged, CarryOutcome, CarryPlan,
-    CarryStep, Landing,
+    carry_repo, carry_repo_with, cleanup, finish, origin_tips, unchanged, unchanged_all,
+    CarryOutcome, CarryPlan, CarryStep, Landing,
 };
 pub(crate) use commands::{
     cancel_project_transfer, get_project_transfer_preflight_impl, list_transferring_projects,
-    prune_backups, transfer_project_impl,
+    prune_backups, recover_interrupted_transfers, transfer_project_impl,
 };
 pub use endpoint::{BloxEndpoint, LocalEndpoint, ScriptOutput, TransferEndpoint};
 pub use orchestrator::{

@@ -152,38 +152,51 @@ pub const REBUNDLE_SCRIPT: &str = concat!(
     "exit 0\n",
 );
 
-/// Check, without writing to it, that a checkout is still what its snapshot
-/// captured — before the checkout is deleted on the strength of that snapshot.
+/// Check, without writing to them, that checkouts are still what their
+/// snapshots captured — before they are deleted on the strength of those
+/// snapshots. One run checks every checkout it is given, so a workspace's
+/// are all checked in one exec, right before the workspace is deleted.
 ///
-/// Arguments: `$1` the checkout, `$2` the branch it must have checked out,
-/// `$3` the snapshot's `head`, `$4` its `tree_i`, `$5` its `tree_w`, `$6` a
-/// scratch file (outside the checkout) for the copy of the index.
+/// Arguments: six per checkout — the checkout, the branch it must have
+/// checked out, the snapshot's `head`, `tree_i` and `tree_w`, and a scratch
+/// file (outside the checkout) for the copy of the index.
 ///
-/// Prints `unchanged=1`, or `changed=<what>` for the first difference. The
-/// index and working tree are read the way [`SNAPSHOT_SCRIPT`] read them, in
-/// a copy of the index, so not even the real index's stat cache is touched.
+/// For each it prints `repo=<index>`, then `unchanged=1`, `changed=<what>` for
+/// the first difference, or `error=<message>` when it could not tell. The
+/// index and working tree are read the way [`SNAPSHOT_SCRIPT`] read them, in a
+/// copy of the index, so not even the real index's stat cache is touched.
 pub const VERIFY_SCRIPT: &str = concat!(
     prelude!(),
-    "cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
-    "branch=$2 head=$3 tree_i=$4 tree_w=$5 tmp_index=$6\n",
-    "top=$(G rev-parse --show-toplevel 2>/dev/null) || fail \"not a git checkout: $PWD\"\n",
-    "cd -- \"$top\" || fail \"cannot enter $top\"\n",
-    "on_fail() { rm -f -- \"$tmp_index\"; }\n",
-    "changed() { rm -f -- \"$tmp_index\"; printf 'changed=%s\\n' \"$*\"; exit 0; }\n",
-    "[ \"$(G symbolic-ref -q HEAD)\" = \"refs/heads/$branch\" ] || changed \"$branch is no longer checked out\"\n",
-    "now=$(G rev-parse -q --verify 'HEAD^{commit}')\n",
-    "[ \"$now\" = \"$head\" ] || changed \"HEAD moved from $head to ${now:-nothing}\"\n",
-    "mkdir -p -- \"$(dirname -- \"$tmp_index\")\" || fail \"cannot create the directory for $tmp_index\"\n",
-    "rm -f -- \"$tmp_index\"\n",
-    "real_index=$(G rev-parse --git-path index)\n",
-    "if [ -f \"$real_index\" ]; then cp -p -- \"$real_index\" \"$tmp_index\" || fail 'cannot copy the index'; fi\n",
-    "t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the index'\n",
-    "[ \"$t\" = \"$tree_i\" ] || changed 'the index changed'\n",
-    "err=$(GI \"$tmp_index\" add -A 2>&1) || fail \"cannot read the working tree: $err\"\n",
-    "t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the working tree'\n",
-    "[ \"$t\" = \"$tree_w\" ] || changed 'files changed'\n",
-    "rm -f -- \"$tmp_index\"\n",
-    "printf 'unchanged=1\\n'\n",
+    // A subshell per checkout, so `fail` and `changed` end that one's check.
+    "check() (\n",
+    "  cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
+    "  branch=$2 head=$3 tree_i=$4 tree_w=$5 tmp_index=$6\n",
+    "  top=$(G rev-parse --show-toplevel 2>/dev/null) || fail \"not a git checkout: $PWD\"\n",
+    "  cd -- \"$top\" || fail \"cannot enter $top\"\n",
+    "  on_fail() { rm -f -- \"$tmp_index\"; }\n",
+    "  changed() { rm -f -- \"$tmp_index\"; printf 'changed=%s\\n' \"$*\"; exit 0; }\n",
+    "  [ \"$(G symbolic-ref -q HEAD)\" = \"refs/heads/$branch\" ] || changed \"$branch is no longer checked out\"\n",
+    "  now=$(G rev-parse -q --verify 'HEAD^{commit}')\n",
+    "  [ \"$now\" = \"$head\" ] || changed \"HEAD moved from $head to ${now:-nothing}\"\n",
+    "  mkdir -p -- \"$(dirname -- \"$tmp_index\")\" || fail \"cannot create the directory for $tmp_index\"\n",
+    "  rm -f -- \"$tmp_index\"\n",
+    "  real_index=$(G rev-parse --git-path index)\n",
+    "  if [ -f \"$real_index\" ]; then cp -p -- \"$real_index\" \"$tmp_index\" || fail 'cannot copy the index'; fi\n",
+    "  t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the index'\n",
+    "  [ \"$t\" = \"$tree_i\" ] || changed 'the index changed'\n",
+    "  err=$(GI \"$tmp_index\" add -A 2>&1) || fail \"cannot read the working tree: $err\"\n",
+    "  t=$(GI \"$tmp_index\" write-tree) || fail 'cannot read the working tree'\n",
+    "  [ \"$t\" = \"$tree_w\" ] || changed 'files changed'\n",
+    "  rm -f -- \"$tmp_index\"\n",
+    "  printf 'unchanged=1\\n'\n",
+    ")\n",
+    "i=0\n",
+    "while [ $# -ge 6 ]; do\n",
+    "  printf 'repo=%s\\n' \"$i\"\n",
+    "  check \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\"\n",
+    "  i=$((i + 1))\n",
+    "  shift 6\n",
+    "done\n",
     "exit 0\n",
 );
 
@@ -283,9 +296,21 @@ pub const APPLY_SCRIPT: &str = concat!(
     "    fi\n",
     "  }\n",
     "  if [ \"$mode\" = checkout ]; then\n",
-    // Untracked files too: they would stay behind in the checkout and be
-    // taken for the branch's own.
-    "    [ -z \"$(G status --porcelain)\" ] || fail 'the destination checkout has uncommitted changes or untracked files'\n",
+    "    [ -z \"$(G status --porcelain --untracked-files=no)\" ] || fail 'the destination checkout has uncommitted changes'\n",
+    // An untracked file the landing would write over is refused. Any other
+    // (a workspace's bootstrap leaves some) stays, and a warning says so, as
+    // it would otherwise pass for the branch's own.
+    "    n=$(G ls-files --others --exclude-standard | wc -l | tr -d ' \\t')\n",
+    "    if [ \"$n\" != 0 ]; then\n",
+    "      trees=$head\n",
+    "      [ \"$restore\" = 1 ] && trees=\"$trees $tree_w\"\n",
+    "      for t in $trees; do\n",
+    "        clash=$(G ls-files -z --others --exclude-standard | xargs -0 env LC_ALL=C git -c core.hooksPath=/dev/null -c core.quotePath=false --literal-pathspecs ls-tree -r --name-only \"$t\" -- | head -n 1)\n",
+    "        [ -z \"$clash\" ] || fail \"the destination checkout has an untracked $clash, which the branch would write over\"\n",
+    "      done\n",
+    "      if [ \"$n\" = 1 ]; then what='1 untracked file was'; else what=\"$n untracked files were\"; fi\n",
+    "      printf 'warning=%s already in the destination checkout (%s, for one) and stayed there\\n' \"$what\" \"$(G -c core.quotePath=false ls-files --others --exclude-standard | head -n 1)\"\n",
+    "    fi\n",
     "    err=$(G checkout -q --no-track -B \"$branch\" \"$head\" 2>&1) || fail \"cannot check out $branch: $err\"\n",
     "  else\n",
     "    cur=$(G rev-parse -q --verify \"refs/heads/$branch\")\n",
@@ -358,15 +383,22 @@ pub const APPLY_SCRIPT: &str = concat!(
     "exit 0\n",
 );
 
-/// Clone a repository unless it is already there: a transfer's secondary
-/// repos at a fresh workspace, whose start only cloned the primary one.
+/// Clone a repository unless it is already there — a transfer's secondary
+/// repos at a fresh workspace, whose start only cloned the primary one — and
+/// check a branch can land in it. A workspace's bootstrap can leave tracked
+/// files changed in the clone `ws start` made, which the apply would only
+/// refuse after the snapshot and the upload.
 ///
 /// Arguments: `$1` the clone directory, `$2` the URL to clone from.
 pub const CLONE_SCRIPT: &str = concat!(
     prelude!(),
-    "[ -d \"$1/.git\" ] && exit 0\n",
-    "mkdir -p -- \"$(dirname -- \"$1\")\" || fail \"cannot create the directory for $1\"\n",
-    "err=$(G clone -q -- \"$2\" \"$1\" 2>&1) || fail \"cannot clone $2: $err\"\n",
+    "if [ ! -d \"$1/.git\" ]; then\n",
+    "  mkdir -p -- \"$(dirname -- \"$1\")\" || fail \"cannot create the directory for $1\"\n",
+    "  err=$(G clone -q -- \"$2\" \"$1\" 2>&1) || fail \"cannot clone $2: $err\"\n",
+    "fi\n",
+    "cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
+    "dirty=$(G -c core.quotePath=false status --porcelain --untracked-files=no | cut -c4- | head -n 3 | paste -s -d ' ' -)\n",
+    "[ -z \"$dirty\" ] || fail \"$1 already has changes to tracked files ($dirty), made in the workspace (by its bootstrap, say); the branch can't be checked out over them\"\n",
     "exit 0\n",
 );
 
@@ -380,9 +412,11 @@ pub const CLONE_SCRIPT: &str = concat!(
 /// counts, a `nested_repo=<path>` per untracked git repository inside the
 /// checkout (which a snapshot could only record as a commit id, and which
 /// `untracked` leaves out), `untracked_bytes` when there are untracked files,
-/// `ignored` (ignored files outside ignored directories: none of them is
-/// carried), `repo_kib` (the object store's size), `unpushed` (commits on no
-/// remote-tracking ref), `upstream`, and the same `warning=`s as
+/// `ignored` (ignored files outside ignored directories, each counted) and
+/// `ignored_dirs` (directories an ignore pattern matches, each counted once
+/// however much they hold) — none of which is carried — `repo_kib` (the
+/// object store's size), `unpushed` (commits on no remote-tracking ref),
+/// `upstream`, and the same `warning=`s as
 /// [`SNAPSHOT_SCRIPT`]. `status` runs with `--no-optional-locks`, so even the
 /// index's stat cache is left alone. `$branch` is only echoed back; the caller
 /// compares `head_ref` against it.
@@ -402,24 +436,25 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    [ -e \"$(G rev-parse --git-path \"${marker%%:*}\")\" ] && printf 'operation=%s\\n' \"${marker#*:}\"\n",
     "  done\n",
     // Porcelain v1 is one line per path (odd names come quoted), `XY path`:
-    // `??` untracked, an unmerged pair conflicted, else X staged and Y not.
-    // With every untracked file listed, the only directories left are the
-    // ones git won't descend into: nested repositories.
-    "  counts=$(G --no-optional-locks status --porcelain=v1 --untracked-files=all 2>/dev/null | awk '\n",
-    "    { xy = substr($0, 1, 2) }\n",
-    "    xy == \"??\" && /\\/\"?$/ { print \"nested_repo=\" substr($0, 4); next }\n",
+    // `??` untracked, `!!` ignored, an unmerged pair conflicted, else X
+    // staged and Y not. With every untracked file listed, the only untracked
+    // directories left are the ones git won't descend into: nested
+    // repositories. `--ignored=matching` lists a directory an ignore pattern
+    // matches (`node_modules/`) once, without walking it, and the files of an
+    // untracked directory holding nothing but ignored files one by one.
+    "  counts=$(G --no-optional-locks status --porcelain=v1 --untracked-files=all --ignored=matching 2>/dev/null | awk '\n",
+    "    { xy = substr($0, 1, 2); dir = /\\/\"?$/ }\n",
+    "    xy == \"!!\" { if (dir) igd++; else ig++; next }\n",
+    "    xy == \"??\" && dir { print \"nested_repo=\" substr($0, 4); next }\n",
     "    xy == \"??\" { u++; next }\n",
     "    xy ~ /^(DD|AU|UD|UA|DU|AA|UU)$/ { c++; next }\n",
     "    { if (substr(xy, 1, 1) != \" \") s++; if (substr(xy, 2, 1) != \" \") w++ }\n",
-    "    END { printf \"staged=%d\\nunstaged=%d\\nuntracked=%d\\nconflicted=%d\\n\", s, w, u, c }')\n",
+    "    END { printf \"staged=%d\\nunstaged=%d\\nuntracked=%d\\nconflicted=%d\\nignored=%d\\nignored_dirs=%d\\n\", s, w, u, c, ig, igd }')\n",
     "  printf '%s\\n' \"$counts\"\n",
     "  case $counts in\n",
     "    *untracked=0*) ;;\n",
     "    *) printf 'untracked_bytes=%s\\n' \"$(G ls-files -z --others --exclude-standard | xargs -0 ls -lnd -- 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')\" ;;\n",
     "  esac\n",
-    // `--directory` stops at an ignored directory (`node_modules/`), which
-    // would otherwise be walked file by file; only plain files are counted.
-    "  printf 'ignored=%s\\n' \"$(G ls-files -z --others --ignored --exclude-standard --directory 2>/dev/null | tr '\\0' '\\n' | grep -vc '/$')\"\n",
     "  printf 'repo_kib=%s\\n' \"$(G count-objects -v 2>/dev/null | awk '$1 == \"size:\" || $1 == \"size-pack:\" { s += $2 } END { print s + 0 }')\"\n",
     "  if [ -n \"${head:-}\" ]; then\n",
     "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
@@ -743,19 +778,41 @@ impl ApplyReport {
     }
 }
 
-/// What [`VERIFY_SCRIPT`] reports: `None` when the checkout is still what its
-/// snapshot captured, else what changed.
-pub fn parse_verify(stdout: &str) -> Result<Option<String>, TransferError> {
-    let report = ScriptReport::parse(stdout);
+/// Split a script's output at its `repo=` lines: what [`PREFLIGHT_SCRIPT`] and
+/// [`VERIFY_SCRIPT`] print for each checkout, in order.
+pub fn sections(stdout: &str) -> Vec<ScriptReport> {
+    let mut sections = Vec::new();
+    let mut current: Option<String> = None;
+    for line in stdout.lines() {
+        if line.starts_with("repo=") {
+            if let Some(text) = current.take() {
+                sections.push(ScriptReport::parse(&text));
+            }
+            current = Some(String::new());
+        } else if let Some(text) = current.as_mut() {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    if let Some(text) = current {
+        sections.push(ScriptReport::parse(&text));
+    }
+    sections
+}
+
+/// One checkout's part of what [`VERIFY_SCRIPT`] reports: `None` when it is
+/// still what its snapshot captured, else what changed. `Err` with the
+/// message when the script could not tell.
+pub fn parse_verify(report: &ScriptReport) -> Result<Option<String>, String> {
     if let Some(what) = report.get("changed") {
         return Ok(Some(what.to_string()));
     }
+    if let Some(message) = report.get("error") {
+        return Err(message.trim().to_string());
+    }
     match report.get("unchanged") {
         Some("1") => Ok(None),
-        _ => Err(TransferError::Protocol {
-            step: "verify",
-            message: "missing unchanged".to_string(),
-        }),
+        _ => Err("the check stopped without an answer".to_string()),
     }
 }
 
@@ -1043,14 +1100,21 @@ mod tests {
 
     #[test]
     fn a_verify_report_names_the_change_or_says_unchanged() {
-        assert_eq!(parse_verify("unchanged=1\n").unwrap(), None);
-        assert_eq!(
-            parse_verify("changed=files changed\n").unwrap().as_deref(),
-            Some("files changed")
+        let reports = sections(
+            "repo=0\nunchanged=1\nrepo=1\nchanged=files changed\n\
+             repo=2\nerror=cannot enter /x\nrepo=3\n",
         );
-        // A script that died before saying either is not "unchanged".
-        assert!(parse_verify("").is_err());
-        assert!(parse_verify("error=cannot enter /x\n").is_err());
+        let results: Vec<_> = reports.iter().map(parse_verify).collect();
+        assert_eq!(
+            results,
+            [
+                Ok(None),
+                Ok(Some("files changed".to_string())),
+                Err("cannot enter /x".to_string()),
+                // A check that died before saying either is not "unchanged".
+                Err("the check stopped without an answer".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <!--
   ProjectTransferRepoRow.svelte — one branch in the transfer dialog: its repo
   and branch, what it carries (unpushed commits, uncommitted changes, by
-  kind), the ignored files that stay behind, and whatever blocks or warns
+  kind), the ignored files and folders that stay behind, and whatever blocks or warns
   about it. Blockers and warnings differ in colour and in a screen-reader
   prefix.
 -->
@@ -9,7 +9,13 @@
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectTransferRepoPreflight } from '../../types';
-  import { issueMessage, plural, uncommittedBreakdown, uncommittedCount } from './projectTransfer';
+  import {
+    ignoredSummary,
+    issueMessage,
+    plural,
+    uncommittedBreakdown,
+    uncommittedCount,
+  } from './projectTransfer';
 
   interface Props {
     row: ProjectTransferRepoPreflight;
@@ -19,6 +25,7 @@
 
   let changes = $derived(uncommittedCount(row));
   let breakdown = $derived(uncommittedBreakdown(row));
+  let ignored = $derived(ignoredSummary(row));
   let renamed = $derived(row.destBranchName !== row.branchName);
 </script>
 
@@ -50,11 +57,8 @@
       <span class:emphasis={changes > 0}>
         {plural(changes, 'uncommitted change')}{#if breakdown}&nbsp;({breakdown}){/if}
       </span>
-      {#if row.ignoredFiles > 0}
-        <span class="ignored">
-          {plural(row.ignoredFiles, 'ignored file')}
-          {row.ignoredFiles === 1 ? 'stays' : 'stay'} behind
-        </span>
+      {#if ignored}
+        <span class="ignored">{ignored}</span>
       {/if}
     {/if}
   </div>

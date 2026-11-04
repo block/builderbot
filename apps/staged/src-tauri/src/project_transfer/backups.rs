@@ -10,6 +10,11 @@
 //! behind, for which this backup is the only copy: that one is kept until it
 //! is removed by hand.
 //!
+//! The manifest is also the transfer's journal: it is written before the
+//! transfer makes anything, with what to [`Undo`], and kept up to date as it
+//! goes, so one Staged never finished can be dealt with at the next start
+//! (see [`super::recovery`]).
+//!
 //! Recovering is plain git: `git fetch <bundle> refs/staged-transfer/<id>/snapshot`
 //! (or check out the backup ref), then `read-tree` the snapshot or its parent.
 
@@ -19,6 +24,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use super::is_valid_transfer_id;
+use super::undo::Undo;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 
@@ -30,7 +36,7 @@ pub fn backup_ref(transfer_id: &str, branch: &str) -> String {
     format!("refs/staged-transfer-backup/{transfer_id}/{branch}")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferManifest {
     pub transfer_id: String,
@@ -40,8 +46,13 @@ pub struct TransferManifest {
     /// Milliseconds since the epoch.
     pub created_at: i64,
     pub include_uncommitted: bool,
-    /// `carrying`, `completed`, or `rolledBack`.
+    /// `carrying` until the database switches, `committed` while the source
+    /// comes down, then `completed`; or `rolledBack`. The first two are a
+    /// transfer still running, or one Staged never finished.
     pub status: String,
+    /// The Staged process running the transfer.
+    #[serde(default)]
+    pub owner_pid: Option<u32>,
     /// The workspace on the remote side.
     pub workspace_name: Option<String>,
     /// Some repo's uncommitted changes stayed behind and exist only in this
@@ -49,15 +60,46 @@ pub struct TransferManifest {
     /// backup refs) by hand once they are no longer wanted.
     #[serde(default)]
     pub keep_until_removed: bool,
+    /// The repos carried so far.
     pub repos: Vec<ManifestRepo>,
+    /// What the transfer made before the database switched, recorded before
+    /// it was made.
+    #[serde(default)]
+    pub undo: Undo,
+    /// What the user should know: what an interrupted transfer left.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
+pub const CARRYING: &str = "carrying";
+pub const COMMITTED: &str = "committed";
+pub const COMPLETED: &str = "completed";
+pub const ROLLED_BACK: &str = "rolledBack";
+
 impl TransferManifest {
+    /// Whether the transfer finished, one way or the other.
+    pub fn is_finished(&self) -> bool {
+        self.status == COMPLETED || self.status == ROLLED_BACK
+    }
+
+    /// The shared local clones that may hold the transfer's refs.
+    fn local_clones(&self) -> Vec<&Path> {
+        let mut clones: Vec<&Path> = self
+            .repos
+            .iter()
+            .filter_map(|r| r.local_clone.as_deref().map(Path::new))
+            .chain(self.undo.clones.iter().map(PathBuf::as_path))
+            .collect();
+        clones.sort();
+        clones.dedup();
+        clones
+    }
+
     /// Whether this backup holds uncommitted changes the transfer did not
     /// restore at the destination, and that a completed transfer may have
     /// deleted at the source.
     pub fn holds_left_behind_changes(&self) -> bool {
-        self.status != "rolledBack"
+        self.status != ROLLED_BACK
             && !self.include_uncommitted
             && self.repos.iter().any(|r| r.has_uncommitted_changes)
     }
@@ -75,7 +117,8 @@ pub struct ManifestRepo {
     /// The working-tree snapshot commit: the bundle's one ref.
     pub snapshot: String,
     pub has_uncommitted_changes: bool,
-    /// The shared local clone holding [`Self::backup_ref`].
+    /// The shared local clone of the repo, which holds [`Self::backup_ref`]
+    /// once the source comes down.
     pub local_clone: Option<String>,
     pub backup_ref: Option<String>,
 }
@@ -97,10 +140,12 @@ pub fn read_manifest(dir: &Path) -> Option<TransferManifest> {
 }
 
 /// Remove every transfer directory under `transfers_dir` older than
-/// `retention` as of `now`, and the backup refs its manifest names. Returns
-/// the directories removed. Age comes from the manifest, or the directory's
-/// mtime without one; only directories named like a transfer id are touched,
-/// and never one whose manifest keeps it until it is removed by hand.
+/// `retention` as of `now`, and every ref the transfer has in the local
+/// clones its manifest names: the backup refs, and any temporary ref a
+/// transfer that stopped part way left. Returns the directories removed. Age
+/// comes from the manifest, or the directory's mtime without one; only
+/// directories named like a transfer id are touched, and never one whose
+/// manifest keeps it until it is removed by hand.
 pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(transfers_dir) else {
         return Vec::new();
@@ -130,17 +175,10 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<
         if created >= cutoff {
             continue;
         }
-        for repo in manifest.iter().flat_map(|m| &m.repos) {
-            let (Some(clone), Some(backup_ref)) = (&repo.local_clone, &repo.backup_ref) else {
-                continue;
-            };
-            let clone = Path::new(clone);
-            if clone.exists() {
-                if let Err(e) = crate::git::cli_run(clone, &["update-ref", "-d", backup_ref]) {
-                    log::warn!(
-                        "[project_transfer] cannot remove {backup_ref} from {}: {e}",
-                        clone.display()
-                    );
+        if let Some(manifest) = &manifest {
+            for clone in manifest.local_clones() {
+                if clone.exists() {
+                    remove_transfer_refs(clone, &manifest.transfer_id);
                 }
             }
         }
@@ -150,6 +188,35 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<
         }
     }
     removed
+}
+
+/// Delete `refs/staged-transfer-backup/<id>/*` and `refs/staged-transfer/<id>/*`
+/// in `clone`.
+fn remove_transfer_refs(clone: &Path, transfer_id: &str) {
+    let namespaces = [
+        format!("refs/staged-transfer-backup/{transfer_id}/"),
+        format!("refs/staged-transfer/{transfer_id}/"),
+    ];
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(namespaces.iter().map(String::as_str));
+    let refs = match crate::git::cli_run(clone, &args) {
+        Ok(refs) => refs,
+        Err(e) => {
+            log::warn!(
+                "[project_transfer] cannot list {transfer_id}'s refs in {}: {e}",
+                clone.display()
+            );
+            return;
+        }
+    };
+    for name in refs.lines().filter(|l| !l.is_empty()) {
+        if let Err(e) = crate::git::cli_run(clone, &["update-ref", "-d", name]) {
+            log::warn!(
+                "[project_transfer] cannot remove {name} from {}: {e}",
+                clone.display()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,9 +230,8 @@ mod tests {
             direction: "toRemote".to_string(),
             created_at,
             include_uncommitted: true,
-            status: "completed".to_string(),
+            status: COMPLETED.to_string(),
             workspace_name: Some("stg-x".to_string()),
-            keep_until_removed: false,
             repos: vec![ManifestRepo {
                 github_repo: "acme/widgets".to_string(),
                 branch: "feature".to_string(),
@@ -177,6 +243,7 @@ mod tests {
                 local_clone: Some(clone.to_string_lossy().into_owned()),
                 backup_ref: Some(backup_ref.to_string()),
             }],
+            ..TransferManifest::default()
         }
     }
 
@@ -234,6 +301,73 @@ mod tests {
             "refs/staged-transfer-backup/",
         ]);
         assert_eq!(refs.trim(), new_ref);
+    }
+
+    /// A transfer that stopped part way may have kept a backup ref it never
+    /// wrote down, or left a temporary one: pruning it takes every ref under
+    /// its id, in every clone it names.
+    #[test]
+    fn prunes_every_ref_an_interrupted_transfer_left() {
+        let root = crate::test_utils::TempDir::new("transfer-prune-interrupted");
+        let clone = root.path().join("clone");
+        std::fs::create_dir_all(&clone).unwrap();
+        let git = |args: &[&str]| crate::git::cli_run(&clone, args).unwrap();
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let head = git(&["rev-parse", "HEAD"]).trim().to_string();
+        let left = [
+            backup_ref("cut", "feature"),
+            "refs/staged-transfer/cut/snapshot".to_string(),
+            backup_ref("rolled", "feature"),
+        ];
+        for name in &left {
+            git(&["update-ref", name, &head]);
+        }
+        let transfers = root.path().join("transfers");
+        let now = SystemTime::now();
+        let old_ms = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 15 * 24 * 60 * 60 * 1000;
+        // Committed, then cut off while the source came down: the backup ref
+        // was kept, the manifest never said so.
+        let mut cut = manifest("cut", old_ms, &clone, "unused");
+        cut.status = CARRYING.to_string();
+        cut.repos[0].backup_ref = None;
+        write_manifest(&transfers.join("cut"), &cut).unwrap();
+        // Rolled back before anything was carried: only the undo list knows
+        // the clone.
+        let mut rolled = manifest("rolled", old_ms, &clone, "unused");
+        rolled.status = ROLLED_BACK.to_string();
+        rolled.repos.clear();
+        rolled.undo.clones.push(clone.clone());
+        write_manifest(&transfers.join("rolled"), &rolled).unwrap();
+
+        let mut removed = prune(&transfers, RETENTION, now);
+        removed.sort();
+
+        assert_eq!(
+            removed,
+            vec![transfers.join("cut"), transfers.join("rolled")]
+        );
+        let refs = git(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/staged-transfer-backup/",
+            "refs/staged-transfer/",
+        ]);
+        assert_eq!(refs.trim(), "");
     }
 
     #[test]

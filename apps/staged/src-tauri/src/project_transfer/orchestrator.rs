@@ -2,20 +2,24 @@
 //! switch the database, tear the source down.
 //!
 //! Until [`Store::apply_project_transfer`] commits, the source and the
-//! database are untouched and every step is undone on failure (or on
-//! cancel, checked between steps): the workspace or the worktrees, branches
+//! database are untouched and every step is undone on failure, panic or
+//! cancel (checked between steps): the workspace or the worktrees, branches
 //! and remotes the transfer created are removed, branch config it replaced is
-//! put back, and the temporary refs at both ends are dropped. The bundles on
-//! this machine always stay, as the backup. After the commit nothing is
-//! undone: tearing the source down is best-effort — and refused for a source
-//! that changed after its snapshot — and what it leaves comes back as
-//! warnings on a successful transfer (see [`teardown`]).
+//! put back, and the temporary refs at both ends are dropped (see
+//! [`super::undo`]). Each is written to the manifest before it is made, so a
+//! transfer Staged never finished is undone at the next start instead. The
+//! bundles on this machine always stay, as the backup. After the commit
+//! nothing is undone: tearing the source down is best-effort — and refused
+//! for a source that changed after its snapshot — and what it leaves comes
+//! back as warnings on a successful transfer (see [`teardown`]).
 //!
 //! Synchronous, for the blocking pool; [`super::commands`] wraps it.
 
 mod teardown;
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -37,7 +41,10 @@ use super::preflight::{
     TransferIssue,
 };
 use super::registry::TransferGuard;
-use super::scripts::CLONE_SCRIPT;
+use super::scripts::{Snapshot, CLONE_SCRIPT};
+use super::undo::{
+    self, AddedRemote, AddedWorktree, CreatedBranch, ReplacedConfig, SourceCheckout, Undo,
+};
 use super::TransferError;
 
 /// Where a transfer is, as `project-transfer-progress` reports it.
@@ -128,34 +135,66 @@ pub(super) fn run_transfer(
         .get_project(guard.project_id())
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {}", guard.project_id()))?;
+    let direction = TransferDirection::from_source(project.location);
     let mut run = Run {
         store,
         host,
         guard,
         include_uncommitted,
         on_progress,
-        direction: TransferDirection::from_source(project.location),
+        direction,
         transfer_dir: host.transfers_dir()?.join(guard.transfer_id()),
         workspace_name: None,
-        undo: Undo::default(),
+        journal: RefCell::new(TransferManifest {
+            transfer_id: guard.transfer_id().to_string(),
+            project_id: project.id.clone(),
+            direction: direction.as_str().to_string(),
+            created_at: crate::store::now_timestamp(),
+            include_uncommitted,
+            status: backups::CARRYING.to_string(),
+            owner_pid: Some(std::process::id()),
+            ..TransferManifest::default()
+        }),
+        journaled: Cell::new(false),
+        committed: Cell::new(false),
     };
-    match run.execute() {
-        Ok(result) => {
+    match catch_unwind(AssertUnwindSafe(|| run.execute())) {
+        Ok(Ok(result)) => {
             run.emit(TransferPhase::Completed, None, None, None);
             Ok(result)
         }
         // Only the steps up to the commit can fail.
-        Err(Failure { message }) => {
-            run.roll_back();
-            log::warn!(
-                "[project_transfer] transfer {} of {} failed: {message}",
+        Ok(Err(Failure { message })) => Err(run.fail(message)),
+        Err(panic) => {
+            let what = panic_message(panic.as_ref());
+            run.clear_poisoned_launch_locks();
+            if !run.committed.get() {
+                return Err(run.fail(format!("The transfer stopped unexpectedly: {what}")));
+            }
+            // The database has switched: the destination is the project now,
+            // so there is nothing to roll back to.
+            let message = format!(
+                "The project moved, but the transfer stopped unexpectedly while removing \
+                 the source ({what}); what it hadn't removed yet is still there."
+            );
+            log::error!(
+                "[project_transfer] transfer {} of {}: {message}",
                 guard.transfer_id(),
                 guard.project_id()
             );
+            run.close_journal(backups::COMPLETED, None, Some(message.clone()));
             run.emit(TransferPhase::Failed, None, Some(message.clone()), None);
             Err(message)
         }
     }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic")
 }
 
 /// Why the transfer stopped, for `?` on every error type it meets.
@@ -169,34 +208,6 @@ impl<E: ToString> From<E> for Failure {
             message: e.to_string(),
         }
     }
-}
-
-/// Everything the transfer made that a rollback removes.
-#[derive(Default)]
-struct Undo {
-    /// The workspace created for a transfer to remote.
-    workspace: Option<String>,
-    /// Checkouts snapshotted at the source: their temporary refs, and a
-    /// workspace's scratch directory.
-    sources: Vec<SourceCheckout>,
-    /// Local clones a transfer to local fetched bundles into.
-    clones: Vec<PathBuf>,
-    /// Local branches the apply created, `(clone, branch, tip)`: deleted
-    /// while they are still at that tip.
-    branches: Vec<(PathBuf, String, String)>,
-    /// Every local branch's `branch.<b>.*` config before the apply replaced
-    /// it, `(clone, branch, entries)`: put back as it was.
-    branch_configs: Vec<(PathBuf, String, teardown::BranchConfig)>,
-    /// Worktrees it added, `(clone, worktree)`.
-    worktrees: Vec<(PathBuf, PathBuf)>,
-    /// Remotes the apply added to a local clone, `(clone, remote)`.
-    remotes: Vec<(PathBuf, String)>,
-}
-
-struct SourceCheckout {
-    /// `None`: this machine.
-    workspace: Option<String>,
-    dir: String,
 }
 
 /// One branch's progress through the transfer.
@@ -225,7 +236,13 @@ struct Run<'a> {
     direction: TransferDirection,
     transfer_dir: PathBuf,
     workspace_name: Option<String>,
-    undo: Undo,
+    /// The manifest as it stands, [`Undo`] list included: written before
+    /// the transfer first makes anything, and again with each change.
+    journal: RefCell<TransferManifest>,
+    /// Whether the manifest has been written.
+    journaled: Cell<bool>,
+    /// Whether the database has switched.
+    committed: Cell<bool>,
 }
 
 fn path_str(path: &Path) -> Result<String, String> {
@@ -304,6 +321,7 @@ impl Run<'_> {
                 .filter_map(|b| b.workspace.as_deref()),
         );
         self.check_sessions(&inspection)?;
+        self.journal.borrow_mut().workspace_name = inspection.preflight.workspace_name.clone();
 
         let mut legs: Vec<Leg> = inspection
             .branches
@@ -332,30 +350,22 @@ impl Run<'_> {
         for (i, leg) in legs.iter_mut().enumerate() {
             if leg.carry {
                 self.carry(i, leg)?;
+                let repo = self.manifest_repo(leg);
+                self.journal.borrow_mut().repos.extend(repo);
+                self.save_journal()?;
             }
-        }
-        if legs.iter().any(|l| l.outcome.is_some()) {
-            backups::write_manifest(
-                &self.transfer_dir,
-                &self.manifest(&inspection, &legs, "carrying"),
-            )?;
         }
 
         self.checkpoint(TransferPhase::Committing, None, None)?;
         self.commit(&inspection, &legs)?;
+        self.committed.set(true);
+        self.close_journal(backups::COMMITTED, None, None);
         // The rows describe the destination now, and setup may provision them
         // while the source comes down.
         self.guard.release_branches();
 
         let warnings = self.tear_down(&inspection, &mut legs);
-        if legs.iter().any(|l| l.outcome.is_some()) {
-            if let Err(e) = backups::write_manifest(
-                &self.transfer_dir,
-                &self.manifest(&inspection, &legs, "completed"),
-            ) {
-                log::warn!("[project_transfer] {e}");
-            }
-        }
+        self.close_journal(backups::COMPLETED, Some(&legs), None);
         Ok(self.result(&inspection, legs, warnings))
     }
 
@@ -380,10 +390,22 @@ impl Run<'_> {
                     None,
                     Some(format!("Resuming workspace {workspace}")),
                 )?;
-                let error = self.host.resume_workspace(&workspace).err();
+                let error = self
+                    .host
+                    .resume_workspace(&workspace, &|| self.guard.is_cancelled())
+                    .err();
+                self.guard_not_cancelled()?;
                 let failed = error.is_some();
-                if let Some(e) = &error {
-                    log::warn!("[project_transfer] cannot resume {workspace}: {e}");
+                match &error {
+                    Some(e) => log::warn!("[project_transfer] cannot resume {workspace}: {e}"),
+                    // Running now, whatever the transfer comes to: the rows
+                    // say so, rather than the state it was resumed from.
+                    None => {
+                        self.store.update_workspace_status_by_workspace_name(
+                            &workspace,
+                            &WorkspaceStatus::Running,
+                        )?;
+                    }
                 }
                 resumed.insert(workspace, error);
                 // One is enough to block the transfer: spare the others.
@@ -478,9 +500,10 @@ impl Run<'_> {
 
         // Recorded before the start: a start that fails half way can still
         // have created it.
-        self.undo.workspace = Some(workspace.clone());
+        self.journal.borrow_mut().workspace_name = Some(workspace.clone());
+        self.record(|undo| undo.workspace = Some(workspace.clone()))?;
         let base = crate::branches::normalize_branch_ref(&legs[primary].source.branch.base_branch);
-        self.host.start_workspace(
+        let started = self.host.start_workspace(
             &workspace,
             &legs[primary].source.github_repo,
             &base,
@@ -492,8 +515,10 @@ impl Run<'_> {
                     None,
                 )
             },
-        )?;
+            &|| self.guard.is_cancelled(),
+        );
         self.guard_not_cancelled()?;
+        started?;
 
         let endpoint = self.host.workspace_endpoint(&workspace);
         for leg in legs.iter_mut().filter(|l| l.carry) {
@@ -564,9 +589,11 @@ impl Run<'_> {
                 leg.row.head.as_deref(),
                 &taken,
             )?;
-            if !self.undo.clones.contains(&clone) {
-                self.undo.clones.push(clone.clone());
-            }
+            self.record(|undo| {
+                if !undo.clones.contains(&clone) {
+                    undo.clones.push(clone.clone());
+                }
+            })?;
             chosen.entry(clone).or_default().insert(name.clone());
 
             leg.exclude_tips = tips;
@@ -623,52 +650,42 @@ impl Run<'_> {
             exclude_tips: leg.exclude_tips.clone(),
             local_bundle: self.transfer_dir.join(&bundle_name),
             bundle_name,
-            source_bytes: leg.source.repo_bytes + leg.row.untracked_bytes,
+            repo_bytes: leg.source.repo_bytes,
+            untracked_bytes: leg.row.untracked_bytes,
         };
 
-        if self.direction == TransferDirection::ToLocal {
-            // Before the apply replaces it, even for a branch it reuses.
-            let clone = PathBuf::from(&plan.dest_dir);
-            let config = teardown::branch_config(&clone, &plan.dest_branch).map_err(|e| {
-                format!(
-                    "Cannot read {}'s config in {}: {e}",
-                    plan.dest_branch, plan.dest_dir
-                )
-            })?;
-            self.undo
-                .branch_configs
-                .push((clone, plan.dest_branch.clone(), config));
-        }
-        self.undo.sources.push(SourceCheckout {
-            workspace: match self.direction {
-                TransferDirection::ToRemote => None,
-                TransferDirection::ToLocal => leg.source.workspace.clone(),
-            },
-            dir: source_dir,
-        });
-        let outcome = carry_repo_with(source.as_ref(), dest.as_ref(), &plan, &mut |step| {
+        self.record(|undo| {
+            undo.sources.push(SourceCheckout {
+                workspace: match self.direction {
+                    TransferDirection::ToRemote => None,
+                    TransferDirection::ToLocal => leg.source.workspace.clone(),
+                },
+                dir: source_dir,
+            })
+        })?;
+        // Why `on_step` stopped the carry, when it was not a cancel.
+        let mut not_recorded = None;
+        let carried = carry_repo_with(source.as_ref(), dest.as_ref(), &plan, &mut |step| {
             let (phase, bytes) = match step {
                 CarryStep::Snapshotting => (TransferPhase::Snapshotting, None),
                 CarryStep::Moving { bytes } => (TransferPhase::Moving, Some(bytes)),
-                CarryStep::Applying => (TransferPhase::Applying, None),
+                CarryStep::Applying { .. } => (TransferPhase::Applying, None),
             };
             self.emit(phase, Some(leg), None, bytes);
-            self.guard_not_cancelled()
-        })?;
+            self.guard_not_cancelled()?;
+            if let (CarryStep::Applying { snapshot }, Landing::Branch) = (step, plan.landing) {
+                if let Err(e) = self.record_landing(&plan, snapshot) {
+                    not_recorded = Some(e);
+                    return Err(TransferError::Cancelled);
+                }
+            }
+            Ok(())
+        });
+        let outcome = match (carried, not_recorded) {
+            (Err(_), Some(e)) => return Err(e.into()),
+            (carried, _) => carried?,
+        };
         if self.direction == TransferDirection::ToLocal {
-            if outcome.applied.created_branch {
-                self.undo.branches.push((
-                    PathBuf::from(&plan.dest_dir),
-                    plan.dest_branch.clone(),
-                    outcome.snapshot.head.clone(),
-                ));
-            }
-            for remote in &outcome.applied.added_remotes {
-                self.undo
-                    .remotes
-                    .push((PathBuf::from(&plan.dest_dir), remote.clone()));
-            }
-
             self.checkpoint(
                 TransferPhase::Applying,
                 Some(leg),
@@ -676,7 +693,12 @@ impl Run<'_> {
             )?;
             let clone = PathBuf::from(&plan.dest_dir);
             let worktree = self.free_worktree_path(leg)?;
-            self.undo.worktrees.push((clone.clone(), worktree.clone()));
+            self.record(|undo| {
+                undo.worktrees.push(AddedWorktree {
+                    clone: clone.clone(),
+                    worktree: worktree.clone(),
+                })
+            })?;
             crate::git::create_worktree_for_existing_branch_at_path(
                 &clone,
                 &leg.dest_branch,
@@ -690,6 +712,127 @@ impl Run<'_> {
         leg.plan = Some(plan);
         leg.outcome = Some(outcome);
         Ok(())
+    }
+
+    /// Before `plan`'s branch lands in a local clone: record its config as it
+    /// is, and whether the apply will create the branch and which remotes it
+    /// will add — exactly those missing now.
+    fn record_landing(&self, plan: &CarryPlan, snapshot: &Snapshot) -> Result<(), String> {
+        let clone = PathBuf::from(&plan.dest_dir);
+        let branch = &plan.dest_branch;
+        // A retry lands what the first attempt recorded.
+        if self
+            .journal
+            .borrow()
+            .undo
+            .branch_configs
+            .iter()
+            .any(|c| c.clone == clone && &c.branch == branch)
+        {
+            return Ok(());
+        }
+        let cannot_read = |e: String| format!("Cannot read {branch} in {}: {e}", plan.dest_dir);
+        let entries = undo::branch_config(&clone, branch).map_err(cannot_read)?;
+        let created = undo::branch_tip(&clone, branch)
+            .map_err(cannot_read)?
+            .is_none();
+        let remotes: Vec<AddedRemote> = snapshot
+            .remotes
+            .iter()
+            .filter(|remote| undo::remote_url(&clone, &remote.name).is_none())
+            .map(|remote| AddedRemote {
+                clone: clone.clone(),
+                remote: remote.name.clone(),
+                url: remote
+                    .entries
+                    .iter()
+                    .find(|e| e.var == "url")
+                    .map(|e| e.value.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        self.record(|undo| {
+            undo.branch_configs.push(ReplacedConfig {
+                clone: clone.clone(),
+                branch: branch.clone(),
+                head: snapshot.head.clone(),
+                entries,
+            });
+            if created {
+                undo.branches.push(CreatedBranch {
+                    clone: clone.clone(),
+                    branch: branch.clone(),
+                    tip: snapshot.head.clone(),
+                });
+            }
+            undo.remotes.extend(remotes);
+        })
+    }
+
+    /// Change the undo list and write it to the manifest, before making what
+    /// the change describes.
+    fn record(&self, change: impl FnOnce(&mut Undo)) -> Result<(), String> {
+        change(&mut self.journal.borrow_mut().undo);
+        self.save_journal()
+    }
+
+    fn save_journal(&self) -> Result<(), String> {
+        let mut manifest = self.journal.borrow_mut();
+        manifest.keep_until_removed = manifest.holds_left_behind_changes();
+        backups::write_manifest(&self.transfer_dir, &manifest)?;
+        self.journaled.set(true);
+        Ok(())
+    }
+
+    /// Bring the manifest to `status` — with the repos as `legs` end up, and
+    /// `warning` — if one was written. Past the point a failure to write it
+    /// could stop anything, so that is only logged.
+    pub(super) fn close_journal(
+        &self,
+        status: &str,
+        legs: Option<&[Leg]>,
+        warning: Option<String>,
+    ) {
+        if !self.journaled.get() {
+            return;
+        }
+        {
+            let mut manifest = self.journal.borrow_mut();
+            manifest.status = status.to_string();
+            if let Some(legs) = legs {
+                manifest.repos = legs.iter().filter_map(|l| self.manifest_repo(l)).collect();
+            }
+            manifest.warnings.extend(warning);
+        }
+        if let Err(e) = self.save_journal() {
+            log::warn!("[project_transfer] {e}");
+        }
+    }
+
+    /// After a panic: one that came while a launch lock was held poisoned
+    /// it, and every later session start on the branch would panic too.
+    fn clear_poisoned_launch_locks(&self) {
+        let Ok(branches) = self
+            .store
+            .list_branches_for_project(self.guard.project_id())
+        else {
+            return;
+        };
+        for branch in branches {
+            crate::session_commands::branch_session_launch_lock_for(&branch.id).clear_poison();
+        }
+    }
+
+    /// Roll back, report the failure, and hand back its message.
+    fn fail(&self, message: String) -> String {
+        self.roll_back();
+        log::warn!(
+            "[project_transfer] transfer {} of {} failed: {message}",
+            self.guard.transfer_id(),
+            self.guard.project_id()
+        );
+        self.emit(TransferPhase::Failed, None, Some(message.clone()), None);
+        message
     }
 
     /// The project's usual worktree path for the branch, or the first free
@@ -787,45 +930,24 @@ impl Run<'_> {
         Ok(())
     }
 
-    fn manifest(&self, inspection: &Inspection, legs: &[Leg], status: &str) -> TransferManifest {
-        let repos = legs
-            .iter()
-            .filter_map(|leg| {
-                let (plan, outcome) = (leg.plan.as_ref()?, leg.outcome.as_ref()?);
-                Some(ManifestRepo {
-                    github_repo: leg.source.github_repo.clone(),
-                    branch: leg.row.branch_name.clone(),
-                    dest_branch: leg.dest_branch.clone(),
-                    bundle: plan.bundle_name.clone(),
-                    head: outcome.snapshot.head.clone(),
-                    snapshot: outcome.snapshot.snapshot.clone(),
-                    has_uncommitted_changes: outcome.snapshot.has_uncommitted_changes(),
-                    local_clone: leg.backup_ref.as_ref().and_then(|_| {
-                        self.host
-                            .local_clone_path(&leg.source.github_repo)
-                            .ok()
-                            .map(|p| p.to_string_lossy().into_owned())
-                    }),
-                    backup_ref: leg.backup_ref.clone(),
-                })
-            })
-            .collect();
-        let mut manifest = TransferManifest {
-            transfer_id: self.guard.transfer_id().to_string(),
-            project_id: inspection.project.id.clone(),
-            direction: self.direction.as_str().to_string(),
-            created_at: crate::store::now_timestamp(),
-            include_uncommitted: self.include_uncommitted,
-            status: status.to_string(),
-            workspace_name: self
-                .workspace_name
-                .clone()
-                .or_else(|| inspection.preflight.workspace_name.clone()),
-            keep_until_removed: false,
-            repos,
-        };
-        manifest.keep_until_removed = manifest.holds_left_behind_changes();
-        manifest
+    /// A carried leg, as the manifest describes it.
+    fn manifest_repo(&self, leg: &Leg) -> Option<ManifestRepo> {
+        let (plan, outcome) = (leg.plan.as_ref()?, leg.outcome.as_ref()?);
+        Some(ManifestRepo {
+            github_repo: leg.source.github_repo.clone(),
+            branch: leg.row.branch_name.clone(),
+            dest_branch: leg.dest_branch.clone(),
+            bundle: plan.bundle_name.clone(),
+            head: outcome.snapshot.head.clone(),
+            snapshot: outcome.snapshot.snapshot.clone(),
+            has_uncommitted_changes: outcome.snapshot.has_uncommitted_changes(),
+            local_clone: self
+                .host
+                .local_clone_path(&leg.source.github_repo)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned()),
+            backup_ref: leg.backup_ref.clone(),
+        })
     }
 
     fn result(

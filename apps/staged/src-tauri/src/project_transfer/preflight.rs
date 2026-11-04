@@ -113,8 +113,14 @@ pub struct RepoPreflight {
     pub untracked: u32,
     pub conflicted: u32,
     pub untracked_bytes: u64,
-    /// Ignored files (outside ignored directories), none of which is carried.
+    /// Ignored files outside ignored directories, each counted — including
+    /// every file of an untracked directory that holds nothing else. None of
+    /// them is carried, and removing the source deletes them.
     pub ignored_files: u32,
+    /// Directories an ignore pattern matches (`node_modules/`, `.venv/`),
+    /// each counted once however much they hold. Like [`Self::ignored_files`],
+    /// never carried.
+    pub ignored_dirs: u32,
     pub has_uncommitted_changes: bool,
     pub blockers: Vec<TransferIssue>,
     pub warnings: Vec<TransferIssue>,
@@ -272,6 +278,7 @@ pub(super) fn inspect_after_resuming(
             conflicted: 0,
             untracked_bytes: 0,
             ignored_files: 0,
+            ignored_dirs: 0,
             has_uncommitted_changes: false,
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -487,7 +494,7 @@ fn inspect_local_sources(
                     )
                     .map_err(|e| e.to_string())
             })
-            .map(|output| sections(&output.stdout));
+            .map(|output| scripts::sections(&output.stdout));
         match report {
             Ok(sections) => match sections.into_iter().next() {
                 Some(section) => {
@@ -623,7 +630,7 @@ fn inspect_remote_sources(
         let output = host
             .workspace_endpoint(&workspace)
             .run_script(PREFLIGHT_SCRIPT, &args)
-            .map(|output| sections(&output.stdout));
+            .map(|output| scripts::sections(&output.stdout));
         match output {
             Ok(sections) => {
                 for (n, (i, dir)) in dirs.into_iter().enumerate() {
@@ -735,27 +742,6 @@ pub(super) fn local_branch_name(
     Err(format!("no free local name for {branch}"))
 }
 
-/// Split [`PREFLIGHT_SCRIPT`]'s output at its `repo=` lines.
-fn sections(stdout: &str) -> Vec<ScriptReport> {
-    let mut sections = Vec::new();
-    let mut current: Option<String> = None;
-    for line in stdout.lines() {
-        if line.starts_with("repo=") {
-            if let Some(text) = current.take() {
-                sections.push(ScriptReport::parse(&text));
-            }
-            current = Some(String::new());
-        } else if let Some(text) = current.as_mut() {
-            text.push_str(line);
-            text.push('\n');
-        }
-    }
-    if let Some(text) = current {
-        sections.push(ScriptReport::parse(&text));
-    }
-    sections
-}
-
 fn inspect_failed(message: &str) -> TransferIssue {
     TransferIssue::new(
         "inspect_failed",
@@ -806,6 +792,7 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     row.ignored_files = count("ignored");
+    row.ignored_dirs = count("ignored_dirs");
     row.has_uncommitted_changes = row.staged + row.unstaged + row.untracked + row.conflicted > 0;
 
     if report.get("detached").is_some() {

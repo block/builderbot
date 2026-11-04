@@ -55,10 +55,14 @@ pub struct CarryPlan {
     pub bundle_name: String,
     /// Where the bundle is kept on this machine.
     pub local_bundle: PathBuf,
-    /// The source repository's object store plus its untracked files: what
-    /// snapshotting and applying take time in proportion to, so a Blox end
-    /// waits long enough for them.
-    pub source_bytes: u64,
+    /// The source repository's object store: what re-bundling the whole
+    /// history takes time in proportion to.
+    pub repo_bytes: u64,
+    /// The source's untracked files. Snapshotting, applying and verifying
+    /// hash and write what changed, so beside the bundle this is what they
+    /// take time in proportion to — not the whole repository, which a
+    /// stat-cached `add -A` and a bundle cut against origin never read.
+    pub untracked_bytes: u64,
 }
 
 /// A repository carried to the destination.
@@ -77,14 +81,18 @@ pub struct CarryOutcome {
 }
 
 /// A step of [`carry_repo_with`], reported before it starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CarryStep {
+#[derive(Debug, Clone, Copy)]
+pub enum CarryStep<'a> {
     Snapshotting,
     /// Moving a bundle of this many bytes.
     Moving {
         bytes: u64,
     },
-    Applying,
+    /// Landing `snapshot`: what the destination is about to gain, for a
+    /// caller that records it first.
+    Applying {
+        snapshot: &'a Snapshot,
+    },
 }
 
 /// Snapshot `plan`'s source, move the bundle, and land it at the destination.
@@ -107,7 +115,7 @@ pub fn carry_repo_with(
     source: &dyn TransferEndpoint,
     dest: &dyn TransferEndpoint,
     plan: &CarryPlan,
-    on_step: &mut dyn FnMut(CarryStep) -> Result<(), TransferError>,
+    on_step: &mut dyn FnMut(CarryStep<'_>) -> Result<(), TransferError>,
 ) -> Result<CarryOutcome, TransferError> {
     check_transfer_id(&plan.transfer_id)?;
     let source_bundle = source.scratch_path(&plan.transfer_id, &plan.bundle_name)?;
@@ -129,7 +137,9 @@ pub fn carry_repo_with(
     let mut bundle = snapshot.bundle.clone();
     on_step(CarryStep::Moving { bytes: bundle.size })?;
     move_bundle(source, dest, &source_bundle, plan, &dest_bundle, &bundle)?;
-    on_step(CarryStep::Applying)?;
+    on_step(CarryStep::Applying {
+        snapshot: &snapshot,
+    })?;
     let mut retried = false;
     let applied = match land(dest, plan, &snapshot, &dest_bundle, &bundle) {
         Err(TransferError::MissingPrerequisites { message, .. }) if snapshot.excluded > 0 => {
@@ -141,7 +151,9 @@ pub fn carry_repo_with(
             bundle = rebundle(source, plan, &source_bundle)?;
             on_step(CarryStep::Moving { bytes: bundle.size })?;
             move_bundle(source, dest, &source_bundle, plan, &dest_bundle, &bundle)?;
-            on_step(CarryStep::Applying)?;
+            on_step(CarryStep::Applying {
+                snapshot: &snapshot,
+            })?;
             retried = true;
             land(dest, plan, &snapshot, &dest_bundle, &bundle)?
         }
@@ -199,7 +211,7 @@ pub fn finish(
             snapshot: &outcome.snapshot,
             restore: plan.include_uncommitted,
         },
-        plan.source_bytes + outcome.bundle.size,
+        plan.untracked_bytes + outcome.bundle.size,
     )
 }
 
@@ -211,22 +223,61 @@ pub fn unchanged(
     plan: &CarryPlan,
     snapshot: &Snapshot,
 ) -> Result<Option<String>, TransferError> {
-    check_transfer_id(&plan.transfer_id)?;
-    let scratch_index =
-        source.scratch_path(&plan.transfer_id, &format!("{}.index", plan.bundle_name))?;
-    let report = run_step_sized(
-        source,
-        "verify",
-        scripts::VERIFY_SCRIPT,
-        &scripts::verify_args(
+    unchanged_all(source, &[(plan, snapshot)])?
+        .pop()
+        .unwrap_or_else(|| Err(no_answer(source, plan)))
+}
+
+/// [`unchanged`] for several checkouts at the same end, in one script run: a
+/// workspace's, checked right before it is deleted. `Err` when the script
+/// could not run at all; otherwise one answer per checkout, in order.
+pub fn unchanged_all(
+    source: &dyn TransferEndpoint,
+    checks: &[(&CarryPlan, &Snapshot)],
+) -> Result<Vec<Result<Option<String>, TransferError>>, TransferError> {
+    let mut args = Vec::new();
+    let mut payload_bytes = 0;
+    for (plan, snapshot) in checks {
+        check_transfer_id(&plan.transfer_id)?;
+        let scratch_index =
+            source.scratch_path(&plan.transfer_id, &format!("{}.index", plan.bundle_name))?;
+        args.extend(scripts::verify_args(
             &plan.source_dir,
             &plan.source_branch,
             snapshot,
             &scratch_index,
-        ),
-        plan.source_bytes,
-    )?;
-    scripts::parse_verify(&report)
+        ));
+        payload_bytes += plan.untracked_bytes + snapshot.bundle.size;
+    }
+    let output = source.run_script_sized(scripts::VERIFY_SCRIPT, &args, payload_bytes)?;
+    let mut sections = scripts::sections(&output.stdout).into_iter();
+    Ok(checks
+        .iter()
+        .map(|(plan, _)| match sections.next() {
+            Some(section) => {
+                scripts::parse_verify(&section).map_err(|message| TransferError::Script {
+                    step: "verify",
+                    endpoint: source.describe(),
+                    message,
+                })
+            }
+            None if !output.success && !output.stderr.trim().is_empty() => {
+                Err(TransferError::Script {
+                    step: "verify",
+                    endpoint: source.describe(),
+                    message: output.stderr.trim().to_string(),
+                })
+            }
+            None => Err(no_answer(source, plan)),
+        })
+        .collect())
+}
+
+fn no_answer(source: &dyn TransferEndpoint, plan: &CarryPlan) -> TransferError {
+    TransferError::Protocol {
+        step: "verify",
+        message: format!("no answer for {} on {}", plan.source_dir, source.describe()),
+    }
 }
 
 /// Remove the transfer's temporary refs from `repo_dir` at `endpoint`, and
@@ -281,7 +332,7 @@ fn snapshot(
             &plan.transfer_id,
             &plan.exclude_tips,
         ),
-        plan.source_bytes,
+        plan.untracked_bytes,
     )?;
     Snapshot::parse(&report, &plan.source_branch)
 }
@@ -296,7 +347,7 @@ fn rebundle(
         "rebundle",
         scripts::REBUNDLE_SCRIPT,
         &scripts::rebundle_args(&plan.source_dir, source_bundle, &plan.transfer_id),
-        plan.source_bytes,
+        plan.repo_bytes,
     )?;
     scripts::parse_rebundle(&report)
 }
@@ -324,7 +375,7 @@ fn land(
             snapshot,
             restore,
         },
-        plan.source_bytes + bundle.size,
+        plan.untracked_bytes + bundle.size,
     )
 }
 

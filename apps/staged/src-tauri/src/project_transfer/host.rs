@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crate::blox;
 
 use super::endpoint::{BloxEndpoint, LocalEndpoint, TransferEndpoint};
+use super::TransferError;
 
 /// A Blox workspace's state, as far as a transfer cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,16 +69,20 @@ pub trait TransferHost: Send + Sync {
 
     /// Create a workspace from `github_repo` at `base`, and wait until it is
     /// running and bootstrapped. `progress` gets a line per state change.
+    /// The wait stops early, with [`TransferError::Cancelled`]'s message,
+    /// once `cancelled` says so.
     fn start_workspace(
         &self,
         name: &str,
         github_repo: &str,
         base: &str,
         progress: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String>;
 
-    /// Resume a suspended workspace and wait until it is running.
-    fn resume_workspace(&self, name: &str) -> Result<(), String>;
+    /// Resume a suspended workspace and wait until it is running, or until
+    /// `cancelled` says to stop waiting.
+    fn resume_workspace(&self, name: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String>;
 
     /// Delete a workspace; one that is already gone counts as deleted.
     fn delete_workspace(&self, name: &str) -> Result<(), String>;
@@ -100,6 +105,8 @@ pub struct LiveHost;
 /// How long a new or resumed workspace may take to come up and bootstrap.
 const WORKSPACE_READY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a wait between polls looks for a cancel.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 fn is_not_found(e: &blox::BloxError) -> bool {
     matches!(e, blox::BloxError::CommandFailed(msg) if msg.to_lowercase().contains("not found"))
@@ -121,8 +128,13 @@ fn workspace_state_from_status(status: Option<&str>) -> WorkspaceState {
 
 impl LiveHost {
     /// Poll until the workspace is running and its bootstrap commands have
-    /// all completed.
-    fn wait_until_ready(&self, name: &str, progress: &dyn Fn(&str)) -> Result<(), String> {
+    /// all completed, or `cancelled` says to stop.
+    fn wait_until_ready(
+        &self,
+        name: &str,
+        progress: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
         let deadline = Instant::now() + WORKSPACE_READY_TIMEOUT;
         let mut last = String::new();
         let mut report = |line: String| {
@@ -132,6 +144,9 @@ impl LiveHost {
             }
         };
         loop {
+            if cancelled() {
+                return Err(TransferError::Cancelled.to_string());
+            }
             match blox::ws_info(name) {
                 Ok(info) => {
                     if let Some(id) = info.workstation_id {
@@ -181,7 +196,13 @@ impl LiveHost {
                     WORKSPACE_READY_TIMEOUT.as_secs() / 60
                 ));
             }
-            std::thread::sleep(WORKSPACE_POLL_INTERVAL);
+            let next_poll = Instant::now() + WORKSPACE_POLL_INTERVAL;
+            while Instant::now() < next_poll {
+                if cancelled() {
+                    return Err(TransferError::Cancelled.to_string());
+                }
+                std::thread::sleep(CANCEL_POLL_INTERVAL);
+            }
         }
     }
 }
@@ -257,6 +278,7 @@ impl TransferHost for LiveHost {
         github_repo: &str,
         base: &str,
         progress: &dyn Fn(&str),
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String> {
         let source = format!("https://github.com/{github_repo}.git?ref={base}");
         progress("Creating the workspace");
@@ -276,14 +298,16 @@ impl TransferHost for LiveHost {
             // in `branches::start_workspace`; the poll below decides.
             Err(e) => log::warn!("[project_transfer] ws start {name}: {e}; polling for it"),
         }
-        self.wait_until_ready(name, progress)
+        self.wait_until_ready(name, progress, cancelled)
     }
 
-    fn resume_workspace(&self, name: &str) -> Result<(), String> {
+    fn resume_workspace(&self, name: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         blox::ws_resume(name).map_err(|e| e.to_string())?;
-        self.wait_until_ready(name, &|line| {
-            log::info!("[project_transfer] resuming {name}: {line}")
-        })
+        self.wait_until_ready(
+            name,
+            &|line| log::info!("[project_transfer] resuming {name}: {line}"),
+            cancelled,
+        )
     }
 
     fn delete_workspace(&self, name: &str) -> Result<(), String> {

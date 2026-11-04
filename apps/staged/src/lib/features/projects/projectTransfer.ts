@@ -57,6 +57,20 @@ export function uncommittedBreakdown(row: ProjectTransferRepoPreflight): string 
 }
 
 /**
+ * What a repo leaves behind as ignored, e.g. "3 ignored files and 2 ignored
+ * folders stay behind"; null with nothing ignored.
+ */
+export function ignoredSummary(row: ProjectTransferRepoPreflight): string | null {
+  const parts = [
+    row.ignoredFiles > 0 && plural(row.ignoredFiles, 'ignored file'),
+    row.ignoredDirs > 0 && plural(row.ignoredDirs, 'ignored folder'),
+  ].filter((part): part is string => Boolean(part));
+  if (parts.length === 0) return null;
+  const one = row.ignoredFiles + row.ignoredDirs === 1;
+  return `${parts.join(' and ')} ${one ? 'stays' : 'stay'} behind`;
+}
+
+/**
  * Whether the dialog asks about uncommitted changes. Besides the repos known
  * to have some, an `unknown` repo (a workspace the transfer resumes first)
  * may turn out to, and the user's answer must still apply to it.

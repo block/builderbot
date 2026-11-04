@@ -21,8 +21,8 @@ pub(crate) struct WorktreeSetupProgress {
 }
 
 /// Emit a `worktree-setup-progress` event for a branch and phase.
-pub(crate) fn emit_setup_progress(
-    handle: &AppHandle,
+pub(crate) fn emit_setup_progress<R: tauri::Runtime>(
+    handle: &AppHandle<R>,
     branch_id: &str,
     phase: &str,
     detail: Option<String>,
@@ -3200,10 +3200,10 @@ fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
 /// delegates to [`create_and_link_worktree`] for worktree creation and DB
 /// linkage. It clones, fetches and creates the worktree inline, so call it
 /// from the blocking pool.
-pub(crate) fn setup_worktree_sync(
+pub(crate) fn setup_worktree_sync<R: tauri::Runtime>(
     store: &Arc<Store>,
     branch_id: &str,
-    app_handle: &tauri::AppHandle,
+    app_handle: &tauri::AppHandle<R>,
 ) -> Result<String, String> {
     crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     let emit_progress = |phase: &str, detail: Option<String>| {
@@ -3214,6 +3214,15 @@ pub(crate) fn setup_worktree_sync(
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    // A caller that read the branch before a transfer to remote switched it
+    // must not give it a worktree now: during teardown that would adopt the
+    // old worktree, which is about to be removed from under the new row.
+    if branch.branch_type == store::BranchType::Remote {
+        return Err(format!(
+            "{} is on a remote workspace; it has no local worktree to set up.",
+            branch.branch_name
+        ));
+    }
 
     let project = store
         .get_project(&branch.project_id)
@@ -4290,6 +4299,21 @@ mod upstream_tracking_tests {
             "feature-new"
         );
         assert_eq!(resolve_remote_branch_sync(&store, &branch), "feature-new");
+    }
+
+    /// Whatever its caller read before a transfer switched the branch to a
+    /// workspace, setup gives it no worktree and no workdir row.
+    #[test]
+    fn worktree_setup_refuses_a_remote_branch() {
+        let (store, project) = store_with_project();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "stg-feature");
+        store.create_branch(&branch).unwrap();
+        let app = mock_app();
+
+        let err = setup_worktree_sync(&store, &branch.id, app.handle()).unwrap_err();
+
+        assert!(err.contains("remote workspace"), "{err}");
+        assert!(store.get_workdir_for_branch(&branch.id).unwrap().is_none());
     }
 
     /// Provisioning is one of the events the queue waits on: a session queued

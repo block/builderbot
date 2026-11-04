@@ -186,7 +186,8 @@ impl World {
             exclude_tips,
             bundle_name: "repo.bundle".to_string(),
             local_bundle: PathBuf::from(local_bundle),
-            source_bytes: 0,
+            repo_bytes: 0,
+            untracked_bytes: 0,
         }
     }
 
@@ -976,6 +977,7 @@ fn a_checkout_landing_refuses_a_dirty_destination() {
         git(&w.source, &["checkout", "-q", "-b", "feature"]);
         write(&w.source, "f.txt", "x\n");
         commit(&w.source, "x");
+        write(&w.source, "notes.txt", "the source's own\n");
         write(&w.dest, "a.txt", "someone's edit\n");
 
         let err = w.to_remote("feature", "feature", true).unwrap_err();
@@ -986,12 +988,43 @@ fn a_checkout_landing_refuses_a_dirty_destination() {
             "someone's edit\n"
         );
 
-        // An untracked file would stay behind and pass for the branch's own.
+        // An untracked file the branch would write over is refused, whether
+        // the branch's commits have it or only its working state does.
         git(&w.dest, &["checkout", "-q", "--", "a.txt"]);
-        write(&w.dest, "stray.txt", "not the branch's\n");
-        let err = w.to_remote("feature", "feature", true).unwrap_err();
-        assert!(err.to_string().contains("untracked files"), "{err}");
-        assert_eq!(rev(&w.dest, "HEAD"), rev(&w.dest, "origin/main"));
+        for clash in ["f.txt", "notes.txt"] {
+            write(&w.dest, clash, "not the branch's\n");
+            let err = w.to_remote("feature", "feature", true).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("has an untracked {clash}, which the branch")),
+                "{err}"
+            );
+            assert_eq!(rev(&w.dest, "HEAD"), rev(&w.dest, "origin/main"));
+            assert_eq!(
+                fs::read_to_string(w.dest.join(clash)).unwrap(),
+                "not the branch's\n"
+            );
+            fs::remove_file(w.dest.join(clash)).unwrap();
+        }
+
+        // Any other (a workspace's bootstrap leaves some) stays, with a
+        // warning so it isn't taken for the branch's.
+        write(&w.dest, "bootstrap/done", "bootstrapped\n");
+        let (outcome, dest) = w.to_remote("feature", "feature", true).unwrap();
+        assert_eq!(
+            outcome.applied.warnings,
+            vec!["1 untracked file was already in the destination checkout \
+                 (bootstrap/done, for one) and stayed there"
+                .to_string()]
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("bootstrap/done")).unwrap(),
+            "bootstrapped\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dest.join("notes.txt")).unwrap(),
+            "the source's own\n"
+        );
     }
 }
 
@@ -1186,6 +1219,178 @@ fn verify_says_whether_a_checkout_is_still_its_snapshot_and_writes_nothing() {
             Some(format!("HEAD moved from {head} to {}", moved.trim()))
         );
     }
+}
+
+#[test]
+fn verify_checks_every_checkout_at_an_end_in_one_run() {
+    for shell in shells() {
+        let w = World::new(shell);
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, "f.txt", "x\n");
+        commit(&w.source, "x");
+        write(&w.source, "notes.txt", "untracked\n");
+        let (outcome, _) = w.to_remote("feature", "feature", true).unwrap();
+        let source = Recording::new(w.endpoint(&w.local_scratch));
+        let plan = CarryPlan {
+            untracked_bytes: 9,
+            ..w.plan(
+                &source.inner,
+                Landing::Checkout,
+                ("feature", "feature"),
+                true,
+                vec![],
+            )
+        };
+        let gone = CarryPlan {
+            source_dir: w.root.join("gone").to_str().unwrap().to_string(),
+            bundle_name: "gone.bundle".to_string(),
+            ..plan.clone()
+        };
+        let elsewhere = CarryPlan {
+            source_branch: "elsewhere".to_string(),
+            bundle_name: "elsewhere.bundle".to_string(),
+            ..plan.clone()
+        };
+        let snapshot = &outcome.snapshot;
+
+        let answers = unchanged_all(
+            &source,
+            &[(&plan, snapshot), (&gone, snapshot), (&elsewhere, snapshot)],
+        )
+        .unwrap();
+
+        assert_eq!(
+            source.runs(),
+            vec![("verify", 3 * (9 + snapshot.bundle.size))]
+        );
+        assert!(matches!(answers[0], Ok(None)), "{:?}", answers[0]);
+        let gone_err = answers[1].as_ref().unwrap_err().to_string();
+        assert!(gone_err.contains("cannot enter"), "{shell}: {gone_err}");
+        assert_eq!(
+            answers[2].as_ref().unwrap().as_deref(),
+            Some("elsewhere is no longer checked out")
+        );
+    }
+}
+
+/// A [`LocalEndpoint`] noting which script each run was and the payload it
+/// was sized for.
+struct Recording {
+    inner: LocalEndpoint,
+    runs: std::sync::Mutex<Vec<(&'static str, u64)>>,
+}
+
+impl Recording {
+    fn new(inner: LocalEndpoint) -> Self {
+        Self {
+            inner,
+            runs: Default::default(),
+        }
+    }
+
+    fn runs(&self) -> Vec<(&'static str, u64)> {
+        self.runs.lock().unwrap().clone()
+    }
+}
+
+fn script_name(script: &str) -> &'static str {
+    [
+        ("snapshot", scripts::SNAPSHOT_SCRIPT),
+        ("rebundle", scripts::REBUNDLE_SCRIPT),
+        ("verify", scripts::VERIFY_SCRIPT),
+        ("apply", scripts::APPLY_SCRIPT),
+        ("origin_tips", scripts::ORIGIN_TIPS_SCRIPT),
+        ("cleanup", scripts::CLEANUP_SCRIPT),
+    ]
+    .into_iter()
+    .find(|(_, s)| *s == script)
+    .map_or("other", |(name, _)| name)
+}
+
+impl TransferEndpoint for Recording {
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+
+    fn run_script(&self, script: &str, args: &[String]) -> Result<ScriptOutput, TransferError> {
+        self.run_script_sized(script, args, 0)
+    }
+
+    fn run_script_sized(
+        &self,
+        script: &str,
+        args: &[String],
+        payload_bytes: u64,
+    ) -> Result<ScriptOutput, TransferError> {
+        self.runs
+            .lock()
+            .unwrap()
+            .push((script_name(script), payload_bytes));
+        self.inner.run_script_sized(script, args, payload_bytes)
+    }
+
+    fn scratch_dir(&self, transfer_id: &str) -> Result<String, TransferError> {
+        self.inner.scratch_dir(transfer_id)
+    }
+
+    fn put_file(&self, local: &Path, path: &str) -> Result<(), TransferError> {
+        self.inner.put_file(local, path)
+    }
+
+    fn get_file(&self, path: &str, local: &Path, size: u64) -> Result<(), TransferError> {
+        self.inner.get_file(path, local, size)
+    }
+}
+
+/// What a step takes time in proportion to is what an end that gives up on
+/// slow scripts waits for: the untracked files and the bundle — the whole
+/// repository only to re-bundle all of it.
+#[test]
+fn each_step_is_sized_by_what_it_reads_and_writes() {
+    let w = World::new("/bin/sh");
+    let first = cut_against_a_commit_the_destination_lacks(&w);
+    let source = Recording::new(w.endpoint(&w.remote_scratch));
+    let dest = Recording::new(w.endpoint(&w.local_scratch));
+    let plan = CarryPlan {
+        repo_bytes: 1_000_000,
+        untracked_bytes: 10,
+        ..w.plan(
+            &source.inner,
+            Landing::Branch,
+            ("feature", "feature"),
+            true,
+            vec![first],
+        )
+    };
+
+    let outcome = carry_repo(&source, &dest, &plan).unwrap();
+    assert!(outcome.retried_without_exclusions);
+    let worktree = w.root.join("wt-feature");
+    git(
+        &w.dest,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worktree.to_str().unwrap(),
+            "feature",
+        ],
+    );
+    finish(&dest, &plan, &outcome, worktree.to_str().unwrap()).unwrap();
+
+    let (cut, whole) = (outcome.snapshot.bundle.size, outcome.bundle.size);
+    assert_eq!(
+        source.runs(),
+        vec![("snapshot", 10), ("rebundle", 1_000_000)]
+    );
+    assert_eq!(
+        dest.runs(),
+        vec![
+            ("apply", 10 + cut),
+            ("apply", 10 + whole),
+            ("apply", 10 + whole)
+        ]
+    );
 }
 
 #[test]

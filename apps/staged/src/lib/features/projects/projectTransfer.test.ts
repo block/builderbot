@@ -7,6 +7,7 @@ import type {
 import {
   asksAboutUncommitted,
   formatBytes,
+  ignoredSummary,
   isTransferCancellable,
   isTransferCancelledError,
   issueMessage,
@@ -39,6 +40,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     conflicted: 0,
     untrackedBytes: 0,
     ignoredFiles: 0,
+    ignoredDirs: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],
@@ -81,6 +83,16 @@ describe('labels', () => {
     expect(plural(2, 'uncommitted change')).toBe('2 uncommitted changes');
     expect(uncommittedBreakdown(repo({ staged: 1, untracked: 2 }))).toBe('1 staged, 2 untracked');
     expect(uncommittedBreakdown(repo())).toBeNull();
+  });
+
+  it('sums up what stays behind as ignored, folders included', () => {
+    expect(ignoredSummary(repo())).toBeNull();
+    expect(ignoredSummary(repo({ ignoredFiles: 1 }))).toBe('1 ignored file stays behind');
+    expect(ignoredSummary(repo({ ignoredDirs: 1 }))).toBe('1 ignored folder stays behind');
+    expect(ignoredSummary(repo({ ignoredDirs: 2 }))).toBe('2 ignored folders stay behind');
+    expect(ignoredSummary(repo({ ignoredFiles: 3, ignoredDirs: 1 }))).toBe(
+      '3 ignored files and 1 ignored folder stay behind'
+    );
   });
 
   it('asks about uncommitted changes when a repo has some or may have some', () => {

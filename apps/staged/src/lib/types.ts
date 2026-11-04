@@ -459,8 +459,11 @@ export interface ProjectTransferRepoPreflight {
   untracked: number;
   conflicted: number;
   untrackedBytes: number;
-  /** Ignored files (outside ignored directories); none of them is carried. */
+  /** Ignored files outside ignored directories, each counted; none of them is carried. */
   ignoredFiles: number;
+  /** Directories matched by an ignore pattern (`node_modules/`, `.venv/`), each counted
+   *  once; none of them is carried. */
+  ignoredDirs: number;
   hasUncommittedChanges: boolean;
   blockers: ProjectTransferIssue[];
   warnings: ProjectTransferIssue[];

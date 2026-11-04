@@ -6,14 +6,16 @@
 //! same `HEAD`, with the same index and working tree. One that changed — an
 //! editor saving, a terminal committing, while the transfer ran — is kept,
 //! and so is anything that can't be checked; the transfer still succeeds,
-//! with a warning saying what was left and why.
+//! with a warning saying what was left and why. A workspace's checkouts are
+//! checked together, in one exec, right before the delete.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::super::backups;
-use super::super::carry::{cleanup, unchanged};
+use super::super::carry::{cleanup, unchanged, unchanged_all};
 use super::super::preflight::{Inspection, TransferDirection, TransferIssue};
-use super::{path_str, Leg, Run, TransferPhase};
+use super::super::undo;
+use super::{Leg, Run, TransferPhase};
 
 impl Run<'_> {
     /// Remove the source: the worktrees or the workspaces, after keeping each
@@ -120,30 +122,48 @@ impl Run<'_> {
         workspace: &str,
         legs: &mut [Leg],
     ) -> Result<(), TransferIssue> {
-        let endpoint = self.host.workspace_endpoint(workspace);
         let mut changed = Vec::new();
         let mut failures = Vec::new();
-        for leg in legs
-            .iter_mut()
-            .filter(|l| l.source.workspace.as_deref() == Some(workspace))
-        {
+        let from_here = |leg: &Leg| {
+            leg.source.workspace.as_deref() == Some(workspace)
+                && leg.plan.is_some()
+                && leg.outcome.is_some()
+        };
+        for leg in legs.iter_mut().filter(|l| from_here(l)) {
             let (Some(plan), Some(outcome)) = (&leg.plan, &leg.outcome) else {
                 continue;
             };
-            let branch = &leg.row.branch_name;
-            let backup_ref = self.keep_backup_ref(
+            match self.keep_backup_ref(
                 Path::new(&plan.dest_dir),
-                branch,
+                &leg.row.branch_name,
                 &outcome.snapshot.snapshot,
-            );
-            match unchanged(endpoint.as_ref(), plan, &outcome.snapshot) {
-                Ok(None) => {}
-                Ok(Some(what)) => changed.push(format!("{branch}: {what}")),
-                Err(e) => failures.push(format!("couldn't check {branch} is unchanged: {e}")),
-            }
-            match backup_ref {
+            ) {
                 Ok(backup_ref) => leg.backup_ref = Some(backup_ref),
-                Err(e) => failures.push(format!("{branch}: {e}")),
+                Err(e) => failures.push(format!("{}: {e}", leg.row.branch_name)),
+            }
+        }
+        // Every check in one exec, as close to the delete as it can be.
+        let checks: Vec<_> = legs
+            .iter()
+            .filter(|l| from_here(l))
+            .filter_map(|l| Some((l.plan.as_ref()?, &l.outcome.as_ref()?.snapshot)))
+            .collect();
+        if !checks.is_empty() {
+            let endpoint = self.host.workspace_endpoint(workspace);
+            match unchanged_all(endpoint.as_ref(), &checks) {
+                Ok(answers) => {
+                    for ((plan, _), answer) in checks.iter().zip(answers) {
+                        let branch = &plan.source_branch;
+                        match answer {
+                            Ok(None) => {}
+                            Ok(Some(what)) => changed.push(format!("{branch}: {what}")),
+                            Err(e) => {
+                                failures.push(format!("couldn't check {branch} is unchanged: {e}"))
+                            }
+                        }
+                    }
+                }
+                Err(e) => failures.push(format!("couldn't check it is unchanged: {e}")),
             }
         }
         if !changed.is_empty() {
@@ -187,137 +207,13 @@ impl Run<'_> {
         Ok(backup_ref)
     }
 
-    /// Undo everything in [`super::Undo`], best-effort: destination first,
-    /// then the source's temporary refs. The bundles on this machine stay.
+    /// Undo everything the transfer recorded, best-effort; see
+    /// [`undo::roll_back`]. The bundles on this machine stay.
     pub(super) fn roll_back(&self) {
         self.emit(TransferPhase::RollingBack, None, None, None);
-        let tid = self.guard.transfer_id();
-        let undo = &self.undo;
-        if let Some(workspace) = &undo.workspace {
-            if let Err(e) = self.host.delete_workspace(workspace) {
-                log::warn!("[project_transfer] rollback: cannot delete workspace {workspace}: {e}");
-            }
-        }
-        for (clone, worktree) in undo.worktrees.iter().rev() {
-            remove_worktree_keeping_branch(clone, worktree);
-        }
-        // Only a branch the apply created, and only while it is where the
-        // transfer put it.
-        for (clone, branch, tip) in &undo.branches {
-            let branch_ref = format!("refs/heads/{branch}");
-            if let Err(e) = crate::git::cli_run(clone, &["update-ref", "-d", &branch_ref, tip]) {
-                log::warn!("[project_transfer] rollback: cannot delete {branch}: {e}");
-            }
-        }
-        // Before the branch config goes back: removing a remote also unsets
-        // the config of the branches that track it.
-        for (clone, remote) in &undo.remotes {
-            let _ = crate::git::cli_run(clone, &["remote", "remove", remote]);
-        }
-        for (clone, branch, entries) in undo.branch_configs.iter().rev() {
-            if let Err(e) = restore_branch_config(clone, branch, entries) {
-                log::warn!("[project_transfer] rollback: cannot restore {branch}'s config: {e}");
-            }
-        }
-        for clone in &undo.clones {
-            let result = self
-                .host
-                .local_endpoint(clone)
-                .map_err(|e| e.to_string())
-                .and_then(|endpoint| {
-                    cleanup(endpoint.as_ref(), &path_str(clone)?, tid, false)
-                        .map_err(|e| e.to_string())
-                });
-            if let Err(e) = result {
-                log::warn!("[project_transfer] rollback: {e}");
-            }
-        }
-        for source in &undo.sources {
-            let result = match &source.workspace {
-                Some(workspace) => cleanup(
-                    self.host.workspace_endpoint(workspace).as_ref(),
-                    &source.dir,
-                    tid,
-                    true,
-                )
-                .map_err(|e| e.to_string()),
-                None => self
-                    .host
-                    .local_endpoint(Path::new(&source.dir))
-                    .and_then(|endpoint| {
-                        cleanup(endpoint.as_ref(), &source.dir, tid, false)
-                            .map_err(|e| e.to_string())
-                    }),
-            };
-            if let Err(e) = result {
-                log::warn!("[project_transfer] rollback: {e}");
-            }
-        }
-        if self.transfer_dir.join(backups::MANIFEST_FILE).exists() {
-            if let Some(mut manifest) = backups::read_manifest(&self.transfer_dir) {
-                manifest.status = "rolledBack".to_string();
-                manifest.keep_until_removed = manifest.holds_left_behind_changes();
-                let _ = backups::write_manifest(&self.transfer_dir, &manifest);
-            }
-        }
-    }
-}
-
-/// A branch's `branch.<branch>.*` config, as `(key, value)` in order.
-pub(super) type BranchConfig = Vec<(String, String)>;
-
-/// `branch.<branch>.*` in `clone`'s own config. A variable set without a
-/// value reads as `true`, as git takes it.
-pub(super) fn branch_config(clone: &Path, branch: &str) -> Result<BranchConfig, String> {
-    let listing = crate::git::cli_run(clone, &["config", "--local", "-z", "--list"])
-        .map_err(|e| e.to_string())?;
-    let prefix = format!("branch.{branch}.");
-    Ok(listing
-        .split('\0')
-        .filter_map(|entry| {
-            let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
-            let var = key.strip_prefix(&prefix)?;
-            (!var.is_empty() && !var.contains('.')).then(|| (key.to_string(), value.to_string()))
-        })
-        .collect())
-}
-
-/// Replace `branch.<branch>.*` in `clone` with `entries`, as
-/// [`branch_config`] read them.
-fn restore_branch_config(
-    clone: &Path,
-    branch: &str,
-    entries: &[(String, String)],
-) -> Result<(), String> {
-    // Fails when there is no such section, which is as good as removed.
-    let _ = crate::git::cli_run(
-        clone,
-        &[
-            "config",
-            "--local",
-            "--remove-section",
-            &format!("branch.{branch}"),
-        ],
-    );
-    for (key, value) in entries {
-        crate::git::cli_run(clone, &["config", "--local", "--add", key, value])
-            .map_err(|e| format!("cannot set {key}: {e}"))?;
-    }
-    Ok(())
-}
-
-/// Remove a worktree the transfer added, without `remove_worktree`'s branch
-/// deletion: the branch is the rollback's to decide about.
-fn remove_worktree_keeping_branch(clone: &Path, worktree: &PathBuf) {
-    let Some(path) = worktree.to_str() else {
-        return;
-    };
-    if crate::git::cli_run(clone, &["worktree", "remove", "--force", path]).is_err() {
-        if worktree.exists() {
-            if let Err(e) = std::fs::remove_dir_all(worktree) {
-                log::warn!("[project_transfer] rollback: cannot remove {path}: {e}");
-            }
-        }
-        let _ = crate::git::cli_run(clone, &["worktree", "prune"]);
+        let recorded = self.journal.borrow().undo.clone();
+        let left = undo::roll_back(&recorded, self.host, self.guard.transfer_id());
+        self.journal.borrow_mut().warnings.extend(left);
+        self.close_journal(backups::ROLLED_BACK, None, None);
     }
 }

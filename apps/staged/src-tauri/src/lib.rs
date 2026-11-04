@@ -2076,7 +2076,14 @@ pub fn run() {
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
             }
-            tauri::async_runtime::spawn_blocking(project_transfer::prune_backups);
+            // Transfers a previous run never finished, then old backups.
+            let transfer_store = get_store(&app.state::<Mutex<Option<Arc<Store>>>>()).ok();
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Some(store) = transfer_store {
+                    project_transfer::recover_interrupted_transfers(&store);
+                }
+                project_transfer::prune_backups();
+            });
 
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.

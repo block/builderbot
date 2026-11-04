@@ -121,6 +121,19 @@ pub(crate) async fn add_project_repo_impl(
         }
     }
 
+    // Again, now the awaits are behind us: a transfer that began during them
+    // reads the project's repos without this one and switches the location
+    // read above, and one that already finished switched it.
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
+    let location_now = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .map(|p| p.location);
+    if location_now != Some(project.location) {
+        return Err(
+            "The project moved while the repository was being added; add it again.".to_string(),
+        );
+    }
     store
         .create_project_repo(&repo)
         .map_err(|e| e.to_string())?;

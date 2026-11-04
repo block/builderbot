@@ -18,14 +18,17 @@ use super::orchestrator::{run_transfer, ProjectTransferResult, TransferPhase, Tr
 use super::preflight::{
     ProjectTransferPreflight, RepoTransferState, TransferDirection, TransferIssue,
 };
+use super::recovery::{self, Recovered};
 use super::registry;
 use super::scripts::{
     APPLY_SCRIPT, CLONE_SCRIPT, ORIGIN_TIPS_SCRIPT, PREFLIGHT_SCRIPT, SNAPSHOT_SCRIPT,
+    VERIFY_SCRIPT,
 };
 use super::tests::{
     commit, configure_identity, git, make_a_mess, noise, observe, rev, source_fingerprint, try_git,
     write, Observed,
 };
+use super::undo::{self, AddedRemote, CreatedBranch, ReplacedConfig, Undo};
 use super::{LocalEndpoint, ScriptOutput, TransferEndpoint, TransferError};
 use crate::store::{
     Branch, BranchType, Project, ProjectLocation, ProjectRepo, Session, Store, Workdir,
@@ -64,6 +67,10 @@ enum Fault {
     EnsureClone,
     /// Resuming a workspace fails, leaving it as it was.
     ResumeWorkspace,
+    /// Resuming a workspace waits until the transfer is cancelled.
+    ResumeHangs,
+    /// The `nth` run (from 1) of the script at the side panics.
+    Panic(Side, &'static str, usize),
 }
 
 #[derive(Default)]
@@ -84,7 +91,7 @@ impl Faults {
         }
         self.seen += 1;
         let nth = match fault {
-            Fault::Script(_, _, nth) => nth,
+            Fault::Script(_, _, nth) | Fault::Panic(_, _, nth) => nth,
             _ => 1,
         };
         self.fired = self.seen == nth;
@@ -118,6 +125,13 @@ impl TransferEndpoint for FaultyEndpoint {
             );
         if hit {
             return Err(injected(self.describe()));
+        }
+        let panics =
+            self.faults.lock().unwrap().hit(
+                |f| matches!(f, Fault::Panic(side, s, _) if *side == self.side && *s == script),
+            );
+        if panics {
+            panic!("injected panic");
         }
         self.inner.run_script(script, args)
     }
@@ -170,6 +184,8 @@ struct FakeHost {
     calls: Mutex<Vec<String>>,
     faults: Arc<Mutex<Faults>>,
     blox: Mutex<Option<BloxUnavailable>>,
+    /// What a new workspace's bootstrap does to its primary clone.
+    bootstrap: Mutex<Option<fn(&Path)>>,
 }
 
 impl FakeHost {
@@ -186,6 +202,7 @@ impl FakeHost {
             calls: Mutex::default(),
             faults: Arc::default(),
             blox: Mutex::default(),
+            bootstrap: Mutex::default(),
         };
         for repo in repos {
             let origin = host.origin(repo);
@@ -255,6 +272,10 @@ impl FakeHost {
 
     fn fired(&self) -> bool {
         self.faults.lock().unwrap().fired
+    }
+
+    fn bootstrap_with(&self, bootstrap: fn(&Path)) {
+        *self.bootstrap.lock().unwrap() = Some(bootstrap);
     }
 
     fn endpoint(&self, env_dir: &Path, scratch_root: PathBuf, side: Side) -> FaultyEndpoint {
@@ -350,6 +371,7 @@ impl TransferHost for FakeHost {
         github_repo: &str,
         base: &str,
         progress: &dyn Fn(&str),
+        _cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String> {
         self.calls.lock().unwrap().push(format!("start {name}"));
         fs::create_dir_all(self.workspace_dir(name)).unwrap();
@@ -373,11 +395,15 @@ impl TransferHost for FakeHost {
                 path(&clone),
             ],
         );
+        configure_identity(&clone);
+        if let Some(bootstrap) = *self.bootstrap.lock().unwrap() {
+            bootstrap(&clone);
+        }
         progress("Workspace running");
         Ok(())
     }
 
-    fn resume_workspace(&self, name: &str) -> Result<(), String> {
+    fn resume_workspace(&self, name: &str, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         self.calls.lock().unwrap().push(format!("resume {name}"));
         if self
             .faults
@@ -386,6 +412,19 @@ impl TransferHost for FakeHost {
             .hit(|f| matches!(f, Fault::ResumeWorkspace))
         {
             return Err("injected failure".to_string());
+        }
+        if self
+            .faults
+            .lock()
+            .unwrap()
+            .hit(|f| matches!(f, Fault::ResumeHangs))
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !cancelled() {
+                assert!(std::time::Instant::now() < deadline, "never cancelled");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            return Err(TransferError::Cancelled.to_string());
         }
         self.set_state(name, WorkspaceState::Running);
         Ok(())
@@ -1181,6 +1220,17 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
     write(&widgets, "ahead-2.txt", "two\n");
     commit(&widgets, "ahead 2");
     make_a_mess(&widgets);
+    // Ignored folders count once each, ignored files anywhere else each.
+    fs::write(
+        f.host.clone_of(WIDGETS).join(".git/info/exclude"),
+        "node_modules/\n.venv/\n",
+    )
+    .unwrap();
+    write(&widgets, "node_modules/a/index.js", "x\n");
+    write(&widgets, "node_modules/b.js", "x\n");
+    write(&widgets, ".venv/bin/python", "x\n");
+    write(&widgets, "logs/one.log", "x\n");
+    write(&widgets, "logs/two.log", "x\n");
 
     let gadgets = f.worktree(1);
     write(
@@ -1227,7 +1277,11 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
         (6, 3, 4, 0)
     );
     assert!(widgets.untracked_bytes >= 1000);
-    assert_eq!(widgets.ignored_files, 1, "debug.log");
+    assert_eq!(
+        (widgets.ignored_files, widgets.ignored_dirs),
+        (3, 2),
+        "debug.log and logs/*.log; node_modules/ and .venv/"
+    );
     assert_eq!(widgets.unpushed_commits, 2);
     assert_eq!(widgets.upstream.as_deref(), Some("origin/feature"));
     assert_eq!(widgets.head, Some(rev(&f.worktree(0), "HEAD")));
@@ -1243,7 +1297,7 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
     assert_eq!(codes(&gadgets.warnings), vec!["submodules", "lfs"]);
     // The nested repository is the blocker, not an untracked file.
     assert!(!gadgets.has_uncommitted_changes);
-    assert_eq!(gadgets.ignored_files, 0);
+    assert_eq!((gadgets.ignored_files, gadgets.ignored_dirs), (0, 0));
 
     let sprockets = &preflight.repos[2];
     assert_eq!(sprockets.conflicted, 1);
@@ -1562,6 +1616,11 @@ fn a_failed_transfer_to_remote_rolls_back_from_every_phase() {
             bundles: 2,
         },
         Case {
+            name: "panic in the second apply",
+            trigger: Trigger::Fault(Fault::Panic(Workspace, APPLY_SCRIPT, 2)),
+            bundles: 2,
+        },
+        Case {
             name: "session at commit",
             trigger: Trigger::SessionAtCommit,
             bundles: 2,
@@ -1629,6 +1688,11 @@ fn a_failed_transfer_to_local_rolls_back_from_every_phase() {
             bundles: 1,
         },
         Case {
+            name: "panic in the worktree",
+            trigger: Trigger::Fault(Fault::Panic(Local, APPLY_SCRIPT, 2)),
+            bundles: 1,
+        },
+        Case {
             name: "second repo",
             trigger: Trigger::Fault(Fault::Script(Local, APPLY_SCRIPT, 3)),
             bundles: 2,
@@ -1681,4 +1745,414 @@ fn a_rolled_back_transfer_to_local_keeps_a_branch_it_reused() {
     assert_eq!(rev(&clone, "refs/heads/feature"), head, "still there");
     assert_eq!(config(), before);
     assert_eq!(clone_state(&clone), refs);
+}
+
+/// What a rollback deletes or puts back, it only touches as the transfer
+/// left it: a branch at the tip it was given, a remote at the URL it was
+/// given, and a branch's config only while the branch is gone or still at
+/// the carried head — at another tip it, and its config, belong to whoever
+/// moved it.
+#[test]
+fn a_rollback_only_touches_what_is_still_as_the_transfer_left_it() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let clone = f.host.clone_of(WIDGETS);
+    let carried = rev(&clone, "origin/main");
+    let other = rev(&clone, "HEAD");
+    write(&f.worktree(0), "other.txt", "other\n");
+    let other_tip = commit(&f.worktree(0), "other");
+    assert_ne!(other, other_tip);
+    let config = |branch: &str| {
+        try_git(
+            &clone,
+            &[
+                "config",
+                "--local",
+                "--get-regexp",
+                &format!("^branch\\.{branch}\\."),
+            ],
+        )
+        .unwrap_or_default()
+    };
+    let replaced = |branch: &str| ReplacedConfig {
+        clone: clone.clone(),
+        branch: branch.to_string(),
+        head: carried.clone(),
+        entries: vec![(
+            format!("branch.{branch}.description"),
+            "before the transfer".to_string(),
+        )],
+    };
+    let undo = Undo {
+        branches: ["at-tip", "moved", "never-made"]
+            .map(|branch| CreatedBranch {
+                clone: clone.clone(),
+                branch: branch.to_string(),
+                tip: carried.clone(),
+            })
+            .to_vec(),
+        branch_configs: vec![replaced("at-tip"), replaced("moved"), replaced("reused")],
+        remotes: ["fork", "theirs", "never-added"]
+            .map(|remote| AddedRemote {
+                clone: clone.clone(),
+                remote: remote.to_string(),
+                url: "https://example.com/fork.git".to_string(),
+            })
+            .to_vec(),
+        ..Undo::default()
+    };
+    git(&clone, &["branch", "--no-track", "at-tip", &carried]);
+    git(&clone, &["branch", "--no-track", "moved", &other_tip]);
+    git(&clone, &["branch", "--no-track", "reused", &carried]);
+    for branch in ["at-tip", "moved", "reused"] {
+        git(
+            &clone,
+            &["config", &format!("branch.{branch}.remote"), "origin"],
+        );
+    }
+    git(
+        &clone,
+        &["remote", "add", "fork", "https://example.com/fork.git"],
+    );
+    git(
+        &clone,
+        &["remote", "add", "theirs", "https://example.com/theirs.git"],
+    );
+
+    let left = undo::roll_back(&undo, &f.host, "t");
+
+    assert!(try_git(&clone, &["rev-parse", "--verify", "refs/heads/at-tip"]).is_err());
+    assert_eq!(rev(&clone, "refs/heads/moved"), other_tip);
+    assert_eq!(rev(&clone, "refs/heads/reused"), carried);
+    assert_eq!(
+        config("at-tip"),
+        "branch.at-tip.description before the transfer\n"
+    );
+    assert_eq!(config("moved"), "branch.moved.remote origin\n", "untouched");
+    assert_eq!(
+        config("reused"),
+        "branch.reused.description before the transfer\n"
+    );
+    assert!(undo::remote_url(&clone, "fork").is_none());
+    assert_eq!(
+        undo::remote_url(&clone, "theirs").as_deref(),
+        Some("https://example.com/theirs.git")
+    );
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left[0].contains("kept branch moved"), "{left:?}");
+    assert!(left[1].contains("kept remote theirs"), "{left:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The destination's own state
+// ---------------------------------------------------------------------------
+
+/// A workspace's bootstrap can leave its clone changed. Tracked changes stop
+/// the transfer before anything is snapshotted; untracked files only when
+/// the branch would write over one, and otherwise stay with a warning.
+#[test]
+fn what_a_workspace_bootstrap_left_in_the_clone_is_checked_before_anything_moves() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let worktree = f.worktree(0);
+    write(&worktree, "notes.txt", "untracked\n");
+    let source = source_fingerprint(&worktree);
+    let db = f.db_state();
+
+    f.host
+        .bootstrap_with(|clone| write(clone, "a.txt", "bootstrapped\n"));
+    let dirty = f.transfer(true);
+    let err = dirty.result.unwrap_err();
+    assert!(
+        err.contains("already has changes to tracked files (a.txt)"),
+        "{err}"
+    );
+    let phases = phases(&dirty.events);
+    assert!(!phases.contains(&TransferPhase::Snapshotting), "{phases:?}");
+    assert_eq!(f.bundles(&dirty.transfer_id), 0);
+
+    f.host
+        .bootstrap_with(|clone| write(clone, "notes.txt", "bootstrapped\n"));
+    let err = f.transfer(true).result.unwrap_err();
+    assert!(
+        err.contains("has an untracked notes.txt, which the branch would write over"),
+        "{err}"
+    );
+    assert_eq!(f.db_state(), db);
+    assert_eq!(source_fingerprint(&worktree), source);
+    assert!(f.host.workspaces().is_empty(), "rolled back");
+
+    f.host
+        .bootstrap_with(|clone| write(clone, ".bootstrapped", "yes\n"));
+    let result = f.transfer(true).result.expect("to remote");
+    let warnings: Vec<&str> = result.repos[0]
+        .warnings
+        .iter()
+        .map(|w| w.message.as_str())
+        .collect();
+    assert!(
+        warnings.contains(
+            &"1 untracked file was already in the destination checkout \
+              (.bootstrapped, for one) and stayed there"
+        ),
+        "{warnings:?}"
+    );
+    assert!(f.checkout(0).join(".bootstrapped").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Resuming the source
+// ---------------------------------------------------------------------------
+
+/// A cancel stops a resume that is still waiting; a resume that finished
+/// leaves the rows running, whatever the transfer comes to.
+#[test]
+fn a_resume_honours_cancel_and_leaves_the_rows_running() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    f.transfer(true).result.expect("to remote");
+    let suspend = || {
+        f.host.set_state(WORKSPACE, WorkspaceState::Suspended);
+        f.store
+            .update_workspace_status_by_workspace_name(WORKSPACE, &WorkspaceStatus::Suspended)
+            .unwrap();
+    };
+    let status = || {
+        f.store
+            .get_branch(&f.branches[0].id)
+            .unwrap()
+            .unwrap()
+            .workspace_status
+    };
+    let resume = format!("resume {WORKSPACE}");
+
+    suspend();
+    f.host.arm(Fault::ResumeHangs);
+    let hung = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !f.host.calls().contains(&resume) {
+                assert!(std::time::Instant::now() < deadline, "never resumed");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(registry::cancel(&f.project.id));
+        });
+        f.transfer(true)
+    });
+    assert!(f.host.fired());
+    let err = hung.result.unwrap_err();
+    assert!(err.contains("transfer was cancelled"), "{err}");
+    assert_eq!(status(), Some(WorkspaceStatus::Suspended));
+
+    let cancelled = f.transfer_with(true, &|progress| {
+        if progress.phase == TransferPhase::Snapshotting {
+            registry::cancel(&progress.project_id);
+        }
+    });
+    assert!(cancelled.result.is_err());
+    assert_eq!(f.host.calls().iter().filter(|c| **c == resume).count(), 2);
+    assert_eq!(status(), Some(WorkspaceStatus::Running), "resumed");
+}
+
+// ---------------------------------------------------------------------------
+// Panics
+// ---------------------------------------------------------------------------
+
+/// Past the switch there is nothing to roll back to: a panic while the
+/// source comes down fails the transfer but leaves the project where it
+/// went, says so, and frees everything it held.
+#[test]
+fn a_panic_after_the_switch_leaves_the_project_at_its_destination() {
+    let f = two_repo_project();
+    let worktrees = [f.worktree(0), f.worktree(1)];
+    // The first worktree's check before it is removed.
+    f.host.arm(Fault::Panic(Side::Local, VERIFY_SCRIPT, 1));
+
+    let transfer = f.transfer(true);
+
+    assert!(f.host.fired());
+    let err = transfer.result.unwrap_err();
+    assert!(err.contains("The project moved"), "{err}");
+    assert!(err.contains("injected panic"), "{err}");
+    let phases = phases(&transfer.events);
+    assert_eq!(phases.last(), Some(&TransferPhase::Failed));
+    assert!(!phases.contains(&TransferPhase::RollingBack), "{phases:?}");
+    let project = f.store.get_project(&f.project.id).unwrap().unwrap();
+    assert_eq!(project.location, ProjectLocation::Remote);
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    assert!(worktrees.iter().all(|wt| wt.is_dir()), "not removed yet");
+    let manifest = f.manifest(&transfer.transfer_id).expect("manifest");
+    assert_eq!(manifest.status, backups::COMPLETED);
+    assert!(
+        manifest.warnings[0].contains("injected panic"),
+        "{manifest:?}"
+    );
+    for branch in &f.branches {
+        let lock = crate::session_commands::branch_session_launch_lock_for(&branch.id);
+        assert!(lock.lock().is_ok());
+    }
+    assert!(recovery::recover(&f.store, &f.host, &|_| false).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Interrupted transfers
+// ---------------------------------------------------------------------------
+
+/// The manifest lists what to undo before each thing is made, so a transfer
+/// cut off part way — here, between the two repos — is rolled back at the
+/// next start: the orphan workspace and the temporary refs.
+#[test]
+fn a_transfer_to_remote_cut_off_before_the_switch_is_undone_at_the_next_start() {
+    let f = two_repo_project();
+    let worktrees = [f.worktree(0), f.worktree(1)];
+    let sources: Vec<_> = worktrees.iter().map(|wt| source_fingerprint(wt)).collect();
+    let checked = Mutex::new(false);
+
+    let transfer = f.transfer_with(true, &|progress| {
+        let manifest = || f.manifest(&progress.transfer_id);
+        match progress.phase {
+            // Nothing made yet, nothing written.
+            TransferPhase::PreparingDestination if progress.detail.is_none() => {
+                assert!(manifest().is_none());
+            }
+            // Recorded before the start.
+            TransferPhase::PreparingDestination
+                if progress.detail.as_deref() == Some("Workspace running") =>
+            {
+                let manifest = manifest().expect("written before the workspace");
+                assert_eq!(manifest.status, backups::CARRYING);
+                assert_eq!(manifest.owner_pid, Some(std::process::id()));
+                assert_eq!(manifest.workspace_name.as_deref(), Some(WORKSPACE));
+                assert_eq!(manifest.undo.workspace.as_deref(), Some(WORKSPACE));
+            }
+            TransferPhase::Applying if progress.branch_id.as_deref() == Some(&f.branches[1].id) => {
+                let before = manifest().expect("manifest");
+                assert_eq!(before.undo.sources.len(), 2);
+                assert_eq!(before.repos.len(), 1, "the first repo is carried");
+                assert!(recovery::is_running(&before), "registered here");
+
+                let recovered = recovery::recover(&f.store, &f.host, &|_| false);
+
+                assert_eq!(
+                    recovered,
+                    vec![(
+                        progress.transfer_id.clone(),
+                        Recovered::RolledBack { left: vec![] }
+                    )]
+                );
+                assert!(f.host.workspaces().is_empty(), "the orphan is deleted");
+                for (wt, before) in worktrees.iter().zip(&sources) {
+                    assert_eq!(temp_refs(wt), "", "{}", wt.display());
+                    assert_eq!(&source_fingerprint(wt), before);
+                }
+                let after = manifest().expect("manifest");
+                assert_eq!(after.status, backups::ROLLED_BACK);
+                assert!(after.warnings[0].contains("undone at the next start"));
+                *checked.lock().unwrap() = true;
+                // Staged was "gone": this run must not carry on.
+                registry::cancel(&progress.project_id);
+            }
+            _ => {}
+        }
+    });
+
+    assert!(*checked.lock().unwrap());
+    assert!(transfer.result.is_err());
+}
+
+#[test]
+fn a_transfer_to_local_cut_off_before_the_switch_is_undone_at_the_next_start() {
+    let f = two_repo_project();
+    f.transfer(true).result.expect("to remote");
+    let checkouts = [f.checkout(0), f.checkout(1)];
+    let clones: Vec<_> = [WIDGETS, GADGETS]
+        .iter()
+        .map(|repo| clone_state(&f.host.clone_of(repo)))
+        .collect();
+    let checked = Mutex::new(false);
+
+    let transfer = f.transfer_with(true, &|progress| {
+        if progress.phase != TransferPhase::Committing {
+            return;
+        }
+        let dir = f.host.root.join("transfers").join(&progress.transfer_id);
+        let undo = backups::read_manifest(&dir).expect("manifest").undo;
+        assert_eq!(
+            (
+                undo.sources.len(),
+                undo.clones.len(),
+                undo.branches.len(),
+                undo.branch_configs.len(),
+                undo.worktrees.len()
+            ),
+            (2, 2, 2, 2, 2)
+        );
+        assert!(!f.worktree_dirs().is_empty());
+
+        let recovered = recovery::recover(&f.store, &f.host, &|_| false);
+
+        assert_eq!(recovered.len(), 1);
+        assert!(f.worktree_dirs().is_empty(), "{:?}", f.worktree_dirs());
+        for (repo, before) in [WIDGETS, GADGETS].iter().zip(&clones) {
+            assert_eq!(&clone_state(&f.host.clone_of(repo)), before, "{repo}");
+        }
+        for checkout in &checkouts {
+            assert_eq!(temp_refs(checkout), "", "{}", checkout.display());
+        }
+        assert_eq!(
+            f.host.workspaces(),
+            vec![WORKSPACE.to_string()],
+            "the source"
+        );
+        *checked.lock().unwrap() = true;
+        registry::cancel(&progress.project_id);
+    });
+
+    assert!(*checked.lock().unwrap());
+    assert!(transfer.result.is_err());
+}
+
+/// Once the database has switched the destination is the project: an
+/// unfinished manifest is only marked, saying what may be left.
+#[test]
+fn a_transfer_cut_off_after_the_switch_is_left_for_the_user() {
+    let f = two_repo_project();
+    let done = f.transfer(true);
+    done.result.expect("to remote");
+    let dir = f.host.root.join("transfers").join(&done.transfer_id);
+    let mut manifest = backups::read_manifest(&dir).unwrap();
+    assert!(!manifest.undo.sources.is_empty());
+    // As if Staged had died while the worktrees came down.
+    manifest.status = backups::COMMITTED.to_string();
+    manifest.owner_pid = Some(dead_pid());
+    backups::write_manifest(&dir, &manifest).unwrap();
+    let calls = f.host.calls();
+    assert!(!recovery::is_running(&manifest));
+
+    let recovered = recovery::recover(&f.store, &f.host, &recovery::is_running);
+
+    let [(tid, Recovered::Marked(warning))] = recovered.as_slice() else {
+        panic!("{recovered:?}");
+    };
+    assert_eq!(tid, &done.transfer_id);
+    assert!(
+        warning.contains("after the project had switched over"),
+        "{warning}"
+    );
+    assert!(warning.contains(&manifest.undo.sources[0].dir), "{warning}");
+    assert_eq!(f.host.calls(), calls, "nothing deleted");
+    assert_eq!(f.host.workspaces(), vec![WORKSPACE.to_string()]);
+    let marked = backups::read_manifest(&dir).unwrap();
+    assert_eq!(marked.status, backups::COMPLETED);
+    assert_eq!(marked.warnings, vec![warning.clone()]);
+    assert!(recovery::recover(&f.store, &f.host, &|_| false).is_empty());
+
+    // Another Staged still running it is left alone.
+    manifest.owner_pid = Some(std::os::unix::process::parent_id());
+    assert!(recovery::is_running(&manifest));
+}
+
+/// A process id no process has.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
 }

@@ -12,7 +12,7 @@ use super::backups;
 use super::host::{LiveHost, TransferHost};
 use super::orchestrator::{run_transfer, ProjectTransferResult, TransferProgress};
 use super::preflight::{inspect, ProjectTransferPreflight, TransferDirection, TransferIssue};
-use super::registry;
+use super::{recovery, registry};
 
 /// The event every [`TransferProgress`] goes out as.
 pub const PROGRESS_EVENT: &str = "project-transfer-progress";
@@ -192,6 +192,19 @@ fn after_transfer(
             app_handle,
             &repo.branch_id,
             crate::session_queue::KickSource::ProjectTransferred,
+        );
+    }
+}
+
+/// Roll back, or mark for the user, each transfer a Staged that is no
+/// longer running left unfinished; see [`recovery`]. Run once at startup,
+/// before [`prune_backups`].
+pub(crate) fn recover_interrupted_transfers(store: &Store) {
+    let recovered = recovery::recover(store, &LiveHost, &recovery::is_running);
+    if !recovered.is_empty() {
+        log::info!(
+            "[project_transfer] dealt with {} interrupted transfers",
+            recovered.len()
         );
     }
 }

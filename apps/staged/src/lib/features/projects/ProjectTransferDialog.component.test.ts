@@ -64,6 +64,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     conflicted: 0,
     untrackedBytes: 0,
     ignoredFiles: 0,
+    ignoredDirs: 0,
     hasUncommittedChanges: false,
     blockers: [],
     warnings: [],
@@ -255,7 +256,7 @@ describe('ProjectTransferDialog', () => {
     unmount(dialog);
   });
 
-  it('says how many ignored files stay behind', async () => {
+  it('says how many ignored files and folders stay behind', async () => {
     const dialog = mountDialog(
       ready(
         preflight({
@@ -263,6 +264,8 @@ describe('ProjectTransferDialog', () => {
             repo({ ignoredFiles: 3 }),
             repo({ branchId: 'b2', ignoredFiles: 1 }),
             repo({ branchId: 'b3' }),
+            repo({ branchId: 'b4', ignoredFiles: 1, ignoredDirs: 2 }),
+            repo({ branchId: 'b5', ignoredDirs: 1 }),
           ],
         })
       )
@@ -274,6 +277,8 @@ describe('ProjectTransferDialog', () => {
     expect(rows[0]).toContain('3 ignored files stay behind');
     expect(rows[1]).toContain('1 ignored file stays behind');
     expect(rows[2]).not.toContain('ignored');
+    expect(rows[3]).toContain('1 ignored file and 2 ignored folders stay behind');
+    expect(rows[4]).toContain('1 ignored folder stays behind');
     unmount(dialog);
   });
 

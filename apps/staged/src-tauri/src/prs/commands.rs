@@ -22,10 +22,10 @@ use super::pr_status::{
     PR_REFRESH_CONCURRENCY,
 };
 use super::pull::pull_or_queue_branch_for_branch;
-use super::revert::revert_commit_for_branch;
 use super::push::{
     has_unpushed_commits_impl, start_or_queue_push_pipeline_for_branch, PushVariant,
 };
+use super::revert::revert_commit_for_branch;
 
 fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<Store>, String> {
     store

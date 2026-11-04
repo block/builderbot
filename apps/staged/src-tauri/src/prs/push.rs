@@ -152,7 +152,8 @@ pub(super) fn insert_running_push_pipeline_session(
     Ok(RunningPipelineSession {
         session_id: session.id,
         pipeline,
-        prompt,
+        prompt: prompt.to_string(),
+        pre_head_sha: None,
         _liveness: liveness,
     })
 }

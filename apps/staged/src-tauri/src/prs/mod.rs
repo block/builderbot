@@ -60,9 +60,9 @@ pub(crate) use pr_status::{
     PrStatusEvent, PR_REFRESH_CONCURRENCY,
 };
 pub(crate) use pull::pull_or_queue_branch_for_branch;
-pub(crate) use revert::revert_commit_for_branch;
 #[cfg(test)]
 pub(crate) use push::build_push_pipeline_steps;
 pub(crate) use push::{
     has_unpushed_commits_impl, start_or_queue_push_pipeline_for_branch, PushVariant,
 };
+pub(crate) use revert::revert_commit_for_branch;

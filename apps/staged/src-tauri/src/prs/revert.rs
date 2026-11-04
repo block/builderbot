@@ -12,6 +12,7 @@ use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineStep, Store};
 
 use super::context::{resolve_branch_pipeline_context, BranchPipelineContext};
+use super::pipeline::{launch_running_pipeline_session, RunningPipelineSession};
 
 pub(super) fn validate_commit_sha(commit_sha: &str) -> Result<String, String> {
     let sha = commit_sha.trim();
@@ -87,47 +88,28 @@ async fn start_running_revert_pipeline_for_branch(
     let pre_head_sha = Some(current_head_for_pipeline_context(&ctx).await?);
     let pipeline = PipelineExecution::from_steps(&steps);
 
-    let mut session = store::Session::new_running(&prompt, &ctx.working_dir);
+    let mut session =
+        store::Session::new_running(&prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
     session.pipeline = Some(pipeline.clone());
+    let liveness = registry.hold(&session.id);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    let branch_id = ctx.branch.id.clone();
-    let project_id = ctx.branch.project_id.clone();
-
-    let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
+    let commit = store::Commit::new_pending(&ctx.branch.id).with_session(&session.id);
     store.create_commit(&commit).map_err(|e| e.to_string())?;
 
-    session_runner::emit_session_running(
-        app_handle,
-        &session.id,
-        &branch_id,
-        &project_id,
-        "commit",
-    );
-
-    session_runner::start_pipeline_session(
-        session_runner::PipelineConfig {
-            session_id: session.id.clone(),
-            prompt,
-            steps,
-            pipeline,
-            working_dir: ctx.working_dir,
-            pre_head_sha,
-            provider,
-            workspace_name: ctx.workspace_name,
-            remote_working_dir: ctx.remote_working_dir,
-            branch_id: Some(branch_id),
-            project_id: Some(project_id),
-        },
-        store,
-        app_handle.clone(),
-        Arc::clone(registry),
-    )?;
-
-    Ok(session.id)
+    let running = RunningPipelineSession {
+        session_id: session.id,
+        pipeline,
+        prompt,
+        pre_head_sha,
+        _liveness: liveness,
+    };
+    launch_running_pipeline_session(
+        ctx, running, steps, "commit", provider, store, app_handle, registry,
+    )
 }
 
 /// Revert a completed commit by creating a new signed-off revert commit.

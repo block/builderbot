@@ -752,7 +752,7 @@
       {:else if workspaceStatus === 'error'}
         <AlertCircle size={12} />
       {/if}
-      <span>{statusLabel(workspaceStatus)}</span>
+      <span class="status-label">{statusLabel(workspaceStatus)}</span>
       {#if workspaceStatus === 'suspended' && workstationName && selectedProject}
         <Button
           variant="ghost"
@@ -773,7 +773,6 @@
         variant="ghost"
         size="sm"
         class="top-bar-action group h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
-        aria-label="Add repo"
         onclick={() => {
           showAddRepoModal = true;
         }}
@@ -809,7 +808,7 @@
       >
         <Trash2 size={14} />
       </span>
-      <span class="top-bar-action-label">Remove Project</span>
+      <span class="top-bar-action-label desktop-only">Remove Project</span>
     </Button>
   {/if}
 {/snippet}
@@ -1001,6 +1000,15 @@
   .workspace-badge.error {
     border-color: var(--ui-danger);
     color: var(--ui-danger);
+  }
+
+  /* On phones the pill shares the bar with the labelled Back and Add Repo
+     buttons, where "Suspended" plus Resume doesn't fit; the pause icon carries
+     the state so Resume stays reachable. */
+  @media (max-width: 768px) {
+    .workspace-badge.suspended .status-label {
+      display: none;
+    }
   }
 
   .main-panel {

@@ -53,7 +53,6 @@
         size="sm"
         class="top-bar-action h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
         title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
-        aria-label="Back"
         onclick={popDetailRoute}
       >
         <ArrowLeft size={14} />
@@ -217,6 +216,11 @@
     -webkit-app-region: no-drag;
   }
 
+  /* Labels for buttons that are icon-only on desktop (New project). */
+  .top-bar :global(.top-bar-action-label.mobile-only) {
+    display: none;
+  }
+
   @media (max-width: 768px) {
     .top-bar {
       --top-bar-action-size: 44px;
@@ -224,14 +228,26 @@
       padding-top: calc(2px + env(safe-area-inset-top));
     }
 
-    /* Narrow bars can't fit the title and badges (the diff route's RepoLabel)
-       beside the right actions, so the badges give way first: they ellipsize
-       while the title keeps its width, and once less than 3em (`.badge-slot`'s
-       flex-basis) fits beside the title they wrap onto a second line that is
-       clipped away, rather than leaving a sliver. Only then does the title
-       itself ellipsize. The height cap stops that hidden line from growing the
-       bar at larger font sizes, and `clip` (unlike `hidden`) can't be scrolled
-       to reveal it. */
+    /* Phones have no traffic lights and no window to drag, and the labelled
+       buttons need the room: drop both spacers (and their flex gaps) and
+       push the right actions over instead. */
+    .traffic-light-spacer,
+    .drag-spacer {
+      display: none;
+    }
+
+    .top-bar-actions {
+      margin-left: auto;
+    }
+
+    /* Between labelled buttons the title area is narrow, so anything that
+       can't fit usefully wraps onto a second line that is clipped away rather
+       than leaving a sliver. Badges (status pills, the diff route's RepoLabel)
+       are atomic: full width or gone, so a pill is never cut. The title
+       ellipsizes down to 4em (`.title-text`'s flex-basis) and only then wraps
+       away. The height cap stops the hidden line from growing the bar at
+       larger font sizes, and `clip` (unlike `hidden`) can't be scrolled to
+       reveal it. */
     .title-content {
       max-width: min(46vw, 420px);
       max-height: var(--top-bar-action-size);
@@ -240,42 +256,65 @@
       overflow: clip;
     }
 
-    /* Fill the bar's height, so a wrapped line starts below the clip. */
-    .title-text {
-      min-height: 100%;
+    /* Zero-width, full-height first item: whatever wraps after it, including
+       the title, starts below the clip. The margin cancels its flex gap. */
+    .title-content::before {
+      content: '';
+      height: var(--top-bar-action-size);
+      margin-right: -8px;
     }
 
-    /* The 3em basis is the wrap threshold; the badge grows back to its natural
-       width when there's room. Plain `flex-shrink: 1` would leave a sliver. */
-    .badge-slot {
-      flex: 1 1 3em;
+    /* The 4em basis is the wrap threshold; the title grows back to its natural
+       width when there's room. The empty `.title-text` of a title-less route
+       (the project view) keeps its zero width. */
+    .title-text:has(.title) {
+      flex: 1 1 4em;
       max-width: max-content;
     }
 
+    /* Centred over the whole bar, the project name would run under the
+       labelled buttons; take the space between them instead, and hide it
+       once that space is too narrow to read. */
     .center-content {
-      width: min(34vw, 240px);
+      position: static;
+      flex: 1 1 0;
+      width: auto;
+      transform: none;
+      container-type: inline-size;
+    }
+
+    @container (width < 6em) {
+      .center-content > :global(*) {
+        visibility: hidden;
+      }
     }
 
     .subtitle {
       display: none;
     }
 
-    /* Every `.top-bar-action` button collapses to an icon-only 44px touch
-       target. Sized in px, not rem, so the 13px root font size and the
-       font-size preference can't shrink it; unlayered, so it also beats the
-       Button size and icon utilities. */
+    /* Every `.top-bar-action` button is a 44px-tall touch target that keeps
+       its label and grows to fit it; icon-only ones are 44px square. Sized in
+       px, not rem, so the 13px root font size and the font-size preference
+       can't shrink it; unlayered, so it also beats the Button size utilities.
+       The icon keeps the desktop labelled buttons' 1rem. */
     .top-bar :global(.top-bar-action) {
-      width: var(--top-bar-action-size);
+      width: auto;
+      min-width: var(--top-bar-action-size);
       height: var(--top-bar-action-size);
-      padding: 0;
+      padding-inline: 12px;
     }
 
     .top-bar :global(.top-bar-action svg) {
-      width: 18px;
-      height: 18px;
+      width: 1rem;
+      height: 1rem;
     }
 
-    .top-bar :global(.top-bar-action-label) {
+    .top-bar :global(.top-bar-action-label.mobile-only) {
+      display: inline;
+    }
+
+    .top-bar :global(.top-bar-action-label.desktop-only) {
       display: none;
     }
   }

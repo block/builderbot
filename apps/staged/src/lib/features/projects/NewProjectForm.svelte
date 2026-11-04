@@ -3,6 +3,10 @@
 
   Contains the form fields, state, and logic for creating a new project.
   Used inside NewProjectModal (as a dialog) and SplashScreen (inline).
+
+  The location starts on the one the last new project was created with
+  (`preferences.newProjectLocation`, shared with the note transfer picker),
+  and creating a project with the picker on screen remembers its choice.
 -->
 <script lang="ts">
   import { slide } from 'svelte/transition';
@@ -20,6 +24,7 @@
   import { focusAfterDialogEnter } from '../../shared/focusAfterDialogEnter';
   import type { PullRequest } from '../../types';
   import { sqState } from '../settings/sq.svelte';
+  import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -36,7 +41,7 @@
     onCreated,
     onCancel,
     name = $bindable(''),
-    location = $bindable('local'),
+    location = $bindable(preferences.newProjectLocation),
     selectedRepo = $bindable(null),
     subpath = $bindable(''),
     initialRepo = null,
@@ -120,6 +125,8 @@
         matchedPr?.baseRef ?? defaultBranch ?? undefined,
         headRepo ?? undefined
       );
+      // Only a location picked with Remote on offer is a choice to remember.
+      if (remoteProjectsAvailable) setNewProjectLocation(effectiveLocation);
       if (matchedPr) {
         const noteTitle = `PR #${matchedPr.number}: ${matchedPr.title}`;
         await commands.createProjectNote(project.id, noteTitle, matchedPr.body ?? '');

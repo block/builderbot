@@ -1,13 +1,22 @@
 import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Project } from '../../types';
+import type { Project, ProjectLocation } from '../../types';
 
-const { sq, store, createProject, detectDefaultBranch } = vi.hoisted(() => ({
-  sq: { loaded: true, available: true },
-  store: { projects: [] as Project[] },
-  createProject: vi.fn(),
-  detectDefaultBranch: vi.fn(),
-}));
+const { sq, store, prefs, setNewProjectLocation, createProject, detectDefaultBranch } = vi.hoisted(
+  () => {
+    const prefs = { newProjectLocation: 'local' as ProjectLocation };
+    return {
+      sq: { loaded: true, available: true },
+      store: { projects: [] as Project[] },
+      prefs,
+      setNewProjectLocation: vi.fn((location: ProjectLocation) => {
+        prefs.newProjectLocation = location;
+      }),
+      createProject: vi.fn(),
+      detectDefaultBranch: vi.fn(),
+    };
+  }
+);
 
 vi.mock('$lib/components/ui/dialog', () =>
   import('../sessions/testStubs/dialogMock').then((m) => m.dialogModuleMock())
@@ -17,6 +26,7 @@ vi.mock(
   () => import('../sessions/testStubs/EmptyStub.svelte')
 );
 vi.mock('../settings/sq.svelte', () => ({ sqState: sq }));
+vi.mock('../settings/preferences.svelte', () => ({ preferences: prefs, setNewProjectLocation }));
 vi.mock('../../stores/projectsData.svelte', () => ({
   projectsDataStore: {
     get projects() {
@@ -156,6 +166,8 @@ describe('NoteTransferDialog new project location', () => {
     sq.loaded = true;
     sq.available = true;
     store.projects = [];
+    prefs.newProjectLocation = 'local';
+    setNewProjectLocation.mockClear();
     createProject.mockReset().mockResolvedValue(created);
     detectDefaultBranch.mockReset().mockResolvedValue('main');
   });
@@ -178,6 +190,7 @@ describe('NoteTransferDialog new project location', () => {
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
     expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
     expect(detectDefaultBranch).not.toHaveBeenCalled();
+    expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('local');
   });
 
   it("creates a remote project from the note's repo, so the move adds nothing", async () => {
@@ -199,6 +212,73 @@ describe('NoteTransferDialog new project location', () => {
       undefined,
       'main'
     );
+  });
+
+  it('starts on the remembered location and remembers the one it creates with', async () => {
+    prefs.newProjectLocation = 'remote';
+    const { target, props, onConfirm } = await open(branchRepo);
+    pickCreateRow(target, 'Fresh');
+    expect(locationTile(target, 'Remote')?.dataset.state).toBe('on');
+    // Choosing doesn't commit it; creating does.
+    locationTile(target, 'Local')!.click();
+    flushSync();
+    chooseRemote(target);
+    expect(setNewProjectLocation).not.toHaveBeenCalled();
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith(
+      'Fresh',
+      'remote',
+      'acme/widgets',
+      'apps/web',
+      undefined,
+      undefined,
+      'main'
+    );
+    expect(setNewProjectLocation).toHaveBeenCalledExactlyOnceWith('remote');
+    expect(props.open).toBe(false);
+
+    // Picking Local next time makes Local the one the open after starts on.
+    props.open = true;
+    flushSync();
+    await settle();
+    pickCreateRow(target, 'Second');
+    expect(locationTile(target, 'Remote')?.dataset.state).toBe('on');
+    locationTile(target, 'Local')!.click();
+    flushSync();
+    confirm(target);
+    await vi.waitFor(() => expect(createProject).toHaveBeenLastCalledWith('Second', 'local'));
+    expect(setNewProjectLocation).toHaveBeenLastCalledWith('local');
+    expect(prefs.newProjectLocation).toBe('local');
+  });
+
+  it('shows a remembered Remote as local while blocked, and keeps remembering it', async () => {
+    prefs.newProjectLocation = 'remote';
+    const { target, onConfirm } = await open('project');
+    pickCreateRow(target, 'Fresh');
+    expectRemoteBlocked(target, 'Remote needs a repo, and this note has none');
+    expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
+    expect(locationTile(target, 'Remote')?.dataset.state).toBe('off');
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
+    // Local was the only option, not a choice, so Remote stays remembered.
+    expect(setNewProjectLocation).not.toHaveBeenCalled();
+  });
+
+  it('creates locally without forgetting a remembered Remote when remote is unavailable', async () => {
+    sq.available = false;
+    prefs.newProjectLocation = 'remote';
+    const { target, onConfirm } = await open(branchRepo);
+    pickCreateRow(target, 'Fresh');
+    expect(target.querySelector('[aria-label="Project location"]')).toBeNull();
+
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith('Fresh', 'local');
+    expect(setNewProjectLocation).not.toHaveBeenCalled();
   });
 
   it('keeps the chosen location when its tile is clicked again', async () => {
@@ -371,6 +451,8 @@ describe("NoteTransferDialog note's repo", () => {
     sq.loaded = true;
     sq.available = true;
     store.projects = [];
+    prefs.newProjectLocation = 'local';
+    setNewProjectLocation.mockClear();
     createProject.mockReset().mockResolvedValue(created);
     detectDefaultBranch.mockReset().mockResolvedValue('main');
   });
@@ -401,6 +483,31 @@ describe("NoteTransferDialog note's repo", () => {
       'remote',
       'acme/gadgets',
       undefined,
+      undefined,
+      undefined,
+      'main'
+    );
+  });
+
+  it('switches to a remembered Remote once the lookup lands', async () => {
+    prefs.newProjectLocation = 'remote';
+    const { lookup, calls } = deferredLookup();
+    const { target, onConfirm } = await open(lookup);
+    pickCreateRow(target, 'Fresh');
+    expect(locationTile(target, 'Local')?.dataset.state).toBe('on');
+    expect(detectDefaultBranch).not.toHaveBeenCalled();
+
+    calls[0].land(branchRepo);
+    await settle();
+    expect(locationTile(target, 'Remote')?.dataset.state).toBe('on');
+    expect(detectDefaultBranch).toHaveBeenCalledWith('acme/widgets');
+    confirm(target);
+    await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
+    expect(createProject).toHaveBeenCalledWith(
+      'Fresh',
+      'remote',
+      'acme/widgets',
+      'apps/web',
       undefined,
       undefined,
       'main'
@@ -449,6 +556,8 @@ describe('NoteTransferDialog pre-transfer checks', () => {
     sq.loaded = true;
     sq.available = true;
     store.projects = [];
+    prefs.newProjectLocation = 'local';
+    setNewProjectLocation.mockClear();
     createProject.mockReset().mockResolvedValue(created);
     detectDefaultBranch.mockReset().mockResolvedValue('main');
   });
@@ -520,5 +629,16 @@ describe('NoteTransferDialog pre-transfer checks', () => {
     confirm(target);
     await vi.waitFor(() => expect(errorText(target)).toBe('name taken'));
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('remembers nothing when creating the project fails', async () => {
+    createProject.mockRejectedValue(new Error('name taken'));
+    const { target } = await open(branchRepo);
+    pickCreateRow(target, 'Fresh');
+    chooseRemote(target);
+
+    confirm(target);
+    await vi.waitFor(() => expect(errorText(target)).toBe('name taken'));
+    expect(setNewProjectLocation).not.toHaveBeenCalled();
   });
 });

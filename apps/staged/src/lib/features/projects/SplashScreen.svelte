@@ -14,6 +14,7 @@
   import NewProjectForm from './NewProjectForm.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import { Button } from '$lib/components/ui/button';
+  import { preferences } from '../settings/preferences.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -26,7 +27,7 @@
   let showForm = $state(false);
 
   let formName = $state('');
-  let formLocation = $state<'local' | 'remote'>('local');
+  let formLocation = $state<'local' | 'remote'>(preferences.newProjectLocation);
   let formSelectedRepo = $state<string | null>(null);
   let formSubpath = $state('');
 

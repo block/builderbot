@@ -8,10 +8,12 @@
   before the note goes there. Whenever confirming would create a project —
   that row picked, or the only row left for Enter — a Local / Remote choice
   is offered for it when remote projects are available (the `sq` CLI is
-  installed), defaulting to local like the new-project form. A remote project
-  starts from the note's repo, looked up from the stored note on each open
-  through `loadNoteRepo` (the host's idea of the repo can be missing or
-  stale), so Remote waits on that lookup.
+  installed). Like the new-project form, it starts on the location the last
+  new project was created with (`preferences.newProjectLocation`, which
+  creating one here with Remote on offer updates), showing local while Remote
+  can't be picked. A remote project starts from the note's repo, looked up
+  from the stored note on each open through `loadNoteRepo` (the host's idea
+  of the repo can be missing or stale), so Remote waits on that lookup.
   `onPrepare` runs before anything is created, so a transfer refused up front
   leaves no project behind — a remote one starts provisioning its workspace
   as soon as it exists. Failures — from those checks, creating the project,
@@ -37,6 +39,7 @@
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { sqState } from '../settings/sq.svelte';
+  import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
   import * as commands from '../../api/commands';
   import { filterMoveTargets, nextMoveTargetIndex } from '../branches/moveBranchTarget';
   import {
@@ -90,7 +93,7 @@
   const searchId = `note-transfer-search-${++inputCounter}`;
   let query = $state('');
   let selection = $state<NoteTransferSelection | null>(null);
-  let location = $state<ProjectLocation>('local');
+  let location = $state<ProjectLocation>(preferences.newProjectLocation);
   let error = $state<string | null>(null);
   let working = $state(false);
   let searchElement = $state<HTMLInputElement | null>(null);
@@ -108,7 +111,7 @@
     if (open && !wasOpen) {
       query = '';
       selection = null;
-      location = 'local';
+      location = preferences.newProjectLocation;
       error = null;
       working = false;
       defaultBranchPrefetch = null;
@@ -144,9 +147,10 @@
   let target = $derived(noteTransferTarget(selected, query, filtered, createName));
   let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
   let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
-  let effectiveLocation = $derived<ProjectLocation>(
-    remoteProjectsAvailable && !remoteBlocker ? location : 'local'
-  );
+  let remoteSelectable = $derived(remoteProjectsAvailable && !remoteBlocker);
+  // The picker shows this, so a remembered Remote doesn't sit selected on a
+  // disabled tile while it is blocked; it applies once the blocker clears.
+  let effectiveLocation = $derived<ProjectLocation>(remoteSelectable ? location : 'local');
   $effect(() => {
     if (open && effectiveLocation === 'remote' && repo) {
       void defaultBranchFor(repo.githubRepo);
@@ -213,11 +217,14 @@
   }
 
   async function createTargetProject(name: string): Promise<Project> {
+    // Only a location picked with Remote on offer is a choice to remember.
+    const chosenLocation = remoteSelectable ? effectiveLocation : null;
+    let project: Project;
     if (effectiveLocation === 'remote' && repo) {
       // Its workspace is provisioned from the repo it is created with; the
       // transfer then finds that repo tracked and adds nothing.
       const defaultBranch = await defaultBranchFor(repo.githubRepo);
-      return commands.createProject(
+      project = await commands.createProject(
         name,
         'remote',
         repo.githubRepo,
@@ -226,8 +233,11 @@
         undefined,
         defaultBranch
       );
+    } else {
+      project = await commands.createProject(name, 'local');
     }
-    return commands.createProject(name, 'local');
+    if (chosenLocation) setNewProjectLocation(chosenLocation);
+    return project;
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
@@ -363,7 +373,7 @@
         <div class="location-field">
           <span class="field-label">New project location</span>
           <ProjectLocationPicker
-            bind:value={location}
+            bind:value={() => effectiveLocation, (next) => (location = next)}
             orientation="horizontal"
             disabled={working}
             remoteDisabledReason={remoteBlocker}

@@ -125,6 +125,24 @@ function locationTile(target: HTMLElement, label: 'Local' | 'Remote') {
   );
 }
 
+/**
+ * Remote is disabled but keeps its own description; the reason is a readable
+ * line below the tiles, outside the faded tile, that the tile and group point to.
+ */
+function expectRemoteBlocked(target: HTMLElement, reason: string) {
+  const picker = target.querySelector('[aria-label="Project location"]')!;
+  const remote = locationTile(target, 'Remote')!;
+  expect(remote.disabled).toBe(true);
+  expect(remote.textContent).toContain('Run agents in the cloud');
+  expect(remote.textContent).not.toContain(reason);
+  const id = remote.getAttribute('aria-describedby');
+  expect(id).toBeTruthy();
+  expect(picker.getAttribute('aria-describedby')).toBe(id);
+  const line = document.getElementById(id!);
+  expect(line?.textContent).toBe(reason);
+  expect(picker.contains(line)).toBe(false);
+}
+
 function confirm(target: HTMLElement) {
   confirmButton(target).click();
 }
@@ -194,9 +212,7 @@ describe('NoteTransferDialog new project location', () => {
   it('disables remote for a project note, which has no repo to start from', async () => {
     const { target, onConfirm } = await open('project');
     pickCreateRow(target, 'Fresh');
-    const remote = locationTile(target, 'Remote')!;
-    expect(remote.disabled).toBe(true);
-    expect(remote.textContent).toContain('Needs a repo; this note has none');
+    expectRemoteBlocked(target, 'Needs a repo; this note has none');
 
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
@@ -369,13 +385,13 @@ describe("NoteTransferDialog note's repo", () => {
     const { lookup, calls } = deferredLookup();
     const { target, onConfirm } = await open(lookup);
     pickCreateRow(target, 'Fresh');
-    const remote = locationTile(target, 'Remote')!;
-    expect(remote.disabled).toBe(true);
-    expect(remote.textContent).toContain("Checking this note's repo…");
+    expectRemoteBlocked(target, "Checking this note's repo…");
 
     calls[0].land({ githubRepo: 'acme/gadgets', subpath: null });
     await settle();
     expect(locationTile(target, 'Remote')!.disabled).toBe(false);
+    expect(locationTile(target, 'Remote')!.hasAttribute('aria-describedby')).toBe(false);
+    expect(target.textContent).not.toContain("Checking this note's repo…");
     chooseRemote(target);
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));
@@ -394,9 +410,7 @@ describe("NoteTransferDialog note's repo", () => {
   it('keeps a branch note bound to no repo local', async () => {
     const { target } = await open(null);
     pickCreateRow(target, 'Fresh');
-    const remote = locationTile(target, 'Remote')!;
-    expect(remote.disabled).toBe(true);
-    expect(remote.textContent).toContain('Needs a repo; this note has none');
+    expectRemoteBlocked(target, 'Needs a repo; this note has none');
   });
 
   it('says the lookup failed rather than that the note has no repo', async () => {
@@ -405,9 +419,7 @@ describe("NoteTransferDialog note's repo", () => {
     calls[0].fail(new Error('Note not found: note-1'));
     await settle();
     pickCreateRow(target, 'Fresh');
-    const remote = locationTile(target, 'Remote')!;
-    expect(remote.disabled).toBe(true);
-    expect(remote.textContent).toContain("Couldn't look up this note's repo");
+    expectRemoteBlocked(target, "Couldn't look up this note's repo");
 
     confirm(target);
     await vi.waitFor(() => expect(onConfirm).toHaveBeenCalledWith('created'));

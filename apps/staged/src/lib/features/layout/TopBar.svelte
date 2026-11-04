@@ -51,7 +51,7 @@
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
+        class="top-bar-action h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
         title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
         aria-label="Back"
         onclick={popDetailRoute}
@@ -217,15 +217,10 @@
     -webkit-app-region: no-drag;
   }
 
-  :global(.top-bar-action) {
-    height: 28px;
-    min-width: 0;
-  }
-
   @media (max-width: 768px) {
     .top-bar {
-      padding: 6px 8px;
-      padding-top: calc(6px + env(safe-area-inset-top));
+      padding: 2px 8px;
+      padding-top: calc(2px + env(safe-area-inset-top));
     }
     .title-content {
       max-width: min(46vw, 420px);
@@ -239,7 +234,22 @@
       display: none;
     }
 
-    .top-bar-action-label {
+    /* Every `.top-bar-action` button collapses to an icon-only 44px touch
+       target. Sized in px, not rem, so the 13px root font size and the
+       font-size preference can't shrink it; unlayered, so it also beats the
+       Button size and icon utilities. */
+    .top-bar :global(.top-bar-action) {
+      width: 44px;
+      height: 44px;
+      padding: 0;
+    }
+
+    .top-bar :global(.top-bar-action svg) {
+      width: 18px;
+      height: 18px;
+    }
+
+    .top-bar :global(.top-bar-action-label) {
       display: none;
     }
   }

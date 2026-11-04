@@ -772,14 +772,15 @@
       <Button
         variant="ghost"
         size="sm"
-        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0"
+        class="top-bar-action group h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
+        aria-label="Add repo"
         onclick={() => {
           showAddRepoModal = true;
         }}
         disabled={selectedProjectAddRepoDisabled}
       >
         <span
-          class="flex size-4 shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
+          class="flex shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
         >
           <Plus size={12} />
         </span>
@@ -791,7 +792,7 @@
       variant="ghost"
       size="sm"
       class={[
-        'top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:size-10 max-md:p-0',
+        'top-bar-action group h-[28px] gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive',
         selectedProjectSafeToDelete && 'border border-destructive text-destructive',
       ]}
       title="Remove project"
@@ -999,17 +1000,6 @@
   .workspace-badge.error {
     border-color: var(--ui-danger);
     color: var(--ui-danger);
-  }
-
-  :global(.top-bar-action) {
-    height: 28px;
-    min-width: 0;
-  }
-
-  @media (max-width: 768px) {
-    .top-bar-action-label {
-      display: none;
-    }
   }
 
   .main-panel {

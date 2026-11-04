@@ -226,11 +226,12 @@
 
     /* Narrow bars can't fit the title and badges (the diff route's RepoLabel)
        beside the right actions, so the badges give way first: they ellipsize
-       while the title keeps its width, and once there's no room for a few
-       characters they wrap onto a second line that is clipped away, rather
-       than leaving a sliver. Only then does the title itself ellipsize. The
-       height cap stops that hidden line from growing the bar at larger font
-       sizes, and `clip` (unlike `hidden`) can't be scrolled to reveal it. */
+       while the title keeps its width, and once less than 3em (`.badge-slot`'s
+       flex-basis) fits beside the title they wrap onto a second line that is
+       clipped away, rather than leaving a sliver. Only then does the title
+       itself ellipsize. The height cap stops that hidden line from growing the
+       bar at larger font sizes, and `clip` (unlike `hidden`) can't be scrolled
+       to reveal it. */
     .title-content {
       max-width: min(46vw, 420px);
       max-height: var(--top-bar-action-size);
@@ -244,6 +245,8 @@
       min-height: 100%;
     }
 
+    /* The 3em basis is the wrap threshold; the badge grows back to its natural
+       width when there's room. Plain `flex-shrink: 1` would leave a sliver. */
     .badge-slot {
       flex: 1 1 3em;
       max-width: max-content;

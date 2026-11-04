@@ -60,6 +60,7 @@ pub(crate) async fn delete_branch_impl<R: tauri::Runtime>(
     services: TeardownServices<R>,
     branch_id: String,
 ) -> Result<(), String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let store = Arc::clone(&services.store);
     let branch = store
         .get_branch(&branch_id)
@@ -85,6 +86,7 @@ pub(crate) async fn remove_project_repo_impl<R: tauri::Runtime>(
     project_id: String,
     project_repo_id: String,
 ) -> Result<(), String> {
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     let store = Arc::clone(&services.store);
     let removed = store
         .get_project_repo(&project_repo_id)
@@ -157,6 +159,7 @@ pub(crate) async fn delete_project_impl<R: tauri::Runtime>(
     services: TeardownServices<R>,
     id: String,
 ) -> Result<(), String> {
+    crate::project_transfer::ensure_project_not_transferring(&id)?;
     let store = Arc::clone(&services.store);
 
     // Clean up branch-backed resources (local worktrees / remote workspaces)

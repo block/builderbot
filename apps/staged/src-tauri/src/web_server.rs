@@ -1667,6 +1667,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let base_branch: String = arg(&args, "baseBranch")?;
             let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
             let project_repo_id: Option<String> = opt_arg(&args, "projectRepoId")?;
+            crate::project_transfer::ensure_project_not_transferring(&project_id)?;
 
             let mut branch = crate::store::Branch::new(&project_id, &branch_name, &base_branch);
             if let Some(pr) = pr_number {
@@ -1720,6 +1721,39 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             )
             .await?;
             Ok(serde_json::to_value(moved).unwrap())
+        }
+        "get_project_transfer_preflight" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let preflight =
+                crate::project_transfer::get_project_transfer_preflight_impl(store, project_id)
+                    .await?;
+            Ok(serde_json::to_value(preflight).unwrap())
+        }
+        "transfer_project" => {
+            let store = get_store(store_mutex)?;
+            let project_id: String = arg(&args, "projectId")?;
+            let include_uncommitted: bool = arg(&args, "includeUncommitted")?;
+            // Detached: the transfer writes workspace statuses and the
+            // project's location, and must finish (or roll back) whether or
+            // not the client is still waiting.
+            let result = detached(crate::project_transfer::transfer_project_impl(
+                store,
+                app_handle.clone(),
+                Arc::clone(action_executor),
+                Arc::clone(action_registry),
+                project_id,
+                include_uncommitted,
+            ))
+            .await?;
+            Ok(serde_json::to_value(result).unwrap())
+        }
+        "cancel_project_transfer" => {
+            let project_id: String = arg(&args, "projectId")?;
+            Ok(
+                serde_json::to_value(crate::project_transfer::cancel_project_transfer(project_id))
+                    .unwrap(),
+            )
         }
         "get_blox_env" => Ok(serde_json::to_value(std::env::var("BLOX_ENV").ok()).unwrap()),
         // =====================================================================
@@ -2084,6 +2118,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "start_workspace" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
+            crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
             let app_handle = app_handle.clone();
             detached(async move {
                 let branch = store

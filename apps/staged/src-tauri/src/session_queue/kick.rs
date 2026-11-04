@@ -49,6 +49,8 @@ pub(crate) enum KickSource {
     /// The reconcile service settled a `disconnected` Blox row on the
     /// branch.
     Reconciled,
+    /// The branch's project moved between local and remote.
+    ProjectTransferred,
 }
 
 impl KickSource {
@@ -70,6 +72,7 @@ impl KickSource {
             Self::Sweep => "sweep",
             Self::LaunchResume => "launch resume",
             Self::Reconciled => "reconciled",
+            Self::ProjectTransferred => "project transferred",
         }
     }
 }

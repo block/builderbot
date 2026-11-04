@@ -8,17 +8,46 @@
 //! Only then does [`crate::store::Store::apply_project_transfer`] switch the
 //! project's location, in one transaction.
 //!
-//! This module is the transport: the scripts, the two [`TransferEndpoint`]s,
-//! and the per-repository pipeline in [`carry_repo`].
+//! The transport is the scripts, the two [`TransferEndpoint`]s, and the
+//! per-repository pipeline in [`carry_repo`]. Around it: [`preflight`] says
+//! what a transfer would carry and what stops it, [`orchestrator`] moves the
+//! whole project (rolling back on failure), [`registry`] keeps one transfer
+//! per project and refuses conflicting work meanwhile, [`backups`] describes
+//! and prunes what is kept, and [`commands`] is the Tauri and web surface.
 
+mod backups;
 mod carry;
+pub(crate) mod commands;
 mod endpoint;
+mod host;
+mod orchestrator;
+#[cfg(test)]
+mod orchestrator_tests;
+mod preflight;
+mod registry;
 mod scripts;
 #[cfg(test)]
 mod tests;
 
-pub use carry::{carry_repo, cleanup, finish, origin_tips, CarryOutcome, CarryPlan, Landing};
+pub use carry::{
+    carry_repo, carry_repo_with, cleanup, finish, origin_tips, CarryOutcome, CarryPlan, CarryStep,
+    Landing,
+};
+pub(crate) use commands::{
+    cancel_project_transfer, get_project_transfer_preflight_impl, prune_backups,
+    transfer_project_impl,
+};
 pub use endpoint::{BloxEndpoint, LocalEndpoint, ScriptOutput, TransferEndpoint};
+pub use orchestrator::{
+    ProjectTransferResult, RepoTransferResult, TransferPhase, TransferProgress,
+};
+pub use preflight::{
+    ProjectTransferPreflight, RepoPreflight, RepoTransferState, TransferDirection, TransferIssue,
+};
+pub use registry::{
+    ensure_branch_not_transferring, ensure_project_not_transferring, is_branch_transferring,
+    TRANSFER_IN_PROGRESS,
+};
 pub use scripts::{
     ApplyReport, BundleFile, ConfigEntry, OriginTips, RemoteConfig, Snapshot, SnapshotWarning,
 };
@@ -49,6 +78,9 @@ pub enum TransferError {
     /// A script's output did not say what it should have.
     #[error("unexpected output from {step}: {message}")]
     Protocol { step: &'static str, message: String },
+    /// The user cancelled the transfer before it switched the project over.
+    #[error("the transfer was cancelled")]
+    Cancelled,
 }
 
 /// Whether `id` can name a transfer: it becomes a ref component and a

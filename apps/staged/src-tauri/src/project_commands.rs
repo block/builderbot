@@ -24,6 +24,7 @@ pub(crate) async fn add_project_repo_impl(
     default_branch: Option<String>,
     head_repo: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     // Use the frontend-prefetched default branch when available to avoid
     // a ~500ms-2s GitHub API round-trip. The fallback runs `gh`, so it goes
     // to the blocking pool. It is resolved before the project's repos are

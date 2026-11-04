@@ -2465,6 +2465,11 @@ pub(crate) fn continue_resume_gate(
         (Some(branch), Some(session_type)) => {
             let launch_lock = branch_session_launch_lock_for(&branch.id);
             let _guard = launch_lock.lock().unwrap();
+            if crate::project_transfer::is_branch_transferring(&branch.id) {
+                return Ok(Err(ContinueOutcome::blocked(
+                    "the project is being transferred; retry once it finishes",
+                )));
+            }
             if should_queue_branch_session_start(store, &branch.id, &session_type)? {
                 return Ok(Err(ContinueOutcome::blocked(
                     "the branch is provisioning or busy with another session; retry once it is idle",
@@ -3633,6 +3638,9 @@ impl QueuedSessionClaim {
     pub(crate) fn claim(&self, store: &Store) -> Result<QueuedSessionStart, String> {
         let launch_lock = branch_session_launch_lock_for(&self.branch_id);
         let _guard = launch_lock.lock().unwrap();
+        if crate::project_transfer::is_branch_transferring(&self.branch_id) {
+            return Ok(QueuedSessionStart::Blocked);
+        }
 
         let status = store
             .get_session(&self.session_id)
@@ -5280,6 +5288,7 @@ pub async fn start_or_queue_branch_session_for_store(
 
     let (target, created) = {
         let _guard = launch_lock.lock().unwrap();
+        crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
         if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
             return insert_queued_branch_session(
                 &store,
@@ -5353,6 +5362,7 @@ pub fn queue_branch_session_for_store(
     let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
     let launch_lock = branch_session_launch_lock_for(&branch_id);
     let _guard = launch_lock.lock().unwrap();
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     insert_queued_branch_session(
         &store,
         &branch_id,
@@ -5561,6 +5571,10 @@ pub(crate) async fn drain_branch_queue(
     };
     if branch_waits_for_provisioning(&store, &branch)? {
         log::debug!("[session_queue] branch {branch_id} is still provisioning; its queue waits");
+        return Ok(false);
+    }
+    if crate::project_transfer::is_branch_transferring(&branch_id) {
+        log::debug!("[session_queue] branch {branch_id} is being transferred; its queue waits");
         return Ok(false);
     }
 
@@ -5988,6 +6002,7 @@ fn forced_start_precheck(
         }
     };
 
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     let active = running_branch_session_kinds(store, branch_id)?;
     if branch_worktree_operation_in_flight(branch_id)
         || !can_force_start_with_active(schedule.kind, &active)

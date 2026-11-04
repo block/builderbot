@@ -71,6 +71,17 @@ pub struct CarryOutcome {
     pub retried_without_exclusions: bool,
 }
 
+/// A step of [`carry_repo_with`], reported before it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarryStep {
+    Snapshotting,
+    /// Moving a bundle of this many bytes.
+    Moving {
+        bytes: u64,
+    },
+    Applying,
+}
+
 /// Snapshot `plan`'s source, move the bundle, and land it at the destination.
 ///
 /// The source is only read (and gains the temporary snapshot ref). When the
@@ -82,11 +93,23 @@ pub fn carry_repo(
     dest: &dyn TransferEndpoint,
     plan: &CarryPlan,
 ) -> Result<CarryOutcome, TransferError> {
+    carry_repo_with(source, dest, plan, &mut |_| Ok(()))
+}
+
+/// [`carry_repo`], calling `on_step` before each step: for progress, and as
+/// a checkpoint — an `Err` from it stops the carry there.
+pub fn carry_repo_with(
+    source: &dyn TransferEndpoint,
+    dest: &dyn TransferEndpoint,
+    plan: &CarryPlan,
+    on_step: &mut dyn FnMut(CarryStep) -> Result<(), TransferError>,
+) -> Result<CarryOutcome, TransferError> {
     check_transfer_id(&plan.transfer_id)?;
     let source_bundle = source.scratch_path(&plan.transfer_id, &plan.bundle_name)?;
     let dest_bundle = dest.scratch_path(&plan.transfer_id, &plan.bundle_name)?;
 
     let started = Instant::now();
+    on_step(CarryStep::Snapshotting)?;
     let snapshot = snapshot(source, plan, &source_bundle)?;
     log::info!(
         "[project_transfer] snapshot of {} on {}: {} bytes, {} tips excluded, uncommitted={} ({} ms)",
@@ -99,7 +122,9 @@ pub fn carry_repo(
     );
 
     let mut bundle = snapshot.bundle.clone();
+    on_step(CarryStep::Moving { bytes: bundle.size })?;
     move_bundle(source, dest, &source_bundle, plan, &dest_bundle, &bundle)?;
+    on_step(CarryStep::Applying)?;
     let mut retried = false;
     let applied = match land(dest, plan, &snapshot, &dest_bundle, &bundle) {
         Err(TransferError::MissingPrerequisites { message, .. }) if snapshot.excluded > 0 => {
@@ -109,7 +134,9 @@ pub fn carry_repo(
                 plan.source_branch
             );
             bundle = rebundle(source, plan, &source_bundle)?;
+            on_step(CarryStep::Moving { bytes: bundle.size })?;
             move_bundle(source, dest, &source_bundle, plan, &dest_bundle, &bundle)?;
+            on_step(CarryStep::Applying)?;
             retried = true;
             land(dest, plan, &snapshot, &dest_bundle, &bundle)?
         }
@@ -323,7 +350,7 @@ fn sha256_file(path: &Path) -> Result<String, TransferError> {
 
 /// Run a script and turn its report into a result: an `error=` line, or a
 /// failed exit without one, is the step's failure.
-fn run_step(
+pub(super) fn run_step(
     endpoint: &dyn TransferEndpoint,
     step: &'static str,
     script: &str,

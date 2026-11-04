@@ -1,8 +1,9 @@
 //! Switching a project between local worktrees and a Blox workspace.
 //!
-//! By the time this runs, every branch already exists at the destination —
-//! a worktree on disk, or a running workspace — and the source is untouched;
-//! see `crate::project_transfer`. What is left is the database's half: one
+//! By the time this runs, every branch with something to carry already exists
+//! at the destination — a worktree on disk, or a running workspace — and the
+//! source is untouched; see `crate::project_transfer`. A branch with nothing
+//! to carry lands unprovisioned, for the usual setup to provision. What is left is the database's half: one
 //! transaction that makes the rows describe the destination. Like
 //! [`Store::move_branch_to_project`] it is `UPDATE`s plus the one `workdirs`
 //! row, never a delete-and-reinsert of anything sessions hang off, so
@@ -17,11 +18,16 @@ use super::{now_timestamp, Store, StoreChange, StoreError};
 /// Where one transferred branch now lives.
 #[derive(Debug, Clone)]
 pub enum BranchLanding {
-    /// A local worktree. The row is inserted as given; its `project_id` and
-    /// `branch_id` must name the project and branch being transferred.
-    Local { workdir: Workdir },
-    /// A Blox workspace, already running.
-    Remote { workspace_name: String },
+    /// A local branch. With a worktree, its row is inserted as given, and its
+    /// `project_id` and `branch_id` must name the project and branch being
+    /// transferred; without one, the branch waits for worktree setup.
+    Local { workdir: Option<Workdir> },
+    /// A Blox workspace: `Running` when the branch was carried into it,
+    /// `Starting` for workspace setup to provision.
+    Remote {
+        workspace_name: String,
+        status: WorkspaceStatus,
+    },
 }
 
 /// One branch's part in a [`ProjectTransfer`].
@@ -84,9 +90,10 @@ impl Store {
         for branch in &transfer.branches {
             let (branch_type, workspace_name, workspace_status) = match &branch.landing {
                 BranchLanding::Local { workdir } => {
-                    if workdir.project_id != transfer.project_id
-                        || workdir.branch_id.as_deref() != Some(branch.branch_id.as_str())
-                    {
+                    if workdir.as_ref().is_some_and(|workdir| {
+                        workdir.project_id != transfer.project_id
+                            || workdir.branch_id.as_deref() != Some(branch.branch_id.as_str())
+                    }) {
                         return Err(StoreError(format!(
                             "The worktree for branch {} belongs to another branch or project.",
                             branch.branch_id
@@ -94,10 +101,13 @@ impl Store {
                     }
                     (BranchType::Local, None, None)
                 }
-                BranchLanding::Remote { workspace_name } => (
+                BranchLanding::Remote {
+                    workspace_name,
+                    status,
+                } => (
                     BranchType::Remote,
                     Some(workspace_name.as_str()),
-                    Some(WorkspaceStatus::Running.as_str()),
+                    Some(status.as_str()),
                 ),
             };
             if branch_type != landing_type {
@@ -167,7 +177,10 @@ impl Store {
                 "DELETE FROM workdirs WHERE branch_id = ?1",
                 params![branch.branch_id],
             )?;
-            if let BranchLanding::Local { workdir } = &branch.landing {
+            if let BranchLanding::Local {
+                workdir: Some(workdir),
+            } = &branch.landing
+            {
                 tx.execute(
                     "INSERT INTO workdirs (id, project_id, path, branch_id, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -252,6 +265,7 @@ mod tests {
                 branch_name: f.branch.branch_name.clone(),
                 landing: BranchLanding::Remote {
                     workspace_name: workspace.to_string(),
+                    status: WorkspaceStatus::Running,
                 },
                 session_working_dir: "/home/me/.staged/repos/acme/widgets".to_string(),
             }],
@@ -266,7 +280,7 @@ mod tests {
                 branch_id: f.branch.id.clone(),
                 branch_name: branch_name.to_string(),
                 landing: BranchLanding::Local {
-                    workdir: Workdir::new(&f.project.id, path).with_branch(&f.branch.id),
+                    workdir: Some(Workdir::new(&f.project.id, path).with_branch(&f.branch.id)),
                 },
                 session_working_dir: format!("{path}/apps/web"),
             }],
@@ -425,6 +439,7 @@ mod tests {
             branch_name: "second".to_string(),
             landing: BranchLanding::Remote {
                 workspace_name: "ws-feature".to_string(),
+                status: WorkspaceStatus::Running,
             },
             session_working_dir: "/home/me/.staged/repos/acme/widgets".to_string(),
         });
@@ -466,7 +481,10 @@ mod tests {
         assert!(f.store.apply_project_transfer(&transfer).is_err());
 
         let mut transfer = to_local(&f, "feature", "/wt/x");
-        let BranchLanding::Local { workdir } = &mut transfer.branches[0].landing else {
+        let BranchLanding::Local {
+            workdir: Some(workdir),
+        } = &mut transfer.branches[0].landing
+        else {
             unreachable!()
         };
         workdir.branch_id = Some(stranger.id.clone());
@@ -488,6 +506,33 @@ mod tests {
                 .branch_type,
             BranchType::Local
         );
+    }
+
+    /// A branch with nothing to carry lands unprovisioned: no worktree row
+    /// locally, `Starting` remotely, for the usual setup to pick up.
+    #[test]
+    fn lands_branches_with_nothing_to_carry_unprovisioned() {
+        let f = local_fixture(Store::in_memory().unwrap());
+        let mut transfer = to_remote(&f, "ws-feature");
+        transfer.branches[0].landing = BranchLanding::Remote {
+            workspace_name: "ws-feature".to_string(),
+            status: WorkspaceStatus::Starting,
+        };
+        f.store.apply_project_transfer(&transfer).unwrap();
+        let branch = f.store.get_branch(&f.branch.id).unwrap().unwrap();
+        assert_eq!(branch.workspace_status, Some(WorkspaceStatus::Starting));
+
+        let mut transfer = to_local(&f, "feature", "/wt/unused");
+        transfer.branches[0].landing = BranchLanding::Local { workdir: None };
+        f.store.apply_project_transfer(&transfer).unwrap();
+        let branch = f.store.get_branch(&f.branch.id).unwrap().unwrap();
+        assert_eq!(branch.branch_type, BranchType::Local);
+        assert_eq!(branch.workspace_status, None);
+        assert!(f
+            .store
+            .get_workdir_for_branch(&f.branch.id)
+            .unwrap()
+            .is_none());
     }
 
     /// The `branches` unique index is the backstop for a de-duplicated name

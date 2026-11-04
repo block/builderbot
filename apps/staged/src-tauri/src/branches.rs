@@ -1320,6 +1320,7 @@ pub fn create_branch(
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
 
     // Detect default branch if none specified (via GitHub API, no local clone needed)
     let target_repo = match project_repo_id {
@@ -1753,6 +1754,7 @@ pub(crate) async fn setup_worktree_from_pr_impl(
     base_ref: String,
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let target_repo = match project_repo_id {
             Some(repo_id) => store
@@ -1838,6 +1840,7 @@ pub(crate) async fn create_remote_branch_impl(
     workspace_name: String,
     project_repo_id: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
+    crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let project = store
             .get_project(&project_id)
@@ -1899,6 +1902,7 @@ pub async fn start_workspace(
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
 
     let branch = store
         .get_branch(&branch_id)
@@ -2888,6 +2892,8 @@ pub(crate) async fn move_branch_impl(
     // Pre-flight, so an impossible move is refused before anything the branch is
     // running gets stopped for it. [`apply_branch_move`] plans again under the
     // launch lock, which is what makes the answer safe to act on.
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
+    crate::project_transfer::ensure_project_not_transferring(target_project_id)?;
     plan_branch_move(store, branch_id, target_project_id)?;
 
     crate::actions::commands::stop_actions_for_branches(executor, registry, &[branch_id]);
@@ -3061,6 +3067,7 @@ pub async fn rename_branch(
     branch_name: String,
 ) -> Result<BranchWithWorkdir, String> {
     let store = get_store(&store)?;
+    crate::project_transfer::ensure_branch_not_transferring(&branch_id)?;
     let new_name = branch_name.trim();
     if new_name.is_empty() {
         return Err("Branch name is required".to_string());
@@ -3149,6 +3156,7 @@ pub(crate) fn record_branch_rename(
     branch: &store::Branch,
     new_name: &str,
 ) -> Result<(), String> {
+    crate::project_transfer::ensure_branch_not_transferring(&branch.id)?;
     store
         .update_branch_name(&branch.id, new_name)
         .map_err(|e| e.to_string())?;
@@ -3195,6 +3203,7 @@ pub(crate) fn setup_worktree_sync(
     branch_id: &str,
     app_handle: &tauri::AppHandle,
 ) -> Result<String, String> {
+    crate::project_transfer::ensure_branch_not_transferring(branch_id)?;
     let emit_progress = |phase: &str, detail: Option<String>| {
         emit_setup_progress(app_handle, branch_id, phase, detail)
     };

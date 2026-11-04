@@ -2076,6 +2076,7 @@ pub fn run() {
             if let Some(path) = preferences_store_path_buf() {
                 preference_events::forward_to_web(app.handle(), path, event_tx.clone());
             }
+            tauri::async_runtime::spawn_blocking(project_transfer::prune_backups);
 
             // Web server startup is stubbed out in this build.
             // TODO(web): restore web server startup from the `mobile-web` branch.
@@ -2229,6 +2230,9 @@ pub fn run() {
             branches::delete_branch,
             branches::rename_branch,
             branches::move_branch,
+            project_transfer::commands::get_project_transfer_preflight,
+            project_transfer::commands::transfer_project,
+            project_transfer::commands::cancel_project_transfer,
             branches::get_blox_env,
             branches::get_workspace_info,
             branches::poll_workspace_status,

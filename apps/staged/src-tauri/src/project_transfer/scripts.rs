@@ -284,6 +284,69 @@ pub const APPLY_SCRIPT: &str = concat!(
     "exit 0\n",
 );
 
+/// Clone a repository unless it is already there: a transfer's secondary
+/// repos at a fresh workspace, whose start only cloned the primary one.
+///
+/// Arguments: `$1` the clone directory, `$2` the URL to clone from.
+pub const CLONE_SCRIPT: &str = concat!(
+    prelude!(),
+    "[ -d \"$1/.git\" ] && exit 0\n",
+    "mkdir -p -- \"$(dirname -- \"$1\")\" || fail \"cannot create the directory for $1\"\n",
+    "err=$(G clone -q -- \"$2\" \"$1\" 2>&1) || fail \"cannot clone $2: $err\"\n",
+    "exit 0\n",
+);
+
+/// Inspect checkouts before a transfer, without writing to any of them.
+///
+/// Arguments: pairs of `dir branch`, one per repository. For each pair it
+/// prints `repo=<index>` and then what it found: `missing=1` (no such
+/// directory) or `not_a_checkout=1` and nothing else; otherwise `head_ref`
+/// (or `detached=1`), `head` (absent on an unborn branch), any
+/// `operation=` in progress, `staged`/`unstaged`/`untracked`/`conflicted`
+/// counts, `untracked_bytes` when there are untracked files, `unpushed`
+/// (commits on no remote-tracking ref), `upstream`, and the same `warning=`s
+/// as [`SNAPSHOT_SCRIPT`]. `status` runs with `--no-optional-locks`, so even
+/// the index's stat cache is left alone. `$branch` is only echoed back; the
+/// caller compares `head_ref` against it.
+pub const PREFLIGHT_SCRIPT: &str = concat!(
+    prelude!(),
+    "i=0\n",
+    "while [ $# -ge 2 ]; do\n",
+    "  dir=$1 branch=$2\n",
+    "  shift 2\n",
+    "  printf 'repo=%s\\nbranch=%s\\n' \"$i\" \"$branch\"\n",
+    "  i=$((i + 1))\n",
+    "  cd -- \"$dir\" 2>/dev/null || { printf 'missing=1\\n'; continue; }\n",
+    "  top=$(G rev-parse --show-toplevel 2>/dev/null) && cd -- \"$top\" 2>/dev/null || { printf 'not_a_checkout=1\\n'; continue; }\n",
+    "  if head_ref=$(G symbolic-ref -q HEAD); then printf 'head_ref=%s\\n' \"${head_ref#refs/heads/}\"; else printf 'detached=1\\n'; fi\n",
+    "  head=$(G rev-parse -q --verify 'HEAD^{commit}') && printf 'head=%s\\n' \"$head\"\n",
+    "  for marker in MERGE_HEAD:merge CHERRY_PICK_HEAD:cherry-pick REVERT_HEAD:revert BISECT_LOG:bisect rebase-merge:rebase rebase-apply:rebase; do\n",
+    "    [ -e \"$(G rev-parse --git-path \"${marker%%:*}\")\" ] && printf 'operation=%s\\n' \"${marker#*:}\"\n",
+    "  done\n",
+    // Porcelain v1 is one line per path (odd names come quoted), `XY path`:
+    // `??` untracked, an unmerged pair conflicted, else X staged and Y not.
+    "  counts=$(G --no-optional-locks status --porcelain=v1 --untracked-files=all 2>/dev/null | awk '\n",
+    "    { xy = substr($0, 1, 2) }\n",
+    "    xy == \"??\" { u++; next }\n",
+    "    xy ~ /^(DD|AU|UD|UA|DU|AA|UU)$/ { c++; next }\n",
+    "    { if (substr(xy, 1, 1) != \" \") s++; if (substr(xy, 2, 1) != \" \") w++ }\n",
+    "    END { printf \"staged=%d\\nunstaged=%d\\nuntracked=%d\\nconflicted=%d\\n\", s, w, u, c }')\n",
+    "  printf '%s\\n' \"$counts\"\n",
+    "  case $counts in\n",
+    "    *untracked=0*) ;;\n",
+    "    *) printf 'untracked_bytes=%s\\n' \"$(G ls-files -z --others --exclude-standard | xargs -0 ls -ln -- 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')\" ;;\n",
+    "  esac\n",
+    "  if [ -n \"${head:-}\" ]; then\n",
+    "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
+    "    up=$(G rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) && printf 'upstream=%s\\n' \"$up\"\n",
+    "  fi\n",
+    "  head=''\n",
+    "  [ -f .gitmodules ] && printf 'warning=submodules\\n'\n",
+    "  G grep -q -e 'filter=lfs' -- '*.gitattributes' 2>/dev/null && printf 'warning=lfs\\n'\n",
+    "done\n",
+    "exit 0\n",
+);
+
 /// Remove a transfer's temporary refs, and optionally its scratch directory.
 ///
 /// Arguments: `$1` the repository (skipped when it does not exist), `$2` the
@@ -631,6 +694,13 @@ pub fn origin_tips_args(repo_dir: &str, branches: &[&str]) -> Vec<String> {
 }
 
 /// Arguments for [`CLEANUP_SCRIPT`].
+pub fn preflight_args<'a>(checkouts: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<String> {
+    checkouts
+        .into_iter()
+        .flat_map(|(dir, branch)| [dir.to_string(), branch.to_string()])
+        .collect()
+}
+
 pub fn cleanup_args(repo_dir: &str, transfer_id: &str, scratch_dir: Option<&str>) -> Vec<String> {
     vec![
         repo_dir.to_string(),

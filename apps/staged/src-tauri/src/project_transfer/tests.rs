@@ -24,7 +24,7 @@ fn shells() -> Vec<&'static str> {
 
 /// Run git without hooks; `Err` carries stderr. Unlike `run_git_in`, stdout
 /// is not trimmed: porcelain output starts with significant spaces.
-fn try_git(repo: &Path, args: &[&str]) -> Result<String, String> {
+pub(super) fn try_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new("git");
     command
         .args(["-c", "core.hooksPath=/dev/null", "-C"])
@@ -39,27 +39,27 @@ fn try_git(repo: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn git(repo: &Path, args: &[&str]) -> String {
+pub(super) fn git(repo: &Path, args: &[&str]) -> String {
     try_git(repo, args).unwrap_or_else(|e| panic!("git {args:?} in {}: {e}", repo.display()))
 }
 
-fn rev(repo: &Path, rev: &str) -> String {
+pub(super) fn rev(repo: &Path, rev: &str) -> String {
     git(repo, &["rev-parse", rev]).trim().to_string()
 }
 
-fn write(repo: &Path, path: &str, contents: impl AsRef<[u8]>) {
+pub(super) fn write(repo: &Path, path: &str, contents: impl AsRef<[u8]>) {
     let path = repo.join(path);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, contents).unwrap();
 }
 
-fn commit(repo: &Path, message: &str) -> String {
+pub(super) fn commit(repo: &Path, message: &str) -> String {
     git(repo, &["add", "-A"]);
     git(repo, &["commit", "-q", "-m", message]);
     rev(repo, "HEAD")
 }
 
-fn configure_identity(repo: &Path) {
+pub(super) fn configure_identity(repo: &Path) {
     for (key, value) in [
         ("user.name", "Test"),
         ("user.email", "test@example.com"),
@@ -70,7 +70,7 @@ fn configure_identity(repo: &Path) {
 }
 
 /// Bytes that differ throughout, so nothing compresses or deltas them away.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
+pub(super) fn noise(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed | 1;
     (0..len)
         .map(|_| {
@@ -255,7 +255,7 @@ impl World {
 
 /// Everything a user could see of a checkout.
 #[derive(Debug, PartialEq, Eq)]
-struct Observed {
+pub(super) struct Observed {
     head: String,
     /// What the branch tracks and how far ahead/behind, from `status --branch`
     /// with the local branch name removed.
@@ -269,7 +269,7 @@ struct Observed {
     branch_config: Vec<(String, String)>,
 }
 
-fn observe(repo: &Path) -> Observed {
+pub(super) fn observe(repo: &Path) -> Observed {
     let status = git(
         repo,
         &[
@@ -352,7 +352,7 @@ fn observe(repo: &Path) -> Observed {
 
 /// What a transfer must leave exactly as it found it at the source: the
 /// visible state, the index's content and every ref but its own.
-fn source_fingerprint(repo: &Path) -> (Observed, String, String) {
+pub(super) fn source_fingerprint(repo: &Path) -> (Observed, String, String) {
     let refs = git(repo, &["for-each-ref", "--format=%(refname) %(objectname)"])
         .lines()
         .filter(|l| !l.starts_with("refs/staged-transfer/"))
@@ -362,7 +362,7 @@ fn source_fingerprint(repo: &Path) -> (Observed, String, String) {
 }
 
 /// Staged, unstaged and untracked changes of every kind git distinguishes.
-fn make_a_mess(repo: &Path) {
+pub(super) fn make_a_mess(repo: &Path) {
     // Partially staged: the index has the first edit, the worktree both.
     write(repo, "partial.txt", "ONE\ntwo\nthree\nfour\nfive\n");
     git(repo, &["add", "partial.txt"]);

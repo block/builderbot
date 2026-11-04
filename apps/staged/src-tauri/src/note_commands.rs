@@ -89,9 +89,7 @@ pub(crate) fn create_standalone_note(
 ) -> Result<NoteTimelineItem, String> {
     let mut note = Note::new_standalone(branch_id, title, content);
     note.subtype = subtype;
-    if note.is_written() {
-        note.read_at = note.completed_at;
-    }
+    note.set_initial_read(note.is_written());
     store
         .create_note_with_unique_title(&mut note)
         .map_err(|e| e.to_string())?;

@@ -178,6 +178,11 @@ impl Store {
     }
 
     /// Update a note's title, content, and optional suggested next steps.
+    ///
+    /// This is the session runner's write, so a change is the agent revising
+    /// the note: it clears `read_at`, and the note reads as unread until the
+    /// user sees the new content. User edits go through
+    /// [`Store::update_written_note`], which leaves it alone.
     pub fn update_note_title_and_content(
         &self,
         id: &str,
@@ -210,7 +215,7 @@ impl Store {
         }
         let now = now_timestamp();
         conn.execute(
-            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6 WHERE id = ?7",
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, read_at = NULL WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
         self.publish_with(|| StoreChange::Notes {
@@ -309,8 +314,8 @@ impl Store {
 
     /// Mark a note read or unread, returning the row as it now reads.
     ///
-    /// A note is unread from the moment its content lands (`completed_at`)
-    /// until the user opens it after that. Each write is skipped when it would
+    /// A note is unread from the moment its content lands (`completed_at`),
+    /// or an agent revises it, until the user opens it after that. Each write is skipped when it would
     /// change nothing — reopening a read note, or opening one whose session is
     /// still writing it, which reads as unread when it lands — so neither
     /// reloads the note lists.

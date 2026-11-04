@@ -120,6 +120,8 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The project-note twin of [`Store::update_note_title_and_content`]: a
+    /// change is the agent revising the note, so it clears `read_at`.
     pub fn update_project_note_title_and_content(
         &self,
         id: &str,
@@ -153,7 +155,7 @@ impl Store {
         let now = now_timestamp();
         conn.execute(
             "UPDATE project_notes
-             SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6
+             SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, read_at = NULL
              WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;

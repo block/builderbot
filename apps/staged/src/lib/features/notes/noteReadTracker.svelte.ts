@@ -5,9 +5,9 @@
  * when reference navigation swaps in another note — and that marks the note
  * read. Refreshes while the note stays on screen only update what the toggle
  * shows, so a manual "Mark as unread" sticks until the note is shown again.
- * The one exception is a note whose content lands while it is on screen (its
- * session finishes in the open viewer): the user watched it land, so it is
- * marked read then. There was nothing to mark unread before that.
+ * The exception is new content arriving while the note is on screen — its
+ * session landing it, or revising it, in the open viewer: the user watched it
+ * arrive, so it is marked read then, as showing it again would.
  */
 
 import {
@@ -22,6 +22,8 @@ interface ShownNote {
   kind: NoteKind;
   noteId: string;
   completedAt: number | null;
+  /** Moves on every content change, so a revision shows up as a new value. */
+  updatedAt: number;
   readAt: number | null;
   /** A child note aggregated under a project note, which no timeline lists. */
   child: boolean;
@@ -31,6 +33,7 @@ interface ShownNote {
 export interface NoteReadSnapshot {
   id: string;
   completedAt: number | null;
+  updatedAt: number;
   readAt: number | null;
 }
 
@@ -38,8 +41,7 @@ function shownNote(kind: NoteKind, row: NoteReadRow): ShownNote {
   return {
     kind,
     noteId: row.id,
-    completedAt: row.completedAt,
-    readAt: row.readAt,
+    ...readFields(row),
     child: 'parentProjectNoteId' in row && row.parentProjectNoteId !== null,
   };
 }
@@ -95,13 +97,18 @@ export class NoteReadTracker {
     this.toggleInFlight = false;
   }
 
-  /** A fresh row for the note on screen, e.g. after a write from another window. */
+  /**
+   * A fresh row for the note on screen, e.g. after a write from another window.
+   * New content — the note landing, or an agent revising it, which leaves it
+   * unread — is marked read; any other refresh leaves the read state alone.
+   */
   observe(note: NoteReadSnapshot): void {
     const shown = this.shown;
     if (!shown || shown.noteId !== note.id) return;
     const landed = shown.completedAt === null && note.completedAt !== null;
-    this.shown = { ...shown, completedAt: note.completedAt, readAt: note.readAt };
-    if (!landed) return;
+    const revised = note.updatedAt !== shown.updatedAt;
+    this.shown = { ...shown, ...readFields(note) };
+    if (!(landed || revised) || !isNoteUnread(note)) return;
     const generation = this.generation;
     writeNoteRead(shown.kind, shown.noteId, true).then(
       (row) => this.apply(generation, row),
@@ -131,6 +138,12 @@ export class NoteReadTracker {
   private apply(generation: number, row: NoteReadRow): void {
     const shown = this.shown;
     if (generation !== this.generation || shown?.noteId !== row.id) return;
-    this.shown = { ...shown, completedAt: row.completedAt, readAt: row.readAt };
+    this.shown = { ...shown, ...readFields(row) };
   }
+}
+
+function readFields(
+  note: NoteReadSnapshot
+): Pick<ShownNote, 'completedAt' | 'updatedAt' | 'readAt'> {
+  return { completedAt: note.completedAt, updatedAt: note.updatedAt, readAt: note.readAt };
 }

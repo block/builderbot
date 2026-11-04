@@ -207,7 +207,9 @@ impl Store {
     /// branch notes bound to the source project's repos, which the destination
     /// need not have. Detached, they surface as ordinary notes on their own
     /// branch timelines, and the `#note:<id>` references in the parent's body
-    /// keep resolving (that lookup has no project scope).
+    /// keep resolving (that lookup has no project scope). They surface read
+    /// (as the 0037 backfill did): the user acted on the parent, not on them,
+    /// so they mustn't light up unread dots across those timelines.
     pub fn move_project_note_to_project(
         &self,
         note_id: &str,
@@ -240,7 +242,8 @@ impl Store {
         }
         Self::rehome_note_media(&tx, note_id, &existing.title, rehomed)?;
         tx.execute(
-            "UPDATE notes SET parent_project_note_id = NULL WHERE parent_project_note_id = ?1",
+            "UPDATE notes SET parent_project_note_id = NULL, read_at = COALESCE(read_at, completed_at)
+             WHERE parent_project_note_id = ?1",
             params![note_id],
         )?;
         let now = now_timestamp();
@@ -723,6 +726,11 @@ mod tests {
         let child =
             Note::new_standalone(&branch.id, "Child", "body").with_parent_project_note(&parent.id);
         f.store.create_note(&child).unwrap();
+        // Still being written, so it has nothing to read yet.
+        let pending = Note::new(&branch.id, "", "")
+            .with_session("session-1")
+            .with_parent_project_note(&parent.id);
+        f.store.create_note(&pending).unwrap();
         while rx.try_recv().is_ok() {}
 
         let moved = f
@@ -742,6 +750,13 @@ mod tests {
         let child = f.store.get_note(&child.id).unwrap().unwrap();
         assert!(child.parent_project_note_id.is_none());
         assert_eq!(child.branch_id, branch.id);
+        // The user never opened the child on its own; it surfaces read rather
+        // than as a stray unread row on its branch timeline.
+        assert!(child.is_read());
+        assert_eq!(child.read_at, child.completed_at);
+        let pending = f.store.get_note(&pending.id).unwrap().unwrap();
+        assert!(pending.parent_project_note_id.is_none());
+        assert_eq!(pending.read_at, None);
         assert!(f.store.list_project_notes(&f.source.id).unwrap().is_empty());
 
         let project_change = |project_id: &str| StoreChange::Notes {

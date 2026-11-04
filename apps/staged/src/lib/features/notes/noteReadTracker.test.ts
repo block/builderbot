@@ -129,6 +129,54 @@ describe('NoteReadTracker', () => {
     expect(tracker.unread).toBe(false);
   });
 
+  it('marks a revision read when it lands while on screen', async () => {
+    const tracker = await newTracker(note('a'));
+    tracker.show('branch', 'a');
+    await flush();
+
+    // `Store::update_note_title_and_content` clears the read on a revision.
+    rows.set('a', { ...rows.get('a')!, content: 'Revised', updatedAt: 40, readAt: null });
+    tracker.observe(rows.get('a')!);
+    expect(tracker.unread).toBe(true);
+    await flush();
+
+    expect(writeNoteRead).toHaveBeenCalledTimes(2);
+    expect(rows.get('a')!.readAt).not.toBeNull();
+    expect(tracker.unread).toBe(false);
+  });
+
+  it('lets a revision override a manual unread, but not a plain refresh', async () => {
+    const tracker = await newTracker(note('a'));
+    tracker.show('branch', 'a');
+    await flush();
+    await tracker.toggle('project-1');
+
+    tracker.observe(rows.get('a')!);
+    await flush();
+    expect(writeNoteRead).toHaveBeenCalledTimes(1);
+    expect(tracker.unread).toBe(true);
+
+    rows.set('a', { ...rows.get('a')!, content: 'Revised', updatedAt: 40 });
+    tracker.observe(rows.get('a')!);
+    await flush();
+    expect(writeNoteRead).toHaveBeenCalledTimes(2);
+    expect(tracker.unread).toBe(false);
+  });
+
+  it('writes nothing when new content leaves the note read', async () => {
+    const tracker = await newTracker(note('a', { subtype: 'written' }));
+    tracker.show('branch', 'a');
+    await flush();
+
+    // The user's own edit to a note they wrote keeps it read.
+    rows.set('a', { ...rows.get('a')!, content: 'Edited', updatedAt: 40 });
+    tracker.observe(rows.get('a')!);
+    await flush();
+
+    expect(writeNoteRead).toHaveBeenCalledTimes(1);
+    expect(tracker.unread).toBe(false);
+  });
+
   it('offers no toggle for a child note', async () => {
     const tracker = await newTracker(note('child', { parentProjectNoteId: 'project-note-1' }));
 

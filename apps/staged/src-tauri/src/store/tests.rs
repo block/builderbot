@@ -3293,14 +3293,23 @@ fn test_set_note_read_marks_landed_notes_only() {
         store.set_note_read(&note.id, true).unwrap().read_at,
         Some(read_at)
     );
-    // A revision is not a new note: it stays read.
+    // The session re-emitting the same note changes nothing, so it stays read.
     store
-        .update_note_title_and_content(&note.id, "Plan", "revised body", None, None)
+        .update_note_title_and_content(&note.id, "Plan", "body", None, None)
         .unwrap();
     assert_eq!(
         store.get_note(&note.id).unwrap().unwrap().read_at,
         Some(read_at)
     );
+    // A revision is new content the user hasn't seen: it reads as unread
+    // again, and opening it marks it read again.
+    store
+        .update_note_title_and_content(&note.id, "Plan", "revised body", None, None)
+        .unwrap();
+    let revised = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(revised.completed_at, landed.completed_at);
+    assert_eq!(revised.read_at, None);
+    assert!(store.set_note_read(&note.id, true).unwrap().is_read());
 
     let unread = store.set_note_read(&note.id, false).unwrap();
     assert_eq!(unread.read_at, None);
@@ -3360,6 +3369,17 @@ fn test_set_project_note_read_round_trips_and_lists() {
     assert_eq!(read_at_in_list(), read.read_at);
 
     store.set_project_note_read(&note.id, false).unwrap();
+    assert_eq!(read_at_in_list(), None);
+
+    // An agent revision makes a read project note unread again.
+    store.set_project_note_read(&note.id, true).unwrap();
+    store
+        .update_project_note_title_and_content(&note.id, "Overview", "body", None, None)
+        .unwrap();
+    assert!(read_at_in_list().is_some());
+    store
+        .update_project_note_title_and_content(&note.id, "Overview", "revised", None, None)
+        .unwrap();
     assert_eq!(read_at_in_list(), None);
 
     assert!(store.set_project_note_read("missing", false).is_err());
@@ -4102,6 +4122,7 @@ fn test_update_written_note_rewrites_title_and_content() {
     store.create_branch(&branch).unwrap();
 
     let mut note = Note::new(&branch.id, "Draft", "# Draft").with_subtype(Note::SUBTYPE_WRITTEN);
+    note.set_initial_read(true);
     store.create_note_with_unique_title(&mut note).unwrap();
     let created_completed_at = note.completed_at;
 
@@ -4112,11 +4133,14 @@ fn test_update_written_note_rewrites_title_and_content() {
     assert_eq!(updated.content, "# Final\n\nbody");
     // Completion is write-once: the note has been readable since it was saved.
     assert_eq!(updated.completed_at, created_completed_at);
+    // The user's own edit is nothing new to them, so the note stays read.
+    assert_eq!(updated.read_at, note.read_at);
 
     let stored = store.get_note(&note.id).unwrap().unwrap();
     assert_eq!(stored.title, "Final");
     assert_eq!(stored.content, "# Final\n\nbody");
     assert!(stored.is_written());
+    assert!(stored.is_read());
 }
 
 /// A written note edited down to a bare title has no body left, which used to

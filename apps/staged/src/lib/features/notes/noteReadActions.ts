@@ -5,12 +5,15 @@
  *
  * Marking a note unread also marks its project unread, so the project carries
  * the sidebar's unread dot until it is next opened — as when one of its
- * sessions finishes while the user is elsewhere.
+ * sessions finishes while the user is elsewhere. Marking one read in the
+ * project on screen clears that dot again, as viewing the project would.
  */
 
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
+import { projectsDataStore } from '../../stores/projectsData.svelte';
+import { navigation } from '../layout/navigation.svelte';
 import type { BranchNote, ProjectNote } from '../../types';
 
 export type NoteKind = 'branch' | 'project';
@@ -49,9 +52,16 @@ export async function setNoteReadState(
     });
     return null;
   }
-  if (!read) {
-    const projectId = 'projectId' in row ? row.projectId : target.projectId;
-    if (projectId) projectStateStore.markAsUnread(projectId);
+  const projectId = 'projectId' in row ? row.projectId : target.projectId;
+  if (projectId && !projectsDataStore.isProjectDeleting(projectId)) {
+    if (!read) {
+      projectStateStore.markAsUnread(projectId);
+    } else if (
+      navigation.selectedProjectId === projectId &&
+      projectStateStore.isUnread(projectId)
+    ) {
+      projectStateStore.markAsRead(projectId);
+    }
   }
   return row;
 }

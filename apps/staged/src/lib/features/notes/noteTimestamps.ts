@@ -33,8 +33,8 @@ export function formatNoteTimestamp(note: NoteTimestamps, nowMs: number): string
 /**
  * Is the note unread? A note is unread from the moment its content lands
  * (`completedAt`) until the user opens it after that, so one still being
- * written is neither, and a revision doesn't make a read note unread again.
- * "Mark as unread" clears `readAt`.
+ * written is neither. An agent revising the note and "Mark as unread" both
+ * clear `readAt`, so it reads as unread again.
  */
 export function isNoteUnread(note: NoteReadTimestamps): boolean {
   return note.completedAt !== null && (note.readAt === null || note.readAt < note.completedAt);

@@ -222,15 +222,27 @@
       padding: 2px 8px;
       padding-top: calc(2px + env(safe-area-inset-top));
     }
+
+    /* Narrow bars can't fit the title and badges (the diff route's RepoLabel)
+       beside the right actions, so the badges give way first: they ellipsize
+       while the title keeps its width, and once there's no room for a few
+       characters they wrap onto a second line that is clipped away, rather
+       than leaving a sliver. Only then does the title itself ellipsize. */
     .title-content {
       max-width: min(46vw, 420px);
+      align-self: stretch;
+      flex-wrap: wrap;
+      overflow: hidden;
     }
 
-    /* Narrow bars can't fit the badges at full width next to the right
-       actions (the diff route's RepoLabel beside its context switcher), so
-       let them shrink and ellipsize instead of painting under the actions. */
+    /* Fill the bar's height, so a wrapped line starts below the clip. */
+    .title-text {
+      min-height: 100%;
+    }
+
     .badge-slot {
-      flex-shrink: 1;
+      flex: 1 1 3em;
+      max-width: max-content;
     }
 
     .center-content {

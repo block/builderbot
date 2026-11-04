@@ -2346,22 +2346,17 @@ pub async fn poll_workspace_status(
     })
 }
 
-/// Map a numeric `CommandType` (from the blox orchestrator proto) to a stable
-/// string identifier that the frontend can map to a display label.
-///
-/// Proto enum values:
-///   0 = COMMAND_TYPE_UNSPECIFIED
-///   1 = COMMAND_TYPE_CHECKOUT
-///   2 = COMMAND_TYPE_EXECUTE_PROCESS
-///   3 = COMMAND_TYPE_PROJECT_BOOTSTRAP
-///   4 = COMMAND_TYPE_PROVISION_WORKSPACE
-pub(crate) fn bootstrap_command_type_name(command_type: u32) -> &'static str {
+/// Map a blox orchestrator `CommandType` to a stable string identifier that
+/// the frontend can map to a display label.
+pub(crate) fn bootstrap_command_type_name(command_type: blox::CommandType) -> &'static str {
     match command_type {
-        1 => "checkout",
-        2 => "execute_process",
-        3 => "project_bootstrap",
-        4 => "provision_workspace",
-        _ => "unknown",
+        blox::CommandType::Checkout => "checkout",
+        blox::CommandType::ExecuteProcess => "execute_process",
+        blox::CommandType::ProjectBootstrap => "project_bootstrap",
+        blox::CommandType::ProvisionWorkspace => "provision_workspace",
+        blox::CommandType::RestoreSnapshot => "restore_snapshot",
+        blox::CommandType::ExecuteBootstrap => "execute_bootstrap",
+        blox::CommandType::Unspecified => "unknown",
     }
 }
 
@@ -2379,21 +2374,22 @@ pub(crate) fn emit_workspace_setup_progress(
     }
 
     let total = bootstrap.len();
-    let completed = bootstrap.iter().filter(|c| c.status == 3).count();
+    let completed = bootstrap.iter().filter(|c| c.status.is_finished()).count();
 
-    // All done — workspace will transition to running, no need to emit.
+    // All done — workspace will transition to running (or error), no need
+    // to emit.
     if completed == total {
         return;
     }
 
-    // Pick the first currently-running command (status 2).  If none are
-    // running yet, fall back to the first non-completed command.
+    // Pick the first currently-running command.  If none are running yet,
+    // fall back to the first unfinished command.
     // Safety: `bootstrap` is non-empty (checked above) and `completed < total`,
-    // so at least one command has status != 3 (completed).
+    // so at least one command is unfinished.
     let current_cmd = bootstrap
         .iter()
-        .find(|c| c.status == 2)
-        .or_else(|| bootstrap.iter().find(|c| c.status != 3))
+        .find(|c| c.status == blox::WorkspaceCommandStatus::Running)
+        .or_else(|| bootstrap.iter().find(|c| !c.status.is_finished()))
         .unwrap();
 
     let phase = bootstrap_command_type_name(current_cmd.command_type);

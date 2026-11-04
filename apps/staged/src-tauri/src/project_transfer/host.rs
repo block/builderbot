@@ -126,9 +126,19 @@ fn workspace_state_from_status(status: Option<&str>) -> WorkspaceState {
     }
 }
 
+/// Which bootstrap step a workspace is on: `(step, total)` while any of its
+/// bootstrap commands has yet to finish, `None` once all have (or none are
+/// listed). A failed command counts as finished; the workspace's own state
+/// says whether it came up.
+fn bootstrap_step(commands: &[blox::WorkspaceCommand]) -> Option<(usize, usize)> {
+    let bootstrap: Vec<_> = commands.iter().filter(|c| c.is_bootstrap).collect();
+    let finished = bootstrap.iter().filter(|c| c.status.is_finished()).count();
+    (finished < bootstrap.len()).then(|| (finished + 1, bootstrap.len()))
+}
+
 impl LiveHost {
     /// Poll until the workspace is running and its bootstrap commands have
-    /// all completed, or `cancelled` says to stop.
+    /// all finished, or `cancelled` says to stop.
     fn wait_until_ready(
         &self,
         name: &str,
@@ -154,28 +164,46 @@ impl LiveHost {
                             cache.insert(name.to_string(), id);
                         }
                     }
-                    match workspace_state_from_status(info.status.as_deref()) {
-                        WorkspaceState::Running => match blox::ws_commands(name) {
-                            Ok(commands) => {
-                                let bootstrap: Vec<_> =
-                                    commands.iter().filter(|c| c.is_bootstrap).collect();
-                                let done = bootstrap.iter().filter(|c| c.status == 3).count();
-                                if done == bootstrap.len() {
+                    let state = workspace_state_from_status(info.status.as_deref());
+                    match state {
+                        // Blox runs the bootstrap while the workspace is
+                        // starting and reports it running as the bootstrap
+                        // ends, give or take a second, so the commands are
+                        // read in both states.
+                        WorkspaceState::Running | WorkspaceState::Starting => {
+                            match blox::ws_commands(name) {
+                                Ok(commands) => match bootstrap_step(&commands) {
+                                    Some((step, total)) => report(format!(
+                                        "Bootstrapping the workspace (step {step} of {total})"
+                                    )),
+                                    None if state == WorkspaceState::Running => {
+                                        if commands.iter().any(|c| {
+                                            c.is_bootstrap
+                                                && c.status == blox::WorkspaceCommandStatus::Failed
+                                        }) {
+                                            log::warn!(
+                                                "[project_transfer] {name} is running, but a bootstrap command failed"
+                                            );
+                                        }
+                                        return Ok(());
+                                    }
+                                    None => {
+                                        report("Waiting for the workspace to start".to_string())
+                                    }
+                                },
+                                // Running is what the rest of the app waits
+                                // for; an unreadable command list does not
+                                // hold it up.
+                                Err(e) if state == WorkspaceState::Running => {
+                                    log::warn!("[project_transfer] ws commands {name}: {e}");
                                     return Ok(());
                                 }
-                                report(format!(
-                                    "Bootstrapping the workspace (step {} of {})",
-                                    done + 1,
-                                    bootstrap.len()
-                                ));
+                                Err(e) => {
+                                    log::debug!("[project_transfer] ws commands {name}: {e}");
+                                    report("Waiting for the workspace to start".to_string())
+                                }
                             }
-                            // Running is what the rest of the app waits for;
-                            // an unreadable command list does not hold it up.
-                            Err(e) => {
-                                log::warn!("[project_transfer] ws commands {name}: {e}");
-                                return Ok(());
-                            }
-                        },
+                        }
                         WorkspaceState::Error => {
                             return Err(format!("Workspace {name} failed to start"))
                         }
@@ -370,5 +398,48 @@ mod tests {
             WorkspaceState::Starting
         );
         assert_eq!(workspace_state_from_status(None), WorkspaceState::Starting);
+    }
+
+    fn commands(json: &str) -> Vec<blox::WorkspaceCommand> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn counts_bootstrap_steps_from_the_command_list() {
+        // As `sq blox ws commands --json` prints it now: newest first, with
+        // `isBootstrap` left out unless it is true.
+        let starting = r#"[
+  {"commandId": "3", "commandType": "COMMAND_TYPE_EXECUTE_PROCESS", "status": "COMMAND_STATUS_RUNNING"},
+  {"commandId": "2", "commandType": "COMMAND_TYPE_EXECUTE_BOOTSTRAP", "status": "COMMAND_STATUS_PENDING", "isBootstrap": true},
+  {"commandId": "1", "commandType": "COMMAND_TYPE_EXECUTE_BOOTSTRAP", "status": "COMMAND_STATUS_SUCCEEDED", "isBootstrap": true}
+]"#;
+        assert_eq!(bootstrap_step(&commands(starting)), Some((2, 2)));
+        assert_eq!(
+            bootstrap_step(&commands(&starting.replace("PENDING", "RUNNING"))),
+            Some((2, 2))
+        );
+        // A process still running is not part of the bootstrap.
+        assert_eq!(
+            bootstrap_step(&commands(&starting.replace("PENDING", "SUCCEEDED"))),
+            None
+        );
+        assert_eq!(
+            bootstrap_step(&commands(&starting.replace("PENDING", "FAILED"))),
+            None
+        );
+        // The older form still counts.
+        assert_eq!(
+            bootstrap_step(&commands(
+                r#"[{"command_id": "1", "command_type": 3, "status": 1, "is_bootstrap": true, "dependencies": []}]"#
+            )),
+            Some((1, 1))
+        );
+        // A workspace past its 50 newest commands no longer lists a bootstrap.
+        assert_eq!(
+            bootstrap_step(&commands(
+                r#"[{"commandId": "9", "commandType": "COMMAND_TYPE_EXECUTE_PROCESS", "status": "COMMAND_STATUS_SUCCEEDED"}]"#
+            )),
+            None
+        );
     }
 }

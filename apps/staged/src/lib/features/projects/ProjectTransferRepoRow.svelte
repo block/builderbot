@@ -1,8 +1,8 @@
 <!--
   ProjectTransferRepoRow.svelte — one branch in the transfer dialog: its repo
-  and branch, what it carries (unpushed commits, uncommitted changes, by
-  kind), the ignored files and folders that stay behind, and whatever blocks or warns
-  about it. Blockers and warnings differ in colour and in a screen-reader
+  and branch, the upstream it tracks, what it carries (unpushed commits,
+  uncommitted changes, by kind), the ignored files and folders that stay
+  behind, and whatever blocks or warns about it. Blockers and warnings differ in colour and in a screen-reader
   prefix.
 -->
 <script lang="ts">
@@ -51,6 +51,9 @@
     {:else if row.state === 'unknown'}
       <span>Checked once the workspace resumes</span>
     {:else}
+      <span class="upstream">
+        {#if row.upstream}tracks {row.upstream}{:else}no upstream{/if}
+      </span>
       <span class:emphasis={row.unpushedCommits > 0}>
         {plural(row.unpushedCommits, 'unpushed commit')}
       </span>
@@ -137,6 +140,11 @@
     gap: 4px 12px;
     color: var(--text-muted);
     font-size: var(--size-xs);
+  }
+
+  .repo-stats .upstream {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .repo-stats .emphasis {

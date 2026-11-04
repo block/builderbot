@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 pub use blox_cli::{
-    BloxError, FileRoute, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput,
+    BloxError, CommandType, FileRoute, WorkspaceCommand, WorkspaceCommandStatus, WorkspaceInfo,
+    WorkspaceListEntry, WsExecOutput,
 };
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();

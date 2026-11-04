@@ -13,6 +13,7 @@ use wait_timeout::ChildExt;
 
 mod commands;
 mod transfer;
+mod workspace_commands;
 
 pub use commands::{
     find_acp_process, find_ended_acp_process, ws_command_list, ws_output, CommandFilter,
@@ -23,6 +24,7 @@ pub use transfer::{
     ws_download, ws_download_args, ws_get_file, ws_put_file, ws_ssh_args, ws_ssh_get, ws_ssh_put,
     ws_upload, ws_upload_args, FileRoute, SqWorkspace, WsTransport, MAX_PART_BYTES,
 };
+pub use workspace_commands::{ws_commands, CommandType, WorkspaceCommand, WorkspaceCommandStatus};
 
 const COMMON_PATHS: &[&str] = &[
     "/opt/homebrew/bin",
@@ -608,31 +610,6 @@ pub fn ws_exec_output_with_timeout(
     let mut full_args = vec!["ws", "exec", name, "--"];
     full_args.extend_from_slice(args);
     run_bytes_full(&full_args, timeout)
-}
-
-/// A bootstrap command returned by `sq blox ws commands <name> --json`.
-///
-/// Predates the CLI's camelCase listing and fails to parse it; ACP process
-/// lookups use [`WorkstationCommand`] via [`ws_command_list`] instead.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceCommand {
-    pub command_id: String,
-    pub command_type: u32,
-    pub status: u32, // 1=pending, 2=running, 3=completed
-    pub is_bootstrap: bool,
-    #[serde(default)]
-    pub dependencies: Vec<String>,
-    /// Catch-all for any other fields the CLI returns.
-    #[serde(flatten)]
-    pub extra: serde_json::Value,
-}
-
-/// List bootstrap commands for a Blox workspace.
-///
-/// Runs: `sq blox ws commands <name> --json`
-pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
-    let stdout = run(&["ws", "commands", name, "--json"], QUICK_TIMEOUT)?;
-    serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.

@@ -137,19 +137,24 @@ describe('ProjectTransferDialog', () => {
     unmount(dialog);
   });
 
-  it('lists each repo with its counts and hides the checkbox when nothing is uncommitted', async () => {
+  it('lists each repo with its upstream and counts and hides the checkbox when nothing is uncommitted', async () => {
     const dialog = mountDialog(
       ready(
         preflight({
-          repos: [repo(), repo({ branchId: 'b2', githubRepo: 'org/beta', unpushedCommits: 0 })],
+          repos: [
+            repo(),
+            repo({ branchId: 'b2', githubRepo: 'org/beta', upstream: null, unpushedCommits: 0 }),
+          ],
         })
       )
     );
     await settle();
     const rows = document.querySelectorAll('.repo-row');
     expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector('.upstream')?.textContent?.trim()).toBe('tracks origin/feature');
     expect(rows[0].textContent).toContain('2 unpushed commits');
     expect(rows[0].textContent).toContain('0 uncommitted changes');
+    expect(rows[1].querySelector('.upstream')?.textContent?.trim()).toBe('no upstream');
     expect(rows[1].textContent).toContain('0 unpushed commits');
     expect(checkbox()).toBeNull();
     expect(submitButton().disabled).toBe(false);
@@ -244,9 +249,10 @@ describe('ProjectTransferDialog', () => {
       )
     );
     await settle();
-    expect(document.querySelector('.repo-row')?.textContent).toContain(
-      'Checked once the workspace resumes'
-    );
+    const row = document.querySelector('.repo-row');
+    expect(row?.textContent).toContain('Checked once the workspace resumes');
+    // Not read yet, so neither "tracks …" nor "no upstream".
+    expect(row?.querySelector('.upstream')).toBeNull();
     expect(document.body.textContent).toContain('Transfer uncommitted changes, if there are any');
     expect(checkbox()!.getAttribute('aria-checked')).toBe('false');
 

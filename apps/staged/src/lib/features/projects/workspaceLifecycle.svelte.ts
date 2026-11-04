@@ -21,6 +21,9 @@ interface WorkspaceLifecycleHooks {
   getBranchesByProject: () => BranchMap;
   setBranchesByProject: (next: BranchMap) => void;
   isProjectDeleting: (projectId: string) => boolean;
+  /** A transferring project's branches are the transfer's to provision: the
+   *  backend refuses worktree and workspace setup until it is over. */
+  isProjectTransferring: (projectId: string) => boolean;
 }
 
 class WorkspaceLifecycleController {
@@ -86,6 +89,7 @@ class WorkspaceLifecycleController {
   }
 
   enqueueInitialSetup(projectId: string, branches: Branch[]): void {
+    if (this.hooks?.isProjectTransferring(projectId)) return;
     let hasActiveRemote = false;
     for (const branch of branches) {
       this.enqueueBranchSetup(projectId, branch);
@@ -203,6 +207,22 @@ class WorkspaceLifecycleController {
     }
   }
 
+  /**
+   * A transfer of `projectId` ended. Branches it left unprovisioned (a remote
+   * workspace still to start, a local branch without a worktree) were skipped
+   * while it ran, and errors from the old location no longer apply: clear
+   * them and set the branches up from what the store holds now.
+   */
+  transferFinished(projectId: string): void {
+    const hooks = this.hooks;
+    if (!hooks || hooks.isProjectTransferring(projectId)) return;
+    const branches = hooks.getBranchesByProject().get(projectId) ?? [];
+    for (const branch of branches) {
+      this.clearBranchState(branch.id);
+    }
+    this.enqueueInitialSetup(projectId, branches);
+  }
+
   clearBranchState(branchId: string): void {
     this.pendingSetupBranches.delete(branchId);
     this.queuedSetupBranches.delete(branchId);
@@ -256,6 +276,8 @@ class WorkspaceLifecycleController {
     const targets: Array<{ projectId: string; branchId: string; status: WorkspaceStatus }> = [];
 
     for (const [projectId, branches] of hooks.getBranchesByProject().entries()) {
+      // A transfer creates and deletes its workspaces itself.
+      if (hooks.isProjectTransferring(projectId)) continue;
       for (const branch of branches) {
         if (
           branch.branchType === 'remote' &&
@@ -362,7 +384,7 @@ class WorkspaceLifecycleController {
     if (!hooks) return;
 
     for (const [projectId, branches] of hooks.getBranchesByProject().entries()) {
-      if (hooks.isProjectDeleting(projectId)) continue;
+      if (hooks.isProjectDeleting(projectId) || hooks.isProjectTransferring(projectId)) continue;
       for (const branch of branches) {
         this.enqueueBranchSetup(projectId, branch);
       }

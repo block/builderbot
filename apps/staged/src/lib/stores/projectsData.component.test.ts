@@ -902,6 +902,7 @@ describe('event listeners', () => {
     expect(eventListeners.get('project-changed')).toHaveLength(1);
     expect(eventListeners.get('branch-changed')).toHaveLength(1);
     expect(eventListeners.get('repos-changed')).toHaveLength(1);
+    expect(eventListeners.get('project-transfer-progress')).toHaveLength(1);
   });
 
   it('coalesces a pr-status-changed burst into one flush, last event winning', async () => {
@@ -1568,5 +1569,97 @@ describe('repoCountsByProject', () => {
 
     expect(listProjectRepos).not.toHaveBeenCalled();
     expect(store.repoCountsByProject.get('p1')).toBe(1);
+  });
+});
+
+describe('project-transfer lifecycle', () => {
+  const progress = (phase: string, overrides: Record<string, unknown> = {}) => ({
+    projectId: 'p1',
+    transferId: 't1',
+    direction: 'toRemote',
+    phase,
+    branchId: null,
+    projectRepoId: null,
+    detail: null,
+    bytes: null,
+    ...overrides,
+  });
+
+  it('marks a confirmed transfer at once and follows its progress events', async () => {
+    const store = await importStore();
+    store.startListeners();
+
+    store.projectTransferStarted('p1', 'toRemote');
+    expect(store.isProjectTransferring('p1')).toBe(true);
+    expect(store.transferringProjects.get('p1')).toBe('toRemote');
+    expect(store.getProjectTransfer('p1')).toEqual({
+      transferId: null,
+      direction: 'toRemote',
+      phase: 'checking',
+      branchId: null,
+      projectRepoId: null,
+      detail: null,
+      bytes: null,
+    });
+
+    // Progress replaces the detail but not the membership map: every row's
+    // status reads membership, and a workspace start emits a line per line.
+    const membership = store.transferringProjects;
+    emit('project-transfer-progress', progress('moving', { branchId: 'b1', bytes: 42 }));
+    expect(store.transferringProjects).toBe(membership);
+    expect(store.getProjectTransfer('p1')).toMatchObject({
+      transferId: 't1',
+      phase: 'moving',
+      branchId: 'b1',
+      bytes: 42,
+    });
+
+    emit('project-transfer-progress', progress('completed'));
+    expect(store.isProjectTransferring('p1')).toBe(false);
+    expect(store.getProjectTransfer('p1')).toBeNull();
+  });
+
+  it('shows a transfer started in another window, through to its failure', async () => {
+    const store = await importStore();
+    store.startListeners();
+    emit('project-transfer-progress', progress('preparing_destination', { detail: 'Cloning' }));
+    expect(store.transferringProjects.get('p1')).toBe('toRemote');
+    expect(store.getProjectTransfer('p1')?.detail).toBe('Cloning');
+    emit('project-transfer-progress', progress('rolling_back'));
+    emit('project-transfer-progress', progress('failed', { detail: 'boom' }));
+    expect(store.isProjectTransferring('p1')).toBe(false);
+  });
+
+  it('drops events of a transfer whose result already landed', async () => {
+    const store = await importStore();
+    store.startListeners();
+    store.projectTransferStarted('p1', 'toLocal');
+    emit('project-transfer-progress', progress('applying', { direction: 'toLocal' }));
+    store.projectTransferFinished('p1', 't1');
+    expect(store.isProjectTransferring('p1')).toBe(false);
+
+    // Web mode: the socket can deliver the tail of the events after the
+    // HTTP response resolved.
+    emit('project-transfer-progress', progress('tearing_down', { direction: 'toLocal' }));
+    emit('project-transfer-progress', progress('completed', { direction: 'toLocal' }));
+    expect(store.isProjectTransferring('p1')).toBe(false);
+
+    // A later transfer of the same project is a new id and shows again.
+    emit('project-transfer-progress', progress('checking', { transferId: 't2' }));
+    expect(store.isProjectTransferring('p1')).toBe(true);
+  });
+
+  it("keeps another window's transfer when this window's start is refused", async () => {
+    const store = await importStore();
+    store.startListeners();
+    emit('project-transfer-progress', progress('snapshotting'));
+    store.projectTransferStarted('p1', 'toRemote');
+    expect(store.getProjectTransfer('p1')?.phase).toBe('snapshotting');
+    // The refused start's failure clears the marker; the running transfer's
+    // next event restores it.
+    store.projectTransferFinished('p1');
+    expect(store.isProjectTransferring('p1')).toBe(false);
+    emit('project-transfer-progress', progress('moving'));
+    expect(store.isProjectTransferring('p1')).toBe(true);
   });
 });

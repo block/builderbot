@@ -7,6 +7,7 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     string,
     Array<{ id: string; worktreePath?: string; branchType?: string; workspaceStatus?: string }>
   >;
+  let transferringProjects: Set<string>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -31,6 +32,7 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     vi.doMock('../agents/agent.svelte', () => ({ agentState: { providers: [] } }));
 
     branchesByProject = new Map([['project-1', [{ id: 'branch-1' }]]]);
+    transferringProjects = new Set();
   });
 
   afterEach(() => {
@@ -49,9 +51,66 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
         branchesByProject = next as never;
       },
       isProjectDeleting: () => false,
+      isProjectTransferring: (projectId) => transferringProjects.has(projectId),
     });
     return workspaceLifecycle;
   }
+
+  /** Flush the setup queue's microtasks. */
+  async function settle() {
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+  }
+
+  // The backend refuses setup_worktree / start_workspace for a transferring
+  // project, so the frontend must not ask: a transfer's branches land
+  // unprovisioned (local without a worktree, remote still starting) and are
+  // the transfer's until it ends.
+  it('skips a transferring project until transferFinished, then sets its branches up', async () => {
+    commandsMock.setupWorktree.mockResolvedValue({ id: 'branch-1', worktreePath: '/tmp/wt' });
+    branchesByProject = new Map([
+      ['project-1', [{ id: 'branch-1', branchType: 'local' }]],
+      ['project-2', [{ id: 'branch-2', branchType: 'remote', workspaceStatus: 'starting' }]],
+    ]);
+    transferringProjects = new Set(['project-1', 'project-2']);
+    const lifecycle = await newController();
+
+    lifecycle.enqueueInitialSetup('project-1', branchesByProject.get('project-1') as never);
+    lifecycle.enqueueInitialSetup('project-2', branchesByProject.get('project-2') as never);
+    await settle();
+    expect(commandsMock.setupWorktree).not.toHaveBeenCalled();
+    expect(commandsMock.startWorkspace).toBeUndefined();
+    // Nor are its workspaces polled: the transfer creates and deletes them.
+    expect(commandsMock.pollAllWorkspaceStatuses).not.toHaveBeenCalled();
+
+    // Still transferring: transferFinished is a no-op (a stale call).
+    lifecycle.transferFinished('project-1');
+    await settle();
+    expect(commandsMock.setupWorktree).not.toHaveBeenCalled();
+
+    transferringProjects.clear();
+    lifecycle.transferFinished('project-1');
+    await settle();
+    expect(commandsMock.setupWorktree).toHaveBeenCalledWith('branch-1');
+    expect(branchesByProject.get('project-1')).toEqual([
+      { id: 'branch-1', worktreePath: '/tmp/wt' },
+    ]);
+    lifecycle.stop();
+  });
+
+  it('transferFinished clears errors the old location left on the branches', async () => {
+    commandsMock.setupWorktreeAndRunPrerun.mockRejectedValue(new Error('no clone'));
+    branchesByProject = new Map([['project-1', [{ id: 'branch-1', branchType: 'local' }]]]);
+    const lifecycle = await newController();
+    await lifecycle.retryWorktree('branch-1', 'project-1').catch(() => {});
+    expect(lifecycle.getWorktreeErrors().get('branch-1')).toBe('no clone');
+
+    commandsMock.setupWorktree.mockResolvedValue({ id: 'branch-1', worktreePath: '/tmp/wt' });
+    lifecycle.transferFinished('project-1');
+    await settle();
+    expect(lifecycle.getWorktreeErrors().has('branch-1')).toBe(false);
+    expect(commandsMock.setupWorktree).toHaveBeenCalledWith('branch-1');
+    lifecycle.stop();
+  });
 
   // While the command is in flight the branch really is held, so the release
   // asserted below is a release and not a guard that never engaged.

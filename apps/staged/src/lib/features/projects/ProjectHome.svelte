@@ -9,6 +9,8 @@
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import CirclePause from '@lucide/svelte/icons/circle-pause';
   import Cloud from '@lucide/svelte/icons/cloud';
+  import CloudUpload from '@lucide/svelte/icons/cloud-upload';
+  import Laptop from '@lucide/svelte/icons/laptop';
   import Pause from '@lucide/svelte/icons/pause';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
@@ -41,6 +43,8 @@
   import { toast } from 'svelte-sonner';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectActions } from './projectActions.svelte';
+  import ProjectTransferBanner from './ProjectTransferBanner.svelte';
+  import { transferActionLabel, transferDirectionFrom } from './projectTransfer';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
@@ -149,6 +153,7 @@
       getBranchesByProject: () => projectsDataStore.branchesByProject,
       setBranchesByProject: (next) => projectsDataStore.setBranchesByProject(next),
       isProjectDeleting: (projectId) => projectsDataStore.isProjectDeleting(projectId),
+      isProjectTransferring: (projectId) => projectsDataStore.isProjectTransferring(projectId),
     });
     checkStoreAndLoad();
 
@@ -334,6 +339,15 @@
   let selectedProjectDeleting = $derived(
     selectedProject ? deletingProjectNames.has(selectedProject.id) : false
   );
+  let selectedProjectTransferring = $derived(
+    selectedProject ? projectsDataStore.isProjectTransferring(selectedProject.id) : false
+  );
+  // Transfer offers the other location; a project with no repo has nothing to move.
+  let selectedProjectTransferLabel = $derived(
+    selectedProject && (repoCountsByProject.get(selectedProject.id) ?? 0) > 0
+      ? transferActionLabel(transferDirectionFrom(selectedProject.location))
+      : null
+  );
   let selectedProjectDetecting = $derived(
     selectedProject ? detectingProjectIds.has(selectedProject.id) : false
   );
@@ -347,7 +361,10 @@
     selectedProject && selectedProject.location === 'remote' ? addRepoHint(selectedProject) : null
   );
   let selectedProjectAddRepoDisabled = $derived(
-    !selectedProject || selectedProjectDeleting || !selectedProjectCanAddRepo
+    !selectedProject ||
+      selectedProjectDeleting ||
+      selectedProjectTransferring ||
+      !selectedProjectCanAddRepo
   );
   let selectedProjectExcludeRepos = $derived(
     selectedProject
@@ -510,7 +527,9 @@
       !selectedProject ||
       deleteShortcutPending ||
       selectedProjectDeleting ||
+      selectedProjectTransferring ||
       projectActions.pendingDelete ||
+      projectActions.pendingTransfer ||
       branchToDelete ||
       showNewProjectModal ||
       showAddRepoModal
@@ -616,6 +635,20 @@
     if (!loading) {
       workspaceLifecycle.scheduleKickoff();
     }
+  });
+
+  // A transfer's branches are skipped by the setup above while it runs; once
+  // it ends they are provisioned from what the store holds now (a branch
+  // with nothing to carry lands as a workspace still to start, or a local
+  // branch without a worktree). Diffed here, not in the store: setting
+  // branches up is this view's policy, as for the kickoff above.
+  let lastTransferring = new Set<string>();
+  $effect(() => {
+    const transferring = new Set(projectsDataStore.transferringProjects.keys());
+    for (const projectId of lastTransferring) {
+      if (!transferring.has(projectId)) workspaceLifecycle.transferFinished(projectId);
+    }
+    lastTransferring = transferring;
   });
 
   async function setupBranchWorktree(branchId: string, projectId: string): Promise<void> {
@@ -788,6 +821,28 @@
       </Button>
     </span>
 
+    {#if selectedProjectTransferLabel}
+      <Button
+        variant="ghost"
+        size="sm"
+        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0"
+        title={selectedProjectTransferLabel}
+        onclick={() => projectActions.requestTransferProject(selectedProject)}
+        disabled={selectedProjectTransferring}
+      >
+        <span
+          class="flex size-4 shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
+        >
+          {#if selectedProject.location === 'local'}
+            <CloudUpload size={13} />
+          {:else}
+            <Laptop size={13} />
+          {/if}
+        </span>
+        <span class="top-bar-action-label">{selectedProjectTransferLabel}</span>
+      </Button>
+    {/if}
+
     <Button
       variant="ghost"
       size="sm"
@@ -798,6 +853,7 @@
       title="Remove project"
       aria-label="Remove project"
       onclick={() => projectActions.requestRemoveProject(selectedProject)}
+      disabled={selectedProjectTransferring}
     >
       <span
         class={[
@@ -879,6 +935,9 @@
     {:else}
       <div class="projects-list">
         {#each visibleProjects as project (project.id)}
+          {#if projectsDataStore.isProjectTransferring(project.id)}
+            <ProjectTransferBanner projectId={project.id} />
+          {/if}
           <ProjectSection
             {project}
             branches={branchesByProject.get(project.id) || []}

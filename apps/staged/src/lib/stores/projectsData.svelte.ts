@@ -44,6 +44,9 @@ import type {
   Project,
   ProjectChangedEvent,
   ProjectRepo,
+  ProjectTransferDirection,
+  ProjectTransferPhase,
+  ProjectTransferProgress,
   RepoHomeItem,
   ReposChangedEvent,
   SessionStatusPayload,
@@ -70,6 +73,20 @@ export function mergeBranchesPreservingWorktree(existing: Branch[], incoming: Br
     }
     return newBranch;
   });
+}
+
+/**
+ * Where a project transfer is: its latest `project-transfer-progress`, or the
+ * confirm that started it (no transfer id yet) until the first event lands.
+ */
+export interface ProjectTransferState {
+  transferId: string | null;
+  direction: ProjectTransferDirection;
+  phase: ProjectTransferPhase;
+  branchId: string | null;
+  projectRepoId: string | null;
+  detail: string | null;
+  bytes: number | null;
 }
 
 /** Run a callback during idle time, falling back to a macrotask where
@@ -107,6 +124,16 @@ class ProjectsDataStore {
   private _error = $state<string | null>(null);
   private _loaded = $state(false);
   private _deletingProjectNames = $state<Map<string, string>>(new Map());
+  /**
+   * Projects being transferred, mapped to the direction. Replaced only when a
+   * transfer starts or ends, so every row's status doesn't recompute on each
+   * progress event; the progress itself lives in _transferProgress.
+   */
+  private _transferringProjects = $state<Map<string, ProjectTransferDirection>>(new Map());
+  private _transferProgress = $state<Map<string, ProjectTransferState>>(new Map());
+  /** Transfers known to be over, so a progress event that arrives after the
+   *  result (web mode: the socket and the HTTP response race) is dropped. */
+  private finishedTransferIds = new Set<string>();
 
   /**
    * Projects whose branches + repos have been fetched at least once, mapped to
@@ -252,6 +279,18 @@ class ProjectsDataStore {
 
   isProjectDeleting(projectId: string): boolean {
     return this._deletingProjectNames.has(projectId);
+  }
+
+  get transferringProjects(): ReadonlyMap<string, ProjectTransferDirection> {
+    return this._transferringProjects;
+  }
+
+  isProjectTransferring(projectId: string): boolean {
+    return this._transferringProjects.has(projectId);
+  }
+
+  getProjectTransfer(projectId: string): ProjectTransferState | null {
+    return this._transferProgress.get(projectId) ?? null;
   }
 
   get homeRepos(): RepoHomeItem[] {
@@ -798,6 +837,68 @@ class ProjectsDataStore {
     this.refetchBranchesIfHydrated(projectId);
   }
 
+  // ── Project-transfer lifecycle ──
+  //
+  // project-transfer-progress reaches every window, so a transfer started
+  // elsewhere shows here too; the window that started it marks it at once
+  // and clears it when transfer_project settles. The data side is
+  // event-driven like a delete: the switch publishes project-changed and
+  // branch-changed, which refetch the project's location and branches.
+
+  /** Mark a transfer this window just confirmed, ahead of its first event. */
+  projectTransferStarted(projectId: string, direction: ProjectTransferDirection): void {
+    if (this._transferringProjects.has(projectId)) return;
+    this.setTransferState(projectId, {
+      transferId: null,
+      direction,
+      phase: 'checking',
+      branchId: null,
+      projectRepoId: null,
+      detail: null,
+      bytes: null,
+    });
+  }
+
+  /** Clear a transfer once transfer_project settles. `transferId` is the
+   *  result's, on success; a failure's id is only known from its events. */
+  projectTransferFinished(projectId: string, transferId?: string): void {
+    if (transferId) this.finishedTransferIds.add(transferId);
+    if (!this._transferringProjects.has(projectId)) return;
+    const transferring = new Map(this._transferringProjects);
+    transferring.delete(projectId);
+    this._transferringProjects = transferring;
+    const progress = new Map(this._transferProgress);
+    progress.delete(projectId);
+    this._transferProgress = progress;
+  }
+
+  private applyTransferProgress(event: ProjectTransferProgress): void {
+    if (this.finishedTransferIds.has(event.transferId)) return;
+    if (event.phase === 'completed' || event.phase === 'failed') {
+      this.projectTransferFinished(event.projectId, event.transferId);
+      return;
+    }
+    this.setTransferState(event.projectId, {
+      transferId: event.transferId,
+      direction: event.direction,
+      phase: event.phase,
+      branchId: event.branchId,
+      projectRepoId: event.projectRepoId,
+      detail: event.detail,
+      bytes: event.bytes,
+    });
+  }
+
+  private setTransferState(projectId: string, state: ProjectTransferState): void {
+    if (this._transferringProjects.get(projectId) !== state.direction) {
+      this._transferringProjects = new Map(this._transferringProjects).set(
+        projectId,
+        state.direction
+      );
+    }
+    this._transferProgress = new Map(this._transferProgress).set(projectId, state);
+  }
+
   // ── Event listeners ──
 
   /** Start the global backend/window listeners. Idempotent; call once at app
@@ -852,6 +953,14 @@ class ProjectsDataStore {
       listenToEvent<BranchChangedEvent>('branch-changed', (payload) => {
         this.pendingBranchChanges.push(payload);
         this.branchChangedFlushCancel ??= scheduleFrame(() => this.flushBranchChanges());
+      })
+    );
+
+    // Project transfers, from this window or any other: the status spinner
+    // and ProjectHome's progress banner.
+    this.unlisteners.push(
+      listenToEvent<ProjectTransferProgress>('project-transfer-progress', (payload) => {
+        this.applyTransferProgress(payload);
       })
     );
 

@@ -19,6 +19,8 @@ import { readSnapshot, writeSnapshot, clearSnapshot, SNAPSHOT_KEYS } from './sha
 import type {
   Project,
   ProjectRepo,
+  ProjectTransferPreflight,
+  ProjectTransferResult,
   RecentRepo,
   GitHubRepo,
   Branch,
@@ -308,6 +310,47 @@ export function validateSubpath(githubRepo: string, subpath: string): Promise<vo
 /** List directories at a given path in a GitHub repository. */
 export function listRepoDirectories(githubRepo: string, path: string): Promise<string[]> {
   return invokeCommand('list_repo_directories', { githubRepo, path });
+}
+
+// =============================================================================
+// Project transfer
+// =============================================================================
+
+/**
+ * What moving a project to its other location (local ↔ Blox) would carry, and
+ * what stops it. Read-only.
+ */
+export function getProjectTransferPreflight(projectId: string): Promise<ProjectTransferPreflight> {
+  return invokeCommand('get_project_transfer_preflight', { projectId });
+}
+
+/**
+ * Move a project to its other location, emitting `project-transfer-progress`
+ * as it goes. Resolves once the project has switched; rejects with everything
+ * undone.
+ */
+export async function transferProject(
+  projectId: string,
+  includeUncommitted: boolean
+): Promise<ProjectTransferResult> {
+  const result = await invokeCommand<ProjectTransferResult>('transfer_project', {
+    projectId,
+    includeUncommitted,
+  });
+  await Promise.all([
+    invalidateCacheByCommand('list_projects'),
+    invalidateCacheByCommand('list_branches_for_project'),
+    invalidateCacheByCommand('list_project_repos'),
+  ]);
+  return result;
+}
+
+/**
+ * Ask a running transfer to stop before it switches the project over.
+ * Resolves whether one was running.
+ */
+export function cancelProjectTransfer(projectId: string): Promise<boolean> {
+  return invokeCommand('cancel_project_transfer', { projectId });
 }
 
 // =============================================================================

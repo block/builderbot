@@ -32,6 +32,8 @@
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
+  import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
+  import { transferDestinationLabel } from './projectTransfer';
   import { projectActions } from './projectActions.svelte';
   import { neighbourAfterRemove } from './focusAfterRemove';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -67,6 +69,11 @@
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+
+  function transferringTitle(project: Project): string {
+    const direction = projectsDataStore.transferringProjects.get(project.id);
+    return direction ? `Transferring to ${transferDestinationLabel(direction)}…` : 'Transferring…';
+  }
 
   // Data comes from the shared projectsData store — returning to the landing
   // page paints instantly from memory while the store revalidates in the
@@ -557,11 +564,19 @@
               project.id,
               deletingProjectNames,
               projectBranches.get(project.id) || [],
-              workspaceLifecycle.getWorktreeErrors()
+              workspaceLifecycle.getWorktreeErrors(),
+              projectsDataStore.transferringProjects
             )}
-            {@const busy = status.kind === 'running' || status.kind === 'backgroundHold'}
+            {@const busy =
+              status.kind === 'running' ||
+              status.kind === 'backgroundHold' ||
+              status.kind === 'transferring'}
             {@const busyTitle =
-              status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
+              status.kind === 'backgroundHold'
+                ? 'Waiting on background work'
+                : status.kind === 'transferring'
+                  ? transferringTitle(project)
+                  : undefined}
             {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
@@ -728,7 +743,12 @@
                   </ContextMenu.Item>
                   <ProjectStatusSubmenu {project} />
                   <ContextMenu.Separator />
-                  <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
+                  <ProjectTransferMenuItem {project} />
+                  <ContextMenu.Item
+                    variant="destructive"
+                    disabled={status.kind === 'transferring'}
+                    onSelect={() => removeProject(project)}
+                  >
                     <Trash2 size={14} /> Remove Project
                   </ContextMenu.Item>
                 </ContextMenu.Content>

@@ -97,6 +97,11 @@ const COMPOSER_SEND_MODE_STORE_KEY = 'composer-send-mode';
  * new-project form or the note transfer picker alike. Global (frontend-only).
  */
 const NEW_PROJECT_LOCATION_STORE_KEY = 'new-project-location';
+/**
+ * Whether a project transfer carries uncommitted changes to the destination:
+ * the last answer to the transfer dialog's checkbox (frontend-only).
+ */
+const TRANSFER_UNCOMMITTED_CHANGES_STORE_KEY = 'transfer-uncommitted-changes';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -215,6 +220,11 @@ export const preferences = $state({
    * to local while remote can't be used. Defaults to local.
    */
   newProjectLocation: 'local' as ProjectLocation,
+  /**
+   * The transfer dialog's last "Transfer uncommitted changes" answer, saved
+   * only when the checkbox was shown. Defaults to carrying them.
+   */
+  transferUncommittedChanges: true,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -305,11 +315,19 @@ const newProjectLocationSync = syncedStoreValue(NEW_PROJECT_LOCATION_STORE_KEY, 
   preferences.newProjectLocation = value === 'remote' ? 'remote' : 'local';
 });
 
+const transferUncommittedChangesSync = syncedPreference(
+  TRANSFER_UNCOMMITTED_CHANGES_STORE_KEY,
+  (value) => {
+    preferences.transferUncommittedChanges = typeof value === 'boolean' ? value : true;
+  }
+);
+
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     projectStatusOptionsSync.dispose();
     composerSendModeSync.dispose();
     newProjectLocationSync.dispose();
+    transferUncommittedChangesSync.dispose();
   });
 }
 
@@ -422,6 +440,9 @@ export async function initPreferences(): Promise<void> {
 
   // Load and follow the composer's last-used submit mode (malformed values fall back to queue)
   await composerSendModeSync.start();
+
+  // Load and follow the transfer dialog's last uncommitted-changes answer
+  await transferUncommittedChangesSync.start();
 }
 
 // =============================================================================
@@ -498,6 +519,16 @@ export function setComposerSendMode(mode: ComposerSendMode): void {
 export function setNewProjectLocation(location: ProjectLocation): void {
   preferences.newProjectLocation = location;
   newProjectLocationSync.save(location);
+}
+
+// =============================================================================
+// Project Transfer Actions
+// =============================================================================
+
+/** Remember whether project transfers carry uncommitted changes. */
+export function setTransferUncommittedChanges(include: boolean): void {
+  preferences.transferUncommittedChanges = include;
+  transferUncommittedChangesSync.save(include);
 }
 
 // =============================================================================

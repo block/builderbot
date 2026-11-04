@@ -420,6 +420,131 @@ export interface Issue {
 }
 
 // =============================================================================
+// Project transfer (src-tauri/src/project_transfer/)
+// =============================================================================
+
+/** Rust `TransferDirection`: `toRemote` moves a local project to Blox. */
+export type ProjectTransferDirection = 'toRemote' | 'toLocal';
+
+/** Rust `TransferIssue`: a stable `code` for the UI, and a sentence for the user. */
+export interface ProjectTransferIssue {
+  code: string;
+  message: string;
+}
+
+/**
+ * Rust `RepoTransferState`. `nothingToCarry`: no checkout (no worktree, a
+ * stopped workspace), so the branch starts from origin at the destination.
+ * `unknown`: not known until the transfer resumes a suspended workspace.
+ */
+export type ProjectTransferRepoState = 'carry' | 'nothingToCarry' | 'unknown';
+
+/** Rust `RepoPreflight`: one branch, on one of the project's repos. */
+export interface ProjectTransferRepoPreflight {
+  branchId: string;
+  projectRepoId: string | null;
+  githubRepo: string;
+  subpath: string | null;
+  branchName: string;
+  /** The name it lands under: differs when the local clone already uses `branchName`. */
+  destBranchName: string;
+  state: ProjectTransferRepoState;
+  head: string | null;
+  /** The upstream as git abbreviates it, e.g. `origin/feature`. */
+  upstream: string | null;
+  /** Commits on no remote-tracking ref. */
+  unpushedCommits: number;
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  conflicted: number;
+  untrackedBytes: number;
+  hasUncommittedChanges: boolean;
+  blockers: ProjectTransferIssue[];
+  warnings: ProjectTransferIssue[];
+}
+
+/** Rust `ProjectTransferPreflight`, from `get_project_transfer_preflight`. */
+export interface ProjectTransferPreflight {
+  projectId: string;
+  from: ProjectLocation;
+  to: ProjectLocation;
+  direction: ProjectTransferDirection;
+  /** The source workspace of a transfer to local; null to remote. */
+  workspaceName: string | null;
+  repos: ProjectTransferRepoPreflight[];
+  blockers: ProjectTransferIssue[];
+  warnings: ProjectTransferIssue[];
+  /** No blockers, project-level or on any repo. */
+  canTransfer: boolean;
+  /** Some repo has staged, unstaged or untracked changes. */
+  hasUncommittedChanges: boolean;
+}
+
+/** Rust `TransferPhase`, in the order a transfer reaches them. */
+export type ProjectTransferPhase =
+  | 'checking'
+  | 'preparing_destination'
+  | 'snapshotting'
+  | 'moving'
+  | 'applying'
+  /** Switching the database over: the last point a cancel is honoured. */
+  | 'committing'
+  | 'tearing_down'
+  | 'completed'
+  | 'rolling_back'
+  | 'failed';
+
+/** Rust `TransferProgress`, the `project-transfer-progress` event payload. */
+export interface ProjectTransferProgress {
+  projectId: string;
+  transferId: string;
+  direction: ProjectTransferDirection;
+  phase: ProjectTransferPhase;
+  /** The branch the phase is about, when it is about one. */
+  branchId: string | null;
+  projectRepoId: string | null;
+  detail: string | null;
+  /** The bundle's size, while `moving`. */
+  bytes: number | null;
+}
+
+/** Rust `RepoTransferResult`: one branch, after the transfer. */
+export interface ProjectTransferRepoResult {
+  branchId: string;
+  projectRepoId: string | null;
+  githubRepo: string;
+  /** Its name at the destination. */
+  branchName: string;
+  previousBranchName: string;
+  /** Whether there was a checkout to carry. */
+  carried: boolean;
+  head: string | null;
+  uncommittedRestored: boolean;
+  /** Uncommitted changes stayed behind, in the backup only. */
+  uncommittedLeftBehind: boolean;
+  retriedWithoutExclusions: boolean;
+  /** The ref holding the source's snapshot in the local clone (transfer to remote). */
+  backupRef: string | null;
+  warnings: ProjectTransferIssue[];
+}
+
+/** Rust `ProjectTransferResult`, from `transfer_project`. */
+export interface ProjectTransferResult {
+  projectId: string;
+  transferId: string;
+  direction: ProjectTransferDirection;
+  location: ProjectLocation;
+  /** Created by a transfer to remote, deleted by one to local. */
+  workspaceName: string | null;
+  repos: ProjectTransferRepoResult[];
+  /** What tearing the source down could not do (`worktree_left`, `workspace_left`). */
+  warnings: ProjectTransferIssue[];
+  /** `~/.staged/transfers/<transfer id>`, when anything was carried. */
+  backupDir: string | null;
+}
+
+// =============================================================================
 // Project notes & sessions
 // =============================================================================
 

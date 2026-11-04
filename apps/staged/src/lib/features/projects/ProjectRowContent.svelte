@@ -46,7 +46,8 @@
       project.id,
       projectsDataStore.deletingProjectNames,
       branches,
-      workspaceLifecycle.getWorktreeErrors()
+      workspaceLifecycle.getWorktreeErrors(),
+      projectsDataStore.transferringProjects
     )
   );
   let badges = $derived(

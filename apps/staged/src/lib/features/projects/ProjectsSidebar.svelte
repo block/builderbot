@@ -38,6 +38,8 @@
   import PinnedRepoCards from './PinnedRepoCards.svelte';
   import ProjectRowContent from './ProjectRowContent.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
+  import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
+  import { transferDestinationLabel } from './projectTransfer';
   import SidebarFilterMenu from './SidebarFilterMenu.svelte';
   import SidebarSearchField from './SidebarSearchField.svelte';
   import SidebarSectionHead from './SidebarSectionHead.svelte';
@@ -58,6 +60,11 @@
   import { neighbourAfterRemove } from './focusAfterRemove';
   import { createScrollIfActive } from './activeRowScroll';
   import * as ContextMenu from '$lib/components/ui/context-menu';
+
+  function transferringTitle(project: Project): string {
+    const direction = projectsDataStore.transferringProjects.get(project.id);
+    return direction ? `Transferring to ${transferDestinationLabel(direction)}…` : 'Transferring…';
+  }
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -545,11 +552,19 @@
                   project.id,
                   deletingProjectNames,
                   projectBranches.get(project.id) || [],
-                  workspaceLifecycle.getWorktreeErrors()
+                  workspaceLifecycle.getWorktreeErrors(),
+                  projectsDataStore.transferringProjects
                 )}
-                {@const busy = status.kind === 'running' || status.kind === 'backgroundHold'}
+                {@const busy =
+                  status.kind === 'running' ||
+                  status.kind === 'backgroundHold' ||
+                  status.kind === 'transferring'}
                 {@const busyTitle =
-                  status.kind === 'backgroundHold' ? 'Waiting on background work' : undefined}
+                  status.kind === 'backgroundHold'
+                    ? 'Waiting on background work'
+                    : status.kind === 'transferring'
+                      ? transferringTitle(project)
+                      : undefined}
                 <ContextMenu.Root>
                   <!-- Hidden here, on the display: contents wrapper, not on the
                        row inside it: WebKit re-shows children of a contents
@@ -631,7 +646,12 @@
                     </ContextMenu.Item>
                     <ProjectStatusSubmenu {project} />
                     <ContextMenu.Separator />
-                    <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
+                    <ProjectTransferMenuItem {project} />
+                    <ContextMenu.Item
+                      variant="destructive"
+                      disabled={status.kind === 'transferring'}
+                      onSelect={() => removeProject(project)}
+                    >
                       <Trash2 size={14} /> Remove Project
                     </ContextMenu.Item>
                   </ContextMenu.Content>

@@ -19,6 +19,7 @@
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
   import ProjectsSidebar from './lib/features/projects/ProjectsSidebar.svelte';
   import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
+  import ProjectTransferDialog from './lib/features/projects/ProjectTransferDialog.svelte';
   import ResumeOnLaunchDialog from './lib/features/sessions/ResumeOnLaunchDialog.svelte';
   import { resumeOnLaunch } from './lib/features/sessions/resumeOnLaunch.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
@@ -870,6 +871,8 @@
   <!-- Shared remove-project confirmation — serves every route's delete entry
        point (sidebar, landing grid, ProjectHome top bar/shortcut). -->
   <ProjectDeleteDialog />
+  <!-- Shared transfer confirmation, likewise. -->
+  <ProjectTransferDialog />
 
   <!-- Launch-time "Resume interrupted sessions?" — opened by resumeOnLaunch.load()
        from onMount on the desktop main window; stays closed everywhere else. -->

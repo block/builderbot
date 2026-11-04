@@ -106,3 +106,60 @@ fn revert_on_a_busy_branch_inserts_nothing() {
         .unwrap()
         .is_empty());
 }
+
+/// Reset-to-origin and discard leave no session row, so the marker they
+/// set is what refuses a revert started while one is moving HEAD.
+#[test]
+fn revert_during_a_worktree_operation_inserts_nothing() {
+    let (store, branch) = setup_branch_store();
+    let registry = test_registry();
+    let ctx = pipeline_context(&branch);
+    let steps = build_revert_pipeline_steps("abc1234").unwrap();
+    let revert = || {
+        insert_running_revert_pipeline_session_if_idle(
+            &store, &registry, &ctx, &steps, "abc1234", None,
+        )
+    };
+
+    let operation = crate::session_commands::BranchWorktreeOperationGuard::acquire(&branch.id);
+    assert_eq!(revert().err().unwrap(), REVERT_WORKTREE_BUSY);
+    assert!(store
+        .get_running_sessions_for_branch(&branch.id)
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .list_commits_for_branch(&branch.id)
+        .unwrap()
+        .is_empty());
+
+    drop(operation);
+    assert!(revert().is_ok());
+}
+
+/// A queued row whose artifact was deleted is stepped over by the drain,
+/// so it must not count as work in flight: a revert would be refused on
+/// the branch for good, and a rebase queued behind it alone would never
+/// be drained.
+#[test]
+fn an_unlinked_queued_row_leaves_the_branch_idle() {
+    let (store, branch) = setup_branch_store();
+    let orphan = store::Session::new_queued("deleted note").with_branch(&branch.id);
+    store.create_session(&orphan).unwrap();
+
+    assert!(!branch_has_work_in_flight(&store, &branch.id).unwrap());
+    assert_eq!(
+        queue_commit_pipeline_locked(&store, &branch.id, &PipelineKind::Rebase, None, None)
+            .unwrap(),
+        None
+    );
+    let steps = build_revert_pipeline_steps("abc1234").unwrap();
+    assert!(insert_running_revert_pipeline_session_if_idle(
+        &store,
+        &test_registry(),
+        &pipeline_context(&branch),
+        &steps,
+        "abc1234",
+        None,
+    )
+    .is_ok());
+}

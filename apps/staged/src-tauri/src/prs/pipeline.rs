@@ -186,6 +186,12 @@ pub(crate) enum BranchWorkInFlight {
 
 /// What the branch is busy with, if anything.
 ///
+/// A queued row that no longer resolves to anything (`BranchSessionLink::Unlinked`:
+/// its commit, note or review was deleted out from under it) does not count,
+/// the same as for a session start. The drain steps over it, so a row queued
+/// behind it alone would wait for a kick that never comes, and a revert, which
+/// refuses rather than queues, would stay refused on the branch for good.
+///
 /// Callers must hold the branch launch lock: the answer is only meaningful for
 /// as long as no session can start or be enqueued underneath them.
 pub(crate) fn branch_work_in_flight(
@@ -198,11 +204,7 @@ pub(crate) fn branch_work_in_flight(
     {
         return Ok(BranchWorkInFlight::Running);
     }
-    if !store
-        .get_queued_sessions_for_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .is_empty()
-    {
+    if crate::session_commands::has_queued_branch_session(store, branch_id)? {
         return Ok(BranchWorkInFlight::Queued);
     }
     Ok(BranchWorkInFlight::None)

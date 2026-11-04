@@ -846,12 +846,30 @@
    */
   let rebaseAlreadyInFlight = $derived(rebaseInFlight(timeline?.commits));
   /**
-   * Gate for reset to origin, which still executes immediately: it is validated
-   * against a point-in-time preview of what would be discarded, so a busy branch
-   * has to keep blocking it.
+   * Gate for the git actions that execute immediately instead of queueing, so a
+   * busy branch has to keep blocking them: reset to origin, which is validated
+   * against a point-in-time preview of what would be discarded, and Revert, which
+   * the backend refuses rather than queues (a queued row would have to persist the
+   * target SHA).
+   *
+   * A reset or discard in flight blocks them too: neither has a session row, and
+   * both move HEAD or the tree under anything that starts beside them. The
+   * backend checks the same thing for a revert from another client. Reset to
+   * origin shows its own "Resetting..." ahead of this reason, so it never reads
+   * as blocked by itself.
+   *
+   * `branchSessionBusy` misses branch work with no timeline artifact, such as a
+   * create-PR session; a Revert clicked then gets the backend's refusal as a toast.
    */
   let immediateGitActionDisabledReason = $derived(
-    branchCommandDisabledReason ?? (branchSessionBusy ? 'Session in progress' : null)
+    branchCommandDisabledReason ??
+      (resettingToOrigin
+        ? 'Resetting to origin'
+        : discardingWorktreeChanges
+          ? 'Discarding changes'
+          : branchSessionBusy
+            ? 'Session in progress'
+            : null)
   );
 
   // =========================================================================

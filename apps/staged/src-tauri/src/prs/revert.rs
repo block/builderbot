@@ -61,6 +61,8 @@ pub(super) fn build_revert_pipeline_steps(commit_sha: &str) -> Result<Vec<Pipeli
 
 pub(super) const REVERT_BRANCH_BUSY: &str =
     "Revert is unavailable while this branch has queued or running work";
+pub(super) const REVERT_WORKTREE_BUSY: &str =
+    "Revert is unavailable while this branch is being reset or its changes discarded";
 
 /// Insert the rows for a revert that runs now, or refuse it on a busy branch.
 ///
@@ -70,6 +72,12 @@ pub(super) const REVERT_BRANCH_BUSY: &str =
 /// with the insert in the same critical section, so two rapid clicks (or a
 /// click racing a session start) cannot both observe an idle branch. This
 /// stays synchronous on purpose: the lock must not be held across an await.
+///
+/// A reset-to-origin or discard has no session row for that check to find,
+/// so the marker they set is read here as well, the way the forced start reads
+/// it: a revert started under one would race its `git reset --hard`, and if it
+/// lost on `index.lock` the AI handoff would be asked to finish reverting a
+/// commit the reset may have just removed from the branch.
 ///
 /// HEAD is not read here. The runner reads it before the revert step (see
 /// [`session_runner::PipelineConfig::capture_pre_head`]), by which point this
@@ -84,6 +92,9 @@ pub(super) fn insert_running_revert_pipeline_session_if_idle(
 ) -> Result<RunningPipelineSession, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(&ctx.branch.id);
     let _guard = launch_lock.lock().unwrap();
+    if crate::session_commands::branch_worktree_operation_in_flight(&ctx.branch.id) {
+        return Err(REVERT_WORKTREE_BUSY.to_string());
+    }
     if branch_has_work_in_flight(store, &ctx.branch.id)? {
         return Err(REVERT_BRANCH_BUSY.to_string());
     }

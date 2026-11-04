@@ -2979,6 +2979,15 @@ pub struct PipelineConfig {
     /// completion is judged by whether HEAD moved, so the read has to come
     /// after its row already makes the branch busy, and through the same
     /// runner as the read it is compared against.
+    ///
+    /// Setting it also promises that the pipeline hands off to AI only from a
+    /// failed step, which leaves HEAD where it was, and that a completed run
+    /// moved HEAD — both true of a revert's one `git revert` step, which exits
+    /// non-zero only before it commits. So if that read fails, the HEAD read
+    /// at handoff stands in for the pre-pipeline HEAD (see
+    /// `pre_head_for_pipeline_handoff`), and on completion HEAD is claimed
+    /// without a comparison (see `finalize_head_moving_commit_pipeline_without_ai`),
+    /// rather than the pending row losing its commit either way.
     pub capture_pre_head: bool,
     /// ACP provider ID (e.g. "goose", "claude").
     pub provider: Option<String>,
@@ -3465,19 +3474,29 @@ fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
         return config.pre_head_sha.clone();
     }
 
-    match config.pipeline.kind.as_ref() {
-        Some(PipelineKind::Squash) => match current_pipeline_head(config) {
-            Ok(head) => Some(head),
-            Err(e) => {
-                log::warn!("Failed to capture squash handoff HEAD: {e}");
-                None
-            }
-        },
+    let read_head_at_handoff = match config.pipeline.kind.as_ref() {
+        Some(PipelineKind::Squash) => true,
+        // A pipeline that asked for its HEAD up front (a revert) only gets here
+        // if that read failed. It hands off only from a failed step, which
+        // left HEAD where it started (see `PipelineConfig::capture_pre_head`),
+        // so HEAD now is the HEAD that read would have returned.
+        None => config.capture_pre_head,
         // A rebase always carries its pre-pipeline HEAD explicitly, so the early
         // return above already answered for it. A push never rewrites local
         // history and a pull never hands off, so neither has a pre-pipeline HEAD
         // to compare against.
-        Some(PipelineKind::Rebase | PipelineKind::Push | PipelineKind::Pull) | None => None,
+        Some(PipelineKind::Rebase | PipelineKind::Push | PipelineKind::Pull) => false,
+    };
+    if !read_head_at_handoff {
+        return None;
+    }
+
+    match current_pipeline_head(config) {
+        Ok(head) => Some(head),
+        Err(e) => {
+            log::warn!("Failed to capture pipeline handoff HEAD: {e}");
+            None
+        }
     }
 }
 
@@ -3573,7 +3592,7 @@ fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store,
         }
     };
 
-    if completed && config.pre_head_sha.is_some() {
+    if completed && (config.pre_head_sha.is_some() || config.capture_pre_head) {
         finalize_head_moving_commit_pipeline_without_ai(config, store);
         return;
     }
@@ -3589,10 +3608,15 @@ fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store,
 }
 
 fn finalize_head_moving_commit_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
-    let Some(pre_head_sha) = config.pre_head_sha.as_deref() else {
+    // With no pre-pipeline HEAD there is nothing to tell a no-op from a commit
+    // by, unless the pipeline asked for one up front: that promises a completed
+    // run moved HEAD (see `PipelineConfig::capture_pre_head`), so HEAD is its
+    // commit even when the read it would be compared against failed.
+    let pre_head_sha = config.pre_head_sha.as_deref();
+    if pre_head_sha.is_none() && !config.capture_pre_head {
         let _ = store.delete_pending_commit_for_session(&config.session_id);
         return;
-    };
+    }
 
     let commit = match store.get_commit_by_session(&config.session_id) {
         Ok(Some(commit)) => commit,
@@ -3607,7 +3631,7 @@ fn finalize_head_moving_commit_pipeline_without_ai(config: &PipelineConfig, stor
     };
 
     // One runner for both reads below, so the HEAD this claims and the commits
-    // reassociation lists can't come from different checkouts.
+    // a rebase's reassociation lists can't come from different checkouts.
     let git = pipeline_git_runner(config);
     let current_head = match crate::branches::head_sha(&git) {
         Ok(head) => head,
@@ -3620,7 +3644,7 @@ fn finalize_head_moving_commit_pipeline_without_ai(config: &PipelineConfig, stor
         }
     };
 
-    if current_head == pre_head_sha {
+    if pre_head_sha == Some(current_head.as_str()) {
         if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
             log::warn!(
                 "Failed to remove no-op pending commit for session {}: {e}",
@@ -3630,20 +3654,25 @@ fn finalize_head_moving_commit_pipeline_without_ai(config: &PipelineConfig, stor
         return;
     }
 
-    // The rebase rewrote every SHA on the branch, orphaning the metadata rows
+    // A rebase rewrote every SHA on the branch, orphaning the metadata rows
     // that pointed at the old ones. Reattach them *before* claiming the new
     // HEAD: once the pre-existing head row owns it, `complete_pending_commit_sha`
     // takes its "target SHA already owned" branch and drops this pipeline's
     // pending row — so the top commit keeps its authoring session instead of
     // the mechanical "Rebase branch" one. A head commit authored outside
     // Staged has no prior row, so the rebase session keeps it, as before.
+    // Any other HEAD-moving pipeline (a revert) only adds a commit on top,
+    // which orphans nothing, so it skips the history walk — and on a remote
+    // branch the workspace round trip — the way the AI handoff path does.
     //
     // This path runs when the pipeline drove the rebase to completion itself,
     // and its own HEAD-moved check above already established there's something
     // to claim, so the returned outcome isn't a gate here: a `MidRebase` answer
     // (an unattached HEAD, or a branch that wouldn't resolve) just means the
     // rows stay orphaned while the claim below proceeds as it always has.
-    let _ = reassociate_rebased_commits(store, &commit.branch_id, &git);
+    if config.pipeline.kind == Some(PipelineKind::Rebase) {
+        let _ = reassociate_rebased_commits(store, &commit.branch_id, &git);
+    }
 
     match store.complete_pending_commit_sha(&commit.id, &commit.branch_id, &current_head) {
         Ok(true) => log::info!(
@@ -9904,6 +9933,101 @@ mod tests {
 
         assert_eq!(pre_head_for_pipeline_handoff(&config), Some(pre_head));
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A revert whose up-front HEAD read failed reads HEAD at handoff instead
+    /// (the failed step left it alone), so the AI turn's commit detection
+    /// still has a HEAD to compare against. A kind-less pipeline that never
+    /// asked reads nothing, and neither does a rebase, whose HEAD at handoff
+    /// may be detached on a partially applied commit.
+    #[test]
+    fn pipeline_handoff_reads_head_when_the_up_front_read_failed() {
+        let repo = make_git_repo("handoff-reads-head-after-failed-capture");
+        let head = run_git(&repo, &["rev-parse", "HEAD"]);
+
+        let mut revert = head_moving_pipeline_config("session-1", &repo, &head, None);
+        revert.pre_head_sha = None;
+        revert.capture_pre_head = true;
+        assert_eq!(pre_head_for_pipeline_handoff(&revert), Some(head.clone()));
+
+        let mut not_asked = head_moving_pipeline_config("session-2", &repo, &head, None);
+        not_asked.pre_head_sha = None;
+        assert_eq!(pre_head_for_pipeline_handoff(&not_asked), None);
+
+        let mut rebase = rebase_pipeline_config("session-3", &repo, &head);
+        rebase.pre_head_sha = None;
+        assert_eq!(pre_head_for_pipeline_handoff(&rebase), None);
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A completed revert always committed, so when its up-front HEAD read
+    /// failed the no-AI resolution claims HEAD for the pending row instead of
+    /// deleting it — deleting it would unlink the session, and a "Reverting…"
+    /// stub keyed on that session would never be pruned. A kind-less pipeline
+    /// that never asked for a HEAD still drops its pending row.
+    #[test]
+    fn completed_revert_claims_head_when_the_up_front_read_failed() {
+        let repo = make_git_repo("revert-claims-head-after-failed-capture");
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let pending_session = |prompt: &str| {
+            let mut session = crate::store::Session::new_running(prompt, &repo);
+            session.pipeline = Some(PipelineExecution::from_steps(&[]));
+            store.create_session(&session).unwrap();
+            let commit = crate::store::Commit::new_pending(&branch.id).with_session(&session.id);
+            store.create_commit(&commit).unwrap();
+            (session.id, commit.id)
+        };
+        let (revert_session, revert_commit) = pending_session("Revert commit abc1234");
+        let (other_session, other_commit) = pending_session("Kind-less pipeline");
+
+        std::fs::write(repo.join("file.txt"), "two\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-m", "Revert \"first\""]);
+        let new_head = run_git(&repo, &["rev-parse", "HEAD"]);
+
+        let mut revert = head_moving_pipeline_config(&revert_session, &repo, "unused", None);
+        revert.pre_head_sha = None;
+        revert.capture_pre_head = true;
+        resolve_pipeline_artifacts_without_ai(&revert, &store, true);
+        let claimed = store.get_commit(&revert_commit).unwrap().unwrap();
+        assert_eq!(claimed.sha.as_deref(), Some(new_head.as_str()));
+
+        let mut not_asked = head_moving_pipeline_config(&other_session, &repo, "unused", None);
+        not_asked.pre_head_sha = None;
+        resolve_pipeline_artifacts_without_ai(&not_asked, &store, true);
+        assert!(store.get_commit(&other_commit).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// Only a rebase orphans the branch's other commit rows. A kind-less
+    /// HEAD-moving pipeline (a revert) claims its own commit and leaves every
+    /// other row and review where it was — even rows a rebase's completion
+    /// would have moved, which is what this rebased fixture holds.
+    #[test]
+    fn kind_less_pipeline_completion_skips_rebase_reassociation() {
+        let fixture = rebased_branch();
+
+        finalize_head_moving_commit_pipeline_without_ai(
+            &head_moving_pipeline_config(
+                &fixture.rebase_session_id,
+                fixture.repo.path(),
+                &fixture.old_head,
+                None,
+            ),
+            &fixture.store,
+        );
+
+        let store = &fixture.store;
+        let head = store.get_commit(&fixture.authored[1].1).unwrap().unwrap();
+        assert_eq!(head.sha.as_deref(), Some(fixture.old_head.as_str()));
+        let review = store.get_review(&fixture.review_id).unwrap().unwrap();
+        assert_eq!(review.commit_sha, fixture.old_head);
+        let pending = store.get_commit(&fixture.pending_id).unwrap().unwrap();
+        assert_eq!(pending.sha.as_deref(), Some(fixture.new_head.as_str()));
     }
 
     /// A revert has no kind, so it is the flag that makes the runner read HEAD

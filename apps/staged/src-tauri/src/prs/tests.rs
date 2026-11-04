@@ -17,8 +17,8 @@ use super::deferred::{
 };
 use super::git_pipeline::rebuild_queued_git_pipeline;
 use super::pipeline::{
-    pipeline_prompt, BranchPipelineResponse, FORCE_PUSH_PROMPT, NO_VERIFY_FORCE_PUSH_PROMPT,
-    NO_VERIFY_PUSH_PROMPT, PULL_PROMPT, PUSH_PROMPT,
+    branch_has_work_in_flight, pipeline_prompt, BranchPipelineResponse, FORCE_PUSH_PROMPT,
+    NO_VERIFY_FORCE_PUSH_PROMPT, NO_VERIFY_PUSH_PROMPT, PULL_PROMPT, PUSH_PROMPT,
 };
 use super::pr_status::{collect_branch_refresh_results, BranchRefresh};
 use super::pull::{
@@ -30,7 +30,8 @@ use super::push::{
     queue_push_pipeline_if_branch_busy, queue_push_pipeline_locked, PushVariant,
 };
 use super::revert::{
-    build_revert_pipeline_steps, insert_running_revert_pipeline_session_if_idle, REVERT_BRANCH_BUSY,
+    build_revert_pipeline_steps, insert_running_revert_pipeline_session_if_idle,
+    REVERT_BRANCH_BUSY, REVERT_WORKTREE_BUSY,
 };
 use crate::git;
 use crate::session_commands::BranchSessionLaunchStatus;

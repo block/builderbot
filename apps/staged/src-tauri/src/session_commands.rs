@@ -13297,10 +13297,28 @@ mod tests {
         let branch = store::Branch::new_remote(&project.id, "feature", "main", &workspace);
         store.create_branch(&branch).unwrap();
 
-        let project_root = crate::git::project_worktree_root_for(&project.id).unwrap();
-        let images_dir = project_root.join("images");
+        /// Removes the project's data dir and the context's temp files even
+        /// when an assertion fails.
+        struct Cleanup {
+            project_root: PathBuf,
+            temp_files: Vec<PathBuf>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.project_root);
+                for path in &self.temp_files {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let temp_dir = std::env::temp_dir();
+        let mut cleanup = Cleanup {
+            project_root: crate::git::project_worktree_root_for(&project.id).unwrap(),
+            temp_files: Vec::new(),
+        };
+        let images_dir = cleanup.project_root.join("images");
         std::fs::create_dir_all(&images_dir).unwrap();
-        let add_image = |filename: &str, session_id: Option<&str>| {
+        let mut add_image = |filename: &str, session_id: Option<&str>| {
             let mut image = store::Image::new(
                 Some(&branch.id),
                 &project.id,
@@ -13312,6 +13330,9 @@ mod tests {
             image.session_id = session_id.map(str::to_string);
             store.create_image(&image).unwrap();
             std::fs::write(images_dir.join(format!("{}.png", image.id)), PNG).unwrap();
+            cleanup
+                .temp_files
+                .push(temp_dir.join(format!("staged-image-{}.png", image.id)));
             image.id
         };
         // Media embedded in a note body, and an image dropped on the branch card.
@@ -13323,11 +13344,13 @@ mod tests {
             &format!("Body\n\n![shot](staged-media://{media_id}.png)\n"),
         );
         store.create_note(&note).unwrap();
+        cleanup
+            .temp_files
+            .push(temp_dir.join(format!("staged-note-{}.md", note.id)));
 
         let context = build_project_session_context(&store, &project);
 
         assert_eq!(crate::blox::ws_exec_calls_for(&workspace), 0);
-        let temp_dir = std::env::temp_dir();
         let pointers: Vec<&str> = context
             .lines()
             .filter_map(|line| line.strip_prefix("See: `")?.strip_suffix('`'))
@@ -13354,11 +13377,6 @@ mod tests {
         assert_eq!(media.len(), 1, "{body}");
         assert!(Path::new(&media[0].target).starts_with(&temp_dir), "{body}");
         assert_eq!(std::fs::read(&media[0].target).unwrap(), PNG);
-
-        for path in pointers.iter().copied().chain([media[0].target.as_str()]) {
-            let _ = std::fs::remove_file(path);
-        }
-        let _ = std::fs::remove_dir_all(project_root);
     }
 
     #[test]

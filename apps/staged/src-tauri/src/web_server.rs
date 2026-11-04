@@ -3656,7 +3656,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 let store = Arc::clone(&store);
                 let project = project.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    session_commands::build_project_session_context(&store, &project, None)
+                    session_commands::build_project_session_context(&store, &project)
                 })
                 .await
                 .map_err(|e| e.to_string())?

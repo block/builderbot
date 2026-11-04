@@ -4165,7 +4165,7 @@ pub async fn start_project_session(
         let store = Arc::clone(&store);
         let project = project.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            build_project_session_context(&store, &project, None)
+            build_project_session_context(&store, &project)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -6617,10 +6617,13 @@ pub(crate) fn build_project_context(
 ///
 /// Includes: project name, all attached repos (with reasons and per-repo
 /// branch timelines), and existing project notes.
+///
+/// A project session runs on this machine even when its branches live on Blox
+/// workspaces, so every note, review and image it points at is written to a
+/// local temp file.
 pub(crate) fn build_project_session_context(
     store: &Arc<Store>,
     project: &store::Project,
-    workspace_name: Option<&str>,
 ) -> String {
     let project_name = project.name.trim();
     let project_name = if project_name.is_empty() {
@@ -6679,8 +6682,7 @@ pub(crate) fn build_project_session_context(
             lines.push(format!("### Branch: {}", branch.branch_name));
             lines.push(String::new());
 
-            let timeline =
-                build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
+            let timeline = build_branch_timeline_summary(store, branch);
             if timeline.is_empty() {
                 lines.push("No activity on this branch yet.".to_string());
             } else {
@@ -6702,8 +6704,7 @@ pub(crate) fn build_project_session_context(
             lines.push(format!("### Branch: {}", branch.branch_name));
             lines.push(String::new());
 
-            let timeline =
-                build_branch_timeline_summary(store, branch, branch.workspace_name.as_deref());
+            let timeline = build_branch_timeline_summary(store, branch);
             if timeline.is_empty() {
                 lines.push("No activity on this branch yet.".to_string());
             } else {
@@ -6722,7 +6723,7 @@ pub(crate) fn build_project_session_context(
             // Blank line before each note: separates the first one from the
             // section heading and the rest from each other.
             lines.push(String::new());
-            lines.push(format_project_note_for_context(store, note, workspace_name));
+            lines.push(format_project_note_for_context(store, note, None));
         }
     }
 
@@ -6735,11 +6736,7 @@ pub(crate) fn build_project_session_context(
 /// Includes commit log (when a local worktree is available), notes, and
 /// reviews — but omits project-level notes (those are rendered separately
 /// at the project level to avoid duplication).
-fn build_branch_timeline_summary(
-    store: &Arc<Store>,
-    branch: &store::Branch,
-    workspace_name: Option<&str>,
-) -> String {
+fn build_branch_timeline_summary(store: &Arc<Store>, branch: &store::Branch) -> String {
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
     let mut visible_shas: HashSet<String> = HashSet::new();
@@ -6766,21 +6763,22 @@ fn build_branch_timeline_summary(
         }
     }
 
-    // Notes are written to temp files in the matching execution environment:
-    // remote workspace when available, otherwise local temp files.
+    // Files go to local temp paths even for a remote branch: the project
+    // session reading them runs here, and each workspace write would be an
+    // `sq` round trip before the session's row can appear.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
-    timeline.extend(note_timeline_entries(store, &branch.id, workspace_name));
+    timeline.extend(note_timeline_entries(store, &branch.id, None));
     timeline.extend(review_timeline_entries(
         store,
         &branch.id,
-        workspace_name,
+        None,
         max_commit_ts,
         &visible_shas,
     ));
     timeline.extend(image_timeline_entries(
         store,
         &branch.id,
-        workspace_name,
+        None,
         &branch.project_id,
     ));
 
@@ -13063,7 +13061,7 @@ mod tests {
         store.create_project_note(&note).unwrap();
         let expected = "### Project Note: Plan\nDate: 2023-11-14 22:13:20 UTC\nSee: `";
 
-        let context = build_project_session_context(&store, &project, None);
+        let context = build_project_session_context(&store, &project);
         assert!(context.contains(expected), "{context}");
 
         let entries = project_note_timeline_entries(&store, &project.id, None);
@@ -13241,7 +13239,7 @@ mod tests {
         }
 
         // Both timeline builders separate items with exactly one blank line.
-        let summary = build_branch_timeline_summary(&store, &branch, None);
+        let summary = build_branch_timeline_summary(&store, &branch);
         assert_eq!(summary.matches("\n\n").count(), 1);
         assert!(!summary.contains("\n\n\n"));
 
@@ -13269,7 +13267,7 @@ mod tests {
             store.create_project_note(&project_note).unwrap();
         }
 
-        let context = build_project_session_context(&store, &project, None);
+        let context = build_project_session_context(&store, &project);
 
         assert!(context.contains(&format!(
             "### Branch: {}\n\n### Note: Branch note\nDate: ",
@@ -13278,6 +13276,89 @@ mod tests {
         assert!(context.contains("## Existing Project Notes\n\n### Project Note: "));
         assert!(context.contains("\n\n### Project Note: Second project note\nDate: "));
         assert!(!context.contains("\n\n\n"));
+    }
+
+    /// A project session runs on this machine even when a branch lives on a
+    /// Blox workspace, so that branch's notes and media must land in local
+    /// files. Writing them to the workspace instead cost an `sq` round trip per
+    /// note and image before the project note's row could appear, and handed
+    /// the agent `See:` paths that did not exist where it runs.
+    #[test]
+    fn project_context_writes_remote_branch_history_to_local_files() {
+        use crate::note_media::refs::extract_media_refs;
+        use crate::note_media::tests::PNG;
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut project = store::Project::new("test-owner/test-repo");
+        project.location = store::ProjectLocation::Remote;
+        store.create_project(&project).unwrap();
+        // No other test names this workspace, so its `ws_exec` count is ours.
+        let workspace = format!("staged-test-{}", uuid::Uuid::new_v4().simple());
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", &workspace);
+        store.create_branch(&branch).unwrap();
+
+        let project_root = crate::git::project_worktree_root_for(&project.id).unwrap();
+        let images_dir = project_root.join("images");
+        std::fs::create_dir_all(&images_dir).unwrap();
+        let add_image = |filename: &str, session_id: Option<&str>| {
+            let mut image = store::Image::new(
+                Some(&branch.id),
+                &project.id,
+                filename,
+                "image/png",
+                PNG.len() as i64,
+                false,
+            );
+            image.session_id = session_id.map(str::to_string);
+            store.create_image(&image).unwrap();
+            std::fs::write(images_dir.join(format!("{}.png", image.id)), PNG).unwrap();
+            image.id
+        };
+        // Media embedded in a note body, and an image dropped on the branch card.
+        let media_id = add_image("shot.png", Some(store::NOTE_MEDIA_SESSION_ID));
+        let card_image_id = add_image("board.png", None);
+        let note = store::Note::new(
+            &branch.id,
+            "Findings",
+            &format!("Body\n\n![shot](staged-media://{media_id}.png)\n"),
+        );
+        store.create_note(&note).unwrap();
+
+        let context = build_project_session_context(&store, &project);
+
+        assert_eq!(crate::blox::ws_exec_calls_for(&workspace), 0);
+        let temp_dir = std::env::temp_dir();
+        let pointers: Vec<&str> = context
+            .lines()
+            .filter_map(|line| line.strip_prefix("See: `")?.strip_suffix('`'))
+            .collect();
+        assert_eq!(pointers.len(), 2, "{context}");
+        for path in &pointers {
+            assert!(
+                Path::new(path).starts_with(&temp_dir) && Path::new(path).exists(),
+                "{path} is not a local file: {context}"
+            );
+        }
+        assert!(
+            pointers
+                .iter()
+                .any(|path| path.ends_with(&format!("staged-image-{card_image_id}.png"))),
+            "{context}"
+        );
+        let note_path = pointers
+            .iter()
+            .find(|path| path.ends_with(&format!("staged-note-{}.md", note.id)))
+            .unwrap_or_else(|| panic!("note pointer missing: {context}"));
+        let body = std::fs::read_to_string(note_path).unwrap();
+        let media = extract_media_refs(&body);
+        assert_eq!(media.len(), 1, "{body}");
+        assert!(Path::new(&media[0].target).starts_with(&temp_dir), "{body}");
+        assert_eq!(std::fs::read(&media[0].target).unwrap(), PNG);
+
+        for path in pointers.iter().copied().chain([media[0].target.as_str()]) {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir_all(project_root);
     }
 
     #[test]

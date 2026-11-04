@@ -7,8 +7,9 @@
   ProjectHome's top bar) shares one flow. A Dialog rather than an AlertDialog:
   it opens at once and shows the preflight loading, then one row per branch
   with what it carries. Blockers disable Transfer and say why. When a repo has
-  uncommitted changes, a checkbox (defaulting to the last answer) chooses
-  whether they move or stay behind in the backup.
+  uncommitted changes, or may have (a workspace the transfer resumes first),
+  a checkbox (defaulting to the last answer) chooses whether they move or
+  stay behind in the backup.
 -->
 <script lang="ts" module>
   let dialogCounter = 0;
@@ -25,7 +26,12 @@
   import { preferences } from '../settings/preferences.svelte';
   import { projectActions } from './projectActions.svelte';
   import ProjectTransferRepoRow from './ProjectTransferRepoRow.svelte';
-  import { issueMessage, transferActionLabel } from './projectTransfer';
+  import {
+    asksAboutUncommitted,
+    issueMessage,
+    transferActionLabel,
+    uncommittedOnlyPossible,
+  } from './projectTransfer';
 
   const checkboxId = `project-transfer-uncommitted-${++dialogCounter}`;
 
@@ -33,6 +39,12 @@
   let preflight = $derived(pending?.status === 'ready' ? pending.preflight : null);
   let title = $derived(pending ? transferActionLabel(pending.direction) : '');
   let repoBlocked = $derived(preflight?.repos.some((repo) => repo.blockers.length > 0) ?? false);
+  let asksUncommitted = $derived(preflight ? asksAboutUncommitted(preflight) : false);
+  let uncommittedLabel = $derived(
+    preflight && uncommittedOnlyPossible(preflight)
+      ? 'Transfer uncommitted changes, if there are any'
+      : 'Transfer uncommitted changes'
+  );
 
   // Each open starts from the remembered answer; a change made in another
   // window while this one is open doesn't flip the box under the user.
@@ -114,7 +126,7 @@
             </ul>
           {/if}
 
-          {#if preflight.hasUncommittedChanges}
+          {#if asksUncommitted}
             <div class="uncommitted">
               <div class="uncommitted-row">
                 <Checkbox
@@ -122,7 +134,7 @@
                   class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
                   bind:checked={includeUncommitted}
                 />
-                <Label for={checkboxId} class="font-normal">Transfer uncommitted changes</Label>
+                <Label for={checkboxId} class="font-normal">{uncommittedLabel}</Label>
               </div>
               {#if !includeUncommitted}
                 <p class="uncommitted-hint">

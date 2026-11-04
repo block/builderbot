@@ -34,8 +34,8 @@ pub use carry::{
     CarryStep, Landing,
 };
 pub(crate) use commands::{
-    cancel_project_transfer, get_project_transfer_preflight_impl, prune_backups,
-    transfer_project_impl,
+    cancel_project_transfer, get_project_transfer_preflight_impl, list_transferring_projects,
+    prune_backups, transfer_project_impl,
 };
 pub use endpoint::{BloxEndpoint, LocalEndpoint, ScriptOutput, TransferEndpoint};
 pub use orchestrator::{

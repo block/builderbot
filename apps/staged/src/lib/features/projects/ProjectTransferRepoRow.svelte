@@ -1,13 +1,15 @@
 <!--
   ProjectTransferRepoRow.svelte — one branch in the transfer dialog: its repo
-  and branch, what it carries (unpushed commits, uncommitted changes), and
-  whatever blocks or warns about it.
+  and branch, what it carries (unpushed commits, uncommitted changes, by
+  kind), the ignored files that stay behind, and whatever blocks or warns
+  about it. Blockers and warnings differ in colour and in a screen-reader
+  prefix.
 -->
 <script lang="ts">
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectTransferRepoPreflight } from '../../types';
-  import { issueMessage, plural, uncommittedCount } from './projectTransfer';
+  import { issueMessage, plural, uncommittedBreakdown, uncommittedCount } from './projectTransfer';
 
   interface Props {
     row: ProjectTransferRepoPreflight;
@@ -16,16 +18,7 @@
   let { row }: Props = $props();
 
   let changes = $derived(uncommittedCount(row));
-  let changesTitle = $derived(
-    [
-      row.staged > 0 && `${row.staged} staged`,
-      row.unstaged > 0 && `${row.unstaged} unstaged`,
-      row.untracked > 0 && `${row.untracked} untracked`,
-      row.conflicted > 0 && `${row.conflicted} conflicted`,
-    ]
-      .filter(Boolean)
-      .join(', ') || undefined
-  );
+  let breakdown = $derived(uncommittedBreakdown(row));
   let renamed = $derived(row.destBranchName !== row.branchName);
 </script>
 
@@ -54,19 +47,31 @@
       <span class:emphasis={row.unpushedCommits > 0}>
         {plural(row.unpushedCommits, 'unpushed commit')}
       </span>
-      <span class:emphasis={changes > 0} title={changesTitle}>
-        {plural(changes, 'uncommitted change')}
+      <span class:emphasis={changes > 0}>
+        {plural(changes, 'uncommitted change')}{#if breakdown}&nbsp;({breakdown}){/if}
       </span>
+      {#if row.ignoredFiles > 0}
+        <span class="ignored">
+          {plural(row.ignoredFiles, 'ignored file')}
+          {row.ignoredFiles === 1 ? 'stays' : 'stay'} behind
+        </span>
+      {/if}
     {/if}
   </div>
 
   {#if row.blockers.length > 0 || row.warnings.length > 0}
     <ul class="issues">
       {#each row.blockers as issue, i (`blocker-${i}`)}
-        <li class="issue blocker">{issueMessage(issue)}</li>
+        <li class="issue blocker">
+          <span class="sr-only">Blocks transfer:</span>
+          {issueMessage(issue)}
+        </li>
       {/each}
       {#each row.warnings as issue, i (`warning-${i}`)}
-        <li class="issue warning">{issueMessage(issue)}</li>
+        <li class="issue warning">
+          <span class="sr-only">Warning:</span>
+          {issueMessage(issue)}
+        </li>
       {/each}
     </ul>
   {/if}
@@ -132,6 +137,10 @@
 
   .repo-stats .emphasis {
     color: var(--text-primary);
+  }
+
+  .repo-stats .ignored {
+    color: var(--status-modified);
   }
 
   .issues {

@@ -1755,6 +1755,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     .unwrap(),
             )
         }
+        "list_transferring_projects" => Ok(serde_json::to_value(
+            crate::project_transfer::list_transferring_projects(),
+        )
+        .unwrap()),
         "get_blox_env" => Ok(serde_json::to_value(std::env::var("BLOX_ENV").ok()).unwrap()),
         // =====================================================================
         // Workspace / Blox commands (Tier 3)

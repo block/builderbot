@@ -2233,6 +2233,7 @@ pub fn run() {
             project_transfer::commands::get_project_transfer_preflight,
             project_transfer::commands::transfer_project,
             project_transfer::commands::cancel_project_transfer,
+            project_transfer::commands::list_transferring_projects,
             branches::get_blox_env,
             branches::get_workspace_info,
             branches::poll_workspace_status,

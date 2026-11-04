@@ -39,7 +39,7 @@
   import ProjectRowContent from './ProjectRowContent.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
-  import { transferDestinationLabel } from './projectTransfer';
+  import { transferringTitle } from './projectTransfer';
   import SidebarFilterMenu from './SidebarFilterMenu.svelte';
   import SidebarSearchField from './SidebarSearchField.svelte';
   import SidebarSectionHead from './SidebarSectionHead.svelte';
@@ -60,11 +60,6 @@
   import { neighbourAfterRemove } from './focusAfterRemove';
   import { createScrollIfActive } from './activeRowScroll';
   import * as ContextMenu from '$lib/components/ui/context-menu';
-
-  function transferringTitle(project: Project): string {
-    const direction = projectsDataStore.transferringProjects.get(project.id);
-    return direction ? `Transferring to ${transferDestinationLabel(direction)}…` : 'Transferring…';
-  }
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -563,7 +558,7 @@
                   status.kind === 'backgroundHold'
                     ? 'Waiting on background work'
                     : status.kind === 'transferring'
-                      ? transferringTitle(project)
+                      ? transferringTitle(projectsDataStore.transferringProjects.get(project.id))
                       : undefined}
                 <ContextMenu.Root>
                   <!-- Hidden here, on the display: contents wrapper, not on the

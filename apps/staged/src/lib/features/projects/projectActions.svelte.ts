@@ -34,6 +34,7 @@ import { focusIfDropped, type FocusAfterRemove } from './focusAfterRemove';
 import { workspaceLifecycle } from './workspaceLifecycle.svelte';
 import { setTransferUncommittedChanges } from '../settings/preferences.svelte';
 import {
+  asksAboutUncommitted,
   isTransferCancelledError,
   issueMessage,
   transferDestinationLabel,
@@ -205,13 +206,12 @@ class ProjectActionsController {
     const request = ++this.transferRequest;
     const direction = transferDirectionFrom(project.location);
     this._pendingTransfer = { project, direction, status: 'loading' };
+    // The dialog labels rows from the preflight, but the progress banner
+    // names repos from the project's own, so fetch them meanwhile (deduped
+    // like the remove flow's). Never rejects, and the dialog doesn't wait.
+    void projectsDataStore.ensureProjectHydrated(project.id);
     try {
-      // The dialog labels rows by the project's repos, so make sure they're
-      // fetched; deduped like the remove flow's.
-      const [preflight] = await Promise.all([
-        commands.getProjectTransferPreflight(project.id),
-        projectsDataStore.ensureProjectHydrated(project.id),
-      ]);
+      const preflight = await commands.getProjectTransferPreflight(project.id);
       if (request !== this.transferRequest) return;
       this._pendingTransfer = {
         project,
@@ -229,8 +229,9 @@ class ProjectActionsController {
    * Start the pending transfer (dialog "Transfer" button). The dialog closes
    * at once; progress shows on the project and the outcome as a toast.
    * `includeUncommitted` is the checkbox, which only shows (and is only
-   * remembered) when some repo has uncommitted changes. Without it there is
-   * nothing to opt out of, so whatever turns up meanwhile is carried.
+   * remembered) when some repo has, or may have, uncommitted changes (see
+   * asksAboutUncommitted). Without it there is nothing to opt out of, so
+   * whatever turns up meanwhile is carried.
    */
   async confirmPendingTransfer({
     includeUncommitted,
@@ -242,14 +243,11 @@ class ProjectActionsController {
     const { project, preflight } = pending;
     this._pendingTransfer = null;
     this.transferRequest += 1;
-    if (preflight.hasUncommittedChanges) {
+    const asked = asksAboutUncommitted(preflight);
+    if (asked) {
       setTransferUncommittedChanges(includeUncommitted);
     }
-    await this.transferProject(
-      project,
-      preflight,
-      preflight.hasUncommittedChanges ? includeUncommitted : true
-    );
+    await this.transferProject(project, preflight, asked ? includeUncommitted : true);
   }
 
   /** Dismiss the transfer dialog without transferring. */
@@ -290,7 +288,8 @@ class ProjectActionsController {
       projectsDataStore.projectTransferFinished(id, result.transferId);
       const warnings = transferResultWarnings(result, preflight);
       const notes = warnings.map(issueMessage);
-      if (result.repos.some((repo) => repo.uncommittedLeftBehind)) {
+      const leftBehind = result.repos.some((repo) => repo.uncommittedLeftBehind);
+      if (leftBehind) {
         notes.push(
           result.backupDir
             ? `Uncommitted changes were left behind in the backup at ${result.backupDir}.`
@@ -302,7 +301,9 @@ class ProjectActionsController {
       if (warnings.length > 0) {
         toast.warning(title, { description, duration: Infinity });
       } else {
-        toast.success(title, { description });
+        // The backup path is how the user gets those changes back, so it
+        // stays until dismissed.
+        toast.success(title, { description, ...(leftBehind ? { duration: Infinity } : {}) });
       }
     } catch (e) {
       const message = errorMessage(e);

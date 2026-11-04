@@ -15,7 +15,9 @@ use super::backups;
 use super::commands::preflight_for;
 use super::host::{BloxUnavailable, TransferHost, WorkspaceState};
 use super::orchestrator::{run_transfer, ProjectTransferResult, TransferPhase, TransferProgress};
-use super::preflight::{ProjectTransferPreflight, RepoTransferState, TransferIssue};
+use super::preflight::{
+    ProjectTransferPreflight, RepoTransferState, TransferDirection, TransferIssue,
+};
 use super::registry;
 use super::scripts::{
     APPLY_SCRIPT, CLONE_SCRIPT, ORIGIN_TIPS_SCRIPT, PREFLIGHT_SCRIPT, SNAPSHOT_SCRIPT,
@@ -553,7 +555,13 @@ impl Fixture {
     ) -> Transfer {
         let transfer_id = uuid::Uuid::new_v4().to_string();
         let branch_ids = self.branches.iter().map(|b| b.id.clone()).collect();
-        let guard = registry::begin(&self.project.id, &transfer_id, branch_ids).unwrap();
+        let guard = registry::begin(
+            &self.project.id,
+            &transfer_id,
+            TransferDirection::from_source(self.project.location),
+            branch_ids,
+        )
+        .unwrap();
         let events = Mutex::new(Vec::new());
         let result = run_transfer(
             &self.store,
@@ -561,6 +569,12 @@ impl Fixture {
             &guard,
             include_uncommitted,
             &|progress| {
+                // A window that loads now reads the same phase from the registry.
+                let listed = registry::list()
+                    .into_iter()
+                    .find(|p| p.transfer_id == transfer_id)
+                    .map(|p| p.phase);
+                assert_eq!(listed, Some(progress.phase));
                 events.lock().unwrap().push(progress.clone());
                 hook(progress);
             },
@@ -1246,7 +1260,13 @@ fn preflight_counts_changes_and_reports_blockers_and_warnings() {
         code: "blox_not_authenticated",
         message: "Not authenticated with Blox.".to_string(),
     });
-    let guard = registry::begin(&f.project.id, "running-transfer", vec![]).unwrap();
+    let guard = registry::begin(
+        &f.project.id,
+        "running-transfer",
+        TransferDirection::ToRemote,
+        vec![],
+    )
+    .unwrap();
     let preflight = f.preflight();
     drop(guard);
     assert_eq!(

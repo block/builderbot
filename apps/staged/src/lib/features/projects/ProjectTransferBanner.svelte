@@ -2,7 +2,8 @@
   ProjectTransferBanner.svelte — a project's transfer in progress, in
   ProjectHome: the direction, the phase (and the repo it is about), the
   backend's latest detail line, and Cancel while a cancel can still be
-  honoured (before the database switch).
+  honoured (before the database switch). Only the phase is a live region:
+  the detail line changes with every line of clone output.
 -->
 <script lang="ts">
   import Spinner from '../../shared/Spinner.svelte';
@@ -41,13 +42,13 @@
 </script>
 
 {#if transfer}
-  <div class="transfer-banner" role="status" aria-live="polite">
+  <div class="transfer-banner">
     <Spinner size={14} />
     <div class="transfer-text">
       <span class="transfer-title">
         Transferring to {transferDestinationLabel(transfer.direction)}
       </span>
-      <span class="transfer-phase">
+      <span class="transfer-phase" role="status">
         {transferPhaseLabel(transfer.phase, transfer.direction, repoName, transfer.bytes)}
       </span>
       {#if transfer.detail}
@@ -55,7 +56,13 @@
       {/if}
     </div>
     {#if isTransferCancellable(transfer.phase)}
-      <Button variant="outline" size="sm" onclick={cancel} disabled={cancelling}>
+      <Button
+        variant="outline"
+        size="sm"
+        onclick={cancel}
+        disabled={cancelling}
+        aria-label={cancelling ? 'Cancelling transfer' : 'Cancel transfer'}
+      >
         {cancelling ? 'Cancelling…' : 'Cancel'}
       </Button>
     {/if}

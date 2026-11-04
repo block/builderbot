@@ -997,6 +997,9 @@ describe('requestTransferProject', () => {
     getProjectTransferPreflight.mockReturnValue(
       new Promise<ProjectTransferPreflight>((resolve) => (resolvePreflight = resolve))
     );
+    // The repos are fetched for the progress banner; the dialog labels rows
+    // from the preflight, so a cold project's hydration doesn't hold it back.
+    ensureProjectHydrated.mockReturnValue(new Promise(() => {}));
     const actions = await importActions();
 
     const request = actions.requestTransferProject(project());
@@ -1115,6 +1118,14 @@ describe('confirmPendingTransfer', () => {
     await actions.confirmPendingTransfer({ includeUncommitted: true });
     expect(setTransferUncommittedChanges).toHaveBeenLastCalledWith(true);
     expect(transferProject).toHaveBeenLastCalledWith('p1', true);
+
+    // A workspace the transfer resumes first may have changes nobody has
+    // counted yet: the checkbox shows for it, and its answer applies.
+    setTransferUncommittedChanges.mockClear();
+    actions = await readyActions(preflight({ repos: [repoPreflight({ state: 'unknown' })] }));
+    await actions.confirmPendingTransfer({ includeUncommitted: false });
+    expect(setTransferUncommittedChanges).toHaveBeenCalledWith(false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', false);
   });
 
   it('refuses a blocked preflight', async () => {
@@ -1147,6 +1158,22 @@ describe('confirmPendingTransfer', () => {
       duration: Infinity,
     });
     expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  it('keeps the success toast open when changes were left behind', async () => {
+    const actions = await readyActions(preflight());
+    const result = transferResult();
+    result.repos[0].uncommittedLeftBehind = true;
+    transferProject.mockResolvedValue(result);
+
+    await actions.confirmPendingTransfer({ includeUncommitted: false });
+
+    // It carries the backup path, the only way back to those changes.
+    expect(toastSuccess).toHaveBeenCalledWith('Transferred "Alpha" to Blox', {
+      description:
+        'Uncommitted changes were left behind in the backup at /home/me/.staged/transfers/t1.',
+      duration: Infinity,
+    });
   });
 
   it('clears the transferring marker and toasts a failure', async () => {

@@ -5,17 +5,20 @@ import type {
   ProjectTransferResult,
 } from '../../types';
 import {
+  asksAboutUncommitted,
   formatBytes,
   isTransferCancellable,
   isTransferCancelledError,
   issueMessage,
   plural,
   transferActionLabel,
-  transferBlockers,
   transferDirectionFrom,
   transferPhaseLabel,
   transferResultWarnings,
+  transferringTitle,
+  uncommittedBreakdown,
   uncommittedCount,
+  uncommittedOnlyPossible,
 } from './projectTransfer';
 
 function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTransferRepoPreflight {
@@ -65,6 +68,9 @@ describe('labels', () => {
     expect(transferDirectionFrom('remote')).toBe('toLocal');
     expect(transferActionLabel('toRemote')).toBe('Transfer to Blox');
     expect(transferActionLabel('toLocal')).toBe('Transfer to local');
+    expect(transferringTitle('toRemote')).toBe('Transferring to Blox…');
+    expect(transferringTitle('toLocal')).toBe('Transferring to local…');
+    expect(transferringTitle(undefined)).toBe('Transferring…');
   });
 
   it('counts every kind of uncommitted change', () => {
@@ -73,6 +79,19 @@ describe('labels', () => {
     );
     expect(plural(1, 'unpushed commit')).toBe('1 unpushed commit');
     expect(plural(2, 'uncommitted change')).toBe('2 uncommitted changes');
+    expect(uncommittedBreakdown(repo({ staged: 1, untracked: 2 }))).toBe('1 staged, 2 untracked');
+    expect(uncommittedBreakdown(repo())).toBeNull();
+  });
+
+  it('asks about uncommitted changes when a repo has some or may have some', () => {
+    expect(asksAboutUncommitted(preflight())).toBe(false);
+    expect(asksAboutUncommitted(preflight({ hasUncommittedChanges: true }))).toBe(true);
+
+    // A workspace the transfer resumes first can't be counted yet.
+    const unknown = preflight({ repos: [repo(), repo({ branchId: 'b2', state: 'unknown' })] });
+    expect(asksAboutUncommitted(unknown)).toBe(true);
+    expect(uncommittedOnlyPossible(unknown)).toBe(true);
+    expect(uncommittedOnlyPossible({ ...unknown, hasUncommittedChanges: true })).toBe(false);
   });
 
   it('formats sizes', () => {
@@ -117,9 +136,16 @@ describe('labels', () => {
 
 describe('issueMessage', () => {
   it('rewrites codes whose backend sentence lacks a next step', () => {
+    // The backend's sentence names the branch and its worktree or workspace,
+    // which a toast has no row to supply, so the next step is appended.
     expect(
       issueMessage({ code: 'detached_head', message: 'The worktree for f has a detached HEAD.' })
-    ).toBe('The checkout has a detached HEAD. Check the branch out again before transferring.');
+    ).toBe(
+      'The worktree for f has a detached HEAD. Check the branch out again before transferring.'
+    );
+    expect(issueMessage({ code: 'conflicts', message: 'f has unresolved conflicts.' })).toBe(
+      'f has unresolved conflicts. Resolve them, or abort the merge or rebase, first.'
+    );
     expect(
       issueMessage({ code: 'wrong_branch', message: 'The worktree for f has main checked out.' })
     ).toBe("The worktree for f has main checked out. Switch back to the project's branch first.");
@@ -128,7 +154,7 @@ describe('issueMessage', () => {
         code: 'blox_not_authenticated',
         message: 'Not authenticated with Blox. Run: sq login',
       })
-    ).toMatch(/sq login/);
+    ).toBe("You're not signed in to Blox. Run “sq login” in a terminal, then try again.");
   });
 
   it('passes the rest through, including the same code for another condition', () => {
@@ -138,14 +164,6 @@ describe('issueMessage', () => {
     expect(issueMessage({ code: 'session_running', message: 'A session is running on f.' })).toBe(
       'A session is running on f.'
     );
-  });
-
-  it('lists project-level blockers ahead of repo blockers', () => {
-    const pf = preflight({
-      blockers: [{ code: 'no_repos', message: 'Attach a repository first.' }],
-      repos: [repo({ blockers: [{ code: 'conflicts', message: 'f has conflicts.' }] })],
-    });
-    expect(transferBlockers(pf).map((b) => b.code)).toEqual(['no_repos', 'conflicts']);
   });
 });
 

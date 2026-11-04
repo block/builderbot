@@ -1,4 +1,4 @@
-import type { Branch, WorkspaceStatus } from '../../types';
+import type { Branch, ProjectLocation, WorkspaceStatus } from '../../types';
 import * as commands from '../../api/commands';
 import { toast } from 'svelte-sonner';
 import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -24,6 +24,11 @@ interface WorkspaceLifecycleHooks {
   /** A transferring project's branches are the transfer's to provision: the
    *  backend refuses worktree and workspace setup until it is over. */
   isProjectTransferring: (projectId: string) => boolean;
+  /** Where the project lives now; null when it isn't known. */
+  getProjectLocation: (projectId: string) => ProjectLocation | null;
+  /** Refetch a project a transfer of it just ended (its location and
+   *  branches), settling once the fresh lists have landed. */
+  refreshTransferredProject: (projectId: string) => Promise<void>;
 }
 
 class WorkspaceLifecycleController {
@@ -35,6 +40,12 @@ class WorkspaceLifecycleController {
 
   private pendingSetupBranches = new Set<string>();
   private queuedSetupBranches = new Set<string>();
+  /** Projects a transfer just ended for, skipped until their refetch lands:
+   *  the lists held until then describe the old location. */
+  private awaitingTransferRefresh = new Set<string>();
+  /** Branches a transfer handed over, whose worktree (if they land without
+   *  one) is set up with prerun actions, as a newly created branch's is. */
+  private prerunOnSetup = new Set<string>();
 
   private activeLocalSetupCount = 0;
   private activeRemoteSetupCount = 0;
@@ -69,6 +80,8 @@ class WorkspaceLifecycleController {
     }
     this.pendingSetupBranches.clear();
     this.queuedSetupBranches.clear();
+    this.awaitingTransferRefresh.clear();
+    this.prerunOnSetup.clear();
     this.activeRemoteWorkspaceStarts.clear();
     this.startingTimestamps.clear();
     this.localSetupTaskQueue = [];
@@ -89,7 +102,7 @@ class WorkspaceLifecycleController {
   }
 
   enqueueInitialSetup(projectId: string, branches: Branch[]): void {
-    if (this.hooks?.isProjectTransferring(projectId)) return;
+    if (this.isProjectHeld(projectId)) return;
     let hasActiveRemote = false;
     for (const branch of branches) {
       this.enqueueBranchSetup(projectId, branch);
@@ -211,22 +224,37 @@ class WorkspaceLifecycleController {
    * A transfer of `projectId` ended. Branches it left unprovisioned (a remote
    * workspace still to start, a local branch without a worktree) were skipped
    * while it ran, and errors from the old location no longer apply: clear
-   * them and set the branches up from what the store holds now.
+   * them, and hold the project until its refetch lands. What the store holds
+   * until then may predate the switch (the commit's own refetch is
+   * frame-buffered), so the kickoff provisions from the fresh lists instead.
+   * Branch ids survive a transfer, so the ones held now are the ones to set
+   * up with prerun actions.
    */
   transferFinished(projectId: string): void {
     const hooks = this.hooks;
     if (!hooks || hooks.isProjectTransferring(projectId)) return;
-    const branches = hooks.getBranchesByProject().get(projectId) ?? [];
-    for (const branch of branches) {
+    for (const branch of hooks.getBranchesByProject().get(projectId) ?? []) {
       this.clearBranchState(branch.id);
+      this.prerunOnSetup.add(branch.id);
     }
-    this.enqueueInitialSetup(projectId, branches);
+    this.awaitingTransferRefresh.add(projectId);
+    void hooks
+      .refreshTransferredProject(projectId)
+      .catch((e) => {
+        console.error('[workspaceLifecycle] Failed to refresh a transferred project:', e);
+      })
+      .finally(() => {
+        if (this.hooks !== hooks) return;
+        this.awaitingTransferRefresh.delete(projectId);
+        this.scheduleKickoff();
+      });
   }
 
   clearBranchState(branchId: string): void {
     this.pendingSetupBranches.delete(branchId);
     this.queuedSetupBranches.delete(branchId);
     this.startingTimestamps.delete(branchId);
+    this.prerunOnSetup.delete(branchId);
 
     this.localSetupTaskQueue = this.localSetupTaskQueue.filter(
       (task) => task.branchId !== branchId
@@ -249,6 +277,17 @@ class WorkspaceLifecycleController {
       changed = true;
     }
     if (changed) this.version++;
+  }
+
+  /** Whether setup must leave the project's branches alone for now: it is
+   *  deleting, transferring, or waiting on its post-transfer refetch. */
+  private isProjectHeld(projectId: string): boolean {
+    const hooks = this.hooks;
+    return (
+      this.awaitingTransferRefresh.has(projectId) ||
+      !!hooks?.isProjectDeleting(projectId) ||
+      !!hooks?.isProjectTransferring(projectId)
+    );
   }
 
   private errorMessage(err: unknown): string {
@@ -384,7 +423,7 @@ class WorkspaceLifecycleController {
     if (!hooks) return;
 
     for (const [projectId, branches] of hooks.getBranchesByProject().entries()) {
-      if (hooks.isProjectDeleting(projectId) || hooks.isProjectTransferring(projectId)) continue;
+      if (this.isProjectHeld(projectId)) continue;
       for (const branch of branches) {
         this.enqueueBranchSetup(projectId, branch);
       }
@@ -395,13 +434,20 @@ class WorkspaceLifecycleController {
     const branchId = branch.id;
     if (this.pendingSetupBranches.has(branchId) || this.queuedSetupBranches.has(branchId)) return;
 
+    // A project's branches all live where it does. One that doesn't is from
+    // a list read before a transfer switched the project over, and setting
+    // it up would provision the old location again.
+    const location = this.hooks?.getProjectLocation(projectId) ?? null;
+    if (location && branch.branchType !== location) return;
+    const runPrerun = this.prerunOnSetup.delete(branchId);
+
     if (branch.branchType === 'local') {
       if (branch.worktreePath || this.worktreeErrors.has(branchId)) return;
       this.queuedSetupBranches.add(branchId);
       this.localSetupTaskQueue.push({
         branchId,
         run: async () => {
-          await this.setupBranchWorktree(branchId, projectId);
+          await this.setupBranchWorktree(branchId, projectId, { runPrerun });
         },
       });
       this.pumpLocalSetupQueue();
@@ -531,10 +577,11 @@ class WorkspaceLifecycleController {
       }
 
       // NOTE: prerun actions are only triggered here when opts.runPrerun
-      // is set (e.g. the retry path). The normal creation paths run them
-      // in the backend (create_project / add_project_repo / MCP). Queued
-      // sessions are likewise started by the backend when it links the
-      // worktree, not from here.
+      // is set (the retry path, and a branch a transfer handed over without
+      // a worktree). The normal creation paths run them in the backend
+      // (create_project / add_project_repo / MCP), as transfer_project does
+      // for the branches it carried. Queued sessions are likewise started by
+      // the backend when it links the worktree, not from here.
     } catch (e) {
       console.error('[workspaceLifecycle] Failed to setup worktree:', e);
       const errMsg = e instanceof Error ? e.message : typeof e === 'string' ? e : String(e);

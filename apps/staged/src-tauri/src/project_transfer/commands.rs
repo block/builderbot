@@ -11,7 +11,7 @@ use crate::store::{ProjectLocation, Store};
 use super::backups;
 use super::host::{LiveHost, TransferHost};
 use super::orchestrator::{run_transfer, ProjectTransferResult, TransferProgress};
-use super::preflight::{inspect, ProjectTransferPreflight, TransferIssue};
+use super::preflight::{inspect, ProjectTransferPreflight, TransferDirection, TransferIssue};
 use super::registry;
 
 /// The event every [`TransferProgress`] goes out as.
@@ -94,7 +94,12 @@ pub(crate) async fn transfer_project_impl(
         .map_err(|e| e.to_string())?;
     let branch_ids: Vec<String> = branches.iter().map(|b| b.id.clone()).collect();
     let transfer_id = uuid::Uuid::new_v4().to_string();
-    let guard = registry::begin(&project_id, &transfer_id, branch_ids.clone())?;
+    let guard = registry::begin(
+        &project_id,
+        &transfer_id,
+        TransferDirection::from_source(project.location),
+        branch_ids.clone(),
+    )?;
     guard.cover_workspaces(branches.iter().filter_map(|b| b.workspace_name.as_deref()));
     let ids: Vec<&str> = branch_ids.iter().map(String::as_str).collect();
     crate::actions::commands::stop_actions_for_branches(&executor, &act_registry, &ids);
@@ -130,6 +135,14 @@ pub(crate) async fn transfer_project_impl(
 #[tauri::command(rename_all = "camelCase")]
 pub fn cancel_project_transfer(project_id: String) -> bool {
     registry::cancel(&project_id)
+}
+
+/// Every transfer running in this process, at its latest progress: what a
+/// window that loads or reconnects mid-transfer shows until the next
+/// `project-transfer-progress` arrives.
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_transferring_projects() -> Vec<TransferProgress> {
+    registry::list()
 }
 
 /// Drop the source's diff caches, run prerun actions in the new local

@@ -20,6 +20,7 @@ import type {
   Project,
   ProjectRepo,
   ProjectTransferPreflight,
+  ProjectTransferProgress,
   ProjectTransferResult,
   RecentRepo,
   GitHubRepo,
@@ -351,6 +352,15 @@ export async function transferProject(
  */
 export function cancelProjectTransfer(projectId: string): Promise<boolean> {
   return invokeCommand('cancel_project_transfer', { projectId });
+}
+
+/**
+ * Every transfer the backend is running, each at its latest progress: what a
+ * window that loads or reconnects mid-transfer shows until the next
+ * `project-transfer-progress` event.
+ */
+export function listTransferringProjects(): Promise<ProjectTransferProgress[]> {
+  return invokeCommand('list_transferring_projects');
 }
 
 // =============================================================================

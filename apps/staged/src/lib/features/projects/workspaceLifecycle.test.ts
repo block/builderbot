@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 describe('WorkspaceLifecycleController.retryWorktree', () => {
   let setupWorktreeAndRunPrerun: ReturnType<typeof vi.fn>;
@@ -8,6 +8,8 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     Array<{ id: string; worktreePath?: string; branchType?: string; workspaceStatus?: string }>
   >;
   let transferringProjects: Set<string>;
+  let projectLocations: Map<string, string>;
+  let refreshTransferredProject: Mock<(projectId: string) => Promise<void>>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -17,11 +19,13 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     vi.stubGlobal('$derived', (value: unknown) => value);
 
     setupWorktreeAndRunPrerun = vi.fn();
-    // Only the commands the controller legitimately issues. Anything else it
-    // reaches for (a queue drain, say) fails loudly as a missing export.
+    // Every command the controller may issue, each a spy, so a test can
+    // assert one wasn't: a missing export would throw inside a setup task's
+    // try and be swallowed as a setup error, never failing the test.
     commandsMock = {
       setupWorktree: vi.fn(),
       setupWorktreeAndRunPrerun,
+      startWorkspace: vi.fn(async () => {}),
       pollAllWorkspaceStatuses: vi.fn(async () => ({})),
     };
     vi.doMock('../../api/commands', () => commandsMock);
@@ -33,9 +37,12 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
 
     branchesByProject = new Map([['project-1', [{ id: 'branch-1' }]]]);
     transferringProjects = new Set();
+    projectLocations = new Map();
+    refreshTransferredProject = vi.fn(async (_projectId: string) => {});
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.doUnmock('../../api/commands');
     vi.doUnmock('svelte-sonner');
@@ -52,6 +59,8 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
       },
       isProjectDeleting: () => false,
       isProjectTransferring: (projectId) => transferringProjects.has(projectId),
+      getProjectLocation: (projectId) => (projectLocations.get(projectId) as never) ?? null,
+      refreshTransferredProject: (projectId) => refreshTransferredProject(projectId),
     });
     return workspaceLifecycle;
   }
@@ -61,54 +70,144 @@ describe('WorkspaceLifecycleController.retryWorktree', () => {
     for (let i = 0; i < 4; i++) await Promise.resolve();
   }
 
+  /** Run a scheduled kickoff (50 ms debounce) and the setup it queues. */
+  async function kickoff(lifecycle: { scheduleKickoff: () => void }) {
+    lifecycle.scheduleKickoff();
+    await vi.advanceTimersByTimeAsync(60);
+    await settle();
+  }
+
+  /** What each project-level setup command was called with, by name. */
+  function setupCalls() {
+    return {
+      setupWorktree: commandsMock.setupWorktree.mock.calls,
+      setupWorktreeAndRunPrerun: commandsMock.setupWorktreeAndRunPrerun.mock.calls,
+      startWorkspace: commandsMock.startWorkspace.mock.calls,
+    };
+  }
+
   // The backend refuses setup_worktree / start_workspace for a transferring
   // project, so the frontend must not ask: a transfer's branches land
   // unprovisioned (local without a worktree, remote still starting) and are
-  // the transfer's until it ends.
-  it('skips a transferring project until transferFinished, then sets its branches up', async () => {
-    commandsMock.setupWorktree.mockResolvedValue({ id: 'branch-1', worktreePath: '/tmp/wt' });
+  // the transfer's until it ends. Then the lists the store holds still
+  // describe the old location (the commit's refetch is frame-buffered), so
+  // setup waits for the project's refetch and provisions from that.
+  it('holds a transferred project until its refetch, then sets it up from the fresh lists', async () => {
+    vi.useFakeTimers();
+    // As the transfers end: project-1 went to local and project-2 to Blox,
+    // but neither the project list nor the branch lists have caught up.
+    // project-2's branch had no worktree (its setup failed before), so set
+    // up from this stale list it would get a local worktree again.
     branchesByProject = new Map([
-      ['project-1', [{ id: 'branch-1', branchType: 'local' }]],
-      ['project-2', [{ id: 'branch-2', branchType: 'remote', workspaceStatus: 'starting' }]],
+      ['project-1', [{ id: 'branch-1', branchType: 'remote', workspaceStatus: 'running' }]],
+      ['project-2', [{ id: 'branch-2', branchType: 'local' }]],
+    ]);
+    projectLocations = new Map([
+      ['project-1', 'remote'],
+      ['project-2', 'local'],
     ]);
     transferringProjects = new Set(['project-1', 'project-2']);
     const lifecycle = await newController();
 
     lifecycle.enqueueInitialSetup('project-1', branchesByProject.get('project-1') as never);
     lifecycle.enqueueInitialSetup('project-2', branchesByProject.get('project-2') as never);
-    await settle();
-    expect(commandsMock.setupWorktree).not.toHaveBeenCalled();
-    expect(commandsMock.startWorkspace).toBeUndefined();
+    await kickoff(lifecycle);
     // Nor are its workspaces polled: the transfer creates and deletes them.
     expect(commandsMock.pollAllWorkspaceStatuses).not.toHaveBeenCalled();
 
     // Still transferring: transferFinished is a no-op (a stale call).
     lifecycle.transferFinished('project-1');
-    await settle();
-    expect(commandsMock.setupWorktree).not.toHaveBeenCalled();
+    expect(refreshTransferredProject).not.toHaveBeenCalled();
 
+    let finishRefresh!: () => void;
+    refreshTransferredProject.mockReturnValue(
+      new Promise<void>((resolve) => (finishRefresh = resolve))
+    );
     transferringProjects.clear();
     lifecycle.transferFinished('project-1');
-    await settle();
-    expect(commandsMock.setupWorktree).toHaveBeenCalledWith('branch-1');
-    expect(branchesByProject.get('project-1')).toEqual([
-      { id: 'branch-1', worktreePath: '/tmp/wt' },
+    lifecycle.transferFinished('project-2');
+    expect(refreshTransferredProject.mock.calls).toEqual([['project-1'], ['project-2']]);
+
+    // Held while the refetch is in flight, whatever triggers setup.
+    lifecycle.enqueueInitialSetup('project-2', branchesByProject.get('project-2') as never);
+    await kickoff(lifecycle);
+    expect(setupCalls()).toEqual({
+      setupWorktree: [],
+      setupWorktreeAndRunPrerun: [],
+      startWorkspace: [],
+    });
+
+    // The refetch lands: project-1's branch had nothing to carry and has no
+    // worktree yet, project-2's workspace is still to start.
+    commandsMock.setupWorktreeAndRunPrerun.mockResolvedValue({
+      id: 'branch-1',
+      branchType: 'local',
+      worktreePath: '/tmp/wt',
+    });
+    branchesByProject = new Map([
+      ['project-1', [{ id: 'branch-1', branchType: 'local' }]],
+      ['project-2', [{ id: 'branch-2', branchType: 'remote', workspaceStatus: 'starting' }]],
     ]);
+    projectLocations = new Map([
+      ['project-1', 'local'],
+      ['project-2', 'remote'],
+    ]);
+    finishRefresh();
+    await vi.advanceTimersByTimeAsync(60);
+    await settle();
+
+    // Set up like a newly created branch: with its prerun actions.
+    expect(setupCalls()).toEqual({
+      setupWorktree: [],
+      setupWorktreeAndRunPrerun: [['branch-1', 'claude']],
+      startWorkspace: [['branch-2']],
+    });
+    expect(branchesByProject.get('project-1')).toEqual([
+      { id: 'branch-1', branchType: 'local', worktreePath: '/tmp/wt' },
+    ]);
+    expect(lifecycle.getWorkspaceErrors().size).toBe(0);
+    lifecycle.stop();
+  });
+
+  it('skips a branch whose type does not match its project location', async () => {
+    vi.useFakeTimers();
+    commandsMock.setupWorktree.mockResolvedValue({
+      id: 'branch-1',
+      branchType: 'local',
+      worktreePath: '/tmp/wt',
+    });
+    branchesByProject = new Map([['project-1', [{ id: 'branch-1', branchType: 'local' }]]]);
+    projectLocations = new Map([['project-1', 'remote']]);
+    const lifecycle = await newController();
+
+    await kickoff(lifecycle);
+    expect(commandsMock.setupWorktree).not.toHaveBeenCalled();
+
+    // Once the two agree it is an ordinary branch: no prerun from here.
+    projectLocations.set('project-1', 'local');
+    await kickoff(lifecycle);
+    expect(commandsMock.setupWorktree).toHaveBeenCalledWith('branch-1');
+    expect(commandsMock.setupWorktreeAndRunPrerun).not.toHaveBeenCalled();
     lifecycle.stop();
   });
 
   it('transferFinished clears errors the old location left on the branches', async () => {
-    commandsMock.setupWorktreeAndRunPrerun.mockRejectedValue(new Error('no clone'));
+    vi.useFakeTimers();
+    commandsMock.setupWorktreeAndRunPrerun.mockRejectedValueOnce(new Error('no clone'));
     branchesByProject = new Map([['project-1', [{ id: 'branch-1', branchType: 'local' }]]]);
     const lifecycle = await newController();
     await lifecycle.retryWorktree('branch-1', 'project-1').catch(() => {});
     expect(lifecycle.getWorktreeErrors().get('branch-1')).toBe('no clone');
 
-    commandsMock.setupWorktree.mockResolvedValue({ id: 'branch-1', worktreePath: '/tmp/wt' });
+    commandsMock.setupWorktreeAndRunPrerun.mockResolvedValue({
+      id: 'branch-1',
+      worktreePath: '/tmp/wt',
+    });
     lifecycle.transferFinished('project-1');
-    await settle();
     expect(lifecycle.getWorktreeErrors().has('branch-1')).toBe(false);
-    expect(commandsMock.setupWorktree).toHaveBeenCalledWith('branch-1');
+    await vi.advanceTimersByTimeAsync(60);
+    await settle();
+    expect(commandsMock.setupWorktreeAndRunPrerun).toHaveBeenLastCalledWith('branch-1', 'claude');
     lifecycle.stop();
   });
 

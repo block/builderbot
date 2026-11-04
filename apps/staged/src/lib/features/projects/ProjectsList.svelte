@@ -33,7 +33,7 @@
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import ProjectTransferMenuItem from './ProjectTransferMenuItem.svelte';
-  import { transferDestinationLabel } from './projectTransfer';
+  import { transferringTitle } from './projectTransfer';
   import { projectActions } from './projectActions.svelte';
   import { neighbourAfterRemove } from './focusAfterRemove';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -69,11 +69,6 @@
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
-
-  function transferringTitle(project: Project): string {
-    const direction = projectsDataStore.transferringProjects.get(project.id);
-    return direction ? `Transferring to ${transferDestinationLabel(direction)}…` : 'Transferring…';
-  }
 
   // Data comes from the shared projectsData store — returning to the landing
   // page paints instantly from memory while the store revalidates in the
@@ -575,7 +570,7 @@
               status.kind === 'backgroundHold'
                 ? 'Waiting on background work'
                 : status.kind === 'transferring'
-                  ? transferringTitle(project)
+                  ? transferringTitle(projectsDataStore.transferringProjects.get(project.id))
                   : undefined}
             {@const hydrated = projectsDataStore.isProjectHydrated(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}

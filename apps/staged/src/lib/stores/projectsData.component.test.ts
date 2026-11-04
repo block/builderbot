@@ -121,14 +121,25 @@ let listBranchesForProject: ReturnType<typeof vi.fn>;
 let listProjectRepos: ReturnType<typeof vi.fn>;
 let listReposForHome: ReturnType<typeof vi.fn>;
 let invalidateProjectBranchTimelines: ReturnType<typeof vi.fn>;
+let listTransferringProjects: ReturnType<typeof vi.fn>;
 let ensureForRepos: ReturnType<typeof vi.fn>;
 let badgeLoadAll: ReturnType<typeof vi.fn>;
 let eventListeners: Map<string, EventCallback[]>;
+/** Each listener's `onEstablished`, by event. */
+let establishedCallbacks: Map<string, Array<() => void>>;
 let windowTarget: EventTarget;
 
 function emit(event: string, payload: unknown): void {
   for (const callback of eventListeners.get(event) ?? []) {
     callback(payload);
+  }
+}
+
+/** Tell `event`'s listeners their channel went live: startup, and in web mode
+ *  every reconnect and event gap. */
+function establish(event: string): void {
+  for (const callback of establishedCallbacks.get(event) ?? []) {
+    callback();
   }
 }
 
@@ -162,11 +173,13 @@ beforeEach(() => {
   vi.stubGlobal('window', windowTarget);
 
   eventListeners = new Map();
+  establishedCallbacks = new Map();
   listProjects = vi.fn().mockResolvedValue(swr([project()]));
   listBranchesForProject = vi.fn().mockResolvedValue(swr([branch()]));
   listProjectRepos = vi.fn().mockResolvedValue(swr([projectRepo()]));
   listReposForHome = vi.fn().mockResolvedValue([]);
   invalidateProjectBranchTimelines = vi.fn();
+  listTransferringProjects = vi.fn().mockResolvedValue([]);
   ensureForRepos = vi.fn().mockResolvedValue(undefined);
   badgeLoadAll = vi.fn().mockResolvedValue(undefined);
 
@@ -176,12 +189,23 @@ beforeEach(() => {
     listProjectRepos,
     listReposForHome,
     invalidateProjectBranchTimelines,
+    listTransferringProjects,
   }));
   vi.doMock('../transport', () => ({
-    listenToEvent: (event: string, callback: EventCallback) => {
+    listenToEvent: (
+      event: string,
+      callback: EventCallback,
+      opts?: { onEstablished?: () => void }
+    ) => {
       const callbacks = eventListeners.get(event) ?? [];
       callbacks.push(callback);
       eventListeners.set(event, callbacks);
+      if (opts?.onEstablished) {
+        establishedCallbacks.set(event, [
+          ...(establishedCallbacks.get(event) ?? []),
+          opts.onEstablished,
+        ]);
+      }
       return () => {
         const remaining = (eventListeners.get(event) ?? []).filter((cb) => cb !== callback);
         eventListeners.set(event, remaining);
@@ -225,6 +249,18 @@ describe('mergeBranchesPreservingWorktree', () => {
       [branch({ worktreePath: '/wt/new' })]
     );
     expect(merged[0].worktreePath).toBe('/wt/new');
+  });
+
+  // A transfer to Blox deletes the worktrees; the path must not ride along
+  // onto the now-remote branch, nor back onto one that returns local later.
+  it('never carries a path onto a remote branch or across a type change', async () => {
+    const merge = await importMerge();
+    const local = branch({ worktreePath: '/wt/b1' });
+    const remote = branch({ branchType: 'remote', worktreePath: null });
+    expect(merge([local], [remote])[0].worktreePath).toBeNull();
+    expect(
+      merge([{ ...local, branchType: 'remote' }], [branch({ worktreePath: null })])[0].worktreePath
+    ).toBeNull();
   });
 
   it('adopts the incoming list shape: new branches added, missing ones dropped', async () => {
@@ -1650,16 +1686,119 @@ describe('project-transfer lifecycle', () => {
   });
 
   it("keeps another window's transfer when this window's start is refused", async () => {
+    listTransferringProjects.mockResolvedValue([progress('snapshotting')]);
     const store = await importStore();
     store.startListeners();
     emit('project-transfer-progress', progress('snapshotting'));
     store.projectTransferStarted('p1', 'toRemote');
     expect(store.getProjectTransfer('p1')?.phase).toBe('snapshotting');
-    // The refused start's failure clears the marker; the running transfer's
-    // next event restores it.
+
+    // The refused start rejects without an id: the running transfer isn't
+    // its to clear, and the registry still lists it.
+    const membership = store.transferringProjects;
+    store.projectTransferFinished('p1');
+    expect(store.transferringProjects).toBe(membership);
+    await tick();
+    expect(listTransferringProjects).toHaveBeenCalledTimes(1);
+    expect(store.getProjectTransfer('p1')).toMatchObject({
+      transferId: 't1',
+      phase: 'snapshotting',
+    });
+  });
+
+  it("clears this window's unconfirmed start when it is refused", async () => {
+    const store = await importStore();
+    store.startListeners();
+    store.projectTransferStarted('p1', 'toRemote');
     store.projectTransferFinished('p1');
     expect(store.isProjectTransferring('p1')).toBe(false);
+    expect(listTransferringProjects).not.toHaveBeenCalled();
+  });
+
+  it('lets go of a failed transfer whose failed event never came', async () => {
+    const store = await importStore();
+    store.startListeners();
+    store.projectTransferStarted('p1', 'toRemote');
     emit('project-transfer-progress', progress('moving'));
+    // transfer_project rejected, and the registry no longer lists it.
+    store.projectTransferFinished('p1');
     expect(store.isProjectTransferring('p1')).toBe(true);
+    await vi.waitFor(() => expect(store.isProjectTransferring('p1')).toBe(false));
+    // Its events, should they still arrive, are over.
+    emit('project-transfer-progress', progress('rolling_back'));
+    expect(store.isProjectTransferring('p1')).toBe(false);
+  });
+
+  it('shows a transfer already running when the window loads', async () => {
+    listTransferringProjects.mockResolvedValue([
+      progress('moving', { direction: 'toLocal', branchId: 'b1', bytes: 42 }),
+    ]);
+    const store = await importStore();
+    store.startListeners();
+    expect(store.isProjectTransferring('p1')).toBe(false);
+
+    establish('project-transfer-progress');
+    await vi.waitFor(() => expect(store.isProjectTransferring('p1')).toBe(true));
+    expect(store.transferringProjects.get('p1')).toBe('toLocal');
+    expect(store.getProjectTransfer('p1')).toMatchObject({
+      transferId: 't1',
+      phase: 'moving',
+      bytes: 42,
+    });
+
+    // Events then take over as usual.
+    emit('project-transfer-progress', progress('completed', { direction: 'toLocal' }));
+    expect(store.isProjectTransferring('p1')).toBe(false);
+  });
+
+  it('lets go of a transfer whose terminal event a reconnect lost', async () => {
+    const store = await importStore();
+    store.startListeners();
+    emit('project-transfer-progress', progress('tearing_down'));
+
+    listTransferringProjects.mockResolvedValue([]);
+    establish('project-transfer-progress');
+    await vi.waitFor(() => expect(store.isProjectTransferring('p1')).toBe(false));
+    emit('project-transfer-progress', progress('completed'));
+    expect(store.isProjectTransferring('p1')).toBe(false);
+  });
+
+  it('keeps a transfer that began while the registry read was in flight', async () => {
+    let resolveList!: (value: unknown[]) => void;
+    listTransferringProjects.mockReturnValue(new Promise((resolve) => (resolveList = resolve)));
+    const store = await importStore();
+    store.startListeners();
+    establish('project-transfer-progress');
+    emit('project-transfer-progress', progress('checking', { transferId: 't2' }));
+
+    resolveList([]);
+    await tick();
+    expect(store.getProjectTransfer('p1')?.transferId).toBe('t2');
+  });
+
+  // The kickoff after a transfer provisions from this list, so it must be
+  // read after the switch and must not inherit the old location's paths.
+  it('refetches a transferred project outright, retrying when a reload overtakes it', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    expect(store.branchesByProject.get('p1')?.[0].worktreePath).toBe('/wt/b1');
+
+    // Back from Blox with nothing to carry: local, and no worktree yet.
+    const landed = branch({ worktreePath: null });
+    let resolveFirst!: (value: SwrResult<Branch[]>) => void;
+    listBranchesForProject
+      .mockReturnValueOnce(new Promise((resolve) => (resolveFirst = resolve)))
+      .mockResolvedValue(swr([landed]));
+    const refreshed = store.refreshTransferredProject('p1');
+
+    // A hard reload lands meanwhile; its merge keeps the old path.
+    await store.refresh();
+    expect(store.branchesByProject.get('p1')?.[0].worktreePath).toBe('/wt/b1');
+
+    resolveFirst(swr([landed]));
+    await refreshed;
+    expect(store.branchesByProject.get('p1')).toEqual([landed]);
+    expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1']);
   });
 });

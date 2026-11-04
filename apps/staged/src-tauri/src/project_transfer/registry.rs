@@ -16,12 +16,19 @@
 //! need to provision — while the project stays registered until the
 //! teardown is done.
 //!
+//! Each entry also holds the transfer's latest progress, so a window that
+//! loads or reconnects mid-transfer can read where it is ([`list`]) instead
+//! of waiting for the next event.
+//!
 //! In-memory and per process: a second Staged instance on the same database
 //! cannot see it (the store's running-session check is the backstop there).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+use super::orchestrator::{TransferPhase, TransferProgress};
+use super::preflight::TransferDirection;
 
 /// What a refused path reports.
 pub const TRANSFER_IN_PROGRESS: &str =
@@ -33,6 +40,8 @@ struct Entry {
     /// Source workspaces, for the paths that name a workspace, not a branch.
     workspaces: Vec<String>,
     cancel: Arc<AtomicBool>,
+    /// The last progress reported, from [`begin`]'s `Checking` on.
+    progress: TransferProgress,
 }
 
 fn transfers() -> &'static Mutex<HashMap<String, Entry>> {
@@ -83,6 +92,11 @@ impl TransferGuard {
         self.with_entry(|entry| add_missing(&mut entry.workspaces, workspaces));
     }
 
+    /// Record `progress` as where the transfer is, for [`list`].
+    pub fn report(&self, progress: &TransferProgress) {
+        self.with_entry(|entry| entry.progress = progress.clone());
+    }
+
     /// Stop guarding the branches and workspaces, once the database has
     /// switched: the rows now describe the destination, and nothing may
     /// refuse to provision them. The project stays registered until drop.
@@ -119,6 +133,7 @@ impl Drop for TransferGuard {
 pub fn begin(
     project_id: &str,
     transfer_id: &str,
+    direction: TransferDirection,
     branch_ids: Vec<String>,
 ) -> Result<TransferGuard, String> {
     let mut transfers = transfers().lock().unwrap();
@@ -133,6 +148,16 @@ pub fn begin(
             branch_ids,
             workspaces: Vec::new(),
             cancel: Arc::clone(&cancel),
+            progress: TransferProgress {
+                project_id: project_id.to_string(),
+                transfer_id: transfer_id.to_string(),
+                direction,
+                phase: TransferPhase::Checking,
+                branch_id: None,
+                project_repo_id: None,
+                detail: None,
+                bytes: None,
+            },
         },
     );
     Ok(TransferGuard {
@@ -140,6 +165,18 @@ pub fn begin(
         transfer_id: transfer_id.to_string(),
         cancel,
     })
+}
+
+/// Every running transfer, as its latest progress.
+pub fn list() -> Vec<TransferProgress> {
+    let mut listed: Vec<TransferProgress> = transfers()
+        .lock()
+        .unwrap()
+        .values()
+        .map(|entry| entry.progress.clone())
+        .collect();
+    listed.sort_by(|a, b| a.project_id.cmp(&b.project_id));
+    listed
 }
 
 pub fn is_project_transferring(project_id: &str) -> bool {
@@ -203,14 +240,24 @@ pub fn ensure_workspace_not_transferring(workspace: &str) -> Result<(), String> 
 mod tests {
     use super::*;
 
+    fn listed(project: &str) -> Option<TransferProgress> {
+        list().into_iter().find(|p| p.project_id == project)
+    }
+
     #[test]
     fn one_transfer_per_project_released_on_drop() {
         let project = uuid::Uuid::new_v4().to_string();
         let branch = uuid::Uuid::new_v4().to_string();
-        let guard = begin(&project, "t1", vec![branch.clone()]).unwrap();
+        let guard = begin(
+            &project,
+            "t1",
+            TransferDirection::ToRemote,
+            vec![branch.clone()],
+        )
+        .unwrap();
         assert!(is_project_transferring(&project));
         assert!(is_branch_transferring(&branch));
-        assert!(begin(&project, "t2", vec![]).is_err());
+        assert!(begin(&project, "t2", TransferDirection::ToRemote, vec![]).is_err());
         assert_eq!(
             ensure_branch_not_transferring(&branch).unwrap_err(),
             TRANSFER_IN_PROGRESS
@@ -235,6 +282,7 @@ mod tests {
 
         drop(guard);
         assert!(!is_project_transferring(&project));
+        assert!(listed(&project).is_none());
         assert!(!is_workspace_transferring(&workspace));
         assert!(!is_branch_transferring(&branch));
         assert!(ensure_project_not_transferring(&project).is_ok());
@@ -246,7 +294,13 @@ mod tests {
         let project = uuid::Uuid::new_v4().to_string();
         let branch = uuid::Uuid::new_v4().to_string();
         let workspace = format!("ws-{project}");
-        let guard = begin(&project, "t1", vec![branch.clone()]).unwrap();
+        let guard = begin(
+            &project,
+            "t1",
+            TransferDirection::ToLocal,
+            vec![branch.clone()],
+        )
+        .unwrap();
         guard.cover_workspaces([workspace.as_str()]);
 
         guard.release_branches();
@@ -254,8 +308,34 @@ mod tests {
         assert!(ensure_branch_not_transferring(&branch).is_ok());
         assert!(ensure_workspace_not_transferring(&workspace).is_ok());
         assert!(is_project_transferring(&project));
-        assert!(begin(&project, "t2", vec![]).is_err());
+        assert!(begin(&project, "t2", TransferDirection::ToLocal, vec![]).is_err());
         drop(guard);
         assert!(!is_project_transferring(&project));
+    }
+
+    #[test]
+    fn lists_each_transfer_at_its_latest_progress() {
+        let project = uuid::Uuid::new_v4().to_string();
+        let guard = begin(&project, "t1", TransferDirection::ToLocal, vec![]).unwrap();
+
+        // Registered, before the first report: checking.
+        let first = listed(&project).unwrap();
+        assert_eq!(first.transfer_id, "t1");
+        assert_eq!(first.direction, TransferDirection::ToLocal);
+        assert_eq!(first.phase, TransferPhase::Checking);
+
+        guard.report(&TransferProgress {
+            phase: TransferPhase::Moving,
+            branch_id: Some("b1".to_string()),
+            bytes: Some(42),
+            ..first
+        });
+        let moving = listed(&project).unwrap();
+        assert_eq!(moving.phase, TransferPhase::Moving);
+        assert_eq!(moving.branch_id.as_deref(), Some("b1"));
+        assert_eq!(moving.bytes, Some(42));
+
+        drop(guard);
+        assert!(listed(&project).is_none());
     }
 }

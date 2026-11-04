@@ -263,7 +263,7 @@ impl Run<'_> {
         detail: Option<String>,
         bytes: Option<u64>,
     ) {
-        (self.on_progress)(&TransferProgress {
+        let progress = TransferProgress {
             project_id: self.guard.project_id().to_string(),
             transfer_id: self.guard.transfer_id().to_string(),
             direction: self.direction,
@@ -272,7 +272,9 @@ impl Run<'_> {
             project_repo_id: leg.and_then(|l| l.source.branch.project_repo_id.clone()),
             detail,
             bytes,
-        });
+        };
+        self.guard.report(&progress);
+        (self.on_progress)(&progress);
     }
 
     /// Report `phase`, then stop here if the transfer was cancelled.

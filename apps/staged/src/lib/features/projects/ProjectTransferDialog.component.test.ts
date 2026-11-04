@@ -18,7 +18,19 @@ const { actions, prefs } = vi.hoisted(() => ({
 vi.mock('$lib/components/ui/dialog', () =>
   import('../sessions/testStubs/dialogMock').then((m) => m.dialogModuleMock())
 );
-vi.mock('./projectActions.svelte', () => ({ projectActions: actions }));
+// `pendingTransfer` is $state-backed, as the real controller's is, so a test
+// can move the mounted dialog through loading → ready, a close and a reopen.
+vi.mock('./projectActions.svelte', async () => {
+  const { reactiveProps } = await import('../sessions/testStubs/reactiveProps.svelte');
+  const state = reactiveProps({ pending: null as unknown });
+  Object.defineProperty(actions, 'pendingTransfer', {
+    get: () => state.pending,
+    set: (value: unknown) => {
+      state.pending = value;
+    },
+  });
+  return { projectActions: actions };
+});
 vi.mock('../settings/preferences.svelte', () => ({ preferences: prefs }));
 
 import ProjectTransferDialog from './ProjectTransferDialog.svelte';
@@ -75,9 +87,15 @@ function preflight(overrides: Partial<ProjectTransferPreflight> = {}): ProjectTr
   };
 }
 
-function ready(pf: ProjectTransferPreflight): PendingTransfer {
-  return { project, direction: pf.direction, status: 'ready', preflight: pf };
+function ready(pf: ProjectTransferPreflight, forProject: Project = project): PendingTransfer {
+  return { project: forProject, direction: pf.direction, status: 'ready', preflight: pf };
 }
+
+const dirty = () =>
+  preflight({
+    repos: [repo({ unstaged: 1, hasUncommittedChanges: true })],
+    hasUncommittedChanges: true,
+  });
 
 function mountDialog(pending: PendingTransfer | null) {
   actions.pendingTransfer = pending;
@@ -152,7 +170,12 @@ describe('ProjectTransferDialog', () => {
       )
     );
     await settle();
-    expect(document.querySelector('.repo-row')?.textContent).toContain('3 uncommitted changes');
+    // The kinds are spelled out, not left to a tooltip.
+    expect(document.querySelector('.repo-row')?.textContent).toContain(
+      '3 uncommitted changes\u00a0(1 staged, 2 untracked)'
+    );
+    expect(document.body.textContent).toContain('Transfer uncommitted changes');
+    expect(document.body.textContent).not.toContain('if there are any');
     const box = checkbox();
     expect(box).not.toBeNull();
     expect(box!.getAttribute('aria-checked')).toBe('false');
@@ -195,14 +218,100 @@ describe('ProjectTransferDialog', () => {
     expect(alert?.textContent).toContain('Resolve the issues marked on the branches above');
     const row = document.querySelector('.repo-row');
     expect(row?.classList.contains('blocked')).toBe(true);
-    expect(row?.querySelector('.issue.blocker')?.textContent).toContain(
-      'Check the branch out again'
-    );
-    expect(row?.querySelector('.issue.warning')?.textContent).toContain('LFS');
+    // Told apart by more than colour: a prefix for screen readers.
+    const blocker = row?.querySelector('.issue.blocker');
+    expect(blocker?.querySelector('.sr-only')?.textContent).toBe('Blocks transfer:');
+    expect(blocker?.textContent).toContain('Check the branch out again');
+    const warning = row?.querySelector('.issue.warning');
+    expect(warning?.querySelector('.sr-only')?.textContent).toBe('Warning:');
+    expect(warning?.textContent).toContain('LFS');
 
     submitButton().click();
     await settle();
     expect(actions.confirmPendingTransfer).not.toHaveBeenCalled();
+    unmount(dialog);
+  });
+
+  it('asks about uncommitted changes a resumed workspace may have', async () => {
+    prefs.transferUncommittedChanges = false;
+    const dialog = mountDialog(
+      ready(
+        preflight({
+          direction: 'toLocal',
+          repos: [repo({ state: 'unknown', unpushedCommits: 0 })],
+        })
+      )
+    );
+    await settle();
+    expect(document.querySelector('.repo-row')?.textContent).toContain(
+      'Checked once the workspace resumes'
+    );
+    expect(document.body.textContent).toContain('Transfer uncommitted changes, if there are any');
+    expect(checkbox()!.getAttribute('aria-checked')).toBe('false');
+
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({ includeUncommitted: false });
+    unmount(dialog);
+  });
+
+  it('says how many ignored files stay behind', async () => {
+    const dialog = mountDialog(
+      ready(
+        preflight({
+          repos: [
+            repo({ ignoredFiles: 3 }),
+            repo({ branchId: 'b2', ignoredFiles: 1 }),
+            repo({ branchId: 'b3' }),
+          ],
+        })
+      )
+    );
+    await settle();
+    const rows = [...document.querySelectorAll('.repo-row')].map((r) =>
+      r.textContent?.replace(/\s+/g, ' ')
+    );
+    expect(rows[0]).toContain('3 ignored files stay behind');
+    expect(rows[1]).toContain('1 ignored file stays behind');
+    expect(rows[2]).not.toContain('ignored');
+    unmount(dialog);
+  });
+
+  // Each open starts from the remembered answer, and nothing but a new open
+  // resets it: not the preflight landing, nor the preference changing in
+  // another window meanwhile.
+  it('keeps the answer through loading → ready and resets it for each new open', async () => {
+    const dialog = mountDialog({ project, direction: 'toRemote', status: 'loading' });
+    await settle();
+    prefs.transferUncommittedChanges = false;
+
+    actions.pendingTransfer = ready(dirty());
+    await settle();
+    expect(checkbox()!.getAttribute('aria-checked')).toBe('true');
+    checkbox()!.click();
+    await settle();
+    expect(checkbox()!.getAttribute('aria-checked')).toBe('false');
+
+    // Reopened straight onto another project: from the preference again.
+    prefs.transferUncommittedChanges = true;
+    actions.pendingTransfer = ready(dirty(), { ...project, id: 'p2', name: 'Beta' });
+    await settle();
+    expect(checkbox()!.getAttribute('aria-checked')).toBe('true');
+    checkbox()!.click();
+    await settle();
+    expect(checkbox()!.getAttribute('aria-checked')).toBe('false');
+
+    // Closed, then reopened for the same project: from the preference too.
+    actions.pendingTransfer = null;
+    await settle();
+    expect(checkbox()).toBeNull();
+    actions.pendingTransfer = ready(dirty());
+    await settle();
+    expect(checkbox()!.getAttribute('aria-checked')).toBe('true');
+
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({ includeUncommitted: true });
     unmount(dialog);
   });
 

@@ -154,6 +154,10 @@
       setBranchesByProject: (next) => projectsDataStore.setBranchesByProject(next),
       isProjectDeleting: (projectId) => projectsDataStore.isProjectDeleting(projectId),
       isProjectTransferring: (projectId) => projectsDataStore.isProjectTransferring(projectId),
+      getProjectLocation: (projectId) =>
+        projectsDataStore.projects.find((p) => p.id === projectId)?.location ?? null,
+      refreshTransferredProject: (projectId) =>
+        projectsDataStore.refreshTransferredProject(projectId),
     });
     checkStoreAndLoad();
 
@@ -632,16 +636,20 @@
 
   $effect(() => {
     branchesByProject;
+    // Setup skips a branch whose type doesn't match its project's location
+    // until the two agree, which may happen on the project list's side.
+    projectsDataStore.projects;
     if (!loading) {
       workspaceLifecycle.scheduleKickoff();
     }
   });
 
   // A transfer's branches are skipped by the setup above while it runs; once
-  // it ends they are provisioned from what the store holds now (a branch
-  // with nothing to carry lands as a workspace still to start, or a local
-  // branch without a worktree). Diffed here, not in the store: setting
-  // branches up is this view's policy, as for the kickoff above.
+  // it ends the project is refetched and the kickoff provisions it from the
+  // fresh lists (a branch with nothing to carry lands as a workspace still to
+  // start, or a local branch without a worktree). Diffed here, not in the
+  // store: setting branches up is this view's policy, as for the kickoff
+  // above.
   let lastTransferring = new Set<string>();
   $effect(() => {
     const transferring = new Set(projectsDataStore.transferringProjects.keys());
@@ -943,6 +951,7 @@
             branches={branchesByProject.get(project.id) || []}
             {reposById}
             deleting={deletingProjectNames.has(project.id)}
+            transferring={projectsDataStore.isProjectTransferring(project.id)}
             {deletingBranches}
             {worktreeErrors}
             {workspaceErrors}

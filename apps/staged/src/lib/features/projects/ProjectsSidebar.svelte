@@ -52,8 +52,10 @@
 
   // All rendered data comes from the shared projectsData store; UI state
   // (width, scroll) lives here or in projectsSidebarState, and the search
-  // query in projectsListViewState so the landing-page grid shares it.
-  let projects = $derived(projectsDataStore.projects);
+  // query in projectsListViewState so the landing-page grid shares it. Rows
+  // come from liveProjects (here and through projectFiltersStore), so a
+  // project's row goes as soon as its delete is confirmed.
+  let projects = $derived(projectsDataStore.liveProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);

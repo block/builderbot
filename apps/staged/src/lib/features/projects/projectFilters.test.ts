@@ -57,7 +57,7 @@ beforeEach(() => {
   derived.by = (compute: () => unknown) => compute();
   vi.stubGlobal('$derived', derived);
   vi.doMock('../../stores/projectsData.svelte', () => ({
-    projectsDataStore: { projects: [], reposByProject: new Map() },
+    projectsDataStore: { liveProjects: [], reposByProject: new Map() },
   }));
   vi.doMock('../../stores/projectState.svelte', () => ({
     projectStateStore: { isUnread: () => false },

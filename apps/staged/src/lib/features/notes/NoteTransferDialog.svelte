@@ -126,13 +126,15 @@
   let labels = $derived(noteTransferLabels(mode));
   let repo = $derived(lookedUpRepo(noteRepo));
   let hint = $derived(repoAddedHint(repo));
+  // Projects being deleted are already gone from every list, so they are
+  // neither offered nor counted as taking a name.
   let candidates = $derived(
-    noteTransferCandidates(projectsDataStore.projects, currentProjectId, mode)
+    noteTransferCandidates(projectsDataStore.liveProjects, currentProjectId, mode)
   );
   let filtered = $derived(filterMoveTargets(candidates, projectsDataStore.reposByProject, query));
-  // Checked against every project, not just the candidates: for a move the
-  // current project is off the list but still exists.
-  let createName = $derived(createProjectOption(query, projectsDataStore.projects));
+  // Checked against every live project, not just the candidates: for a move
+  // the current project is off the list but still exists.
+  let createName = $derived(createProjectOption(query, projectsDataStore.liveProjects));
   // A selection the query has since filtered away is no selection; the
   // "create" row tracks the query itself, so it survives typing.
   let selected = $derived.by<NoteTransferSelection | null>(() => {

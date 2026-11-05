@@ -162,8 +162,24 @@ class ProjectsDataStore {
 
   // ── Reactive reads ──
 
+  /** Every listed project, including any with a delete in flight. Rendered
+   *  lists, counts and pickers read liveProjects instead; this is for guards,
+   *  lookups by id and list positions that must still see a doomed project. */
   get projects(): Project[] {
     return this._projects;
+  }
+
+  /**
+   * The project list minus projects with a delete in flight: what the home
+   * grid, the sidebar, the filter chips and the project pickers show. A
+   * confirmed delete hides the project here at once rather than when the
+   * backend's worktree teardown finishes, and projectDeleteFailed brings it
+   * back by clearing the marker. See the project-delete lifecycle below.
+   */
+  get liveProjects(): Project[] {
+    const deleting = this._deletingProjectNames;
+    if (deleting.size === 0) return this._projects;
+    return this._projects.filter((project) => !deleting.has(project.id));
   }
 
   get branchesByProject(): Map<string, Branch[]> {
@@ -526,8 +542,8 @@ class ProjectsDataStore {
     this._hydratedProjects = prunedHydrated;
 
     // A project that vanished from the fetched list finished deleting: drop
-    // its in-progress marker in the same apply, so the card goes straight
-    // from "Deleting…" to gone with no flash of a live project in between.
+    // its in-progress marker in the same apply, so liveProjects, which has
+    // hidden it since the delete started, never sees it again in between.
     if (this._deletingProjectNames.size > 0) {
       const prunedDeleting = new Map<string, string>();
       for (const [projectId, name] of this._deletingProjectNames) {
@@ -734,28 +750,36 @@ class ProjectsDataStore {
 
   // ── Project-delete lifecycle ──
   //
-  // On the success path the data side is event-driven: the backend delete
-  // publishes project-changed, whose list refetch removes the project and
-  // its "Deleting…" marker in one apply (see applyProjectList). Until that
-  // lands, the marker keeps the card in its deleting state — even if a fetch
-  // started before the delete resolves late and still contains the project —
-  // so nothing ever flashes back to life.
+  // Confirming a delete sets the project's marker, and liveProjects drops the
+  // project at once: its card leaves the grid and the sidebar without waiting
+  // on the backend, whose worktree teardown runs before the row delete and can
+  // take seconds. projects still lists it, so guards and list positions keep
+  // working.
   //
-  // The marker is not purely cosmetic, though: flushBranchChanges suppresses
-  // branch refetches for a deleting project, since the cascade emits one
-  // branch-changed per branch and refetching a doomed list N times would be
-  // pure churn. That debt has to be paid back when the delete fails — see
-  // projectDeleteFailed.
+  // On the success path the data side is event-driven: the backend delete
+  // publishes project-changed, whose list refetch removes the project and its
+  // marker in one apply (see applyProjectList). Until that lands, the marker
+  // keeps the project hidden — even if a fetch started before the delete
+  // resolves late and still contains it — so a stale refetch never brings
+  // the card back. Only projectDeleteFailed does that, alongside its toast.
+  // The trade: a delete that fails shows the card vanish and then return.
+  //
+  // The marker does more than hide the project, though: flushBranchChanges
+  // suppresses branch refetches for a deleting project, since the cascade
+  // emits one branch-changed per branch and refetching a doomed list N times
+  // would be pure churn. That debt has to be paid back when the delete fails —
+  // see projectDeleteFailed.
 
   projectDeleteStarted(projectId: string, name: string): void {
     this._deletingProjectNames = new Map(this._deletingProjectNames).set(projectId, name);
   }
 
   /** Clear the in-progress marker for a delete that failed — the project is
-   *  still alive, so no project-changed refetch will prune it. The cascade may
-   *  have deleted branch rows before failing, and flushBranchChanges dropped
-   *  those branch-changed events on the floor, so refetch the list here: it is
-   *  the only signal that will ever repair it. Clearing the marker first also
+   *  still alive, so no project-changed refetch will prune it, and clearing
+   *  the marker puts it back in liveProjects. The cascade may have deleted
+   *  branch rows before failing, and flushBranchChanges dropped those
+   *  branch-changed events on the floor, so refetch the list here: it is the
+   *  only signal that will ever repair it. Clearing the marker first also
    *  lets any trailing branch-changed from the same cascade take the normal
    *  path instead of being dropped a second time. */
   projectDeleteFailed(projectId: string): void {
@@ -808,7 +832,7 @@ class ProjectsDataStore {
 
     // Store change feed: a project write in any window (or the backend)
     // reloads the list. Create/rename land the new row; a delete's refetch
-    // prunes the project and its "Deleting…" marker together, and the
+    // prunes the project and its deleting marker together, and the
     // generation bump discards any stale apply still in flight.
     this.unlisteners.push(
       listenToEvent<ProjectChangedEvent>('project-changed', () => {

@@ -59,8 +59,9 @@
   // background. Filters live in the shared projectFiltersStore and the
   // search query in projectsListViewState, so the sidebar sees the same
   // selection and query; scroll restore is view-local but persists across
-  // visits via that same state; modal state stays in the component.
-  let projects = $derived(projectsDataStore.projects);
+  // visits via that same state; modal state stays in the component. A project
+  // being deleted is already off liveProjects, so its card goes on confirm.
+  let projects = $derived(projectsDataStore.liveProjects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
@@ -224,8 +225,8 @@
     const targetProjectId = projectsListViewState.returnTargetProjectId;
     // Wait for the return-target card's final height, but only while the
     // target is still a project: a delete lands you back here via goHome()
-    // with the deleted id as the target, and applyProjectList has already
-    // pruned it from the hydrated set, so it would otherwise never satisfy.
+    // with the deleted id as the target, whose card never renders again
+    // (hidden while deleting, then pruned along with its hydrated entry).
     const targetHydrated =
       !targetProjectId ||
       !projects.some((p) => p.id === targetProjectId) ||

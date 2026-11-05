@@ -29,7 +29,7 @@ vi.mock('../settings/sq.svelte', () => ({ sqState: sq }));
 vi.mock('../settings/preferences.svelte', () => ({ preferences: prefs, setNewProjectLocation }));
 vi.mock('../../stores/projectsData.svelte', () => ({
   projectsDataStore: {
-    get projects() {
+    get liveProjects() {
       return store.projects;
     },
     reposByProject: new Map(),

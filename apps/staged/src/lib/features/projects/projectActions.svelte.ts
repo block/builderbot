@@ -148,6 +148,8 @@ class ProjectActionsController {
 
     const id = project.id;
     const branchesToClear = projectsDataStore.branchesByProject.get(id) || [];
+    // Marks the project deleting, which also hides it from the grid, the
+    // sidebar and the pickers (projectsDataStore.liveProjects) right away.
     projectsDataStore.projectDeleteStarted(id, projectDisplayName(project));
 
     // When the project on screen is being deleted, navigate away immediately
@@ -181,7 +183,7 @@ class ProjectActionsController {
     try {
       await commands.deleteProject(id);
       // The delete's project-changed event prunes the project and its
-      // "Deleting…" marker from projectsDataStore, and each branch's
+      // deleting marker from projectsDataStore, and each branch's
       // branch-changed invalidates its timeline caches. In web mode an echo
       // lost to a WebSocket gap is recovered by the reconnect revalidation in
       // transport.ts, so the marker can't outlive the socket outage.
@@ -193,6 +195,7 @@ class ProjectActionsController {
       console.error('Failed to delete project:', e);
       const message = e instanceof Error ? e.message : String(e);
       toast.error('Unable to delete project', { description: message });
+      // Clearing the marker brings the hidden card back next to the toast.
       projectsDataStore.projectDeleteFailed(id);
     }
   }

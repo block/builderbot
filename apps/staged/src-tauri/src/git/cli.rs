@@ -119,6 +119,9 @@ fn is_unusable_git(err: &GitError) -> bool {
         GitError::GitNotFound => true,
         GitError::CommandFailed(stderr) => is_unusable_git_error(stderr),
         GitError::NotARepo(_) | GitError::InvalidUtf8 | GitError::InvalidPath(_) => false,
+        // Only a bounded run wraps its error this way, never a lite one, but
+        // the git that failed is the same either way: judge the wrapped error.
+        GitError::CapturedEnvPending(inner) => is_unusable_git(inner),
     }
 }
 

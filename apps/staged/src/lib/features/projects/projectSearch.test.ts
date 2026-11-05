@@ -932,6 +932,64 @@ describe('searchProjects ranking', () => {
       expect(found('fix fi')).toBe(true);
       expect(found('fix fx')).toBe(false);
     });
+
+    it('keeps a word a bare `pr` contains: `pr` can match a PR with no text at all', () => {
+      // Nothing of Beta's holds a "p"; its PR alone meets `pr`.
+      const beta = project({ id: 'beta', name: 'Beta', githubRepo: 'acme/web' });
+      const alpha = project({ id: 'alpha', name: 'Alpha', githubRepo: 'acme/web' });
+      const ctx = context({
+        branches: {
+          beta: [
+            branch({ projectId: 'beta', branchName: 'main', prNumber: 5, prTitle: 'Fix bug' }),
+          ],
+          alpha: [branch({ projectId: 'alpha', branchName: 'main', prNumber: 6 })],
+        },
+      });
+      const found = (query: string) =>
+        searchProjects([beta, alpha], query, buildSearchSnapshot([beta, alpha], ctx)).projects.map(
+          (p) => p.id
+        );
+      expect(found('pr')).toEqual(['beta', 'alpha']);
+      expect(found('p')).toEqual(['alpha']);
+      // `pr` plus `p` as text, in either order.
+      expect(found('p pr')).toEqual(['alpha']);
+      expect(found('pr p')).toEqual(['alpha']);
+    });
+
+    it('keeps a bare `pr` a longer word contains, so it still scores as a PR', () => {
+      // "improve" holds the letters, but only Login has a PR.
+      const improved = project({ id: 'improved', name: 'Improved search' });
+      const login = project({ id: 'login', name: 'Login' });
+      const ctx = context({
+        branches: {
+          login: [
+            branch({
+              projectId: 'login',
+              branchName: 'x',
+              prNumber: 7,
+              prTitle: 'Improve login redirect',
+            }),
+          ],
+        },
+      });
+      // Login: 32 (pr) + 32 (title) + 32 (one item); Improved search: 64.
+      expect(ranked([improved, login], 'pr improve', ctx)).toEqual(['login', 'improved']);
+      expect(ranked([improved, login], 'improve pr', ctx)).toEqual(['login', 'improved']);
+      // As one word, the name wins.
+      expect(ranked([login, improved], 'improve', ctx)).toEqual(['improved', 'login']);
+    });
+
+    it('still drops a bare `pr` that a PR-number term starts', () => {
+      const app = project({ id: 'app', name: 'App', githubRepo: null });
+      const plan = project({ id: 'plan', name: 'pr12 plan', githubRepo: null });
+      const ctx = context({
+        branches: { app: [branch({ projectId: 'app', branchName: 'fix', prNumber: 12 })] },
+      });
+      // Counted, the `pr` would give App the PR weight again and the one-item
+      // bonus (96), past plan's all-in-name 64.
+      expect(ranked([app, plan], 'pr12', ctx)).toEqual(['plan', 'app']);
+      expect(ranked([app, plan], 'pr pr12', ctx)).toEqual(['plan', 'app']);
+    });
   });
 });
 
@@ -1278,6 +1336,8 @@ describe('searchOrderHold', () => {
     expect(ids(run(hold, 'login', polled))).toEqual(['a', 'b', 'c']);
     expect(ids(run(hold, 'login ', polled))).toEqual(['c', 'a', 'b']);
     expect(ids(run(hold, 'logi', polled))).toEqual(['c', 'a', 'b']);
+    // Back to the first query: ranked afresh, not in the slots it had.
+    expect(ids(run(hold, 'login', polled))).toEqual(['c', 'a', 'b']);
   });
 
   it('passes a blank query through and forgets the held order', () => {
@@ -1288,11 +1348,106 @@ describe('searchOrderHold', () => {
     expect(ids(run(hold, 'login', polled))).toEqual(['c', 'a', 'b']);
   });
 
-  it('hands back the fresh result when it is already in the order on screen', () => {
+  it('keeps the rank map, with the fresh reasons, when the rows on screen are unchanged', () => {
+    const hold = searchOrderHold();
+    const first = run(hold, 'login');
+    // A refetch that only retitles b's note: same rows, a new reason.
+    const retitled = {
+      ...before,
+      index: { ...before.index, b: [indexItem({ id: 'n', title: 'Login notes v2' })] },
+    };
+    const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(retitled)));
+    const held = hold('login', fresh);
+    expect(held.rank).toBe(first.rank);
+    expect(held.projects).toBe(first.projects);
+    expect(held.reasons).toBe(fresh.reasons);
+    expect(held.reasons.get('b')?.label).toBe('Login notes v2');
+    // Fresh project objects (a rename elsewhere) still keep the map.
+    const renamed = list.map((p) => ({ ...p }));
+    const again = hold(
+      'login',
+      searchProjects(renamed, 'login', buildSearchSnapshot(renamed, context(retitled)))
+    );
+    expect(again.rank).toBe(first.rank);
+    expect(again.projects).toEqual(renamed.slice(0, 3));
+    expect(again.projects[0]).toBe(renamed[0]);
+  });
+
+  it('hands back the last result itself when nothing changed', () => {
+    const hold = searchOrderHold();
+    const only = [a];
+    // A match on the name alone: no reason line, so the reasons map is the
+    // shared empty one both times.
+    const first = hold('a', searchProjects(only, 'a', buildSearchSnapshot(only, context())));
+    const next = searchProjects(only, 'a', buildSearchSnapshot(only, context()));
+    expect(next.reasons).toBe(first.reasons);
+    expect(hold('a', next)).toBe(first);
+  });
+
+  it('hands back the fresh result when its own order is the held one', () => {
     const hold = searchOrderHold();
     run(hold, 'login');
-    const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(before)));
+    const renamed = {
+      ...before,
+      index: { ...before.index, b: [indexItem({ id: 'n', title: 'Auth notes' })] },
+    };
+    const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(renamed)));
+    expect(ids(fresh)).toEqual(['a', 'c']);
     expect(hold('login', fresh)).toBe(fresh);
+  });
+
+  it('puts a project that matches again back in its slot, not at the end', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    const dropped = {
+      ...before,
+      index: { ...before.index, b: [indexItem({ id: 'n', title: 'Auth notes' })] },
+    };
+    expect(ids(run(hold, 'login', dropped))).toEqual(['a', 'c']);
+    // d is new while b is away: it goes after the rest.
+    const added = {
+      ...dropped,
+      branches: { ...dropped.branches, d: [branch({ projectId: 'd', branchName: 'login-x' })] },
+    };
+    expect(ids(run(hold, 'login', added))).toEqual(['a', 'c', 'd']);
+    // b comes back between a and c, where it was.
+    const back = { ...added, index: before.index };
+    expect(ids(run(hold, 'login', back))).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('returns the sticky card to the slot it was opened from', () => {
+    // Ranked a, x, d, c, b for "login": the name (and its bonus), a PR
+    // title, a branch, a project note, a review.
+    const [a5, b5, c5, d5, x5] = ['a', 'b', 'c', 'd', 'x'].map((id) =>
+      project({ id, name: id === 'a' ? 'Login app' : id.toUpperCase() })
+    );
+    const five = [a5, b5, c5, d5, x5];
+    const snapshot = buildSearchSnapshot(
+      five,
+      context({
+        branches: {
+          x: [branch({ projectId: 'x', branchName: 'y', prNumber: 9, prTitle: 'Fix login' })],
+          d: [branch({ projectId: 'd', branchName: 'login-page' })],
+        },
+        index: {
+          c: [indexItem({ kind: 'projectNote', id: 'pn', title: 'Login plan' })],
+          b: [indexItem({ kind: 'review', id: 'v', title: 'login review' })],
+        },
+      })
+    );
+    const hold = searchOrderHold();
+    const show = (chips: Project[], sticky: string | null) =>
+      ids(hold('login', visibleProjects(five, chips, sticky, 'login', snapshot)));
+    expect(show(five, null)).toEqual(['a', 'x', 'd', 'c', 'b']);
+    // Visiting x marks it read; under the project layer, the Unread chip
+    // drops it.
+    const unread = [a5, b5, c5, d5];
+    expect(show(unread, null)).toEqual(['a', 'd', 'c', 'b']);
+    // Back on the grid, x returns as the sticky card, where it was.
+    expect(show(unread, 'x')).toEqual(['a', 'x', 'd', 'c', 'b']);
+    // And a chip toggled off and on puts it back the same way.
+    expect(show(unread, null)).toEqual(['a', 'd', 'c', 'b']);
+    expect(show(five, null)).toEqual(['a', 'x', 'd', 'c', 'b']);
   });
 });
 

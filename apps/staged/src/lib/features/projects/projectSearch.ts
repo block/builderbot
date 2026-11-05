@@ -395,24 +395,33 @@ function nameOnlyEntry(project: Project): SearchSnapshotEntry {
   };
 }
 
-/** Whether every field holding `other` holds `term` too, so `term` adds
- *  nothing. A number term can match a PR by its number rather than its
- *  text, so the only shorter term it implies is a bare `pr` it starts with
- *  (`pr123`: PR 123 is a PR), and a number term is never implied, only
- *  repeated. */
+/**
+ * Whether every project `other` matches, `term` matches too, so `term` adds
+ * nothing. Only text a term is matched by as text can imply anything:
+ *
+ * - A number term can match a PR by its number rather than its text, so it
+ *   is never implied, only repeated.
+ * - A bare `pr` matches any project with a PR whatever its text holds, so
+ *   it implies nothing (`p pr` keeps `p`). It is implied only by a number
+ *   term it starts (`pr123`, `pr#12`): whatever matches that either has
+ *   the PR or holds the letters.
+ * - Plain text is implied by plain text holding it (`log` by `login`),
+ *   never by a number term, which might have matched by number, nor by a
+ *   bare `pr`, which might have matched by a PR.
+ */
 function impliedBy(term: Term, other: Term): boolean {
-  return (
-    term.number === null && other.text.includes(term.text) && (other.number === null || term.anyPr)
-  );
+  if (term.number !== null || !other.text.includes(term.text)) return false;
+  if (term.anyPr) return other.number !== null;
+  return other.number === null && !other.anyPr;
 }
 
 /**
- * The query's terms, parsed, minus any another term implies: a repeat, or
- * a word inside a longer one (`log` in `login`, `pr` in `pr123`). What
- * matches is unchanged, since every field holding the longer term holds
- * the shorter; what stops is one word counting twice, scoring twice and
- * earning the one-item bonus a one-word query never gets, so `login login`
- * ranks as `login` does. Of two repeats, the first is kept.
+ * The query's terms, parsed, minus any another term implies (impliedBy): a
+ * repeat, or a word inside a longer one (`log` in `login`, `pr` in
+ * `pr123`). What matches is unchanged; what stops is one word counting
+ * twice, scoring twice and earning the one-item bonus a one-word query
+ * never gets, so `login login` ranks as `login` does. Of two repeats, the
+ * first is kept.
  */
 function parseTerms(raw: readonly string[]): Term[] {
   const all = raw.map((text) => ({ text, number: termPrNumber(text), anyPr: text === 'pr' }));
@@ -661,18 +670,51 @@ export function searchProjects(
   return { projects: ranked, rank: positions(ranked), reasons: reasons ?? NO_REASONS };
 }
 
-/** `next`'s matches in `held`'s order: the ones `held` ranked keep their
- *  order, then the new ones in `next`'s. `next` itself when that is its
- *  own order. Both rank non-null. */
-function inHeldOrder(held: ProjectSearchResult, next: ProjectSearchResult): ProjectSearchResult {
-  const heldRank = held.rank!;
+function sameIds(a: readonly Project[], b: readonly Project[]): boolean {
+  return a.length === b.length && a.every((p, i) => p.id === b[i].id);
+}
+
+/** What searchOrderHold remembers about the query it holds. */
+interface HeldOrder {
+  query: string;
+  /** Every id ranked under `query`, in the order on screen, including ones
+   *  that have since stopped matching: one that matches again goes back to
+   *  its slot. Ids first seen later are appended. */
+  order: string[];
+  seen: Set<string>;
+  /** The result last handed out. */
+  last: ProjectSearchResult;
+}
+
+/**
+ * `next`'s matches in `held`'s remembered order, then the ones never seen
+ * under the query in `next`'s order, which `held` then remembers too.
+ * `held.last` again when nothing changed, its rank map with `next`'s reasons
+ * when only the reasons or project objects did, and `next` itself when its
+ * own order is the held one. `next.rank` is non-null.
+ */
+function inHeldOrder(held: HeldOrder, next: ProjectSearchResult): ProjectSearchResult {
   const nextRank = next.rank!;
   const projects: Project[] = [];
-  for (const p of held.projects) {
-    const at = nextRank.get(p.id);
+  for (const id of held.order) {
+    const at = nextRank.get(id);
     if (at !== undefined) projects.push(next.projects[at]);
   }
-  for (const p of next.projects) if (!heldRank.has(p.id)) projects.push(p);
+  for (const p of next.projects) {
+    if (held.seen.has(p.id)) continue;
+    held.seen.add(p.id);
+    held.order.push(p.id);
+    projects.push(p);
+  }
+  const last = held.last;
+  // The same rows in the same places: keep the rank map, so what reads it —
+  // `hidden` on every row, the settle wait (searchRowOrder) — stays put
+  // through a PR poll or an index refetch that only changed a reason.
+  if (sameIds(projects, last.projects)) {
+    const same = projects.every((p, i) => p === last.projects[i]);
+    if (same && next.reasons === last.reasons) return last;
+    return { projects: same ? last.projects : projects, rank: last.rank, reasons: next.reasons };
+  }
   if (projects.every((p, i) => p === next.projects[i])) return next;
   return { projects, rank: positions(projects), reasons: next.reasons };
 }
@@ -685,25 +727,33 @@ function inHeldOrder(held: ProjectSearchResult, next: ProjectSearchResult): Proj
  * While the query stays the one the results were last ranked for, a fresh
  * result keeps the order already on screen: projects that still match keep
  * their places, ones that stopped matching drop out, and new matches follow
- * the rest, best first. So a PR poll bringing a title, an index refetch
- * while a session writes notes, a rename or a filter change under a held
- * query can hide a card or add one at the end, but never move the card
- * under the cursor, or the one ⌘N was about to open. Reasons are always the
- * fresh result's. Any edit to the query, a space included, ranks afresh; a
- * blank query passes through and forgets the held order.
+ * the rest, best first. A project that drops out and matches again — the
+ * sticky return card, after visiting it marked it read and the Unread chip
+ * dropped it, or a chip toggled off and on — goes back to the slot it had,
+ * not to the end. So a PR poll bringing a title, an index refetch while a
+ * session writes notes, a rename or a filter change under a held query can
+ * hide a card or add one at the end, but never move the card under the
+ * cursor, or the one ⌘N was about to open. Reasons are always the fresh
+ * result's. When the rows on screen are unchanged, so is the rank map. Any
+ * edit to the query, a space included, ranks afresh and forgets the slots;
+ * a blank query passes through.
  */
 export function searchOrderHold(): (
   query: string,
   result: ProjectSearchResult
 ) => ProjectSearchResult {
-  let held: { query: string; result: ProjectSearchResult } | null = null;
+  let held: HeldOrder | null = null;
   return (query, result) => {
     if (result.rank === null) {
       held = null;
       return result;
     }
-    if (held !== null && held.query === query) result = inHeldOrder(held.result, result);
-    held = { query, result };
+    if (held !== null && held.query === query) {
+      held.last = inHeldOrder(held, result);
+      return held.last;
+    }
+    const order = result.projects.map((p) => p.id);
+    held = { query, order, seen: new Set(order), last: result };
     return result;
   };
 }
@@ -791,7 +841,8 @@ export function withStickyProject(
  * card that doesn't match it is hidden. Nor is it pinned first: it ranks
  * like any other card. The query outlives the visit, so the card comes back
  * to the rank it was opened from, which is where the scroll restore looks
- * for it.
+ * for it — even when the chips dropped it while the grid was covered, since
+ * searchOrderHold remembers its slot.
  *
  * With no sticky re-insertion and an empty query, `chipFiltered` is returned
  * unchanged as the result's `projects`.

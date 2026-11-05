@@ -521,7 +521,7 @@
             placeholder="Search projects, branches, PRs, notes"
             clearable
             onfocus={() => projectSearchIndex.ensureLoaded()}
-            onblur={cardOrder.settle}
+            onkeydown={cardOrder.fieldKeydown}
           />
         </div>
 
@@ -547,7 +547,7 @@
             </span>
           {/if}
         </div>
-        <div class="projects-grid">
+        <div class="projects-grid" onpointerdowncapture={cardOrder.rowsPointerdown}>
           {#each cardOrder.rows as project (project.id)}
             {@const status = getProjectStatus(
               project.id,

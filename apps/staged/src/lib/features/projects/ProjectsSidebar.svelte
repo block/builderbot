@@ -451,7 +451,7 @@
       <SidebarSearchField
         bind:value={projectsListViewState.searchQuery}
         onfocus={() => projectSearchIndex.ensureLoaded()}
-        onblur={rowOrder.settle}
+        onkeydown={rowOrder.fieldKeydown}
       />
     </div>
 
@@ -535,7 +535,7 @@
             {/if}
             <!-- The rows' own flex column, so the search's `order` ranks them
                  among themselves and never past the section headers. -->
-            <div class="project-rows">
+            <div class="project-rows" onpointerdowncapture={rowOrder.rowsPointerdown}>
               {#each rowOrder.rows as project (project.id)}
                 {@const status = getProjectStatus(
                   project.id,

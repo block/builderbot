@@ -34,12 +34,18 @@ let rank = $state.raw<ReadonlyMap<string, number> | null>(null);
 let base = $state.raw<Project[]>([a, b, c, d]);
 let order: SearchRowOrder;
 let cleanup: () => void;
+// The row ids as an {#each} last rendered them: updated only when effects
+// flush, as the DOM is.
+let rendered: string[] = [];
 
 const ids = () => order.rows.map((p) => p.id);
 const orders = () => order.rows.map((p) => order.orderOf(p.id));
 function setRank(next: ReadonlyMap<string, number> | null) {
   rank = next;
   flushSync();
+}
+function key(name: string) {
+  return new KeyboardEvent('keydown', { key: name });
 }
 function wait(ms: number) {
   vi.advanceTimersByTime(ms);
@@ -56,12 +62,16 @@ beforeEach(() => {
       () => base,
       () => rank
     );
+    $effect(() => {
+      rendered = ids();
+    });
   });
   flushSync();
 });
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -96,12 +106,76 @@ describe('searchRowOrder', () => {
     expect(ids()).toEqual(['d', 'c', 'a', 'b']);
   });
 
-  it('settles at once when asked, as the search field blurs', () => {
+  it('settles at once when asked', () => {
     setRank(rankOf('c', 'a'));
     order.settle();
-    flushSync();
     expect(ids()).toEqual(['c', 'a', 'b', 'd']);
     expect(orders()).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it('settles on Tab in the search field, before focus moves, and on no other key', () => {
+    setRank(rankOf('c', 'a'));
+    order.fieldKeydown(key('a'));
+    order.fieldKeydown(key('ArrowDown'));
+    flushSync();
+    expect(rendered).toEqual(['a', 'b', 'c', 'd']);
+    // No flush in between: the rows have moved by the time the keydown
+    // handler returns and the browser picks the next focus target.
+    order.fieldKeydown(key('Tab'));
+    expect(rendered).toEqual(['c', 'a', 'b', 'd']);
+  });
+
+  it('gives focus back to a row the move dropped it from', () => {
+    const row = document.createElement('button');
+    document.body.append(row);
+    row.focus();
+    setRank(rankOf('c', 'a'));
+    // What WebKit does to a focused node a keyed {#each} moves.
+    const focus = vi.spyOn(row, 'focus');
+    vi.spyOn(document, 'activeElement', 'get')
+      .mockReturnValueOnce(row)
+      .mockReturnValueOnce(document.body);
+    order.settle();
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    row.remove();
+  });
+
+  describe('while a pointer is down on the rows', () => {
+    it.each(['pointerup', 'pointercancel', 'click'])(
+      'holds the wait until %s, then waits afresh',
+      (end) => {
+        setRank(rankOf('c', 'a'));
+        wait(SEARCH_SETTLE_MS - 100);
+        order.rowsPointerdown();
+        flushSync();
+        wait(SEARCH_SETTLE_MS * 3);
+        expect(ids()).toEqual(['a', 'b', 'c', 'd']);
+        // Off the rows too: a press can end anywhere.
+        document.body.dispatchEvent(new Event(end, { bubbles: true }));
+        flushSync();
+        wait(SEARCH_SETTLE_MS - 1);
+        expect(ids()).toEqual(['a', 'b', 'c', 'd']);
+        wait(1);
+        expect(ids()).toEqual(['c', 'a', 'b', 'd']);
+      }
+    );
+
+    it('still settles on Tab', () => {
+      setRank(rankOf('c', 'a'));
+      order.rowsPointerdown();
+      flushSync();
+      order.fieldKeydown(key('Tab'));
+      expect(ids()).toEqual(['c', 'a', 'b', 'd']);
+    });
+
+    it('stops listening for the press to end once torn down', () => {
+      const remove = vi.spyOn(window, 'removeEventListener');
+      cleanup();
+      for (const type of ['pointerup', 'pointercancel', 'click']) {
+        expect(remove).toHaveBeenCalledWith(type, expect.any(Function), true);
+      }
+      cleanup = () => {};
+    });
   });
 
   it('needs no order for a ranking the settled rows already follow', () => {

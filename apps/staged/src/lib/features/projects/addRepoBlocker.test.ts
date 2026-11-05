@@ -23,6 +23,11 @@ describe('addRepoBlocker', () => {
     expect(addRepoBlocker(remote, [])).toBeNull();
   });
 
+  it('ignores a remote branch with a blank workspace name, like the backend', () => {
+    const blank = { ...remoteBranch(null), workspaceName: '  ' };
+    expect(addRepoBlocker(remote, [blank])).toBeNull();
+  });
+
   it('lets a repo join a running workspace', () => {
     expect(addRepoBlocker(remote, [remoteBranch('running')])).toBeNull();
   });

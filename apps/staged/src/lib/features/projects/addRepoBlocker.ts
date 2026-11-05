@@ -10,7 +10,9 @@ import type { Branch, Project } from '../../types';
  */
 export function addRepoBlocker(project: Project, branches: Branch[]): string | null {
   if (project.location !== 'remote') return null;
-  const workspaceBranches = branches.filter((b) => b.branchType === 'remote' && b.workspaceName);
+  const workspaceBranches = branches.filter(
+    (b) => b.branchType === 'remote' && b.workspaceName?.trim()
+  );
   if (workspaceBranches.length === 0) return null;
   if (workspaceBranches.some((b) => b.workspaceStatus === 'running')) return null;
   if (workspaceBranches.some((b) => b.workspaceStatus === 'starting')) {

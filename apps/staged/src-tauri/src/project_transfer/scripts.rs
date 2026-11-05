@@ -338,12 +338,16 @@ pub const ORIGIN_TIPS_SCRIPT: &str = concat!(
 ///
 /// With `ignored=<archive>` (and `ignored_sha256`), `checkout` and `finish`
 /// then place the source's ignored files into the checkout (see [`ignored`])
-/// and report `ignored_placed` and what they left out.
+/// and report `ignored_placed` and what they left out. With
+/// `ignored_excludes=<list>` (and `ignored_excludes_sha256`) too, the files
+/// it names that this checkout doesn't ignore first get an entry in its
+/// `info/exclude` (`ignored_excluded`), which a failure leaves behind: each
+/// names one path that isn't there, as the source had it.
 pub const APPLY_SCRIPT: &str = concat!(
     prelude!(),
     lfs_prelude!(),
     ignored_prelude!(),
-    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256='' ignored='' ignored_sha256=''\n",
+    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256='' ignored='' ignored_sha256='' ignored_excludes='' ignored_excludes_sha256=''\n",
     "while [ $# -gt 0 ]; do\n",
     "  case $1 in\n",
     "    --) shift; break ;;\n",
@@ -362,6 +366,8 @@ pub const APPLY_SCRIPT: &str = concat!(
     "    lfs_sha256=*) lfs_sha256=${1#lfs_sha256=} ;;\n",
     "    ignored=*) ignored=${1#ignored=} ;;\n",
     "    ignored_sha256=*) ignored_sha256=${1#ignored_sha256=} ;;\n",
+    "    ignored_excludes=*) ignored_excludes=${1#ignored_excludes=} ;;\n",
+    "    ignored_excludes_sha256=*) ignored_excludes_sha256=${1#ignored_excludes_sha256=} ;;\n",
     "    *) fail \"unknown argument: $1\" ;;\n",
     "  esac\n",
     "  shift\n",
@@ -578,7 +584,8 @@ pub const CLONE_SCRIPT: &str = concat!(
 /// `ignored_dirs` (directories an ignore pattern matches, each counted once
 /// however much they hold) — no directory of which is carried — then, when
 /// there are ignored files, `ignored_files` and `ignored_bytes` for the ones
-/// a transfer would archive (see [`ignored`]), `repo_kib` (the
+/// a transfer would archive (see [`ignored`]), or `ignored_unlisted=1` when
+/// they can't be listed, `repo_kib` (the
 /// object store's size), `unpushed` (commits on no remote-tracking ref),
 /// `upstream`, and the same `warning=`s as
 /// [`SNAPSHOT_SCRIPT`]. In a repository that uses LFS it also prints the
@@ -629,8 +636,14 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "  esac\n",
     // Not `set --`: the loop is walking the arguments.
     "  if [ \"$(printf '%s\\n' \"$counts\" | sed -n 's/^ignored=//p')\" != 0 ]; then\n",
-    "    ig=$(ignored_list | ignored_sizes)\n",
-    "    printf 'ignored_files=%s\\nignored_bytes=%s\\n' \"${ig% *}\" \"${ig#* }\"\n",
+    // A listing that fails says so, as the archive that backs them up
+    // would fail the same way.
+    "    if ig=$(ignored_list); then\n",
+    "      if [ -n \"$ig\" ]; then ig=$(printf '%s\\n' \"$ig\" | ignored_sizes); else ig='0 0'; fi\n",
+    "      printf 'ignored_files=%s\\nignored_bytes=%s\\n' \"${ig% *}\" \"${ig#* }\"\n",
+    "    else\n",
+    "      printf 'ignored_unlisted=1\\n'\n",
+    "    fi\n",
     "  fi\n",
     "  printf 'repo_kib=%s\\n' \"$(G count-objects -v 2>/dev/null | awk '$1 == \"size:\" || $1 == \"size-pack:\" { s += $2 } END { print s + 0 }')\"\n",
     "  if [ -n \"${head:-}\" ]; then\n",
@@ -1151,7 +1164,16 @@ pub struct ApplyRequest<'a> {
     pub lfs_path: Option<&'a str>,
     /// The source's ignored files at the destination, to place into the
     /// checkout (`Checkout`, `Finish`; `Branch` ignores them).
-    pub ignored: Option<(&'a str, &'a BundleFile)>,
+    pub ignored: Option<IgnoredAtDest<'a>>,
+}
+
+/// The source's ignored files at the destination (see [`ignored`]).
+#[derive(Debug, Clone, Copy)]
+pub struct IgnoredAtDest<'a> {
+    pub archive_path: &'a str,
+    pub archive: &'a BundleFile,
+    /// The excludes list beside it, when it has one.
+    pub excludes: Option<(&'a str, &'a BundleFile)>,
 }
 
 impl ApplyRequest<'_> {
@@ -1178,9 +1200,13 @@ impl ApplyRequest<'_> {
             args.push(format!("lfs={path}"));
             args.push(format!("lfs_sha256={}", lfs.archive.sha256));
         }
-        if let Some((path, archive)) = self.ignored.filter(|_| self.mode != ApplyMode::Branch) {
-            args.push(format!("ignored={path}"));
-            args.push(format!("ignored_sha256={}", archive.sha256));
+        if let Some(ignored) = self.ignored.filter(|_| self.mode != ApplyMode::Branch) {
+            args.push(format!("ignored={}", ignored.archive_path));
+            args.push(format!("ignored_sha256={}", ignored.archive.sha256));
+            if let Some((path, list)) = ignored.excludes {
+                args.push(format!("ignored_excludes={path}"));
+                args.push(format!("ignored_excludes_sha256={}", list.sha256));
+            }
         }
         args.push("--".to_string());
         if self.mode == ApplyMode::Finish {
@@ -1476,10 +1502,26 @@ mod tests {
             size: 1,
             sha256: "cd".repeat(32),
         };
-        request.ignored = Some(("/t/x.ignored.tar", &ignored));
+        request.ignored = Some(IgnoredAtDest {
+            archive_path: "/t/x.ignored.tar",
+            archive: &ignored,
+            excludes: None,
+        });
         let args = request.args();
         assert!(args.contains(&"ignored=/t/x.ignored.tar".to_string()));
         assert!(args.contains(&format!("ignored_sha256={}", "cd".repeat(32))));
+        assert!(!args.iter().any(|a| a.starts_with("ignored_excludes")));
+        let excludes = BundleFile {
+            size: 1,
+            sha256: "ab".repeat(32),
+        };
+        request.ignored = Some(IgnoredAtDest {
+            excludes: Some(("/t/x.ignored.excludes", &excludes)),
+            ..request.ignored.unwrap()
+        });
+        let args = request.args();
+        assert!(args.contains(&"ignored_excludes=/t/x.ignored.excludes".to_string()));
+        assert!(args.contains(&format!("ignored_excludes_sha256={}", "ab".repeat(32))));
         request.mode = ApplyMode::Branch;
         assert!(!request.args().iter().any(|a| a.starts_with("ignored")));
     }

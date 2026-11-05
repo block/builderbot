@@ -7,8 +7,8 @@
 //! in the shared local clone, pointing at the working-tree snapshot, whose
 //! history holds the index snapshot and the branch tip. [`prune`] removes
 //! both after [`RETENTION`] — except a transfer that left uncommitted changes
-//! behind, for which this backup is the only copy: that one is kept until it
-//! is removed by hand.
+//! or ignored files behind, for which this backup is the only copy: that one
+//! is kept until it is removed by hand.
 //!
 //! The manifest is also the transfer's journal: it is written before the
 //! transfer makes anything, with what to [`Undo`], and kept up to date as it
@@ -66,9 +66,10 @@ pub struct TransferManifest {
     pub owner_pid: Option<u32>,
     /// The workspace on the remote side.
     pub workspace_name: Option<String>,
-    /// Some repo's uncommitted changes stayed behind and exist only in this
-    /// backup, so [`prune`] never removes it: delete the directory (and its
-    /// backup refs) by hand once they are no longer wanted.
+    /// Some repo's uncommitted changes or ignored files stayed behind and
+    /// exist only in this backup, so [`prune`] never removes it: delete the
+    /// directory (and its backup refs) by hand once they are no longer
+    /// wanted.
     #[serde(default)]
     pub keep_until_removed: bool,
     /// The repos carried so far.
@@ -106,13 +107,16 @@ impl TransferManifest {
         clones
     }
 
-    /// Whether this backup holds uncommitted changes the transfer did not
-    /// restore at the destination, and that a completed transfer may have
-    /// deleted at the source.
-    pub fn holds_left_behind_changes(&self) -> bool {
+    /// Whether this backup holds what the transfer did not restore at the
+    /// destination, and a completed transfer may have deleted at the source:
+    /// uncommitted changes left behind, or ignored files it archived and
+    /// didn't place (not carried, or carried and left out there).
+    pub fn holds_left_behind_files(&self) -> bool {
         self.status != ROLLED_BACK
-            && !self.include_uncommitted
-            && self.repos.iter().any(|r| r.has_uncommitted_changes)
+            && self.repos.iter().any(|r| {
+                (!self.include_uncommitted && r.has_uncommitted_changes)
+                    || r.ignored.as_ref().is_some_and(ManifestIgnored::left_behind)
+            })
     }
 }
 
@@ -150,6 +154,13 @@ pub struct ManifestIgnored {
     pub over_cap: bool,
     /// How many were put in the destination checkout.
     pub placed: u64,
+}
+
+impl ManifestIgnored {
+    /// Whether the archive holds files the destination checkout didn't get.
+    pub fn left_behind(&self) -> bool {
+        self.archive.is_some() && self.placed < self.files
+    }
 }
 
 /// Write `manifest` into `dir`, whole or not at all.
@@ -190,7 +201,7 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Vec<
         let manifest = read_manifest(&dir);
         if manifest
             .as_ref()
-            .is_some_and(|m| m.keep_until_removed || m.holds_left_behind_changes())
+            .is_some_and(|m| m.keep_until_removed || m.holds_left_behind_files())
         {
             continue;
         }
@@ -439,8 +450,9 @@ mod tests {
     }
 
     /// An ignored-files archive is one more file in the transfer's directory:
-    /// it goes with an old transfer, stays with one kept until removed, and a
-    /// manifest from before it existed still reads (and prunes by its age).
+    /// it goes with an old transfer that placed every file, stays with one
+    /// kept until removed, and a manifest from before it existed still reads
+    /// (and prunes by its age).
     #[test]
     fn prunes_ignored_files_backups_with_their_transfer() {
         let root = crate::test_utils::TempDir::new("transfer-prune-ignored");
@@ -456,12 +468,13 @@ mod tests {
         let with_archive = |id: &str, kept: bool| {
             let mut m = manifest(id, old_ms, &clone, &backup_ref(id, "feature"));
             m.keep_until_removed = kept;
+            m.include_ignored = true;
             m.repos[0].ignored = Some(ManifestIgnored {
                 archive: Some(archive.to_string()),
                 files: 2,
                 bytes: 20,
                 over_cap: false,
-                placed: 0,
+                placed: 2,
             });
             let dir = transfers.join(id);
             write_manifest(&dir, &m).unwrap();
@@ -508,5 +521,61 @@ mod tests {
         // The legacy one went by its manifest's age, not its fresh mtime.
         assert_eq!(removed, vec![legacy_dir, transfers.join("old")]);
         assert!(transfers.join("kept").join(archive).exists());
+    }
+
+    /// Ignored files the destination didn't get — not carried, or carried
+    /// and left out there — exist only in the archive once the source is
+    /// gone, so it is kept like uncommitted changes left behind.
+    #[test]
+    fn keeps_a_backup_holding_ignored_files_it_did_not_place_whatever_its_age() {
+        let root = crate::test_utils::TempDir::new("transfer-prune-ignored-left");
+        let clone = root.path().join("clone");
+        let transfers = root.path().join("transfers");
+        let now = SystemTime::now();
+        let old_ms = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 30 * 24 * 60 * 60 * 1000;
+        let ignored = |archive: bool, files: u64, placed: u64| ManifestIgnored {
+            archive: archive.then(|| "0-widgets.ignored.tar".to_string()),
+            files,
+            bytes: files * 10,
+            over_cap: !archive,
+            placed,
+        };
+        let cases = [
+            // Not carried: the archive is the only copy.
+            ("not-carried", COMPLETED, ignored(true, 2, 0), true),
+            // Carried, but one was left out at the destination.
+            ("partly-placed", COMPLETED, ignored(true, 3, 2), true),
+            ("all-placed", COMPLETED, ignored(true, 2, 2), false),
+            // Over the cap: nothing was archived to keep.
+            ("over-cap", COMPLETED, ignored(false, 2, 0), false),
+            // Rolled back: the source is still there.
+            ("rolled-back", ROLLED_BACK, ignored(true, 2, 0), false),
+        ];
+        for (id, status, ignored, holds) in &cases {
+            let mut m = manifest(id, old_ms, &clone, &backup_ref(id, "feature"));
+            m.status = status.to_string();
+            m.repos[0].ignored = Some(ignored.clone());
+            assert_eq!(m.holds_left_behind_files(), *holds, "{id}");
+            // Written by an older build, without the flag: the rule holds.
+            write_manifest(&transfers.join(id), &m).unwrap();
+        }
+
+        let mut removed = prune(&transfers, RETENTION, now);
+        removed.sort();
+
+        assert_eq!(
+            removed,
+            vec![
+                transfers.join("all-placed"),
+                transfers.join("over-cap"),
+                transfers.join("rolled-back")
+            ]
+        );
+        assert!(transfers.join("not-carried").join(MANIFEST_FILE).exists());
+        assert!(transfers.join("partly-placed").join(MANIFEST_FILE).exists());
     }
 }

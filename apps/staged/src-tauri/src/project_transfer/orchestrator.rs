@@ -861,7 +861,7 @@ impl Run<'_> {
 
     fn save_journal(&self) -> Result<(), String> {
         let mut manifest = self.journal.borrow_mut();
-        manifest.keep_until_removed = manifest.holds_left_behind_changes();
+        manifest.keep_until_removed = manifest.holds_left_behind_files();
         backups::write_manifest(&self.transfer_dir, &manifest)?;
         self.journaled.set(true);
         Ok(())

@@ -14,14 +14,28 @@
 //! [`IGNORED_ARCHIVE_SCRIPT`] packs them into `<bundle stem>.ignored.tar`, a
 //! plain archive of `./<path>` entries — `tar -xf` it in a checkout to put
 //! them back — unless they come to more than the cap, when it says so and
-//! writes nothing. [`APPLY_SCRIPT`](super::APPLY_SCRIPT) unpacks one into a
-//! staging directory and places each file into the checkout itself, once the
-//! working tree is in place: only a path the destination ignores too (so
-//! never a tracked one, and never one that would show up as a change of the
-//! branch's own); never over anything already there; and never through a
-//! symlink, or where a file stands in for a directory, so nothing lands
-//! outside the checkout. Each placed file is compared with what was archived.
-//! Tree hashes are untouched: ignored files are in neither snapshot.
+//! writes nothing. Beside it, `<bundle stem>.ignored.excludes` lists the ones
+//! only this machine's own rules ignore — the clone's `info/exclude`, the
+//! global `core.excludesFile` — rather than a `.gitignore` in the checkout,
+//! which a destination checks out too. [`APPLY_SCRIPT`](super::APPLY_SCRIPT)
+//! unpacks the archive into a staging directory and places each file into the
+//! checkout itself, once the working tree is in place: only a path the
+//! destination ignores too (so never a tracked one, and never one that would
+//! show up as a change of the branch's own); never over anything already
+//! there; and never through a symlink, or where a file stands in for a
+//! directory, so nothing lands outside the checkout. Each placed file is
+//! compared with what was archived. Tree hashes are untouched: ignored files
+//! are in neither snapshot.
+//!
+//! Two things make the destination ignore what the source did. A path on the
+//! excludes list that the destination doesn't ignore gets an anchored entry
+//! (`/<path>`) in its `info/exclude` first, as its rules can't be expected
+//! there: a fresh workspace clone has none. And an archived `.gitignore` —
+//! a cache directory's own `*` (`.pytest_cache/`, `.mypy_cache/`, a uv
+//! `.venv/`), which ignores itself and everything beside it — is put in place
+//! before asking, as until it is there nothing it ignores is; any that turns
+//! out not to be ignored itself is taken back out, and the question asked
+//! again without it.
 
 use super::{BundleFile, ScriptReport, TransferError};
 
@@ -37,10 +51,14 @@ macro_rules! ignored_prelude {
             // One `./<path>` line per ignored file to carry, for the checkout
             // at `.`. `-z` gives names as they are; `--no-renames` keeps
             // every record one path. A record ending in `/` is a directory an
-            // ignore pattern matches, not walked.
+            // ignore pattern matches, not walked. Each batch exits 0 whatever
+            // its last record was; a status that fails adds a record no
+            // status prints (after a NUL, which ends any record it cut
+            // short), and the batch that sees it exits 1, so the listing
+            // fails rather than come out short.
             "ignored_list() {\n",
-            "  G --no-optional-locks status --porcelain=v1 -z --no-renames --untracked-files=all --ignored=matching 2>/dev/null \\\n",
-            "  | xargs -0 sh -c 'nl=\"\n\"; for e; do case $e in *\"$nl\"*|\"!! \"*/) ;; \"!! \"*) p=${e#\"!! \"}; [ -f \"$p\" ] && [ ! -L \"$p\" ] && printf \"./%s\\n\" \"$p\" ;; esac; done' sh\n",
+            "  { G --no-optional-locks status --porcelain=v1 -z --no-renames --untracked-files=all --ignored=matching 2>/dev/null || printf '\\000ignored_list_failed\\000'; } \\\n",
+            "  | xargs -0 sh -c 'nl=\"\n\"; rc=0; for e; do case $e in ignored_list_failed) rc=1 ;; *\"$nl\"*|\"!! \"*/) ;; \"!! \"*) p=${e#\"!! \"}; if [ -f \"$p\" ] && [ ! -L \"$p\" ]; then printf \"./%s\\n\" \"$p\"; fi ;; esac; done; exit $rc' sh\n",
             "}\n",
             // stdin: path lines; stdout: `<count> <bytes>` of the regular
             // files among them. With no input, GNU xargs runs `ls` once
@@ -51,11 +69,26 @@ macro_rules! ignored_prelude {
             "}\n",
             // Lines in a file, for a report.
             "ignored_count() { wc -l < \"$1\" | tr -d ' \\t'; }\n",
+            // The paths in the file `$1` that the checkout at `.` ignores,
+            // sorted, into `$2`. check-ignore leaves out tracked paths and
+            // exits 1 when it ignores none; when it can't answer at all, `$2`
+            // is empty and this fails.
+            "ignored_check() {\n",
+            "  tr '\\n' '\\000' < \"$1\" | G check-ignore -z --stdin > \"$2.z\" 2>/dev/null\n",
+            "  _ic=$?\n",
+            "  [ \"$_ic\" -le 1 ] || : > \"$2.z\"\n",
+            "  tr '\\000' '\\n' < \"$2.z\" | LC_ALL=C sort > \"$2\"\n",
+            "  rm -f -- \"$2.z\"\n",
+            "  [ \"$_ic\" -le 1 ]\n",
+            "}\n",
             // Place the archive `$ignored` (checked against
-            // `$ignored_sha256`) into the checkout at `.`; see the module
-            // documentation. Prints `ignored_placed`, and for what it left
-            // out `ignored_unignored` / `ignored_in_the_way` with one path
-            // of each as an example. Uses `fail` for anything it can't do.
+            // `$ignored_sha256`) into the checkout at `.`, with the excludes
+            // list `$ignored_excludes` (checked against
+            // `$ignored_excludes_sha256`) when there is one; see the module
+            // documentation. Prints `ignored_placed`, `ignored_excluded`
+            // when it added entries to `info/exclude`, and for what it left
+            // out `ignored_unignored` / `ignored_in_the_way` with one path of
+            // each as an example. Uses `fail` for anything it can't do.
             "ignored_place() {\n",
             "  [ \"$(sha256_of \"$ignored\")\" = \"$ignored_sha256\" ] || fail 'the ignored files do not match their checksum'\n",
             "  _st=\"$ignored.d\"\n",
@@ -63,6 +96,11 @@ macro_rules! ignored_prelude {
             "  mkdir -p -- \"$_st/files\" || fail \"cannot create $_st\"\n",
             "  _err=$(tar -xf \"$ignored\" -C \"$_st/files\" 2>&1) || fail \"cannot unpack the ignored files: $_err\"\n",
             "  (cd -- \"$_st/files\" && find . -type f) | LC_ALL=C sort > \"$_st/all\" || fail 'cannot list the ignored files'\n",
+            "  : > \"$_st/local\"\n",
+            "  if [ -n \"$ignored_excludes\" ]; then\n",
+            "    [ \"$(sha256_of \"$ignored_excludes\")\" = \"$ignored_excludes_sha256\" ] || fail 'the ignored files to exclude do not match their checksum'\n",
+            "    LC_ALL=C sort -u \"$ignored_excludes\" > \"$_st/local\" || fail 'cannot read the ignored files to exclude'\n",
+            "  fi\n",
             "  : > \"$_st/free\"\n",
             "  : > \"$_st/in_the_way\"\n",
             // First what is in the way: anything at the path, and a symlink
@@ -80,22 +118,65 @@ macro_rules! ignored_prelude {
             "    if [ \"$_ok\" = 1 ] && { [ -e \"./$_r\" ] || [ -L \"./$_r\" ]; }; then _ok=0; fi\n",
             "    if [ \"$_ok\" = 1 ]; then printf '%s\\n' \"$_p\" >> \"$_st/free\"; else printf '%s\\n' \"$_r\" >> \"$_st/in_the_way\"; fi\n",
             "  done < \"$_st/all\"\n",
-            // Then what this checkout ignores too: check-ignore leaves out
-            // tracked paths and the rest. It exits 1 when it ignores none; if
-            // it can't answer at all, nothing is placed.
-            "  tr '\\n' '\\000' < \"$_st/free\" | G check-ignore -z --stdin > \"$_st/ignored0\" 2>/dev/null\n",
-            "  [ $? -le 1 ] || : > \"$_st/ignored0\"\n",
-            "  tr '\\000' '\\n' < \"$_st/ignored0\" | LC_ALL=C sort > \"$_st/ignored\"\n",
+            // Then the source machine's own rules, for the free paths they
+            // decided that this checkout doesn't ignore: one anchored entry
+            // each, with the characters a pattern treats specially escaped,
+            // appended unless the same line is there already. A local
+            // destination's `info/exclude` is its shared clone's, which
+            // usually ignores them already.
+            "  LC_ALL=C comm -12 \"$_st/free\" \"$_st/local\" > \"$_st/local_free\"\n",
+            "  if ignored_check \"$_st/local_free\" \"$_st/local_ignored\"; then\n",
+            "    LC_ALL=C comm -23 \"$_st/local_free\" \"$_st/local_ignored\" > \"$_st/local_add\"\n",
+            "  else\n",
+            "    : > \"$_st/local_add\"\n",
+            "  fi\n",
+            "  if [ -s \"$_st/local_add\" ]; then\n",
+            "    _ex=$(G rev-parse --git-path info/exclude) || fail 'cannot find info/exclude'\n",
+            "    mkdir -p -- \"$(dirname -- \"$_ex\")\" || fail \"cannot create the directory for $_ex\"\n",
+            "    if [ -s \"$_ex\" ] && [ -n \"$(tail -c 1 -- \"$_ex\")\" ]; then printf '\\n' >> \"$_ex\" || fail \"cannot write $_ex\"; fi\n",
+            "    while IFS= read -r _p; do\n",
+            "      _e=/$(printf '%s' \"${_p#./}\" | LC_ALL=C sed 's/[][\\\\*?#! ]/\\\\&/g')\n",
+            "      LC_ALL=C grep -qxF -e \"$_e\" -- \"$_ex\" 2>/dev/null || printf '%s\\n' \"$_e\" >> \"$_ex\" || fail \"cannot write $_ex\"\n",
+            "    done < \"$_st/local_add\"\n",
+            "    printf 'ignored_excluded=%s\\n' \"$(ignored_count \"$_st/local_add\")\"\n",
+            "  fi\n",
+            // Then each free `.gitignore`, so what it ignores is ignored when
+            // asked; the directories made for it are noted, to go again if
+            // it does.
+            "  : > \"$_st/tentative\"\n",
+            "  : > \"$_st/made\"\n",
+            "  while IFS= read -r _p; do\n",
+            "    case $_p in */.gitignore) printf '%s\\n' \"$_p\" >> \"$_st/tentative\" ;; esac\n",
+            "  done < \"$_st/free\"\n",
+            "  while IFS= read -r _p; do\n",
+            "    _r=${_p#./} _m=${_p%/.gitignore}\n",
+            "    while [ \"$_m\" != . ] && [ ! -e \"$_m\" ]; do printf '%s\\n' \"$_m\" >> \"$_st/made\"; _m=${_m%/*}; done\n",
+            "    mkdir -p -- \"${_p%/.gitignore}\" || fail \"cannot create the directory for $_r\"\n",
+            "    cp -p \"$_st/files/$_r\" \"$_p\" || fail \"cannot place $_r\"\n",
+            "    cmp -s \"$_st/files/$_r\" \"$_p\" || fail \"$_r did not arrive whole\"\n",
+            "  done < \"$_st/tentative\"\n",
+            // Then what this checkout ignores, until every `.gitignore` put
+            // in place is among it: one that isn't would show up as
+            // untracked, and what it alone ignored with it. If check-ignore
+            // can't answer at all, nothing is placed.
+            "  while :; do\n",
+            "    ignored_check \"$_st/free\" \"$_st/ignored\"\n",
+            "    LC_ALL=C comm -23 \"$_st/tentative\" \"$_st/ignored\" > \"$_st/drop\"\n",
+            "    [ -s \"$_st/drop\" ] || break\n",
+            "    while IFS= read -r _p; do rm -f -- \"$_p\"; done < \"$_st/drop\"\n",
+            "    LC_ALL=C comm -23 \"$_st/tentative\" \"$_st/drop\" > \"$_st/kept\"\n",
+            "    mv -f -- \"$_st/kept\" \"$_st/tentative\"\n",
+            "  done\n",
+            "  LC_ALL=C sort -ru \"$_st/made\" | while IFS= read -r _m; do rmdir -- \"$_m\" 2>/dev/null; done\n",
             "  LC_ALL=C comm -23 \"$_st/free\" \"$_st/ignored\" > \"$_st/unignored\"\n",
-            "  : > \"$_st/placed\"\n",
+            "  LC_ALL=C comm -23 \"$_st/ignored\" \"$_st/tentative\" > \"$_st/rest\"\n",
             "  while IFS= read -r _p; do\n",
             "    _r=${_p#./}\n",
             "    case $_r in */*) [ -d \"./${_r%/*}\" ] || mkdir -p -- \"./${_r%/*}\" || fail \"cannot create the directory for $_r\" ;; esac\n",
             "    cp -p \"$_st/files/$_r\" \"./$_r\" || fail \"cannot place $_r\"\n",
             "    cmp -s \"$_st/files/$_r\" \"./$_r\" || fail \"$_r did not arrive whole\"\n",
-            "    printf '%s\\n' \"$_r\" >> \"$_st/placed\"\n",
-            "  done < \"$_st/ignored\"\n",
-            "  printf 'ignored_placed=%s\\n' \"$(ignored_count \"$_st/placed\")\"\n",
+            "  done < \"$_st/rest\"\n",
+            "  printf 'ignored_placed=%s\\n' \"$(ignored_count \"$_st/ignored\")\"\n",
             "  if [ -s \"$_st/unignored\" ]; then\n",
             "    printf 'ignored_unignored=%s\\nignored_unignored_path=%s\\n' \"$(ignored_count \"$_st/unignored\")\" \"$(head -n 1 \"$_st/unignored\" | sed 's|^\\./||')\"\n",
             "  fi\n",
@@ -111,24 +192,29 @@ macro_rules! ignored_prelude {
 /// Archive a checkout's ignored files (see the module documentation).
 ///
 /// Arguments: `$1` the checkout, `$2` the archive to write (absolute; its
-/// directory is created), `$3` the cap in bytes.
+/// directory is created), `$3` the cap in bytes, `$4` where to write the
+/// excludes list.
 ///
 /// Prints `ignored_files` and `ignored_bytes`. With none, that is all. Past
 /// the cap it adds `ignored_over_cap=1` and writes nothing. Otherwise it
 /// replaces `$2` whole — through `$2.part`, so an archive already there
 /// stays until this one is complete — and prints its `ignored_size` and
-/// `ignored_sha256`. Reads the checkout only.
+/// `ignored_sha256`; and replaces `$4` with the `./<path>` lines of the ones
+/// only rules outside the checkout's `.gitignore` files ignore, printing its
+/// `ignored_excludes_size` and `ignored_excludes_sha256`, or removes it when
+/// there are none (or check-ignore can't say). Reads the checkout only.
 pub const IGNORED_ARCHIVE_SCRIPT: &str = concat!(
     prelude!(),
     ignored_prelude!(),
     "cd -- \"$1\" 2>/dev/null || fail \"cannot enter $1\"\n",
-    "ar=$2 cap=$3\n",
+    "ar=$2 cap=$3 ex=$4\n",
     "case $cap in ''|*[!0-9]*) fail \"not a size: $cap\" ;; esac\n",
+    "[ -n \"$ex\" ] || fail 'no path for the excludes list'\n",
     "top=$(G rev-parse --show-toplevel 2>/dev/null) || fail \"not a git checkout: $PWD\"\n",
     "cd -- \"$top\" || fail \"cannot enter $top\"\n",
     "mkdir -p -- \"$(dirname -- \"$ar\")\" || fail \"cannot create the directory for $ar\"\n",
     "list=\"$ar.list\"\n",
-    "on_fail() { rm -f -- \"$list\" \"$ar.part\"; }\n",
+    "on_fail() { rm -f -- \"$list\" \"$ar.part\" \"$ex.z\" \"$ex.part\"; }\n",
     "ignored_list > \"$list\" || fail 'cannot list the ignored files'\n",
     "sizes=$(ignored_sizes < \"$list\")\n",
     "n=${sizes% *} b=${sizes#* }\n",
@@ -144,9 +230,29 @@ pub const IGNORED_ARCHIVE_SCRIPT: &str = concat!(
     "err=$(tr '\\n' '\\000' < \"$list\" | $tar_c -cf \"$ar.part\" --null -T - 2>&1)\n",
     "rc=$?\n",
     "if [ \"$rc\" != 0 ] && ! { [ \"$gnu\" = 1 ] && [ \"$rc\" = 1 ] && [ -s \"$ar.part\" ]; }; then fail \"cannot archive the ignored files: $err\"; fi\n",
+    // What decided each one: check-ignore -v -z gives `<source> NUL <line>
+    // NUL <pattern> NUL <path> NUL`, and names a `.gitignore` in the
+    // checkout by its path from the top, `info/exclude` by a path into the
+    // git directory, and the global excludes file by an absolute path. A
+    // negated pattern means not ignored; none should decide here, and none
+    // is listed.
+    "rm -f -- \"$ex\"\n",
+    "tr '\\n' '\\000' < \"$list\" | G check-ignore -v -z --stdin > \"$ex.z\" 2>/dev/null\n",
+    "if [ $? -le 1 ]; then\n",
+    "  tr '\\000' '\\n' < \"$ex.z\" | awk 'NR % 4 == 1 { s = $0 } NR % 4 == 3 { p = $0 } NR % 4 == 0 && p !~ /^!/ && (s ~ /^\\// || (s != \".gitignore\" && s !~ /\\/\\.gitignore$/)) { print }' | LC_ALL=C sort > \"$ex.part\"\n",
+    "else\n",
+    "  : > \"$ex.part\"\n",
+    "fi\n",
+    "rm -f -- \"$ex.z\"\n",
     "mv -f -- \"$ar.part\" \"$ar\" || fail \"cannot write $ar\"\n",
     "rm -f -- \"$list\"\n",
     "printf 'ignored_size=%s\\nignored_sha256=%s\\n' \"$(size_of \"$ar\")\" \"$(sha256_of \"$ar\")\"\n",
+    "if [ -s \"$ex.part\" ]; then\n",
+    "  mv -f -- \"$ex.part\" \"$ex\" || fail \"cannot write $ex\"\n",
+    "  printf 'ignored_excludes_size=%s\\nignored_excludes_sha256=%s\\n' \"$(size_of \"$ex\")\" \"$(sha256_of \"$ex\")\"\n",
+    "else\n",
+    "  rm -f -- \"$ex.part\"\n",
+    "fi\n",
     "exit 0\n",
 );
 
@@ -159,6 +265,9 @@ pub struct IgnoredFiles {
     pub over_cap: bool,
     /// The archive, when there was anything to archive within the cap.
     pub archive: Option<BundleFile>,
+    /// The excludes list beside it: the files in it that only rules outside
+    /// the checkout's `.gitignore` files ignore, when there are any.
+    pub excludes: Option<BundleFile>,
 }
 
 impl IgnoredFiles {
@@ -167,6 +276,13 @@ impl IgnoredFiles {
     pub fn archive_name(bundle_name: &str) -> String {
         let stem = bundle_name.strip_suffix(".bundle").unwrap_or(bundle_name);
         format!("{stem}.ignored.tar")
+    }
+
+    /// The excludes list's file name for a bundle's: `0-widgets.bundle`
+    /// keeps it in `0-widgets.ignored.excludes`.
+    pub fn excludes_name(bundle_name: &str) -> String {
+        let stem = bundle_name.strip_suffix(".bundle").unwrap_or(bundle_name);
+        format!("{stem}.ignored.excludes")
     }
 
     pub fn parse(stdout: &str) -> Result<Self, TransferError> {
@@ -180,18 +296,32 @@ impl IgnoredFiles {
         } else {
             None
         };
+        let excludes = match report.get("ignored_excludes_sha256") {
+            Some(_) if archive.is_some() => Some(BundleFile::from_report_as(
+                STEP,
+                &report,
+                "ignored_excludes",
+            )?),
+            _ => None,
+        };
         Ok(Self {
             files,
             bytes,
             over_cap,
             archive,
+            excludes,
         })
     }
 }
 
 /// Arguments for [`IGNORED_ARCHIVE_SCRIPT`].
-pub fn archive_args(checkout: &str, archive: &str, cap: u64) -> Vec<String> {
-    vec![checkout.to_string(), archive.to_string(), cap.to_string()]
+pub fn archive_args(checkout: &str, archive: &str, cap: u64, excludes: &str) -> Vec<String> {
+    vec![
+        checkout.to_string(),
+        archive.to_string(),
+        cap.to_string(),
+        excludes.to_string(),
+    ]
 }
 
 /// What placing an archive at the destination did: part of
@@ -199,9 +329,13 @@ pub fn archive_args(checkout: &str, archive: &str, cap: u64) -> Vec<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IgnoredPlacement {
     pub placed: u64,
-    /// Files the destination doesn't ignore (its `.gitignore` or excludes
-    /// differ), so they were left out rather than pass for the branch's own
-    /// changes there.
+    /// Files only the source machine's own excludes ignored, which this
+    /// one's didn't, given an entry in its `info/exclude` so they could be
+    /// placed.
+    pub excluded: u64,
+    /// Files the destination doesn't ignore (a `.gitignore` change that
+    /// stayed behind, say), so they were left out rather than pass for the
+    /// branch's own changes there.
     pub unignored: u64,
     pub unignored_example: Option<String>,
     /// Files with something already in the way: a file at the path, or a
@@ -223,6 +357,7 @@ impl IgnoredPlacement {
         report.get("ignored_placed")?;
         Some(Self {
             placed: count("ignored_placed"),
+            excluded: count("ignored_excluded"),
             unignored: count("ignored_unignored"),
             unignored_example: example("ignored_unignored_path"),
             in_the_way: count("ignored_in_the_way"),
@@ -252,8 +387,28 @@ mod tests {
                     size: 10240,
                     sha256: "ab".repeat(32)
                 }),
+                excludes: None,
             }
         );
+        let with_excludes = IgnoredFiles::parse(&format!(
+            "ignored_files=3\nignored_bytes=120\nignored_size=10240\nignored_sha256={sha}\n\
+             ignored_excludes_size=12\nignored_excludes_sha256={}\n",
+            "CD".repeat(32)
+        ))
+        .unwrap();
+        assert_eq!(
+            with_excludes.excludes,
+            Some(BundleFile {
+                size: 12,
+                sha256: "cd".repeat(32)
+            })
+        );
+        // An excludes list promises its size.
+        assert!(IgnoredFiles::parse(&format!(
+            "ignored_files=3\nignored_bytes=120\nignored_size=10240\nignored_sha256={sha}\n\
+             ignored_excludes_sha256={sha}\n"
+        ))
+        .is_err());
         let none = IgnoredFiles::parse("ignored_files=0\nignored_bytes=0\n").unwrap();
         assert_eq!(none.archive, None);
         let over = IgnoredFiles::parse(
@@ -269,18 +424,23 @@ mod tests {
             IgnoredFiles::archive_name("0-widgets.bundle"),
             "0-widgets.ignored.tar"
         );
+        assert_eq!(
+            IgnoredFiles::excludes_name("0-widgets.bundle"),
+            "0-widgets.ignored.excludes"
+        );
     }
 
     #[test]
     fn a_placement_report_names_what_was_left_out() {
         let report = ScriptReport::parse(
-            "ignored_placed=2\nignored_unignored=1\nignored_unignored_path=.envrc\n\
+            "ignored_placed=2\nignored_excluded=1\nignored_unignored=1\nignored_unignored_path=.envrc\n\
              ignored_in_the_way=3\nignored_in_the_way_path=cache/x.log\n",
         );
         assert_eq!(
             IgnoredPlacement::from_report(&report),
             Some(IgnoredPlacement {
                 placed: 2,
+                excluded: 1,
                 unignored: 1,
                 unignored_example: Some(".envrc".to_string()),
                 in_the_way: 3,

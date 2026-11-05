@@ -1,7 +1,7 @@
 //! Ignored files: which ones a transfer archives, the cap, and placing them
 //! at the destination, under every shell.
 
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{symlink, PermissionsExt};
 
 use super::*;
 use scripts::{IgnoredFiles, IgnoredPlacement, IGNORED_ARCHIVE_SCRIPT, IGNORED_FILES_CAP};
@@ -110,6 +110,11 @@ fn assert_holds(dir: &Path, expected: &Files, what: &str) {
     assert_eq!(files_under(dir).len(), expected.len(), "{what}");
 }
 
+/// The excludes list [`IGNORED_ARCHIVE_SCRIPT`] writes beside `archive`.
+fn excludes_beside(archive: &Path) -> PathBuf {
+    archive.with_extension("excludes")
+}
+
 fn archive(
     endpoint: &LocalEndpoint,
     checkout: &Path,
@@ -123,6 +128,7 @@ fn archive(
                 checkout.to_str().unwrap(),
                 archive.to_str().unwrap(),
                 cap,
+                excludes_beside(archive).to_str().unwrap(),
             ),
         )
         .unwrap();
@@ -330,9 +336,6 @@ fn placing_ignored_files_never_overwrites_or_follows_a_symlink() {
     for shell in shells() {
         let w = World::new(shell);
         let mut expected = ignored_fixture(&w.source);
-        // Ignored at the source only, so not at the destination.
-        fs::write(w.source.join(".git/info/exclude"), "*.secret\n").unwrap();
-        write(&w.source, "x.secret", "secret\n");
         // Already there, and ignored on main too, so it isn't untracked.
         write(&w.dest, "debug.log", "theirs\n");
         // A symlink out of the checkout where a directory of theirs goes.
@@ -360,10 +363,8 @@ fn placing_ignored_files_never_overwrites_or_follows_a_symlink() {
             files_under(&outside).is_empty(),
             "{shell}: wrote through the symlink"
         );
-        assert!(!w.dest.join("x.secret").exists(), "{shell}");
         let placement = outcome.applied.ignored.unwrap();
-        assert_eq!(placement.unignored, 1, "{shell}");
-        assert_eq!(placement.unignored_example.as_deref(), Some("x.secret"));
+        assert_eq!(placement.unignored, 0, "{shell}: {placement:?}");
         // debug.log, and both files under the symlink.
         assert_eq!(placement.in_the_way, 3, "{shell}: {placement:?}");
         assert!(placement.in_the_way_example.is_some());
@@ -489,5 +490,435 @@ fn backing_ignored_files_up_brings_them_here_once() {
         let over = super::super::carry::back_up_ignored(&source, &small, None).unwrap();
         assert!(over.over_cap);
         assert_eq!(fetched(), 2, "{shell}");
+    }
+}
+
+/// Git at one end with nothing of this machine's: no system config, a global
+/// config of `config` alone, and a home of its own — so the developer's
+/// `~/.config/git/ignore` stays out, and each end ignores only what the test
+/// says it does.
+struct Isolated {
+    vars: Vec<(&'static str, String)>,
+}
+
+impl Isolated {
+    fn new(root: &Path, name: &str, config: &str) -> Self {
+        let home = root.join(format!("home-{name}"));
+        fs::create_dir_all(home.join(".config/git")).unwrap();
+        let gitconfig = home.join(".gitconfig");
+        fs::write(&gitconfig, config).unwrap();
+        let path = |p: PathBuf| p.to_str().unwrap().to_string();
+        Self {
+            vars: vec![
+                ("HOME", path(home.clone())),
+                ("XDG_CONFIG_HOME", path(home.join(".config"))),
+                ("GIT_CONFIG_GLOBAL", path(gitconfig)),
+                ("GIT_CONFIG_NOSYSTEM", "1".to_string()),
+            ],
+        }
+    }
+
+    /// The default global excludes file, `$XDG_CONFIG_HOME/git/ignore`.
+    fn global_ignore(&self) -> PathBuf {
+        let xdg = &self
+            .vars
+            .iter()
+            .find(|(k, _)| *k == "XDG_CONFIG_HOME")
+            .unwrap()
+            .1;
+        Path::new(xdg).join("git/ignore")
+    }
+
+    fn endpoint(&self, endpoint: LocalEndpoint) -> LocalEndpoint {
+        self.vars
+            .iter()
+            .fold(endpoint, |e, (k, v)| e.with_var(k, v))
+    }
+
+    fn git(&self, repo: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        command
+            .args(["-c", "core.hooksPath=/dev/null", "-C"])
+            .arg(repo)
+            .args(args);
+        strip_git_env(&mut command);
+        command.envs(self.vars.iter().map(|(k, v)| (k, v)));
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn status(&self, repo: &Path) -> String {
+        self.git(repo, &["status", "--porcelain", "--untracked-files=all"])
+    }
+}
+
+fn append(path: &Path, text: &str) {
+    let mut contents = fs::read(path).unwrap_or_default();
+    contents.extend_from_slice(text.as_bytes());
+    fs::write(path, contents).unwrap();
+}
+
+/// The preflight's report for one checkout.
+fn preflight_of(endpoint: &LocalEndpoint, checkout: &Path) -> scripts::ScriptReport {
+    let output = endpoint
+        .run_script(
+            scripts::PREFLIGHT_SCRIPT,
+            &scripts::preflight_args([(checkout.to_str().unwrap(), "feature")]),
+        )
+        .unwrap();
+    assert!(output.success, "{}{}", output.stdout, output.stderr);
+    scripts::sections(&output.stdout).remove(0)
+}
+
+/// An ignored symlink, dangling or not, that git lists last used to end
+/// the listing's batch with a failed test, which failed the whole listing:
+/// every backup failed, and the preflight said nothing.
+#[test]
+fn an_ignored_symlink_listed_last_neither_fails_the_listing_nor_is_archived() {
+    for shell in shells() {
+        let w = World::new(shell);
+        git(&w.source, &["checkout", "-q", "-b", "feature"]);
+        write(&w.source, ".gitignore", ".env\nbazel-*\nzz-*\n");
+        commit(&w.source, "ignore links");
+        write(&w.source, ".env", "SECRET=1\n");
+        symlink("src", w.source.join("bazel-out")).unwrap();
+        symlink("nowhere", w.source.join("zz-dangling")).unwrap();
+        symlink(".env", w.source.join("zz-link")).unwrap();
+        let listed = git(
+            &w.source,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored=matching",
+                "--untracked-files=all",
+            ],
+        );
+        assert_eq!(listed.lines().last(), Some("!! zz-link"), "{listed}");
+        let endpoint = w.endpoint(&w.local_scratch);
+        let path = w.local_scratch.join("x.ignored.tar");
+
+        let ignored = archive(&endpoint, &w.source, &path, IGNORED_FILES_CAP).unwrap();
+
+        let expected: Files = [(".env".to_string(), b"SECRET=1\n".to_vec())].into();
+        assert_eq!((ignored.files, ignored.bytes), (1, 9), "{shell}");
+        assert_archive_holds(&path, &w.root.join("unpacked"), &expected, shell);
+        let report = preflight_of(&endpoint, &w.source);
+        assert_eq!(report.get("ignored_files"), Some("1"), "{shell}");
+        assert_eq!(report.get("ignored_unlisted"), None, "{shell}");
+    }
+}
+
+/// A status that fails part way fails the listing, rather than pass for a
+/// checkout without ignored files: the archive refuses, so the source is
+/// kept, and the preflight says so.
+#[test]
+fn a_failing_status_fails_the_ignored_listing_and_the_preflight_says_so() {
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    for shell in shells() {
+        let w = World::new(shell);
+        ignored_fixture(&w.source);
+        // Only the listing's status — `-z` with `--ignored=matching` — fails,
+        // after printing one record, as one cut off would.
+        let shim = w.root.join("shim");
+        fs::create_dir_all(&shim).unwrap();
+        fs::write(
+            shim.join("git"),
+            format!(
+                "#!/bin/sh\nz=0 i=0\nfor a; do case $a in -z) z=1 ;; --ignored=matching) i=1 ;; esac; done\n\
+                 if [ $z = 1 ] && [ $i = 1 ]; then printf '!! .env\\000!! debu'; exit 128; fi\n\
+                 exec {} \"$@\"\n",
+                real_git.trim()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(shim.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+        let endpoint = w.endpoint(&w.local_scratch).with_var(
+            "PATH",
+            &format!(
+                "{}:{}",
+                shim.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+        let path = w.local_scratch.join("x.ignored.tar");
+
+        let err = archive(&endpoint, &w.source, &path, IGNORED_FILES_CAP).unwrap_err();
+
+        assert!(
+            err.contains("cannot list the ignored files"),
+            "{shell}: {err}"
+        );
+        assert!(!path.exists());
+        let report = preflight_of(&endpoint, &w.source);
+        assert_eq!(report.get("ignored_unlisted"), Some("1"), "{shell}");
+        assert_eq!(report.get("ignored_files"), None, "{shell}");
+        // The counts that don't need the list still come.
+        assert_eq!(report.get("ignored_dirs"), Some("4"), "{shell}");
+    }
+}
+
+/// `.pytest_cache/` (or `.mypy_cache/`, or a uv `.venv/`) holds a `.gitignore`
+/// of `*`: git lists each file in it, and none of them is ignored at a
+/// destination until that `.gitignore` is there. A `.gitignore` that only a
+/// change left behind ignores is taken back out, with what it ignored.
+#[test]
+fn a_directory_that_ignores_itself_arrives_whole() {
+    for shell in shells() {
+        for landing in [Landing::Checkout, Landing::Branch] {
+            let w = World::new(shell);
+            let source_env = Isolated::new(&w.root, "source", "");
+            let dest_env = Isolated::new(&w.root, "dest", "");
+            git(&w.source, &["checkout", "-q", "-b", "feature"]);
+            write(&w.source, "src/tracked.txt", "tracked\n");
+            commit(&w.source, "feature");
+            let expected: Files = [
+                (
+                    ".pytest_cache/.gitignore",
+                    "# Created by pytest automatically.\n*\n",
+                ),
+                (".pytest_cache/README.md", "# pytest cache directory #\n"),
+                // In a directory the branch has.
+                ("src/.cache/.gitignore", "*\n"),
+                ("src/.cache/data", "data\n"),
+            ]
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
+            .collect();
+            for (path, content) in &expected {
+                write(&w.source, path, content);
+            }
+            // A directory in it is one `*` matches: an ignored folder,
+            // never carried.
+            write(&w.source, ".pytest_cache/v/cache/nodeids", "[]\n");
+            // Ignored only by an uncommitted line, which stays behind.
+            append(&w.source.join(".gitignore"), "gen/.gitignore\n");
+            write(&w.source, "gen/.gitignore", "out.txt\n");
+            write(&w.source, "gen/out.txt", "out\n");
+            let (source, dest, checkout) = match landing {
+                Landing::Checkout => (
+                    source_env.endpoint(w.endpoint(&w.local_scratch)),
+                    dest_env.endpoint(w.endpoint(&w.remote_scratch)),
+                    w.dest.clone(),
+                ),
+                Landing::Branch => (
+                    source_env.endpoint(w.endpoint(&w.remote_scratch)),
+                    dest_env.endpoint(w.endpoint(&w.local_scratch)),
+                    w.root.join("wt-feature"),
+                ),
+            };
+            let plan = CarryPlan {
+                include_ignored: true,
+                ..w.origin_plan(
+                    &source,
+                    &dest,
+                    landing,
+                    ("feature", "feature"),
+                    false,
+                    &["main"],
+                )
+            };
+            let outcome = carry_repo(&source, &dest, &plan).unwrap();
+            let placement = match landing {
+                Landing::Checkout => outcome.applied.ignored.clone(),
+                Landing::Branch => {
+                    git(
+                        &w.dest,
+                        &[
+                            "worktree",
+                            "add",
+                            "-q",
+                            checkout.to_str().unwrap(),
+                            "feature",
+                        ],
+                    );
+                    finish(&dest, &plan, &outcome, checkout.to_str().unwrap())
+                        .unwrap()
+                        .ignored
+                }
+            }
+            .unwrap();
+
+            let what = format!("{shell} {landing:?}");
+            assert_eq!(ignored_in(&checkout, &expected), expected, "{what}");
+            assert_eq!(
+                placement.placed,
+                expected.len() as u64,
+                "{what}: {placement:?}"
+            );
+            assert_eq!(placement.excluded, 0, "{what}");
+            assert_eq!(placement.unignored, 2, "{what}: {placement:?}");
+            assert_eq!(
+                placement.unignored_example.as_deref(),
+                Some("gen/.gitignore"),
+                "{what}"
+            );
+            assert!(!checkout.join("gen").exists(), "{what}: gen/ left behind");
+            assert!(!checkout.join(".pytest_cache/v").exists(), "{what}");
+            assert_eq!(dest_env.status(&checkout), "", "{what}");
+            let staged = format!("{}.d", outcome.dest_ignored.as_deref().unwrap());
+            assert!(!Path::new(&staged).exists(), "{what}: {staged} left");
+        }
+    }
+}
+
+/// Files only the source machine's own rules ignore — its clone's
+/// `info/exclude`, its global excludes file — would show up as untracked at
+/// a destination without those rules, so each gets an anchored entry in the
+/// destination's `info/exclude` first, unless the destination ignores it
+/// already.
+#[test]
+fn files_only_this_machines_excludes_ignore_arrive_with_an_entry_in_info_exclude() {
+    let odd = "odd #1 [a]*?! x\\y.local";
+    for shell in shells() {
+        // To a fresh workspace clone, which has none of the source's rules.
+        let w = World::new(shell);
+        let mut expected = ignored_fixture(&w.source);
+        let excludes_file = w.root.join("excludes");
+        fs::write(&excludes_file, "**/.claude/settings.local.json\n*.swp\n").unwrap();
+        let source_env = Isolated::new(
+            &w.root,
+            "source",
+            &format!("[core]\n\texcludesFile = {}\n", excludes_file.display()),
+        );
+        let dest_env = Isolated::new(&w.root, "dest", "");
+        append(&w.source.join(".git/info/exclude"), ".penpal\n*.local\n");
+        let local: Files = [
+            (".penpal", "pen\n"),
+            (".claude/settings.local.json", "{}\n"),
+            ("src/notes.swp", "swp\n"),
+            (odd, "odd\n"),
+        ]
+        .into_iter()
+        .map(|(p, c)| (p.to_string(), c.as_bytes().to_vec()))
+        .collect();
+        for (path, content) in &local {
+            write(&w.source, path, content);
+        }
+        expected.extend(local.clone());
+        let source = source_env.endpoint(w.endpoint(&w.local_scratch));
+        let dest = dest_env.endpoint(w.endpoint(&w.remote_scratch));
+        // The dialog counts them with the rest: they move too.
+        let report = preflight_of(&source, &w.source);
+        assert_eq!(
+            report.get("ignored_files"),
+            Some(expected.len().to_string().as_str()),
+            "{shell}"
+        );
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Checkout,
+                ("feature", "feature"),
+                true,
+                &["main"],
+            )
+        };
+
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+
+        let listed = fs::read_to_string(plan.local_ignored_excludes()).unwrap();
+        let mut wanted: Vec<String> = local.keys().map(|p| format!("./{p}")).collect();
+        wanted.sort();
+        assert_eq!(listed.lines().collect::<Vec<_>>(), wanted, "{shell}");
+        assert!(outcome.ignored.as_ref().unwrap().excludes.is_some());
+        assert_eq!(ignored_in(&w.dest, &expected), expected, "{shell}");
+        let placement = outcome.applied.ignored.clone().unwrap();
+        assert_eq!(
+            placement,
+            IgnoredPlacement {
+                placed: expected.len() as u64,
+                excluded: local.len() as u64,
+                ..IgnoredPlacement::default()
+            },
+            "{shell}"
+        );
+        let exclude = fs::read_to_string(w.dest.join(".git/info/exclude")).unwrap();
+        for entry in [
+            "/.penpal",
+            "/.claude/settings.local.json",
+            "/src/notes.swp",
+            "/odd\\ \\#1\\ \\[a\\]\\*\\?\\!\\ x\\\\y.local",
+        ] {
+            assert!(
+                exclude.lines().any(|l| l == entry),
+                "{shell}: {entry} in {exclude}"
+            );
+        }
+        // Nothing shows up as a change of the branch's own.
+        assert_eq!(
+            dest_env.status(&w.dest),
+            source_env.status(&w.source),
+            "{shell}"
+        );
+
+        // To a local clone whose rules already ignore some of them, finishing
+        // in a new worktree: only the others get an entry, after a newline
+        // the file didn't end with.
+        let w = World::new(shell);
+        ignored_fixture(&w.source);
+        let excludes_file = w.root.join("excludes");
+        fs::write(&excludes_file, "**/.claude/settings.local.json\n*.swp\n").unwrap();
+        let source_env = Isolated::new(
+            &w.root,
+            "source",
+            &format!("[core]\n\texcludesFile = {}\n", excludes_file.display()),
+        );
+        let dest_env = Isolated::new(&w.root, "dest", "");
+        fs::write(dest_env.global_ignore(), "*.swp\n").unwrap();
+        append(&w.source.join(".git/info/exclude"), ".penpal\n*.local\n");
+        fs::write(w.dest.join(".git/info/exclude"), ".penpal").unwrap();
+        for (path, content) in &local {
+            write(&w.source, path, content);
+        }
+        let source = source_env.endpoint(w.endpoint(&w.remote_scratch));
+        let dest = dest_env.endpoint(w.endpoint(&w.local_scratch));
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Branch,
+                ("feature", "feature"),
+                false,
+                &["main"],
+            )
+        };
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+        let worktree = w.root.join("wt-feature");
+        git(
+            &w.dest,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_str().unwrap(),
+                "feature",
+            ],
+        );
+        let finished = finish(&dest, &plan, &outcome, worktree.to_str().unwrap()).unwrap();
+
+        assert_eq!(ignored_in(&worktree, &local), local, "{shell}");
+        let placement = finished.ignored.unwrap();
+        assert_eq!((placement.excluded, placement.unignored), (2, 0), "{shell}");
+        assert_eq!(
+            fs::read_to_string(w.dest.join(".git/info/exclude")).unwrap(),
+            format!(
+                ".penpal\n/.claude/settings.local.json\n{}\n",
+                "/odd\\ \\#1\\ \\[a\\]\\*\\?\\!\\ x\\\\y.local"
+            ),
+            "{shell}"
+        );
+        assert_eq!(dest_env.status(&worktree), "", "{shell}");
     }
 }

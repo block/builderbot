@@ -54,12 +54,16 @@
   );
   let asksIgnored = $derived(preflight ? asksAboutIgnored(preflight) : false);
   let ignoredBlocked = $derived(preflight ? ignoredTransferBlocked(preflight) : null);
+  // A repo over the cap isn't backed up (its row says its ignored files are
+  // deleted with the source), so the note doesn't promise it.
   let backupNote = $derived(
     !asksIgnored
       ? ''
-      : pending?.direction === 'toRemote'
-        ? ', after their ignored files are backed up on this machine'
-        : ', after its ignored files are backed up on this machine'
+      : ignoredBlocked !== null
+        ? ', after ignored files under the size limit are backed up on this machine'
+        : pending?.direction === 'toRemote'
+          ? ', after their ignored files are backed up on this machine'
+          : ', after its ignored files are backed up on this machine'
   );
 
   // Each open starts from the remembered answer; a change made in another

@@ -445,6 +445,12 @@ describe('ProjectTransferDialog', () => {
     expect(rows[0]).not.toContain('kept in the backup');
     expect(rows[0]).toContain('more than the 256 MB a transfer can carry');
     expect(rows[1]).toContain('1 ignored file stays behind (kept in the backup)');
+    // The footnote promises a backup only of the ones under the limit.
+    const text = document.body.textContent?.replace(/\s+/g, ' ');
+    expect(text).toContain(
+      'after ignored files under the size limit are backed up on this machine'
+    );
+    expect(text).not.toContain('after their ignored files are backed up');
     // A warning, not a blocker: the transfer can go without them.
     expect(submitButton().disabled).toBe(false);
 

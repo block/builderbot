@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 
 use super::endpoint::TransferEndpoint;
 use super::scripts::{
-    self, ApplyMode, ApplyReport, ApplyRequest, BundleFile, IgnoredFiles, LfsPayload, OriginTips,
-    ScriptReport, Snapshot,
+    self, ApplyMode, ApplyReport, ApplyRequest, BundleFile, IgnoredAtDest, IgnoredFiles,
+    LfsPayload, OriginTips, ScriptReport, Snapshot,
 };
 use super::{is_valid_transfer_id, TransferError};
 
@@ -104,6 +104,17 @@ impl CarryPlan {
     pub fn local_ignored(&self) -> PathBuf {
         self.local_bundle.with_file_name(self.ignored_name())
     }
+
+    /// The ignored files' excludes list's name at each end.
+    pub fn ignored_excludes_name(&self) -> String {
+        IgnoredFiles::excludes_name(&self.bundle_name)
+    }
+
+    /// Where the excludes list is kept on this machine, beside the archive.
+    pub fn local_ignored_excludes(&self) -> PathBuf {
+        self.local_bundle
+            .with_file_name(self.ignored_excludes_name())
+    }
 }
 
 /// A repository carried to the destination.
@@ -122,6 +133,8 @@ pub struct CarryOutcome {
     pub ignored: Option<IgnoredFiles>,
     /// Their archive's path at the destination, when there was one to send.
     pub dest_ignored: Option<String>,
+    /// Its excludes list's path at the destination, when it had one.
+    pub dest_ignored_excludes: Option<String>,
     pub applied: ApplyReport,
     /// Whether the destination lacked the commits the first bundle was cut
     /// against, so it was re-bundled whole.
@@ -201,11 +214,18 @@ pub fn carry_repo_with(
         None
     };
     let ignored_archive = ignored.as_ref().and_then(|i| i.archive.as_ref());
+    let ignored_excludes = ignored
+        .as_ref()
+        .filter(|i| i.archive.is_some())
+        .and_then(|i| i.excludes.as_ref());
 
     let mut bundle = snapshot.bundle.clone();
     let lfs_bytes = snapshot.lfs.as_ref().map_or(0, |lfs| lfs.archive.size);
     on_step(CarryStep::Moving {
-        bytes: bundle.size + lfs_bytes + ignored_archive.map_or(0, |a| a.size),
+        bytes: bundle.size
+            + lfs_bytes
+            + ignored_archive.map_or(0, |a| a.size)
+            + ignored_excludes.map_or(0, |e| e.size),
     })?;
     move_file(
         source,
@@ -248,6 +268,23 @@ pub fn carry_repo_with(
         }
         None => None,
     };
+    let dest_ignored_excludes = match ignored_excludes {
+        Some(list) => {
+            let name = plan.ignored_excludes_name();
+            let dest_list = dest.scratch_path(&plan.transfer_id, &name)?;
+            move_file(
+                source,
+                dest,
+                "the ignored files to exclude",
+                &source.scratch_path(&plan.transfer_id, &name)?,
+                &plan.local_ignored_excludes(),
+                &dest_list,
+                list,
+            )?;
+            Some(dest_list)
+        }
+        None => None,
+    };
     on_step(CarryStep::Applying {
         snapshot: &snapshot,
     })?;
@@ -260,7 +297,14 @@ pub fn carry_repo_with(
             &dest_bundle,
             bundle,
             dest_lfs.as_deref(),
-            dest_ignored.as_deref().zip(ignored_archive),
+            dest_ignored
+                .as_deref()
+                .zip(ignored_archive)
+                .map(|(archive_path, archive)| IgnoredAtDest {
+                    archive_path,
+                    archive,
+                    excludes: dest_ignored_excludes.as_deref().zip(ignored_excludes),
+                }),
         )
     };
     let applied = match land_bundle(&bundle) {
@@ -303,6 +347,7 @@ pub fn carry_repo_with(
         dest_lfs,
         ignored,
         dest_ignored,
+        dest_ignored_excludes,
         applied,
         retried_without_exclusions: retried,
     })
@@ -348,7 +393,12 @@ fn archive_ignored(
         source,
         "ignored files",
         scripts::IGNORED_ARCHIVE_SCRIPT,
-        &scripts::ignored_archive_args(&plan.source_dir, &archive, plan.ignored_cap),
+        &scripts::ignored_archive_args(
+            &plan.source_dir,
+            &archive,
+            plan.ignored_cap,
+            &source.scratch_path(&plan.transfer_id, &plan.ignored_excludes_name())?,
+        ),
         plan.ignored_bytes.min(plan.ignored_cap),
     )?;
     IgnoredFiles::parse(&report)
@@ -390,10 +440,7 @@ pub fn finish(
             snapshot: &outcome.snapshot,
             restore: plan.include_uncommitted,
             lfs_path: outcome.dest_lfs.as_deref(),
-            ignored: outcome
-                .dest_ignored
-                .as_deref()
-                .zip(carried_archive(outcome)),
+            ignored: dest_ignored(outcome),
         },
         // Checking LFS content out writes every object again.
         plan.untracked_bytes
@@ -405,6 +452,20 @@ pub fn finish(
 
 fn carried_archive(outcome: &CarryOutcome) -> Option<&BundleFile> {
     outcome.ignored.as_ref().and_then(|i| i.archive.as_ref())
+}
+
+/// The ignored files `outcome` sent to the destination, with their excludes
+/// list when it went too.
+fn dest_ignored(outcome: &CarryOutcome) -> Option<IgnoredAtDest<'_>> {
+    let ignored = outcome.ignored.as_ref()?;
+    Some(IgnoredAtDest {
+        archive_path: outcome.dest_ignored.as_deref()?,
+        archive: ignored.archive.as_ref()?,
+        excludes: outcome
+            .dest_ignored_excludes
+            .as_deref()
+            .zip(ignored.excludes.as_ref()),
+    })
 }
 
 /// Placing ignored files unpacks their archive and copies each file out.
@@ -571,7 +632,7 @@ fn land(
     dest_bundle: &str,
     bundle: &BundleFile,
     dest_lfs: Option<&str>,
-    dest_ignored: Option<(&str, &BundleFile)>,
+    dest_ignored: Option<IgnoredAtDest<'_>>,
 ) -> Result<ApplyReport, TransferError> {
     let mode = match plan.landing {
         Landing::Checkout => ApplyMode::Checkout,
@@ -599,7 +660,10 @@ fn land(
             lfs_path: dest_lfs,
             ignored: dest_ignored,
         },
-        plan.untracked_bytes + bundle.size + lfs_bytes + placing_bytes(dest_ignored.map(|d| d.1)),
+        plan.untracked_bytes
+            + bundle.size
+            + lfs_bytes
+            + placing_bytes(dest_ignored.map(|d| d.archive)),
     )
 }
 

@@ -118,7 +118,7 @@ fn recover_one(
         manifest.warnings.push(warning.clone());
         Recovered::Marked(warning)
     };
-    manifest.keep_until_removed = manifest.holds_left_behind_changes();
+    manifest.keep_until_removed = manifest.holds_left_behind_files();
     if let Err(e) = backups::write_manifest(dir, &manifest) {
         log::warn!("[project_transfer] {e}");
     }

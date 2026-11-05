@@ -26,6 +26,9 @@ const LARGE_PAYLOAD_BYTES: u64 = 100 * 1024 * 1024;
 /// transfer asked to carry them.
 pub(super) const IGNORED_TOO_LARGE: &str = "ignored_too_large";
 
+/// A row's warning that its ignored files couldn't be listed.
+const IGNORED_UNLISTED: &str = "ignored_unlisted";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TransferDirection {
@@ -847,6 +850,18 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     row.ignored_dirs = count("ignored_dirs");
+    // Unlisted, they aren't carried (`ignored_files` is 0), and a source
+    // whose backup fails the same way is kept.
+    if report.get("ignored_unlisted").is_some() {
+        row.warnings.push(TransferIssue::new(
+            IGNORED_UNLISTED,
+            format!(
+                "{}'s ignored files couldn't be listed, so they won't be transferred; if they \
+                 still can't be backed up when the transfer ends, the {kind} is kept.",
+                row.branch_name
+            ),
+        ));
+    }
     if let Some(lfs) = LfsCounts::from_report(report) {
         let changed = |key: &str| report.get(key).and_then(|v| v.parse::<u64>().ok());
         row.lfs_present = lfs.present + changed("lfs_changed").unwrap_or(0);
@@ -938,4 +953,70 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         ));
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row() -> RepoPreflight {
+        RepoPreflight {
+            branch_id: "b".to_string(),
+            project_repo_id: None,
+            github_repo: "acme/widgets".to_string(),
+            subpath: None,
+            branch_name: "feature".to_string(),
+            dest_branch_name: "feature".to_string(),
+            state: RepoTransferState::NothingToCarry,
+            head: None,
+            upstream: None,
+            unpushed_commits: 0,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+            untracked_bytes: 0,
+            ignored_files: 0,
+            ignored_bytes: 0,
+            ignored_dirs: 0,
+            lfs_present: 0,
+            lfs_present_bytes: 0,
+            lfs_missing: 0,
+            lfs_missing_bytes: 0,
+            has_uncommitted_changes: false,
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Ignored files that can't be listed can't be carried or backed up: a
+    /// warning says so, rather than a count of none.
+    #[test]
+    fn ignored_files_that_cant_be_listed_are_a_warning() {
+        let report = ScriptReport::parse(
+            "head_ref=feature\nhead=abc\nstaged=0\nunstaged=0\nuntracked=0\nconflicted=0\n\
+             ignored=3\nignored_dirs=1\nignored_unlisted=1\n",
+        );
+        let mut unlisted = row();
+        assert!(read_checkout(&mut unlisted, &report, "worktree"));
+        assert_eq!(unlisted.ignored_files, 0);
+        assert!(unlisted.blockers.is_empty());
+        let codes: Vec<&str> = unlisted.warnings.iter().map(|w| w.code.as_str()).collect();
+        assert_eq!(codes, [IGNORED_UNLISTED]);
+        assert!(
+            unlisted.warnings[0]
+                .message
+                .contains("the worktree is kept"),
+            "{:?}",
+            unlisted.warnings
+        );
+
+        let listed = ScriptReport::parse(
+            "head_ref=feature\nhead=abc\nignored=3\nignored_files=3\nignored_bytes=30\n",
+        );
+        let mut row = row();
+        read_checkout(&mut row, &listed, "worktree");
+        assert_eq!(row.ignored_files, 3);
+        assert!(row.warnings.is_empty(), "{:?}", row.warnings);
+    }
 }

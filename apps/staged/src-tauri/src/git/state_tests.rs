@@ -267,6 +267,61 @@ fn bounded_build_declines_a_status_that_failed_after_a_capture_timed_out() {
     );
 }
 
+/// A bounded `git status` that joined a capture which then timed out while
+/// it waited declines the build as well. The capture marks its root before
+/// it wakes its waiters, so the read gets the same recent timeout as the
+/// reads after it rather than a capture that failed for good, which would
+/// make its failure an answer and the tree read as clean.
+#[cfg(unix)]
+#[test]
+fn bounded_build_declines_a_status_whose_capture_timed_out_while_it_waited() {
+    use crate::shell_env::{CaptureTimeouts, ShellEnvCache};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let repo = repo_with_unrunnable_clean_filter();
+    // The shell hangs, and once it is killed nothing it started is left, so
+    // the mark it leaves holds for `retry_after`.
+    let shell = crate::test_utils::write_fake_shell("#!/bin/sh\nexec sleep 30\n");
+    let timeouts = CaptureTimeouts {
+        shell: Duration::from_secs(3),
+        group: Duration::from_secs(4),
+        retry_after: Duration::from_secs(600),
+    };
+    let cache = Arc::new(
+        ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+            .with_home(repo.path().parent().expect("repo parent"))
+            .with_capture_timeouts(timeouts),
+    );
+    // The capture is in flight before the build's first read.
+    cache.prewarm(repo.path());
+
+    let bound = Duration::from_secs(30);
+    let status_waited = Mutex::new(None);
+    let error = settled_state(repo.path(), |args| {
+        if args.first() != Some(&"status") {
+            return cli::run_lite(repo.path(), args);
+        }
+        let started = Instant::now();
+        let read = cli::run_bounded_with_cache(&cache, repo.path(), args, bound);
+        *status_waited.lock().unwrap() = Some(started.elapsed());
+        read
+    })
+    .expect_err("status failed only for want of the captured env");
+    let waited = status_waited
+        .into_inner()
+        .unwrap()
+        .expect("the build read the status");
+    assert!(
+        waited >= timeouts.shell / 2 && waited < bound,
+        "status didn't wait on the capture until it timed out: {waited:?}"
+    );
+    assert!(
+        matches!(&error, GitError::CapturedEnvPending(inner) if inner.to_string().contains("clean filter")),
+        "{error:?}"
+    );
+}
+
 /// A pending failure in any read, not just `status`, declines the build,
 /// and reads that fail the same way with any env, such as a `merge-base`
 /// against a missing `origin/main`, don't.

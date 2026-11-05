@@ -482,7 +482,8 @@ fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) -> Applied
 ///
 /// When the bound runs out the inherited env is used and the capture is left
 /// running. The same goes, without the wait, for a root whose last capture
-/// timed out recently. Only the first caller to give up on a given capture logs it; the
+/// timed out recently, and for a read whose capture timed out while it
+/// waited. Only the first caller to give up on a given capture logs it; the
 /// rest of a refresh's reads, and other branches waiting on the same
 /// directory, would otherwise repeat the line once each. The warning is the
 /// capture's own summary line when it finishes, which counts every caller
@@ -515,13 +516,14 @@ fn apply_captured_env_within(
             warn_capture_failed(repo, &e);
             strip_git_env(command);
             AppliedEnv::LiteFallback {
-                // A root that timed out recently is captured again once
-                // what its shell left running has finished, or after a few
-                // minutes, so its captured env is still to come, as for a
-                // capture still running. A failure the captured env might
-                // have avoided then makes a state build decline, and the
-                // card keeps its state, rather than reading a `git status`
-                // that couldn't run a filter as a clean tree.
+                // A root that timed out recently, before this read or while
+                // it waited on the capture, is captured again once what its
+                // shell left running has finished, or after a few minutes,
+                // so its captured env is still to come, as for a capture
+                // still running. A failure the captured env might have
+                // avoided then makes a state build decline, and the card
+                // keeps its state, rather than reading a `git status` that
+                // couldn't run a filter as a clean tree.
                 capture_pending: crate::shell_env::is_recent_timeout(&e),
             }
         }

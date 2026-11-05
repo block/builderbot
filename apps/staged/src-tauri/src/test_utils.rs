@@ -163,3 +163,16 @@ pub fn write_fake_shell(content: &str) -> tempfile::TempPath {
     fs::set_permissions(&temp_path, perms).expect("chmod 755");
     temp_path
 }
+
+/// A line of `sh` for a fake shell, or something it starts, that waits for
+/// the file at `quoted_path` (already shell-quoted) to exist. It polls every
+/// 50 ms and gives up with `exit 1` after 1200 polls, about a minute, so a
+/// process a failed test never releases doesn't outlive the test binary
+/// polling a deleted tempdir.
+#[cfg(unix)]
+pub fn wait_for_file_sh(quoted_path: &str) -> String {
+    format!(
+        "i=0; while [ ! -e {quoted_path} ]; do \
+         [ $i -lt 1200 ] || exit 1; i=$((i+1)); sleep 0.05; done"
+    )
+}

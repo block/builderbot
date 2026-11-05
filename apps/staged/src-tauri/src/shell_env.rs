@@ -1267,6 +1267,10 @@ impl ShellEnvCache {
     /// the same cold capture. Those reads don't count as waiters in the
     /// capture's summary line, since they never waited.
     ///
+    /// A capture that times out while this caller waits on it fails the wait
+    /// with the recent-timeout error the reads after it get
+    /// ([`is_recent_timeout`]), not with the capture's own message.
+    ///
     /// [`get_blocking`]: ShellEnvCache::get_blocking
     pub fn get_blocking_within(
         &self,
@@ -1297,7 +1301,12 @@ impl ShellEnvCache {
             let waiter = promise.register_waiter();
             match promise.wait_blocking_until(deadline) {
                 Waited::Done(Ok(env)) => return Ok(BoundedEnv::Ready(env)),
-                Waited::Done(Err(msg)) => return Err(io::Error::other(msg)),
+                Waited::Done(Err(msg)) => {
+                    return Err(match self.live_timeout(key) {
+                        Some(timed_out) => timed_out.into(),
+                        None => io::Error::other(msg),
+                    });
+                }
                 Waited::Cancelled => continue, // Capturer cancelled — retry.
                 Waited::TimedOut => {
                     drop(waiter);
@@ -1306,6 +1315,20 @@ impl ShellEnvCache {
                     });
                 }
             }
+        }
+    }
+
+    /// The error `key`'s live timed-out mark gives lookups, if it has one.
+    ///
+    /// A capture that times out marks its root before it wakes its waiters,
+    /// so a bounded read woken by the timeout finds the mark here. It then
+    /// fails as the reads after it do ([`is_recent_timeout`]), and its caller
+    /// knows the captured env is still to come rather than that the capture
+    /// failed for good.
+    fn live_timeout(&self, key: &Path) -> Option<RecentTimeout> {
+        match self.inner.lock().unwrap().get(key) {
+            Some(CachedEntry::TimedOut(mark)) => mark.recent_timeout(self.timeouts.retry_after),
+            _ => None,
         }
     }
 

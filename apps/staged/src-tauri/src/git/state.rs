@@ -921,9 +921,10 @@ pub fn compute_local_branch_git_state_with<T: Send>(
 /// caller keeps the state it has. `refresh_branch_git_state` then queues one
 /// follow-up refresh on the capture (`timeline::git_state_follow_up`), which
 /// runs once it lands and gets the real state. After a timeout there is no
-/// capture to ride on, so the card keeps its state until a later refresh. Nothing retries here: a retry with the captured env
-/// would wait out the capture this build exists not to wait for, and a
-/// second bounded read of the same capture returns at once without it.
+/// capture to ride on, so the card keeps its state until a later refresh.
+/// Nothing retries here: a retry with the captured env would wait out the
+/// capture this build exists not to wait for, and a second bounded read of
+/// the same capture returns at once without it.
 pub fn compute_local_branch_git_state_bounded(
     repo: &Path,
     branch_name: &str,

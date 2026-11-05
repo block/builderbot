@@ -110,22 +110,22 @@ impl Drop for Place {
 mod tests {
     use super::*;
     use crate::shell_env::BoundedEnv;
-    use crate::test_utils::write_fake_shell;
+    use crate::test_utils::{wait_for_file_sh, write_fake_shell};
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    /// A cache whose fake shell takes `delay` seconds, logs each launch to
-    /// `launches`, and then exits with `status`. The scratch dir is its
+    /// A cache whose fake shell logs each launch to `launches`, runs `wait`
+    /// (a line of `sh`), and then exits with `status`. The scratch dir is its
     /// `$HOME`, so the env-root walk never leaves it.
     fn cache_with_shell(
         scratch: &Path,
-        delay: &str,
+        wait: &str,
         status: u8,
     ) -> (Arc<ShellEnvCache>, tempfile::TempPath, PathBuf) {
         let launches = scratch.join("launches");
         let shell = write_fake_shell(&format!(
-            "#!/bin/sh\necho launch >> '{}'\nsleep {delay}\n[ {status} = 0 ] || exit {status}\n\
+            "#!/bin/sh\necho launch >> '{}'\n{wait}\n[ {status} = 0 ] || exit {status}\n\
              PATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
             launches.display()
         ));
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn declined_refresh_runs_once_when_the_capture_lands() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let (cache, _shell, launch_log) = cache_with_shell(scratch.path(), "1", 0);
+        let (cache, _shell, launch_log) = cache_with_shell(scratch.path(), "sleep 1", 0);
         let worktree = worktree(scratch.path());
         let follow_ups = FollowUps::default();
         let (runs, ran) = mpsc::channel();
@@ -217,9 +217,11 @@ mod tests {
     #[test]
     fn follow_up_is_dropped_when_the_capture_fails() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        // Slow enough that the decline, the schedule and the `get_blocking`
-        // below all find this one capture still running on a loaded machine.
-        let (cache, _shell, launch_log) = cache_with_shell(scratch.path(), "2", 3);
+        // The shell fails only once the test releases it, so the decline and
+        // the schedule both find this one capture still running.
+        let release = scratch.path().join("release");
+        let wait = wait_for_file_sh(&format!("'{}'", release.display()));
+        let (cache, _shell, launch_log) = cache_with_shell(scratch.path(), &wait, 3);
         let worktree = worktree(scratch.path());
         let follow_ups = FollowUps::default();
         let (runs, ran) = mpsc::channel();
@@ -228,12 +230,11 @@ mod tests {
         assert!(follow_ups.schedule(&cache, &worktree, "a", counted(&runs, "a")));
         // The queued follow-up now holds the only sender.
         drop(runs);
-        // The capture fails at about 2 s, and a failure isn't cached.
-        let failed = cache.get_blocking(&worktree).map(|_| ());
-        assert!(failed.is_err(), "{failed:?}");
+        std::fs::write(&release, "").expect("write release");
 
-        // The capture thread drops the follow-up after it has woken its
-        // waiters, so wait for that rather than allow it a fixed time.
+        // The capture fails, and a failure isn't cached: its entry is gone
+        // before the capture thread drops the follow-up, which frees the
+        // branch's place.
         wait_until("the branch to lose its place", || {
             follow_ups.lock().is_empty()
         });

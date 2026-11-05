@@ -7,7 +7,7 @@
 //! serve fast and slow directories in the same test.
 
 use super::*;
-use crate::test_utils::write_fake_shell;
+use crate::test_utils::{wait_for_file_sh, write_fake_shell};
 use std::sync::mpsc;
 
 /// Fake `$SHELL` that reads its delay, then logs its directory to
@@ -725,13 +725,12 @@ fn timeout_kills_the_shell_but_not_what_it_started() {
     // The child says it started, waits for the test's go-ahead, and says it
     // finished. The shell waits for the child to start, then hangs.
     let marks = single_quote(&log.path().to_string_lossy());
+    let wait_for_go = wait_for_file_sh(&format!("{marks}/go"));
     let shell = write_fake_shell(&format!(
         "#!/bin/sh\n\
          PATH=/usr/bin:/bin\n\
          export PATH\n\
-         ( : > {marks}/started; \
-           while [ ! -e {marks}/go ]; do sleep 0.05; done; \
-           : > {marks}/finished ) &\n\
+         ( : > {marks}/started; {wait_for_go}; : > {marks}/finished ) &\n\
          while [ ! -e {marks}/started ]; do sleep 0.05; done\n\
          exec sleep 30\n"
     ));
@@ -915,23 +914,37 @@ fn after_capture_runs_once_the_capture_lands_without_promoting_it() {
 
 /// Fake `$SHELL` for what a killed shell leaves running. Each launch logs its
 /// directory to `log/launches`. Once `log/healthy` exists a launch captures
-/// as usual. Until then it starts a child that marks `log/started`, waits
-/// for `log/go` and marks `log/finished`, and then hangs once the child is
-/// up, so the child is what the capture timeout leaves behind.
+/// as usual. Until then it starts a child that writes its pid to
+/// `log/child.pid`, marks `log/started`, waits for `log/go` and marks
+/// `log/finished`, and then hangs once the child is up, so the child is what
+/// the capture timeout leaves behind.
 fn leaving_shell(log: &Path) -> tempfile::TempPath {
     let log = single_quote(&log.to_string_lossy());
+    let wait_for_go = wait_for_file_sh(&format!("{log}/go"));
     write_fake_shell(&format!(
         "#!/bin/sh\n\
          PATH=/usr/bin:/bin\n\
          export PATH\n\
          pwd >> {log}/launches\n\
          [ -e {log}/healthy ] && exec /bin/sh -s\n\
-         ( : > {log}/started; \
-           while [ ! -e {log}/go ]; do sleep 0.05; done; \
-           : > {log}/finished ) &\n\
+         ( sh -c 'echo $PPID' > {log}/child.pid; : > {log}/started; \
+           {wait_for_go}; : > {log}/finished ) &\n\
          while [ ! -e {log}/started ]; do sleep 0.05; done\n\
          exec sleep 30\n"
     ))
+}
+
+/// The pid [`leaving_shell`]'s child wrote, which it has by the time it marks
+/// `log/started`.
+fn child_pid(log: &Path) -> libc::pid_t {
+    let pid = std::fs::read_to_string(log.join("child.pid")).expect("read child.pid");
+    pid.trim().parse().expect("child pid")
+}
+
+/// Whether process `pid` still exists.
+fn process_exists(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks whether the process exists.
+    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 /// A cache using [`leaving_shell`] with `timeouts`, and a capture directory
@@ -1015,17 +1028,18 @@ fn timed_out_mark_lapses_once_what_the_shell_left_finishes() {
 
 /// L15: While what a killed shell left running is still going, its
 /// timed-out mark holds past `retry_after`, so no second rc run starts
-/// beside it. Once the leftovers are killed at the group deadline the mark
+/// beside it. At the group deadline the leftovers are killed and the mark
 /// lapses, and the next lookup captures again.
 #[test]
 fn timed_out_mark_holds_while_what_the_shell_left_runs() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
-    // `retry_after` is zero, so only the child holds the mark. The group
-    // deadline leaves the lookups below seconds to spare.
+    // `retry_after` is zero, so only the child holds the mark, and any lookup
+    // after the kill shows the mark outliving it. The group deadline leaves a
+    // loaded machine seconds to spare for that lookup.
     let timeouts = CaptureTimeouts {
         shell: Duration::from_secs(3),
-        group: Duration::from_secs(8),
+        group: Duration::from_secs(15),
         retry_after: Duration::ZERO,
     };
     let (cache, _shell, dir) = leaving_cache(log.path(), scratch.path(), timeouts);
@@ -1037,21 +1051,21 @@ fn timed_out_mark_holds_while_what_the_shell_left_runs() {
         .expect_err("the hung capture fails");
     assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
     wait_until("the child to start", || log.path().join("started").exists());
+    let child = child_pid(log.path());
     // A second shell would capture at once from here on.
     std::fs::write(log.path().join("healthy"), "").expect("write healthy");
-    for _ in 0..2 {
-        let held = cache
-            .get_blocking(&dir)
-            .map(|_| ())
-            .expect_err("the child holds the mark");
-        assert!(is_recent_timeout(&held), "{held}");
-        std::thread::sleep(Duration::from_millis(500));
-    }
+    let held = cache
+        .get_blocking(&dir)
+        .map(|_| ())
+        .expect_err("the child holds the mark");
+    assert!(is_recent_timeout(&held), "{held}");
+    assert!(held.to_string().contains("still running"), "{held}");
     assert_eq!(
         launch_dirs(log.path()).len(),
         1,
         "no second shell beside the leftovers"
     );
+    assert!(process_exists(child), "the child is still running");
 
     wait_until("the mark to lapse", || cache.get_blocking(&dir).is_ok());
     assert!(
@@ -1059,9 +1073,10 @@ fn timed_out_mark_holds_while_what_the_shell_left_runs() {
         "the mark lapsed before the group deadline: {:?}",
         started.elapsed()
     );
-    assert!(
-        !log.path().join("finished").exists(),
-        "the child was killed at the group deadline, not left to finish"
-    );
+    // The child never gets its go-ahead, so only the watchdog's kill at the
+    // deadline ends it before its own wait gives up, about a minute in.
+    wait_until("the child to be killed at the group deadline", || {
+        !process_exists(child)
+    });
     assert_eq!(launch_dirs(log.path()).len(), 2);
 }

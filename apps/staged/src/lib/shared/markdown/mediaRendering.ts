@@ -67,14 +67,35 @@ export function renderMarkdownMedia(
  * metadata, which then falls back to the CSS caps alone.
  */
 function imageSizeAttributes(src: string, dimensions: ImageDimensions | null | undefined): string {
-  if (!dimensions) return '';
-  const { width, height, density } = dimensions;
-  if (!(width > 0 && height > 0 && density >= 1)) return '';
-  const logicalWidth = Math.round(width / density);
-  const logicalHeight = Math.round(height / density);
-  const srcset = density > 1 ? ` srcset="${src} ${density}x"` : '';
+  const layout = mediaImageLayout(dimensions);
+  if (!layout) return '';
+  const srcset = layout.density > 1 ? ` srcset="${src} ${layout.density}x"` : '';
   return (
-    `${srcset} width="${logicalWidth}" height="${logicalHeight}"` +
-    ` style="--media-width: ${logicalWidth}px; --media-aspect: ${(width / height).toFixed(4)}"`
+    `${srcset} width="${layout.width}" height="${layout.height}"` +
+    ` style="--media-width: ${layout.width}px; --media-aspect: ${layout.aspect}"`
   );
+}
+
+/** The layout `imageSizeAttributes` emits, for callers that set it on a live element. */
+export interface MediaImageLayout {
+  /** Logical size: pixels over density. */
+  width: number;
+  height: number;
+  density: number;
+  /** Pixel aspect ratio, formatted for the `--media-aspect` custom property. */
+  aspect: string;
+}
+
+export function mediaImageLayout(
+  dimensions: ImageDimensions | null | undefined
+): MediaImageLayout | null {
+  if (!dimensions) return null;
+  const { width, height, density } = dimensions;
+  if (!(width > 0 && height > 0 && density >= 1)) return null;
+  return {
+    width: Math.round(width / density),
+    height: Math.round(height / density),
+    density,
+    aspect: (width / height).toFixed(4),
+  };
 }

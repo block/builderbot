@@ -22,8 +22,10 @@
   the backend guarantees a failed transfer left the note where it was.
 
   The line under the title says what travels: a repo note's repository, or —
-  for a moved project note — its child notes and their sessions (commits and
-  code reviews from that session stay on their branch).
+  for a moved project note with child notes — those notes and their sessions
+  (commits and code reviews from that session stay on their branch). A note
+  that brings children can only land in a local project, so remote ones are
+  left off the list then.
 -->
 <script lang="ts" module>
   let inputCounter = 0;
@@ -47,6 +49,7 @@
   import * as commands from '../../api/commands';
   import { filterMoveTargets, nextMoveTargetIndex } from '../branches/moveBranchTarget';
   import {
+    childrenTravel,
     createProjectOption,
     lookedUpRepo,
     newRemoteProjectBlocker,
@@ -83,6 +86,8 @@
      * creates nothing.
      */
     onPrepare?: () => Promise<void>;
+    /** Whether a project note has child notes that a move would bring along. */
+    hasChildren?: boolean;
     /** Perform the transfer into an existing (or just-created) project. */
     onConfirm: (targetProjectId: string) => Promise<void>;
   }
@@ -95,6 +100,7 @@
     currentProjectId = null,
     loadNoteRepo,
     onPrepare,
+    hasChildren = false,
     onConfirm,
   }: Props = $props();
 
@@ -133,11 +139,13 @@
 
   let labels = $derived(noteTransferLabels(mode));
   let repo = $derived(lookedUpRepo(noteRepo));
-  let hint = $derived(noteTransferHint(mode, noteKind, repo));
+  let hint = $derived(noteTransferHint(mode, noteKind, repo, hasChildren));
   // Projects being deleted are already gone from every list, so they are not
   // offered as destinations.
   let candidates = $derived(
-    noteTransferCandidates(projectsDataStore.liveProjects, currentProjectId, mode)
+    noteTransferCandidates(projectsDataStore.liveProjects, currentProjectId, mode, {
+      localOnly: childrenTravel(mode, noteKind, hasChildren),
+    })
   );
   let filtered = $derived(filterMoveTargets(candidates, projectsDataStore.reposByProject, query));
   // Checked against every project, not just the candidates: for a move the

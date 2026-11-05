@@ -49,9 +49,14 @@
 //! detached from its parent project note. A project note takes its child
 //! notes along: each lands on the branch in the target that tracks the same
 //! repo and subpath (added first when missing, as in step 1), with its session
-//! and its parent link, in the parent's transaction. The move waits for any child
-//! session that is still queued or running, and is refused when a child sits
-//! on a remote branch or either project is remote, the way a branch move is.
+//! and its parent link, in the parent's transaction. The move waits for the
+//! parent's session and any child session that is still queued or running
+//! (`sessions.branch_id` is the branch queue's scheduling key, and a session
+//! that was resumed is live again however settled its note reads), and is
+//! refused when a child sits on a remote branch, on a branch outside the
+//! parent's project, or either project is remote, the way a branch move is.
+//! A repo added for a child in step 1 is not removed when a later step fails:
+//! the error names it, and it stays tracked the way a manual add would.
 //! The commits and code reviews a project session produced carry no link back
 //! to it and stay on their branch. A copy is a standalone note: no session,
 //! no parent, no children, no suggested next steps, and — having no session
@@ -130,6 +135,7 @@ where
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Note not found: {note_id}"))?;
     ensure_settled(
+        store,
         &note.title,
         note.session_id.as_deref(),
         note.completed_at,
@@ -294,6 +300,7 @@ where
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project note not found: {note_id}"))?;
     ensure_settled(
+        store,
         &note.title,
         note.session_id.as_deref(),
         note.completed_at,
@@ -344,6 +351,7 @@ where
             keys.push(key);
         }
     }
+    let mut added: Vec<RepoKey> = Vec::new();
     for key in keys {
         let already_tracked = store
             .find_project_repo(&target.id, &key.github_repo, key.subpath.as_deref())
@@ -353,11 +361,30 @@ where
             ensure_repo(key.clone())
                 .await
                 .map_err(|e| format!("Could not add {} to {}: {e}", key.describe(), target.name))?;
+            added.push(key);
         }
     }
+    // A repo that was added stays added when a later step fails: removing it
+    // would tear down a worktree the user may already be looking at, and the
+    // add is what a manual "Add repository" would have done anyway. The error
+    // says so, so the user is not left wondering where the repo came from.
+    move_project_note_now(store, &note, &target).map_err(|e| with_added_repos(e, &added, &target))
+}
+
+/// The rest of a project-note move, once every repo it needs is in `target`:
+/// read the family again, resolve each child's destination branch, stage the
+/// media and run the transaction. Synchronous, so nothing can change between
+/// the second read and the transaction except through the store itself —
+/// which the transaction's own guards cover.
+fn move_project_note_now(
+    store: &Store,
+    before: &ProjectNote,
+    target: &Project,
+) -> Result<ProjectNote, String> {
+    let mode = TransferMode::Move;
     // Adding repos can take seconds; what moves is the family as it reads
     // now — including a child that finished, or a save that landed, meanwhile.
-    let note = refetch_project_note(store, &note)?;
+    let note = refetch_project_note(store, before)?;
     let mut children_with_destination: Vec<(Note, Branch)> = Vec::new();
     for child in store
         .list_child_notes(&note.id)
@@ -450,6 +477,23 @@ where
     finish_all(store, mode, &previous_contents, staged, result)
 }
 
+/// A failure after step 1 left `added` tracked by `target`; say so.
+fn with_added_repos(err: String, added: &[RepoKey], target: &Project) -> String {
+    let mut names: Vec<String> = added.iter().map(RepoKey::describe).collect();
+    let (list, verb, remain) = match names.len() {
+        0 => return err,
+        1 => (names.pop().unwrap(), "was", "remains"),
+        _ => {
+            let last = names.pop().unwrap();
+            (format!("{} and {last}", names.join(", ")), "were", "remain")
+        }
+    };
+    format!(
+        "{err} {list} {verb} added to {} along the way and {remain} tracked there.",
+        target.name
+    )
+}
+
 /// Remote branches of a project share one Blox workspace, so a child note's
 /// branch cannot change projects — the same rule the branch move applies. A
 /// project note without children has nothing on a workspace and still moves.
@@ -480,7 +524,11 @@ fn ensure_local_projects(
 /// Refused while the child's session is queued or running: `sessions.branch_id`
 /// is the branch queue's scheduling key, and rewriting it under a live drain
 /// would hand the session to a branch that is not running it. Also refused
-/// for a child on a remote branch, which the branch move excludes too.
+/// for a child on a remote branch, which the branch move excludes too, and
+/// for a child whose branch is not in the parent's project: a branch move
+/// detaches such children (and migration 0039 cleared the links older moves
+/// left), so that link is stale, and following it would pull a note out of a
+/// project this move was never asked to touch.
 fn child_repo(
     store: &Store,
     parent: &ProjectNote,
@@ -507,6 +555,14 @@ fn child_repo(
     if branch.branch_type == BranchType::Remote {
         return Err(format!(
             "{} has {} on remote branch '{}'; notes on remote branches can't move between projects.",
+            quoted(&parent.title),
+            child_label(child),
+            branch.branch_name
+        ));
+    }
+    if branch.project_id != parent.project_id {
+        return Err(format!(
+            "{} is linked to {} on branch '{}', which is in a different project; the note can't move while that link stands.",
             quoted(&parent.title),
             child_label(child),
             branch.branch_name
@@ -555,6 +611,7 @@ fn refetch_project_note(store: &Store, before: &ProjectNote) -> Result<ProjectNo
             )
         })?;
     ensure_settled(
+        store,
         &fresh.title,
         fresh.session_id.as_deref(),
         fresh.completed_at,
@@ -597,16 +654,37 @@ pub(crate) async fn add_repo_to_project(
 
 /// A note whose session is still producing it has no settled content to carry,
 /// and the runner would keep writing to it wherever it went.
+///
+/// `completed_at` alone does not say so: it is set once and never cleared, so
+/// a note whose session was resumed still reads as finished. The session's
+/// own status is what tells a live runner from a settled one — and a live
+/// session is scheduled by `sessions.branch_id`, which a move rewrites.
 fn ensure_settled(
+    store: &Store,
     title: &str,
     session_id: Option<&str>,
     completed_at: Option<i64>,
     mode: TransferMode,
 ) -> Result<(), String> {
-    if session_id.is_some() && completed_at.is_none() {
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+    if completed_at.is_none() {
         return Err(format!(
             "{} is still being generated; wait for its session to finish before {} it.",
             quoted(title),
+            mode.gerund()
+        ));
+    }
+    let status = store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .map(|session| session.status);
+    if let Some(status @ (SessionStatus::Queued | SessionStatus::Running)) = status {
+        return Err(format!(
+            "{}'s session is {} again; wait for it to finish before {} the note.",
+            quoted(title),
+            status.as_str(),
             mode.gerund()
         ));
     }
@@ -630,6 +708,7 @@ fn refetch_branch_note(store: &Store, before: &Note, mode: TransferMode) -> Resu
             )
         })?;
     ensure_settled(
+        store,
         &fresh.title,
         fresh.session_id.as_deref(),
         fresh.completed_at,
@@ -2381,6 +2460,175 @@ mod tests {
             f.assert_family_unmoved(&parent, &child, &session);
             assert!(f.store.list_project_repos(&f.target.id).unwrap().is_empty());
         }
+    }
+
+    /// `completed_at` is never cleared, so a parent whose session was resumed
+    /// still reads as finished; its live status is what refuses the move.
+    #[tokio::test]
+    async fn project_note_move_waits_for_a_resumed_parent_session() {
+        let f = fixture();
+        let parent_session = Session::new_running("plan", Path::new("/tmp/wt"));
+        f.store.create_session(&parent_session).unwrap();
+        f.store
+            .update_session_status(&parent_session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let parent =
+            ProjectNote::new(&f.source.id, "Plan", "body").with_session(&parent_session.id);
+        f.store.create_project_note(&parent).unwrap();
+        f.store.mark_project_note_completed(&parent.id).unwrap();
+        let (child, session) = f.child_of(&parent, &f.source_branch.id, "Findings");
+
+        for status in [SessionStatus::Running, SessionStatus::Queued] {
+            f.store
+                .update_session_status(&parent_session.id, status.clone(), None, None)
+                .unwrap();
+
+            let err = transfer_project_note(
+                &f.store,
+                &parent.id,
+                &f.target.id,
+                TransferMode::Move,
+                never_called,
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(
+                err,
+                format!(
+                    "\"Plan\"'s session is {} again; wait for it to finish before moving the note.",
+                    status.as_str()
+                )
+            );
+            f.assert_family_unmoved(&parent, &child, &session);
+        }
+
+        // Resumed while the repo was being added: the second read refuses too,
+        // and the repo that was added stays.
+        f.store
+            .update_session_status(&parent_session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| {
+                f.store
+                    .update_session_status(&parent_session.id, SessionStatus::Running, None, None)
+                    .unwrap();
+                std::future::ready(f.attach_repo(key))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "\"Plan\"'s session is running again; wait for it to finish before moving the note. \
+             acme/widgets at apps/web was added to target along the way and remains tracked there."
+        );
+        f.assert_family_unmoved(&parent, &child, &session);
+        assert!(f.target_branch().is_some());
+    }
+
+    /// A child that is resumed while the repo is being added fails the second
+    /// read; the repo stays added, and the error says so.
+    #[tokio::test]
+    async fn child_resumed_during_the_repo_add_stops_the_move_and_names_the_added_repo() {
+        let f = fixture();
+        let (parent, child, session) = f.family();
+
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| {
+                f.store
+                    .update_session_status(&session.id, SessionStatus::Running, None, None)
+                    .unwrap();
+                std::future::ready(f.attach_repo(key))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "\"Plan\" has child note \"Findings\" whose session is still running; wait for it to finish before moving the note. \
+             acme/widgets at apps/web was added to target along the way and remains tracked there."
+        );
+        f.assert_family_unmoved(&parent, &child, &session);
+        assert!(f.target_branch().is_some());
+    }
+
+    #[test]
+    fn with_added_repos_lists_every_repo_that_was_added() {
+        let target = Project::named("target");
+        let widgets = RepoKey {
+            github_repo: "acme/widgets".into(),
+            subpath: Some("apps/web".into()),
+        };
+        let gadgets = RepoKey {
+            github_repo: "acme/gadgets".into(),
+            subpath: None,
+        };
+        let tools = RepoKey {
+            github_repo: "acme/tools".into(),
+            subpath: None,
+        };
+        assert_eq!(with_added_repos("Boom.".into(), &[], &target), "Boom.");
+        assert_eq!(
+            with_added_repos("Boom.".into(), std::slice::from_ref(&widgets), &target),
+            "Boom. acme/widgets at apps/web was added to target along the way and remains tracked there."
+        );
+        assert_eq!(
+            with_added_repos("Boom.".into(), &[widgets, gadgets, tools], &target),
+            "Boom. acme/widgets at apps/web, acme/gadgets and acme/tools were added to target along the way and remain tracked there."
+        );
+    }
+
+    /// A child whose branch is in another project is a stale link (branch
+    /// moves detach as they go; migration 0039 cleared the old ones), not a
+    /// note this move may pull along.
+    #[tokio::test]
+    async fn project_note_move_is_refused_for_a_child_on_a_branch_in_another_project() {
+        let f = fixture();
+        let (parent, _, _) = f.family();
+        f.attach_repo(RepoKey {
+            github_repo: "acme/widgets".into(),
+            subpath: Some("apps/web".into()),
+        })
+        .unwrap();
+        let elsewhere = f.target_branch().unwrap();
+        let (stray, _) = f.child_of(&parent, &elsewhere.id, "Stray");
+
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            never_called,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            "\"Plan\" is linked to child note \"Stray\" on branch 'target-feature', which is in a different project; the note can't move while that link stands."
+        );
+        assert_eq!(
+            f.store
+                .get_project_note(&parent.id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            f.source.id
+        );
+        assert_eq!(
+            f.store.get_note(&stray.id).unwrap().unwrap().branch_id,
+            elsewhere.id
+        );
     }
 
     #[tokio::test]

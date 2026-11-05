@@ -78,6 +78,7 @@
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import NoteTransferMenu from './NoteTransferMenu.svelte';
+  import { isSessionActive } from '../../shared/sessionStatus';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
   /**
@@ -94,6 +95,13 @@
     onClose: () => void;
     /** When set, shows a button to open the associated chat session. */
     sessionId?: string | null;
+    /**
+     * The session's status as the host knows it (its list row); the chat
+     * pane's report wins while it is open. Queued/running disables "Move".
+     */
+    sessionStatus?: string | null;
+    /** A project note's child notes, which a move brings along. */
+    hasChildren?: boolean;
     noteUpdatedAt?: number | null;
     onOpenSession?: (sessionId: string) => void;
     noteId?: string | null;
@@ -119,6 +127,8 @@
     content,
     onClose,
     sessionId,
+    sessionStatus = null,
+    hasChildren = false,
     noteUpdatedAt,
     onOpenSession,
     noteId,
@@ -223,6 +233,8 @@
       : null
   );
   let previousSessionStatus = $state<Session['status'] | null>(null);
+  // The pane's report while the chat is open, the host's status otherwise.
+  let sessionActive = $derived(isSessionActive(previousSessionStatus ?? sessionStatus));
   let noteHasPikchr = $derived(
     extractMarkdownDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
   );
@@ -755,6 +767,8 @@
                 {noteKind}
                 noteTitle={displayTitle}
                 {projectId}
+                {hasChildren}
+                {sessionActive}
                 onMoved={onClose}
               />
             {/if}

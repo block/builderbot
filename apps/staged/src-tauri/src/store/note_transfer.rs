@@ -299,12 +299,22 @@ impl Store {
                 return Err(relocated_during_transfer(&child_title));
             }
             // Same as `move_note_to_branch`: the session is scheduled by
-            // `sessions.branch_id` and has to arrive with its note.
+            // `sessions.branch_id` and has to arrive with its note. The caller
+            // checked it was settled before planning, but a resume can land
+            // between that read and this write, and a live drain must not have
+            // its session handed to a branch that is not running it — so the
+            // status is part of the key, and a miss fails the whole move.
             if let Some(session_id) = session_id.as_deref() {
-                tx.execute(
-                    "UPDATE sessions SET branch_id = ?1 WHERE id = ?2",
+                let changed = tx.execute(
+                    "UPDATE sessions SET branch_id = ?1
+                     WHERE id = ?2 AND status NOT IN ('queued', 'running')",
                     params![child.target_branch_id, session_id],
                 )?;
+                if changed != 1 {
+                    return Err(StoreError(format!(
+                        "The session of '{child_title}' started again during the transfer; wait for it to finish before moving the note."
+                    )));
+                }
             }
             for branch_id in [&child.expected_branch_id, &child.target_branch_id] {
                 if !touched_branches.contains(branch_id) {
@@ -465,7 +475,7 @@ fn relocated_during_transfer(title: &str) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::models::Project;
+    use crate::store::models::{Project, SessionStatus};
 
     struct Fixture {
         store: Store,
@@ -747,6 +757,9 @@ mod tests {
         let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
             .with_branch(&f.source_branch.id);
         f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
         let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
             .with_parent_project_note(&note.id)
             .with_session(&session.id);
@@ -783,6 +796,67 @@ mod tests {
             Some(f.source_branch.id.clone())
         );
         assert!(f.store.get_image(&image.id).unwrap().is_none());
+    }
+
+    /// A child whose session went live again after the plan was made — the
+    /// planner's status check and this write are separate reads — fails the
+    /// move inside the transaction, and nothing of the family changes.
+    #[test]
+    fn project_note_move_is_refused_when_a_child_session_resumed_after_planning() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id)
+            .with_session(&session.id);
+        f.store.create_note(&child).unwrap();
+        let plan = child_move(&child, &f.target_branch.id);
+        let image = Image::new(None, &f.target.id, "shot.png", "image/png", 3, false);
+
+        for status in [SessionStatus::Queued, SessionStatus::Running] {
+            f.store
+                .update_session_status(&session.id, status, None, None)
+                .unwrap();
+
+            let err = f
+                .store
+                .move_project_note_to_project(
+                    &note.id,
+                    &f.source.id,
+                    &f.target.id,
+                    "new body",
+                    std::slice::from_ref(&image),
+                    &[],
+                    std::slice::from_ref(&plan),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "The session of 'Child' started again during the transfer; wait for it to finish before moving the note."
+            );
+            let stored = f.store.get_project_note(&note.id).unwrap().unwrap();
+            assert_eq!(stored.project_id, f.source.id);
+            assert_eq!(stored.content, "body");
+            let child = f.store.get_note(&child.id).unwrap().unwrap();
+            assert_eq!(child.branch_id, f.source_branch.id);
+            assert_eq!(child.content, "body");
+            assert_eq!(
+                child.parent_project_note_id.as_deref(),
+                Some(note.id.as_str())
+            );
+            assert_eq!(
+                f.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+        }
     }
 
     /// The mirror image: a child that is no longer where the plan saw it
@@ -914,6 +988,9 @@ mod tests {
         let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
             .with_branch(&f.source_branch.id);
         f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
         let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
             .with_parent_project_note(&parent.id)
             .with_session(&session.id);

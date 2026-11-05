@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -221,8 +221,8 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             image_ids   TEXT DEFAULT NULL
         );
         CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the table/column the 0026 auto-review cleanup targets.
         CREATE TABLE reviews (
             id         TEXT PRIMARY KEY,
@@ -233,8 +233,8 @@ fn test_store_repairs_github_comment_tracking_user_version() {
         -- Only the table/columns the 0034 backfill joins.
         CREATE TABLE commits (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         -- The parent of the `sessions.branch_id` key 0022 adds, which the 0034
-        -- backfill writes.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- backfill writes, with the `project_id` the 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -275,7 +275,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -322,8 +322,8 @@ fn test_store_repairs_pipeline_user_version() {
             image_ids   TEXT DEFAULT NULL
         );
         CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the table/column the 0026 auto-review cleanup targets.
         CREATE TABLE reviews (
             id         TEXT PRIMARY KEY,
@@ -334,8 +334,8 @@ fn test_store_repairs_pipeline_user_version() {
         -- Only the table/columns the 0034 backfill joins.
         CREATE TABLE commits (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         -- The parent of the `sessions.branch_id` key 0022 adds, which the 0034
-        -- backfill writes.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- backfill writes, with the `project_id` the 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -371,7 +371,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -424,8 +424,8 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
         );
         -- Only the table the 0025/0027 note column adds and the 0031 backfill target.
         CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the table/column the 0026 auto-review cleanup targets.
         CREATE TABLE reviews (
             id         TEXT PRIMARY KEY,
@@ -436,8 +436,8 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
         -- Only the table/columns the 0034 backfill joins.
         CREATE TABLE commits (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         -- The parent of the `sessions.branch_id` key 0022 adds, which the 0034
-        -- backfill writes.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- backfill writes, with the `project_id` the 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
@@ -462,7 +462,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -512,10 +512,11 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
         INSERT INTO reviews (id, is_auto) VALUES
             ('user-review', 0),
             ('auto-review', 1);
-        -- Only the table the 0027 note column add and the 0031 backfill target.
-        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the table the 0027 note column add and the 0031 backfill target,
+        -- plus the `parent_project_note_id` (0025) the 0039 repair clears.
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER, parent_project_note_id TEXT);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the columns the 0028 backfill reads and the 0030 drop targets.
         CREATE TABLE repo_actions (
             id          TEXT PRIMARY KEY,
@@ -528,8 +529,9 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
         CREATE TABLE session_messages (id INTEGER PRIMARY KEY AUTOINCREMENT);
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         ",
     )
     .unwrap();
@@ -542,7 +544,7 @@ fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     // Reviews the removed auto-review feature created in the background are
@@ -583,8 +585,8 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
             ('idle',   0);
         -- Only the table the 0025/0027 note column adds and the 0031 backfill target.
         CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the table/column the 0026 auto-review cleanup targets.
         CREATE TABLE reviews (
             id         TEXT PRIMARY KEY,
@@ -607,8 +609,9 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
         CREATE TABLE session_messages (id INTEGER PRIMARY KEY AUTOINCREMENT);
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         ",
     )
     .unwrap();
@@ -621,7 +624,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set
@@ -655,18 +658,19 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
         CREATE TABLE projects (id TEXT PRIMARY KEY);
         CREATE TABLE images (id TEXT PRIMARY KEY);
         CREATE TABLE notes (
-            id           TEXT PRIMARY KEY,
-            branch_id    TEXT,
-            session_id   TEXT,
-            updated_at   INTEGER NOT NULL,
-            completed_at INTEGER
+            id                     TEXT PRIMARY KEY,
+            branch_id              TEXT,
+            session_id             TEXT,
+            updated_at             INTEGER NOT NULL,
+            completed_at           INTEGER,
+            parent_project_note_id TEXT
         );
         INSERT INTO notes (id, session_id, updated_at, completed_at) VALUES
             ('dropped',   NULL,        100, NULL),
             ('with-body', NULL,        200,  150),
             ('agent',     'session-1', 300, NULL);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the table/column the 0026 auto-review cleanup targets.
         CREATE TABLE reviews (
             id         TEXT PRIMARY KEY,
@@ -689,8 +693,9 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
         CREATE TABLE session_messages (id INTEGER PRIMARY KEY AUTOINCREMENT);
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         ",
     )
     .unwrap();
@@ -703,7 +708,7 @@ fn test_note_migrations_backfill_subtype_and_completion_for_session_less_notes()
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "notes", "subtype"));
 
     let subtype = |id: &str| -> Option<String> {
@@ -785,15 +790,17 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
         -- Only the table/columns the 0034 backfill joins.
         CREATE TABLE commits (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         CREATE TABLE sessions (id TEXT PRIMARY KEY, branch_id TEXT);
-        -- Only the table the 0027 note column add and the 0031 backfill target.
-        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the table the 0027 note column add and the 0031 backfill target,
+        -- plus the `parent_project_note_id` (0025) the 0039 repair clears.
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER, parent_project_note_id TEXT);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the table the 0029 ALTER targets; the rest of the real table
         -- predates every migration below.
         CREATE TABLE session_messages (id INTEGER PRIMARY KEY AUTOINCREMENT);
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         ",
     )
     .unwrap();
@@ -806,7 +813,7 @@ fn test_pinned_actions_migration_pins_each_contexts_first_run_action() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "repo_actions", "pinned"));
     assert!(column_exists(&conn, "repo_actions", "icon"));
 
@@ -859,16 +866,18 @@ fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
         INSERT INTO repo_actions (id, auto_commit) VALUES
             ('format', 1),
             ('test',   0);
-        -- Only the table the 0031 backfill targets.
-        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the table the 0031 backfill targets, plus the
+        -- `parent_project_note_id` (0025) the 0039 repair clears.
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT, updated_at INTEGER NOT NULL, completed_at INTEGER, parent_project_note_id TEXT);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         -- Only the tables/columns the 0034 backfill joins.
         CREATE TABLE sessions (id TEXT PRIMARY KEY, branch_id TEXT);
         CREATE TABLE commits (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         CREATE TABLE reviews (id TEXT PRIMARY KEY, branch_id TEXT, session_id TEXT);
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         ",
     )
     .unwrap();
@@ -881,7 +890,7 @@ fn test_auto_commit_removal_migration_drops_flag_and_keeps_actions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(!column_exists(&conn, "repo_actions", "auto_commit"));
 
     // Only the flag goes: an action that had auto-commit enabled keeps running
@@ -921,16 +930,17 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
             ('project-session', NULL);
         CREATE TABLE commits (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         INSERT INTO commits (id, branch_id, session_id) VALUES ('c1', 'branch-a', 'commit-session');
-        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT, completed_at INTEGER);
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT, completed_at INTEGER, parent_project_note_id TEXT);
         INSERT INTO notes (id, branch_id, session_id) VALUES
             ('n1', 'branch-b', 'note-session'),
             ('n2', 'branch-b', NULL);
-        -- Only the table/column 0038 reads alongside `notes.completed_at`.
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the columns 0038 adds to and the 0039 repair reads.
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         CREATE TABLE reviews (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, session_id TEXT);
         INSERT INTO reviews (id, branch_id, session_id) VALUES ('r1', 'branch-a', 'review-session');
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
         ",
     )
     .unwrap();
@@ -943,7 +953,7 @@ fn test_session_branch_id_backfill_links_artifact_backed_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
 
     let branch_of = |id: &str| -> Option<String> {
         conn.query_row(
@@ -980,11 +990,12 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
         -- Only the table 0035 adds its column to.
         CREATE TABLE sessions (id TEXT PRIMARY KEY);
         INSERT INTO sessions (id) VALUES ('old-a'), ('old-b');
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY);
-        -- Only the tables/columns 0038 touches.
-        CREATE TABLE notes (id TEXT PRIMARY KEY, completed_at INTEGER);
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
+        -- Only the tables/columns 0038 and the 0039 repair touch.
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, completed_at INTEGER, parent_project_note_id TEXT);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         ",
     )
     .unwrap();
@@ -999,7 +1010,7 @@ fn test_session_chat_read_at_migration_marks_existing_chats_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "sessions", "chat_read_at"));
 
     let read_at = |id: &str| -> Option<i64> {
@@ -1036,12 +1047,13 @@ fn test_pr_title_migration_adds_an_empty_title_to_existing_branches() {
             app_version TEXT NOT NULL
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
-        -- Only the table 0037 adds its column to.
-        CREATE TABLE branches (id TEXT PRIMARY KEY, pr_number INTEGER);
+        -- Only the table 0037 adds its column to, with the `project_id` the
+        -- 0039 repair joins on.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT, pr_number INTEGER);
         INSERT INTO branches (id, pr_number) VALUES ('with-pr', 123), ('no-pr', NULL);
-        -- Only the tables/columns 0038 touches.
-        CREATE TABLE notes (id TEXT PRIMARY KEY, completed_at INTEGER);
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the tables/columns 0038 and the 0039 repair touch.
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, completed_at INTEGER, parent_project_note_id TEXT);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         ",
     )
     .unwrap();
@@ -1054,7 +1066,7 @@ fn test_pr_title_migration_adds_an_empty_title_to_existing_branches() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     assert!(column_exists(&conn, "branches", "pr_title"));
 
     // No backfill: a linked PR's title arrives with the next status poll.
@@ -1082,9 +1094,11 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
             app_version TEXT NOT NULL
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
-        -- Only the tables 0038 adds its column to.
-        CREATE TABLE notes (id TEXT PRIMARY KEY, completed_at INTEGER);
-        CREATE TABLE project_notes (id TEXT PRIMARY KEY, completed_at INTEGER);
+        -- Only the tables 0038 adds its column to, with the columns the 0039
+        -- repair reads and writes.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT);
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT, completed_at INTEGER, parent_project_note_id TEXT);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT, completed_at INTEGER);
         INSERT INTO notes (id, completed_at) VALUES ('landed', 1000), ('writing', NULL);
         INSERT INTO project_notes (id, completed_at) VALUES ('landed', 2000), ('writing', NULL);
         ",
@@ -1099,7 +1113,7 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
 
     for (table, landed_at) in [("notes", 1000), ("project_notes", 2000)] {
         assert!(column_exists(&conn, table, "read_at"));
@@ -1116,6 +1130,72 @@ fn test_note_read_at_migration_marks_landed_notes_read() {
         // One still being written reads as unread when it lands.
         assert_eq!(read_at("writing"), None, "{table}");
     }
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_child_note_repair_detaches_only_cross_project_parents() {
+    let path = temp_db_path("child-note-cross-project");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 38;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        -- Only the columns the 0039 repair reads and writes.
+        CREATE TABLE branches (id TEXT PRIMARY KEY, project_id TEXT NOT NULL);
+        INSERT INTO branches (id, project_id) VALUES
+            ('moved',  'target'),
+            ('stayed', 'source');
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY, project_id TEXT NOT NULL);
+        INSERT INTO project_notes (id, project_id) VALUES
+            ('source-plan', 'source'),
+            ('target-plan', 'target');
+        CREATE TABLE notes (id TEXT PRIMARY KEY, branch_id TEXT NOT NULL, parent_project_note_id TEXT);
+        INSERT INTO notes (id, branch_id, parent_project_note_id) VALUES
+            ('moved-child',    'moved',       'source-plan'),
+            ('stayed-child',   'stayed',      'source-plan'),
+            ('target-child',   'moved',       'target-plan'),
+            ('dangling-child', 'moved',       'deleted-plan'),
+            ('orphan-child',   'gone-branch', 'source-plan'),
+            ('plain',          'moved',       NULL);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 39);
+
+    let parent_of = |id: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT parent_project_note_id FROM notes WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    // A branch moved before moves cleared the link: its child is cut loose
+    // from the project note it left behind.
+    assert_eq!(parent_of("moved-child"), None);
+    // Same-project links are what child notes are meant to have.
+    assert_eq!(parent_of("stayed-child").as_deref(), Some("source-plan"));
+    assert_eq!(parent_of("target-child").as_deref(), Some("target-plan"));
+    // With its parent or its branch gone there is no project to compare, so
+    // the link stays put.
+    assert_eq!(parent_of("dangling-child").as_deref(), Some("deleted-plan"));
+    assert_eq!(parent_of("orphan-child").as_deref(), Some("source-plan"));
+    assert_eq!(parent_of("plain"), None);
 
     cleanup_db(&path);
 }

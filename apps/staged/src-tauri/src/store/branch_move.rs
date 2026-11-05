@@ -4,10 +4,16 @@
 //! messages, comments, reviewed files — hangs off `branch_id` and follows the
 //! branch for free. Only four things carry a `project_id` of their own and have
 //! to be rewritten in step with it: the branch row, its `project_repos` row,
-//! its `workdirs` row, and its images. That rewrite is what lives here, in one
-//! transaction, as `UPDATE`s and one `INSERT` only — the `AFTER DELETE`
-//! triggers on the artifact tables garbage-collect sessions, so a
-//! delete-and-reinsert would take transcripts with it.
+//! its `workdirs` row, and its images. One link points the other way and has
+//! to be cut instead: a child note's `parent_project_note_id` names a project
+//! note, and project notes stay with their project. The move clears it, the
+//! way moving a single note to another branch does, so the note surfaces on
+//! its branch's timeline in the destination and deleting that parent can no
+//! longer cascade into a project it isn't in.
+//!
+//! All of that lives here, in one transaction, as `UPDATE`s and one `INSERT`
+//! only — the `AFTER DELETE` triggers on the artifact tables garbage-collect
+//! sessions, so a delete-and-reinsert would take transcripts with it.
 
 use rusqlite::{params, OptionalExtension};
 
@@ -58,7 +64,8 @@ pub struct BranchMove {
 
 impl Store {
     /// Move a branch into another project, rewriting every `project_id` that
-    /// points at the old one.
+    /// points at the old one and detaching the branch's child notes from their
+    /// project notes, which stay behind.
     ///
     /// The `branches(project_id, project_repo_id, branch_name)` and
     /// `workdirs(project_id, path)` unique indexes are the backstop against a
@@ -142,6 +149,15 @@ impl Store {
             )?;
         }
 
+        // Detach the branch's child notes (see the module docs). Their parent
+        // project notes don't move, so each link would now cross projects.
+        // `updated_at` is left alone: only the link changed, not the note.
+        tx.execute(
+            "UPDATE notes SET parent_project_note_id = NULL
+             WHERE branch_id = ?1 AND parent_project_note_id IS NOT NULL",
+            params![mv.branch_id],
+        )?;
+
         // Branch-scoped images only: an image with no `branch_id` belongs to a
         // project note and stays where it is.
         tx.execute(
@@ -159,6 +175,12 @@ impl Store {
         // publish nothing in the feed says the branch left, and a consumer that
         // scopes its invalidation to the named project would leave the branch
         // listed under its old project too.
+        //
+        // Detached child notes need no `Notes` change. They join this branch's
+        // timeline, and the `Branch` changes already cover the timeline. The
+        // parent project note's own row is unchanged, and losing a child
+        // doesn't publish for its project here, just as it doesn't in
+        // `move_note_to_branch`.
         self.publish(StoreChange::Branch {
             branch_id: mv.branch_id.clone(),
             project_id: Some(mv.target_project_id.clone()),
@@ -301,7 +323,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::store::models::{Branch, Image, Note, Project, Session, Workdir};
+    use crate::store::models::{Branch, Image, Note, Project, ProjectNote, Session, Workdir};
 
     struct Fixture {
         store: Store,
@@ -356,10 +378,17 @@ mod tests {
     /// consumer that scopes its invalidation to the named project has no other
     /// way to hear that the branch left the source — the branch row itself now
     /// points at the target, so an enrichment lookup could never resolve it.
+    ///
+    /// Detaching a child note adds nothing: the note joins this branch's
+    /// timeline, which the `Branch` changes already cover.
     #[test]
     fn change_feed_publishes_one_branch_change_per_touched_project() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(64);
         let f = fixture_in(Store::in_memory().unwrap().with_change_sender(tx));
+        let parent = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&parent).unwrap();
+        let child = Note::new(&f.branch.id, "Step 1", "body").with_parent_project_note(&parent.id);
+        f.store.create_note(&child).unwrap();
         while rx.try_recv().is_ok() {}
 
         f.store.move_branch_to_project(&reparent(&f, None)).unwrap();
@@ -455,6 +484,51 @@ mod tests {
                 .as_deref(),
             Some(f.target.id.as_str())
         );
+    }
+
+    /// The parent project note stays in the source project, so a child note
+    /// on the moved branch is detached from it: the note shows on its
+    /// branch's timeline in the destination, and deleting the parent no
+    /// longer reaches into another project. A child of the same parent on a
+    /// branch that stays keeps its link.
+    #[test]
+    fn detaches_the_branchs_child_notes_from_their_project_note() {
+        let f = fixture();
+        let parent = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&parent).unwrap();
+        let child = Note::new(&f.branch.id, "Step 1", "body").with_parent_project_note(&parent.id);
+        f.store.create_note(&child).unwrap();
+        let other_repo = ProjectRepo::new(&f.source.id, "acme/other", "main", None);
+        f.store.create_project_repo(&other_repo).unwrap();
+        let staying =
+            Branch::new(&f.source.id, "main", "origin/main").with_project_repo(&other_repo.id);
+        f.store.create_branch(&staying).unwrap();
+        let sibling = Note::new(&staying.id, "Step 2", "body").with_parent_project_note(&parent.id);
+        f.store.create_note(&sibling).unwrap();
+
+        f.store.move_branch_to_project(&reparent(&f, None)).unwrap();
+
+        let ids = |notes: Vec<Note>| notes.into_iter().map(|n| n.id).collect::<Vec<_>>();
+        assert!(f
+            .store
+            .get_note(&child.id)
+            .unwrap()
+            .unwrap()
+            .parent_project_note_id
+            .is_none());
+        assert_eq!(
+            ids(f.store.list_notes_for_branch(&f.branch.id).unwrap()),
+            vec![child.id.clone()]
+        );
+        assert_eq!(
+            ids(f.store.list_child_notes(&parent.id).unwrap()),
+            vec![sibling.id.clone()]
+        );
+
+        // Deleting the parent now takes only the child that stayed behind.
+        f.store.delete_project_note(&parent.id).unwrap();
+        assert!(f.store.get_note(&child.id).unwrap().is_some());
+        assert!(f.store.get_note(&sibling.id).unwrap().is_none());
     }
 
     #[test]
@@ -711,12 +785,17 @@ mod tests {
     }
 
     /// The unique indexes are the backstop inside the transaction, and a
-    /// violation has to leave the branch where it was.
+    /// violation has to leave the branch where it was, child notes still
+    /// attached.
     #[test]
     fn rolls_back_when_the_destination_already_has_the_repo() {
         let f = fixture();
         let conflict = ProjectRepo::new(&f.target.id, "acme/widgets", "main", None);
         f.store.create_project_repo(&conflict).unwrap();
+        let parent = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&parent).unwrap();
+        let child = Note::new(&f.branch.id, "Step 1", "body").with_parent_project_note(&parent.id);
+        f.store.create_note(&child).unwrap();
 
         let err = f
             .store
@@ -742,6 +821,15 @@ mod tests {
                 .unwrap()
                 .project_id,
             f.source.id
+        );
+        assert_eq!(
+            f.store
+                .get_note(&child.id)
+                .unwrap()
+                .unwrap()
+                .parent_project_note_id
+                .as_deref(),
+            Some(parent.id.as_str())
         );
     }
 

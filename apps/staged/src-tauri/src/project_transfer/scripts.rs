@@ -160,13 +160,15 @@ pub const SNAPSHOT_SCRIPT: &str = concat!(
     "  printf 'bundle=deferred\\n'\n",
     "fi\n",
     // --- The LFS objects it refers to, beside the bundle ---
-    // In W, in I, and in the bundle's commits that no remote has: a remote's
-    // are on its LFS server.
+    // In W, in HEAD (what the destination checks out when the uncommitted
+    // changes stay behind), in I, and in the bundle's commits that no remote
+    // has: a remote's other commits are on its LFS server.
     "lfs_ar=\"$bundle.lfs.tar\"\n",
     "rm -rf -- \"$lfs_ar\" \"$lfs_ar.d\"\n",
     "if uses_lfs \"$snapshot\" \"$head\"; then\n",
     "  manifest=$({\n",
     "    G ls-tree -r \"$snapshot\" | awk '$2 == \"blob\" { print $3, \"w\" }'\n",
+    "    G ls-tree -r \"$head\" | awk '$2 == \"blob\" { print $3, \"h\" }'\n",
     "    G ls-tree -r \"$index_commit\" | awk '$2 == \"blob\" { print $3, \"o\" }'\n",
     "    G rev-list --objects \"$snapshot\" --not $not --remotes | awk '{ print $1, \"o\" }'\n",
     "  } | lfs_pointers)\n",
@@ -174,7 +176,7 @@ pub const SNAPSHOT_SCRIPT: &str = concat!(
     "    lfs_d=$(lfs_dir) || fail 'cannot find the LFS object store'\n",
     "    mkdir -p -- \"$lfs_ar.d\" || fail \"cannot create $lfs_ar.d\"\n",
     "    printf '%s\\n' \"$manifest\" | lfs_have \"$lfs_d\" > \"$lfs_ar.d/oids\" || fail 'cannot list the LFS objects'\n",
-    "    awk '$4 == 1 { print \"objects/\" substr($1, 1, 2) \"/\" substr($1, 3, 2) \"/\" $1 }' \"$lfs_ar.d/oids\" > \"$lfs_ar.d/paths\"\n",
+    "    awk '$5 == 1 { print \"objects/\" substr($1, 1, 2) \"/\" substr($1, 3, 2) \"/\" $1 }' \"$lfs_ar.d/oids\" > \"$lfs_ar.d/paths\"\n",
     // bsdtar (macOS) would add AppleDouble `._` entries and extended
     // attributes, which GNU tar unpacks as files in the object store.
     "    tar_c=tar\n",
@@ -315,14 +317,16 @@ pub const ORIGIN_TIPS_SCRIPT: &str = concat!(
 /// so what the caller rolls back is only what a successful run reported.
 ///
 /// With `lfs=<archive>` (and `lfs_sha256`), `checkout` and `branch` unpack
-/// the snapshot's LFS objects and refuse to go on if one `W` uses and the
-/// source had is not there after; set the LFS filter up unless git-lfs is
-/// missing (`lfs_unavailable=1`) or some config scope already has it; fetch
-/// what the source lacked from origin, best-effort; and report what is still
-/// missing (`lfs_missing`, `lfs_missing_bytes`). `checkout` and `finish` then
-/// run `git lfs checkout` once the working tree is in place. A failure leaves the
-/// unpacked objects and the filter config behind: objects are named by their
-/// hash, and the filter is what this repository's attributes ask for.
+/// the snapshot's LFS objects and refuse to go on if one the checkout uses
+/// (`W`'s with `restore=1`, else `HEAD`'s) and the source had is not there
+/// after; set the LFS filter up unless git-lfs is missing
+/// (`lfs_unavailable=1`) or some config scope already has it; fetch from
+/// origin, best-effort, the ones the checkout uses that the source lacked;
+/// and report how many of those are still missing (`lfs_missing`,
+/// `lfs_missing_bytes`). `checkout` and `finish` then run `git lfs checkout`
+/// once the working tree is in place. A failure leaves the unpacked objects
+/// and the filter config behind: objects are named by their hash, and the
+/// filter is what this repository's attributes ask for.
 pub const APPLY_SCRIPT: &str = concat!(
     prelude!(),
     lfs_prelude!(),
@@ -395,25 +399,31 @@ pub const APPLY_SCRIPT: &str = concat!(
     "    [ \"$(sha256_of \"$lfs\")\" = \"$lfs_sha256\" ] || fail 'the LFS objects do not match their checksum'\n",
     "    lfs_d=$(lfs_dir) || fail 'cannot find the LFS object store'\n",
     "    oids=$(tar -xOf \"$lfs\" oids) || fail 'cannot read the LFS manifest'\n",
-    "    if printf '%s\\n' \"$oids\" | awk '$4 == 1 { f = 1 } END { exit !f }'; then\n",
+    "    if printf '%s\\n' \"$oids\" | awk '$5 == 1 { f = 1 } END { exit !f }'; then\n",
     "      mkdir -p -- \"$lfs_d\" || fail \"cannot create $lfs_d\"\n",
     "      err=$(tar -xf \"$lfs\" -C \"$lfs_d\" objects 2>&1) || fail \"cannot unpack the LFS objects: $err\"\n",
     "    fi\n",
+    // The manifest's column for what the checkout uses: W when the
+    // uncommitted changes are restored, else HEAD. `lfs_have` appends
+    // whether the object is here now, as `$6`.
+    "    use=4\n",
+    "    [ \"$restore\" = 1 ] && use=3\n",
     "    have=$(printf '%s\\n' \"$oids\" | lfs_have \"$lfs_d\")\n",
-    "    lost=$(printf '%s\\n' \"$have\" | awk '$3 == 1 && $4 == 1 && $5 == 0 { n++ } END { print n + 0 }')\n",
+    "    lost=$(printf '%s\\n' \"$have\" | awk -v c=\"$use\" '$c == 1 && $5 == 1 && $6 == 0 { n++ } END { print n + 0 }')\n",
     "    [ \"$lost\" = 0 ] || fail \"$lost LFS objects the working tree uses did not arrive\"\n",
     "  fi\n",
-    "  if [ -n \"$lfs\" ] || uses_lfs \"$w\"; then lfs_setup; fi\n",
+    "  if [ -n \"$lfs\" ] || uses_lfs \"$w\" \"$head\"; then lfs_setup; fi\n",
     "  if [ -n \"$lfs\" ]; then\n",
-    // Pushed content the source never downloaded. A remote that wants
-    // credentials this end lacks fails fast, as nothing may prompt.
-    "    if printf '%s\\n' \"$have\" | awk '$5 == 0 { f = 1 } END { exit !f }' && G lfs version >/dev/null 2>&1; then\n",
-    "      refs=$head\n",
-    "      [ \"$restore\" = 1 ] && refs=\"$refs $snap_ref $snap_ref^1\"\n",
-    "      G -c lfs.transfer.maxretries=2 lfs fetch origin $refs >/dev/null 2>&1\n",
+    // Pushed content the source never downloaded, fetched for the tree the
+    // checkout will be. A remote that wants credentials this end lacks fails
+    // fast, as nothing may prompt.
+    "    if printf '%s\\n' \"$have\" | awk -v c=\"$use\" '$c == 1 && $6 == 0 { f = 1 } END { exit !f }' && G lfs version >/dev/null 2>&1; then\n",
+    "      tree=$head\n",
+    "      [ \"$restore\" = 1 ] && tree=$snapshot\n",
+    "      G -c lfs.transfer.maxretries=2 lfs fetch origin \"$tree\" >/dev/null 2>&1\n",
     "      have=$(printf '%s\\n' \"$oids\" | lfs_have \"$lfs_d\")\n",
     "    fi\n",
-    "    printf '%s\\n' \"$have\" | awk '$5 == 0 { n++; b += $2 } END { printf \"lfs_missing=%d\\nlfs_missing_bytes=%.0f\\n\", n, b }'\n",
+    "    printf '%s\\n' \"$have\" | awk -v c=\"$use\" '$c == 1 && $6 == 0 { n++; b += $2 } END { printf \"lfs_missing=%d\\nlfs_missing_bytes=%.0f\\n\", n, b }'\n",
     "  fi\n",
     // --- The branch ---
     // What a failure from here on takes back. Remote names are refname
@@ -555,8 +565,10 @@ pub const CLONE_SCRIPT: &str = concat!(
 /// `lfs_*` counts for `HEAD`, the index and the unpushed commits, and — when
 /// the filter is set up, so a snapshot would store them as LFS objects —
 /// `lfs_changed`/`lfs_changed_bytes` for the modified and untracked files the
-/// filter applies to, which only a snapshot hashes. `status` runs with
-/// `--no-optional-locks`, so even the index's stat cache is left alone.
+/// filter applies to, which only a snapshot hashes. Those are what a snapshot
+/// carries, so the counts hold whether or not the uncommitted changes go.
+/// `status` runs with `--no-optional-locks`, so even the index's stat cache
+/// is left alone.
 /// `$branch` is only echoed back; the caller compares `head_ref` against it.
 pub const PREFLIGHT_SCRIPT: &str = concat!(
     prelude!(),
@@ -600,9 +612,13 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    up=$(G rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) && printf 'upstream=%s\\n' \"$up\"\n",
     "  fi\n",
     "  if [ -n \"${head:-}\" ] && { G grep -q --untracked -e 'filter=lfs' -- '*.gitattributes' 2>/dev/null || uses_lfs HEAD; } && lfs_d=$(lfs_dir); then\n",
+    // The index stands in for W, which only a snapshot hashes: W's other
+    // objects are the changed files, which the source has once they are
+    // hashed. So `lfs_missing` covers what the destination may fetch with
+    // the uncommitted changes (W) and without them (HEAD).
     "    {\n",
-    "      G ls-tree -r HEAD | awk '$2 == \"blob\" { print $3, \"o\" }'\n",
-    "      G ls-files -s | awk '{ print $2, \"o\" }'\n",
+    "      G ls-tree -r HEAD | awk '$2 == \"blob\" { print $3, \"h\" }'\n",
+    "      G ls-files -s | awk '{ print $2, \"w\" }'\n",
     "      G rev-list --objects HEAD --not --remotes | awk '{ print $1, \"o\" }'\n",
     "    } | lfs_pointers | lfs_have \"$lfs_d\" | lfs_counts\n",
     // check-attr -z prints `path NUL attribute NUL value NUL`.

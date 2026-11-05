@@ -999,7 +999,7 @@ impl Run<'_> {
                 "lfs_unavailable",
                 format!(
                     "Git LFS isn't installed {here}, so LFS files hold pointers; install \
-                     git-lfs and run `git lfs checkout`."
+                     git-lfs, then run git lfs checkout."
                 ),
             ));
         }
@@ -1008,7 +1008,7 @@ impl Run<'_> {
                 "lfs_not_fetched",
                 format!(
                     "{} {} the source didn't have couldn't be fetched from origin, so the \
-                     files that use them hold pointers until `git lfs pull` gets them.",
+                     files that use them hold pointers until git lfs pull fetches them.",
                     applied.lfs_missing,
                     if applied.lfs_missing == 1 {
                         "LFS object"

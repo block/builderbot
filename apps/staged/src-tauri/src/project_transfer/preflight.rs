@@ -126,8 +126,9 @@ pub struct RepoPreflight {
     /// filter applies to, which the snapshot stores as new objects.
     pub lfs_present: u64,
     pub lfs_present_bytes: u64,
-    /// LFS objects it refers to that the source never downloaded: the
-    /// destination fetches them from origin if it can.
+    /// LFS objects in `HEAD` or the index that the source never downloaded:
+    /// the destination fetches the ones its checkout uses from origin if it
+    /// can.
     pub lfs_missing: u64,
     pub lfs_missing_bytes: u64,
     pub has_uncommitted_changes: bool,

@@ -357,10 +357,156 @@ fn leaving_uncommitted_changes_behind_still_checks_out_lfs_content() {
     }
 }
 
+/// `main` pushed with its LFS objects: `*.psd` tracked, and `art.psd` and
+/// `gone.psd`. Then `feature` at the source, where the index changes both: a
+/// new version of `art.psd` is staged, and `gone.psd` is removed with `git
+/// rm`. Neither pushed version is in the index, the working tree or an
+/// unpushed commit; only `HEAD` has them. Returns them as pushed.
+fn pushed_lfs_files_the_index_changes(w: &World) -> Files {
+    track_psd(&w.source);
+    let art = noise(2200, 31);
+    let gone = noise(1700, 32);
+    write(&w.source, "art.psd", &art);
+    write(&w.source, "gone.psd", &gone);
+    commit(&w.source, "art");
+    git(&w.source, &["lfs", "push", "origin", "main"]);
+    git(&w.source, &["push", "-q", "origin", "main"]);
+    git(&w.dest, &["fetch", "-q", "origin"]);
+    git(&w.source, &["checkout", "-q", "-b", "feature"]);
+    write(&w.source, "art.psd", noise(2400, 33));
+    git(&w.source, &["add", "art.psd"]);
+    git(&w.source, &["rm", "-q", "gone.psd"]);
+    vec![("art.psd", art), ("gone.psd", gone)]
+}
+
+#[test]
+fn leaving_uncommitted_changes_behind_checks_out_pushed_lfs_files_the_index_changed() {
+    if !lfs_installed(
+        "leaving_uncommitted_changes_behind_checks_out_pushed_lfs_files_the_index_changed",
+    ) {
+        return;
+    }
+    for shell in shells() {
+        for to_remote in [true, false] {
+            let what = format!("{shell}, to remote: {to_remote}");
+            let w = World::new(shell);
+            let files = pushed_lfs_files_the_index_changes(&w);
+            let preflight = w
+                .isolated(&w.local_scratch)
+                .run_script(
+                    scripts::PREFLIGHT_SCRIPT,
+                    &scripts::preflight_args([(w.source.to_str().unwrap(), "feature")]),
+                )
+                .unwrap();
+
+            let (outcome, checkout, finished) = w.carry_lfs(to_remote, false).unwrap();
+
+            // HEAD's two, though no unpushed commit has them, and the staged
+            // version, which stays in the backup.
+            let counts = outcome
+                .snapshot
+                .lfs
+                .as_ref()
+                .expect("an LFS payload")
+                .counts;
+            assert_eq!(
+                (counts.total, counts.present, counts.missing),
+                (3, 3, 0),
+                "{what}"
+            );
+            let section = &scripts::sections(&preflight.stdout)[0];
+            assert_eq!(
+                LfsCounts::from_report(section).map(|c| (c.present, c.missing)),
+                Some((3, 0)),
+                "{what}: the preflight counts the same"
+            );
+            assert_eq!(
+                (outcome.applied.lfs_missing, finished.lfs_missing),
+                (0, 0),
+                "{what}"
+            );
+            assert!(
+                finished.warnings.is_empty(),
+                "{what}: {:?}",
+                finished.warnings
+            );
+            assert_content(&checkout, &files);
+            assert_eq!(rev(&checkout, "HEAD"), outcome.snapshot.head, "{what}");
+            assert_eq!(git(&checkout, &["status", "--porcelain"]), "", "{what}");
+        }
+    }
+}
+
+/// What the checkout uses is what has to arrive: `HEAD`'s objects when the
+/// uncommitted changes stay behind, the working tree's when they come. One
+/// the source never downloaded is fetched from origin only when the checkout
+/// uses it.
+#[test]
+fn lfs_objects_the_checkout_uses_are_fetched_whichever_changes_come() {
+    if !lfs_installed("lfs_objects_the_checkout_uses_are_fetched_whichever_changes_come") {
+        return;
+    }
+    for to_remote in [true, false] {
+        for include_uncommitted in [false, true] {
+            let what = format!("to remote: {to_remote}, uncommitted: {include_uncommitted}");
+            let w = World::new("/bin/sh");
+            // Someone else pushes two LFS files, objects and all.
+            let other = w.other_clone("other");
+            track_psd(&other);
+            let kept = noise(1300, 41);
+            let gone = noise(1600, 42);
+            write(&other, "kept.psd", &kept);
+            write(&other, "gone.psd", &gone);
+            commit(&other, "pushed");
+            git(&other, &["lfs", "push", "origin", "main"]);
+            git(&other, &["push", "-q", "origin", "main"]);
+            git(&w.dest, &["fetch", "-q", "origin"]);
+            // The source has the pointers but never downloaded the objects,
+            // and stages one's removal.
+            git(
+                &w.source,
+                &["lfs", "install", "--local", "--skip-repo", "--skip-smudge"],
+            );
+            git(&w.source, &["pull", "-q", "--ff-only", "origin", "main"]);
+            git(&w.source, &["checkout", "-q", "-b", "feature"]);
+            git(&w.source, &["rm", "-q", "gone.psd"]);
+
+            let (outcome, checkout, finished) =
+                w.carry_lfs(to_remote, include_uncommitted).unwrap();
+
+            let counts = outcome.snapshot.lfs.as_ref().unwrap().counts;
+            assert_eq!(
+                (counts.total, counts.present, counts.missing),
+                (2, 0, 2),
+                "{what}"
+            );
+            assert_eq!(
+                (outcome.applied.lfs_missing, finished.lfs_missing),
+                (0, 0),
+                "{what}"
+            );
+            if include_uncommitted {
+                assert_content(&checkout, &vec![("kept.psd", kept.clone())]);
+                assert!(!checkout.join("gone.psd").exists(), "{what}");
+                assert!(!has_lfs_object(&checkout, &gone), "{what}: not used");
+            } else {
+                assert_content(
+                    &checkout,
+                    &vec![("kept.psd", kept.clone()), ("gone.psd", gone.clone())],
+                );
+                assert_eq!(git(&checkout, &["status", "--porcelain"]), "", "{what}");
+            }
+        }
+    }
+}
+
 /// A source whose LFS archive loses an object the working tree uses on the
-/// way, with the archive's size and checksum made to match what is left.
+/// way, with the archive's size and checksum made to match what is left: one
+/// in `W` and not `HEAD` when the uncommitted changes are restored, else one
+/// in `HEAD` and not `W`.
 struct DropsAnLfsObject {
     inner: LocalEndpoint,
+    restore: bool,
 }
 
 fn tar(args: &[&str]) {
@@ -377,12 +523,14 @@ impl DropsAnLfsObject {
         let unpacked = PathBuf::from(format!("{archive}.unpacked"));
         fs::create_dir_all(&unpacked).unwrap();
         tar(&["-xf", archive, "-C", unpacked.to_str().unwrap()]);
+        // `<oid> <size> <in W> <in HEAD> <at the source>`.
+        let (used, unused) = if self.restore { (2, 3) } else { (3, 2) };
         let manifest = fs::read_to_string(unpacked.join("oids")).unwrap();
         let oid = manifest
             .lines()
             .map(|line| line.split(' ').collect::<Vec<_>>())
-            .find(|fields| fields[2] == "1" && fields[3] == "1")
-            .expect("an object in W")[0]
+            .find(|fields| fields[used] == "1" && fields[unused] == "0" && fields[4] == "1")
+            .expect("an object only the checkout uses")[0]
             .to_string();
         fs::remove_file(
             unpacked
@@ -452,8 +600,8 @@ fn an_lfs_object_lost_on_the_way_fails_the_apply_before_the_branch_lands() {
         return;
     }
     for shell in shells() {
-        for to_remote in [true, false] {
-            let what = format!("{shell}, to remote: {to_remote}");
+        for (to_remote, restore) in [(true, true), (false, true), (true, false), (false, false)] {
+            let what = format!("{shell}, to remote: {to_remote}, uncommitted: {restore}");
             let w = World::new(shell);
             lfs_branch(&w);
             let (source_scratch, dest_scratch, landing) = if to_remote {
@@ -463,9 +611,16 @@ fn an_lfs_object_lost_on_the_way_fails_the_apply_before_the_branch_lands() {
             };
             let source = DropsAnLfsObject {
                 inner: w.isolated(source_scratch),
+                restore,
             };
             let dest = w.isolated(dest_scratch);
-            let plan = w.plan(&source.inner, landing, ("feature", "feature"), true, vec![]);
+            let plan = w.plan(
+                &source.inner,
+                landing,
+                ("feature", "feature"),
+                restore,
+                vec![],
+            );
             let dest_before = source_fingerprint(&w.dest);
 
             let err = carry_repo(&source, &dest, &plan).unwrap_err();

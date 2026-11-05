@@ -728,6 +728,40 @@ fn test_transition_from_owned_active_does_not_overwrite_completed_session() {
     assert_eq!(final_state.status, SessionStatus::Completed);
 }
 
+/// A remote session a dead instance left running is taken over by whichever
+/// instance sweeps it first; the next sweep (here or elsewhere) finds it owned.
+#[test]
+fn test_adopt_running_session_takes_a_dead_owners_row_once() {
+    let store = Store::in_memory().unwrap();
+    let dead_pid = std::process::id().wrapping_add(1);
+
+    let mut orphaned = Session::new_running("orphaned", Path::new("/tmp"));
+    orphaned.owner_pid = Some(dead_pid);
+    store.create_session(&orphaned).unwrap();
+
+    assert!(store
+        .adopt_running_session(&orphaned.id, Some(dead_pid))
+        .unwrap());
+    let adopted = store.get_session(&orphaned.id).unwrap().unwrap();
+    assert_eq!(adopted.status, SessionStatus::Running);
+    assert_eq!(adopted.owner_pid, Some(std::process::id()));
+
+    assert!(
+        !store
+            .adopt_running_session(&orphaned.id, Some(dead_pid))
+            .unwrap(),
+        "a row already taken over is not taken again"
+    );
+
+    let mut finished = Session::new_running("finished", Path::new("/tmp"));
+    finished.owner_pid = None;
+    store.create_session(&finished).unwrap();
+    store
+        .update_session_status(&finished.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    assert!(!store.adopt_running_session(&finished.id, None).unwrap());
+}
+
 #[test]
 fn test_transition_queued_to_running_claims_queued_session() {
     let store = Store::in_memory().unwrap();

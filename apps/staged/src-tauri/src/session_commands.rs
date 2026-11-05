@@ -1644,6 +1644,39 @@ async fn prepare_resume(
     })
 }
 
+/// The runner config for reattaching to `session`, a remote session whose
+/// owner process is gone (see `session_runner::recover_dead_sessions`), read
+/// the way a resume reads it. It carries no `pre_head_sha`: the branch's HEAD
+/// now is not where the turn started, so the caller works that out.
+pub(crate) async fn reattach_session_config(
+    store: &Arc<Store>,
+    session: &store::Session,
+) -> Result<SessionConfig, String> {
+    let plan = prepare_resume(store, session, session.branch_id.clone(), None).await?;
+    Ok(SessionConfig {
+        session_id: session.id.clone(),
+        prompt: session.prompt.clone(),
+        working_dir: plan.working_dir,
+        agent_session_id: plan.agent_session_id,
+        pre_head_sha: None,
+        provider: plan.provider,
+        workspace_name: plan.workspace_name,
+        extra_env: plan.extra_env,
+        mcp_project_id: None,
+        action_executor: None,
+        action_registry: None,
+        remote_working_dir: plan.remote_working_dir,
+        image_ids: Vec::new(),
+        queued_message_id: None,
+        acp_config_selection: plan.effective_acp_config_selection,
+        branch_id: plan.event_branch_id,
+        project_id: plan.event_project_id.or(plan.mcp_project_id),
+        expose_pikchr_tools: false,
+        parent_project_note_id: plan.parent_project_note_id,
+        background_hold: None,
+    })
+}
+
 /// The second half of a resume, after the row has been claimed `running`
 /// (and with the caller's liveness hold still in place): announce the
 /// status, persist the config selection and hand the row to the runner. A

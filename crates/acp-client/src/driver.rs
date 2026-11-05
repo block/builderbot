@@ -2038,6 +2038,78 @@ impl AcpDriver {
         config_options: &[AcpSessionConfigOptionSelection],
         auth_selection: Option<&AcpAuthenticationSelection>,
     ) -> Result<SessionConnection, String> {
+        self.open_connection(
+            session_id,
+            working_dir,
+            store,
+            writer,
+            cancel_token,
+            agent_session_id,
+            config_options,
+            auth_selection,
+            false,
+        )
+        .await
+    }
+
+    /// Reattach to remote session `agent_session_id`, whose turn a previous
+    /// app instance prompted and was then gone before it ended, and wait for
+    /// that turn to end.
+    ///
+    /// The session is loaded through the shared proxy (so `sq` attaches to
+    /// the agent process still serving the turn) and the rest of the turn is
+    /// recorded as it streams. It completes once bloxlet reports the agent
+    /// process idle, and fails as remote agent lost (see
+    /// [`is_remote_agent_lost_error`]) when that process is gone. Must be
+    /// called from within a Tokio `LocalSet`, like [`Self::connect`].
+    pub async fn reattach(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        cancel_token: &CancellationToken,
+        agent_session_id: &str,
+    ) -> Result<AgentRunOutcome, String> {
+        if !self.is_remote {
+            return Err("Only a remote session's turn can be reattached to".to_string());
+        }
+        let mut connection = self
+            .open_connection(
+                session_id,
+                working_dir,
+                store,
+                writer,
+                cancel_token,
+                Some(agent_session_id),
+                &[],
+                None,
+                true,
+            )
+            .await?;
+        let Some(settled) = connection.take_settled_receiver() else {
+            return Err("The reattached connection has no settled event".to_string());
+        };
+        settled
+            .await
+            .map_err(|_| "The reattached connection ended without settling".to_string())?
+            .outcome
+    }
+
+    /// [`Self::connect`], or with `reattach` [`Self::reattach`]'s connection.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_connection(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        cancel_token: &CancellationToken,
+        agent_session_id: Option<&str>,
+        config_options: &[AcpSessionConfigOptionSelection],
+        auth_selection: Option<&AcpAuthenticationSelection>,
+        reattach: bool,
+    ) -> Result<SessionConnection, String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
         let acp_working_dir = resolve_acp_working_dir(
             working_dir,
@@ -2275,6 +2347,15 @@ impl AcpDriver {
                 Box::new(normalized_stdout_reader),
             )
         };
+        let reattached_turn = match &agent_process {
+            AgentProcess::Remote(lease) if reattach => {
+                Some(lease.reattached_turn().ok_or_else(|| {
+                    "This remote agent's workspace is unknown, so its turn cannot be reattached to"
+                        .to_string()
+                })?)
+            }
+            _ => None,
+        };
         let stdin_compat = outgoing_writer.compat_write();
         let stdout_compat = incoming_reader.compat();
 
@@ -2435,6 +2516,7 @@ impl AcpDriver {
                         &mut turn_control_rx,
                         &hold_active_for_task,
                         &pending_reply,
+                        reattached_turn,
                     )
                     .await
                     .map_err(agent_client_protocol::util::internal_error)
@@ -5813,6 +5895,7 @@ async fn run_acp_session(
     turn_control_rx: &mut mpsc::UnboundedReceiver<TurnControlRequest>,
     hold_active: &AtomicBool,
     pending_reply: &RefCell<Option<oneshot::Sender<SessionTurnResult>>>,
+    reattached_turn: Option<remote_process::ReattachedTurn>,
 ) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
     let setup_task = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
@@ -5882,6 +5965,17 @@ async fn run_acp_session(
     }
     if acp_session_id.is_some() {
         handler.transition_to_waiting_for_prompt().await;
+    }
+    if let Some(turn) = reattached_turn {
+        return observe_reattached_turn(
+            connection,
+            &setup,
+            handler,
+            our_session_id,
+            cancel_token,
+            turn,
+        )
+        .await;
     }
 
     // Prompt loop: the connection lifetime is hoisted above the turn
@@ -6171,6 +6265,42 @@ async fn run_acp_session(
                 return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
             }
         }
+    }
+}
+
+/// Record a reattached turn (see [`AcpDriver::reattach`]) as it streams until
+/// it ends. Nothing is prompted: the agent is still serving the turn, and its
+/// updates for the session reach this connection now that it has loaded it.
+async fn observe_reattached_turn(
+    connection: &ConnectionTo<Agent>,
+    setup: &AcpSessionSetup,
+    handler: &Arc<AcpNotificationHandler>,
+    our_session_id: &str,
+    cancel_token: &CancellationToken,
+    turn: remote_process::ReattachedTurn,
+) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
+    handler.begin_turn_permissions();
+    handler.transition_to_live().await;
+    handler
+        .response
+        .lock()
+        .await
+        .start_prompt(setup.agent_session_id.to_string());
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            handler.cancel_pending_permissions();
+            if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                log::warn!("{e}");
+            }
+            Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
+        }
+        ended = turn.ended() => match ended {
+            Ok(()) => {
+                log::info!("Session {our_session_id}: the reattached turn has ended");
+                Ok((AgentRunOutcome::Completed, SessionSettleReason::ResponseComplete))
+            }
+            Err(cause) => Err(format!("{REMOTE_AGENT_LOST_PREFIX}{cause}")),
+        },
     }
 }
 

@@ -1911,10 +1911,6 @@ pub fn start_session(
             }
         });
 
-        let cancellation_completion_reason = registry
-            .cancellation_completion_reason(&session_id_for_status)
-            .unwrap_or(CompletionReason::Interrupted);
-
         if let Err(ref e) = result {
             if config.acp_config_selection.is_some()
                 && acp_client::is_config_selection_unavailable_error(e)
@@ -1929,219 +1925,249 @@ pub fn start_session(
             }
         }
 
-        // Transition the session to its terminal state, but only if it is
-        // still "running". This prevents a late-arriving "completed" from
-        // overwriting a "cancelled" that was set by a concurrent cancel
-        // request. If the transition returns false the cancel_session
-        // command (or delete) already moved the status — we skip the event
-        // to avoid a duplicate.
-        //
-        // If the session was cancelled and then deleted, these DB writes
-        // are harmless no-ops — see module-level docs on the race.
-        //
-        // Read once: the arms below and the late-Stop check after the hooks
-        // need to agree on what "cancelled before the run settled" means.
-        let cancel_requested = cancel_token.is_cancelled();
-        let (new_status, error_msg, completion_reason) = match result {
-            Ok(AgentRunOutcome::Cancelled) if cancel_requested => {
-                ("cancelled", None, cancellation_completion_reason.clone())
-            }
-            Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
-            // A cancel that landed on a turn which had already completed and
-            // held for its background work stopped only the *wait*. Fall
-            // through to the completed arm so the stop can't erase the turn's
-            // artifacts (commit detection, note generation, pr/push outcomes).
-            Ok(AgentRunOutcome::Completed)
-                if cancel_requested
-                    && !completed_turn_survives_late_cancel(settle_reason.get()) =>
-            {
-                ("cancelled", None, cancellation_completion_reason.clone())
-            }
-            Ok(AgentRunOutcome::Completed) => (
-                "completed",
-                None,
-                completed_turn_completion_reason(settle_reason.get()),
-            ),
-            Err(ref e) if cancel_requested => {
-                log::info!(
-                    "Session {session_id_for_status} cancelled (error during teardown: {e})"
-                );
-                ("cancelled", None, cancellation_completion_reason)
-            }
-            Err(ref e) => {
-                log::error!("Session {session_id_for_status} failed: {e}");
-                ("error", Some(e.clone()), failed_run_completion_reason(e))
-            }
-        };
-
-        let completed_successfully =
-            terminal_state_completed_successfully(new_status, &completion_reason);
-
-        // Run post-completion hooks before transitioning status.
-        // These detect artifacts produced by the session (commits, notes).
-        //
-        // `result` only materializes once the connection *settles* (the agent
-        // is torn down) — under a background hold that is quiescence or the
-        // hold cap, not the prompt resolving — so a commit made by an
-        // out-of-turn background continuation is visible to these hooks.
-        if completed_successfully {
-            run_post_completion_hooks(
-                &config.session_id,
-                &config.working_dir,
-                config.pre_head_sha.as_deref(),
-                config.workspace_name.as_deref(),
-                config
-                    .remote_working_dir
-                    .as_deref()
-                    .and_then(|dir| dir.to_str()),
-                &store_for_status,
-                turn_start_message_id,
-            );
-        }
-
-        // The registry entry is still in place during the hooks, so a Stop
-        // that lands while they run fires this token: `cancel` answers `true`
-        // and `cancel_session_impl` writes nothing, leaving this thread to
-        // record it. (It used to find the entry already gone and write
-        // `cancelled` straight to the row; same outcome, different writer.)
-        // Only a Stop *newer* than the match above counts — one it already
-        // saw may have been folded into `completed` deliberately, see
-        // `completed_turn_survives_late_cancel`.
-        let (new_status, error_msg, completion_reason) =
-            if !cancel_requested && cancel_token.is_cancelled() {
-                log::info!(
-                    "Session {session_id_for_status} cancelled during its post-completion hooks"
-                );
-                let reason = registry
-                    .cancellation_completion_reason(&session_id_for_status)
-                    .unwrap_or(CompletionReason::Interrupted);
-                ("cancelled", None, reason)
-            } else {
-                (new_status, error_msg, completion_reason)
-            };
-
-        // Decided: from here the entry is a finished turn's, and a Resume that
-        // wins the row between the write below and the deregister must not
-        // inherit a Stop that was aimed at this turn (see `mark_finished`).
-        registry.mark_finished(&session_id_for_status, registration);
-        let status_enum = SessionStatus::parse(new_status).unwrap();
-        let transitioned = store_for_status
-            .transition_from_running(
-                &session_id_for_status,
-                status_enum,
-                error_msg.as_deref(),
-                Some(&completion_reason),
-            )
-            .unwrap_or(false);
-
-        // Deregister only now that the terminal state is written: a `running`
-        // row this process owns with no registry entry is what the
-        // stranded-session sweep ends, so the entry has to outlive the row's
-        // time in `running`. Epoch-guarded, because a Resume that wins the row
-        // between the write above and this line has registered a successor
-        // under the same id (see `RegistrationEpoch`).
-        registry.deregister(&session_id_for_status, registration);
-
-        // Parse and persist pr/push outcomes and emit the pr-created /
-        // push-completed domain events. Gated on winning the transition so
-        // exactly one writer runs them, and emitted before the terminal
-        // status event so clients see the outcome first.
-        if transitioned {
-            crate::session_completion::run_completion_side_effects(
-                &store_for_status,
-                &app_handle,
-                &session_id_for_status,
-                config.branch_id.as_deref(),
-                new_status,
-            );
-        }
-
-        // Always emit the terminal status event, even if the DB row was already
-        // deleted (e.g. user deleted the pending commit). This lets the frontend
-        // clean up sidebar "running" state as a safety net.
-        emit_status(
-            &app_handle,
-            &session_id_for_status,
-            new_status,
-            error_msg,
-            Some(&completion_reason),
-            config.branch_id.clone(),
-            config.project_id.clone(),
+        finish_session_run(
+            &config,
+            result,
+            settle_reason.get(),
+            turn_start_message_id,
+            &cancel_token,
+            registration,
+            store_for_status,
+            registry,
+            app_handle,
         );
-
-        if transitioned {
-            let branch_id = config.branch_id.clone();
-            // Read the token again rather than reusing what the terminal-state
-            // match saw: the entry stayed registered through the hooks and up
-            // to the `deregister` above, so a Stop landing anywhere in that
-            // stretch reached this token. One that landed before the terminal
-            // write was recorded by the late-Stop check and is already
-            // `cancelled` in the row; one that landed between the write and
-            // the deregister changed no row — the turn was over — but still
-            // says the user does not want the queued follow-up to run.
-            //
-            // Naming the shared body rather than a command is the point: the
-            // Tauri command and the web dispatcher's `cancel_session` arm both
-            // route through `session_commands::cancel_session_impl`, so this
-            // holds whichever transport the Stop arrived on. A transport that
-            // cancelled through the registry alone would leave the row
-            // `running`, let the transition win, and drain the follow-up
-            // anyway.
-            let should_drain_queued_message =
-                queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
-            let session_id_for_follow_up = session_id_for_status.clone();
-            let action_executor_for_follow_up = config
-                .action_executor
-                .clone()
-                .unwrap_or_else(|| Arc::new(ActionExecutor::new()));
-            let action_registry_for_follow_up = config
-                .action_registry
-                .clone()
-                .unwrap_or_else(|| Arc::new(ActionRegistry::new()));
-
-            if should_drain_queued_message || branch_id.is_some() {
-                let store_for_follow_up = Arc::clone(&store_for_status);
-                let registry_for_follow_up = Arc::clone(&registry);
-                let app_handle_for_follow_up = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    if should_drain_queued_message {
-                        match crate::session_commands::drain_queued_message_for_session(
-                            Arc::clone(&store_for_follow_up),
-                            Arc::clone(&registry_for_follow_up),
-                            Arc::clone(&action_executor_for_follow_up),
-                            Arc::clone(&action_registry_for_follow_up),
-                            app_handle_for_follow_up.clone(),
-                            session_id_for_follow_up.clone(),
-                        )
-                        .await
-                        {
-                            Ok(true) => {
-                                log::info!(
-                                    "Drained queued follow-up message for session {session_id_for_follow_up}"
-                                );
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                log::error!(
-                                    "Failed to drain queued follow-up message for session {session_id_for_follow_up}: {e}"
-                                );
-                            }
-                        }
-                    }
-
-                    if let Some(branch_id) = branch_id {
-                        crate::session_queue::kick(
-                            &app_handle_for_follow_up,
-                            &branch_id,
-                            crate::session_queue::KickSource::TerminalState,
-                        );
-                    }
-                });
-            }
-        }
     });
 
     Ok(SessionStartOutcome::Started)
+}
+
+/// The normal completion path every agent run ends through: post-completion
+/// hooks for a turn that completed, the terminal state, the completion side
+/// effects, the terminal status event, and the queued follow-up and branch
+/// drains. `registration` is the run's registry entry, which this ends.
+#[allow(clippy::too_many_arguments)]
+fn finish_session_run(
+    config: &SessionConfig,
+    result: Result<AgentRunOutcome, String>,
+    settle_reason: Option<acp_client::SessionSettleReason>,
+    turn_start_message_id: i64,
+    cancel_token: &CancellationToken,
+    registration: RegistrationEpoch,
+    store_for_status: Arc<Store>,
+    registry: Arc<SessionRegistry>,
+    app_handle: AppHandle,
+) {
+    let session_id_for_status = config.session_id.clone();
+    let cancellation_completion_reason = registry
+        .cancellation_completion_reason(&session_id_for_status)
+        .unwrap_or(CompletionReason::Interrupted);
+
+    // Transition the session to its terminal state, but only if it is
+    // still "running". This prevents a late-arriving "completed" from
+    // overwriting a "cancelled" that was set by a concurrent cancel
+    // request. If the transition returns false the cancel_session
+    // command (or delete) already moved the status — we skip the event
+    // to avoid a duplicate.
+    //
+    // If the session was cancelled and then deleted, these DB writes
+    // are harmless no-ops — see module-level docs on the race.
+    //
+    // Read once: the arms below and the late-Stop check after the hooks
+    // need to agree on what "cancelled before the run settled" means.
+    let cancel_requested = cancel_token.is_cancelled();
+    let (new_status, error_msg, completion_reason) = match result {
+        Ok(AgentRunOutcome::Cancelled) if cancel_requested => {
+            ("cancelled", None, cancellation_completion_reason.clone())
+        }
+        Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
+        // A cancel that landed on a turn which had already completed and
+        // held for its background work stopped only the *wait*. Fall
+        // through to the completed arm so the stop can't erase the turn's
+        // artifacts (commit detection, note generation, pr/push outcomes).
+        Ok(AgentRunOutcome::Completed)
+            if cancel_requested && !completed_turn_survives_late_cancel(settle_reason) =>
+        {
+            ("cancelled", None, cancellation_completion_reason.clone())
+        }
+        Ok(AgentRunOutcome::Completed) => (
+            "completed",
+            None,
+            completed_turn_completion_reason(settle_reason),
+        ),
+        Err(ref e) if cancel_requested => {
+            log::info!("Session {session_id_for_status} cancelled (error during teardown: {e})");
+            ("cancelled", None, cancellation_completion_reason)
+        }
+        Err(ref e) => {
+            log::error!("Session {session_id_for_status} failed: {e}");
+            ("error", Some(e.clone()), failed_run_completion_reason(e))
+        }
+    };
+
+    let completed_successfully =
+        terminal_state_completed_successfully(new_status, &completion_reason);
+
+    // Run post-completion hooks before transitioning status.
+    // These detect artifacts produced by the session (commits, notes).
+    //
+    // `result` only materializes once the connection *settles* (the agent
+    // is torn down) — under a background hold that is quiescence or the
+    // hold cap, not the prompt resolving — so a commit made by an
+    // out-of-turn background continuation is visible to these hooks.
+    if completed_successfully {
+        run_post_completion_hooks(
+            &config.session_id,
+            &config.working_dir,
+            config.pre_head_sha.as_deref(),
+            config.workspace_name.as_deref(),
+            config
+                .remote_working_dir
+                .as_deref()
+                .and_then(|dir| dir.to_str()),
+            &store_for_status,
+            turn_start_message_id,
+        );
+    }
+
+    // The registry entry is still in place during the hooks, so a Stop
+    // that lands while they run fires this token: `cancel` answers `true`
+    // and `cancel_session_impl` writes nothing, leaving this thread to
+    // record it. (It used to find the entry already gone and write
+    // `cancelled` straight to the row; same outcome, different writer.)
+    // Only a Stop *newer* than the match above counts — one it already
+    // saw may have been folded into `completed` deliberately, see
+    // `completed_turn_survives_late_cancel`.
+    let (new_status, error_msg, completion_reason) = if !cancel_requested
+        && cancel_token.is_cancelled()
+    {
+        log::info!("Session {session_id_for_status} cancelled during its post-completion hooks");
+        let reason = registry
+            .cancellation_completion_reason(&session_id_for_status)
+            .unwrap_or(CompletionReason::Interrupted);
+        ("cancelled", None, reason)
+    } else {
+        (new_status, error_msg, completion_reason)
+    };
+
+    // Decided: from here the entry is a finished turn's, and a Resume that
+    // wins the row between the write below and the deregister must not
+    // inherit a Stop that was aimed at this turn (see `mark_finished`).
+    registry.mark_finished(&session_id_for_status, registration);
+    let status_enum = SessionStatus::parse(new_status).unwrap();
+    let transitioned = store_for_status
+        .transition_from_running(
+            &session_id_for_status,
+            status_enum,
+            error_msg.as_deref(),
+            Some(&completion_reason),
+        )
+        .unwrap_or(false);
+
+    // Deregister only now that the terminal state is written: a `running`
+    // row this process owns with no registry entry is what the
+    // stranded-session sweep ends, so the entry has to outlive the row's
+    // time in `running`. Epoch-guarded, because a Resume that wins the row
+    // between the write above and this line has registered a successor
+    // under the same id (see `RegistrationEpoch`).
+    registry.deregister(&session_id_for_status, registration);
+
+    // Parse and persist pr/push outcomes and emit the pr-created /
+    // push-completed domain events. Gated on winning the transition so
+    // exactly one writer runs them, and emitted before the terminal
+    // status event so clients see the outcome first.
+    if transitioned {
+        crate::session_completion::run_completion_side_effects(
+            &store_for_status,
+            &app_handle,
+            &session_id_for_status,
+            config.branch_id.as_deref(),
+            new_status,
+        );
+    }
+
+    // Always emit the terminal status event, even if the DB row was already
+    // deleted (e.g. user deleted the pending commit). This lets the frontend
+    // clean up sidebar "running" state as a safety net.
+    emit_status(
+        &app_handle,
+        &session_id_for_status,
+        new_status,
+        error_msg,
+        Some(&completion_reason),
+        config.branch_id.clone(),
+        config.project_id.clone(),
+    );
+
+    if transitioned {
+        let branch_id = config.branch_id.clone();
+        // Read the token again rather than reusing what the terminal-state
+        // match saw: the entry stayed registered through the hooks and up
+        // to the `deregister` above, so a Stop landing anywhere in that
+        // stretch reached this token. One that landed before the terminal
+        // write was recorded by the late-Stop check and is already
+        // `cancelled` in the row; one that landed between the write and
+        // the deregister changed no row — the turn was over — but still
+        // says the user does not want the queued follow-up to run.
+        //
+        // Naming the shared body rather than a command is the point: the
+        // Tauri command and the web dispatcher's `cancel_session` arm both
+        // route through `session_commands::cancel_session_impl`, so this
+        // holds whichever transport the Stop arrived on. A transport that
+        // cancelled through the registry alone would leave the row
+        // `running`, let the transition win, and drain the follow-up
+        // anyway.
+        let should_drain_queued_message =
+            queued_follow_up_should_start(completed_successfully, cancel_token.is_cancelled());
+        let session_id_for_follow_up = session_id_for_status.clone();
+        let action_executor_for_follow_up = config
+            .action_executor
+            .clone()
+            .unwrap_or_else(|| Arc::new(ActionExecutor::new()));
+        let action_registry_for_follow_up = config
+            .action_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(ActionRegistry::new()));
+
+        if should_drain_queued_message || branch_id.is_some() {
+            let store_for_follow_up = Arc::clone(&store_for_status);
+            let registry_for_follow_up = Arc::clone(&registry);
+            let app_handle_for_follow_up = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if should_drain_queued_message {
+                    match crate::session_commands::drain_queued_message_for_session(
+                        Arc::clone(&store_for_follow_up),
+                        Arc::clone(&registry_for_follow_up),
+                        Arc::clone(&action_executor_for_follow_up),
+                        Arc::clone(&action_registry_for_follow_up),
+                        app_handle_for_follow_up.clone(),
+                        session_id_for_follow_up.clone(),
+                    )
+                    .await
+                    {
+                        Ok(true) => {
+                            log::info!(
+                                "Drained queued follow-up message for session {session_id_for_follow_up}"
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            log::error!(
+                                "Failed to drain queued follow-up message for session {session_id_for_follow_up}: {e}"
+                            );
+                        }
+                    }
+                }
+
+                if let Some(branch_id) = branch_id {
+                    crate::session_queue::kick(
+                        &app_handle_for_follow_up,
+                        &branch_id,
+                        crate::session_queue::KickSource::TerminalState,
+                    );
+                }
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3572,9 +3598,12 @@ fn emit_pipeline_step<R: tauri::Runtime>(
 /// - `owner_pid` is our own PID → ours; its session thread owns the row, skip.
 /// - `owner_pid` belongs to a live process → another Staged instance owns
 ///   it; leave it alone.
-/// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
-///   error with `AppQuit` reason and emit `session-status-changed` so the
-///   frontend learns the outcome.
+/// - `owner_pid` is dead (or NULL for pre-migration rows) → a remote session
+///   with an agent session is taken over and reattached to, since its agent
+///   runs on the workspace and may outlive the owner (see
+///   [`reattach_dead_owner_session`]); anything else ended with its owner, so
+///   transition it to error with `AppQuit` reason and emit
+///   `session-status-changed` so the frontend learns the outcome.
 ///
 /// Only `running` rows are swept. A `queued` row carries no owner — it waits
 /// for a branch drain, and whether one is still coming depends on the
@@ -3599,6 +3628,10 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
         };
 
         if should_cancel {
+            if dead_owner_recovery(&store, &session) == DeadOwnerRecovery::Reattach {
+                reattach_dead_owner_session(Arc::clone(&store), &app_handle, session);
+                continue;
+            }
             let transitioned = store
                 .transition_from_running(
                     &session.id,
@@ -3636,6 +3669,232 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
             }
         }
     }
+}
+
+/// How [`recover_dead_sessions`] ends a `running` row whose owner is gone.
+#[derive(Debug, PartialEq, Eq)]
+enum DeadOwnerRecovery {
+    /// Its agent went with the owner: record [`CompletionReason::AppQuit`].
+    AppQuit,
+    /// A remote session whose agent runs on its workspace, where it may still
+    /// be serving the turn: reattach to it.
+    Reattach,
+}
+
+fn dead_owner_recovery(store: &Store, session: &crate::store::Session) -> DeadOwnerRecovery {
+    // Without an agent session there is nothing to reattach to: the owner
+    // went before the agent had one.
+    let has_agent_session =
+        crate::session_commands::resumable_agent_session_id(session.agent_id.as_deref()).is_some();
+    if has_agent_session && session_workspace_name(store, session).is_some() {
+        DeadOwnerRecovery::Reattach
+    } else {
+        DeadOwnerRecovery::AppQuit
+    }
+}
+
+/// The workspace a session's branch lives on, when it is a remote branch —
+/// found through the same links a resume follows, from the store alone.
+fn session_workspace_name(store: &Store, session: &crate::store::Session) -> Option<String> {
+    let branch_id = session
+        .branch_id
+        .clone()
+        .or_else(|| {
+            let commit = store.get_commit_by_session(&session.id).ok().flatten();
+            commit.map(|commit| commit.branch_id)
+        })
+        .or_else(|| {
+            let note = store.get_note_by_session(&session.id).ok().flatten();
+            note.map(|note| note.branch_id)
+        })
+        .or_else(|| {
+            let review = store.get_review_by_session(&session.id).ok().flatten();
+            review.map(|review| review.branch_id)
+        })?;
+    store.get_branch(&branch_id).ok().flatten()?.workspace_name
+}
+
+/// Take over remote session `session`, whose owner process is gone, and
+/// finish it the way its owner would have: reattach to its agent on the
+/// workspace, wait for the turn the owner prompted to end, and run the
+/// normal completion path ([`finish_session_run`]) — or fail it as
+/// [`CompletionReason::RemoteAgentLost`] when that agent is gone too.
+fn reattach_dead_owner_session(
+    store: Arc<Store>,
+    app_handle: &AppHandle,
+    session: crate::store::Session,
+) {
+    use tauri::Manager;
+    let Some(registry) = app_handle
+        .try_state::<Arc<SessionRegistry>>()
+        .map(|registry| Arc::clone(&registry))
+    else {
+        return;
+    };
+    // Registered before the row becomes ours: a `running` row this process
+    // owns with no entry is what the stranded-session sweep ends. The quit
+    // flag is read after, so a shutdown either sees the entry or has already
+    // published the flag; a row left here is the next launch's to recover.
+    let (cancel_token, registration) = registry.register(&session.id);
+    let adopted = !crate::app_lifecycle::is_quitting(app_handle)
+        && store
+            .adopt_running_session(&session.id, session.owner_pid)
+            .unwrap_or(false);
+    if !adopted {
+        registry.deregister(&session.id, registration);
+        return;
+    }
+    log::info!(
+        "Reattaching to remote session {} whose owner process {:?} is gone",
+        session.id,
+        session.owner_pid
+    );
+    let app_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime for session");
+        let local = tokio::task::LocalSet::new();
+        let reattached = local.block_on(&rt, async {
+            let config = crate::session_commands::reattach_session_config(&store, &session).await?;
+            Ok::<_, String>(reattach_turn(&store, config, &cancel_token).await)
+        });
+        match reattached {
+            Ok((config, turn_start_message_id, result)) => finish_session_run(
+                &config,
+                result,
+                None,
+                turn_start_message_id,
+                &cancel_token,
+                registration,
+                store,
+                registry,
+                app_handle,
+            ),
+            Err(error) => {
+                let project_id = store.get_project_id_for_session(&session.id).ok().flatten();
+                let transitioned = finish_failed_before_run(
+                    &session.id,
+                    session.branch_id.clone(),
+                    project_id,
+                    &store,
+                    &app_handle,
+                    &error,
+                );
+                registry.deregister(&session.id, registration);
+                if transitioned {
+                    drain_queued_after_terminal_state(
+                        store,
+                        registry,
+                        app_handle,
+                        session.id,
+                        session.branch_id,
+                        false,
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Reattach to the remote session `config` describes and wait out the turn
+/// its previous owner prompted, returning the config (with the HEAD the turn
+/// started from, for commit detection), where the turn's messages start, and
+/// how the turn ended.
+async fn reattach_turn(
+    store: &Arc<Store>,
+    mut config: SessionConfig,
+    cancel_token: &CancellationToken,
+) -> (SessionConfig, i64, Result<AgentRunOutcome, String>) {
+    // The turn starts at its prompt, the session's latest user message.
+    let turn_start = store
+        .get_session_messages(&config.session_id)
+        .ok()
+        .and_then(|messages| {
+            messages
+                .into_iter()
+                .rev()
+                .find(|message| message.role == MessageRole::User)
+        });
+    let turn_start_message_id = turn_start.as_ref().map_or(0, |message| message.id);
+    if let Some(turn_started_at) = turn_start.map(|message| message.created_at) {
+        if store
+            .get_commit_by_session(&config.session_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            let working_dir = config.working_dir.clone();
+            let workspace_name = config.workspace_name.clone();
+            let remote_dir = config
+                .remote_working_dir
+                .as_deref()
+                .and_then(|dir| dir.to_str())
+                .map(str::to_string);
+            config.pre_head_sha = tauri::async_runtime::spawn_blocking(move || {
+                let git = crate::branches::git_runner(
+                    &working_dir,
+                    workspace_name.as_deref(),
+                    remote_dir,
+                );
+                head_before(&git, turn_started_at)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("HEAD lookup task failed: {e}")))
+            .inspect_err(|e| {
+                log::warn!(
+                    "Session {}: could not find the HEAD its turn started from, so its \
+                     commit goes undetected: {e}",
+                    config.session_id
+                )
+            })
+            .ok()
+            .flatten();
+        }
+    }
+
+    let result = async {
+        let agent_session_id = config
+            .agent_session_id
+            .clone()
+            .ok_or("The session has no agent session to reattach to")?;
+        let workspace_name = config
+            .workspace_name
+            .as_deref()
+            .ok_or("The session is not on a remote workspace")?;
+        let mut driver = AcpDriver::for_workspace(workspace_name, config.provider.as_deref())?;
+        if let Some(ref remote_dir) = config.remote_working_dir {
+            driver = driver.with_remote_working_dir(remote_dir.clone());
+        }
+        let store_trait: Arc<dyn acp_client::Store> = store.clone();
+        let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::new(
+            config.session_id.clone(),
+            Arc::clone(store),
+        ));
+        driver
+            .reattach(
+                &config.session_id,
+                &config.working_dir,
+                &store_trait,
+                &writer,
+                cancel_token,
+                &agent_session_id,
+            )
+            .await
+    }
+    .await;
+    (config, turn_start_message_id, result)
+}
+
+/// The branch's HEAD as of `at` (ms since the epoch): its newest commit made
+/// before then, or `None` when it has none that old. A turn's commits come
+/// after its prompt, so this is the HEAD a turn prompted at `at` started from.
+fn head_before(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<String>, String> {
+    let before = format!("--before=@{}", at.div_euclid(1000));
+    let sha = git(&["rev-list", "-1", &before, "HEAD"])?;
+    let sha = sha.trim();
+    Ok((!sha.is_empty()).then(|| sha.to_string()))
 }
 
 /// How often [`spawn_dead_session_sweep`] re-runs [`recover_dead_sessions`].
@@ -4878,6 +5137,105 @@ mod tests {
             failed_run_completion_reason("ACP protocol failed: server shut down unexpectedly"),
             CompletionReason::Crashed
         );
+    }
+
+    #[test]
+    fn a_dead_owners_remote_session_is_reattached_and_a_local_one_quit() {
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let local = crate::store::Branch::new(&project.id, "local", "main");
+        store.create_branch(&local).unwrap();
+        let remote = crate::store::Branch::new_remote(&project.id, "remote", "main", "ws-1");
+        store.create_branch(&remote).unwrap();
+        let dir = std::env::temp_dir();
+
+        // A local agent ends with the app that ran it.
+        let session = crate::store::Session::new_running("go", &dir)
+            .with_branch(&local.id)
+            .with_agent("agent-local");
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::AppQuit
+        );
+
+        // A remote agent may still be serving the turn, whether the session
+        // reaches its branch directly or through the commit it is making.
+        let session = crate::store::Session::new_running("go", &dir)
+            .with_branch(&remote.id)
+            .with_agent("agent-remote");
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::Reattach
+        );
+        let session = crate::store::Session::new_running("go", &dir).with_agent("agent-commit");
+        store.create_session(&session).unwrap();
+        let commit = crate::store::Commit::new_pending(&remote.id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::Reattach
+        );
+
+        // A remote owner that died before the agent had a session leaves
+        // nothing to reattach to.
+        let session = crate::store::Session::new_running("go", &dir).with_branch(&remote.id);
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::AppQuit
+        );
+        let pending = format!(
+            "{}start",
+            crate::session_commands::PENDING_BRANCH_START_AGENT_ID_PREFIX
+        );
+        let session = crate::store::Session::new_running("go", &dir)
+            .with_branch(&remote.id)
+            .with_agent(&pending);
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::AppQuit
+        );
+    }
+
+    #[test]
+    fn head_before_finds_the_head_a_turn_started_from() {
+        let dir = std::env::temp_dir().join(format!(
+            "staged-head-before-{}",
+            crate::store::now_timestamp()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.email", "test@example.com"]);
+        run_git(&dir, &["config", "user.name", "Test User"]);
+        let commit_at = |secs: i64| {
+            std::fs::write(dir.join("file.txt"), secs.to_string()).unwrap();
+            run_git(&dir, &["add", "file.txt"]);
+            let mut command = std::process::Command::new("git");
+            command.args(["commit", "-m", "change"]).current_dir(&dir);
+            strip_git_env(&mut command);
+            let date = format!("@{secs} +0000");
+            command
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date);
+            assert!(command.output().unwrap().status.success());
+            run_git(&dir, &["rev-parse", "HEAD"])
+        };
+        let first = commit_at(1_000_000_000);
+        let second = commit_at(1_000_000_100);
+        let third = commit_at(1_000_000_200);
+        let git: crate::branches::GitRunner<'_> = Box::new(|args| Ok(run_git(&dir, args)));
+
+        // `at` is in milliseconds, like the message timestamps it comes from.
+        assert_eq!(
+            head_before(&git, 1_000_000_150_000).unwrap(),
+            Some(second.clone())
+        );
+        assert_eq!(head_before(&git, 1_000_000_100_999).unwrap(), Some(second));
+        assert_eq!(head_before(&git, 1_000_000_099_000).unwrap(), Some(first));
+        assert_eq!(head_before(&git, 1_100_000_000_000).unwrap(), Some(third));
+        assert_eq!(head_before(&git, 999_999_999_000).unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

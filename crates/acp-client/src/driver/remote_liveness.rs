@@ -7,7 +7,8 @@
 //! retries disconnects indefinitely. Nothing then reaches the sessions on
 //! it, so they would wait forever. The proxy uses [`check`] to find out, when
 //! the stream has just disconnected or a session's tool call has gone quiet
-//! for [`STALLED_TOOL_CALL_AFTER`].
+//! for [`STALLED_TOOL_CALL_AFTER`]. A session reattached to a turn a previous
+//! app instance started uses it to learn when that turn has ended.
 
 use std::ffi::{OsStr, OsString};
 use std::process::Stdio;
@@ -38,6 +39,13 @@ pub(super) const DISCONNECT_WATCH: Duration = Duration::from_secs(5 * 60);
 pub(super) const CHECK_AFTER_DISCONNECT_EVERY: Duration = Duration::from_secs(30);
 #[cfg(test)]
 pub(super) const CHECK_AFTER_DISCONNECT_EVERY: Duration = Duration::from_millis(100);
+
+/// How often a session reattached to a turn a previous app instance started
+/// asks whether that turn has ended.
+#[cfg(not(test))]
+pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_secs(15);
+#[cfg(test)]
+pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_millis(50);
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -70,7 +78,10 @@ impl Target {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Liveness {
+    /// Running a prompt.
     Running,
+    /// Running, with no prompt in flight.
+    Idle,
     /// The process has stopped, for the given reason.
     Gone(String),
 }
@@ -79,8 +90,14 @@ pub(super) enum Liveness {
 /// the check itself failed and says nothing about the process.
 pub(super) async fn check(target: &Target, command_id: &str) -> Result<Liveness, String> {
     let active = list_commands(target, &["--status=active"]).await?;
-    if active.iter().any(|command| command.id == command_id) {
-        return Ok(Liveness::Running);
+    if let Some(command) = active.iter().find(|command| command.id == command_id) {
+        // bloxlet marks an ACP process idle while none of its prompts is
+        // pending, across every session it hosts.
+        return Ok(if command.status == "idle" {
+            Liveness::Idle
+        } else {
+            Liveness::Running
+        });
     }
     // No longer active. Its record says why, when it is still listed.
     let record = list_commands(target, &[&format!("--limit={COMMAND_HISTORY_LIMIT}")])

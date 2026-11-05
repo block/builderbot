@@ -21,13 +21,18 @@
 //! its output ends while sessions are attached, or when bloxlet reports the
 //! agent process stopped (see [`super::remote_liveness`]). Each session then
 //! ends with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the cause.
+//!
+//! A session a previous app instance left running reattaches through the same
+//! proxy, so `sq` attaches to the agent process still serving its turn; a
+//! [`ReattachedTurn`] then says whether that process survived and when the
+//! turn has ended.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, Command};
@@ -160,6 +165,15 @@ impl RemoteProcessLease {
         self.process.transport.lost_cause()
     }
 
+    /// For a session reattaching to a turn a previous app instance started:
+    /// a watch on that turn, when bloxlet can be asked about its agent.
+    pub(super) fn reattached_turn(&self) -> Option<ReattachedTurn> {
+        Some(ReattachedTurn {
+            process: Arc::clone(&self.process),
+            target: remote_liveness::Target::of(&self.key.program, &self.key.args)?,
+        })
+    }
+
     /// Detach this session. When it was the last one attached, wait for the
     /// proxy to stop, like stopping a session's own agent process would.
     pub(super) async fn release(mut self) {
@@ -226,6 +240,72 @@ impl RemoteProcessLease {
 impl Drop for RemoteProcessLease {
     fn drop(&mut self) {
         self.detach();
+    }
+}
+
+/// A turn a previous app instance started on a remote agent, which a session
+/// has reattached to through the proxy.
+pub(super) struct ReattachedTurn {
+    process: Arc<SharedProcess>,
+    target: remote_liveness::Target,
+}
+
+impl ReattachedTurn {
+    /// Wait for the turn to end, which is when bloxlet reports its agent
+    /// process idle. bloxlet tracks prompts per process, so this also waits
+    /// out prompts other sessions on it have in flight.
+    ///
+    /// Fails, naming the cause, when the process that ran the turn is gone:
+    /// `sq` found none to attach to and started a new one, or bloxlet reports
+    /// it stopped.
+    pub(super) async fn ended(self) -> Result<(), String> {
+        let command_id = self.surviving_command().await?;
+        log::info!(
+            "{}: reattached to agent process (command {command_id}); waiting for its turn to end",
+            self.process.describe()
+        );
+        loop {
+            match remote_liveness::check(&self.target, &command_id).await {
+                Ok(Liveness::Idle) => return Ok(()),
+                Ok(Liveness::Running) => {}
+                Ok(Liveness::Gone(cause)) => return Err(cause),
+                Err(error) => log::warn!(
+                    "{}: could not check command {command_id}: {error}",
+                    self.process.describe()
+                ),
+            }
+            tokio::time::sleep(remote_liveness::REATTACHED_TURN_POLL).await;
+        }
+    }
+
+    /// bloxlet's id for the agent process `sq` attached to, provided it was
+    /// already running rather than started for this attachment.
+    async fn surviving_command(&self) -> Result<String, String> {
+        // `sq` logs which process it attached to before it relays any frame,
+        // so by the time the session is set up it has normally been read.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let report = self.process.report.lock().unwrap();
+                match (report.attachment, &report.command_id) {
+                    (Attachment::Reused, Some(command_id)) => return Ok(command_id.clone()),
+                    (Attachment::Started, _) => {
+                        return Err("the agent process that ran it is gone: `sq blox acp` \
+                                    found none to reattach to and started a new one"
+                            .to_string())
+                    }
+                    _ => {}
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "`sq blox acp` never said which agent process it attached to, \
+                            so whether the one that ran it survived is unknown"
+                        .to_string(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -430,7 +510,7 @@ async fn watch_liveness(process: Arc<SharedProcess>, target: remote_liveness::Ta
             process.describe()
         );
         match remote_liveness::check(&target, &command_id).await {
-            Ok(Liveness::Running) => {
+            Ok(Liveness::Running | Liveness::Idle) => {
                 log::info!("{}: command {command_id} still runs", process.describe());
             }
             Ok(Liveness::Gone(cause)) => {

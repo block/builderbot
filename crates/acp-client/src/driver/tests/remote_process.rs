@@ -12,12 +12,16 @@ const WAIT: Duration = Duration::from_secs(30);
 
 /// Stands in for `sq`. As `sq blox acp` it is a fake ACP agent: each launch
 /// records its pid, every frame it reads, and the SIGINT that stops it, and
-/// logs its bloxlet command id (`cmd-<pid>`) the way `sq` does. It answers
-/// setup and prompts at once, except prompts saying
+/// logs its bloxlet command id (`cmd-<pid>`) the way `sq` does — or, when
+/// `reuse` holds a command id, logs attaching to that earlier process. It
+/// answers setup and prompts at once, except prompts saying
 /// - "hold me": answered only once cancelled;
 /// - "stall": starts a tool call and goes quiet;
 /// - "disconnect": logs a stream disconnect and goes quiet;
 /// - "exit": ends its output.
+///
+/// A session it loads while reusing a process is one an earlier connection
+/// prompted: once `finish` exists, the agent streams the rest of that turn.
 ///
 /// As `sq blox ws commands` it prints `active.json` or `history.json` and
 /// records the call in `checks`.
@@ -32,7 +36,11 @@ if [ "$2" = ws ]; then
   exit 0
 fi
 echo $$ >> "$dir/launches"
-printf '  0.42s \033[92mINF\033[0m Started new ACP process \033[2mprocess_id=\033[0mcmd-%s\n' $$ >&2
+if [ -f "$dir/reuse" ]; then
+  printf '  0.42s \033[92mINF\033[0m Found existing ACP process, reusing \033[2mprocess_id=\033[0m%s\n' "$(cat "$dir/reuse")" >&2
+else
+  printf '  0.42s \033[92mINF\033[0m Started new ACP process \033[2mprocess_id=\033[0mcmd-%s\n' $$ >&2
+fi
 trap 'echo interrupted >> "$dir/signals"; exit 0' INT
 n=0
 held=
@@ -41,8 +49,16 @@ while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | sed -n 's/.*"id":"\(staged-[^"]*\)".*/\1/p')
   result='{}'
   case "$line" in
-    *'"method":"initialize"'*) result='{"protocolVersion":1}' ;;
+    *'"method":"initialize"'*) result='{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
     *'"method":"session/new"'*) n=$((n+1)); result="{\"sessionId\":\"sess-$$-$n\"}" ;;
+    *'"method":"session/load"'*)
+      if [ -f "$dir/reuse" ]; then
+        sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+        (
+          while [ ! -f "$dir/finish" ] && kill -0 $$ 2>/dev/null; do sleep 0.02; done
+          printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Committed the fix."}}}}\n' "$sid"
+        ) &
+      fi ;;
     *'"method":"session/prompt"'*'hold me'*) held=$id; continue ;;
     *'"method":"session/prompt"'*'stall'*)
       sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
@@ -129,6 +145,18 @@ impl FakeSq {
             .lines()
             .map(|pid| pid.parse().unwrap())
             .collect()
+    }
+
+    /// Have `sq` attach to the earlier agent process `command_id` instead of
+    /// starting one.
+    fn reuse(&self, command_id: &str) {
+        std::fs::write(self.dir.join("reuse"), command_id).unwrap();
+    }
+
+    /// Let the agent finish the turn a reattached session's earlier
+    /// connection prompted.
+    fn finish_turn(&self) {
+        std::fs::write(self.dir.join("finish"), "").unwrap();
     }
 
     /// Answer `sq blox ws commands` with these active commands and full
@@ -438,6 +466,139 @@ async fn sessions_fail_as_remote_agent_lost_when_a_reconnect_finds_the_agent_gon
                 )],
             )
             .await;
+        })
+        .await;
+}
+
+fn reattach_in_background(
+    driver: AcpDriver,
+    sq: &FakeSq,
+    writer: Arc<BasicMessageWriter>,
+) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
+    let dir = sq.dir.clone();
+    tokio::task::spawn_local(async move {
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let writer: Arc<dyn MessageWriter> = writer;
+        timeout(
+            WAIT,
+            driver.reattach(
+                "staged-session",
+                &dir,
+                &store,
+                &writer,
+                &CancellationToken::new(),
+                "sess-earlier",
+            ),
+        )
+        .await
+        .expect("the reattachment should end")
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_reattached_turn_whose_agent_survived_is_recorded_until_bloxlet_reports_it_idle() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let writer = Arc::new(BasicMessageWriter::new());
+            let reattached = reattach_in_background(sq.workspace_driver(), &sq, writer.clone());
+
+            wait_until("bloxlet is asked whether the turn has ended", || {
+                sq.checks() > 0
+            })
+            .await;
+            assert!(
+                !reattached.is_finished(),
+                "a turn bloxlet still runs is waited on"
+            );
+            let loads = sq.received("session/load");
+            assert_eq!(loads.len(), 1, "{loads:?}");
+            assert!(
+                loads[0].contains("\"sessionId\":\"sess-earlier\""),
+                "{loads:?}"
+            );
+
+            // The agent finishes the turn the earlier connection prompted.
+            sq.finish_turn();
+            let deadline = tokio::time::Instant::now() + WAIT;
+            while writer.get_text().await != "Committed the fix." {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the rest of the turn should be recorded: {:?}",
+                    writer.get_text().await
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+                "[]",
+            );
+
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(
+                sq.received("session/prompt").is_empty(),
+                "reattaching prompts nothing"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reattaching_to_a_turn_whose_agent_is_gone_fails_as_remote_agent_lost() {
+    LocalSet::new()
+        .run_until(async {
+            // No earlier process to attach to, so `sq` starts one.
+            let sq = FakeSq::new("reattach-gone");
+            let writer = Arc::new(BasicMessageWriter::new());
+
+            let outcome = reattach_in_background(sq.workspace_driver(), &sq, writer)
+                .await
+                .unwrap();
+            let error = outcome.expect_err("the process that ran the turn is gone");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(error.contains("started a new one"), "{error}");
+            assert_eq!(sq.checks(), 0, "bloxlet need not be asked");
+            assert!(
+                sq.interrupted(),
+                "the process `sq` started for the reattachment is stopped again"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reattaching_to_a_turn_bloxlet_reports_failed_fails_as_remote_agent_lost() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-failed");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                "[]",
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_FAILED","message":"bloxlet restarted while command was running"}]"#,
+            );
+            let writer = Arc::new(BasicMessageWriter::new());
+
+            let outcome = reattach_in_background(sq.workspace_driver(), &sq, writer)
+                .await
+                .unwrap();
+            let error = outcome.expect_err("bloxlet reports the agent stopped");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(
+                error.contains(
+                    "bloxlet reports the agent process (command cmd-earlier) as failed: \
+                     bloxlet restarted while command was running"
+                ),
+                "{error}"
+            );
         })
         .await;
 }

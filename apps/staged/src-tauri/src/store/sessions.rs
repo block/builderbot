@@ -213,6 +213,26 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Take over a `running` row whose owner process is gone, making this
+    /// process its owner.
+    ///
+    /// Returns `true` if the row was taken, `false` if it is no longer
+    /// `running` under `previous_owner` — it finished, or another instance
+    /// sweeping the same data dir took it first.
+    pub fn adopt_running_session(
+        &self,
+        id: &str,
+        previous_owner: Option<u32>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE sessions SET owner_pid = ?1
+             WHERE id = ?2 AND status = 'running' AND owner_pid IS ?3",
+            params![std::process::id(), id, previous_owner],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Atomically transition a session from `Queued` to the given status.
     ///
     /// Returns `true` if the row was updated, `false` if the session was

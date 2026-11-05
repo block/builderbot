@@ -22,9 +22,14 @@ interface ShownNote {
   kind: NoteKind;
   noteId: string;
   completedAt: number | null;
-  /** Moves on every content change, so a revision shows up as a new value. */
-  updatedAt: number;
   readAt: number | null;
+  /**
+   * What the note says. A refresh that changes either is a revision, as the
+   * backend counts one; `updatedAt` also moves on writes that aren't, like an
+   * agent re-emit that only changes the suggested next steps.
+   */
+  title: string;
+  content: string;
   /** A child note aggregated under a project note, which no timeline lists. */
   child: boolean;
 }
@@ -33,8 +38,9 @@ interface ShownNote {
 export interface NoteReadSnapshot {
   id: string;
   completedAt: number | null;
-  updatedAt: number;
   readAt: number | null;
+  title: string;
+  content: string;
 }
 
 function shownNote(kind: NoteKind, row: NoteReadRow): ShownNote {
@@ -106,7 +112,7 @@ export class NoteReadTracker {
     const shown = this.shown;
     if (!shown || shown.noteId !== note.id) return;
     const landed = shown.completedAt === null && note.completedAt !== null;
-    const revised = note.updatedAt !== shown.updatedAt;
+    const revised = note.title !== shown.title || note.content !== shown.content;
     this.shown = { ...shown, ...readFields(note) };
     if (!(landed || revised) || !isNoteUnread(note)) return;
     const generation = this.generation;
@@ -144,6 +150,11 @@ export class NoteReadTracker {
 
 function readFields(
   note: NoteReadSnapshot
-): Pick<ShownNote, 'completedAt' | 'updatedAt' | 'readAt'> {
-  return { completedAt: note.completedAt, updatedAt: note.updatedAt, readAt: note.readAt };
+): Pick<ShownNote, 'completedAt' | 'readAt' | 'title' | 'content'> {
+  return {
+    completedAt: note.completedAt,
+    readAt: note.readAt,
+    title: note.title,
+    content: note.content,
+  };
 }

@@ -63,7 +63,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import { splitNoteMarkdown } from '../notes/noteMarkdown';
-  import { setNoteReadState, writeNoteRead } from '../notes/noteReadActions';
+  import { forgetDeletedNote, setNoteReadState, writeNoteRead } from '../notes/noteReadActions';
   import { attachBasename, formatAttachErrors } from '../sessions/attachErrors';
   import { fileToBase64 } from '../sessions/attachmentData';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
@@ -1517,6 +1517,7 @@
       confirmDelete = null;
       try {
         await deleteSessionLinkedItem(() => commands.deleteNote(noteId, !!sessionId), sessionId);
+        forgetDeletedNote('branch', noteId);
         loadTimeline();
       } catch (e) {
         console.error('Failed to delete note:', e);

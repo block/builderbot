@@ -163,6 +163,28 @@ describe('NoteReadTracker', () => {
     expect(tracker.unread).toBe(false);
   });
 
+  it('keeps a manual unread through a write that leaves the text alone', async () => {
+    const tracker = await newTracker(note('a'));
+    tracker.show('branch', 'a');
+    await flush();
+    await tracker.toggle('project-1');
+
+    // An agent re-emit that only changes the suggested next steps keeps the
+    // read state, but still moves `updatedAt`.
+    rows.set('a', { ...rows.get('a')!, suggestedNextNoteStep: 'Follow up', updatedAt: 40 });
+    tracker.observe(rows.get('a')!);
+    await flush();
+    expect(writeNoteRead).toHaveBeenCalledTimes(1);
+    expect(tracker.unread).toBe(true);
+
+    // A new title is a revision, as a new body is.
+    rows.set('a', { ...rows.get('a')!, title: 'Retitled', updatedAt: 50 });
+    tracker.observe(rows.get('a')!);
+    await flush();
+    expect(writeNoteRead).toHaveBeenCalledTimes(2);
+    expect(tracker.unread).toBe(false);
+  });
+
   it('writes nothing when new content leaves the note read', async () => {
     const tracker = await newTracker(note('a', { subtype: 'written' }));
     tracker.show('branch', 'a');

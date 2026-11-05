@@ -8,7 +8,7 @@
  *
  * A project is marked as "read" when:
  * - The user navigates to that project
- * - The user reads again every note whose "Mark as unread" flagged it
+ * - The user reads again, or deletes, every note whose "Mark as unread" flagged it
  *
  * Running sessions are tracked to show spinners on project cards
  * Unread state is persisted to disk and the macOS dock badge is kept in sync.
@@ -157,6 +157,16 @@ class ProjectStateStore {
     const held = this.noteUnreads.get(projectId);
     if (!held?.delete(noteKey) || held.size > 0) return;
     this.markAsRead(projectId);
+  }
+
+  /**
+   * The note was deleted, so nothing will read it again: releases its hold on
+   * every project its "Mark as unread" flagged, as reading it would have.
+   */
+  forgetNote(noteKey: string): void {
+    for (const projectId of this.projectsFlaggedByNote(noteKey)) {
+      this.releaseNoteUnread(projectId, noteKey);
+    }
   }
 
   /**

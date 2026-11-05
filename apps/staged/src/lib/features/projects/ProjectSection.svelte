@@ -42,7 +42,7 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { minuteNow } from '../../shared/relativeTime.svelte';
   import { noteLastWrittenAt, noteReadState } from '../notes/noteTimestamps';
-  import { setNoteReadState } from '../notes/noteReadActions';
+  import { forgetDeletedNote, setNoteReadState } from '../notes/noteReadActions';
   import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
@@ -478,6 +478,8 @@
       deletingNoteIds = new Set([...deletingNoteIds, noteId]);
       try {
         await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
+        // Its child notes take no "Mark as unread", so only the note holds a flag.
+        forgetDeletedNote('project', noteId);
         // Optimistic removal; the delete's notes-changed event re-fetches every
         // window's project-note surfaces (including this one) to confirm.
         projectNotes = projectNotes.filter((n) => n.id !== noteId);

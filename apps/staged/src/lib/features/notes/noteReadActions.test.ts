@@ -33,6 +33,7 @@ type Tracker = import('./noteReadTracker.svelte').NoteReadTracker;
 
 let setNoteReadState: Actions['setNoteReadState'];
 let writeNoteRead: Actions['writeNoteRead'];
+let forgetDeletedNote: Actions['forgetDeletedNote'];
 let projectStateStore: ProjectStateStore;
 let newTracker: () => Tracker;
 
@@ -90,7 +91,7 @@ beforeEach(async () => {
   );
   // A fresh project state store per test.
   vi.resetModules();
-  ({ setNoteReadState, writeNoteRead } = await import('./noteReadActions'));
+  ({ setNoteReadState, writeNoteRead, forgetDeletedNote } = await import('./noteReadActions'));
   ({ projectStateStore } = await import('../../stores/projectState.svelte'));
   const { NoteReadTracker } = await import('./noteReadTracker.svelte');
   newTracker = () => new NoteReadTracker();
@@ -211,5 +212,40 @@ describe('setNoteReadState', () => {
       description: 'Note not found: note-1',
     });
     expect(projectStateStore.isUnread('project-1')).toBe(false);
+  });
+});
+
+describe('forgetDeletedNote', () => {
+  it('clears the project flag once every note holding it is deleted', async () => {
+    await setBranchNote('note-1', 'project-1', false);
+    await setNoteReadState({ kind: 'project', noteId: 'project-note-1' }, false);
+    await setBranchNote('note-2', 'project-of-note', false);
+
+    forgetDeletedNote('branch', 'note-1');
+    expect(projectStateStore.isUnread('project-1')).toBe(false);
+
+    forgetDeletedNote('project', 'project-note-1');
+    expect(projectStateStore.isUnread('project-of-note')).toBe(true);
+    forgetDeletedNote('branch', 'note-2');
+    expect(projectStateStore.isUnread('project-of-note')).toBe(false);
+  });
+
+  it('only releases the deleted note’s own hold', async () => {
+    await setBranchNote('note-1', 'project-1', false);
+
+    // A project note with the same id, and a note that holds nothing.
+    forgetDeletedNote('project', 'note-1');
+    forgetDeletedNote('branch', 'note-3');
+
+    expect(projectStateStore.isUnread('project-1')).toBe(true);
+  });
+
+  it('leaves a flag set some other way to the project', async () => {
+    await setBranchNote('note-1', 'project-1', false);
+    projectStateStore.markAsUnread('project-1');
+
+    forgetDeletedNote('branch', 'note-1');
+
+    expect(projectStateStore.isUnread('project-1')).toBe(true);
   });
 });

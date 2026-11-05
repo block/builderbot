@@ -5,9 +5,10 @@
  *
  * Marking a note unread also marks its project unread, so the project carries
  * the sidebar's unread dot — as when one of its sessions finishes while the
- * user is elsewhere. Reading the note again, however that happens, takes the
- * dot away with it, unless another note marked unread still holds it or the
- * project was flagged some other way (see `projectStateStore.markUnreadForNote`).
+ * user is elsewhere. Reading the note again, however that happens, or deleting
+ * it takes the dot away with it, unless another note marked unread still holds
+ * it or the project was flagged some other way (see
+ * `projectStateStore.markUnreadForNote`).
  */
 
 import { toast } from 'svelte-sonner';
@@ -54,6 +55,15 @@ export async function writeNoteRead(
     }
   }
   return row;
+}
+
+/**
+ * The note was deleted: release the project flags its "Mark as unread" held,
+ * as reading it would have. A project being deleted loses its flag with it,
+ * so unlike a read this needn't skip one.
+ */
+export function forgetDeletedNote(kind: NoteKind, noteId: string): void {
+  projectStateStore.forgetNote(noteKey(kind, noteId));
 }
 
 /**

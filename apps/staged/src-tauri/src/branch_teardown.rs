@@ -8,13 +8,23 @@
 //! stop its sessions ([`stop_branch_sessions`]), remove its worktree or
 //! workspace, then delete the row, which cascades to everything on it.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_queue::teardown::stop_branch_sessions;
 use crate::session_runner::SessionRegistry;
 use crate::store::{self, Store};
 use crate::{branches, git};
+
+#[cfg(test)]
+mod tests;
+
+/// How many clones a project delete tears down at once. Few projects span
+/// more repos than this, and a teardown is mostly `git worktree remove`
+/// deleting files, so more threads would only queue on the disk.
+const MAX_PARALLEL_CLONE_CLEANUPS: usize = 4;
 
 /// The services a branch teardown stops work through.
 pub(crate) struct TeardownServices<R: tauri::Runtime> {
@@ -161,8 +171,9 @@ pub(crate) async fn delete_project_impl<R: tauri::Runtime>(
         let store = Arc::clone(&store);
         let id = id.clone();
         move || {
-            crate::cleanup_project_branches_best_effort(
+            cleanup_project_branches_best_effort(
                 &branches,
+                |branch| cleanup_lane(&store, branch),
                 |branch| branches::cleanup_branch_resources_best_effort(&store, branch),
                 |branch| store.delete_branch(&branch.id).map_err(|e| e.to_string()),
             );
@@ -186,4 +197,117 @@ pub(crate) async fn delete_project_impl<R: tauri::Runtime>(
     .map_err(|e| format!("Failed to clean up project resources: {e}"))?;
 
     store.delete_project(&id).map_err(|e| e.to_string())
+}
+
+/// The lane [`cleanup_project_branches_best_effort`] runs `branch` in: its
+/// repo slug for a local branch, which names the clone its worktree teardown
+/// runs git in. Lowercased, as GitHub slugs and the macOS clone paths they
+/// name are both case-insensitive. `None` for a remote branch, and for a
+/// local one whose repo can't be resolved, as its cleanup then fails before
+/// running git.
+fn cleanup_lane(store: &Arc<Store>, branch: &store::Branch) -> Option<String> {
+    if branch.branch_type != store::BranchType::Local {
+        return None;
+    }
+    let project = store.get_project(&branch.project_id).ok().flatten()?;
+    branches::resolve_branch_repo_slug(store, &project, branch)
+        .ok()
+        .map(|slug| slug.to_ascii_lowercase())
+}
+
+/// Tear down every branch of a project being deleted and delete their rows,
+/// best effort: a failure is logged and the rest carry on.
+///
+/// Branches run in lanes keyed by `lane_of`: one per clone, holding its local
+/// branches, and one (`None`) for the remote ones. Up to
+/// [`MAX_PARALLEL_CLONE_CLEANUPS`] lanes run at once, each running its
+/// branches in list order. `worktree remove`, `prune` and `branch -D` in one
+/// clone contend on its `.git` locks, and the remote lane deletes rows as it
+/// goes so the last branch on a shared workspace is the one that deletes it.
+/// A panicking lane does not stop the others; the panic resurfaces once they
+/// finish.
+pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
+    branches: &[store::Branch],
+    lane_of: L,
+    cleanup_branch_resources: F,
+    delete_branch_row: G,
+) where
+    L: Fn(&store::Branch) -> Option<String>,
+    F: Fn(&store::Branch) + Sync,
+    G: Fn(&store::Branch) -> Result<(), String> + Sync,
+{
+    // Lanes in first-seen order, as indexes into `branches`.
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    let mut lane_ids: HashMap<Option<String>, usize> = HashMap::new();
+    for (index, branch) in branches.iter().enumerate() {
+        let lane = *lane_ids.entry(lane_of(branch)).or_insert_with(|| {
+            lanes.push(Vec::new());
+            lanes.len() - 1
+        });
+        lanes[lane].push(index);
+    }
+
+    let failed_branch_deletes = Mutex::new(Vec::new());
+    let next_lane = AtomicUsize::new(0);
+    let drain_lanes = || {
+        while let Some(lane) = lanes.get(next_lane.fetch_add(1, Ordering::Relaxed)) {
+            for &index in lane {
+                let branch = &branches[index];
+                cleanup_branch_resources(branch);
+                // Delete branch rows as we go so shared-workspace cleanup can
+                // converge on the final owner and remove the workspace once.
+                if let Err(e) = delete_branch_row(branch) {
+                    log::warn!(
+                        "failed to delete branch '{}' during project cleanup: {e}",
+                        branch.id
+                    );
+                    failed_branch_deletes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(index);
+                }
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        // This thread drains lanes too, so a one-clone project spawns none.
+        for _ in 1..lanes.len().min(MAX_PARALLEL_CLONE_CLEANUPS) {
+            let spawned = std::thread::Builder::new()
+                .name("project-cleanup".to_string())
+                .spawn_scoped(scope, drain_lanes);
+            if let Err(e) = spawned {
+                // The lanes still drain, on the threads already running.
+                log::warn!("failed to spawn a project cleanup thread: {e}");
+                break;
+            }
+        }
+        drain_lanes();
+    });
+
+    let mut failed_branch_deletes = failed_branch_deletes
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    if failed_branch_deletes.is_empty() {
+        return;
+    }
+    failed_branch_deletes.sort_unstable();
+
+    // One retry can unblock convergence when an early branch-row delete failed.
+    for index in failed_branch_deletes {
+        let branch = &branches[index];
+        if let Err(e) = delete_branch_row(branch) {
+            log::warn!(
+                "failed retry delete for branch '{}' during project cleanup: {e}",
+                branch.id
+            );
+        }
+    }
+
+    // Re-run remote cleanup once after retries so shared workspace deletion
+    // can converge when the first pass observed stale peer rows.
+    for branch in branches {
+        if branch.branch_type == store::BranchType::Remote {
+            cleanup_branch_resources(branch);
+        }
+    }
 }

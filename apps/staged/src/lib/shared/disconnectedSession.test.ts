@@ -62,6 +62,12 @@ describe('disconnectedLabel', () => {
     );
   });
 
+  it('says when the turn is over but its background work is still running', () => {
+    expect(disconnectedLabel(waiting('background_work'))).toBe(
+      'Running on Blox — background work still running'
+    );
+  });
+
   it('never reads as a crash', () => {
     for (const s of [null, state('checking'), waiting('unreachable')]) {
       expect(disconnectedLabel(s)).not.toMatch(/crash/i);
@@ -135,6 +141,25 @@ describe('disconnectedAlertStatus', () => {
       busy: null,
       text: 'Staged can’t reach Blox right now.',
       detail: null,
+    });
+  });
+
+  it('explains a turn held for its background work, and when it is checked again', () => {
+    const message =
+      'The turn has ended, but background work it started is still running on the workstation';
+    expect(
+      disconnectedAlertStatus(
+        state('waiting', {
+          reason: { kind: 'background_work', message },
+          attempts: 0,
+          nextAttemptAt: NOW + 60_000,
+        }),
+        NOW
+      )
+    ).toEqual({
+      busy: null,
+      text: 'The turn has finished, but background work it started is still running on the workstation. Staged will catch up once it ends. Next check in under a minute.',
+      detail: message,
     });
   });
 });

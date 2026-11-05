@@ -9,7 +9,7 @@ use acp_client::{
 use tauri::Manager;
 
 use super::blox::probe_from_ws_info;
-use super::row::{PROMPT_NOT_RECEIVED, TURN_UNDETERMINED, WORKSTATION_GONE};
+use super::row::{BACKGROUND_WORK_LIVE, PROMPT_NOT_RECEIVED, TURN_UNDETERMINED, WORKSTATION_GONE};
 use super::stop::MAY_STILL_RUN;
 use super::*;
 use crate::session_queue::{BranchQueueKicker, KickSource};
@@ -115,6 +115,7 @@ fn ended_turn() -> AttachOutcome {
     AttachOutcome::Ended {
         result: Some(TurnResult::Stopped(StopReason::EndTurn)),
         latest_prompt: LatestPrompt::Replayed,
+        background_work_live: false,
     }
 }
 
@@ -564,10 +565,15 @@ fn a_running_turn_is_reattached_and_followed_to_its_end() {
         None,
         CompletionReason::TurnComplete,
     );
-    assert!(
-        !fx.blox.called("recorded"),
-        "a live process has no recording to read"
-    );
+    // Nothing is read before the attach, but the recording is once the turn
+    // is over, for work it may have left running.
+    let calls = fx.blox.calls();
+    let attach = calls.iter().position(|c| c.starts_with("attach")).unwrap();
+    let recorded: Vec<usize> = (0..calls.len())
+        .filter(|&i| calls[i].starts_with("recorded"))
+        .collect();
+    assert_eq!(recorded.len(), 1, "{calls:?}");
+    assert!(attach < recorded[0], "{calls:?}");
     let statuses = fx.host.statuses.lock().unwrap().clone();
     assert_eq!(statuses[0].status, "running");
     assert_eq!(statuses[0].session_type.as_deref(), Some("commit"));
@@ -761,6 +767,7 @@ fn a_prompt_the_agent_never_received_settles_resumable_not_completed() {
         Ok(AttachOutcome::Ended {
             result: Some(TurnResult::Stopped(StopReason::EndTurn)),
             latest_prompt: LatestPrompt::Missing,
+            background_work_live: false,
         })
     });
 
@@ -824,6 +831,7 @@ fn an_errored_turn_settles_failed() {
                 message: Some("API Error: 500".to_string()),
             }),
             latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
         })
     });
 
@@ -853,6 +861,7 @@ fn an_idle_turn_that_errored_settles_failed_from_its_recording() {
         Ok(AttachOutcome::Ended {
             result: None,
             latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
         })
     });
 
@@ -878,6 +887,7 @@ fn an_idle_turn_that_was_aborted_settles_cancelled_from_its_recording() {
         Ok(AttachOutcome::Ended {
             result: None,
             latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
         })
     });
 
@@ -892,7 +902,7 @@ fn an_idle_turn_that_was_aborted_settles_cancelled_from_its_recording() {
 }
 
 /// With nothing in the recording either, an ended turn reads as completed,
-/// as before; and a result the attach saw needs no recording at all.
+/// as before; and a result the attach saw beats the recording's.
 #[test]
 fn an_idle_turn_with_no_result_anywhere_settles_completed() {
     let fx = Fixture::new();
@@ -902,6 +912,7 @@ fn an_idle_turn_with_no_result_anywhere_settles_completed() {
         Ok(AttachOutcome::Ended {
             result: None,
             latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
         })
     });
 
@@ -912,9 +923,11 @@ fn an_idle_turn_with_no_result_anywhere_settles_completed() {
 
     let fx = Fixture::new();
     let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Failed { message: None }),
+    });
     fx.reconcile(&session);
     assert_eq!(fx.row(&session.id).status, SessionStatus::Completed);
-    assert!(!fx.blox.called("recorded"));
 }
 
 #[test]
@@ -934,6 +947,321 @@ fn a_recorded_errored_turn_settles_failed() {
     assert_eq!(row.status, SessionStatus::Error);
     assert_eq!(row.completion_reason, Some(CompletionReason::Crashed));
     assert!(row.error_message.is_some());
+}
+
+// =============================================================================
+// Work that outlives the turn
+// =============================================================================
+
+/// The reason a row held for its session's work reports.
+fn assert_held(fx: &Fixture, session: &Session) {
+    let row = fx.row(&session.id);
+    assert_eq!(row.status, SessionStatus::Disconnected);
+    assert_eq!(row.owner_pid, None);
+    assert!(!fx.registry.is_live(&session.id));
+    assert!(fx.host.drains().is_empty(), "the branch stays blocked");
+    let event = fx.host.last_reconcile_event().unwrap();
+    assert_eq!(event.phase, ReconcilePhase::Waiting);
+    assert_eq!(
+        event.reason,
+        Some(ReconcileReason::new(
+            ReconcileReasonKind::BackgroundWork,
+            BACKGROUND_WORK_LIVE
+        ))
+    );
+    assert_eq!(event.attempts, 0, "held work is not a failure");
+    let commit = fx
+        .store
+        .get_commit_by_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(commit.sha, None, "no completion hook ran");
+}
+
+/// The process reads `IDLE` — every prompt answered — but the recording
+/// shows a background task the turn started still live: the row is held,
+/// without being claimed (so it doesn't flip `running` and back) or
+/// attached to, and checked again after a short wait rather than a backoff.
+#[test]
+fn an_idle_session_still_working_after_its_turn_is_held_without_claiming_it() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Holding {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+
+    assert!(fx.reconcile(&session));
+
+    fx.assert_untouched(&session);
+    assert_held(&fx, &session);
+    assert!(!fx.blox.called("attach"));
+    assert!(fx.host.statuses().is_empty());
+    let next = fx.host.last_reconcile_event().unwrap().next_attempt_at;
+    let wait = next.unwrap() - now_timestamp();
+    assert!(
+        (50_000..=HELD_WORK_RECHECK.as_millis() as i64).contains(&wait),
+        "{wait}"
+    );
+    assert!(
+        !fx.reconciler
+            .reconcile_blocking(&session.id, Trigger::Sweep),
+        "the sweep waits for the recheck"
+    );
+}
+
+/// Held while the recording shows work going — tasks live, then a cycle a
+/// settled task woke, with no prompt in flight — and settled from the
+/// turn's result once it shows the work over.
+#[test]
+fn a_held_session_is_checked_until_its_work_ends_then_settles() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Holding {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+    fx.reconcile(&session);
+    assert_held(&fx, &session);
+    let first = fx.host.last_reconcile_event().unwrap().next_attempt_at;
+
+    fx.blox.set_recorded(RecordedTurn::InFlight);
+    fx.reconcile(&session);
+    assert_held(&fx, &session);
+    let second = fx.host.last_reconcile_event().unwrap().next_attempt_at;
+    assert!(
+        second.unwrap() - first.unwrap() >= HELD_WORK_RECHECK.as_millis() as i64 - 10_000,
+        "the recheck spaces out"
+    );
+    assert!(!fx.blox.called("attach"));
+
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::TurnComplete,
+    );
+    assert_eq!(fx.host.statuses(), vec!["running", "completed"]);
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), true)]
+    );
+}
+
+/// A followed turn that ends with background work live on the stream goes
+/// back to `disconnected`, held, rather than settling.
+#[test]
+fn a_followed_turn_that_leaves_work_live_goes_back_to_disconnected() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Running, Some("cmd-live"));
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+            latest_prompt: LatestPrompt::Replayed,
+            background_work_live: true,
+        })
+    });
+
+    assert!(fx.reconcile(&session));
+
+    assert_held(&fx, &session);
+    assert_eq!(fx.host.statuses(), vec!["running", "disconnected"]);
+    assert!(fx.host.side_effects.lock().unwrap().is_empty());
+}
+
+/// The same when only the recording knows: tasks started before the attach
+/// are never re-sent to it.
+#[test]
+fn a_followed_turn_whose_recording_shows_work_live_is_held() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Running, Some("cmd-live"));
+    fx.blox.set_recorded(RecordedTurn::Holding {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+
+    fx.reconcile(&session);
+
+    assert_held(&fx, &session);
+    assert_eq!(fx.host.statuses(), vec!["running", "disconnected"]);
+}
+
+/// Work still going at the live hold's ceiling settles the turn anyway: a
+/// hung background shell doesn't hold the branch forever.
+#[test]
+fn held_work_past_the_hold_ceiling_settles_the_turn() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Holding {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+    let reconciler = Reconciler::new(
+        Arc::clone(&fx.store),
+        Arc::clone(&fx.registry),
+        fx.blox.clone(),
+        fx.host.clone(),
+    )
+    .with_held_work_ceiling(Duration::ZERO);
+
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::TurnComplete,
+    );
+    assert!(fx.blox.called("attach"));
+}
+
+/// A Stop that reaches a followed turn as it ends with work live does what
+/// a Stop during the live hold does: the work is cancelled, and the turn,
+/// already over, stands.
+#[test]
+fn a_stop_as_a_followed_turn_leaves_work_live_cancels_the_work() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Running, Some("cmd-live"));
+    let registry = Arc::clone(&fx.registry);
+    fx.blox.on_attach(move |target, _, _| {
+        assert!(registry.cancel(&target.session_id));
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+            latest_prompt: LatestPrompt::Replayed,
+            background_work_live: true,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    assert!(fx.blox.called("cancel:acp-1"));
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::TurnComplete,
+    );
+}
+
+/// A gone process took the work the turn left running with it: the turn
+/// stands, from its result.
+#[test]
+fn a_gone_process_s_held_turn_settles_from_its_result() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Gone { message: None }, Some("cmd-1"));
+    fx.blox.set_recorded(RecordedTurn::Holding {
+        result: Some(TurnResult::Failed {
+            message: Some("API Error: 500".to_string()),
+        }),
+    });
+    fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Error,
+        Some("API Error: 500"),
+        CompletionReason::Crashed,
+    );
+}
+
+// =============================================================================
+// Agents without turn state
+// =============================================================================
+
+/// An agent without the Claude bridge's turn state (Codex, Goose, Pi, Amp)
+/// on a process of its own: the recording's answer to the prompt says how
+/// the turn ended, an error one failing it as the live path does.
+#[test]
+fn an_agent_without_turn_state_settles_from_its_prompt_answer() {
+    let failure = "Prompt failed: Error { code: -32603: Internal error, message: \"Internal \
+                   error\", data: None }";
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.store.set_session_provider(&session.id, "codex").unwrap();
+    fx.blox.set_recorded(RecordedTurn::Answered {
+        result: TurnResult::Failed {
+            message: Some(failure.to_string()),
+        },
+    });
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Error,
+        Some(failure),
+        CompletionReason::Crashed,
+    );
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)]
+    );
+
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Answered {
+        result: TurnResult::Stopped(StopReason::Cancelled),
+    });
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        None,
+        CompletionReason::Interrupted,
+    );
+}
+
+/// A gone process's last prompt answer doesn't say a newer prompt wasn't in
+/// flight when it went: nothing describes the turn.
+#[test]
+fn a_gone_process_s_prompt_answer_does_not_describe_its_turn() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Gone { message: None }, Some("cmd-1"));
+    fx.blox.set_recorded(RecordedTurn::Answered {
+        result: TurnResult::Stopped(StopReason::EndTurn),
+    });
+    fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        Some(TURN_UNDETERMINED),
+        CompletionReason::Interrupted,
+    );
 }
 
 /// A failed attach hands the row back as it found it — `disconnected`, owned
@@ -1602,6 +1930,13 @@ fn backoff_doubles_from_a_minute_up_to_half_an_hour() {
 }
 
 #[test]
+fn held_work_is_rechecked_from_a_minute_up_to_five() {
+    let secs: Vec<u64> = (1..=5).map(|n| held_work_recheck(n).as_secs()).collect();
+    assert_eq!(secs, vec![60, 120, 240, 300, 300]);
+    assert_eq!(held_work_recheck(u32::MAX), HELD_WORK_RECHECK_CAP);
+}
+
+#[test]
 fn ws_info_answers_map_to_probes() {
     use crate::blox::{BloxError, WorkspaceInfo};
     let info = |status: Option<&str>| {
@@ -1675,5 +2010,9 @@ fn the_reconcile_event_is_camel_case_with_snake_case_values() {
             "attempts": 2,
             "nextAttemptAt": 5,
         })
+    );
+    assert_eq!(
+        serde_json::to_value(ReconcileReasonKind::BackgroundWork).unwrap(),
+        "background_work"
     );
 }

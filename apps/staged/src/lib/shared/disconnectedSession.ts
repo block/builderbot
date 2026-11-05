@@ -78,6 +78,7 @@ const REASON_PHRASE: Record<SessionReconcileReasonKind, string> = {
   suspended: 'workstation suspended',
   workstation_not_running: 'workstation not running',
   attach_failed: 'couldn’t reconnect',
+  background_work: 'background work still running',
 };
 
 /** Sentence form of each reason, for the chat pane. */
@@ -87,6 +88,8 @@ const REASON_SENTENCE: Record<SessionReconcileReasonKind, string> = {
   suspended: 'The workstation is suspended. Staged will catch up once it’s running again.',
   workstation_not_running: 'The workstation isn’t running.',
   attach_failed: 'Staged reached the workstation but couldn’t reconnect to this session.',
+  background_work:
+    'The turn has finished, but background work it started is still running on the workstation. Staged will catch up once it ends.',
 };
 
 /** The phrase after "Running on Blox — " for where reconciling stands. */

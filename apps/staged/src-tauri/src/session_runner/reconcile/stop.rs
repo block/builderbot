@@ -110,9 +110,9 @@ fn cancel_over_fresh_connection(
 
 /// Cancel a `disconnected` row's remote turn, best effort and in the
 /// background, for a caller about to end or delete the row itself: a branch
-/// teardown that leaves the workstation standing, or a session delete. Once
-/// the row is gone nothing — reconcile included — could stop the turn, and it
-/// would run on in a checkout other work is using.
+/// teardown (whether or not it is expected to delete the workstation), or a
+/// session delete. Once the row is gone nothing — reconcile included — could
+/// stop the turn, and it would run on in a checkout other work may be using.
 ///
 /// The target is resolved now, while the row and its branch still exist; the
 /// cancel, which can take [`STOP_DEADLINE`], runs on a thread of its own.

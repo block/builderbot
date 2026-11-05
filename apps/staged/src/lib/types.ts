@@ -846,7 +846,13 @@ export type SessionReconcilePhase = 'checking' | 'stopping' | 'waiting' | 'idle'
 
 /** Why the last reconcile attempt left a row `disconnected`. */
 export type SessionReconcileReasonKind =
-  'unreachable' | 'not_authenticated' | 'suspended' | 'workstation_not_running' | 'attach_failed';
+  | 'unreachable'
+  | 'not_authenticated'
+  | 'suspended'
+  | 'workstation_not_running'
+  | 'attach_failed'
+  /** Not a failure: the turn is over, but work it started is still running. */
+  | 'background_work';
 
 export interface SessionReconcileReason {
   kind: SessionReconcileReasonKind;

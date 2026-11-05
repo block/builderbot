@@ -975,6 +975,75 @@ async fn a_disconnected_session_keeps_its_branch_busy_until_stopped() {
     assert_eq!(status_of(&store, &note.id), Some(SessionStatus::Running));
 }
 
+/// Every `disconnected` row's remote turn is cancelled before its branch goes,
+/// whether or not the teardown is expected to delete the workstation. Two
+/// branches removed together that share one each see the other still using
+/// it, so cleanup leaves it standing with the turns running; a lone branch's
+/// goes with it. A row that isn't `disconnected` has no turn to cancel here.
+#[test]
+fn tearing_down_branches_cancels_every_disconnected_turn() {
+    use crate::session_queue::teardown::signal_branch_sessions_with;
+
+    let (store, local) = store_with_branch();
+    let first = store::Branch::new_remote(&local.project_id, "first", "main", "ws-shared");
+    let second = store::Branch::new_remote(&local.project_id, "second", "main", "ws-shared");
+    let lone = store::Branch::new_remote(&local.project_id, "lone", "main", "ws-lone");
+    for branch in [&first, &second, &lone] {
+        store.create_branch(branch).unwrap();
+    }
+    let disconnected = |branch: &store::Branch| {
+        let mut row = session(&branch.id, "mid-turn", SessionStatus::Running);
+        row.agent_id = Some("acp-1".to_string());
+        store.create_session(&row).unwrap();
+        assert!(store
+            .transition_from_running(&row.id, SessionStatus::Disconnected, None, None)
+            .unwrap());
+        row.id
+    };
+    let on_first = disconnected(&first);
+    let on_second = disconnected(&second);
+    let on_lone = disconnected(&lone);
+    let orphan = note_session(&store, &first.id, SessionStatus::Running);
+
+    let app = mock_app();
+    let registry = SessionRegistry::new();
+    let cancelled = Mutex::new(Vec::new());
+    let cancel = |_: &Store, session: &Session| {
+        cancelled.lock().unwrap().push(session.id.clone());
+    };
+
+    let owned = signal_branch_sessions_with(
+        &store,
+        &registry,
+        app.handle(),
+        &[first.clone(), second.clone()],
+        &cancel,
+    )
+    .unwrap();
+    assert!(owned.is_empty(), "nothing here owns these rows");
+    signal_branch_sessions_with(
+        &store,
+        &registry,
+        app.handle(),
+        std::slice::from_ref(&lone),
+        &cancel,
+    )
+    .unwrap();
+
+    let mut cancelled = cancelled.into_inner().unwrap();
+    cancelled.sort();
+    let mut expected = vec![on_first.clone(), on_second.clone(), on_lone.clone()];
+    expected.sort();
+    assert_eq!(cancelled, expected);
+    for id in [&on_first, &on_second, &on_lone, &orphan.id] {
+        assert_eq!(
+            status_of(&store, id),
+            Some(SessionStatus::Cancelled),
+            "{id}"
+        );
+    }
+}
+
 /// Running rows on a Blox branch and a local one: one mid-turn on the
 /// workstation (it has an agent session), one that never got that far, and a
 /// local one. Every row is `running` under `owner_pid`.

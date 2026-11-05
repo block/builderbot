@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// - `streaming`: as `claude`, with a message still streaming when the
 ///   proxy attaches: it relays part of it before the load, the replay has
 ///   none of it, and its last chunk comes live.
+/// - `holding`: as `claude`, except that the turn starts a background task
+///   live, which is still running when the session goes idle.
 /// - `plain`: an agent with no message ids and no raw SDK frames; the
 ///   replay adds one message and nothing follows.
 /// - `replaced`: the pinned process is gone and the proxy started another.
@@ -86,6 +88,12 @@ while IFS= read -r line; do
           text '"messageId":"m2",' 'Done'
           text '"messageId":"m2",' ' now'
           sdk '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"stop_reason":"end_turn","terminal_reason":"completed","result":"Done now","uuid":"result-1","parent_tool_use_id":null}'
+          reply old-prompt '{"stopReason":"end_turn"}'
+          idle ;;
+        holding)
+          sdk '{"type":"system","subtype":"task_started","task_id":"bg-1","uuid":"task-1"}'
+          result t1 'ok'
+          sdk '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"stop_reason":"end_turn","terminal_reason":"completed","result":"Done","uuid":"result-1","parent_tool_use_id":null}'
           reply old-prompt '{"stopReason":"end_turn"}'
           idle ;;
         streaming)
@@ -403,6 +411,7 @@ async fn attach_records_only_what_the_transcript_lacks_and_settles_on_its_own_id
         Ok(AttachOutcome::Ended {
             result: Some(TurnResult::Stopped(StopReason::EndTurn)),
             latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
         })
     );
     assert!(run.caught_up);
@@ -427,6 +436,22 @@ async fn attach_records_only_what_the_transcript_lacks_and_settles_on_its_own_id
         run.log.contains("SIGINT"),
         "a dedicated process's proxy is stopped gracefully: {}",
         run.log
+    );
+}
+
+/// The turn ends with a background task it started still running: the turn
+/// is over, and the attach says the session's work is not.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_turn_that_ends_with_a_background_task_live_says_its_work_goes_on() {
+    let run = attach("holding", ScriptedProbe::running(), true, None, false).await;
+    assert_eq!(
+        run.outcome,
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+            latest_prompt: LatestPrompt::Replayed,
+            background_work_live: true,
+        })
     );
 }
 
@@ -457,6 +482,7 @@ async fn attach_reports_a_newest_prompt_the_agent_never_received() {
         Ok(AttachOutcome::Ended {
             result: Some(TurnResult::Stopped(StopReason::EndTurn)),
             latest_prompt: LatestPrompt::Missing,
+            background_work_live: false,
         })
     );
 }
@@ -508,6 +534,7 @@ async fn without_frames_the_attach_settles_when_the_process_reads_idle() {
         Ok(AttachOutcome::Ended {
             result: None,
             latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
         })
     );
     assert_eq!(run.rows, ["text:More."]);

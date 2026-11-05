@@ -17,6 +17,12 @@
 //!   and the row settled `completed` (running the commit, note and review
 //!   hooks against the turn's persisted base), `cancelled` or `error`, as the
 //!   process and its recorded output say;
+//! - the turn is over but the session is still working (background tasks it
+//!   started are live, or a continuation cycle they woke is running), which
+//!   the process reading `IDLE` does not rule out: the row stays
+//!   `disconnected` and is checked again ([`RowOutcome::Held`]) until the
+//!   work ends, as the live post-turn hold waits for it, and within the same
+//!   ceiling;
 //! - nothing says how the turn ended: `cancelled`/`interrupted` with a
 //!   message — resumable — rather than a guessed `completed`.
 //!
@@ -63,6 +69,13 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30 * 60);
 /// The least time between two attempts a successful Blox call can set off for
 /// one row: a burst of `ws exec`s (a diff load) should not attach once each.
 const NUDGE_MIN_SPACING: Duration = Duration::from_secs(30);
+/// The wait before checking again on a row whose session is still working
+/// after its turn; it doubles with each further check that finds the work
+/// still going, up to [`HELD_WORK_RECHECK_CAP`]. Not a failure backoff: the
+/// work can end at any moment and the branch's queue waits on it, so the cap
+/// is lower. Each check reads the process's recording (one `ws output`).
+const HELD_WORK_RECHECK: Duration = Duration::from_secs(60);
+const HELD_WORK_RECHECK_CAP: Duration = Duration::from_secs(5 * 60);
 
 /// What the reconcile service is doing about a `disconnected` row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -97,6 +110,10 @@ pub enum ReconcileReasonKind {
     WorkstationNotRunning,
     /// The workstation answered, but attaching to the session failed.
     AttachFailed,
+    /// The turn is over, but the session is still working on the workstation:
+    /// background tasks it started are live, or a continuation cycle they
+    /// woke is running. Not a failure; the row settles once the work ends.
+    BackgroundWork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -164,6 +181,12 @@ struct RowState {
     last_attempt: Option<Instant>,
     next_attempt: Option<Instant>,
     next_attempt_at: Option<i64>,
+    /// When an attempt first found the session still working after its turn
+    /// ([`RowOutcome::Held`]), for [`Reconciler::held_work_ceiling`].
+    held_since: Option<Instant>,
+    /// Checks in a row that found the work still going, for the recheck
+    /// spacing.
+    held_checks: u32,
     /// Learnt on the first attempt, for [`note_workspace_reachable`] and the
     /// event's routing fields.
     workspace_name: Option<String>,
@@ -182,6 +205,10 @@ pub(super) enum RowOutcome {
     /// Still `disconnected` because the attempt stood down (the app is
     /// quitting), not because anything failed.
     Left,
+    /// Still `disconnected` because the session is still working after its
+    /// turn (a [`ReconcileReasonKind::BackgroundWork`] reason): check again
+    /// soon, without counting a failure.
+    Held(ReconcileReason),
 }
 
 /// The reconcile service: per-row state plus what it reconciles through.
@@ -191,6 +218,13 @@ pub struct Reconciler {
     blox: Arc<dyn ReconcileBlox>,
     host: Arc<dyn ReconcileHost>,
     rows: Mutex<HashMap<String, RowState>>,
+    /// How long a row may stay held for its session's work, from the first
+    /// attempt that found it working, before it settles regardless. The live
+    /// post-turn hold's own ceiling: a hung background shell must not hold
+    /// the branch forever, and honest work never reaches it. Reconcile can't
+    /// time tasks one by one from a recording, as the live hold's per-task
+    /// cap does, so only the ceiling applies.
+    held_work_ceiling: Duration,
 }
 
 impl Reconciler {
@@ -206,7 +240,15 @@ impl Reconciler {
             blox,
             host,
             rows: Mutex::new(HashMap::new()),
+            held_work_ceiling: acp_client::BackgroundHoldConfig::default().hold_ceiling,
         }
+    }
+
+    /// [`Self::new`] with a different [`Self::held_work_ceiling`] (tests).
+    #[cfg(test)]
+    pub(super) fn with_held_work_ceiling(mut self, ceiling: Duration) -> Self {
+        self.held_work_ceiling = ceiling;
+        self
     }
 
     /// Start an attempt for `session_id` on its own thread, if `trigger`
@@ -456,6 +498,27 @@ impl Reconciler {
                     row.phase = ReconcilePhase::Waiting;
                     event_for(session_id, row)
                 }),
+                RowOutcome::Held(reason) => rows.get_mut(session_id).map(|row| {
+                    let now = Instant::now();
+                    row.in_flight = false;
+                    // The workstation answered: whatever failed before has
+                    // passed.
+                    row.failures = 0;
+                    row.held_since.get_or_insert(now);
+                    row.held_checks += 1;
+                    let delay = held_work_recheck(row.held_checks);
+                    row.next_attempt = Some(now + delay);
+                    row.next_attempt_at = Some(now_timestamp() + delay.as_millis() as i64);
+                    log::info!(
+                        "[reconcile] Session {session_id} stays disconnected: {}; checking \
+                         again in {}s",
+                        reason.message,
+                        delay.as_secs()
+                    );
+                    row.reason = Some(reason);
+                    row.phase = ReconcilePhase::Waiting;
+                    event_for(session_id, row)
+                }),
                 RowOutcome::Left => rows.get_mut(session_id).map(|row| {
                     row.in_flight = false;
                     row.phase = if row.failures > 0 {
@@ -471,6 +534,20 @@ impl Reconciler {
             self.host.emit_reconcile(&event);
         }
         None
+    }
+}
+
+impl Reconciler {
+    /// Whether the session's work has kept the row held past
+    /// [`Self::held_work_ceiling`]: the next attempt settles it as if the
+    /// work had ended.
+    fn held_work_outlasted_ceiling(&self, session_id: &str) -> bool {
+        self.rows
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|row| row.held_since)
+            .is_some_and(|since| since.elapsed() >= self.held_work_ceiling)
     }
 }
 
@@ -497,8 +574,19 @@ fn event_for(session_id: &str, row: &RowState) -> SessionReconcileEvent {
 
 /// The wait after a row's `failures`-th failed attempt in a row.
 fn backoff(failures: u32) -> Duration {
-    let doublings = failures.saturating_sub(1).min(16);
-    BACKOFF_BASE.saturating_mul(1 << doublings).min(BACKOFF_CAP)
+    doubling(BACKOFF_BASE, failures, BACKOFF_CAP)
+}
+
+/// The wait after the `checks`-th check in a row that found a session still
+/// working after its turn.
+fn held_work_recheck(checks: u32) -> Duration {
+    doubling(HELD_WORK_RECHECK, checks, HELD_WORK_RECHECK_CAP)
+}
+
+/// `base` doubled for each of `nth` after the first, up to `cap`.
+fn doubling(base: Duration, nth: u32, cap: Duration) -> Duration {
+    let doublings = nth.saturating_sub(1).min(16);
+    base.saturating_mul(1 << doublings).min(cap)
 }
 
 // =============================================================================

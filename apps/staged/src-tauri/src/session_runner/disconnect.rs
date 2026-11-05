@@ -25,7 +25,12 @@ use crate::store::{CompletionReason, Session, Store};
 /// completed, but the hold lost its connection with background tasks still
 /// live (`background_work_left`), and whatever they do next — the
 /// continuation they trigger included — would be recorded by no one if the
-/// row settled. A loss during setup sent no prompt, so nothing is running
+/// row settled, and the queue drained under it. Reconcile keeps such a row
+/// `disconnected` for as long as the process's recording, or an attach's live
+/// stream, shows that work going, rechecking it until it ends (bounded by the
+/// live hold's ceiling), and only then settles the completed turn. The
+/// process reading `IDLE` does not end the wait: that only says the prompt
+/// was answered. A loss during setup sent no prompt, so nothing is running
 /// remotely; a hold lost with nothing live settles as the completed turn it
 /// is. Errors the agent answered itself (auth, a refused prompt, a
 /// bridge-relayed "process exited") carry no transport loss at all. A Stop

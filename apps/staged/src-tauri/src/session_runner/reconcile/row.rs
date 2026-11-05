@@ -29,14 +29,18 @@ pub(super) const PROMPT_NOT_RECEIVED: &str =
     "Staged lost its connection before this message reached the workstation";
 /// An error result the agent gave no text for.
 const TURN_FAILED: &str = "The agent's turn on the workstation ended with an error";
+/// The turn is over, and the work it set going is not.
+pub(super) const BACKGROUND_WORK_LIVE: &str =
+    "The turn has ended, but background work it started is still running on the workstation";
 
 /// How a claimed row ends this attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verdict {
-    /// Back to `disconnected`: this attempt stopped following a turn that
-    /// may still be running. `reason` is why, when it is a failure to back
-    /// off from; `None` for a quit, which detached on purpose.
-    Disconnected(Option<ReconcileReason>),
+    /// Back to `disconnected`, reporting the outcome if the write wins: this
+    /// attempt stopped following a turn that may still be running (`Left`
+    /// for a quit, which detached on purpose; `Backoff` for a failure), or
+    /// saw it end with the session still working (`Held`).
+    Disconnected(RowOutcome),
     Completed,
     Cancelled {
         message: Option<String>,
@@ -143,6 +147,16 @@ impl Reconciler {
             RemoteProcessStatus::Gone { .. } => Some(self.read_recorded_turn(&target)),
             RemoteProcessStatus::Running | RemoteProcessStatus::Idle => None,
         };
+        // `IDLE` only says every prompt was answered: the work a turn set
+        // going (background tasks, the continuation cycles they wake) runs on
+        // with none in flight. Checked before claiming, so a row held for it
+        // doesn't flip `running` and back on every check.
+        if process.status == RemoteProcessStatus::Idle
+            && !self.held_work_outlasted_ceiling(session_id)
+            && shows_held_work(&self.read_recorded_turn(&target))
+        {
+            return RowOutcome::Held(held_work_reason());
+        }
         let gone_message = match process.status {
             RemoteProcessStatus::Gone { message } => message,
             _ => None,
@@ -375,19 +389,38 @@ impl Reconciler {
             Ok(AttachOutcome::Ended {
                 result,
                 latest_prompt,
+                background_work_live,
             }) => {
-                // A turn that ended before the attach was made sent its
-                // `result` frame to the connection that is gone, and the
-                // replay re-sends none: the process's recording still holds
-                // it. Without it an errored or aborted turn would read as
-                // completed.
-                let result = result.or_else(|| {
-                    match recorded.unwrap_or_else(|| self.read_recorded_turn(target)) {
-                        RecordedTurn::Ended { result } => result,
-                        RecordedTurn::InFlight | RecordedTurn::Unknown => None,
+                // Read once the turn is over, so it holds the turn's end:
+                // whether the session is still working (tasks started before
+                // the attach are only in the recording), and how the turn
+                // ended when the attach didn't see it. A turn that ended
+                // before the attach sent its `result` frame, or its prompt's
+                // answer, to the connection that is gone, and the replay
+                // re-sends neither; without them an errored or aborted turn
+                // would read as completed.
+                let recorded = recorded.unwrap_or_else(|| self.read_recorded_turn(target));
+                if background_work_live || shows_held_work(&recorded) {
+                    if stop.is_some() {
+                        // As a Stop during the live hold: the turn stands,
+                        // and its work is cancelled.
+                        if let Some(message) = self.cancel_remote_turn(target) {
+                            log::warn!("[reconcile] Session {session_id}: {message}");
+                        }
+                    } else if self.held_work_outlasted_ceiling(session_id) {
+                        log::warn!(
+                            "[reconcile] Session {session_id}: settling with its background \
+                             work still live, past the hold ceiling"
+                        );
+                    } else {
+                        return Verdict::Disconnected(RowOutcome::Held(held_work_reason()));
                     }
-                });
-                from_ended_turn(result, latest_prompt, stop)
+                }
+                from_ended_turn(
+                    result.or_else(|| recorded_result(recorded)),
+                    latest_prompt,
+                    stop,
+                )
             }
             Ok(AttachOutcome::ProcessGone {
                 message,
@@ -404,17 +437,19 @@ impl Reconciler {
                 let message = self.cancel_remote_turn(target);
                 Verdict::Cancelled { message, reason }
             }
-            Ok(AttachOutcome::Live) => Verdict::Disconnected(None),
+            Ok(AttachOutcome::Live) => Verdict::Disconnected(RowOutcome::Left),
             Ok(AttachOutcome::TransportLost) | Err(_) if quit || token.is_cancelled() => {
-                Verdict::Disconnected(None)
+                Verdict::Disconnected(RowOutcome::Left)
             }
-            Ok(AttachOutcome::TransportLost) => Verdict::Disconnected(Some(ReconcileReason::new(
-                ReconcileReasonKind::AttachFailed,
-                "The connection to the workstation was lost",
-            ))),
+            Ok(AttachOutcome::TransportLost) => {
+                Verdict::Disconnected(RowOutcome::Backoff(ReconcileReason::new(
+                    ReconcileReasonKind::AttachFailed,
+                    "The connection to the workstation was lost",
+                )))
+            }
             Err(e) => {
                 log::warn!("[reconcile] Session {session_id}: attach failed: {e}");
-                Verdict::Disconnected(Some(ReconcileReason::new(
+                Verdict::Disconnected(RowOutcome::Backoff(ReconcileReason::new(
                     ReconcileReasonKind::AttachFailed,
                     e,
                 )))
@@ -434,21 +469,18 @@ impl Reconciler {
         let session_id = target.session_id.as_str();
         let cancelled_before_hooks = token.is_cancelled();
         let (status, message, reason) = match verdict {
-            Verdict::Disconnected(failure) => {
+            Verdict::Disconnected(outcome) => {
                 self.registry.mark_finished(session_id, epoch);
                 let written = self
                     .store
                     .transition_from_running(session_id, SessionStatus::Disconnected, None, None)
                     .unwrap_or(false);
                 self.registry.deregister(session_id, epoch);
-                if written {
-                    self.emit_status(target, &SessionStatus::Disconnected, None, None);
+                if !written {
+                    return RowOutcome::Done;
                 }
-                return match failure {
-                    Some(reason) if written => RowOutcome::Backoff(reason),
-                    _ if written => RowOutcome::Left,
-                    _ => RowOutcome::Done,
-                };
+                self.emit_status(target, &SessionStatus::Disconnected, None, None);
+                return outcome;
             }
             Verdict::Completed => {
                 self.run_completion_hooks(target);
@@ -549,10 +581,45 @@ fn prompt_not_received(stop: Option<CompletionReason>) -> Verdict {
     }
 }
 
-/// The verdict for a turn an attach saw end, from the session's last
-/// `result` frame — read as the live path reads the prompt's answer — and
-/// whether the agent received the newest prompt at all. `stop` is a Stop
-/// that reached the attempt meanwhile.
+/// Whether a recording read from a process that reads `IDLE` (every prompt
+/// answered) shows the session still working: background tasks live after
+/// its turn, or a cycle running with no prompt in flight, one a settled task
+/// woke.
+fn shows_held_work(recorded: &RecordedTurn) -> bool {
+    matches!(
+        recorded,
+        RecordedTurn::Holding { .. } | RecordedTurn::InFlight
+    )
+}
+
+fn held_work_reason() -> ReconcileReason {
+    ReconcileReason::new(ReconcileReasonKind::BackgroundWork, BACKGROUND_WORK_LIVE)
+}
+
+/// How a recording says the session's last turn ended, for a turn an attach
+/// saw end: the Claude bridge's `result` frame, or, for an agent with no turn
+/// state, the prompt's own answer.
+fn recorded_result(recorded: RecordedTurn) -> Option<TurnResult> {
+    match recorded {
+        RecordedTurn::Ended { result } | RecordedTurn::Holding { result } => result,
+        RecordedTurn::Answered { result } => Some(result),
+        RecordedTurn::InFlight | RecordedTurn::Unknown => None,
+    }
+}
+
+/// The verdict for a turn an attach saw end, from how it ended — the
+/// session's last `result` frame, or the prompt's answer in the recording,
+/// read as the live path reads the prompt's answer — and whether the agent
+/// received the newest prompt at all. `stop` is a Stop that reached the
+/// attempt meanwhile.
+///
+/// Known limitation: a `result` of `None` settles `completed`. The process
+/// read `IDLE`, so the prompt was answered, but nothing says how: the
+/// recording couldn't be read, or the process is shared with other sessions
+/// (an agent this build doesn't know runs on Blox's shared default), whose
+/// answers can't be told from this session's. Every agent Staged runs on a
+/// process of its own (Claude, Codex, Goose, Pi, Amp) is read from its
+/// recording.
 fn from_ended_turn(
     result: Option<TurnResult>,
     latest_prompt: LatestPrompt,
@@ -586,11 +653,16 @@ fn from_gone_process(
         return prompt_not_received(stop);
     }
     match recorded {
-        RecordedTurn::Ended { result } => from_ended_turn(result, latest_prompt, None),
+        // Work the turn left running died with the process; the turn stands.
+        RecordedTurn::Ended { result } | RecordedTurn::Holding { result } => {
+            from_ended_turn(result, latest_prompt, None)
+        }
         RecordedTurn::InFlight => Verdict::Failed {
             message: process_message.unwrap_or_else(|| PROCESS_DIED_MID_TURN.to_string()),
         },
-        RecordedTurn::Unknown => match process_message {
+        // A prompt answer doesn't say a later prompt wasn't in flight when
+        // the process went.
+        RecordedTurn::Answered { .. } | RecordedTurn::Unknown => match process_message {
             Some(message) => Verdict::Failed { message },
             None => Verdict::Cancelled {
                 message: Some(TURN_UNDETERMINED.to_string()),

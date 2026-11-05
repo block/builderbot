@@ -67,17 +67,33 @@ pub(crate) async fn stop_branch_sessions<R: tauri::Runtime>(
 /// - A running row nothing here owns (another process's, or one the sweep has
 ///   not reached yet) is written `cancelled` directly, as `cancel_session_impl`'s
 ///   fallback does, so the client sees it end. A `disconnected` row is never
-///   owned, so it always takes this path; when its workstation outlives the
-///   teardown (another branch uses it), its remote turn is cancelled first,
-///   best effort, since nothing could stop it once the row is gone.
+///   owned, so it always takes this path, and its remote turn is cancelled
+///   first, best effort, since nothing could stop it once the row is gone.
+///   That is so whether or not the teardown is expected to delete the
+///   workstation: cleanup can leave it standing (two branches removed
+///   together that share it each see the other still using it; a failed
+///   `ws_delete`), and a cancel against one being deleted does no harm.
 pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
     store: &Store,
     registry: &SessionRegistry,
     app_handle: &tauri::AppHandle<R>,
     branches: &[store::Branch],
 ) -> Result<Vec<String>, String> {
+    signal_branch_sessions_with(store, registry, app_handle, branches, &|store, session| {
+        session_runner::reconcile::cancel_abandoned_turn(store, session);
+    })
+}
+
+/// [`signal_branch_sessions`], with how a `disconnected` row's remote turn is
+/// cancelled as a parameter (tests).
+pub(super) fn signal_branch_sessions_with<R: tauri::Runtime>(
+    store: &Store,
+    registry: &SessionRegistry,
+    app_handle: &tauri::AppHandle<R>,
+    branches: &[store::Branch],
+    cancel_abandoned_turn: &dyn Fn(&Store, &store::Session),
+) -> Result<Vec<String>, String> {
     let mut owned = Vec::new();
-    let leaving: Vec<&str> = branches.iter().map(|branch| branch.id.as_str()).collect();
 
     for branch in branches {
         let queued = store
@@ -107,10 +123,8 @@ pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
                 registry.cancel_or_defer(&session.id, CompletionReason::Interrupted);
                 owned.push(session.id);
             } else {
-                if session.status == SessionStatus::Disconnected
-                    && crate::branches::workspace_outlives(store, branch, &leaving).unwrap_or(false)
-                {
-                    session_runner::reconcile::cancel_abandoned_turn(store, &session);
+                if session.status == SessionStatus::Disconnected {
+                    cancel_abandoned_turn(store, &session);
                 }
                 store
                     .update_session_status(

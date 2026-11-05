@@ -267,6 +267,15 @@ impl PromptLedger {
     /// leaves the local-only ones out of its replay (`/compact`, `/context`,
     /// `/model`, `/status`, ...) and the SDK expands prompt commands into
     /// their prompt.
+    ///
+    /// The cost of erring this way, accepted because a false `Missing` is the
+    /// dearer mistake: when the previous turn's transcript ends with a user
+    /// message the agent added itself (a task notification once a background
+    /// task finished, or an interrupt marker), a newest prompt that never
+    /// reached the agent also reads `Unknown`, and reconcile then settles
+    /// from the previous turn's result, `completed` for a task-notification
+    /// tail. That is the setup-kill case `Missing` exists for, in a narrower
+    /// form.
     fn replay_ends_before_newest(&self) -> bool {
         let [.., before_newest, newest] = self.stored.as_slice() else {
             return false;

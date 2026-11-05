@@ -24,10 +24,17 @@ pub enum AttachOutcome {
     /// sends none, or the turn ended before the attach could see it.
     /// `latest_prompt` says whether the agent ever received the newest
     /// prompt the transcript holds: if it didn't, the turn that ended is an
-    /// earlier prompt's.
+    /// earlier prompt's. `background_work_live` says the session was still
+    /// working, as far as this connection saw: background tasks it saw start
+    /// and not settle, or the session still busy when the process read
+    /// `IDLE` (which only says every prompt was answered), as in a
+    /// continuation cycle a settled task woke. Tasks started before the
+    /// attach are in the process's recording only (see
+    /// [`AcpDriver::recorded_turn`]).
     Ended {
         result: Option<TurnResult>,
         latest_prompt: LatestPrompt,
+        background_work_live: bool,
     },
     /// Detached ([`AttachedSession::detach_handle`]) before the turn was
     /// seen to end: it may still be running remotely.
@@ -537,6 +544,9 @@ async fn run_attach(
             TurnEnd::Idle => AttachOutcome::Ended {
                 result: handler.last_result().as_ref().and_then(result_turn),
                 latest_prompt,
+                background_work_live: background_work_live(
+                    &handler.subscribe_background_activity().borrow(),
+                ),
             },
             TurnEnd::ProcessGone { message } => AttachOutcome::ProcessGone {
                 message,

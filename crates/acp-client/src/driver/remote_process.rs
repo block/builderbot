@@ -125,9 +125,10 @@ struct SharedProcess {
     /// for the answer to its cancel (see [`ReattachedTurn::cancel_quiet_turn`]).
     cancel_windows: Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
     /// Set once a session let go of the proxy leaving its turn running on
-    /// the agent (see [`LeaseDetacher`]): from then on the proxy is never
-    /// sent SIGINT, which would stop a process `sq` started — and that turn
-    /// with it — but only SIGKILLed.
+    /// the agent (see [`LeaseDetacher`]), or ended in a way that must not
+    /// interrupt it (see [`RemoteProcessLease::never_interrupt`]): from then
+    /// on the proxy is never sent SIGINT, which would stop a process `sq`
+    /// started — and every turn on it — but only SIGKILLed.
     keep_agent: AtomicBool,
     /// Cancelled to interrupt the proxy.
     stop: CancellationToken,
@@ -274,12 +275,12 @@ impl RemoteProcessLease {
         }
     }
 
-    /// Before [`Self::release`]: leave this session's turn running on the
-    /// agent rather than cancelling it once its connection is gone, and
-    /// never send the proxy SIGINT (see [`SharedProcess::keep_agent`]).
-    pub(super) fn keep_agent_running(&self) {
+    /// Before [`Self::release`]: never send the proxy SIGINT, whichever
+    /// session lets go of it last (see [`SharedProcess::keep_agent`] and
+    /// `TransportMonitor::spares_proxy`). This session's own prompts still in
+    /// flight are cancelled as usual once its connection is gone.
+    pub(super) fn never_interrupt(&self) {
         self.process.keep_agent.store(true, Ordering::Relaxed);
-        self.process.transport.keep_client(self.client);
     }
 
     /// Detach this session. When it was the last one attached, wait for the

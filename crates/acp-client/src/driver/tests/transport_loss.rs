@@ -146,16 +146,60 @@ fn a_prompt_is_refused_once_the_transport_is_known_lost() {
     assert!(monitor.lost().is_cancelled());
 }
 
-/// Only a detach leaves the remote turn running (see the lease tests
-/// below): a transport lost on its own is the proxy's to stop.
 #[test]
-fn teardown_stops_as_usual_unless_detached() {
+fn teardown_skips_sigint_once_detached_or_lost() {
     let monitor = TransportMonitor::new();
     assert_eq!(monitor.begin_teardown(), ProxyStop::Graceful);
 
+    for signal in [
+        TransportSignal::StdoutClosed,
+        TransportSignal::OrchestratorEof,
+    ] {
+        let monitor = TransportMonitor::new();
+        monitor.signal(signal);
+        assert_eq!(monitor.begin_teardown(), ProxyStop::KillOnly, "{signal}");
+    }
+}
+
+/// Another session's turn may be running on a shared process: even a normal
+/// end of this one must not SIGINT it.
+#[test]
+fn teardown_of_a_shared_process_never_sends_sigint() {
     let monitor = TransportMonitor::new();
-    monitor.signal(TransportSignal::StdoutClosed);
-    assert_eq!(monitor.begin_teardown(), ProxyStop::Graceful);
+    monitor.mark_shared_process();
+    monitor.session_named();
+    assert_eq!(monitor.verdict(true, None), None);
+    assert_eq!(monitor.begin_teardown(), ProxyStop::KillOnly);
+}
+
+#[test]
+fn proxy_stderr_markers_are_classified() {
+    let monitor = TransportMonitor::new();
+    monitor.observe_proxy_stderr("INF Found existing ACP process, reusing process_id=27294439");
+    assert!(!monitor.process_replaced());
+    assert!(!monitor.lost().is_cancelled());
+
+    for line in [
+        "INF Requested ACP process has exited, matching its recorded command",
+        "INF Requested ACP process is no longer active, falling back to command matching",
+        "INF Started new ACP process process_id=27300001 command=claude-agent-acp",
+    ] {
+        let monitor = TransportMonitor::new();
+        monitor.observe_proxy_stderr(line);
+        assert!(monitor.process_replaced(), "{line}");
+        assert!(
+            !monitor.lost().is_cancelled(),
+            "a replacement is not a loss: {line}"
+        );
+    }
+
+    let monitor = TransportMonitor::new();
+    monitor.observe_proxy_stderr("INF Received EOF signal from orchestrator, connection closed");
+    assert_eq!(
+        monitor.first_signal(),
+        Some(TransportSignal::OrchestratorEof)
+    );
+    assert!(monitor.lost().is_cancelled());
 }
 
 #[test]
@@ -343,6 +387,63 @@ wait $!"#,
             .count()
     }
 
+    /// An attach spawns its proxy itself: a detach SIGKILLs that group at
+    /// once, and once teardown has begun it is disarmed, so it can never
+    /// signal a reaped (and reusable) pgid.
+    #[tokio::test(flavor = "current_thread")]
+    async fn detach_kills_an_armed_proxy_group_and_is_disarmed_by_teardown() {
+        let (mut child, grandchild) = spawn_sigint_honouring_group().await;
+        let monitor = TransportMonitor::new();
+        monitor.arm_proxy_group(child.id().expect("running") as i32);
+        let handle = DetachHandle::new(Arc::clone(&monitor));
+
+        assert!(handle.detach());
+        assert!(monitor.detach_requested());
+        assert!(monitor.lost().is_cancelled());
+        assert_eq!(monitor.first_signal(), Some(TransportSignal::Detached));
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .expect("the wrapper dies promptly")
+            .expect("waitable");
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "killed, not interrupted: {status:?}"
+        );
+        wait_until_gone(grandchild).await;
+
+        assert_eq!(monitor.begin_teardown(), ProxyStop::KillOnly);
+        assert!(!handle.detach(), "disarmed once teardown began");
+    }
+
+    /// A lease released as usual interrupts the proxy it was the last to
+    /// hold — the fake `sq` does log a SIGINT — while one that spares it (a
+    /// shared process) only SIGKILLs it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lease_released_kill_only_never_interrupts_its_proxy() {
+        for kill_only in [false, true] {
+            let dir = scratch_dir(if kill_only { "kill-only" } else { "graceful" });
+            let (lease, _streams) = remote_process::attach(sigint_logging_proxy(&dir), "Test")
+                .await
+                .expect("the proxy spawns");
+            let (proxy, grandchild) = read_pids(&dir).await;
+            if kill_only {
+                lease.never_interrupt();
+            }
+            tokio::time::timeout(Duration::from_secs(10), lease.release())
+                .await
+                .expect("the proxy stops promptly");
+            wait_until_gone(proxy).await;
+            wait_until_gone(grandchild).await;
+            assert_eq!(
+                sigints_logged(&dir),
+                usize::from(!kill_only),
+                "kill_only: {kill_only}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     /// The quit path's detach of the only session on a proxy: its group is
     /// SIGKILLed at once, with no SIGINT, and the detach is disarmed once
     /// teardown begins, so it can never signal a reaped (and reusable) pgid.
@@ -488,6 +589,7 @@ mod fake_proxy {
             background_hold_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            blox_process: None,
         }
     }
 

@@ -1457,7 +1457,11 @@ pub fn start_session(
             // agent the user chose, without re-running the (login-shell) discovery.
             let (driver, resolved_provider_id): (AcpDriver, Option<String>) =
                 if let Some(ref ws_name) = config.workspace_name {
-                    let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
+                    let mut d = AcpDriver::for_workspace(
+                        ws_name,
+                        config.provider.as_deref(),
+                        &config.session_id,
+                    )?;
                     if let Some(ref remote_dir) = config.remote_working_dir {
                         d = d.with_remote_working_dir(remote_dir.clone());
                     }
@@ -4228,7 +4232,13 @@ async fn reattach_agent(
         .workspace_name
         .as_deref()
         .ok_or("The session is not on a remote workspace")?;
-    let mut driver = AcpDriver::for_workspace(workspace_name, config.provider.as_deref())?;
+    // The same argv as the session's own runs, so `sq` attaches to the
+    // workstation process that ran the turn.
+    let mut driver = AcpDriver::for_workspace(
+        workspace_name,
+        config.provider.as_deref(),
+        &config.session_id,
+    )?;
     if let Some(ref remote_dir) = config.remote_working_dir {
         driver = driver.with_remote_working_dir(remote_dir.clone());
     }

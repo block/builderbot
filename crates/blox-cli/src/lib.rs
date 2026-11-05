@@ -10,6 +10,13 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use wait_timeout::ChildExt;
 
+mod commands;
+
+pub use commands::{
+    find_acp_process, find_ended_acp_process, ws_command_list, CommandFilter, CommandStatus,
+    WorkstationCommand,
+};
+
 const COMMON_PATHS: &[&str] = &[
     "/opt/homebrew/bin",
     "/usr/local/bin",
@@ -575,6 +582,9 @@ pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxErr
 }
 
 /// A bootstrap command returned by `sq blox ws commands <name> --json`.
+///
+/// Predates the CLI's camelCase listing and fails to parse it; ACP process
+/// lookups use [`WorkstationCommand`] via [`ws_command_list`] instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceCommand {
     pub command_id: String,

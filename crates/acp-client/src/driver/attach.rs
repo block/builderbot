@@ -1,0 +1,694 @@
+//! Attaching a fresh connection to a Blox session's remote agent process:
+//! catching the transcript up, following a turn still in flight to its end,
+//! and cancelling one.
+//!
+//! The turn was prompted over a connection that is gone, so its
+//! `session/prompt` response never matches a request here (the relay
+//! broadcasts it, and the SDK drops it as unknown). Its end is read instead
+//! from the session's own raw SDK frames — `result`, then
+//! `session_state_changed: idle` — where the agent sends them (the Claude
+//! bridge), and from the workstation process status for every agent
+//! ([`RemoteProcessStatus`]).
+use super::*;
+
+use tokio::process::ChildStdin;
+use tokio_util::compat::Compat;
+
+use catch_up::CatchUpStage;
+
+/// How an [`AcpDriver::attach`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachOutcome {
+    /// The turn is over, and the transcript caught up with it. `stop_reason`
+    /// comes from the session's last `result` frame: `None` when the agent
+    /// sends none, or the turn ended before the attach could see it.
+    Completed { stop_reason: Option<StopReason> },
+    /// Detached ([`AttachedSession::detach_handle`]) before the turn was
+    /// seen to end: it may still be running remotely.
+    Live,
+    /// The session's process is gone, and the turn with it: Blox listed it
+    /// as ended (`message` is what it recorded, e.g. "bloxlet restarted
+    /// while command was running"), or the proxy started a new process in
+    /// its place, whose replay the transcript caught up from.
+    ProcessGone { message: Option<String> },
+    /// The connection to the workstation was lost, the proxy's report that
+    /// its remote process went away included; the turn's fate is unknown.
+    TransportLost,
+}
+
+/// How an [`AcpDriver::attach_cancel`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// The session is idle: the cancel landed, or nothing was running.
+    Stopped,
+    /// The session's process is gone, and its turn with it (see
+    /// [`AttachOutcome::ProcessGone`]).
+    ProcessGone { message: Option<String> },
+    /// The cancel went out, but nothing confirmed the turn stopped before
+    /// the deadline.
+    Unconfirmed,
+    /// The connection was lost before the cancel was confirmed.
+    TransportLost,
+}
+
+/// An attach in progress; see [`AcpDriver::attach`].
+pub struct AttachedSession {
+    caught_up: watch::Receiver<bool>,
+    task: tokio::task::JoinHandle<Result<AttachOutcome, String>>,
+    transport: Arc<TransportMonitor>,
+}
+
+impl AttachedSession {
+    /// Wait until the replay is recorded and the attach follows the live
+    /// stream. `false` when the attach ended first (see [`Self::settled`]).
+    pub async fn caught_up(&mut self) -> bool {
+        self.caught_up
+            .wait_for(|caught_up| *caught_up)
+            .await
+            .is_ok()
+    }
+
+    /// Stop following without stopping the turn: the proxy is SIGKILLed with
+    /// no SIGINT, and the attach settles [`AttachOutcome::Live`] unless it
+    /// already saw the turn end.
+    pub fn detach_handle(&self) -> DetachHandle {
+        DetachHandle::new(Arc::clone(&self.transport))
+    }
+
+    /// The attach's outcome, once the proxy is stopped.
+    pub async fn settled(self) -> Result<AttachOutcome, String> {
+        self.task
+            .await
+            .map_err(|e| format!("ACP attach task failed: {e}"))?
+    }
+}
+
+/// Pacing for an attach's waits on the remote process.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct AttachTiming {
+    /// Between process-status reads. Each read is one or two `sq` calls.
+    pub(super) poll: Duration,
+    /// How long an `IDLE` process gets for the session's own `idle` frame
+    /// (and the `result` before it) to arrive, when the agent sends frames.
+    pub(super) idle_drain: Duration,
+}
+
+impl Default for AttachTiming {
+    fn default() -> Self {
+        Self {
+            poll: Duration::from_secs(5),
+            idle_drain: Duration::from_secs(2),
+        }
+    }
+}
+
+type ProxyStreams =
+    ByteStreams<Compat<ChildStdin>, Compat<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>;
+
+/// A spawned `sq blox acp` attached to the session's process.
+struct AttachProxy {
+    child: tokio::process::Child,
+    transport: Arc<TransportMonitor>,
+    streams: ProxyStreams,
+}
+
+impl AcpDriver {
+    /// Attach to a Blox session's remote agent process, catch the transcript
+    /// up with it, and follow its turn, if one is running, to the end.
+    ///
+    /// `command_id` pins the process the session last ran on; without one,
+    /// the session's own argv finds it (see [`AcpDriver::for_workspace`]).
+    /// The connection sends `initialize` and `session/load` with the usual
+    /// `_meta`, records the replay past what `store` already holds for
+    /// `session_id` through `writer` (deduplicated by message and tool-call
+    /// id, and accepting a replay that ends mid-turn), then follows the live
+    /// stream until the turn is seen to end, the process goes, the transport
+    /// is lost, or the caller detaches.
+    ///
+    /// When the proxy reports starting a new process in place of the
+    /// session's (`Requested ACP process has exited`), the turn is over: the
+    /// attach backfills from the new process's replay and settles
+    /// [`AttachOutcome::ProcessGone`].
+    ///
+    /// Must be called from within a Tokio `LocalSet`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+        command_id: Option<&str>,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        auth_selection: Option<&AcpAuthenticationSelection>,
+    ) -> Result<AttachedSession, String> {
+        self.attach_with_timing(
+            session_id,
+            agent_session_id,
+            command_id,
+            working_dir,
+            store,
+            writer,
+            auth_selection,
+            AttachTiming::default(),
+        )
+    }
+
+    /// [`AcpDriver::attach`] with its pacing as a parameter (tests).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attach_with_timing(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+        command_id: Option<&str>,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        auth_selection: Option<&AcpAuthenticationSelection>,
+        timing: AttachTiming,
+    ) -> Result<AttachedSession, String> {
+        // Without what is stored, the whole replay would be recorded again.
+        let stored = store.get_session_replay_boundaries(session_id)?;
+        let acp_working_dir =
+            resolve_acp_working_dir(working_dir, true, self.remote_working_dir.as_deref())?;
+        let AttachProxy {
+            mut child,
+            transport,
+            streams,
+        } = self.spawn_attach_proxy(session_id, command_id, working_dir)?;
+        let handler = Arc::new(
+            AcpNotificationHandler::new(
+                Arc::clone(writer),
+                false,
+                Vec::new(),
+                CancellationToken::new(),
+            )
+            .catching_up(&stored)
+            .with_transport_monitor(Arc::clone(&transport)),
+        );
+        let (caught_up_tx, caught_up) = watch::channel(false);
+
+        let context = AttachContext {
+            our_session_id: session_id.to_string(),
+            agent_session_id: agent_session_id.to_string(),
+            command_id: command_id.map(str::to_string),
+            working_dir: acp_working_dir,
+            store: Arc::clone(store),
+            mcp_servers: self.mcp_servers.clone(),
+            agent_label: self.agent_label.clone(),
+            auth_selection: auth_selection.cloned(),
+            unattended_session_mode: self.unattended_session_mode.clone(),
+            blox: self.blox_process.clone(),
+            timing,
+        };
+        let writer = Arc::clone(writer);
+        let task_transport = Arc::clone(&transport);
+        let task = tokio::task::spawn_local(async move {
+            let transport = task_transport;
+            let protocol_result = staged_client(&handler)
+                .connect_with(streams, async |connection| {
+                    run_attach(&connection, &handler, &context, caught_up_tx)
+                        .await
+                        .map_err(agent_client_protocol::util::internal_error)
+                })
+                .await
+                .map_err(|e| format!("ACP protocol failed: {e:?}"));
+
+            handler.cancel_pending_permissions();
+            writer.finalize().await;
+            stop_proxy(&mut child, &transport).await;
+            match protocol_result {
+                Ok(outcome) => Ok(outcome),
+                // The SDK ended the connection under the attach.
+                Err(_) if transport.first_signal().is_some() => Ok(lost_outcome(&transport)),
+                Err(e) => Err(e),
+            }
+        });
+
+        Ok(AttachedSession {
+            caught_up,
+            task,
+            transport,
+        })
+    }
+
+    /// Cancel a Blox session's turn from a fresh connection: attach,
+    /// `initialize`, then `session/cancel` (no `session/load`), and wait up
+    /// to `deadline` for the session to go idle — its own `idle` frame where
+    /// the agent sends one, otherwise the process reading `IDLE`.
+    ///
+    /// Must be called from within a Tokio `LocalSet`.
+    pub async fn attach_cancel(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+        command_id: Option<&str>,
+        working_dir: &Path,
+        deadline: Duration,
+    ) -> Result<CancelOutcome, String> {
+        self.attach_cancel_with_timing(
+            session_id,
+            agent_session_id,
+            command_id,
+            working_dir,
+            deadline,
+            AttachTiming::default(),
+        )
+        .await
+    }
+
+    /// [`AcpDriver::attach_cancel`] with its pacing as a parameter (tests).
+    pub(super) async fn attach_cancel_with_timing(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+        command_id: Option<&str>,
+        working_dir: &Path,
+        deadline: Duration,
+        timing: AttachTiming,
+    ) -> Result<CancelOutcome, String> {
+        let AttachProxy {
+            mut child,
+            transport,
+            streams,
+        } = self.spawn_attach_proxy(session_id, command_id, working_dir)?;
+        // Nothing is loaded, so nothing is recorded.
+        let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+        let handler = Arc::new(
+            AcpNotificationHandler::new(writer, false, Vec::new(), CancellationToken::new())
+                .with_transport_monitor(Arc::clone(&transport)),
+        );
+        let sent = std::cell::Cell::new(false);
+        let protocol_result = staged_client(&handler)
+            .connect_with(streams, async |connection| {
+                let cancel = async {
+                    initialize_connection(
+                        &connection,
+                        &handler,
+                        session_id,
+                        &self.agent_label,
+                        &[],
+                    )
+                    .await?;
+                    handler.name_session(agent_session_id).await;
+                    if transport.process_replaced() {
+                        return Ok(CancelOutcome::ProcessGone {
+                            message: ended_message(self.blox_process.as_ref(), command_id).await,
+                        });
+                    }
+                    send_session_cancel(&connection, agent_session_id)?;
+                    sent.set(true);
+                    log::info!(
+                        "ACP session {agent_session_id}: sent session/cancel from an attach \
+                         for session {session_id}"
+                    );
+                    Ok::<_, String>(
+                        match wait_for_turn_end(
+                            &handler,
+                            self.blox_process.as_ref(),
+                            command_id,
+                            timing,
+                        )
+                        .await
+                        {
+                            TurnEnd::Idle => CancelOutcome::Stopped,
+                            TurnEnd::ProcessGone { message } => {
+                                CancelOutcome::ProcessGone { message }
+                            }
+                            TurnEnd::TransportLost => CancelOutcome::TransportLost,
+                        },
+                    )
+                };
+                match tokio::time::timeout(deadline, cancel).await {
+                    Ok(Ok(outcome)) => Ok(outcome),
+                    Ok(Err(e)) => Err(agent_client_protocol::util::internal_error(e)),
+                    Err(_) if sent.get() => Ok(CancelOutcome::Unconfirmed),
+                    Err(_) => Err(agent_client_protocol::util::internal_error(format!(
+                        "Timed out after {}s before session/cancel could be sent",
+                        deadline.as_secs()
+                    ))),
+                }
+            })
+            .await
+            .map_err(|e| format!("ACP protocol failed: {e:?}"));
+
+        handler.cancel_pending_permissions();
+        stop_proxy(&mut child, &transport).await;
+        match protocol_result {
+            Ok(outcome) => Ok(outcome),
+            Err(_) if transport.first_signal().is_some() => Ok(CancelOutcome::TransportLost),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Spawn `sq blox acp` for an attach: this driver's argv, pinned to
+    /// `command_id` when one is known, wired like [`AcpDriver::connect`]'s
+    /// remote spawn (own process group, transport monitor, stderr markers).
+    fn spawn_attach_proxy(
+        &self,
+        session_id: &str,
+        command_id: Option<&str>,
+        working_dir: &Path,
+    ) -> Result<AttachProxy, String> {
+        if !self.is_remote {
+            return Err("Only a remote (Blox) session can be attached to".to_string());
+        }
+        let spawn_working_dir = resolve_spawn_working_dir(working_dir, true);
+        let mut args = self.acp_args.clone();
+        if let Some(id) = command_id {
+            args.push(format!("--command-id={id}"));
+        }
+        let spawn_command = acp_spawn_command(
+            &self.binary_path,
+            &args,
+            self.interpreter_env_snapshot.as_deref(),
+        );
+        let mut cmd = Command::new(&spawn_command.program);
+        cmd.args(&spawn_command.args)
+            .current_dir(&spawn_working_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        for (k, v) in &self.extra_env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().map_err(|e| {
+            format!(
+                "Failed to spawn {} for an attach (binary: {}): {e}",
+                self.agent_label,
+                self.binary_path.display()
+            )
+        })?;
+
+        let transport = TransportMonitor::new();
+        #[cfg(unix)]
+        if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+            transport.arm_proxy_group(pid);
+        }
+        if self.shares_remote_process() {
+            transport.mark_shared_process();
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_stderr_reader(
+                stderr,
+                self.agent_label.clone(),
+                session_id.to_string(),
+                CancellationToken::new(),
+                Arc::clone(&transport),
+            );
+        }
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to get stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to get stdout".to_string())?;
+        let streams = ByteStreams::new(
+            stdin.compat_write(),
+            normalized_stdout(stdout, true, Arc::clone(&transport)).compat(),
+        );
+        Ok(AttachProxy {
+            child,
+            transport,
+            streams,
+        })
+    }
+}
+
+/// What an attach's connection task owns.
+struct AttachContext {
+    our_session_id: String,
+    agent_session_id: String,
+    command_id: Option<String>,
+    working_dir: PathBuf,
+    store: Arc<dyn Store>,
+    mcp_servers: Vec<McpServer>,
+    agent_label: String,
+    auth_selection: Option<AcpAuthenticationSelection>,
+    unattended_session_mode: Option<String>,
+    blox: Option<BloxProcess>,
+    timing: AttachTiming,
+}
+
+async fn run_attach(
+    connection: &ConnectionTo<Agent>,
+    handler: &Arc<AcpNotificationHandler>,
+    context: &AttachContext,
+    caught_up: watch::Sender<bool>,
+) -> Result<AttachOutcome, String> {
+    let transport = &handler.transport;
+    // The session's `result` frames are this connection's to accept,
+    // though no prompt of its own is in flight.
+    handler
+        .response
+        .lock()
+        .await
+        .start_prompt(context.agent_session_id.clone());
+    let setup = tokio::time::timeout(
+        ACP_SETUP_TIMEOUT,
+        setup_acp_session(AcpSessionSetupContext {
+            connection,
+            working_dir: &context.working_dir,
+            store: &context.store,
+            handler,
+            our_session_id: &context.our_session_id,
+            acp_session_id: Some(&context.agent_session_id),
+            config_options: &[],
+            mcp_servers: &context.mcp_servers,
+            agent_label: &context.agent_label,
+            auth_selection: context.auth_selection.as_ref(),
+            unattended_session_mode: context.unattended_session_mode.as_deref(),
+        }),
+    );
+    tokio::pin!(setup);
+    let setup_result = tokio::select! {
+        result = &mut setup => result,
+        // A proxy that lost its remote process keeps stdout open; a reply
+        // already on its way still wins.
+        _ = transport.lost().cancelled() => {
+            match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, &mut setup).await {
+                Ok(result) => result,
+                Err(_) => return Ok(lost_outcome(transport)),
+            }
+        }
+    };
+    match setup_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e))
+            if transport.first_signal().is_some() || formatted_error_is_transport_closed(&e) =>
+        {
+            log::info!(
+                "ACP session {}: attach lost its transport during setup: {e}",
+                context.agent_session_id
+            );
+            return Ok(lost_outcome(transport));
+        }
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(format!(
+                "Timed out attaching to the ACP session after {}s",
+                ACP_SETUP_TIMEOUT.as_secs()
+            ))
+        }
+    }
+    handler.set_catch_up_stage(CatchUpStage::Live).await;
+    let _ = caught_up.send(true);
+    log::info!(
+        "ACP session {}: attach caught up for session {}",
+        context.agent_session_id,
+        context.our_session_id
+    );
+
+    let command_id = context.command_id.as_deref();
+    if transport.process_replaced() {
+        return Ok(AttachOutcome::ProcessGone {
+            message: ended_message(context.blox.as_ref(), command_id).await,
+        });
+    }
+    Ok(
+        match wait_for_turn_end(handler, context.blox.as_ref(), command_id, context.timing).await {
+            TurnEnd::Idle => AttachOutcome::Completed {
+                stop_reason: handler.last_result().as_ref().and_then(result_stop_reason),
+            },
+            TurnEnd::ProcessGone { message } => AttachOutcome::ProcessGone { message },
+            TurnEnd::TransportLost => lost_outcome(transport),
+        },
+    )
+}
+
+/// How a wait on the session's turn ended.
+enum TurnEnd {
+    Idle,
+    ProcessGone { message: Option<String> },
+    TransportLost,
+}
+
+/// Wait for the session's turn to end: its own `idle` frame, or the process
+/// reading `IDLE` (then a short drain for the frames, where the agent sends
+/// them), or gone.
+async fn wait_for_turn_end(
+    handler: &AcpNotificationHandler,
+    blox: Option<&BloxProcess>,
+    command_id: Option<&str>,
+    timing: AttachTiming,
+) -> TurnEnd {
+    let transport = &handler.transport;
+    let mut activity = handler.subscribe_background_activity();
+    let mut statuses = blox.map(|blox| poll_process_status(blox, command_id, timing.poll));
+    loop {
+        if activity.borrow_and_update().session_state == Some(SdkSessionState::Idle) {
+            return TurnEnd::Idle;
+        }
+        tokio::select! {
+            _ = transport.lost().cancelled() => return TurnEnd::TransportLost,
+            changed = activity.changed() => {
+                if changed.is_err() {
+                    return TurnEnd::TransportLost;
+                }
+            }
+            Some(status) = async {
+                match statuses.as_mut() {
+                    Some(statuses) => statuses.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match status {
+                Ok(RemoteProcessStatus::Running) => {}
+                Ok(RemoteProcessStatus::Idle) => {
+                    if activity.borrow().sdk_frames_seen {
+                        let _ = tokio::time::timeout(
+                            timing.idle_drain,
+                            activity.wait_for(|activity| {
+                                activity.session_state == Some(SdkSessionState::Idle)
+                            }),
+                        )
+                        .await;
+                    }
+                    return TurnEnd::Idle;
+                }
+                Ok(RemoteProcessStatus::Gone { message }) => {
+                    return TurnEnd::ProcessGone { message };
+                }
+                Err(e) => log::warn!("Reading the remote ACP process status failed: {e}"),
+            },
+        }
+    }
+}
+
+/// Read the process status now, then every `every`, until the receiver is
+/// dropped.
+fn poll_process_status(
+    blox: &BloxProcess,
+    command_id: Option<&str>,
+    every: Duration,
+) -> mpsc::Receiver<Result<RemoteProcessStatus, String>> {
+    let (tx, rx) = mpsc::channel(1);
+    let probe = Arc::clone(&blox.probe);
+    let command_id = command_id.map(str::to_string);
+    tokio::task::spawn_local(async move {
+        loop {
+            let status = tokio::select! {
+                _ = tx.closed() => return,
+                status = probe.status(command_id.as_deref()) => status,
+            };
+            if tx.send(status).await.is_err() {
+                return;
+            }
+            tokio::select! {
+                _ = tx.closed() => return,
+                _ = tokio::time::sleep(every) => {}
+            }
+        }
+    });
+    rx
+}
+
+/// Why the session's replaced process ended, best effort.
+async fn ended_message(blox: Option<&BloxProcess>, command_id: Option<&str>) -> Option<String> {
+    match blox?.probe.ended_message(command_id).await {
+        Ok(message) => message,
+        Err(e) => {
+            log::warn!("Reading why the remote ACP process ended failed: {e}");
+            None
+        }
+    }
+}
+
+fn lost_outcome(transport: &TransportMonitor) -> AttachOutcome {
+    if transport.detach_requested() {
+        AttachOutcome::Live
+    } else {
+        AttachOutcome::TransportLost
+    }
+}
+
+/// Stop an attach's proxy (see [`ProxyStop`]). A proxy that reused the
+/// session's process leaves it running either way.
+async fn stop_proxy(child: &mut tokio::process::Child, transport: &TransportMonitor) {
+    match transport.begin_teardown() {
+        ProxyStop::Graceful => graceful_stop(child, true).await,
+        ProxyStop::KillOnly => kill_without_interrupt(child, true).await,
+    }
+}
+
+/// The ACP stop reason a Claude Agent SDK `result` frame stands for, when it
+/// says.
+pub(super) fn result_stop_reason(message: &serde_json::Value) -> Option<StopReason> {
+    let field = |name: &str| message.get(name).and_then(serde_json::Value::as_str);
+    match field("subtype")? {
+        "success" => Some(match field("stop_reason") {
+            Some("max_tokens") => StopReason::MaxTokens,
+            Some("refusal") => StopReason::Refusal,
+            _ => StopReason::EndTurn,
+        }),
+        "error_max_turns" => Some(StopReason::MaxTurnRequests),
+        "error_during_execution"
+            if field("terminal_reason").is_some_and(|reason| reason.starts_with("aborted")) =>
+        {
+            Some(StopReason::Cancelled)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn result_frames_map_to_stop_reasons() {
+        let reason = |frame: serde_json::Value| result_stop_reason(&frame);
+        assert_eq!(
+            reason(serde_json::json!({
+                "type": "result", "subtype": "success", "is_error": false,
+                "stop_reason": "end_turn", "terminal_reason": "completed"
+            })),
+            Some(StopReason::EndTurn)
+        );
+        // Observed on a live cancel.
+        assert_eq!(
+            reason(serde_json::json!({
+                "type": "result", "subtype": "error_during_execution", "is_error": true,
+                "stop_reason": "tool_use", "terminal_reason": "aborted_tools"
+            })),
+            Some(StopReason::Cancelled)
+        );
+        assert_eq!(
+            reason(serde_json::json!({"subtype": "success", "stop_reason": "max_tokens"})),
+            Some(StopReason::MaxTokens)
+        );
+        assert_eq!(
+            reason(serde_json::json!({"subtype": "error_max_turns"})),
+            Some(StopReason::MaxTurnRequests)
+        );
+        assert_eq!(
+            reason(serde_json::json!({"subtype": "error_during_execution"})),
+            None
+        );
+        assert_eq!(reason(serde_json::json!({})), None);
+    }
+}

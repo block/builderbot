@@ -25,6 +25,7 @@ mod types;
 pub use agent_client_protocol::schema::v1::{
     ConfigOptionUpdate, McpServer, McpServerHttp, McpServerSse, SessionConfigOption,
     SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
+    StopReason,
 };
 pub use driver::{
     autoapprove_permission_decision, background_continuation_origin, carry_config_value_hint,
@@ -35,9 +36,10 @@ pub use driver::{
     AcpAuthenticationSelection, AcpDriver, AcpEventMetadata, AcpInitializeMetadata,
     AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
     AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver, AgentRunOutcome,
-    AsyncTaskStopHandle, BackgroundHoldConfig, BackgroundHoldObserver, BackgroundHoldStatus,
-    BackgroundHoldTask, BasicMessageWriter, DetachHandle, MessageWriter, OutOfTurnPermissionPolicy,
-    PromptImage, ReattachTurn, ReplayBoundary, SessionConnection, SessionLifetime,
+    AsyncTaskStopHandle, AttachOutcome, AttachedSession, BackgroundHoldConfig,
+    BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BasicMessageWriter,
+    CancelOutcome, DetachHandle, MessageWriter, OutOfTurnPermissionPolicy, PromptImage,
+    ReattachTurn, RemoteProcessStatus, ReplayBoundary, SessionConnection, SessionLifetime,
     SessionSettleReason, SessionSettled, SteerError, SteerOutcome, Store, TransportLoss,
     TransportLossPhase, TurnControlHandle, BACKGROUND_CONTINUATION_ORIGIN,
 };

@@ -180,6 +180,7 @@ impl FakeSq {
             background_hold_observer: None,
             steering_disabled: false,
             unattended_session_mode: None,
+            blox_process: None,
         }
     }
 

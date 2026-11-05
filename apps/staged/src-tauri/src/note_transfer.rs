@@ -60,7 +60,9 @@
 //! The commits and code reviews a project session produced carry no link back
 //! to it and stay on their branch. A copy is a standalone note: no session,
 //! no parent, no children, no suggested next steps, and — having no session
-//! to overwrite it — editable like a note the user wrote.
+//! to overwrite it — editable like a note the user wrote. It only needs the
+//! note to have finished once; a session that was resumed does not hold a
+//! copy back, since the copy leaves the session where it is.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -351,23 +353,28 @@ where
             keys.push(key);
         }
     }
+    // A repo that was added stays added when a later step fails — the next
+    // repo's add included: removing it would tear down a worktree the user
+    // may already be looking at, and the add is what a manual "Add
+    // repository" would have done anyway. Every error from here on says so,
+    // so the user is not left wondering where the repo came from.
     let mut added: Vec<RepoKey> = Vec::new();
     for key in keys {
         let already_tracked = store
             .find_project_repo(&target.id, &key.github_repo, key.subpath.as_deref())
-            .map_err(|e| e.to_string())?
+            .map_err(|e| with_added_repos(e.to_string(), &added, &target))?
             .is_some();
         if !already_tracked {
-            ensure_repo(key.clone())
-                .await
-                .map_err(|e| format!("Could not add {} to {}: {e}", key.describe(), target.name))?;
+            ensure_repo(key.clone()).await.map_err(|e| {
+                with_added_repos(
+                    format!("Could not add {} to {}: {e}", key.describe(), target.name),
+                    &added,
+                    &target,
+                )
+            })?;
             added.push(key);
         }
     }
-    // A repo that was added stays added when a later step fails: removing it
-    // would tear down a worktree the user may already be looking at, and the
-    // add is what a manual "Add repository" would have done anyway. The error
-    // says so, so the user is not left wondering where the repo came from.
     move_project_note_now(store, &note, &target).map_err(|e| with_added_repos(e, &added, &target))
 }
 
@@ -656,9 +663,11 @@ pub(crate) async fn add_repo_to_project(
 /// and the runner would keep writing to it wherever it went.
 ///
 /// `completed_at` alone does not say so: it is set once and never cleared, so
-/// a note whose session was resumed still reads as finished. The session's
-/// own status is what tells a live runner from a settled one — and a live
-/// session is scheduled by `sessions.branch_id`, which a move rewrites.
+/// a note whose session was resumed still reads as finished. For a move the
+/// session's own status is checked too: a live session is scheduled by
+/// `sessions.branch_id`, which the move rewrites. A copy leaves the session
+/// where it is and takes a snapshot of the note as it reads now, so a
+/// resumed session is no reason to refuse it — only one that never finished.
 fn ensure_settled(
     store: &Store,
     title: &str,
@@ -675,6 +684,9 @@ fn ensure_settled(
             quoted(title),
             mode.gerund()
         ));
+    }
+    if mode == TransferMode::Copy {
+        return Ok(());
     }
     let status = store
         .get_session(session_id)
@@ -2653,6 +2665,131 @@ mod tests {
         );
         f.assert_family_unmoved(&parent, &child, &session);
         assert!(f.target_branch().is_none());
+    }
+
+    /// Children on two repos the target lacks: when the second add fails, the
+    /// error still names the first, which stays added.
+    #[tokio::test]
+    async fn failed_second_repo_add_names_the_repo_added_before_it() {
+        let f = fixture();
+        let (parent, child, session) = f.family();
+        let gadgets = ProjectRepo::new(&f.source.id, "acme/gadgets", "gadgets", None);
+        f.store.create_project_repo(&gadgets).unwrap();
+        let gadgets_branch =
+            Branch::new(&f.source.id, "gadgets", "origin/main").with_project_repo(&gadgets.id);
+        f.store.create_branch(&gadgets_branch).unwrap();
+        let (gadget_child, gadget_session) =
+            f.child_of(&parent, &gadgets_branch.id, "Gadget findings");
+        let calls = Mutex::new(Vec::new());
+
+        let err = transfer_project_note(
+            &f.store,
+            &parent.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| {
+                let mut calls = calls.lock().unwrap();
+                calls.push(key.clone());
+                std::future::ready(if calls.len() == 1 {
+                    f.attach_repo(key)
+                } else {
+                    Err("Workspace is not running".to_string())
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            err,
+            format!(
+                "Could not add {} to target: Workspace is not running {} was added to target along the way and remains tracked there.",
+                calls[1].describe(),
+                calls[0].describe()
+            )
+        );
+        f.assert_family_unmoved(&parent, &child, &session);
+        f.assert_family_unmoved(&parent, &gadget_child, &gadget_session);
+        // The first repo is tracked by the target; the second is not.
+        let tracked: Vec<String> = f
+            .store
+            .list_project_repos(&f.target.id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.github_repo)
+            .collect();
+        assert_eq!(tracked, [calls[0].github_repo.clone()]);
+    }
+
+    /// A copy is a snapshot that leaves the session where it is, so a session
+    /// that is running again does not stop it — only a move.
+    #[tokio::test]
+    async fn copies_proceed_while_the_notes_session_is_running_again() {
+        let f = fixture();
+        let session =
+            Session::new_running("note", Path::new("/tmp/wt")).with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
+        f.store.create_note(&note).unwrap();
+        let project_session = Session::new_running("plan", Path::new("/tmp/wt"));
+        f.store.create_session(&project_session).unwrap();
+        let project_note =
+            ProjectNote::new(&f.source.id, "Plan", "body").with_session(&project_session.id);
+        f.store.create_project_note(&project_note).unwrap();
+        f.store
+            .mark_project_note_completed(&project_note.id)
+            .unwrap();
+        f.attach_repo(RepoKey {
+            github_repo: "acme/widgets".into(),
+            subpath: Some("apps/web".into()),
+        })
+        .unwrap();
+
+        let copy = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
+        assert_eq!(copy.branch_id, f.target_branch().unwrap().id);
+        assert_eq!(copy.content, "body");
+        assert!(copy.session_id.is_none());
+
+        let copy = transfer_project_note(
+            &f.store,
+            &project_note.id,
+            &f.target.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
+        assert_eq!(copy.project_id, f.target.id);
+        assert!(copy.session_id.is_none());
+
+        // The same sessions still refuse a move.
+        for (id, label) in [(&note.id, "Findings"), (&project_note.id, "Plan")] {
+            let err = if id == &note.id {
+                transfer_branch_note(&f.store, id, &f.target.id, TransferMode::Move, never_called)
+                    .await
+                    .unwrap_err()
+            } else {
+                transfer_project_note(&f.store, id, &f.target.id, TransferMode::Move, never_called)
+                    .await
+                    .unwrap_err()
+            };
+            assert_eq!(
+                err,
+                format!(
+                    "\"{label}\"'s session is running again; wait for it to finish before moving the note."
+                )
+            );
+        }
     }
 
     #[tokio::test]

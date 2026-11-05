@@ -569,7 +569,10 @@
   let openNote = $state<OpenProjectNoteState | null>(null);
   let childHashtagItems = $state<HashtagItem[]>([]);
   // Every child, titled or not: a move takes them all, so the picker's hint
-  // and its project list depend on there being any.
+  // and its project list depend on there being any. Kept current with the
+  // hashtag items while the dialog is open: a reply can resume the session
+  // and spawn a child, and a branch move can detach one (see
+  // `refreshOpenNoteChildren`).
   let openNoteChildCount = $state(0);
   let childHashtagLoadGeneration = 0;
   let noteModalHashtagItems = $derived([...hashtagItems, ...childHashtagItems]);
@@ -635,6 +638,17 @@
       openNoteChildCount = 0;
       childHashtagItems = [];
     }
+  }
+
+  /**
+   * Re-read the open note's children. Called when its session leaves an
+   * active status (a resumed session may have spawned children) and on the
+   * project-notes invalidation a branch move or a child delete raises, so
+   * the `#note:` references and the move picker see the same children the
+   * backend would move.
+   */
+  function refreshOpenNoteChildren() {
+    if (openNote) void loadChildHashtagItems(openNote.noteId);
   }
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
@@ -831,6 +845,7 @@
     // this one's own edit echoing back through notes-changed.
     const onProjectNotesInvalidated = () => {
       void loadProjectNotes();
+      refreshOpenNoteChildren();
       hashtagVersion++;
     };
     window.addEventListener('project-notes-invalidated', onProjectNotesInvalidated);
@@ -873,6 +888,7 @@
         // Branch timelines were already invalidated by sessionStatusListener
         // for the session's own branch; just re-derive the hashtag items.
         hashtagVersion++;
+        if (openNote?.sessionId === sessionId) refreshOpenNoteChildren();
       }
     });
 

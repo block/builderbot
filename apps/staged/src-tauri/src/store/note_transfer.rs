@@ -24,7 +24,7 @@
 //! would otherwise be silently overwritten; matching zero rows fails the
 //! transaction instead, so the media rows roll back with it.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use super::models::{Branch, Image, Note, ProjectNote, ProjectRepo};
 use super::{now_timestamp, Store, StoreChange, StoreError};
@@ -168,10 +168,7 @@ impl Store {
         // session as queued or running work, and its completion would drain
         // the branch it left.
         if let Some(session_id) = existing.session_id.as_deref() {
-            tx.execute(
-                "UPDATE sessions SET branch_id = ?1 WHERE id = ?2",
-                params![target_branch_id, session_id],
-            )?;
+            move_settled_session(&tx, session_id, target_branch_id, &existing.title)?;
         }
         tx.commit()?;
 
@@ -299,22 +296,9 @@ impl Store {
                 return Err(relocated_during_transfer(&child_title));
             }
             // Same as `move_note_to_branch`: the session is scheduled by
-            // `sessions.branch_id` and has to arrive with its note. The caller
-            // checked it was settled before planning, but a resume can land
-            // between that read and this write, and a live drain must not have
-            // its session handed to a branch that is not running it — so the
-            // status is part of the key, and a miss fails the whole move.
+            // `sessions.branch_id` and has to arrive with its note.
             if let Some(session_id) = session_id.as_deref() {
-                let changed = tx.execute(
-                    "UPDATE sessions SET branch_id = ?1
-                     WHERE id = ?2 AND status NOT IN ('queued', 'running')",
-                    params![child.target_branch_id, session_id],
-                )?;
-                if changed != 1 {
-                    return Err(StoreError(format!(
-                        "The session of '{child_title}' started again during the transfer; wait for it to finish before moving the note."
-                    )));
-                }
+                move_settled_session(&tx, session_id, &child.target_branch_id, &child_title)?;
             }
             for branch_id in [&child.expected_branch_id, &child.target_branch_id] {
                 if !touched_branches.contains(branch_id) {
@@ -466,6 +450,40 @@ fn media_changed_during_transfer(title: &str) -> StoreError {
 
 /// The note was not where the caller last saw it, so the destination it
 /// resolved no longer applies.
+/// Re-home a note's session with the note. The caller checked the session
+/// was settled before planning, but a resume can land between that read and
+/// this write, and a live drain must not have its session handed to a branch
+/// that is not running it — so the status is part of the key, and a live
+/// session fails the whole move. A session row that no longer exists is not
+/// a live one: the planner reads a missing session as settled, and so does
+/// this, or a retry could never clear the error.
+fn move_settled_session(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    target_branch_id: &str,
+    note_title: &str,
+) -> Result<(), StoreError> {
+    let changed = tx.execute(
+        "UPDATE sessions SET branch_id = ?1
+         WHERE id = ?2 AND status NOT IN ('queued', 'running')",
+        params![target_branch_id, session_id],
+    )?;
+    if changed == 1 {
+        return Ok(());
+    }
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
+        params![session_id],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    Err(StoreError(format!(
+        "The session of '{note_title}' started again during the transfer; wait for it to finish before moving the note."
+    )))
+}
+
 fn relocated_during_transfer(title: &str) -> StoreError {
     StoreError(format!(
         "Note '{title}' was moved or deleted during the transfer."
@@ -629,6 +647,9 @@ mod tests {
         let session = crate::store::Session::new_running("write", std::path::Path::new("/tmp"))
             .with_branch(&f.source_branch.id);
         f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
         let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
         f.store.create_note(&note).unwrap();
 
@@ -647,6 +668,79 @@ mod tests {
             f.store.get_branch_id_for_session(&session.id).unwrap(),
             Some(f.target_branch.id.clone())
         );
+    }
+
+    /// The planner's status check and this write are separate reads: a session
+    /// that went live again in between fails the move inside the transaction.
+    #[test]
+    fn move_is_refused_when_the_notes_session_resumed_after_planning() {
+        let f = fixture();
+        let session = crate::store::Session::new_running("write", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session(&session.id);
+        f.store.create_note(&note).unwrap();
+        let image = Image::new(
+            Some(&f.target_branch.id),
+            &f.target.id,
+            "shot.png",
+            "image/png",
+            3,
+            false,
+        );
+
+        for status in [SessionStatus::Queued, SessionStatus::Running] {
+            f.store
+                .update_session_status(&session.id, status, None, None)
+                .unwrap();
+
+            let err = f
+                .store
+                .move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &f.target_branch.id,
+                    "new body",
+                    std::slice::from_ref(&image),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "The session of 'Findings' started again during the transfer; wait for it to finish before moving the note."
+            );
+            let stored = f.store.get_note(&note.id).unwrap().unwrap();
+            assert_eq!(stored.branch_id, f.source_branch.id);
+            assert_eq!(stored.content, "body");
+            assert_eq!(
+                f.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+        }
+    }
+
+    /// A note whose session row is gone has nothing live to protect; the
+    /// move goes ahead rather than failing on a session no retry can settle.
+    #[test]
+    fn move_proceeds_when_the_notes_session_row_is_gone() {
+        let f = fixture();
+        let note = Note::new(&f.source_branch.id, "Findings", "body").with_session("ghost");
+        f.store.create_note(&note).unwrap();
+
+        let moved = f
+            .store
+            .move_note_to_branch(
+                &note.id,
+                &f.source_branch.id,
+                &f.target_branch.id,
+                "body",
+                &[],
+            )
+            .unwrap();
+
+        assert_eq!(moved.branch_id, f.target_branch.id);
+        assert_eq!(moved.session_id.as_deref(), Some("ghost"));
     }
 
     #[test]
@@ -857,6 +951,36 @@ mod tests {
             );
             assert!(f.store.get_image(&image.id).unwrap().is_none());
         }
+    }
+
+    /// A child whose session row is gone moves like one whose session is
+    /// settled.
+    #[test]
+    fn project_note_move_proceeds_when_a_child_session_row_is_gone() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id)
+            .with_session("ghost");
+        f.store.create_note(&child).unwrap();
+
+        let moved = f
+            .store
+            .move_project_note_to_project(
+                &note.id,
+                &f.source.id,
+                &f.target.id,
+                "body",
+                &[],
+                &[child_move(&child, &f.target_branch.id)],
+            )
+            .unwrap();
+
+        assert_eq!(moved.project_id, f.target.id);
+        let child = f.store.get_note(&child.id).unwrap().unwrap();
+        assert_eq!(child.branch_id, f.target_branch.id);
+        assert_eq!(child.session_id.as_deref(), Some("ghost"));
     }
 
     /// The mirror image: a child that is no longer where the plan saw it

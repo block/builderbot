@@ -1970,7 +1970,7 @@ pub fn start_session(
             }
             Err(ref e) => {
                 log::error!("Session {session_id_for_status} failed: {e}");
-                ("error", Some(e.clone()), CompletionReason::Crashed)
+                ("error", Some(e.clone()), failed_run_completion_reason(e))
             }
         };
 
@@ -4209,6 +4209,16 @@ fn queued_follow_up_should_start(completed_successfully: bool, cancel_requested:
     completed_successfully && !cancel_requested
 }
 
+/// Why a session whose run failed ended: its remote agent was lost under it,
+/// or the agent failed it.
+fn failed_run_completion_reason(error: &str) -> CompletionReason {
+    if acp_client::is_remote_agent_lost_error(error) {
+        CompletionReason::RemoteAgentLost
+    } else {
+        CompletionReason::Crashed
+    }
+}
+
 /// Whether a terminal state is "the agent did the work" — the gate for
 /// post-completion hooks, auto-review, and (with
 /// [`queued_follow_up_should_start`] on top) draining a queued follow-up.
@@ -4840,6 +4850,7 @@ mod tests {
             CompletionReason::Interrupted,
             CompletionReason::ProjectSessionInterrupted,
             CompletionReason::Crashed,
+            CompletionReason::RemoteAgentLost,
             CompletionReason::AppQuit,
             CompletionReason::Unknown,
         ] {
@@ -4852,6 +4863,21 @@ mod tests {
             "cancelled",
             &CompletionReason::HeldUntilCap
         ));
+    }
+
+    #[test]
+    fn a_run_that_lost_its_remote_agent_fails_as_remote_agent_lost() {
+        assert_eq!(
+            failed_run_completion_reason(
+                "Remote agent lost: bloxlet reports the agent process (command 27101663) \
+                 as failed: bloxlet restarted while command was running"
+            ),
+            CompletionReason::RemoteAgentLost
+        );
+        assert_eq!(
+            failed_run_completion_reason("ACP protocol failed: server shut down unexpectedly"),
+            CompletionReason::Crashed
+        );
     }
 
     #[test]

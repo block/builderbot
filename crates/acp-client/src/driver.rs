@@ -49,6 +49,7 @@ use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
 
+mod remote_liveness;
 mod remote_process;
 mod remote_routing;
 mod response_completion;
@@ -2343,7 +2344,7 @@ impl AcpDriver {
             let permission_handler = Arc::clone(&handler);
             let notification_handler = Arc::clone(&handler);
             let ext_notification_handler = Arc::clone(&handler);
-            let protocol_result = Client
+            let protocol_result: Result<_, String> = Client
                 .builder()
                 .name("staged-acp-client")
                 .on_receive_request(
@@ -2440,6 +2441,18 @@ impl AcpDriver {
                 })
                 .await
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
+            // A remote agent lost under the session ends its connection with
+            // whatever error the cut-off stream produced; report the loss.
+            let protocol_result = match (protocol_result, agent_process.lost_cause()) {
+                (Err(error), Some(cause)) if !cancel_token.is_cancelled() => {
+                    log::warn!(
+                        "Session {our_session_id}: remote agent lost ({cause}); \
+                         its connection ended with: {error}"
+                    );
+                    Err(format!("{REMOTE_AGENT_LOST_PREFIX}{cause}"))
+                }
+                (result, _) => result,
+            };
 
             // Nothing serves the turn-control channel past this point: fail
             // new requests fast at the handle and answer any already queued.
@@ -2547,6 +2560,14 @@ enum AgentProcess {
 }
 
 impl AgentProcess {
+    /// Why the remote agent was lost under this session, if it was.
+    fn lost_cause(&self) -> Option<String> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(lease) => lease.lost_cause(),
+        }
+    }
+
     /// Stop a local agent; detach from a remote one, which stops only once no
     /// other session is attached.
     async fn release(self) {
@@ -6447,6 +6468,17 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
                 || error.contains(CONFIG_SELECTION_STALE_NOT_SELECT)))
 }
 
+/// Starts the error a session ends with when its remote agent process was
+/// lost under it — its output ended, or bloxlet reports it stopped — followed
+/// by the cause.
+const REMOTE_AGENT_LOST_PREFIX: &str = "Remote agent lost: ";
+
+/// Whether a session error means its remote agent process was lost under it,
+/// rather than the agent failing the session.
+pub fn is_remote_agent_lost_error(error: &str) -> bool {
+    error.contains(REMOTE_AGENT_LOST_PREFIX)
+}
+
 // Fragment shared by `setup_acp_session`'s required-transport check and
 // [`is_missing_mcp_transport_error`] — the same producer/matcher contract as
 // the config-selection constants above.
@@ -7458,6 +7490,7 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     mod real_bridge;
+    mod remote_liveness;
     #[cfg(unix)]
     mod remote_process;
     mod remote_routing;

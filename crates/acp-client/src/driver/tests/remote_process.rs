@@ -1,7 +1,7 @@
 //! Sessions sharing one remote agent process through one `sq` proxy.
 
 use super::*;
-use crate::driver::SessionConnection;
+use crate::driver::{is_remote_agent_lost_error, SessionConnection};
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 use std::os::unix::fs::PermissionsExt;
@@ -10,13 +10,29 @@ use tokio::time::timeout;
 
 const WAIT: Duration = Duration::from_secs(30);
 
-/// Stands in for `sq blox acp`: a fake ACP agent. Each launch records its
-/// pid, every frame it reads, and the SIGINT that stops it. It answers setup
-/// and prompts at once, except a prompt saying "hold me", which it answers
-/// only once cancelled.
+/// Stands in for `sq`. As `sq blox acp` it is a fake ACP agent: each launch
+/// records its pid, every frame it reads, and the SIGINT that stops it, and
+/// logs its bloxlet command id (`cmd-<pid>`) the way `sq` does. It answers
+/// setup and prompts at once, except prompts saying
+/// - "hold me": answered only once cancelled;
+/// - "stall": starts a tool call and goes quiet;
+/// - "disconnect": logs a stream disconnect and goes quiet;
+/// - "exit": ends its output.
+///
+/// As `sq blox ws commands` it prints `active.json` or `history.json` and
+/// records the call in `checks`.
 const FAKE_SQ: &str = r#"#!/bin/sh
 dir='@DIR@'
+if [ "$2" = ws ]; then
+  echo "$*" >> "$dir/checks"
+  case "$*" in
+    *--status=active*) cat "$dir/active.json" 2>/dev/null || echo '[]' ;;
+    *) cat "$dir/history.json" 2>/dev/null || echo '[]' ;;
+  esac
+  exit 0
+fi
 echo $$ >> "$dir/launches"
+printf '  0.42s \033[92mINF\033[0m Started new ACP process \033[2mprocess_id=\033[0mcmd-%s\n' $$ >&2
 trap 'echo interrupted >> "$dir/signals"; exit 0' INT
 n=0
 held=
@@ -28,6 +44,14 @@ while IFS= read -r line; do
     *'"method":"initialize"'*) result='{"protocolVersion":1}' ;;
     *'"method":"session/new"'*) n=$((n+1)); result="{\"sessionId\":\"sess-$$-$n\"}" ;;
     *'"method":"session/prompt"'*'hold me'*) held=$id; continue ;;
+    *'"method":"session/prompt"'*'stall'*)
+      sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+      printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Run the tests","status":"in_progress"}}}\n' "$sid"
+      continue ;;
+    *'"method":"session/prompt"'*'disconnect'*)
+      echo '  9.10s WRN Stream disconnected, retrying error="stream error: unavailable"' >&2
+      continue ;;
+    *'"method":"session/prompt"'*'exit'*) exit 0 ;;
     *'"method":"session/prompt"'*) result='{"stopReason":"end_turn"}' ;;
     *'"method":"session/cancel"'*)
       if [ -n "$held" ]; then
@@ -67,12 +91,21 @@ impl FakeSq {
         Self { dir }
     }
 
-    /// A remote driver whose `sq` is the fake, as `AcpDriver::for_workspace`
-    /// builds it.
+    /// A remote driver whose `sq` is the fake.
     fn driver(&self) -> AcpDriver {
+        self.driver_with_args(vec![])
+    }
+
+    /// A remote driver for workspace `test-ws`, as `AcpDriver::for_workspace`
+    /// builds it, so its proxy can ask bloxlet about its agent.
+    fn workspace_driver(&self) -> AcpDriver {
+        self.driver_with_args(blox_cli::acp_proxy_args("test-ws", None))
+    }
+
+    fn driver_with_args(&self, acp_args: Vec<String>) -> AcpDriver {
         AcpDriver {
             binary_path: self.dir.join("sq"),
-            acp_args: vec![],
+            acp_args,
             agent_label: String::from("Blox"),
             is_remote: true,
             extra_env: vec![],
@@ -96,6 +129,27 @@ impl FakeSq {
             .lines()
             .map(|pid| pid.parse().unwrap())
             .collect()
+    }
+
+    /// Answer `sq blox ws commands` with these active commands and full
+    /// history.
+    fn set_commands(&self, active: &str, history: &str) {
+        std::fs::write(self.dir.join("active.json"), active).unwrap();
+        std::fs::write(self.dir.join("history.json"), history).unwrap();
+    }
+
+    /// The bloxlet command id the (only) launch announced.
+    async fn command_id(&self) -> String {
+        wait_until("the agent launches", || !self.launches().is_empty()).await;
+        format!("cmd-{}", self.launches()[0])
+    }
+
+    /// How many times bloxlet was asked about the agent.
+    fn checks(&self) -> usize {
+        self.read("checks")
+            .lines()
+            .filter(|line| line.contains("--status=active"))
+            .count()
     }
 
     fn interrupted(&self) -> bool {
@@ -256,6 +310,134 @@ async fn cancelling_a_session_on_a_shared_remote_agent_cancels_only_that_session
             assert_ne!(second.agent_session_id(), first.agent_session_id());
             assert_eq!(sq.launches().len(), 1);
             assert!(sq.interrupted());
+        })
+        .await;
+}
+
+/// The agent lost under two sessions mid-turn ends both with the same
+/// remote-agent-lost error, naming why.
+async fn assert_both_lost(
+    first: tokio::task::JoinHandle<(Session, Result<AgentRunOutcome, String>)>,
+    second: tokio::task::JoinHandle<(Session, Result<AgentRunOutcome, String>)>,
+    cause: &[&str],
+) {
+    let (_, first) = first.await.unwrap();
+    let (_, second) = second.await.unwrap();
+    let error = first.expect_err("the first session's agent was lost");
+    assert!(is_remote_agent_lost_error(&error), "{error}");
+    assert!(
+        cause.iter().any(|cause| error.contains(cause)),
+        "the error should name the cause: {error}"
+    );
+    assert_eq!(second, Err(error), "both sessions lost the same agent");
+}
+
+fn prompt_in_background(
+    mut session: Session,
+    text: &'static str,
+) -> tokio::task::JoinHandle<(Session, Result<AgentRunOutcome, String>)> {
+    tokio::task::spawn_local(async move {
+        let outcome = session.prompt(text).await;
+        (session, outcome)
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_fail_as_remote_agent_lost_when_the_agent_output_ends() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("eof");
+            let driver = sq.driver();
+            let first = Session::connect(&driver, &sq, "first").await;
+            let second = Session::connect(&driver, &sq, "second").await;
+
+            let first = prompt_in_background(first, "hold me");
+            wait_until("the agent holds the first prompt", || {
+                !sq.received("session/prompt").is_empty()
+            })
+            .await;
+            let second = prompt_in_background(second, "exit");
+
+            assert_both_lost(
+                first,
+                second,
+                &["output stream ended", "`sq blox acp` proxy exited"],
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_fail_as_remote_agent_lost_once_bloxlet_reports_a_quiet_tool_calls_agent_failed() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("stalled");
+            let driver = sq.workspace_driver();
+            let first = Session::connect(&driver, &sq, "first").await;
+            let second = Session::connect(&driver, &sq, "second").await;
+            let command = sq.command_id().await;
+            sq.set_commands(
+                &format!(r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_RUNNING"}}]"#),
+                "[]",
+            );
+
+            let first = prompt_in_background(first, "stall");
+            let second = prompt_in_background(second, "hold me");
+            wait_until("bloxlet is asked about the quiet tool call", || {
+                sq.checks() > 0
+            })
+            .await;
+            assert!(
+                !first.is_finished() && !second.is_finished(),
+                "an agent bloxlet still runs is left alone"
+            );
+
+            // bloxlet restarts under the agent, which the stream never shows.
+            sq.set_commands(
+                "[]",
+                &format!(
+                    r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_FAILED","message":"bloxlet restarted while command was running"}}]"#
+                ),
+            );
+            assert_both_lost(
+                first,
+                second,
+                &[&format!(
+                    "bloxlet reports the agent process (command {command}) as failed: \
+                     bloxlet restarted while command was running"
+                )],
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_fail_as_remote_agent_lost_when_a_reconnect_finds_the_agent_gone() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reconnect");
+            let driver = sq.workspace_driver();
+            let first = Session::connect(&driver, &sq, "first").await;
+            let second = Session::connect(&driver, &sq, "second").await;
+            let command = sq.command_id().await;
+
+            let first = prompt_in_background(first, "hold me");
+            wait_until("the agent holds the first prompt", || {
+                !sq.received("session/prompt").is_empty()
+            })
+            .await;
+            let second = prompt_in_background(second, "disconnect");
+
+            assert_both_lost(
+                first,
+                second,
+                &[&format!(
+                    "bloxlet no longer lists the agent process (command {command}) as running"
+                )],
+            )
+            .await;
         })
         .await;
 }

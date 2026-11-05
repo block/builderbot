@@ -448,6 +448,11 @@ export type CompletionReason =
   | 'interrupted'
   | 'project_session_interrupted'
   | 'crashed'
+  /**
+   * The session's remote (Blox) agent process was lost under it — its output
+   * ended, or bloxlet reports it stopped. The error message names the cause.
+   */
+  | 'remote_agent_lost'
   | 'app_quit'
   | 'unknown';
 
@@ -459,6 +464,7 @@ export type CompletionReason =
  */
 export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
   'crashed',
+  'remote_agent_lost',
   'app_quit',
   'interrupted',
   'project_session_interrupted',

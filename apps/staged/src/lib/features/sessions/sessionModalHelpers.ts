@@ -68,6 +68,9 @@ export interface ToolDisplay {
 
 export function sessionEndMessage(current: Pick<Session, 'completionReason'>): string {
   if (current.completionReason === 'crashed') return 'This session ended unexpectedly.';
+  if (current.completionReason === 'remote_agent_lost') {
+    return 'This session’s agent stopped running on its workspace.';
+  }
   if (current.completionReason === 'app_quit') {
     return 'This session was interrupted when Staged closed.';
   }

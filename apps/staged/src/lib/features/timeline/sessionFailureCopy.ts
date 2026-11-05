@@ -14,6 +14,8 @@ export function failedArtifactSubtitle(
   switch (completionReason) {
     case 'crashed':
       return `Session crashed — no ${noun} created`;
+    case 'remote_agent_lost':
+      return `Workspace agent lost — no ${noun} created`;
     case 'app_quit':
       return `Session interrupted — no ${noun} created`;
     case 'project_session_interrupted':

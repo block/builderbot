@@ -16,17 +16,24 @@
 //! not start, so when the proxy attached to one an earlier app instance left
 //! running, interrupting it leaves that process up for the next session to
 //! reuse.
+//!
+//! The proxy also fails every attached session when its agent is lost: when
+//! its output ends while sessions are attached, or when bloxlet reports the
+//! agent process stopped (see [`super::remote_liveness`]). Each session then
+//! ends with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the cause.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, Command};
 use tokio_util::sync::CancellationToken;
 
+use super::remote_liveness::{self, Liveness};
 use super::remote_routing::{RemoteTransport, RoutedClientStreams};
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -60,11 +67,22 @@ fn registry() -> MutexGuard<'static, HashMap<ProxyKey, Entry>> {
 
 /// Whether `sq` started the agent process or attached to a running one, as
 /// its log reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Attachment {
+    #[default]
     Unknown,
     Started,
     Reused,
+}
+
+/// What the proxy's log has said about its agent process.
+#[derive(Default)]
+struct ProxyReport {
+    attachment: Attachment,
+    /// bloxlet's id for the agent process's command.
+    command_id: Option<String>,
+    /// When the proxy last lost its output stream and began retrying.
+    last_disconnect: Option<Instant>,
 }
 
 /// One running `sq` proxy and its routed stdio. The child itself is owned by
@@ -74,7 +92,7 @@ struct SharedProcess {
     label: String,
     pid: Option<u32>,
     transport: RemoteTransport,
-    attachment: Mutex<Attachment>,
+    report: Mutex<ProxyReport>,
     /// Cancelled to interrupt the proxy.
     stop: CancellationToken,
     /// Cancelled once the proxy is observed to be gone.
@@ -137,6 +155,11 @@ impl RemoteProcessLease {
         &self.process.exited
     }
 
+    /// Why the agent was lost under the attached sessions, if it was.
+    pub(super) fn lost_cause(&self) -> Option<String> {
+        self.process.transport.lost_cause()
+    }
+
     /// Detach this session. When it was the last one attached, wait for the
     /// proxy to stop, like stopping a session's own agent process would.
     pub(super) async fn release(mut self) {
@@ -183,7 +206,7 @@ impl RemoteProcessLease {
             );
             return None;
         }
-        if *process.attachment.lock().unwrap() == Attachment::Reused {
+        if process.report.lock().unwrap().attachment == Attachment::Reused {
             log::info!(
                 "{}: the last session detached; stopping it. It attached to an agent process \
                  that was already running on the workstation, which `sq` leaves running",
@@ -221,6 +244,10 @@ pub(super) async fn attach(
         let stopping = {
             let mut registry = registry();
             match registry.get_mut(&key) {
+                // Lost its agent and about to stop: start another once it has.
+                Some(Entry::Live { process, .. }) if process.transport.closed().is_cancelled() => {
+                    process.stopped.clone()
+                }
                 Some(Entry::Live { process, leases }) => {
                     *leases += 1;
                     log::info!(
@@ -315,7 +342,7 @@ async fn run_proxy(
         label,
         pid: child.id(),
         transport: RemoteTransport::spawn(stdin, stdout),
-        attachment: Mutex::new(Attachment::Unknown),
+        report: Mutex::new(ProxyReport::default()),
         stop: CancellationToken::new(),
         exited: CancellationToken::new(),
         stopped: CancellationToken::new(),
@@ -325,17 +352,31 @@ async fn run_proxy(
         // Nobody holds a lease, so nobody would ever stop it.
         process.stop.cancel();
     }
+    let watch = remote_liveness::Target::of(&key.program, &key.args)
+        .map(|target| tokio::spawn(watch_liveness(Arc::clone(&process), target)));
 
     tokio::select! {
         _ = process.stop.cancelled() => {}
         _ = process.exited.cancelled() => {}
         _ = process.transport.closed().cancelled() => {}
     }
+    if let Some(watch) = watch {
+        watch.abort();
+    }
     let attached = process.retire(&key);
+    if process.stop.is_cancelled() {
+        // Stopping on purpose: its output ending is no loss to report.
+        process.transport.close();
+    } else {
+        process
+            .transport
+            .lose("the `sq blox acp` proxy exited".to_string());
+    }
     if attached > 0 {
         log::warn!(
-            "{}: exited with {attached} session(s) still attached",
-            process.describe()
+            "{}: lost its agent with {attached} session(s) attached: {}",
+            process.describe(),
+            process.transport.lost_cause().unwrap_or_default()
         );
     }
     super::graceful_stop(&mut child, true).await;
@@ -345,17 +386,81 @@ async fn run_proxy(
     process.stopped.cancel();
 }
 
+/// While sessions are attached, ask bloxlet whether the agent process still
+/// runs whenever its stream recently disconnected or a session's tool call
+/// has gone quiet, and fail the sessions once it does not.
+async fn watch_liveness(process: Arc<SharedProcess>, target: remote_liveness::Target) {
+    let mut last_check: Option<Instant> = None;
+    let mut reported_no_command_id = false;
+    let mut tick = tokio::time::interval(remote_liveness::WATCH_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let since_check = last_check.map(|at| at.elapsed());
+        let last_disconnect = process.report.lock().unwrap().last_disconnect;
+        let reason = if last_disconnect
+            .is_some_and(|at| at.elapsed() < remote_liveness::DISCONNECT_WATCH)
+            && since_check
+                .is_none_or(|elapsed| elapsed >= remote_liveness::CHECK_AFTER_DISCONNECT_EVERY)
+        {
+            "its output stream disconnected"
+        } else if since_check
+            .is_none_or(|elapsed| elapsed >= remote_liveness::STALLED_TOOL_CALL_AFTER)
+            && process
+                .transport
+                .has_stalled_tool_call(remote_liveness::STALLED_TOOL_CALL_AFTER)
+        {
+            "a session's tool call has gone quiet"
+        } else {
+            continue;
+        };
+        let Some(command_id) = process.report.lock().unwrap().command_id.clone() else {
+            if !std::mem::replace(&mut reported_no_command_id, true) {
+                log::warn!(
+                    "{}: {reason}, but `sq` never named the agent's command, so bloxlet \
+                     cannot be asked about it",
+                    process.describe()
+                );
+            }
+            continue;
+        };
+        last_check = Some(Instant::now());
+        log::info!(
+            "{}: {reason}; asking bloxlet whether command {command_id} still runs",
+            process.describe()
+        );
+        match remote_liveness::check(&target, &command_id).await {
+            Ok(Liveness::Running) => {
+                log::info!("{}: command {command_id} still runs", process.describe());
+            }
+            Ok(Liveness::Gone(cause)) => {
+                log::warn!("{}: {cause}", process.describe());
+                process.transport.lose(cause);
+                return;
+            }
+            Err(error) => {
+                log::warn!(
+                    "{}: could not check command {command_id}: {error}",
+                    process.describe()
+                );
+            }
+        }
+    }
+}
+
 /// Log the proxy's stderr (spawn and auth failures surface only here) and
-/// note whether it started or reused the agent process.
+/// note what it says about the agent process.
 async fn drain_stderr(stderr: ChildStderr, process: Arc<SharedProcess>) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(attachment) = attachment_reported_by(&line) {
-            *process.attachment.lock().unwrap() = attachment;
-        }
+        process
+            .report
+            .lock()
+            .unwrap()
+            .note(&blox_cli::strip_ansi_escape_sequences(&line));
         match process.pid {
             Some(pid) => log::warn!("[{} stderr][proxy pid {pid}] {line}", process.label),
             None => log::warn!("[{} stderr] {line}", process.label),
@@ -364,6 +469,36 @@ async fn drain_stderr(stderr: ChildStderr, process: Arc<SharedProcess>) {
     // stderr EOF (or a read error) means the proxy has exited or torn down
     // its stderr; either way its agent can no longer be trusted to report.
     process.exited.cancel();
+}
+
+impl ProxyReport {
+    fn note(&mut self, line: &str) {
+        if let Some(attachment) = attachment_reported_by(line) {
+            self.attachment = attachment;
+            if let Some(command_id) =
+                logged_value(line, "process_id").or_else(|| logged_value(line, "command_id"))
+            {
+                self.command_id = Some(command_id.to_string());
+            }
+        }
+        if line.contains("Stream disconnected, retrying")
+            || line.contains("failed to start receive stream, retrying")
+        {
+            self.last_disconnect = Some(Instant::now());
+        }
+    }
+}
+
+/// The value of `key=value` in a log line.
+fn logged_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let start = line
+        .match_indices(&format!("{key}="))
+        .find(|(at, _)| *at == 0 || line.as_bytes()[at - 1].is_ascii_whitespace())?
+        .0
+        + key.len()
+        + 1;
+    let value = line[start..].split_whitespace().next()?.trim_matches('"');
+    (!value.is_empty()).then_some(value)
 }
 
 fn attachment_reported_by(line: &str) -> Option<Attachment> {

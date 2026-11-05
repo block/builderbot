@@ -240,6 +240,50 @@ fn resumed_session_is_owned_from_its_load_request() {
     );
 }
 
+fn tool_call(session: &str, kind: &str, status: &str) -> String {
+    json!({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "sessionId": session,
+        "update": {"sessionUpdate": kind, "toolCallId": "tool-1", "title": "Run the tests",
+                   "status": status}}})
+    .to_string()
+}
+
+#[test]
+fn a_session_stalls_only_while_a_quiet_tool_call_is_running() {
+    let router = RemoteSessionRouter::new();
+    let (client, _rx) = attach(&router);
+    router.outgoing(client, &prompt(1, "sess-a"));
+    let quiet = Duration::from_millis(50);
+
+    router.incoming(&chunk("sess-a", "thinking"));
+    std::thread::sleep(quiet);
+    assert!(
+        !router.has_stalled_tool_call(quiet),
+        "a quiet session with no tool call running has not stalled"
+    );
+
+    router.incoming(&tool_call("sess-a", "tool_call", "pending"));
+    router.incoming(&tool_call("sess-a", "tool_call_update", "in_progress"));
+    assert!(
+        !router.has_stalled_tool_call(quiet),
+        "a tool call that just started has not stalled"
+    );
+    std::thread::sleep(quiet);
+    assert!(router.has_stalled_tool_call(quiet));
+
+    router.incoming(&tool_call("sess-a", "tool_call_update", "completed"));
+    std::thread::sleep(quiet);
+    assert!(!router.has_stalled_tool_call(quiet));
+
+    router.incoming(&tool_call("sess-a", "tool_call_update", "in_progress"));
+    router.detach(client);
+    std::thread::sleep(quiet);
+    assert!(
+        !router.has_stalled_tool_call(quiet),
+        "a detached session's tool calls are not watched"
+    );
+}
+
 #[test]
 fn request_cancellation_names_the_namespaced_id() {
     let router = RemoteSessionRouter::new();

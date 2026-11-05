@@ -13,10 +13,16 @@
 //! allocate ids; agent-initiated frames go to the client that owns the ACP
 //! `sessionId` they name; a frame nobody owns is logged and dropped rather
 //! than written into some other session's transcript.
+//!
+//! It also notes when each session last heard from the agent and which of
+//! its tool calls are running, so a session stuck mid-tool-call on an agent
+//! that died without closing the stream can be noticed (see
+//! [`RemoteSessionRouter::has_stalled_tool_call`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
@@ -57,8 +63,19 @@ struct RouterState {
     early_frames: VecDeque<EarlyFrame>,
     /// Unowned session ids already reported, so each is logged once.
     reported_unowned: HashSet<String>,
+    /// What each session's agent last did.
+    activity: HashMap<String, SessionActivity>,
     /// The agent's output has ended; nothing more will be routed.
     closed: bool,
+    /// Why the agent was lost, when its output ended other than by
+    /// [`RemoteSessionRouter::close`].
+    lost: Option<String>,
+}
+
+struct SessionActivity {
+    last_frame_at: Instant,
+    /// Tool calls the agent reported `in_progress` and has not finished.
+    running_tool_calls: HashSet<String>,
 }
 
 struct PendingRequest {
@@ -98,8 +115,15 @@ impl RemoteSessionRouter {
     /// Forget a client along with its sessions and in-flight requests.
     pub(super) fn detach(&self, client: RemoteClientId) {
         let mut state = self.state();
+        let state = &mut *state;
         state.clients.remove(&client);
-        state.owners.retain(|_, owner| *owner != client);
+        state.owners.retain(|session_id, owner| {
+            let keep = *owner != client;
+            if !keep {
+                state.activity.remove(session_id);
+            }
+            keep
+        });
         state.pending.retain(|_, pending| pending.client != client);
         if !state.session_new_pending() {
             state.drop_early_frames();
@@ -111,6 +135,36 @@ impl RemoteSessionRouter {
         let mut state = self.state();
         state.closed = true;
         state.clients.clear();
+    }
+
+    /// Close because the agent was lost, recording why unless the router was
+    /// already closed.
+    pub(super) fn lose(&self, cause: String) {
+        let mut state = self.state();
+        if state.closed {
+            return;
+        }
+        state.lost = Some(cause);
+        state.closed = true;
+        state.clients.clear();
+    }
+
+    /// Why the agent was lost, if it was.
+    pub(super) fn lost_cause(&self) -> Option<String> {
+        self.state().lost.clone()
+    }
+
+    /// Whether an attached session has a tool call running and has heard
+    /// nothing from the agent for `quiet_for`. That is how a session on an
+    /// agent that died mid-tool-call looks while the stream stays open.
+    pub(super) fn has_stalled_tool_call(&self, quiet_for: Duration) -> bool {
+        let state = self.state();
+        state.owners.keys().any(|session_id| {
+            state.activity.get(session_id).is_some_and(|activity| {
+                !activity.running_tool_calls.is_empty()
+                    && activity.last_frame_at.elapsed() >= quiet_for
+            })
+        })
     }
 
     /// Prepare one frame `client` is sending to the agent, returning the line
@@ -176,7 +230,10 @@ impl RemoteSessionRouter {
         };
         let is_request = frame.get("id").is_some_and(|id| !id.is_null());
         match session_id_in(&frame, "params") {
-            Some(session_id) => state.route_session_frame(session_id, line),
+            Some(session_id) => {
+                state.note_activity(session_id, &frame);
+                state.route_session_frame(session_id, line);
+            }
             None if is_request => state.route_sessionless_request(method, line),
             None => {
                 let clients: Vec<_> = state.clients.keys().copied().collect();
@@ -196,6 +253,31 @@ impl RouterState {
                     "Remote ACP session {session_id} moved from client {previous} to client {client}"
                 );
             }
+        }
+    }
+
+    fn note_activity(&mut self, session_id: &str, frame: &Map<String, Value>) {
+        let activity = self
+            .activity
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionActivity {
+                last_frame_at: Instant::now(),
+                running_tool_calls: HashSet::new(),
+            });
+        activity.last_frame_at = Instant::now();
+        let Some(update) = frame.get("params").and_then(|params| params.get("update")) else {
+            return;
+        };
+        let (Some(tool_call_id), Some(status)) = (
+            update.get("toolCallId").and_then(Value::as_str),
+            update.get("status").and_then(Value::as_str),
+        ) else {
+            return;
+        };
+        if status == "in_progress" {
+            activity.running_tool_calls.insert(tool_call_id.to_string());
+        } else {
+            activity.running_tool_calls.remove(tool_call_id);
         }
     }
 
@@ -325,8 +407,8 @@ fn wire_request_id(client: RemoteClientId, original_id: &Value) -> String {
 pub(super) struct RemoteTransport {
     router: Arc<RemoteSessionRouter>,
     to_agent: mpsc::UnboundedSender<String>,
-    /// Cancelled once the agent's stdout has ended and every client has been
-    /// told so.
+    /// Cancelled once the transport has closed: every client has been told
+    /// the agent's output ended.
     closed: CancellationToken,
 }
 
@@ -362,7 +444,7 @@ impl RemoteTransport {
         }
     }
 
-    /// Cancelled once the agent's stdout has ended.
+    /// Cancelled once the transport has closed.
     pub(super) fn closed(&self) -> &CancellationToken {
         &self.closed
     }
@@ -370,6 +452,23 @@ impl RemoteTransport {
     /// End every attached client's stream.
     pub(super) fn close(&self) {
         self.router.close();
+        self.closed.cancel();
+    }
+
+    /// End every attached client's stream because the agent was lost.
+    pub(super) fn lose(&self, cause: String) {
+        self.router.lose(cause);
+        self.closed.cancel();
+    }
+
+    /// Why the agent was lost, if it was.
+    pub(super) fn lost_cause(&self) -> Option<String> {
+        self.router.lost_cause()
+    }
+
+    /// See [`RemoteSessionRouter::has_stalled_tool_call`].
+    pub(super) fn has_stalled_tool_call(&self, quiet_for: Duration) -> bool {
+        self.router.has_stalled_tool_call(quiet_for)
     }
 
     /// Attach one ACP connection. It detaches once it stops writing.
@@ -412,12 +511,17 @@ async fn read_agent_stdout<R: AsyncRead + Unpin>(
     router: Arc<RemoteSessionRouter>,
     closed: CancellationToken,
 ) {
-    if let Err(error) =
-        super::normalize_remote_acp_stdout(stdout, |line| router.incoming(&line)).await
-    {
-        log::error!("remote ACP stdout normalization failed: {error}");
-    }
-    router.close();
+    let cause =
+        match super::normalize_remote_acp_stdout(stdout, |line| router.incoming(&line)).await {
+            Ok(()) => "the remote agent's output stream ended".to_string(),
+            Err(error) => {
+                log::error!("remote ACP stdout normalization failed: {error}");
+                format!("reading the remote agent's output failed: {error}")
+            }
+        };
+    // Unless the proxy was being stopped (which closes the router first),
+    // the sessions still attached have lost their agent.
+    router.lose(cause);
     closed.cancel();
 }
 

@@ -227,7 +227,7 @@ pub fn acp_proxy_args(workspace_name: &str, command: Option<&str>) -> Vec<String
 /// Strip ANSI escape sequences (CSI and OSC) from a string so that
 /// downstream string-matching (e.g. `is_auth_error`) is not confused by
 /// terminal colour / style codes that `sq` may emit on stderr.
-fn strip_ansi_escape_sequences(input: &str) -> String {
+pub fn strip_ansi_escape_sequences(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
 

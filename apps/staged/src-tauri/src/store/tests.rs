@@ -1876,6 +1876,7 @@ fn test_completion_reason_round_trips() {
         CompletionReason::Interrupted,
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
+        CompletionReason::RemoteAgentLost,
         CompletionReason::AppQuit,
         CompletionReason::Unknown,
     ] {
@@ -1905,6 +1906,7 @@ fn test_completion_reason_resumability() {
         CompletionReason::Interrupted,
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
+        CompletionReason::RemoteAgentLost,
         CompletionReason::AppQuit,
     ] {
         assert!(reason.is_resumable(), "{reason:?} should be resumable");

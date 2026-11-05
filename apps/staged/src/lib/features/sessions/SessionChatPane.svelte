@@ -3054,7 +3054,9 @@
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
         {@const isWarning =
-          session.completionReason === 'crashed' || session.completionReason === 'app_quit'}
+          session.completionReason === 'crashed' ||
+          session.completionReason === 'remote_agent_lost' ||
+          session.completionReason === 'app_quit'}
         <Alert.Root class="mt-3">
           <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />
           <Alert.Description>

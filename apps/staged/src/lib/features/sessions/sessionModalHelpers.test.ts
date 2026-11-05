@@ -223,4 +223,10 @@ describe('sessionEndMessage', () => {
       'The wait for this session’s background work was stopped.'
     );
   });
+
+  it('explains a lost workspace agent', () => {
+    expect(sessionEndMessage({ completionReason: 'remote_agent_lost' })).toBe(
+      'This session’s agent stopped running on its workspace.'
+    );
+  });
 });

@@ -40,8 +40,8 @@ impl Store {
 
     pub(super) fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
         conn.execute(
-            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 note.id,
                 note.branch_id,
@@ -55,6 +55,7 @@ impl Store {
                 note.suggested_next_note_step,
                 note.parent_project_note_id,
                 note.subtype,
+                note.read_at,
             ],
         )?;
         Ok(())
@@ -97,7 +98,7 @@ impl Store {
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE id = ?1",
             params![id],
             Self::row_to_note,
@@ -113,7 +114,7 @@ impl Store {
     pub fn list_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE branch_id = ?1 AND parent_project_note_id IS NULL
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -127,7 +128,7 @@ impl Store {
     pub fn list_all_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE branch_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -142,7 +143,7 @@ impl Store {
     pub fn list_child_notes(&self, parent_project_note_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE parent_project_note_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -154,7 +155,7 @@ impl Store {
     pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_note,
@@ -167,7 +168,7 @@ impl Store {
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
              FROM notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_note,
@@ -177,6 +178,12 @@ impl Store {
     }
 
     /// Update a note's title, content, and optional suggested next steps.
+    ///
+    /// This is the session runner's write, so a new title or body is the agent
+    /// revising the note: it clears `read_at`, and the note reads as unread
+    /// until the user sees the new content. A change to the suggested next
+    /// steps alone leaves it read. User edits go through
+    /// [`Store::update_written_note`], which leaves it alone.
     pub fn update_note_title_and_content(
         &self,
         id: &str,
@@ -209,7 +216,7 @@ impl Store {
         }
         let now = now_timestamp();
         conn.execute(
-            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6 WHERE id = ?7",
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, read_at = CASE WHEN title = ?1 AND content = ?2 THEN read_at ELSE NULL END WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
         self.publish_with(|| StoreChange::Notes {
@@ -249,7 +256,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let existing = conn
             .query_row(
-                "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
+                "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
                  FROM notes WHERE id = ?1",
                 params![id],
                 Self::row_to_note,
@@ -306,6 +313,63 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a note read or unread, returning the row as it now reads.
+    ///
+    /// A note is unread from the moment its content lands (`completed_at`),
+    /// or an agent revises it, until the user opens it after that. Each write is skipped when it would
+    /// change nothing — reopening a read note, or opening one whose session is
+    /// still writing it, which reads as unread when it lands — so neither
+    /// reloads the note lists.
+    pub fn set_note_read(&self, id: &str, read: bool) -> Result<Note, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = Self::write_read_at(&conn, "notes", id, read)?;
+        let note = conn
+            .query_row(
+                "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype, read_at
+                 FROM notes WHERE id = ?1",
+                params![id],
+                Self::row_to_note,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError(format!("Note not found: {id}")))?;
+        if changed {
+            self.publish(StoreChange::Notes {
+                branch_id: Some(note.branch_id.clone()),
+                project_id: None,
+            });
+        }
+        Ok(note)
+    }
+
+    /// The `read_at` write behind [`Store::set_note_read`] and its project-note
+    /// twin, on `table`. Returns whether the read state changed.
+    ///
+    /// Marking read stamps a time no earlier than `completed_at`, so a clock
+    /// that stepped back since the note landed can't leave it unread.
+    pub(super) fn write_read_at(
+        conn: &rusqlite::Connection,
+        table: &'static str,
+        id: &str,
+        read: bool,
+    ) -> Result<bool, StoreError> {
+        let changed = if read {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET read_at = MAX(?2, completed_at)
+                     WHERE id = ?1 AND completed_at IS NOT NULL
+                       AND (read_at IS NULL OR read_at < completed_at)"
+                ),
+                params![id, now_timestamp()],
+            )?
+        } else {
+            conn.execute(
+                &format!("UPDATE {table} SET read_at = NULL WHERE id = ?1 AND read_at IS NOT NULL"),
+                params![id],
+            )?
+        };
+        Ok(changed > 0)
+    }
+
     pub fn delete_note(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         // Resolved before the row disappears, published only if the delete lands.
@@ -334,6 +398,7 @@ impl Store {
             suggested_next_note_step: row.get(9)?,
             parent_project_note_id: row.get(10)?,
             subtype: row.get(11)?,
+            read_at: row.get(12)?,
         })
     }
 }

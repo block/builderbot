@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { formatNoteTimestamp, isNoteRevised, noteLastWrittenAt } from './noteTimestamps';
+import {
+  formatNoteTimestamp,
+  isNoteRevised,
+  isNoteUnread,
+  noteLastWrittenAt,
+  noteReadState,
+} from './noteTimestamps';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -71,5 +77,32 @@ describe('note timestamps', () => {
     expect(formatNoteTimestamp(note, now)).toBe(
       `Updated ${new Date(updatedAt).toLocaleDateString()}`
     );
+  });
+});
+
+describe('isNoteUnread', () => {
+  const completedAt = now - 5 * MINUTE;
+
+  it('is unread once the content lands, until it is opened', () => {
+    expect(isNoteUnread({ completedAt, readAt: null })).toBe(true);
+    expect(isNoteUnread({ completedAt, readAt: completedAt })).toBe(false);
+    expect(isNoteUnread({ completedAt, readAt: now })).toBe(false);
+  });
+
+  it('counts an open before the content landed as unread', () => {
+    expect(isNoteUnread({ completedAt, readAt: completedAt - MINUTE })).toBe(true);
+  });
+
+  it('is never unread while the note is still being written', () => {
+    expect(isNoteUnread({ completedAt: null, readAt: null })).toBe(false);
+    expect(isNoteUnread({ completedAt: null, readAt: now })).toBe(false);
+  });
+});
+
+describe('noteReadState', () => {
+  it('offers no read state until the note lands', () => {
+    expect(noteReadState({ completedAt: null, readAt: null })).toBeNull();
+    expect(noteReadState({ completedAt: now, readAt: null })).toBe('unread');
+    expect(noteReadState({ completedAt: now, readAt: now })).toBe('read');
   });
 });

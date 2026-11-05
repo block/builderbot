@@ -2623,12 +2623,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
             let subtype: Option<String> = opt_arg(&args, "subtype")?;
-            let mut note = crate::store::models::Note::new_standalone(&branch_id, &title, &content);
-            note.subtype = subtype;
-            store
-                .create_note_with_unique_title(&mut note)
-                .map_err(|e| e.to_string())?;
-            let item = crate::note_commands::standalone_note_to_timeline_item(note);
+            let item = crate::note_commands::create_standalone_note(
+                &store, &branch_id, &title, &content, subtype,
+            )?;
             Ok(serde_json::to_value(item).unwrap())
         }
         "update_note" => {
@@ -2657,6 +2654,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
             let item = note.map(|n| crate::note_commands::note_to_timeline_item(&store, n));
             Ok(serde_json::to_value(item).unwrap())
+        }
+        "set_note_read" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            let read: bool = arg(&args, "read")?;
+            let note = store
+                .set_note_read(&note_id, read)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(note).unwrap())
         }
         "list_child_notes" => {
             let store = get_store(store_mutex)?;
@@ -2717,6 +2723,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let session_id: String = arg(&args, "sessionId")?;
             let note = store
                 .get_note_by_session(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(note).unwrap())
+        }
+        "set_project_note_read" => {
+            let store = get_store(store_mutex)?;
+            let project_note_id: String = arg(&args, "projectNoteId")?;
+            let read: bool = arg(&args, "read")?;
+            let note = store
+                .set_project_note_read(&project_note_id, read)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(note).unwrap())
         }

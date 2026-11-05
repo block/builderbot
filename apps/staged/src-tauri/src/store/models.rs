@@ -970,6 +970,11 @@ pub struct Note {
     /// [`Note::SUBTYPE_WRITTEN`] means the user authored it directly and it can
     /// be edited in place.
     pub subtype: Option<String>,
+    /// When the user last opened the note. Once `completed_at` is set the note
+    /// reads as unread while this is unset or older than it; see
+    /// `Store::set_note_read`. An agent revision clears it, so the user sees
+    /// the new content as unread.
+    pub read_at: Option<i64>,
 }
 
 impl Note {
@@ -993,6 +998,7 @@ impl Note {
             suggested_next_note_step: None,
             parent_project_note_id: None,
             subtype: None,
+            read_at: None,
         }
     }
 
@@ -1028,6 +1034,33 @@ impl Note {
     pub fn is_written(&self) -> bool {
         self.subtype.as_deref() == Some(Self::SUBTYPE_WRITTEN)
     }
+
+    /// Whether the note reads as read; see [`reads_as_read`].
+    pub fn is_read(&self) -> bool {
+        reads_as_read(self.completed_at, self.read_at)
+    }
+
+    /// Start a just-built note read or unread; see [`initial_read_at`].
+    pub fn set_initial_read(&mut self, read: bool) {
+        self.read_at = initial_read_at(self.completed_at, read);
+    }
+}
+
+/// Whether a note or project note reads as read: its content has landed and
+/// the user opened it since. Mirrors the frontend's `isNoteUnread`.
+fn reads_as_read(completed_at: Option<i64>, read_at: Option<i64>) -> bool {
+    matches!((completed_at, read_at), (Some(completed), Some(read)) if read >= completed)
+}
+
+/// The `read_at` a just-built note starts with: read as of when it landed, or
+/// unread. A note the user wrote starts read, and a copy takes its source's
+/// state; everything else is new to the user.
+fn initial_read_at(completed_at: Option<i64>, read: bool) -> Option<i64> {
+    if read {
+        completed_at
+    } else {
+        None
+    }
 }
 
 // =============================================================================
@@ -1056,6 +1089,8 @@ pub struct ProjectNote {
     pub suggested_next_commit_step: Option<String>,
     /// AI-suggested prompt for a follow-up note session.
     pub suggested_next_note_step: Option<String>,
+    /// When the user last opened the note; see [`Note::read_at`].
+    pub read_at: Option<i64>,
     /// Resolved session status (e.g. "running", "completed", "cancelled").
     /// Populated at query time via `resolve_session_status()`.
     #[serde(skip_deserializing)]
@@ -1087,6 +1122,7 @@ impl ProjectNote {
             completed_at: if has_content { Some(now) } else { None },
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
+            read_at: None,
             session_status: None,
             completion_reason: None,
             last_chat_message_at: None,
@@ -1097,6 +1133,16 @@ impl ProjectNote {
     pub fn with_session(mut self, session_id: &str) -> Self {
         self.session_id = Some(session_id.to_string());
         self
+    }
+
+    /// Whether the note reads as read; see [`Note::is_read`].
+    pub fn is_read(&self) -> bool {
+        reads_as_read(self.completed_at, self.read_at)
+    }
+
+    /// Start a just-built note read or unread; see [`Note::set_initial_read`].
+    pub fn set_initial_read(&mut self, read: bool) {
+        self.read_at = initial_read_at(self.completed_at, read);
     }
 }
 

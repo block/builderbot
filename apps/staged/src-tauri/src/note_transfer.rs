@@ -223,6 +223,8 @@ where
         TransferMode::Copy => {
             let mut copy = Note::new_standalone(&target_branch.id, &note.title, &media.content)
                 .with_subtype(Note::SUBTYPE_WRITTEN);
+            // The user made the copy, so it is no newer to them than the source.
+            copy.set_initial_read(note.is_read());
             store
                 .copy_note_to_branch(&mut copy, &media.images)
                 .map(|()| copy)
@@ -319,7 +321,8 @@ pub(crate) fn transfer_project_note(
             &media.rehomed,
         ),
         TransferMode::Copy => {
-            let copy = ProjectNote::new(&target.id, &note.title, &media.content);
+            let mut copy = ProjectNote::new(&target.id, &note.title, &media.content);
+            copy.set_initial_read(note.is_read());
             store
                 .copy_project_note_to_project(&copy, &media.images)
                 .map(|()| copy)
@@ -1126,6 +1129,41 @@ mod tests {
         );
     }
 
+    /// The user made the copy, so it reads as its source did rather than
+    /// lighting up as new.
+    #[tokio::test]
+    async fn a_copy_takes_its_sources_read_state() {
+        let f = fixture();
+        let unread = f.note("Unread", "body");
+        let read = f.note("Read", "body");
+        f.store.set_note_read(&read.id, true).unwrap();
+
+        let unread_copy = transfer_branch_note(
+            &f.store,
+            &unread.id,
+            &f.source.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
+        let read_copy = transfer_branch_note(
+            &f.store,
+            &read.id,
+            &f.source.id,
+            TransferMode::Copy,
+            never_called,
+        )
+        .await
+        .unwrap();
+
+        assert!(!unread_copy.is_read());
+        assert!(read_copy.is_read());
+        let stored_read_at = |id: &str| f.store.get_note(id).unwrap().unwrap().read_at;
+        assert_eq!(stored_read_at(&unread_copy.id), None);
+        assert_eq!(stored_read_at(&read_copy.id), read_copy.read_at);
+    }
+
     #[tokio::test]
     async fn move_to_the_same_project_is_refused_but_copy_duplicates() {
         let f = fixture();
@@ -1894,6 +1932,25 @@ mod tests {
         assert_eq!(moved.project_id, f.target.id);
         assert!(f.store.list_project_notes(&f.source.id).unwrap().is_empty());
         assert_eq!(f.store.list_project_notes(&f.target.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_project_note_copy_takes_its_sources_read_state() {
+        let f = fixture();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body");
+        f.store.create_project_note(&note).unwrap();
+
+        let unread_copy =
+            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+        f.store.set_project_note_read(&note.id, true).unwrap();
+        let read_copy =
+            transfer_project_note(&f.store, &note.id, &f.target.id, TransferMode::Copy).unwrap();
+
+        assert!(!unread_copy.is_read());
+        assert!(read_copy.is_read());
+        let stored_read_at = |id: &str| f.store.get_project_note(id).unwrap().unwrap().read_at;
+        assert_eq!(stored_read_at(&unread_copy.id), None);
+        assert_eq!(stored_read_at(&read_copy.id), read_copy.read_at);
     }
 
     #[test]

@@ -47,7 +47,12 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
-  import { formatNoteTimestamp, noteLastWrittenAt } from '../notes/noteTimestamps';
+  import {
+    formatNoteTimestamp,
+    noteLastWrittenAt,
+    noteReadState,
+    type NoteReadState,
+  } from '../notes/noteTimestamps';
   import { reviewBadges } from './reviewBadges';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { canStartQueuedSessionNow, type QueuedSessionKind } from './queuedSessionStart';
@@ -90,6 +95,8 @@
     onDeleteCommit?: (sha: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
+    /** Mark a note read or unread from its context menu. */
+    onSetNoteRead?: (noteId: string, read: boolean) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeleteImage?: (imageId: string, opts?: { altKey: boolean }) => void;
     /** Start a specific queued session ahead of the branch queue. */
@@ -180,6 +187,7 @@
     onDeleteCommit,
     onDeletePendingCommit,
     onDeleteNote,
+    onSetNoteRead,
     onDeleteReview,
     onDeleteImage,
     onStartQueuedNow,
@@ -295,6 +303,8 @@
     noteUpdatedAt?: number;
     noteSubtype?: NoteSubtype;
     chatState?: NoteChatState;
+    /** Set on a completed note row: whether the user has opened it since it landed. */
+    noteReadState?: NoteReadState;
     reviewId?: string;
     imageId?: string;
     imageFilename?: string;
@@ -788,6 +798,7 @@
         noteUpdatedAt: note.updatedAt,
         noteSubtype: note.subtype,
         chatState: type === 'note' ? noteChatState(note) : 'none',
+        noteReadState: type === 'note' ? (noteReadState(note) ?? undefined) : undefined,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
@@ -1064,11 +1075,16 @@
     });
   }
 
+  function canSetNoteRead(item: DisplayItem): boolean {
+    return !!item.noteReadState && !!item.noteId && !item.deleting && !!onSetNoteRead;
+  }
+
   function hasContextMenuAction(item: DisplayItem): boolean {
     return (
       !!item.commitSha ||
       (!!item.hashtagRef && !!onNewSessionReferring) ||
       canStartNow(item) ||
+      canSetNoteRead(item) ||
       isDeletable(item)
     );
   }
@@ -1082,6 +1098,14 @@
       commitSha: item.commitSha,
       hashtagRef: item.hashtagRef,
       onStartNow: canStartNow(item) ? () => onStartQueuedNow!(item.sessionId!) : undefined,
+      onMarkRead:
+        canSetNoteRead(item) && item.noteReadState === 'unread'
+          ? () => onSetNoteRead!(item.noteId!, true)
+          : undefined,
+      onMarkUnread:
+        canSetNoteRead(item) && item.noteReadState === 'read'
+          ? () => onSetNoteRead!(item.noteId!, false)
+          : undefined,
       onDelete:
         isDeletable(item) && !deleteDisabledReason
           ? (opts) => handleDeleteClick(item, opts)
@@ -1199,6 +1223,7 @@
               !actionFooterVisible}
             sessionId={item.sessionId}
             chatState={item.chatState}
+            unread={item.noteReadState === 'unread'}
             deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
             contextMenuKey={hasContextMenuAction(item) ? item.key : undefined}
             showConnector={item.showConnector}

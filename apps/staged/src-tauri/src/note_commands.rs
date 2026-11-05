@@ -34,6 +34,7 @@ pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineIt
         subtype: note.subtype,
         last_chat_message_at,
         chat_read_at,
+        read_at: note.read_at,
     }
 }
 
@@ -55,6 +56,7 @@ pub(crate) fn standalone_note_to_timeline_item(note: Note) -> NoteTimelineItem {
         subtype: note.subtype,
         last_chat_message_at: None,
         chat_read_at: None,
+        read_at: note.read_at,
     }
 }
 
@@ -71,8 +73,23 @@ pub fn create_note(
     subtype: Option<String>,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    let mut note = crate::store::models::Note::new_standalone(&branch_id, &title, &content);
+    create_standalone_note(&store, &branch_id, &title, &content, subtype)
+}
+
+/// The body of [`create_note`], shared with the web dispatcher's arm.
+///
+/// A note the user just wrote starts read; a dropped file or saved action
+/// output is new to them, so it starts unread like a session's note.
+pub(crate) fn create_standalone_note(
+    store: &Store,
+    branch_id: &str,
+    title: &str,
+    content: &str,
+    subtype: Option<String>,
+) -> Result<NoteTimelineItem, String> {
+    let mut note = Note::new_standalone(branch_id, title, content);
     note.subtype = subtype;
+    note.set_initial_read(note.is_written());
     store
         .create_note_with_unique_title(&mut note)
         .map_err(|e| e.to_string())?;
@@ -191,6 +208,21 @@ pub fn get_branch_note_by_session(
         .map_err(|e| e.to_string())
 }
 
+/// Mark a branch note read or unread, returning the row as it now reads.
+///
+/// The note viewer marks a note read when it opens one; the viewer's toggle
+/// and the timeline context menu set either state.
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_note_read(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+    read: bool,
+) -> Result<Note, String> {
+    crate::get_store(&store)?
+        .set_note_read(&note_id, read)
+        .map_err(|e| e.to_string())
+}
+
 /// Fetch a single note by id (no branch filter), with resolved session status.
 ///
 /// Used by the project-note view to open a `#note:<id>` reference — including
@@ -282,6 +314,19 @@ pub fn get_project_note_by_session(
         .map_err(|e| e.to_string())
 }
 
+/// Mark a project note read or unread, returning the row as it now reads; the
+/// project-note counterpart of [`set_note_read`].
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_project_note_read(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_note_id: String,
+    read: bool,
+) -> Result<crate::store::ProjectNote, String> {
+    crate::get_store(&store)?
+        .set_project_note_read(&project_note_id, read)
+        .map_err(|e| e.to_string())
+}
+
 /// Delete a project note, its child notes, and every session they owned.
 ///
 /// The store cascade removes the child-note rows, but their sessions may still
@@ -315,6 +360,7 @@ mod tests {
     use crate::note_media::files::store_media_file;
     use crate::note_media::tests::{Fixture, PNG};
     use crate::store::images::image_file_path;
+    use crate::store::models::{Branch, Project};
     use crate::store::{Image, NOTE_MEDIA_SESSION_ID};
 
     fn embed(image: &Image) -> String {
@@ -365,5 +411,33 @@ mod tests {
         f.store.create_note_with_unique_title(&mut pasted).unwrap();
         update_note_impl(&f.store, &note.id, "Shots", "Before").unwrap();
         assert_kept(&f, &image);
+    }
+
+    #[test]
+    fn standalone_notes_start_read_only_when_the_user_wrote_them() {
+        let store = Store::in_memory().unwrap();
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        let written = create_standalone_note(
+            &store,
+            &branch.id,
+            "Mine",
+            "body",
+            Some(Note::SUBTYPE_WRITTEN.to_string()),
+        )
+        .unwrap();
+        assert!(written.read_at.is_some());
+        assert_eq!(written.read_at, written.completed_at);
+
+        // A dropped file is new to the user, like a session's note.
+        let dropped = create_standalone_note(&store, &branch.id, "notes.md", "body", None).unwrap();
+        assert_eq!(dropped.read_at, None);
+
+        let stored_read_at = |id: &str| store.get_note(id).unwrap().unwrap().read_at;
+        assert_eq!(stored_read_at(&written.id), written.read_at);
+        assert_eq!(stored_read_at(&dropped.id), None);
     }
 }

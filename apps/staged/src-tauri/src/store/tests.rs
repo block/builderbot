@@ -3261,6 +3261,158 @@ fn test_mark_session_chat_read_only_writes_for_new_replies() {
     assert!(read_at().unwrap() > first_read);
 }
 
+#[test]
+fn test_set_note_read_marks_landed_notes_only() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // A session's note is a stub until its content lands; opening it then
+    // marks nothing, so it still reads as unread once it lands.
+    let note = Note::new(&branch.id, "", "").with_session("session-1");
+    store.create_note(&note).unwrap();
+    let opened = store.set_note_read(&note.id, true).unwrap();
+    assert_eq!((opened.completed_at, opened.read_at), (None, None));
+
+    store
+        .update_note_title_and_content(&note.id, "Plan", "body", None, None)
+        .unwrap();
+    let landed = store.get_note(&note.id).unwrap().unwrap();
+    assert!(landed.completed_at.is_some());
+    assert_eq!(landed.read_at, None);
+
+    let read = store.set_note_read(&note.id, true).unwrap();
+    let read_at = read.read_at.unwrap();
+    assert!(read_at >= landed.completed_at.unwrap());
+
+    // Reopening a read note leaves the read time alone.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        store.set_note_read(&note.id, true).unwrap().read_at,
+        Some(read_at)
+    );
+    // The session re-emitting the same note changes nothing, so it stays read.
+    store
+        .update_note_title_and_content(&note.id, "Plan", "body", None, None)
+        .unwrap();
+    assert_eq!(
+        store.get_note(&note.id).unwrap().unwrap().read_at,
+        Some(read_at)
+    );
+    // New suggested next steps alone are no new content to read: the write
+    // lands, but the note stays read.
+    store
+        .update_note_title_and_content(&note.id, "Plan", "body", Some("Commit it"), None)
+        .unwrap();
+    let stepped = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(
+        stepped.suggested_next_commit_step.as_deref(),
+        Some("Commit it")
+    );
+    assert!(stepped.updated_at > landed.updated_at);
+    assert_eq!(stepped.read_at, Some(read_at));
+    // A revision is new content the user hasn't seen: it reads as unread
+    // again, and opening it marks it read again.
+    store
+        .update_note_title_and_content(&note.id, "Plan", "revised body", None, None)
+        .unwrap();
+    let revised = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(revised.completed_at, landed.completed_at);
+    assert_eq!(revised.read_at, None);
+    assert!(store.set_note_read(&note.id, true).unwrap().is_read());
+
+    let unread = store.set_note_read(&note.id, false).unwrap();
+    assert_eq!(unread.read_at, None);
+    assert_eq!(unread.content, "revised body");
+
+    assert!(store.set_note_read("missing", true).is_err());
+}
+
+#[test]
+fn test_set_note_read_survives_a_clock_behind_completion() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let future = super::now_timestamp() + 60_000;
+    let note = Note {
+        completed_at: Some(future),
+        ..Note::new(&branch.id, "Plan", "body")
+    };
+    store.create_note(&note).unwrap();
+    let project_note = ProjectNote {
+        completed_at: Some(future),
+        ..ProjectNote::new(&project.id, "Overview", "body")
+    };
+    store.create_project_note(&project_note).unwrap();
+
+    // Stamped "now" alone, the read would predate the note and leave it unread.
+    assert_eq!(
+        store.set_note_read(&note.id, true).unwrap().read_at,
+        Some(future)
+    );
+    assert_eq!(
+        store
+            .set_project_note_read(&project_note.id, true)
+            .unwrap()
+            .read_at,
+        Some(future)
+    );
+}
+
+#[test]
+fn test_set_project_note_read_round_trips_and_lists() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let note = ProjectNote::new(&project.id, "Overview", "body");
+    store.create_project_note(&note).unwrap();
+    let read_at_in_list = || store.list_project_notes_with_status(&project.id).unwrap()[0].read_at;
+
+    // New notes start unread.
+    assert_eq!(read_at_in_list(), None);
+
+    let read = store.set_project_note_read(&note.id, true).unwrap();
+    assert_eq!(read.project_id, project.id);
+    assert!(read.read_at.is_some());
+    assert_eq!(read_at_in_list(), read.read_at);
+
+    store.set_project_note_read(&note.id, false).unwrap();
+    assert_eq!(read_at_in_list(), None);
+
+    // An agent revision makes a read project note unread again.
+    store.set_project_note_read(&note.id, true).unwrap();
+    store
+        .update_project_note_title_and_content(&note.id, "Overview", "body", None, None)
+        .unwrap();
+    assert!(read_at_in_list().is_some());
+    // New suggested next steps alone leave it read.
+    store
+        .update_project_note_title_and_content(
+            &note.id,
+            "Overview",
+            "body",
+            None,
+            Some("Write the plan"),
+        )
+        .unwrap();
+    let stepped = store.get_project_note(&note.id).unwrap().unwrap();
+    assert_eq!(
+        stepped.suggested_next_note_step.as_deref(),
+        Some("Write the plan")
+    );
+    assert!(read_at_in_list().is_some());
+    store
+        .update_project_note_title_and_content(&note.id, "Overview", "revised", None, None)
+        .unwrap();
+    assert_eq!(read_at_in_list(), None);
+
+    assert!(store.set_project_note_read("missing", false).is_err());
+}
+
 // =============================================================================
 // Workdirs
 // =============================================================================
@@ -3998,6 +4150,7 @@ fn test_update_written_note_rewrites_title_and_content() {
     store.create_branch(&branch).unwrap();
 
     let mut note = Note::new(&branch.id, "Draft", "# Draft").with_subtype(Note::SUBTYPE_WRITTEN);
+    note.set_initial_read(true);
     store.create_note_with_unique_title(&mut note).unwrap();
     let created_completed_at = note.completed_at;
 
@@ -4008,11 +4161,14 @@ fn test_update_written_note_rewrites_title_and_content() {
     assert_eq!(updated.content, "# Final\n\nbody");
     // Completion is write-once: the note has been readable since it was saved.
     assert_eq!(updated.completed_at, created_completed_at);
+    // The user's own edit is nothing new to them, so the note stays read.
+    assert_eq!(updated.read_at, note.read_at);
 
     let stored = store.get_note(&note.id).unwrap().unwrap();
     assert_eq!(stored.title, "Final");
     assert_eq!(stored.content, "# Final\n\nbody");
     assert!(stored.is_written());
+    assert!(stored.is_read());
 }
 
 /// A written note edited down to a bare title has no body left, which used to
@@ -5014,6 +5170,56 @@ fn change_feed_marking_a_chat_read_skips_replies_its_note_already_covers() {
             project_id: Some(project.id.clone())
         }
     );
+}
+
+#[test]
+fn change_feed_note_read_state_publishes_only_when_it_changes() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let note = Note::new(&branch.id, "Plan", "body");
+    store.create_note(&note).unwrap();
+    let project_note = ProjectNote::new(&project.id, "Overview", "body");
+    store.create_project_note(&project_note).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let branch_change = super::StoreChange::Notes {
+        branch_id: Some(branch.id.clone()),
+        project_id: None,
+    };
+    let project_change = super::StoreChange::Notes {
+        branch_id: None,
+        project_id: Some(project.id.clone()),
+    };
+
+    // Rows show the read state, so their lists reload in every window.
+    store.set_note_read(&note.id, true).unwrap();
+    assert_eq!(rx.try_recv().unwrap(), branch_change);
+    store.set_project_note_read(&project_note.id, true).unwrap();
+    assert_eq!(rx.try_recv().unwrap(), project_change);
+
+    // Reopening a read note writes nothing, so it reloads nothing.
+    store.set_note_read(&note.id, true).unwrap();
+    store.set_project_note_read(&project_note.id, true).unwrap();
+    assert!(rx.try_recv().is_err());
+
+    store.set_note_read(&note.id, false).unwrap();
+    assert_eq!(rx.try_recv().unwrap(), branch_change);
+    store
+        .set_project_note_read(&project_note.id, false)
+        .unwrap();
+    assert_eq!(rx.try_recv().unwrap(), project_change);
+
+    // Marking an unread note unread again is a no-op too.
+    store.set_note_read(&note.id, false).unwrap();
+    store
+        .set_project_note_read(&project_note.id, false)
+        .unwrap();
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]

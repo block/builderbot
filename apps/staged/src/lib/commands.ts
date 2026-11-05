@@ -344,6 +344,23 @@ export function getNote(noteId: string): Promise<import('./types').NoteTimelineI
 }
 
 /**
+ * Mark a branch note read or unread, returning the row as it now reads. A
+ * write that changes the read state publishes `notes-changed`; marking a read
+ * note read, or a note still being written, writes nothing.
+ */
+export function setNoteRead(noteId: string, read: boolean): Promise<BranchNote> {
+  return invokeCommand('set_note_read', { noteId, read });
+}
+
+/** The project-note counterpart of {@link setNoteRead}. */
+export function setProjectNoteRead(
+  projectNoteId: string,
+  read: boolean
+): Promise<import('./types').ProjectNote> {
+  return invokeCommand('set_project_note_read', { projectNoteId, read });
+}
+
+/**
  * List the child notes aggregated under a given project note. Children are
  * hidden from branch timelines, so this is the dedicated path the project-note
  * view uses to resolve `#note:<id>` references to their titles.

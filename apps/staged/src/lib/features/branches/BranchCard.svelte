@@ -63,6 +63,7 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import { splitNoteMarkdown } from '../notes/noteMarkdown';
+  import { forgetDeletedNote, setNoteReadState, writeNoteRead } from '../notes/noteReadActions';
   import { attachBasename, formatAttachErrors } from '../sessions/attachErrors';
   import { fileToBase64 } from '../sessions/attachmentData';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
@@ -1074,6 +1075,10 @@
       openWriteNote = {
         note: { id: note.noteId, title: note.title, content: note.content },
       };
+      // The viewer marks the notes it shows read; the editor does it here.
+      writeNoteRead('branch', note.noteId, true).catch((error) => {
+        console.warn('Failed to mark note read', error);
+      });
       return;
     }
     openNote = {
@@ -1512,6 +1517,7 @@
       confirmDelete = null;
       try {
         await deleteSessionLinkedItem(() => commands.deleteNote(noteId, !!sessionId), sessionId);
+        forgetDeletedNote('branch', noteId);
         loadTimeline();
       } catch (e) {
         console.error('Failed to delete note:', e);
@@ -2136,6 +2142,8 @@
               onDeleteCommit={handleDeleteCommit}
               onDeletePendingCommit={handleDeletePendingCommit}
               onDeleteNote={handleDeleteNote}
+              onSetNoteRead={(noteId, read) =>
+                void setNoteReadState({ kind: 'branch', noteId }, read)}
               onDeleteReview={handleDeleteReview}
               onImageClick={handleImageClick}
               onDeleteImage={handleDeleteImage}

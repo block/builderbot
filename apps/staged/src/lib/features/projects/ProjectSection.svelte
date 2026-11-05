@@ -41,7 +41,8 @@
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { minuteNow } from '../../shared/relativeTime.svelte';
-  import { noteLastWrittenAt } from '../notes/noteTimestamps';
+  import { noteLastWrittenAt, noteReadState } from '../notes/noteTimestamps';
+  import { forgetDeletedNote, setNoteReadState } from '../notes/noteReadActions';
   import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
@@ -477,6 +478,8 @@
       deletingNoteIds = new Set([...deletingNoteIds, noteId]);
       try {
         await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
+        // Its child notes take no "Mark as unread", so only the note holds a flag.
+        forgetDeletedNote('project', noteId);
         // Optimistic removal; the delete's notes-changed event re-fetches every
         // window's project-note surfaces (including this one) to confirm.
         projectNotes = projectNotes.filter((n) => n.id !== noteId);
@@ -542,9 +545,12 @@
     const actions: TimelineContextMenuAction[] = [];
     for (const note of timelineNotes) {
       const deleting = deletingNoteIds.has(note.id);
+      const readState = deleting ? null : projectNoteReadState(note);
       actions.push({
         key: projectNoteContextMenuKey(note),
         hashtagRef: isCompletedProjectNote(note) ? `#project-note:${note.id}` : undefined,
+        onMarkRead: readState === 'unread' ? () => setProjectNoteRead(note.id, true) : undefined,
+        onMarkUnread: readState === 'read' ? () => setProjectNoteRead(note.id, false) : undefined,
         onDelete: deleting ? undefined : (opts) => handleDeleteNote(note.id, opts),
       });
     }
@@ -620,6 +626,14 @@
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
     return noteRowPhase(note) === 'done';
+  }
+
+  function projectNoteReadState(note: ProjectNote) {
+    return isCompletedProjectNote(note) ? noteReadState(note) : null;
+  }
+
+  function setProjectNoteRead(noteId: string, read: boolean) {
+    void setNoteReadState({ kind: 'project', noteId }, read);
   }
 
   function projectNoteContextMenuKey(note: ProjectNote): string {
@@ -898,6 +912,7 @@
               isLast={false}
               sessionId={note.sessionId ?? undefined}
               chatState={row.type === 'note' ? noteChatState(note) : 'none'}
+              unread={projectNoteReadState(note) === 'unread'}
               onItemClick={row.type === 'note' ? () => openProjectNote(note) : undefined}
               onSessionClick={(sid) => {
                 openProjectNote({ ...note, sessionId: sid }, true);

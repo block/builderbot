@@ -45,8 +45,8 @@ impl Store {
         note: &ProjectNote,
     ) -> Result<(), StoreError> {
         conn.execute(
-            "INSERT INTO project_notes (id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO project_notes (id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 note.id,
                 note.project_id,
@@ -58,6 +58,7 @@ impl Store {
                 note.completed_at,
                 note.suggested_next_commit_step,
                 note.suggested_next_note_step,
+                note.read_at,
             ],
         )?;
         Ok(())
@@ -66,7 +67,7 @@ impl Store {
     pub fn get_project_note(&self, id: &str) -> Result<Option<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes WHERE id = ?1",
             params![id],
             Self::row_to_project_note,
@@ -78,7 +79,7 @@ impl Store {
     pub fn list_project_notes(&self, project_id: &str) -> Result<Vec<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes
              WHERE project_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
@@ -94,7 +95,7 @@ impl Store {
     ) -> Result<Option<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_project_note,
@@ -110,7 +111,7 @@ impl Store {
     ) -> Result<Option<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
              FROM project_notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_project_note,
@@ -119,6 +120,8 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The project-note twin of [`Store::update_note_title_and_content`]: a new
+    /// title or body is the agent revising the note, so it clears `read_at`.
     pub fn update_project_note_title_and_content(
         &self,
         id: &str,
@@ -152,7 +155,8 @@ impl Store {
         let now = now_timestamp();
         conn.execute(
             "UPDATE project_notes
-             SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6
+             SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6,
+                 read_at = CASE WHEN title = ?1 AND content = ?2 THEN read_at ELSE NULL END
              WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
@@ -183,6 +187,29 @@ impl Store {
             ),
         });
         Ok(())
+    }
+
+    /// Mark a project note read or unread, returning the row as it now reads
+    /// (session status unresolved); see [`Store::set_note_read`].
+    pub fn set_project_note_read(&self, id: &str, read: bool) -> Result<ProjectNote, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let changed = Self::write_read_at(&conn, "project_notes", id, read)?;
+        let note = conn
+            .query_row(
+                "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, read_at
+                 FROM project_notes WHERE id = ?1",
+                params![id],
+                Self::row_to_project_note,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError(format!("Project note not found: {id}")))?;
+        if changed {
+            self.publish(StoreChange::Notes {
+                branch_id: None,
+                project_id: Some(note.project_id.clone()),
+            });
+        }
+        Ok(note)
     }
 
     /// Delete a project note and report the sessions it orphaned, atomically.
@@ -247,6 +274,7 @@ impl Store {
             completed_at: row.get(7)?,
             suggested_next_commit_step: row.get(8)?,
             suggested_next_note_step: row.get(9)?,
+            read_at: row.get(10)?,
             session_status: None,
             completion_reason: None,
             last_chat_message_at: None,

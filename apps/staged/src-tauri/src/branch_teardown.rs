@@ -229,9 +229,17 @@ fn cleanup_lane(store: &Arc<Store>, branch: &store::Branch) -> Option<String> {
 ///
 /// A panic abandons only the rest of its own lane. It is logged with the
 /// lane's key, its thread moves on to the next unclaimed lane, and every
-/// other lane still runs. After the retry and sweep below, the first panic
-/// is re-raised with its own payload, so the caller still sees a crashed
-/// teardown and keeps the project row for a retry.
+/// other lane still runs. A panic in the row-delete retry or the remote
+/// sweep below costs only that branch's step there. Once everything has
+/// run, the teardown's first panic is re-raised with its own payload, so the
+/// caller still sees a crashed teardown and keeps the project row for a
+/// retry.
+///
+/// This isolates panics in a teardown's git and filesystem work. A panic
+/// inside a store call is no better off: it poisons the store's connection
+/// mutex, and every later store call in the app panics on it until a
+/// restart, as it always has. Here that only means the later lanes' store
+/// calls panic too, each caught and logged like the first.
 pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
     branches: &[store::Branch],
     lane_of: L,
@@ -260,10 +268,11 @@ pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
     let next_lane = AtomicUsize::new(0);
     let drain_lanes = || {
         while let Some((key, lane)) = lanes.get(next_lane.fetch_add(1, Ordering::Relaxed)) {
-            // Unwind-safe enough: a panic only abandons the rest of this
-            // lane, and what the other lanes share is atomic or behind a
-            // poison-tolerant lock.
-            let ran = catch_unwind(AssertUnwindSafe(|| {
+            let step = format!(
+                "project cleanup lane '{}'",
+                key.as_deref().unwrap_or("(no clone)")
+            );
+            run_isolated(&first_panic, &step, || {
                 for &index in lane {
                     let branch = &branches[index];
                     cleanup_branch_resources(branch);
@@ -281,18 +290,7 @@ pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
                             .push(index);
                     }
                 }
-            }));
-            if let Err(payload) = ran {
-                log::error!(
-                    "project cleanup lane '{}' panicked, skipping the rest of its branches: {}",
-                    key.as_deref().unwrap_or("(no clone)"),
-                    panic_message(payload.as_ref())
-                );
-                first_panic
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .get_or_insert(payload);
-            }
+            });
         }
     };
     std::thread::scope(|scope| {
@@ -320,19 +318,31 @@ pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
         // failed.
         for index in failed_branch_deletes {
             let branch = &branches[index];
-            if let Err(e) = delete_branch_row(branch) {
-                log::warn!(
-                    "failed retry delete for branch '{}' during project cleanup: {e}",
-                    branch.id
-                );
-            }
+            run_isolated(
+                &first_panic,
+                &format!("retry delete for branch '{}'", branch.id),
+                || {
+                    if let Err(e) = delete_branch_row(branch) {
+                        log::warn!(
+                            "failed retry delete for branch '{}' during project cleanup: {e}",
+                            branch.id
+                        );
+                    }
+                },
+            );
         }
 
         // Re-run remote cleanup once after retries so shared workspace
         // deletion can converge when the first pass observed stale peer rows.
+        // This is also the only cleanup the remote branches after a panicked
+        // one get, so a branch that panics again here doesn't stop it.
         for branch in branches {
             if branch.branch_type == store::BranchType::Remote {
-                cleanup_branch_resources(branch);
+                run_isolated(
+                    &first_panic,
+                    &format!("remote sweep of branch '{}'", branch.id),
+                    || cleanup_branch_resources(branch),
+                );
             }
         }
     }
@@ -342,6 +352,26 @@ pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
         .unwrap_or_else(PoisonError::into_inner)
     {
         resume_unwind(payload);
+    }
+}
+
+/// Run one step of [`cleanup_project_branches_best_effort`], catching a
+/// panic in it. The panic is logged with `step`'s description and the
+/// teardown carries on. Only the first panic's payload is kept, to re-raise
+/// once the teardown has run.
+///
+/// Unwind-safe enough: a panic abandons only the rest of this step, and what
+/// the steps share here is atomic or behind a poison-tolerant lock.
+fn run_isolated(first_panic: &Mutex<Option<Box<dyn Any + Send>>>, step: &str, run: impl FnOnce()) {
+    if let Err(payload) = catch_unwind(AssertUnwindSafe(run)) {
+        log::error!(
+            "{step} panicked during project cleanup, skipping the rest of it: {}",
+            panic_message(payload.as_ref())
+        );
+        first_panic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert(payload);
     }
 }
 

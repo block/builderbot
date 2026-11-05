@@ -148,7 +148,11 @@
   }
 
   // The row goes as soon as the remove is confirmed, taking focus with it, so
-  // focus moves on to the row that takes its place.
+  // focus moves on to the row that takes its place. Removing the open
+  // project opens the next one in the unfiltered list, and its row is the
+  // one focus takes, even when the filter or search shows a different
+  // neighbour. The list keeps that row as the selected one when the filter
+  // rules it out, so highlight and focus agree.
   function removeProject(project: Project) {
     const shownIds = sidebarProjects
       .filter((p) => matchingProjects === null || matchingProjects.has(p.id))

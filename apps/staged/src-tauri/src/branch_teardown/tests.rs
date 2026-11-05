@@ -208,10 +208,12 @@ fn cleanup_lanes_follow_the_clone_directory() {
 }
 
 /// A panicking lane costs only its own branches. Even when the first lane
-/// every thread claims panics, the lanes after them still run, and the first
-/// panic resurfaces only after the row-delete retry and the remote sweep.
+/// every thread claims panics, the lanes after them still run. A panic in
+/// the row-delete retry or the remote sweep costs only that step: the sweep
+/// still reaches the remote branches the panicked lane never got to, and the
+/// first panic, not a later one, resurfaces once everything has run.
 #[test]
-fn delete_project_cleanup_runs_every_lane_when_lanes_panic() {
+fn delete_project_cleanup_runs_every_lane_retry_and_sweep_when_steps_panic() {
     let panicking: Vec<String> = (0..MAX_PARALLEL_CLONE_CLEANUPS)
         .map(|n| format!("panics{n}"))
         .collect();
@@ -221,12 +223,12 @@ fn delete_project_cleanup_runs_every_lane_when_lanes_panic() {
         .collect();
     branches.push(local_branch("project-1", "survivor-1"));
     branches.push(local_branch("project-1", "survivor-2"));
-    branches.push(remote_branch(
-        "project-1",
-        "remote",
-        "feature-remote",
-        "ws-shared",
-    ));
+    // The remote lane: a failed row delete that brings on the retry and the
+    // sweep, then a branch whose cleanup panics on every call, abandoning the
+    // one after it to the sweep.
+    for id in ["remote", "remote-panics", "remote-after"] {
+        branches.push(remote_branch("project-1", id, id, "ws-shared"));
+    }
 
     let cleanups = CallLog::default();
     let deletes = CallLog::default();
@@ -236,16 +238,27 @@ fn delete_project_cleanup_runs_every_lane_when_lanes_panic() {
             // One lane per local branch, so each panic is its own lane.
             |branch| (branch.branch_type == BranchType::Local).then(|| branch.id.clone()),
             |branch| {
-                cleanups.record(branch);
+                let call = cleanups.record(branch);
                 if branch.id.starts_with("panics") {
                     panic!("simulated cleanup panic");
                 }
+                if branch.id == "remote-panics" {
+                    // The same panic both times, told apart only so a later
+                    // payload replacing the first one shows.
+                    if call == 1 {
+                        panic!("simulated cleanup panic");
+                    }
+                    panic!("simulated recurring sweep panic");
+                }
             },
             |branch| {
-                if deletes.record(branch) == 1 && branch.id == "remote" {
-                    Err("simulated transient delete failure".to_string())
-                } else {
-                    Ok(())
+                let call = deletes.record(branch);
+                match (branch.id.as_str(), call) {
+                    ("remote" | "survivor-2", 1) => {
+                        Err("simulated transient delete failure".to_string())
+                    }
+                    ("survivor-2", _) => panic!("simulated retry panic"),
+                    _ => Ok(()),
                 }
             },
         );
@@ -255,16 +268,20 @@ fn delete_project_cleanup_runs_every_lane_when_lanes_panic() {
     assert_eq!(
         payload.downcast_ref::<&str>(),
         Some(&"simulated cleanup panic"),
-        "the lane's own payload, not scope's generic one"
+        "the first lane panic's own payload, not scope's generic one or a later panic's"
     );
     for id in &panicking {
         assert_eq!(cleanups.count(id), 1, "{id} cleaned once");
         assert_eq!(deletes.count(id), 0, "{id} panicked before its delete");
     }
-    for id in ["survivor-1", "survivor-2"] {
-        assert_eq!(cleanups.count(id), 1, "{id} cleaned once");
-        assert_eq!(deletes.count(id), 1, "{id} deleted once");
+    for (id, cleaned, deleted, why) in [
+        ("survivor-1", 1, 1, "no panic"),
+        ("survivor-2", 1, 2, "its retry delete panicked"),
+        ("remote", 2, 2, "retried, then swept"),
+        ("remote-panics", 2, 0, "panicked in its lane and the sweep"),
+        ("remote-after", 1, 0, "swept only"),
+    ] {
+        assert_eq!(cleanups.count(id), cleaned, "{id} cleanups: {why}");
+        assert_eq!(deletes.count(id), deleted, "{id} deletes: {why}");
     }
-    assert_eq!(cleanups.count("remote"), 2, "remote cleaned, then swept");
-    assert_eq!(deletes.count("remote"), 2, "remote deleted, then retried");
 }

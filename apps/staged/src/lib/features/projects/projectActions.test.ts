@@ -566,8 +566,10 @@ describe('focus after remove', () => {
     hasUnpushedCommits.mockResolvedValue(true);
     const actions = await importActions();
     await actions.requestRemoveProject(project(), focusAfterRemove);
-    // Focus is on the dialog's Remove button, still on screen as it closes.
-    documentState.activeElement = { tagName: 'BUTTON' };
+    // The Remove button unmounts with the dialog's footer in the flush that
+    // hides the card. bits-ui's FocusScope then focuses the dialog's content,
+    // before the delete's own focus check runs.
+    documentState.activeElement = { tagName: 'DIV' };
 
     await actions.confirmPendingDelete();
     await tick();
@@ -575,6 +577,61 @@ describe('focus after remove', () => {
     expect(neighbour.focus).not.toHaveBeenCalled();
     expect(actions.takeFocusAfterRemove()).toBe(neighbour);
     expect(actions.takeFocusAfterRemove()).toBeNull();
+  });
+
+  describe('when the removed project is the one open', () => {
+    // The sidebar's repo filter shows [A1, A2, A3] over [A1, B1, A2, B2, A3]
+    // with A2 open. Removing A2 opens B2, the next live project in the
+    // unfiltered list, and the sidebar appends B2's row as the selected one.
+    // Focus has to land there, on the row the sidebar highlights, rather
+    // than on A3, the filtered list's neighbour.
+    async function removeOpenProjectFromFilteredSidebar() {
+      storeState.projects = ['A1', 'B1', 'A2', 'B2', 'A3'].map((id) => project({ id, name: id }));
+      storeState.branchesByProject = new Map([['A2', [mergedBranch({ projectId: 'A2' })]]]);
+      storeState.reposByProject = new Map([['A2', [projectRepo({ projectId: 'A2' })]]]);
+      navigationState.selectedProjectId = 'A2';
+      type Row = { isConnected: boolean; focus: ReturnType<typeof vi.fn> };
+      const row = (): Row => ({ isConnected: true, focus: vi.fn() });
+      const rows = new Map<string, Row>([
+        ['A1', row()],
+        ['A3', row()],
+      ]);
+      selectProject.mockImplementation((projectId: string) => rows.set(projectId, row()));
+      const { neighbourAfterRemove } = await import('./focusAfterRemove');
+      const focusAfterRemove = neighbourAfterRemove(
+        ['A1', 'A2', 'A3'],
+        'A2',
+        (projectId) => rows.get(projectId) as unknown as HTMLElement | undefined
+      );
+      return { rows, removed: storeState.projects[2], focusAfterRemove };
+    }
+
+    it('focuses the row of the project the delete opened instead', async () => {
+      const { rows, removed, focusAfterRemove } = await removeOpenProjectFromFilteredSidebar();
+      const actions = await importActions();
+
+      await actions.requestRemoveProject(removed, focusAfterRemove);
+      await tick();
+
+      expect(selectProject).toHaveBeenCalledWith('B2');
+      expect(rows.get('B2')!.focus).toHaveBeenCalledWith({ preventScroll: true });
+      expect(rows.get('A3')!.focus).not.toHaveBeenCalled();
+    });
+
+    it("hands the dialog's close the same row", async () => {
+      hasUnpushedCommits.mockResolvedValue(true);
+      const { rows, removed, focusAfterRemove } = await removeOpenProjectFromFilteredSidebar();
+      const actions = await importActions();
+      await actions.requestRemoveProject(removed, focusAfterRemove);
+      // As above: the dialog's FocusScope has focused its content.
+      documentState.activeElement = { tagName: 'DIV' };
+
+      await actions.confirmPendingDelete();
+      await tick();
+
+      expect(selectProject).toHaveBeenCalledWith('B2');
+      expect(actions.takeFocusAfterRemove()).toBe(rows.get('B2'));
+    });
   });
 
   it('leaves a cancelled dialog to return focus itself', async () => {

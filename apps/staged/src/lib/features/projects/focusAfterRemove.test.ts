@@ -38,13 +38,13 @@ describe('neighbourAfterRemove', () => {
   it('picks the card that takes the removed one’s place', () => {
     const resolve = neighbourAfterRemove(['a', 'b', 'c'], 'b', (id) => cards.get(id));
     remove('b');
-    expect(resolve()).toBe(cards.get('c'));
+    expect(resolve(null)).toBe(cards.get('c'));
   });
 
   it('falls back to the closest earlier card when nothing follows', () => {
     const resolve = neighbourAfterRemove(['a', 'b', 'c'], 'c', (id) => cards.get(id));
     remove('c');
-    expect(resolve()).toBe(cards.get('b'));
+    expect(resolve(null)).toBe(cards.get('b'));
   });
 
   it('skips cards hidden or gone since the remove was picked', () => {
@@ -54,7 +54,24 @@ describe('neighbourAfterRemove', () => {
     );
     remove('b');
     // d was never rendered, c is hidden: a is what's left.
-    expect(resolve()).toBe(cards.get('a'));
+    expect(resolve(null)).toBe(cards.get('a'));
+  });
+
+  it('prefers the row of the project opened instead, wherever it sits', () => {
+    // A filtered sidebar showing [a, b, c], where removing the open b opened
+    // e from the whole list. The sidebar appends e as the selected row.
+    const opened = document.createElement('button');
+    layerHost.appendChild(opened);
+    const rows = new Map([...cards, ['e', opened]]);
+    const resolve = neighbourAfterRemove(['a', 'b', 'c'], 'b', (id) => rows.get(id));
+    remove('b');
+    expect(resolve('e')).toBe(opened);
+  });
+
+  it('falls back to the neighbour when the project opened instead isn’t shown', () => {
+    const resolve = neighbourAfterRemove(['a', 'b', 'c'], 'b', (id) => cards.get(id));
+    remove('b');
+    expect(resolve('e')).toBe(cards.get('c'));
   });
 
   it('goes to the active layer’s host when no card is left', () => {
@@ -67,7 +84,7 @@ describe('neighbourAfterRemove', () => {
 
     const resolve = neighbourAfterRemove(['a'], 'a', (id) => cards.get(id));
     remove('a');
-    expect(resolve()).toBe(layerHost);
+    expect(resolve(null)).toBe(layerHost);
   });
 });
 

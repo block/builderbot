@@ -35,8 +35,9 @@ class ProjectActionsController {
   private _pendingDelete = $state<Project | null>(null);
   /** Where focus goes if the pending delete is confirmed, from its list. */
   private pendingFocusAfterRemove: FocusAfterRemove | null = null;
-  /** The confirmed delete's, until the dialog's close takes it. */
-  private confirmedFocusAfterRemove: FocusAfterRemove | null = null;
+  /** The confirmed delete's, bound to what it opened instead, until the
+   *  dialog's close takes it. */
+  private confirmedFocusAfterRemove: (() => HTMLElement | null) | null = null;
 
   /** Each project's queue tail resolves to its last successfully persisted status. */
   private readonly statusOverrideWrites = new Map<
@@ -146,10 +147,7 @@ class ProjectActionsController {
     const focusAfterRemove = this.pendingFocusAfterRemove;
     this._pendingDelete = null;
     this.pendingFocusAfterRemove = null;
-    if (project) {
-      this.confirmedFocusAfterRemove = focusAfterRemove;
-      await this.deleteProject(project, focusAfterRemove ?? undefined);
-    }
+    if (project) await this.deleteProject(project, focusAfterRemove ?? undefined, true);
   }
 
   /** Dismiss the confirmation dialog without deleting. */
@@ -161,8 +159,9 @@ class ProjectActionsController {
   /**
    * For the confirmation dialog's close-focus handler: the element to focus
    * after a confirmed remove, or null to leave focus to the dialog, as after
-   * a cancel. Taken once. The dialog still holds focus when the project is
-   * hidden, so it hands focus over itself rather than wait for it to drop.
+   * a cancel. Taken once. Focus stays in the dialog when the project is
+   * hidden (see deleteProject), so the dialog hands it over itself rather
+   * than wait for it to drop.
    */
   takeFocusAfterRemove(): HTMLElement | null {
     const resolve = this.confirmedFocusAfterRemove;
@@ -170,9 +169,11 @@ class ProjectActionsController {
     return resolve ? resolve() : null;
   }
 
+  /** `fromDialog`: confirmed in the dialog, whose close hands focus over. */
   private async deleteProject(
     project: Project,
-    focusAfterRemove?: FocusAfterRemove
+    focusAfterRemove?: FocusAfterRemove,
+    fromDialog = false
   ): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
 
@@ -186,6 +187,7 @@ class ProjectActionsController {
     // When the project on screen is being deleted, navigate away immediately
     // so the user doesn't have to wait for backend deletion. Deleting any
     // other project (sidebar/landing-grid context menu) keeps the current view.
+    let openedInstead: string | null = null;
     if (navigation.selectedProjectId === id) {
       const projects = projectsDataStore.projects;
       const currentIndex = projects.findIndex((p) => p.id === id);
@@ -197,6 +199,7 @@ class ProjectActionsController {
         const next =
           alive.find((p) => projects.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
         selectProject(next.id);
+        openedInstead = next.id;
       } else {
         goHome();
       }
@@ -212,10 +215,23 @@ class ProjectActionsController {
     releaseProjectLayer(id);
 
     // Its card or row, and its context menu with it, unmounts in the next
-    // flush. Focus that was in either drops to <body> then. Focus still in
-    // the confirmation dialog is handed over by the dialog's close instead
-    // (takeFocusAfterRemove).
-    if (focusAfterRemove) void tick().then(() => focusIfDropped(focusAfterRemove));
+    // flush, and focus that was in either drops to <body>. focusIfDropped
+    // picks it up once that flush has run.
+    //
+    // A confirmed dialog's Remove button unmounts in the same flush, as the
+    // dialog's footer only renders while a delete is pending. Focus doesn't
+    // drop then: bits-ui's FocusScope sees the button it last focused go and
+    // focuses the dialog's content, from a mutation-observer microtask that
+    // runs before this check. focusIfDropped leaves that alone, and the
+    // dialog's close hands focus over instead (takeFocusAfterRemove). Were
+    // that order to flip, focusIfDropped would focus the pick first, the
+    // still-open dialog's trap would pull focus back, and the close would
+    // land it on the same pick, as both resolve it the same way.
+    if (focusAfterRemove) {
+      const resolveFocus = () => focusAfterRemove(openedInstead);
+      if (fromDialog) this.confirmedFocusAfterRemove = resolveFocus;
+      void tick().then(() => focusIfDropped(resolveFocus));
+    }
 
     try {
       await commands.deleteProject(id);

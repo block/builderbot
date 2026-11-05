@@ -3,7 +3,7 @@
 
   The pill shows what the project's status icon shows everywhere else (see
   ProjectStatusIcon) and opens a menu to pick one of the configured status
-  options, or Default to go back to the computed PR/cloud status. The Default
+  options, or Default to go back to the computed PR status. The Default
   row previews that computed status, so the user sees what they'd fall back
   to. The option list itself is edited in Settings > General. The sidebar and
   grid context menus offer the same choices through ProjectStatusSubmenu.
@@ -37,7 +37,7 @@
 
   let options = $derived(preferences.projectStatusOptions);
   let override = $derived(findProjectStatusOverride(project, options));
-  let computed = $derived(resolveComputedProjectStatus(project, branches));
+  let computed = $derived(resolveComputedProjectStatus(branches));
   let computedLabel = $derived(computedStatusLabel(computed));
 
   function handleValueChange(value: string) {

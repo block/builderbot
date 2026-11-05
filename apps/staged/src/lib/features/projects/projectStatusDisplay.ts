@@ -1,7 +1,8 @@
 /**
  * What a project's status icon shows: a user-chosen status option when one is
- * set, otherwise the status computed from its branches (aggregate PR state for
- * local projects, workspace state for remote ones).
+ * set, otherwise the status computed from its branches (their aggregate PR
+ * state). Local and remote projects resolve alike; a remote project's location
+ * is marked separately (RemoteProjectIcon), not by its status icon.
  *
  * The option list is app-wide configuration (preferences), the selection is
  * per-project data (`Project.statusOverride`). Kept component-free so the
@@ -9,7 +10,7 @@
  * the rules stay testable.
  */
 
-import type { Branch, Project, WorkspaceStatus } from '../../types';
+import type { Branch, Project } from '../../types';
 import { aggregateProjectPrStatus, projectHasCodeChanges } from '../../shared/utils';
 
 /** A fixed palette, so overridden icons stay theme-aware and in-family. */
@@ -127,29 +128,19 @@ export type ProjectPrStatus = ReturnType<typeof aggregateProjectPrStatus>;
 
 /** The status a project shows when no override applies. */
 export type ComputedProjectStatus =
-  | { kind: 'cloud'; workspaceStatus: WorkspaceStatus | null }
-  | { kind: 'pr'; prStatus: ProjectPrStatus; hasCodeChanges: boolean }
-  | { kind: 'placeholder' };
+  { kind: 'pr'; prStatus: ProjectPrStatus; hasCodeChanges: boolean } | { kind: 'placeholder' };
 
 export type ResolvedProjectStatus =
   { kind: 'override'; option: ProjectStatusOption } | ComputedProjectStatus;
 
 /**
- * The status computed from a project's branches. Remote projects know their
- * location from the project list alone, so they paint the cloud straight away;
- * local ones show a placeholder until their branches are hydrated.
+ * The status computed from a project's branches: a placeholder until they are
+ * hydrated, then their aggregate PR state.
  */
 export function resolveComputedProjectStatus(
-  project: Pick<Project, 'location'>,
   branches: Branch[],
   hydrated = true
 ): ComputedProjectStatus {
-  if (project.location === 'remote') {
-    return {
-      kind: 'cloud',
-      workspaceStatus: branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null,
-    };
-  }
   if (!hydrated) return { kind: 'placeholder' };
   return {
     kind: 'pr',
@@ -170,43 +161,23 @@ export function findProjectStatusOverride(
 }
 
 /**
- * What a project's status icon shows. A chosen option wins over both the PR
- * and the cloud status; it comes with the project list, so it needs no
- * hydration either.
+ * What a project's status icon shows. A chosen option wins over the PR status;
+ * it comes with the project list, so it needs no hydration.
  */
 export function resolveProjectStatus(
-  project: Pick<Project, 'location' | 'statusOverride'>,
+  project: Pick<Project, 'statusOverride'>,
   branches: Branch[],
   options: ProjectStatusOption[],
   hydrated = true
 ): ResolvedProjectStatus {
   const option = findProjectStatusOverride(project, options);
   if (option) return { kind: 'override', option };
-  return resolveComputedProjectStatus(project, branches, hydrated);
-}
-
-function workspaceStatusLabel(status: WorkspaceStatus | null): string {
-  switch (status) {
-    case 'starting':
-      return 'Workspace provisioning';
-    case 'running':
-      return 'Workspace running';
-    case 'stopped':
-      return 'Workspace stopped';
-    case 'suspended':
-      return 'Workspace suspended';
-    case 'error':
-      return 'Workspace error';
-    default:
-      return 'Remote workspace';
-  }
+  return resolveComputedProjectStatus(branches, hydrated);
 }
 
 /** Human-readable text for a computed status, as the picker's Default row shows it. */
 export function computedStatusLabel(status: ComputedProjectStatus): string {
   switch (status.kind) {
-    case 'cloud':
-      return workspaceStatusLabel(status.workspaceStatus);
     case 'placeholder':
       return 'Loading…';
     case 'pr':

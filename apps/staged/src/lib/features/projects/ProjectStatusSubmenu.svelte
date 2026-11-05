@@ -3,7 +3,7 @@
   context menu (sidebar rows and project grid cards).
 
   Offers the same choices as the detail page's ProjectStatusPicker: Default,
-  previewing the computed PR/cloud status, each configured status option, and
+  previewing the computed PR status, each configured status option, and
   "Edit statuses…". Branches come from the shared projects store, so the
   Default preview reads "Loading…" rather than a guess until they land.
 -->
@@ -37,7 +37,6 @@
   let override = $derived(findProjectStatusOverride(project, options));
   let computed = $derived(
     resolveComputedProjectStatus(
-      project,
       projectsDataStore.branchesByProject.get(project.id) ?? [],
       projectsDataStore.isProjectHydrated(project.id)
     )

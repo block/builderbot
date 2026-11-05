@@ -27,6 +27,7 @@
   import { getProjectStatus } from './projectStatus';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
+  import RemoteProjectIcon from './RemoteProjectIcon.svelte';
   import ProjectStatusSubmenu from './ProjectStatusSubmenu.svelte';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -552,8 +553,8 @@
                       ></div>
                     {/if}
                     <div class="card-header">
-                      <!-- Remote cards and chosen statuses paint at once; only
-                           the PR status waits on branches. -->
+                      <!-- Chosen statuses paint at once; only the PR status
+                           waits on branches. -->
                       <ProjectStatusIcon
                         {project}
                         branches={projectBranches.get(project.id) || []}
@@ -570,14 +571,45 @@
                     {#if status.kind === 'deleting'}
                       <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
                     {/if}
-                    <div class="repo">
-                      {#if repos.length > 0}
-                        {#each [...repos].sort((a, b) => {
-                          const aKey = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
-                          const bKey = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
-                          return aKey.localeCompare(bKey);
-                        }) as r}
-                          {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
+                    <div class="card-footer">
+                      {#if project.location === 'remote'}
+                        <RemoteProjectIcon size={14} />
+                      {/if}
+                      <div class="repo">
+                        {#if repos.length > 0}
+                          {#each [...repos].sort((a, b) => {
+                            const aKey = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
+                            const bKey = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
+                            return aKey.localeCompare(bKey);
+                          }) as r}
+                            {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
+                            {#if badge}
+                              <span
+                                class="repo-badge-label"
+                                style="background: {badgeBg(
+                                  badge.hue,
+                                  darkMode.value
+                                )}; color: {badgeFg(badge.hue, darkMode.value)};"
+                              >
+                                <RepoLabel
+                                  githubRepo={r.headRepo ?? r.githubRepo}
+                                  subpath={r.subpath}
+                                />
+                              </span>
+                            {:else}
+                              <span class="repo-line">
+                                <RepoLabel
+                                  githubRepo={r.headRepo ?? r.githubRepo}
+                                  subpath={r.subpath}
+                                />
+                              </span>
+                            {/if}
+                          {/each}
+                        {:else if project.githubRepo}
+                          {@const badge = repoBadgeStore.lookup(
+                            project.githubRepo,
+                            project.subpath
+                          )}
                           {#if badge}
                             <span
                               class="repo-badge-label"
@@ -587,39 +619,22 @@
                               )}; color: {badgeFg(badge.hue, darkMode.value)};"
                             >
                               <RepoLabel
-                                githubRepo={r.headRepo ?? r.githubRepo}
-                                subpath={r.subpath}
+                                githubRepo={project.githubRepo}
+                                subpath={project.subpath}
                               />
                             </span>
                           {:else}
                             <span class="repo-line">
                               <RepoLabel
-                                githubRepo={r.headRepo ?? r.githubRepo}
-                                subpath={r.subpath}
+                                githubRepo={project.githubRepo}
+                                subpath={project.subpath}
                               />
                             </span>
                           {/if}
-                        {/each}
-                      {:else if project.githubRepo}
-                        {@const badge = repoBadgeStore.lookup(project.githubRepo, project.subpath)}
-                        {#if badge}
-                          <span
-                            class="repo-badge-label"
-                            style="background: {badgeBg(
-                              badge.hue,
-                              darkMode.value
-                            )}; color: {badgeFg(badge.hue, darkMode.value)};"
-                          >
-                            <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
-                          </span>
                         {:else}
-                          <span class="repo-line">
-                            <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
-                          </span>
+                          No repo attached
                         {/if}
-                      {:else}
-                        No repo attached
-                      {/if}
+                      </div>
                     </div>
                   </button>
                 </ContextMenu.Trigger>
@@ -832,8 +847,23 @@
     flex-shrink: 0;
   }
 
-  .repo {
+  /* Pinned to the bottom of the card. A remote project's cloud leads the repo
+     line in a column as wide as the header's status icon, so it sits under
+     that icon and the repos line up with the name. */
+  .card-footer {
     margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .card-footer > :global(.remote-project-icon) {
+    width: 16px;
+  }
+
+  .repo {
+    flex: 1;
+    min-width: 0;
     font-size: var(--size-sm);
     display: flex;
     flex-wrap: wrap;

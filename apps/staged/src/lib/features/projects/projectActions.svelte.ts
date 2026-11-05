@@ -49,10 +49,10 @@ class ProjectActionsController {
 
   /**
    * Choose a status option for a project, or null to go back to Default (the
-   * computed PR/cloud status). Patches the project store at once so every
-   * surface repaints. Writes run in selection order for each project, and a
-   * failed write rolls back to the last confirmed status only if no newer
-   * selection has superseded it.
+   * computed PR status). Patches the project store at once so every surface
+   * repaints. Writes run in selection order for each project, and a failed
+   * write rolls back to the last confirmed status only if no newer selection
+   * has superseded it.
    */
   async setProjectStatusOverride(project: Project, statusOverride: string | null): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;

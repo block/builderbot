@@ -144,6 +144,22 @@ pub(crate) fn resolve_branch_repo_slug(
     Ok(project_primary_repo(project)?.to_string())
 }
 
+/// The Blox workspace a remote project's branches share, or `None` while the
+/// project has no remote branch — a remote project created without a repo
+/// has no workspace until its first repo is added and provisions one.
+pub(crate) fn existing_project_workspace_name(
+    store: &Store,
+    project_id: &str,
+) -> Result<Option<String>, String> {
+    Ok(store
+        .list_branches_for_project(project_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|b| b.branch_type == store::BranchType::Remote)
+        .and_then(|b| b.workspace_name)
+        .filter(|name| !name.trim().is_empty()))
+}
+
 /// Resolve the shared workspace name for a remote project.
 ///
 /// If any remote branch already exists for the project, reuse its workspace
@@ -153,14 +169,7 @@ pub(crate) fn resolve_project_workspace_name(
     project: &store::Project,
     fallback_workspace_name: Option<&str>,
 ) -> Result<String, String> {
-    let existing = store
-        .list_branches_for_project(&project.id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|b| b.branch_type == store::BranchType::Remote)
-        .and_then(|b| b.workspace_name)
-        .filter(|name| !name.trim().is_empty());
-    if let Some(name) = existing {
+    if let Some(name) = existing_project_workspace_name(store, &project.id)? {
         return Ok(name);
     }
 

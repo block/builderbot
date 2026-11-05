@@ -13,13 +13,15 @@
   creating one here with Remote on offer updates), showing local while Remote
   can't be picked. A remote project starts from the note's repo, looked up
   from the stored note on each open through `loadNoteRepo` (the host's idea
-  of the repo can be missing or stale), so Remote waits on that lookup.
+  of the repo can be missing or stale), so Remote waits on that lookup; a
+  note with no repo makes a remote project with none, and no workspace yet.
   `onPrepare` runs before anything is created, so a transfer refused up front
-  leaves no project behind — a remote one starts provisioning its workspace
-  as soon as it exists. Failures — from those checks, creating the project,
-  adding the note's repo, or the transfer itself — stay inline so the choice
-  can be retried, and one that comes after the project was created says so;
-  the backend guarantees a failed transfer left the note where it was.
+  leaves no project behind — a remote one made from a repo starts
+  provisioning its workspace as soon as it exists. Failures — from those
+  checks, creating the project, adding the note's repo, or the transfer
+  itself — stay inline so the choice can be retried, and one that comes
+  after the project was created says so; the backend guarantees a failed
+  transfer left the note where it was.
 -->
 <script lang="ts" module>
   let inputCounter = 0;
@@ -246,7 +248,8 @@
         defaultBranch
       );
     } else {
-      project = await commands.createProject(name, 'local');
+      // A remote project with no repo has no workspace until one is added.
+      project = await commands.createProject(name, at);
     }
     if (remember) setNewProjectLocation(at);
     return project;

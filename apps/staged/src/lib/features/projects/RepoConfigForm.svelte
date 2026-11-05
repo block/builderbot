@@ -53,9 +53,6 @@
     // Optional callbacks
     onBranchSelected?: (selection: BranchSelection) => void;
 
-    // Show "Required" badge on Repository label (for remote location in NewProjectForm)
-    repoRequired?: boolean;
-
     // Exposed API for parent validation and programmatic repo selection
     api?: {
       waitForSubpathValidation: () => Promise<SubpathValidationResult>;
@@ -75,7 +72,6 @@
     disabled = false,
     excludeRepos,
     autofocus = false,
-    repoRequired = false,
     onBranchSelected,
     api = $bindable<
       | {
@@ -293,12 +289,7 @@
      them while the loading overlay is visible. -->
   <div class="repo-fields" class:resolving-hidden={resolvingPr}>
     <div class="form-group">
-      <Label for="project-repo-select" class="text-muted-foreground text-xs">
-        Repository
-        {#if repoRequired && !selectedRepo}
-          <span class="field-badge required">Required</span>
-        {/if}
-      </Label>
+      <Label for="project-repo-select" class="text-muted-foreground text-xs">Repository</Label>
       {#if selectedRepo}
         <div class="repo-info" class:disabled>
           <GitBranch size={14} class="repo-info-icon" />
@@ -492,11 +483,6 @@
 
   .field-badge.recommended {
     background-color: var(--ui-accent);
-    color: var(--bg-deepest);
-  }
-
-  .field-badge.required {
-    background-color: var(--ui-danger);
     color: var(--bg-deepest);
   }
 

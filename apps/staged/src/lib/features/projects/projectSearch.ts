@@ -16,11 +16,13 @@
  * result shows, and returns the ranked matches and their reasons from one
  * pass.
  *
- * Neither surface re-renders in rank order. Both keep every row mounted in
- * its unsearched DOM order, hide what the query rules out, and lay the rest
- * out by `ProjectSearchResult.rank` through CSS `order`, so a keystroke flips
+ * Neither surface re-renders per keystroke. Both keep every row mounted,
+ * hide what the query rules out, and lay the rest out by
+ * `ProjectSearchResult.rank` through CSS `order`, so a keystroke flips
  * attributes and styles on rows that already exist rather than re-keying an
- * `{#each}`.
+ * `{#each}`; once the query settles, the rows are re-keyed into rank order
+ * once, so DOM order matches the screen (Row order, searchRowOrder). A
+ * held query is re-ranked only when it is edited (searchOrderHold).
  *
  * `visibleProjects` is the whole composition the grid shows — chip filters,
  * sticky return-target card, then the query — lifted out of the component so
@@ -40,6 +42,16 @@ import { projectDisplayName } from '../../shared/utils';
 // name, or MATCH_BONUS.allInOneItem when a single branch (with its PR), note
 // or review holds every term of a multi-word query. The weights are powers
 // of two, so a one-word query orders strictly by the best field it hit.
+//
+// A bare `pr` is a PR term. In a project with a PR it scores as the PR,
+// however many words of the name contain the two letters (improved, project,
+// prod); in one without, it is plain text, and the name still matches it
+// but scores nothing for it, so every project with a PR outranks it.
+//
+// Ranking is by field; the reason line is by identity. A term the name or a
+// repo label holds is one the card already shows, so it never puts an item
+// on the reason line, even where an item's field outscores the repo label
+// and lifts the card.
 
 /** What a query term is worth, by the best field it was found in. */
 export const FIELD_WEIGHTS = {
@@ -58,6 +70,31 @@ export const FIELD_WEIGHTS = {
   /** A review's title. */
   review: 1,
 } as const;
+
+/** A field a query term can be found in. */
+export type SearchField = keyof typeof FIELD_WEIGHTS;
+
+/** The heaviest field an item can hold a term in: a term's scan of the
+ *  items stops at the first item holding it there. */
+const MAX_ITEM_WEIGHT = Math.max(
+  FIELD_WEIGHTS.pr,
+  FIELD_WEIGHTS.branch,
+  FIELD_WEIGHTS.projectNote,
+  FIELD_WEIGHTS.note,
+  FIELD_WEIGHTS.review
+);
+
+/** One bit per field, so the fields an item holds text in and the fields a
+ *  query's terms were best found in compare in one AND. */
+const FIELD_BIT: Record<SearchField, number> = {
+  name: 1,
+  pr: 2,
+  branch: 4,
+  repo: 8,
+  projectNote: 16,
+  note: 32,
+  review: 64,
+};
 
 /** Added once to a project's score when every term lands in one place. */
 export const MATCH_BONUS = {
@@ -107,9 +144,10 @@ export interface MatchReason {
   /** Contributing items other than the one shown. */
   more: number;
   /**
-   * The query terms (queryTerms) this item matched for itself: the ones it
-   * holds that the name or a repo label doesn't explain better, minus any
-   * its PR prefix explains (a bare `pr`, or the PR's number). The label
+   * The query terms (parsed: repeats and contained words dropped) this
+   * item matched for itself: the ones it holds that neither the name nor a
+   * repo label holds, minus any its PR prefix explains (a bare `pr`, or the
+   * PR's number). The label
    * windows on the first of these, so a term that highlights early anyway —
    * in the `PR #123` prefix, or one the name already matched — doesn't hold
    * a long title's match off screen.
@@ -120,11 +158,12 @@ export interface MatchReason {
 /** A search's result: what it keeps, in what order, and why, from one pass. */
 export interface ProjectSearchResult {
   /** The projects the query keeps, best match first and equal scores in
-   *  input order; for a blank query, the input array itself. */
+   *  input order (or, after searchOrderHold, the order already on screen);
+   *  for a blank query, the input array itself. */
   projects: Project[];
-  /** Each kept project's index in `projects`, by id: the CSS `order` the
-   *  surfaces lay kept rows out by, and the set they hide the rest by. Null
-   *  for a blank query, which keeps everything in its own order. */
+  /** Each kept project's index in `projects`, by id: the order the surfaces
+   *  lay kept rows out in, and the set they hide the rest by. Null for a
+   *  blank query, which keeps everything in its own order. */
   rank: ReadonlyMap<string, number> | null;
   /** Why each kept project matched, by id, when its name and repos alone
    *  don't say. */
@@ -143,10 +182,13 @@ interface SearchItem {
   updatedAt: number;
   /** `name` lower-cased: a branch name or a title. */
   text: string;
-  /** What a term found in `text` is worth (FIELD_WEIGHTS). */
-  weight: number;
-  /** `prTitle` lower-cased, worth FIELD_WEIGHTS.pr. */
+  /** The field `text` is: a branch name, or the index item's kind. */
+  field: SearchField;
+  /** `prTitle` lower-cased, in the `pr` field. */
   prText: string | null;
+  /** FIELD_BIT of every field the item can hold a term in: `field`, and
+   *  `pr` when it has a PR. */
+  fields: number;
 }
 
 /** One project's prepared search data. */
@@ -156,6 +198,8 @@ export interface SearchSnapshotEntry {
   /** Its repo labels, lower-cased. */
   readonly repos: readonly string[];
   readonly items: readonly SearchItem[];
+  /** Whether any item has a PR, for a bare `pr`. */
+  readonly hasPr: boolean;
   /** The context lists `items` came from. Bookkeeping, updated in place when
    *  an entry is kept, so an unchanged list skips the item-by-item compare. */
   branches: readonly Branch[] | undefined;
@@ -177,13 +221,23 @@ interface Term {
 }
 
 /** Per-search scratch space, so scoring a project allocates only what a
- *  result keeps. */
+ *  result keeps. Indexed by term, for the project being scored. */
 interface Scratch {
-  /** Each term's best weight in the project being scored. */
-  best: number[];
+  /** The best field the term was found in. */
+  field: SearchField[];
+  /** What the term scores: its best field's weight, or 0 for a bare `pr`
+   *  that only the name of a project without a PR holds. */
+  weight: number[];
+  /** Whether the name or a repo label holds the term: the card already
+   *  shows it, so no item has to explain it. */
+  identity: boolean[];
   /** The reason the last scored project shows, if any. */
   reason: MatchReason | undefined;
 }
+
+/** matchEntry's score for an entry that doesn't match. A match can score 0:
+ *  a bare `pr` only a PR-less project's name holds. */
+const NO_MATCH = -1;
 
 const NO_STRINGS: readonly string[] = [];
 const NO_ITEMS: readonly SearchItem[] = [];
@@ -234,8 +288,9 @@ function projectItems(
       prNumber: b.prNumber,
       updatedAt: b.updatedAt,
       text: b.branchName.toLowerCase(),
-      weight: FIELD_WEIGHTS.branch,
+      field: 'branch',
       prText: prTitle?.toLowerCase() ?? null,
+      fields: FIELD_BIT.branch | (b.prNumber === null ? 0 : FIELD_BIT.pr),
     });
   }
   for (const item of indexItems ?? []) {
@@ -246,8 +301,9 @@ function projectItems(
       prNumber: null,
       updatedAt: item.updatedAt,
       text: item.text,
-      weight: FIELD_WEIGHTS[item.kind],
+      field: item.kind,
       prText: null,
+      fields: FIELD_BIT[item.kind],
     });
   }
   return items;
@@ -258,7 +314,7 @@ function sameStrings(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /** Whether two item lists match and label alike (the lower-cased texts and
- *  weights follow from the rest). */
+ *  fields follow from the rest). */
 function sameItems(a: readonly SearchItem[], b: readonly SearchItem[]): boolean {
   return (
     a.length === b.length &&
@@ -296,7 +352,8 @@ function projectEntry(
     prev.indexItems = indexItems;
     return prev;
   }
-  return { name, repos, items, branches, indexItems };
+  const hasPr = items.some((item) => item.prNumber !== null);
+  return { name, repos, items, hasPr, branches, indexItems };
 }
 
 /**
@@ -332,13 +389,40 @@ function nameOnlyEntry(project: Project): SearchSnapshotEntry {
     name: projectDisplayName(project).toLowerCase(),
     repos: NO_STRINGS,
     items: NO_ITEMS,
+    hasPr: false,
     branches: undefined,
     indexItems: undefined,
   };
 }
 
-function parseTerms(terms: readonly string[]): Term[] {
-  return terms.map((text) => ({ text, number: termPrNumber(text), anyPr: text === 'pr' }));
+/** Whether every field holding `other` holds `term` too, so `term` adds
+ *  nothing. A number term can match a PR by its number rather than its
+ *  text, so the only shorter term it implies is a bare `pr` it starts with
+ *  (`pr123`: PR 123 is a PR), and a number term is never implied, only
+ *  repeated. */
+function impliedBy(term: Term, other: Term): boolean {
+  return (
+    term.number === null && other.text.includes(term.text) && (other.number === null || term.anyPr)
+  );
+}
+
+/**
+ * The query's terms, parsed, minus any another term implies: a repeat, or
+ * a word inside a longer one (`log` in `login`, `pr` in `pr123`). What
+ * matches is unchanged, since every field holding the longer term holds
+ * the shorter; what stops is one word counting twice, scoring twice and
+ * earning the one-item bonus a one-word query never gets, so `login login`
+ * ranks as `login` does. Of two repeats, the first is kept.
+ */
+function parseTerms(raw: readonly string[]): Term[] {
+  const all = raw.map((text) => ({ text, number: termPrNumber(text), anyPr: text === 'pr' }));
+  if (all.length === 1) return all;
+  return all.filter(
+    (term, i) =>
+      !all.some((other, j) =>
+        other.text === term.text ? j < i : j !== i && impliedBy(term, other)
+      )
+  );
 }
 
 function includedIn(fields: readonly string[], text: string): boolean {
@@ -351,29 +435,48 @@ function itemPrHasTerm(item: SearchItem, term: Term): boolean {
   return item.prNumber !== null && (term.anyPr || term.number === item.prNumber);
 }
 
-/** What the term is worth in the item: the PR's weight when its PR holds it
- *  (itemPrHasTerm, or the PR's title), else its text's, else 0. */
-function itemWeight(item: SearchItem, term: Term): number {
-  if (itemPrHasTerm(item, term) || item.prText?.includes(term.text)) return FIELD_WEIGHTS.pr;
-  return item.text.includes(term.text) ? item.weight : 0;
+/** The field the item holds the term in: its PR when the PR does
+ *  (itemPrHasTerm, or the PR's title), else its text's, else null. */
+function itemField(item: SearchItem, term: Term): SearchField | null {
+  if (itemPrHasTerm(item, term) || item.prText?.includes(term.text)) return 'pr';
+  return item.text.includes(term.text) ? item.field : null;
 }
 
-/** The weight of the best field in the entry that holds the term, or 0. */
-function termWeight(entry: SearchSnapshotEntry, term: Term): number {
-  if (entry.name.includes(term.text)) return FIELD_WEIGHTS.name;
-  let best = 0;
-  for (const item of entry.items) {
-    best = Math.max(best, itemWeight(item, term));
-    // No item field outranks a PR.
-    if (best === FIELD_WEIGHTS.pr) return best;
+/**
+ * Records term `i`'s best field in the entry, what it scores, and whether
+ * the name or a repo label holds it (Scratch). False when nothing holds it.
+ */
+function scoreTerm(entry: SearchSnapshotEntry, term: Term, i: number, s: Scratch): boolean {
+  if (term.anyPr && entry.hasPr) {
+    // The project's PRs hold it, whatever else has the two letters.
+    s.field[i] = 'pr';
+    s.weight[i] = FIELD_WEIGHTS.pr;
+    s.identity[i] = false;
+    return true;
   }
-  if (best < FIELD_WEIGHTS.repo && includedIn(entry.repos, term.text)) return FIELD_WEIGHTS.repo;
-  return best;
-}
-
-/** A term the name or a repo label explains: the card or row already shows it. */
-function isIdentityWeight(weight: number): boolean {
-  return weight === FIELD_WEIGHTS.name || weight === FIELD_WEIGHTS.repo;
+  const inName = entry.name.includes(term.text);
+  const inRepo = includedIn(entry.repos, term.text);
+  let field: SearchField | null = inName ? 'name' : null;
+  // A bare `pr` here is two letters of a word; see Ranking.
+  let weight = inName && !term.anyPr ? FIELD_WEIGHTS.name : 0;
+  if (weight < MAX_ITEM_WEIGHT) {
+    for (const item of entry.items) {
+      const found = itemField(item, term);
+      if (found === null || FIELD_WEIGHTS[found] <= weight) continue;
+      field = found;
+      weight = FIELD_WEIGHTS[found];
+      if (weight === MAX_ITEM_WEIGHT) break;
+    }
+  }
+  if (inRepo && FIELD_WEIGHTS.repo > weight) {
+    field = 'repo';
+    weight = FIELD_WEIGHTS.repo;
+  }
+  if (field === null) return false;
+  s.field[i] = field;
+  s.weight[i] = weight;
+  s.identity[i] = inName || inRepo;
+  return true;
 }
 
 /**
@@ -386,7 +489,7 @@ function isIdentityWeight(weight: number): boolean {
 function reasonFor(
   item: SearchItem,
   terms: readonly Term[],
-  best: readonly number[],
+  identity: readonly boolean[],
   more: number
 ): MatchReason {
   const itemTerms: string[] = [];
@@ -394,7 +497,7 @@ function reasonFor(
   let inText = false;
   for (let i = 0; i < terms.length; i++) {
     const term = terms[i];
-    if (isIdentityWeight(best[i]) || itemPrHasTerm(item, term)) continue;
+    if (identity[i] || itemPrHasTerm(item, term)) continue;
     const title = item.prText?.includes(term.text) ?? false;
     const text = item.text.includes(term.text);
     if (!title && !text) continue;
@@ -411,8 +514,8 @@ function reasonFor(
 }
 
 /**
- * The entry's score for the parsed query (FIELD_WEIGHTS, MATCH_BONUS), or 0
- * when it doesn't match; its reason, if it shows one, in `scratch.reason`.
+ * The entry's score for the parsed query (FIELD_WEIGHTS, MATCH_BONUS), or
+ * NO_MATCH; its reason, if it shows one, in `s.reason`.
  *
  * A project matches when every term is a substring of some field of it —
  * the name, a repo label, any branch name, PR or title — case-insensitively,
@@ -423,55 +526,73 @@ function reasonFor(
  *
  * Every term in the name: the top score, and no reason, as the name on
  * screen explains it. Otherwise the reason is the best of the items that
- * contributed — that hold a term at its best weight, one the name or a repo
- * label doesn't explain, or that earn the one-item bonus — ranked by what
- * the item alone would score, then recency, with the rest counted as `more`.
- * A bare `pr` met only by a PR's prefix doesn't make that PR contribute when
- * the query has other terms of its own: every PR meets it. Nothing
- * contributing means the name and repos explain the match: no reason.
+ * contributed, ranked by what the item alone would score, then recency,
+ * with the rest counted as `more`. An item contributes when it holds one of
+ * the query's own terms — one neither the name nor a repo label holds — in
+ * that term's best field, or holds every term of a query that has one of
+ * its own. A bare `pr` met only by a PR's prefix doesn't make that PR
+ * contribute when the query has other terms of its own: every PR meets it.
+ * A query with no terms of its own is the name and repos' match: no reason,
+ * though items can still lift its score.
  */
-function matchEntry(entry: SearchSnapshotEntry, terms: readonly Term[], scratch: Scratch): number {
-  const { best } = scratch;
-  scratch.reason = undefined;
+function matchEntry(entry: SearchSnapshotEntry, terms: readonly Term[], s: Scratch): number {
+  s.reason = undefined;
   let score = 0;
   let allInName = true;
   let ownTerms = 0;
+  // FIELD_BIT of the best fields of the query's own terms: what an item
+  // has to hold text in to supply one.
+  let wanted = 0;
   for (let i = 0; i < terms.length; i++) {
-    const weight = termWeight(entry, terms[i]);
-    if (weight === 0) return 0;
-    best[i] = weight;
-    score += weight;
-    if (weight !== FIELD_WEIGHTS.name) allInName = false;
-    if (!isIdentityWeight(weight)) ownTerms++;
+    if (!scoreTerm(entry, terms[i], i, s)) return NO_MATCH;
+    score += s.weight[i];
+    if (s.field[i] !== 'name' || terms[i].anyPr) allInName = false;
+    if (!s.identity[i]) {
+      ownTerms++;
+      wanted |= FIELD_BIT[s.field[i]];
+    }
   }
   if (allInName) return score + MATCH_BONUS.allInName;
+  const multi = terms.length > 1;
+  // One term, and the name or a repo holds it: no item explains anything.
+  if (!multi && ownTerms === 0) return score;
 
   let shown: SearchItem | null = null;
   let shownScore = 0;
   let contributing = 0;
   let oneItem = false;
   for (const item of entry.items) {
+    const canSupply = (item.fields & wanted) !== 0;
+    // Otherwise it only counts by holding every term: as a contributor when
+    // the query has terms of its own, else just for the bonus, once.
+    if (!canSupply && !(multi && (ownTerms > 0 || !oneItem))) continue;
     let held = 0;
     let itemScore = 0;
     let supplies = false;
     for (let i = 0; i < terms.length; i++) {
       const term = terms[i];
-      const weight = itemWeight(item, term);
-      if (weight === 0) continue;
+      const found = itemField(item, term);
+      if (found === null) {
+        // Missing one term, it can't hold every term either.
+        if (!canSupply) break;
+        continue;
+      }
       held++;
-      itemScore += weight;
-      // An item weight never equals the name's or a repo's, so this is a
-      // term only items explain, at its best.
-      if (weight === best[i] && !(term.anyPr && ownTerms > 1 && itemPrHasTerm(item, term))) {
+      itemScore += FIELD_WEIGHTS[found];
+      if (
+        !s.identity[i] &&
+        found === s.field[i] &&
+        !(term.anyPr && ownTerms > 1 && itemPrHasTerm(item, term))
+      ) {
         supplies = true;
       }
     }
-    const whole = terms.length > 1 && held === terms.length;
+    const whole = multi && held === terms.length;
     if (whole) {
       oneItem = true;
       itemScore += MATCH_BONUS.allInOneItem;
     }
-    if (!supplies && !whole) continue;
+    if (!supplies && !(whole && ownTerms > 0)) continue;
     contributing++;
     if (
       !shown ||
@@ -483,7 +604,7 @@ function matchEntry(entry: SearchSnapshotEntry, terms: readonly Term[], scratch:
     }
   }
   if (oneItem) score += MATCH_BONUS.allInOneItem;
-  if (shown) scratch.reason = reasonFor(shown, terms, best, contributing - 1);
+  if (shown) s.reason = reasonFor(shown, terms, s.identity, contributing - 1);
   return score;
 }
 
@@ -493,6 +614,13 @@ function byScore(kept: Project[], scores: readonly number[]): Project[] {
     .map((_, i) => i)
     .sort((a, b) => scores[b] - scores[a])
     .map((i) => kept[i]);
+}
+
+/** Each project's index in `projects`, by id. */
+function positions(projects: readonly Project[]): Map<string, number> {
+  const rank = new Map<string, number>();
+  for (let i = 0; i < projects.length; i++) rank.set(projects[i].id, i);
+  return rank;
 }
 
 /**
@@ -510,7 +638,12 @@ export function searchProjects(
   const raw = queryTerms(query);
   if (raw.length === 0) return { projects, rank: null, reasons: NO_REASONS };
   const terms = parseTerms(raw);
-  const scratch: Scratch = { best: new Array<number>(terms.length).fill(0), reason: undefined };
+  const scratch: Scratch = {
+    field: new Array<SearchField>(terms.length).fill('name'),
+    weight: new Array<number>(terms.length).fill(0),
+    identity: new Array<boolean>(terms.length).fill(false),
+    reason: undefined,
+  };
   const kept: Project[] = [];
   const scores: number[] = [];
   let tied = true;
@@ -518,18 +651,114 @@ export function searchProjects(
   for (const project of projects) {
     const entry = snapshot?.entries.get(project.id) ?? nameOnlyEntry(project);
     const score = matchEntry(entry, terms, scratch);
-    if (score === 0) continue;
+    if (score === NO_MATCH) continue;
     if (scores.length > 0 && score !== scores[0]) tied = false;
     kept.push(project);
     scores.push(score);
     if (scratch.reason) (reasons ??= new Map()).set(project.id, scratch.reason);
   }
   const ranked = tied ? kept : byScore(kept, scores);
-  return {
-    projects: ranked,
-    rank: new Map(ranked.map((p, i) => [p.id, i])),
-    reasons: reasons ?? NO_REASONS,
+  return { projects: ranked, rank: positions(ranked), reasons: reasons ?? NO_REASONS };
+}
+
+/** `next`'s matches in `held`'s order: the ones `held` ranked keep their
+ *  order, then the new ones in `next`'s. `next` itself when that is its
+ *  own order. Both rank non-null. */
+function inHeldOrder(held: ProjectSearchResult, next: ProjectSearchResult): ProjectSearchResult {
+  const heldRank = held.rank!;
+  const nextRank = next.rank!;
+  const projects: Project[] = [];
+  for (const p of held.projects) {
+    const at = nextRank.get(p.id);
+    if (at !== undefined) projects.push(next.projects[at]);
+  }
+  for (const p of next.projects) if (!heldRank.has(p.id)) projects.push(p);
+  if (projects.every((p, i) => p === next.projects[i])) return next;
+  return { projects, rank: positions(projects), reasons: next.reasons };
+}
+
+/**
+ * A surface's search results, re-ranked only when its query is edited. Call
+ * the returned function with every fresh result and the query it ran for,
+ * inside the `$derived` that runs the search.
+ *
+ * While the query stays the one the results were last ranked for, a fresh
+ * result keeps the order already on screen: projects that still match keep
+ * their places, ones that stopped matching drop out, and new matches follow
+ * the rest, best first. So a PR poll bringing a title, an index refetch
+ * while a session writes notes, a rename or a filter change under a held
+ * query can hide a card or add one at the end, but never move the card
+ * under the cursor, or the one ⌘N was about to open. Reasons are always the
+ * fresh result's. Any edit to the query, a space included, ranks afresh; a
+ * blank query passes through and forgets the held order.
+ */
+export function searchOrderHold(): (
+  query: string,
+  result: ProjectSearchResult
+) => ProjectSearchResult {
+  let held: { query: string; result: ProjectSearchResult } | null = null;
+  return (query, result) => {
+    if (result.rank === null) {
+      held = null;
+      return result;
+    }
+    if (held !== null && held.query === query) result = inHeldOrder(held.result, result);
+    held = { query, result };
+    return result;
   };
+}
+
+// ── Row order ──
+//
+// A surface lays out its rows by `rank` with CSS `order` per keystroke,
+// leaving the DOM alone, and re-keys its {#each} into rank order once the
+// query settles, so DOM and tab order catch up with the order on screen
+// (searchRowOrder.svelte.ts). These are the pure halves of that.
+
+/**
+ * `base` with the projects `order` ranks first, by position, then the rest
+ * in `base` order: the order to render rows in once a search settles. A
+ * null order is `base` itself.
+ */
+export function inRankOrder(base: Project[], order: ReadonlyMap<string, number> | null): Project[] {
+  if (order === null) return base;
+  const ranked: Array<Project | undefined> = new Array(order.size);
+  const rest: Project[] = [];
+  for (const p of base) {
+    const at = order.get(p.id);
+    if (at === undefined) rest.push(p);
+    else ranked[at] = p;
+  }
+  // Positions of projects `base` no longer holds stay empty.
+  const rows: Project[] = [];
+  for (const p of ranked) if (p !== undefined) rows.push(p);
+  for (const p of rest) rows.push(p);
+  return rows;
+}
+
+/** Each project's position in `base`, by id: where a row goes for a blank
+ *  query while the DOM still holds the last search's order. */
+export function basePositions(base: readonly Project[]): ReadonlyMap<string, number> {
+  return positions(base);
+}
+
+/**
+ * Whether `rows`, in render order, already put the projects `target` ranks
+ * in its order, so CSS `order` has nothing to move. Rows `target` doesn't
+ * hold are hidden and don't count.
+ */
+export function rowsFollowRank(
+  rows: readonly Project[],
+  target: ReadonlyMap<string, number>
+): boolean {
+  let last = -1;
+  for (const p of rows) {
+    const at = target.get(p.id);
+    if (at === undefined) continue;
+    if (at < last) return false;
+    last = at;
+  }
+  return true;
 }
 
 /**
@@ -580,9 +809,9 @@ export function visibleProjects(
 /**
  * The ⌘1–9 number of each card on screen, by project id: the first nine of
  * `shown` (visibleProjects' result), in the order the grid lays them out —
- * rank order while searching. The grid keeps cards mounted in their
- * unsearched order, hiding and reordering them with CSS, so a card's place in
- * the rendered list is not its place on screen; ⌘N opens `shown[N - 1]`, and
+ * rank order while searching. The grid keeps cards mounted, hiding them and,
+ * until a query settles, reordering them with CSS, so a card's place in the
+ * rendered list is not its place on screen; ⌘N opens `shown[N - 1]`, and
  * these are the numbers the overlay has to show for that.
  */
 export function projectShortcutNumbers(shown: Project[]): Map<string, number> {

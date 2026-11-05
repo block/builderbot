@@ -45,8 +45,10 @@
     sidebarPinnedRepos,
     sidebarProjectMatches,
   } from './sidebarSearch';
+  import { searchOrderHold } from './projectSearch';
   import { projectSearchSnapshots } from './projectSearchContext';
   import { projectSearchIndex } from './projectSearchIndex.svelte';
+  import { searchRowOrder } from './searchRowOrder.svelte';
   import { queryTerms } from '../../shared/textSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
@@ -130,15 +132,26 @@
   // Matched on branches, PRs, repo labels and titles too (projectSearch),
   // prepared once per data change and only while searching, like the grid;
   // rows found that way say why on their meta line. Ranked like the grid,
-  // too: the rows stay in their unsearched DOM order and move with CSS
-  // `order` (projectRank), so ranking never re-keys the {#each}.
+  // too, and like it re-ranked only when the query is edited
+  // (searchOrderHold).
   const searchSnapshot = projectSearchSnapshots();
   let searchData = $derived(searching ? searchSnapshot() : null);
+  const holdOrder = searchOrderHold();
   let projectMatches = $derived(
-    sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
+    holdOrder(
+      searchQuery.current,
+      sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
+    )
   );
   // Null while the query is blank: every row shows, unordered.
   let projectRank = $derived(projectMatches.rank);
+  // The order the {#each} renders the rows in: per keystroke they stay put
+  // and CSS `order` moves them; once the query settles they are re-keyed
+  // into rank order, so tab and reading order match the screen.
+  const rowOrder = searchRowOrder(
+    () => sidebarProjects,
+    () => projectRank
+  );
   let visibleProjectCount = $derived(projectRank?.size ?? sidebarProjects.length);
   let searchTerms = $derived(queryTerms(searchQuery.current));
   let matchReasons = $derived(projectMatches.reasons);
@@ -438,6 +451,7 @@
       <SidebarSearchField
         bind:value={projectsListViewState.searchQuery}
         onfocus={() => projectSearchIndex.ensureLoaded()}
+        onblur={rowOrder.settle}
       />
     </div>
 
@@ -522,7 +536,7 @@
             <!-- The rows' own flex column, so the search's `order` ranks them
                  among themselves and never past the section headers. -->
             <div class="project-rows">
-              {#each sidebarProjects as project (project.id)}
+              {#each rowOrder.rows as project (project.id)}
                 {@const status = getProjectStatus(
                   project.id,
                   deletingProjectNames,
@@ -544,7 +558,7 @@
                          the rank's `order` goes here. -->
                     <button
                       class="project-row project-item"
-                      style:order={projectRank?.get(project.id)}
+                      style:order={rowOrder.orderOf(project.id)}
                       data-project-id={project.id}
                       use:scrollIfActive={layerProjectId === project.id}
                       class:active={layerProjectId === project.id}

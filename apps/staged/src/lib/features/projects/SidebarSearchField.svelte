@@ -15,9 +15,16 @@
     placeholder?: string;
     /** The input took focus; the owner prefetches what a query will search. */
     onfocus?: () => void;
+    /** The input lost focus. */
+    onblur?: () => void;
   }
 
-  let { value = $bindable(''), placeholder = 'Search repos & projects', onfocus }: Props = $props();
+  let {
+    value = $bindable(''),
+    placeholder = 'Search repos & projects',
+    onfocus,
+    onblur,
+  }: Props = $props();
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && value) {
@@ -38,6 +45,7 @@
     spellcheck="false"
     onkeydown={handleKeydown}
     {onfocus}
+    {onblur}
   />
   {#if value}
     <button type="button" class="clear" aria-label="Clear search" onclick={() => (value = '')}>

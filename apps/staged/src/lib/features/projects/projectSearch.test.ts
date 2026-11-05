@@ -3,8 +3,13 @@ import type { Branch, Project, ProjectRepo } from '../../types';
 import { queryTerms } from '../../shared/textSearch';
 import { labelTerms, matchLabelSegments } from './matchReasonLabel';
 import {
+  FIELD_WEIGHTS,
+  basePositions,
   buildSearchSnapshot,
+  inRankOrder,
   projectShortcutNumbers,
+  rowsFollowRank,
+  searchOrderHold,
   searchProjects,
   visibleProjects,
   withStickyProject,
@@ -353,6 +358,23 @@ describe('the matching rule', () => {
       const noPrs = context({ branches: { p1: [branch({ branchName: 'tidy-typos' })] } });
       expect(match(app, 'pr', noPrs).matched).toBe(false);
       expect(match(app, 'pr123', noPrs).matched).toBe(false);
+    });
+
+    it('lets the PR, not the name, hold a bare `pr` in a project with a PR', () => {
+      // "pr" is in "Improved"; the project's PRs still explain it.
+      const improved = project({ id: 'p1', name: 'Improved search' });
+      expect(match(improved, 'pr', ctx).reason).toEqual({
+        kind: 'pr',
+        label: 'PR #77 · add-metrics',
+        more: 1,
+        itemTerms: [],
+      });
+    });
+
+    it('matches `pr` in the name of a project without a PR, with no reason', () => {
+      const improved = project({ id: 'p1', name: 'Improved search' });
+      const noPrs = context({ branches: { p1: [branch({ branchName: 'tidy-typos' })] } });
+      expect(match(improved, 'pr', noPrs)).toEqual({ matched: true, reason: null });
     });
 
     it('still matches `pr` and `pr123` as text', () => {
@@ -768,6 +790,149 @@ describe('searchProjects ranking', () => {
     expect(result.rank).toBeNull();
     expect(result.reasons.size).toBe(0);
   });
+
+  it('gives every field its own weight, so a field is never mistaken for another', () => {
+    const weights = Object.values(FIELD_WEIGHTS);
+    expect(new Set(weights).size).toBe(weights.length);
+  });
+
+  describe('a bare `pr`', () => {
+    const withPr = project({ id: 'pr', name: 'Alpha' });
+    const prInName = project({ id: 'name', name: 'Improved search' });
+    const ctx = context({
+      branches: { pr: [branch({ projectId: 'pr', branchName: 'x', prNumber: 12 })] },
+    });
+
+    it('ranks a project with a PR above one that only has `pr` in its name', () => {
+      expect(ranked([prInName, withPr], 'pr', ctx)).toEqual(['pr', 'name']);
+    });
+
+    it('still finds the name match, scoring nothing for the `pr` in it', () => {
+      expect(ranked([prInName], 'pr', ctx)).toEqual(['name']);
+      // "search" earns the name weight; "pr" adds nothing and no name bonus.
+      expect(ranked([prInName, withPr], 'search pr', ctx)).toEqual(['name']);
+    });
+
+    it('scores a project with a PR as the PR even when its name has `pr`', () => {
+      const both = project({ id: 'both', name: 'Project X' });
+      const bothCtx = context({
+        branches: { both: [branch({ projectId: 'both', branchName: 'y', prNumber: 3 })] },
+      });
+      const result = searchProjects([both], 'pr', buildSearchSnapshot([both], bothCtx));
+      expect(result.reasons.get('both')?.label).toBe('PR #3 · y');
+    });
+  });
+
+  describe('a term a repo label holds', () => {
+    // Conventional-commit PR titles name the repo: `feat(staged): …`.
+    const staged = { 'block/builderbot/apps/staged': 'staged' };
+    const repos = (id: string) => [
+      projectRepo({ projectId: id, githubRepo: 'block/builderbot', subpath: 'apps/staged' }),
+    ];
+    const withPrs = project({ id: 'a', name: 'One' });
+    const noPrs = project({ id: 'b', name: 'Two' });
+    const ctx = context({
+      repos: { a: repos('a'), b: repos('b') },
+      shortNames: staged,
+      branches: {
+        a: [
+          branch({ id: 'b1', projectId: 'a', prNumber: 1, prTitle: 'feat(staged): one' }),
+          branch({ id: 'b2', projectId: 'a', prNumber: 2, prTitle: 'fix(staged): two' }),
+        ],
+      },
+    });
+
+    it('still lets a PR holding it lift the card', () => {
+      expect(ranked([noPrs, withPrs], 'staged', ctx)).toEqual(['a', 'b']);
+    });
+
+    it('gives no reason: the repo badge already shows it', () => {
+      const list = [noPrs, withPrs];
+      const result = searchProjects(list, 'staged', buildSearchSnapshot(list, ctx));
+      expect(result.reasons.size).toBe(0);
+    });
+
+    it('leaves the reason to the terms only items hold', () => {
+      const result = searchProjects([withPrs], 'staged two', buildSearchSnapshot([withPrs], ctx));
+      expect(result.reasons.get('a')).toEqual({
+        kind: 'pr',
+        label: 'PR #2 · fix(staged): two',
+        more: 0,
+        itemTerms: ['two'],
+      });
+    });
+
+    it('gives no reason when one item holds every term but the identity holds them all', () => {
+      const tweaks = project({ id: 'c', name: 'Search tweaks' });
+      const notes = context({
+        repos: { c: repos('c') },
+        shortNames: staged,
+        index: { c: [indexItem({ title: 'staged search ideas' })] },
+      });
+      const result = searchProjects(
+        [tweaks],
+        'search staged',
+        buildSearchSnapshot([tweaks], notes)
+      );
+      expect(result.projects).toEqual([tweaks]);
+      expect(result.reasons.size).toBe(0);
+    });
+
+    it('still earns the one-item bonus for an item holding every term', () => {
+      // Both hold "search" in the name and "staged" in a repo; only one has a
+      // note saying both.
+      const tweaks = project({ id: 'c', name: 'Search tweaks' });
+      const plain = project({ id: 'd', name: 'Search plain' });
+      const notes = context({
+        repos: { c: repos('c'), d: repos('d') },
+        shortNames: staged,
+        index: { c: [indexItem({ title: 'staged search ideas' })] },
+      });
+      expect(ranked([plain, tweaks], 'search staged', notes)).toEqual(['c', 'd']);
+    });
+  });
+
+  describe('repeated and contained terms', () => {
+    const repo = project({ id: 'repo', name: 'R', githubRepo: 'acme/login' });
+    const review = project({ id: 'review', name: 'V' });
+    const ctx = context({
+      index: { review: [indexItem({ kind: 'review', id: 'v', title: 'login flow' })] },
+    });
+
+    it('ranks `login login` and `log login` as `login`', () => {
+      // One word: the repo label outranks the review. Counted twice, the
+      // review's one-item bonus would reverse that.
+      expect(ranked([review, repo], 'login', ctx)).toEqual(['repo', 'review']);
+      expect(ranked([review, repo], 'login login', ctx)).toEqual(['repo', 'review']);
+      expect(ranked([review, repo], 'log login', ctx)).toEqual(['repo', 'review']);
+      expect(ranked([review, repo], 'login log', ctx)).toEqual(['repo', 'review']);
+    });
+
+    it('keeps the reason `login` gives', () => {
+      const result = (query: string) =>
+        searchProjects([review], query, buildSearchSnapshot([review], ctx)).reasons.get('review');
+      expect(result('login login')).toEqual(result('login'));
+      expect(result('log login')).toEqual(result('login'));
+    });
+
+    it('matches what it matched before', () => {
+      const app = project({ id: 'app', name: 'App', githubRepo: null });
+      const prCtx = context({
+        branches: { app: [branch({ projectId: 'app', branchName: 'fix', prNumber: 12 })] },
+      });
+      const found = (query: string) =>
+        searchProjects([app], query, buildSearchSnapshot([app], prCtx)).projects.length === 1;
+      // `#12` finds PR 12 by number, not by any text holding "#", so `#`
+      // still has to land on its own.
+      expect(found('#12')).toBe(true);
+      expect(found('# #12')).toBe(false);
+      // `pr123`-style terms hold a bare `pr`; `12 #12` are both number terms.
+      expect(found('pr pr12')).toBe(true);
+      expect(found('12 #12')).toBe(true);
+      expect(found('fix fi')).toBe(true);
+      expect(found('fix fx')).toBe(false);
+    });
+  });
 });
 
 describe('buildSearchSnapshot', () => {
@@ -1003,5 +1168,167 @@ describe('projectShortcutNumbers', () => {
 
   it('is empty when nothing is shown', () => {
     expect(projectShortcutNumbers([]).size).toBe(0);
+  });
+});
+
+describe('searchOrderHold', () => {
+  const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => project({ id, name: id.toUpperCase() }));
+  const list = [a, b, c, d];
+  // "login" in a branch name (16), a note title (2) and a review title (1).
+  const before = {
+    branches: { a: [branch({ projectId: 'a', branchName: 'login-page' })] },
+    index: {
+      b: [indexItem({ id: 'n', title: 'Login notes' })],
+      c: [indexItem({ kind: 'review', id: 'v', title: 'Review login' })],
+    },
+  };
+  const run = (hold: ReturnType<typeof searchOrderHold>, query: string, data = before) =>
+    hold(query, searchProjects(list, query, buildSearchSnapshot(list, context(data))));
+  const ids = (result: { projects: Project[] }) => result.projects.map((p) => p.id);
+  // A PR poll brings c a PR titled "Fix login": 32 points, ahead of a.
+  const polled = {
+    ...before,
+    branches: {
+      ...before.branches,
+      c: [branch({ projectId: 'c', branchName: 'x', prNumber: 4, prTitle: 'Fix login' })],
+    },
+  };
+
+  it('ranks the first result for a query as searchProjects did', () => {
+    const hold = searchOrderHold();
+    const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(before)));
+    expect(hold('login', fresh)).toBe(fresh);
+    expect(ids(fresh)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('keeps the order on screen when the data changes under a held query', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    // Ranked afresh, c would jump to the front.
+    expect(ids(searchProjects(list, 'login', buildSearchSnapshot(list, context(polled))))).toEqual([
+      'c',
+      'a',
+      'b',
+    ]);
+    const held = run(hold, 'login', polled);
+    expect(ids(held)).toEqual(['a', 'b', 'c']);
+    expect(held.rank).toEqual(
+      new Map([
+        ['a', 0],
+        ['b', 1],
+        ['c', 2],
+      ])
+    );
+  });
+
+  it('takes the reasons from the fresh result', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    expect(run(hold, 'login', polled).reasons.get('c')?.label).toBe('PR #4 · Fix login');
+  });
+
+  it('drops a project that stops matching, the rest keeping their places', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login', polled);
+    run(hold, 'login', before);
+    const renamed = {
+      ...before,
+      index: { ...before.index, b: [indexItem({ id: 'n', title: 'Auth notes' })] },
+    };
+    const held = run(hold, 'login', renamed);
+    expect(ids(held)).toEqual(['c', 'a']);
+    expect(held.rank).toEqual(
+      new Map([
+        ['c', 0],
+        ['a', 1],
+      ])
+    );
+  });
+
+  it('adds a new match after the rest, however well it scores', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    const named = {
+      ...before,
+      branches: {
+        ...before.branches,
+        d: [branch({ projectId: 'd', branchName: 'y', prNumber: 5, prTitle: 'Login form' })],
+      },
+    };
+    expect(ids(run(hold, 'login', named))).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('keeps an added match where it was added', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    // d's branch would rank it second; it goes last.
+    const added = {
+      ...before,
+      branches: { ...before.branches, d: [branch({ projectId: 'd', branchName: 'login-x' })] },
+    };
+    expect(ids(run(hold, 'login', added))).toEqual(['a', 'b', 'c', 'd']);
+    // And stays last while the query is held.
+    const repolled = { ...added, branches: { ...added.branches, c: polled.branches.c } };
+    expect(ids(run(hold, 'login', repolled))).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('ranks afresh when the query is edited, even by a space', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    expect(ids(run(hold, 'login', polled))).toEqual(['a', 'b', 'c']);
+    expect(ids(run(hold, 'login ', polled))).toEqual(['c', 'a', 'b']);
+    expect(ids(run(hold, 'logi', polled))).toEqual(['c', 'a', 'b']);
+  });
+
+  it('passes a blank query through and forgets the held order', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    const blank = searchProjects(list, '');
+    expect(hold('', blank)).toBe(blank);
+    expect(ids(run(hold, 'login', polled))).toEqual(['c', 'a', 'b']);
+  });
+
+  it('hands back the fresh result when it is already in the order on screen', () => {
+    const hold = searchOrderHold();
+    run(hold, 'login');
+    const fresh = searchProjects(list, 'login', buildSearchSnapshot(list, context(before)));
+    expect(hold('login', fresh)).toBe(fresh);
+  });
+});
+
+describe('row order', () => {
+  const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((id) => project({ id }));
+  const base = [a, b, c, d];
+  const order = (...ids: string[]) => new Map(ids.map((id, i) => [id, i]));
+
+  describe('inRankOrder', () => {
+    it('is the base list itself without an order', () => {
+      expect(inRankOrder(base, null)).toBe(base);
+    });
+
+    it('puts the ranked projects first, by rank, then the rest in base order', () => {
+      expect(inRankOrder(base, order('c', 'a'))).toEqual([c, a, b, d]);
+    });
+
+    it('skips ranked projects the base list no longer holds', () => {
+      expect(inRankOrder([a, b, d], order('c', 'd', 'a'))).toEqual([d, a, b]);
+    });
+  });
+
+  describe('rowsFollowRank', () => {
+    it('is true when the ranked rows already sit in rank order, hidden ones aside', () => {
+      expect(rowsFollowRank(base, order('b', 'd'))).toBe(true);
+      expect(rowsFollowRank([c, a, b, d], order('c', 'a', 'd'))).toBe(true);
+      expect(rowsFollowRank(base, new Map())).toBe(true);
+    });
+
+    it('is false when CSS order has rows to move', () => {
+      expect(rowsFollowRank(base, order('d', 'b'))).toBe(false);
+      expect(rowsFollowRank([c, a, b, d], basePositions(base))).toBe(false);
+    });
+  });
+
+  it('basePositions gives each project its place in the list', () => {
+    expect(basePositions(base)).toEqual(order('a', 'b', 'c', 'd'));
   });
 });

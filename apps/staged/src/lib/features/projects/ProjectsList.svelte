@@ -49,9 +49,15 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { projectShortcutNumbers, visibleProjects, withStickyProject } from './projectSearch';
+  import {
+    projectShortcutNumbers,
+    searchOrderHold,
+    visibleProjects,
+    withStickyProject,
+  } from './projectSearch';
   import { projectSearchSnapshots } from './projectSearchContext';
   import { projectSearchIndex } from './projectSearchIndex.svelte';
+  import { searchRowOrder } from './searchRowOrder.svelte';
   import ProjectMatchReason from './ProjectMatchReason.svelte';
   import { queryTerms } from '../../shared/textSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
@@ -162,17 +168,20 @@
   let searchData = $derived(searchActive ? searchSnapshot() : null);
   // The cards left on screen, best match first, and why each matched when
   // its name and repos don't say, from one pass. See visibleProjects for the
-  // composition. The query doesn't re-render the grid in that order: it hides
-  // the cards it rules out and moves the rest with CSS `order` (search.rank),
-  // so the {#each} keeps its unsearched order and nothing is re-keyed per
-  // keystroke.
+  // composition. Ranked when the query is edited and only then: a data change
+  // under a held query hides or appends cards but never moves one
+  // (searchOrderHold).
+  const holdOrder = searchOrderHold();
   let search = $derived(
-    visibleProjects(
-      projects,
-      projectFiltersStore.filteredProjects,
-      effectiveStickyId,
+    holdOrder(
       gridQuery.current,
-      searchData
+      visibleProjects(
+        projects,
+        projectFiltersStore.filteredProjects,
+        effectiveStickyId,
+        gridQuery.current,
+        searchData
+      )
     )
   );
   // What ⌘1–9, the scroll restore and the empty state go by.
@@ -184,6 +193,13 @@
   // Cards keep their {#each} slot whether hidden or moved, so the overlay
   // numbers come from the position on screen (rank order) instead.
   let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
+  // The order the {#each} renders the cards in: per keystroke the cards stay
+  // put and CSS `order` moves them; once the query settles they are re-keyed
+  // into rank order, so tab and reading order match the screen.
+  const cardOrder = searchRowOrder(
+    () => gridProjects,
+    () => searchRank
+  );
 
   // Decides the empty-state copy: blame the query only when the grid would
   // have shown something without it. Judged against the sticky-adjusted base,
@@ -505,6 +521,7 @@
             placeholder="Search projects, branches, PRs, notes"
             clearable
             onfocus={() => projectSearchIndex.ensureLoaded()}
+            onblur={cardOrder.settle}
           />
         </div>
 
@@ -531,7 +548,7 @@
           {/if}
         </div>
         <div class="projects-grid">
-          {#each gridProjects as project (project.id)}
+          {#each cardOrder.rows as project (project.id)}
             {@const status = getProjectStatus(
               project.id,
               deletingProjectNames,
@@ -550,7 +567,7 @@
             <div
               class="project-card-wrapper"
               hidden={searchRank !== null && !searchRank.has(project.id)}
-              style:order={searchRank?.get(project.id)}
+              style:order={cardOrder.orderOf(project.id)}
               use:trackProjectCard={project.id}
             >
               <ContextMenu.Root>
@@ -802,9 +819,9 @@
     margin-bottom: 14px;
   }
 
-  /* A grid, not just for the columns: while searching, each shown card's
-     inline `order` lays the cards out by rank without moving them in the
-     DOM. */
+  /* A grid, not just for the columns: until a query settles, each shown
+     card's inline `order` lays the cards out by rank without moving them in
+     the DOM. */
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));

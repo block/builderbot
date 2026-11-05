@@ -16,13 +16,13 @@
  * build — a context menu per project, and per repo card an actions IPC wave
  * plus three backend event subscriptions. Hiding turns a keystroke into a
  * `hidden` flip on rows that already exist, and the project rows' ranking
- * into a CSS `order` on each (SidebarProjectMatches.rank). Repo cards keep
- * their pin order.
+ * into a CSS `order` on each until the query settles (searchRowOrder). Repo
+ * cards keep their pin order.
  */
 
 import type { Project, RepoHomeItem } from '../../types';
 import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
-import { searchProjects, type MatchReason, type SearchSnapshot } from './projectSearch';
+import { searchProjects, type ProjectSearchResult, type SearchSnapshot } from './projectSearch';
 import { repoKey } from './repoReorder';
 
 /**
@@ -61,23 +61,18 @@ export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<stri
   return new Set(searchRepos(repos, query).map(repoKey));
 }
 
-export interface SidebarProjectMatches {
-  /** Each kept project row's place on screen, by id (searchProjects' rank):
-   *  rows it doesn't hold are hidden, the rest laid out in this order. Null
-   *  when the query is blank and every row shows in its own order. */
-  rank: ReadonlyMap<string, number> | null;
-  /** Why each kept project matched, when its name and repos don't say. */
-  reasons: ReadonlyMap<string, MatchReason>;
-}
-
-/** The project rows the query keeps (searchProjects' rule), their rank, and why. */
+/**
+ * The project rows the query keeps, by searchProjects' rule: `rank` places
+ * each kept row on screen (rows it doesn't hold are hidden; null for a blank
+ * query, every row in its own order), and `reasons` says why each matched
+ * when its name and repos don't.
+ */
 export function sidebarProjectMatches(
   projects: Project[],
   query: string,
   snapshot?: SearchSnapshot | null
-): SidebarProjectMatches {
-  const { rank, reasons } = searchProjects(projects, query, snapshot);
-  return { rank, reasons };
+): ProjectSearchResult {
+  return searchProjects(projects, query, snapshot);
 }
 
 /** "1 result" / "n results" — the count a section header shows while searching. */

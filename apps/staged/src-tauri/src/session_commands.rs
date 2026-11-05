@@ -9322,7 +9322,9 @@ mod tests {
     #[test]
     fn cancelling_a_paused_rate_limited_session_records_the_stop_and_releases_its_dependents() {
         let (store, branch) = setup_branch_store();
-        let paused = create_session_with_status(&store, "rebase", store::SessionStatus::Running);
+        let paused =
+            store::Session::new_running("rebase", Path::new("/tmp")).with_branch(&branch.id);
+        store.create_session(&paused).unwrap();
         store
             .create_commit(
                 &store::Commit::new_with_sha(&branch.id, "abc123").with_session(&paused.id),

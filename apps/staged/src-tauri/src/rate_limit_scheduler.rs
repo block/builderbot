@@ -1176,7 +1176,7 @@ mod tests {
         let store = Arc::new(Store::in_memory().unwrap());
         let (branch, paused) = branch_with_paused_session(&store);
         queued_push_depending_on(&store, &branch, &paused.id);
-        let independent = Session::new_queued("queued branch work");
+        let independent = Session::new_queued("queued branch work").with_branch(&branch.id);
         store.create_session(&independent).unwrap();
         store
             .create_commit(

@@ -730,6 +730,9 @@ pub enum OutOfTurnPermissionPolicy {
     AutoDeny,
 }
 
+/// The default [`BackgroundHoldConfig::hold_ceiling`]: 4 hours.
+pub(crate) const DEFAULT_HOLD_CEILING: Duration = Duration::from_secs(4 * 60 * 60);
+
 /// Configuration for the post-turn background hold.
 ///
 /// When set on a driver (see [`AcpDriver::with_background_hold`]), a
@@ -825,7 +828,7 @@ impl Default for BackgroundHoldConfig {
     fn default() -> Self {
         Self {
             hold_cap: Duration::from_secs(1800),
-            hold_ceiling: Duration::from_secs(14400),
+            hold_ceiling: DEFAULT_HOLD_CEILING,
             debounce: Duration::from_secs(10),
             taskless_debounce: Duration::from_secs(1),
             idle_latch_staleness: Duration::from_secs(120),
@@ -1450,6 +1453,17 @@ impl AcpDriver {
         self.blox_process
             .as_ref()
             .is_some_and(|blox| blox.command.dedicated)
+    }
+
+    /// The agent session a connection's proxy routes to it from the moment it
+    /// attaches (see `remote_process::attach`): `reattach`'s, and only on a
+    /// process dedicated to this Staged session. On Blox's shared default the
+    /// session may belong to another connection, so the claim waits for the
+    /// `session/load`.
+    fn reattach_session_claim<'a>(&self, reattach: Option<&'a ReattachTurn>) -> Option<&'a str> {
+        reattach
+            .filter(|_| self.runs_dedicated_remote_process())
+            .map(|turn| turn.agent_session_id.as_str())
     }
 }
 
@@ -2500,9 +2514,7 @@ impl AcpDriver {
             // replay, instead of being dropped as nobody's — losing a
             // `tool_call` the replay may not hold yet, and leaving its later
             // updates without a call to land on.
-            let owns = reattach
-                .filter(|_| self.runs_dedicated_remote_process())
-                .map(|turn| turn.agent_session_id.as_str());
+            let owns = self.reattach_session_claim(reattach);
             let (lease, streams) = remote_process::attach(cmd, &self.agent_label, owns)
                 .await
                 .map_err(spawn_error)?;

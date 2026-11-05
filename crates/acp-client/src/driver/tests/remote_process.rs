@@ -1692,12 +1692,13 @@ async fn two_quiet_reattached_turns_of_one_instance_are_told_apart() {
 
 /// A process dedicated to the turn's session has no co-tenants to hide the
 /// turn's end behind, and Claude there runs unattended (`bypassPermissions`),
-/// so asks no permission: a turn quiet there is busy in a long, silent tool.
-/// It is waited on past the quiet cap, until bloxlet reports the process
-/// idle, and never cancelled. (A dedicated Codex process, which does ask,
-/// keeps the cap: see `only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap`.)
+/// so should ask no permission: a turn quiet there is most likely busy in a
+/// long, silent tool. It is waited on past the quiet cap, under the much
+/// longer one such a process gets, until bloxlet reports the process idle,
+/// and not cancelled. (A dedicated Codex process, which does ask, keeps the
+/// quiet cap: see `only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap`.)
 #[tokio::test(flavor = "current_thread")]
-async fn a_quiet_reattached_turn_on_a_dedicated_process_is_not_capped() {
+async fn a_quiet_reattached_turn_on_a_dedicated_process_outlasts_the_quiet_cap() {
     LocalSet::new()
         .run_until(async {
             let sq = FakeSq::new("reattach-dedicated-quiet");
@@ -1887,6 +1888,46 @@ async fn a_tool_call_relayed_before_the_reattached_load_is_recorded_once() {
             );
         })
         .await;
+}
+
+/// Only a reattach to the session's own process claims its frames when the
+/// proxy attaches. On Blox's shared default argv (no `--staged-session`)
+/// another session's connection may own the agent session, so nothing is
+/// claimed until the `session/load`.
+#[test]
+fn only_a_dedicated_reattach_claims_its_session_at_attach_time() {
+    let turn = ReattachTurn {
+        agent_session_id: "sess-earlier".to_string(),
+        prompted_at: 0,
+        connected_at: None,
+        owner_pid: None,
+        sole_turn_of_owner: false,
+    };
+    let driver = |agent_id| {
+        AcpDriver::for_workspace_with_binary(PathBuf::from("sq"), "test-ws", agent_id, "session-1")
+    };
+
+    let shared = driver(None);
+    assert!(
+        !shared
+            .acp_args
+            .iter()
+            .any(|arg| arg.contains("--staged-session")),
+        "{:?}",
+        shared.acp_args
+    );
+    assert_eq!(shared.reattach_session_claim(Some(&turn)), None);
+
+    let dedicated = driver(Some("claude"));
+    assert_eq!(
+        dedicated.reattach_session_claim(Some(&turn)),
+        Some("sess-earlier")
+    );
+    assert_eq!(
+        dedicated.reattach_session_claim(None),
+        None,
+        "not a reattach"
+    );
 }
 
 /// Stopping a reattached turn cancels it on the agent, which `sq` leaves

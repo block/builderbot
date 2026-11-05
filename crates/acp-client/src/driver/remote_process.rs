@@ -457,8 +457,8 @@ impl ReattachedTurn {
     /// lasts at most until the turn's session has heard nothing for
     /// [`remote_liveness::REATTACHED_TURN_QUIET_CAP`], when the turn is
     /// cancelled (see [`Self::cancel_quiet_turn`]). A process dedicated to the
-    /// turn's session whose agent runs unattended is waited on for as long as
-    /// bloxlet runs it (see [`remote_liveness::Target::reattached_turn_quiet_cap`]).
+    /// turn's session whose agent runs unattended gets a much longer cap (see
+    /// [`remote_liveness::Target::reattached_turn_quiet_cap`]).
     ///
     /// Fails with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the
     /// cause when the process that ran the turn is gone: `sq` found none to
@@ -484,15 +484,13 @@ impl ReattachedTurn {
                 match remote_liveness::check(&self.target, &command_id).await {
                     Ok(Liveness::Idle) => return Ok(()),
                     Ok(Liveness::Running) => {
-                        if let Some(quiet_cap) = quiet_cap {
-                            let heard_at = self
-                                .process
-                                .transport
-                                .last_heard(&self.agent_session_id)
-                                .map_or(watching_from, |at| at.max(watching_from));
-                            if heard_at.elapsed() >= quiet_cap {
-                                return self.cancel_quiet_turn(heard_at.elapsed()).await;
-                            }
+                        let heard_at = self
+                            .process
+                            .transport
+                            .last_heard(&self.agent_session_id)
+                            .map_or(watching_from, |at| at.max(watching_from));
+                        if heard_at.elapsed() >= quiet_cap {
+                            return self.cancel_quiet_turn(heard_at.elapsed()).await;
                         }
                     }
                     Ok(Liveness::Gone(cause)) => {

@@ -58,11 +58,11 @@ pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_millis(50);
 /// earlier connection never answered is not re-sent to a new one, so a turn
 /// blocked on one would otherwise run (and hold its branch's queue) forever.
 ///
-/// Not on a process dedicated to the turn's session whose agent runs
-/// unattended (see [`Target::reattached_turn_quiet_cap`]): it has no
-/// co-tenants and asks no permission, while a long, silent tool is just as
-/// likely there. A dedicated Codex, Pi or Amp process keeps the cap, since
-/// those agents ask.
+/// A process dedicated to the turn's session whose agent runs unattended
+/// gets the much longer [`super::DEFAULT_HOLD_CEILING`] instead (see
+/// [`Target::reattached_turn_quiet_cap`]): it has no co-tenants and should
+/// ask no permission, while a long, silent tool is just as likely there. A
+/// dedicated Codex, Pi or Amp process keeps this cap, since those agents ask.
 #[cfg(not(test))]
 pub(super) const REATTACHED_TURN_QUIET_CAP: Duration = Duration::from_secs(30 * 60);
 #[cfg(test)]
@@ -137,21 +137,35 @@ impl Target {
     }
 
     /// How long a turn reattached to through this proxy may go quiet before
-    /// it is cancelled ([`REATTACHED_TURN_QUIET_CAP`]), or `None` to wait on
-    /// it for as long as bloxlet runs it. That is only for a process
+    /// it is cancelled: [`REATTACHED_TURN_QUIET_CAP`], or the post-turn
+    /// hold's ceiling ([`super::DEFAULT_HOLD_CEILING`], 4 h) on a process
     /// dedicated to one Staged session (an argv naming it, see
     /// [`crate::types::staged_session_agent`]) whose agent runs unattended
-    /// ([`super::blox_runs_unattended`]): nothing can block it on a
-    /// permission request, and no co-tenant hides its end. A process pinned
-    /// by `--command-id` is not known to be one.
-    pub(super) fn reattached_turn_quiet_cap(&self) -> Option<Duration> {
+    /// ([`super::blox_runs_unattended`]). No co-tenant hides its end there,
+    /// and it should ask no permission, so a quiet turn is most likely busy
+    /// in a long, silent tool. A process pinned by `--command-id` is not
+    /// known to be one.
+    ///
+    /// The long cap is still a cap because "unattended" is best-effort. The
+    /// Claude bridge does not offer `bypassPermissions` when settings
+    /// (managed ones included) disable it or when it runs as root without
+    /// `IS_SANDBOX`, and even with it on still sends
+    /// `session/request_permission` for AskUserQuestion, safety checks and
+    /// explicit ask rules. A request the lost connection left unanswered is
+    /// not re-sent to the new one, so without a cap such a turn would hold
+    /// its branch's queue until someone pressed Stop.
+    pub(super) fn reattached_turn_quiet_cap(&self) -> Duration {
         let alone_and_unattended = match &self.requested {
             Requested::Command(_) => false,
             Requested::Argv(argv) => {
                 crate::types::staged_session_agent(argv).is_some_and(super::blox_runs_unattended)
             }
         };
-        (!alone_and_unattended).then_some(REATTACHED_TURN_QUIET_CAP)
+        if alone_and_unattended {
+            super::DEFAULT_HOLD_CEILING
+        } else {
+            REATTACHED_TURN_QUIET_CAP
+        }
     }
 
     /// The agent process the proxy asks `sq` for, for a log line.

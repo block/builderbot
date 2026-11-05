@@ -3,9 +3,10 @@
 use crate::driver::remote_liveness::{
     parse_commands, parse_utc_timestamp, CommandRecord, Target, REATTACHED_TURN_QUIET_CAP,
 };
-use crate::driver::AcpDriver;
+use crate::driver::{AcpDriver, BackgroundHoldConfig};
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
+use std::time::Duration;
 
 fn record(id: &str, status: &str, message: &str) -> CommandRecord {
     CommandRecord {
@@ -117,31 +118,38 @@ fn workspace_target(agent_id: Option<&str>) -> Target {
     Target::of(OsStr::new("sq"), &args).expect("a blox acp proxy")
 }
 
-/// A reattached turn goes uncapped only on a process dedicated to its
-/// session whose agent runs unattended (Goose's `GOOSE_MODE=auto`, Claude's
-/// `bypassPermissions`). A dedicated Codex, Pi or Amp process keeps the cap,
-/// as do Blox's shared default and a process pinned by id: those agents ask
-/// permission, and a request the lost connection never answered would
-/// otherwise hold the turn forever.
+/// A reattached turn gets the long cap, the post-turn hold's 4 h ceiling,
+/// only on a process dedicated to its session whose agent runs unattended
+/// (Goose's `GOOSE_MODE=auto`, Claude's `bypassPermissions`); never none,
+/// since Claude's bypass is best-effort and some asks get through it. A
+/// dedicated Codex, Pi or Amp process keeps the 30 min cap, as do Blox's
+/// shared default and a process pinned by id: those agents ask permission,
+/// and a request the lost connection never answered would otherwise hold
+/// the turn.
 #[test]
 fn only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap() {
+    let long_cap = BackgroundHoldConfig::default().hold_ceiling;
+    assert_eq!(long_cap, Duration::from_secs(4 * 60 * 60));
     for agent in ["claude", "goose"] {
         assert_eq!(
             workspace_target(Some(agent)).reattached_turn_quiet_cap(),
-            None,
+            long_cap,
             "{agent}"
         );
     }
+    // The 30 min cap (shortened under test) is distinct from the long one,
+    // so the cases below tell the two apart.
+    assert!(REATTACHED_TURN_QUIET_CAP < long_cap);
     for agent in ["codex", "pi", "amp"] {
         assert_eq!(
             workspace_target(Some(agent)).reattached_turn_quiet_cap(),
-            Some(REATTACHED_TURN_QUIET_CAP),
+            REATTACHED_TURN_QUIET_CAP,
             "{agent}"
         );
     }
     assert_eq!(
         workspace_target(None).reattached_turn_quiet_cap(),
-        Some(REATTACHED_TURN_QUIET_CAP),
+        REATTACHED_TURN_QUIET_CAP,
         "Blox's shared default"
     );
     let pinned: Vec<OsString> = ["blox", "acp", "ws-1", "--command-id=cmd-1"]
@@ -152,6 +160,6 @@ fn only_a_dedicated_unattended_agent_is_waited_on_past_the_quiet_cap() {
         Target::of(OsStr::new("sq"), &pinned)
             .unwrap()
             .reattached_turn_quiet_cap(),
-        Some(REATTACHED_TURN_QUIET_CAP)
+        REATTACHED_TURN_QUIET_CAP
     );
 }

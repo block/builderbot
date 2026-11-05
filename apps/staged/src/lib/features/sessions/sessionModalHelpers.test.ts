@@ -4,6 +4,7 @@ import {
   formatToolDisplay,
   insertedText,
   makePathsRelative,
+  newestUserMessageId,
   reconnectedOutcomeMessage,
   sessionEndMessage,
   sessionErrorMessage,
@@ -302,5 +303,24 @@ describe('reconnectedOutcomeMessage', () => {
     for (const status of ['error', 'cancelled', 'running', 'disconnected'] as const) {
       expect(reconnectedOutcomeMessage({ status })).toBeNull();
     }
+  });
+});
+
+describe('newestUserMessageId', () => {
+  it('finds the newest user message, past the replies after it', () => {
+    expect(
+      newestUserMessageId([
+        { id: 1, role: 'user' },
+        { id: 2, role: 'assistant' },
+        { id: 5, role: 'user' },
+        { id: 6, role: 'assistant' },
+        { id: 7, role: 'tool_call' },
+      ])
+    ).toBe(5);
+  });
+
+  it('is null when no user message is loaded', () => {
+    expect(newestUserMessageId([])).toBeNull();
+    expect(newestUserMessageId([{ id: 3, role: 'assistant' }])).toBeNull();
   });
 });

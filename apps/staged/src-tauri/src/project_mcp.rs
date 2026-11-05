@@ -883,6 +883,7 @@ impl ProjectToolsHandler {
                         branch_id: Some(branch_id.clone()),
                         project_id: Some(self.project_id.clone()),
                         session_type: None,
+                        dependency_skipped: false,
                     },
                 );
                 crate::session_queue::kick(

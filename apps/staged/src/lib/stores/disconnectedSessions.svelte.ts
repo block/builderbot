@@ -54,9 +54,15 @@ class DisconnectedSessionsStore {
     this.version++;
   }
 
-  /** The session left `disconnected` (any other status event). */
+  /**
+   * The session left `disconnected` (any other status event). Its reconcile
+   * state goes too: it only describes a disconnected row, and if the `idle`
+   * that normally drops it is missed (a dropped event, a reconnect) nothing
+   * else would.
+   */
   clear(sessionId: string): void {
-    if (this.sessions.delete(sessionId)) this.version++;
+    const removed = this.sessions.delete(sessionId);
+    if (this.reconcile.delete(sessionId) || removed) this.version++;
   }
 
   /**
@@ -69,7 +75,12 @@ class DisconnectedSessionsStore {
     let changed = false;
     for (const sessionId of [...this.sessions.keys()]) {
       if (!snapshotIds.has(sessionId) && !skip(sessionId)) {
+        // As in `clear`: the session's reconcile state goes with it. State
+        // for sessions this client never knew as disconnected is left to the
+        // reconcile snapshot, which is authoritative for it — an event for
+        // one can land while this snapshot is in flight.
         this.sessions.delete(sessionId);
+        this.reconcile.delete(sessionId);
         changed = true;
       }
     }

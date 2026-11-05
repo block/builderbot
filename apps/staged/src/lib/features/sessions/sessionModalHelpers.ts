@@ -1,5 +1,5 @@
 import { normalizeDisplayRoots, type DisplayRootInput } from './pathDisplayRoots';
-import type { Session } from '../../types';
+import type { Session, SessionMessage } from '../../types';
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
@@ -137,6 +137,20 @@ export function sessionErrorMessage(errorMessage: string): string {
 export function reconnectedOutcomeMessage(current: Pick<Session, 'status'>): string | null {
   if (current.status === 'completed') {
     return 'Staged reconnected to the workstation and caught up. The agent finished this turn.';
+  }
+  return null;
+}
+
+/**
+ * The id of the newest user message loaded, or null when none is: the prompt
+ * of the turn in flight, or of the last turn. A pane that watched its session
+ * disconnect remembers it, so the reconnected note speaks for that turn only.
+ */
+export function newestUserMessageId(
+  messages: Pick<SessionMessage, 'id' | 'role'>[]
+): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') return messages[i].id;
   }
   return null;
 }

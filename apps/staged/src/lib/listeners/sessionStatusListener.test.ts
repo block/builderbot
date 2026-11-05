@@ -494,11 +494,12 @@ describe('sessionStatusListener busy-state hydration', () => {
     it('settles a cancelled push as a cancellation, not a skipped force push', async () => {
       const emit = await disconnect('blox-push', 'push');
 
+      // No completion reason either: only the explicit flag marks a skip.
       emit({
         sessionId: 'blox-push',
         status: 'cancelled',
         errorMessage: "Staged couldn't tell whether this turn finished on the workstation",
-        completionReason: 'interrupted',
+        completionReason: null,
         projectId: 'project-1',
         branchId: 'branch-1',
         sessionType: 'push',
@@ -511,6 +512,60 @@ describe('sessionStatusListener busy-state hydration', () => {
       );
       expect(pushStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
       expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+    });
+
+    it('settles from the event for a client that only knew the session as disconnected', async () => {
+      const emit = await disconnect('blox-pr', 'pr');
+
+      // A settle without the session type (any terminal emit for the row)
+      // still counts: this client saw it disconnect.
+      emit({
+        sessionId: 'blox-pr',
+        status: 'error',
+        errorMessage: 'boom',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+      });
+
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+    });
+
+    it('settles from the event on a client that never saw the session', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+      eventCallbacks.get('session-status-changed')!({
+        sessionId: 'blox-pr',
+        status: 'completed',
+        completionReason: null,
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'pr',
+      });
+
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('keeps other terminal events for unregistered sessions out of unread', async () => {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // A queued session cancelled before it ran: the event names its project
+      // and branch, but this client never registered it.
+      eventCallbacks.get('session-status-changed')!({
+        sessionId: 'queued-1',
+        status: 'cancelled',
+        completionReason: 'interrupted',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+      });
+
+      expect(projectStateStore.markAsUnread).not.toHaveBeenCalled();
+      expect(consoleWarn).toHaveBeenCalled();
     });
   });
 
@@ -1538,6 +1593,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         errorMessage: skipReason,
         branchId: 'branch-1',
         sessionType: 'push',
+        dependencySkipped: true,
       });
 
       expect(toastError).toHaveBeenCalledWith('Force push skipped', { description: skipReason });
@@ -1554,6 +1610,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         errorMessage: skipReason,
         branchId: 'branch-1',
         sessionType: 'push',
+        dependencySkipped: true,
       });
 
       expect(toastError).toHaveBeenCalledWith('Force push skipped', { description: skipReason });
@@ -1570,6 +1627,7 @@ describe('sessionStatusListener busy-state hydration', () => {
         errorMessage: skipReason,
         branchId: 'branch-1',
         sessionType: 'push',
+        dependencySkipped: true,
       });
 
       // The skip is the row's whole lifecycle: it was never running, so it was
@@ -1579,6 +1637,25 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(consoleWarn).not.toHaveBeenCalled();
       expect(sessionRegistry.cleanupSession).not.toHaveBeenCalled();
       expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+    });
+
+    it('leaves a skipped PR to its timeline: no chip error, no unread', async () => {
+      await listen();
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'pr-1',
+        status: 'cancelled',
+        errorMessage: skipReason,
+        projectId: 'project-other',
+        branchId: 'branch-1',
+        sessionType: 'pr',
+        dependencySkipped: true,
+      });
+
+      expect(toastError).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
+      expect(projectStateStore.markAsUnread).not.toHaveBeenCalled();
     });
 
     it('ignores ordinary cancellations, which carry no session type', async () => {

@@ -1814,6 +1814,7 @@ fn launch_resume(
             branch_id: event_branch_id,
             project_id: event_project_id.or(mcp_project_id.clone()),
             session_type,
+            dependency_skipped: false,
         },
     );
 
@@ -2951,6 +2952,7 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
                         branch_id: branch_id.clone(),
                         project_id,
                         session_type: None,
+                        dependency_skipped: false,
                     },
                 );
                 // A running session's cancel drains the branch, which settles
@@ -3021,6 +3023,7 @@ pub(crate) fn cancel_queued_session_of_deleted_artifact<R: tauri::Runtime>(
             branch_id,
             project_id,
             session_type: None,
+            dependency_skipped: false,
         },
     );
     if let Err(e) =
@@ -3099,7 +3102,15 @@ pub(crate) fn delete_session_impl<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     session_id: &str,
 ) -> Result<(), String> {
-    registry.cancel(session_id);
+    if !registry.cancel(session_id) {
+        // A `disconnected` row's turn may still be running on its
+        // workstation, which the delete leaves standing; with the row gone
+        // nothing could stop it. A reconcile attempt following it holds an
+        // entry, and the cancel above has it stop the turn.
+        if let Ok(Some(session)) = store.get_session(session_id) {
+            session_runner::reconcile::cancel_abandoned_turn(store, &session);
+        }
+    }
     let branch_id = store.get_branch_id_for_session(session_id).ok().flatten();
 
     store
@@ -4393,6 +4404,7 @@ pub async fn start_project_session(
             branch_id: None,
             project_id: Some(project_id.clone()),
             session_type: None,
+            dependency_skipped: false,
         },
     );
 
@@ -6268,6 +6280,7 @@ async fn start_queued_session_for_branch(
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
+            dependency_skipped: false,
         },
     );
 

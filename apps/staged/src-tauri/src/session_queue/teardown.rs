@@ -67,7 +67,9 @@ pub(crate) async fn stop_branch_sessions<R: tauri::Runtime>(
 /// - A running row nothing here owns (another process's, or one the sweep has
 ///   not reached yet) is written `cancelled` directly, as `cancel_session_impl`'s
 ///   fallback does, so the client sees it end. A `disconnected` row is never
-///   owned, so it always takes this path.
+///   owned, so it always takes this path; when its workstation outlives the
+///   teardown (another branch uses it), its remote turn is cancelled first,
+///   best effort, since nothing could stop it once the row is gone.
 pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
     store: &Store,
     registry: &SessionRegistry,
@@ -75,6 +77,7 @@ pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
     branches: &[store::Branch],
 ) -> Result<Vec<String>, String> {
     let mut owned = Vec::new();
+    let leaving: Vec<&str> = branches.iter().map(|branch| branch.id.as_str()).collect();
 
     for branch in branches {
         let queued = store
@@ -104,6 +107,11 @@ pub(crate) fn signal_branch_sessions<R: tauri::Runtime>(
                 registry.cancel_or_defer(&session.id, CompletionReason::Interrupted);
                 owned.push(session.id);
             } else {
+                if session.status == SessionStatus::Disconnected
+                    && crate::branches::workspace_outlives(store, branch, &leaving).unwrap_or(false)
+                {
+                    session_runner::reconcile::cancel_abandoned_turn(store, &session);
+                }
                 store
                     .update_session_status(
                         &session.id,

@@ -42,12 +42,15 @@ pub enum LatestPrompt {
     /// The replay re-sent it: the agent received it, so the turn the session
     /// ended on is this prompt's.
     Replayed,
-    /// The replay re-sent prompts, but not this one: the agent never received
-    /// it (the connection went between Staged persisting the prompt and
-    /// sending it). Whatever turn the session shows ended is an earlier one.
+    /// The replay ends on the prompt before this one: the agent never
+    /// received it (the connection went between Staged persisting the prompt
+    /// and sending it). Whatever turn the session shows ended is an earlier
+    /// one.
     Missing,
-    /// Nothing to tell from: the transcript holds no prompt text, or the
-    /// agent replays no prompts at all.
+    /// Nothing to tell from: the transcript holds no prompt text, the agent
+    /// replays no prompts at all, or the replay lacks this one without
+    /// proving it never arrived (it ends on something else, or the prompt is
+    /// a slash command the agent may not replay as typed).
     Unknown,
 }
 
@@ -246,9 +249,33 @@ impl PromptLedger {
         let never_sent = aligned(&self.stored[..self.stored.len() - 1], &self.replayed);
         match received.cmp(&never_sent) {
             std::cmp::Ordering::Greater => LatestPrompt::Replayed,
-            std::cmp::Ordering::Less => LatestPrompt::Missing,
-            std::cmp::Ordering::Equal => LatestPrompt::Unknown,
+            std::cmp::Ordering::Less if self.replay_ends_before_newest() => LatestPrompt::Missing,
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => LatestPrompt::Unknown,
         }
+    }
+
+    /// The positive evidence `Missing` needs, on top of the alignment
+    /// preferring it: the replay's last user message is the prompt before the
+    /// newest, so nothing the user sent came after it, and the newest prompt
+    /// is one the replay would show if the agent had received it.
+    ///
+    /// `Missing` turns a turn that may have finished into a resumable stop
+    /// (no hooks, no queue drain), so a replay that merely lacks the newest
+    /// prompt's text is not enough. The agent may have rewritten it, or
+    /// added a user message of its own after it (an interrupt marker), and a
+    /// slash command may never be replayed as typed at all: the Claude bridge
+    /// leaves the local-only ones out of its replay (`/compact`, `/context`,
+    /// `/model`, `/status`, ...) and the SDK expands prompt commands into
+    /// their prompt.
+    fn replay_ends_before_newest(&self) -> bool {
+        let [.., before_newest, newest] = self.stored.as_slice() else {
+            return false;
+        };
+        !newest.starts_with('/')
+            && self
+                .replayed
+                .last()
+                .is_some_and(|last| last.contains(before_newest.as_str()))
     }
 }
 
@@ -1034,7 +1061,8 @@ mod tests {
     }
 
     /// User messages the agent adds itself (task notifications, interrupt
-    /// markers) are skipped.
+    /// markers) are skipped when matching, but are no proof of a missing
+    /// prompt.
     #[test]
     fn user_messages_the_agent_adds_are_skipped() {
         let stored = [prompt("Fix the build"), prompt("Now add a test")];
@@ -1050,8 +1078,62 @@ mod tests {
             ),
             LatestPrompt::Replayed
         );
+        // The replay doesn't end on the prompt before the newest: something
+        // came after it, and the newest prompt may be what set it off.
         assert_eq!(
             latest_prompt_after(&stored, &["Fix the build", "[Request interrupted by user]"]),
+            LatestPrompt::Unknown
+        );
+    }
+
+    /// The bridge leaves local-only slash commands out of its replay, and
+    /// the SDK replays prompt commands expanded: a newest prompt that is a
+    /// slash command can't be told missing from the replay lacking it.
+    #[test]
+    fn a_newest_slash_command_the_replay_lacks_is_unknown() {
+        for command in ["/compact", "/context", "/model opus", "/review the diff"] {
+            let stored = [prompt("Fix the build"), prompt(command)];
+            assert_eq!(
+                latest_prompt_after(&stored, &["Fix the build"]),
+                LatestPrompt::Unknown,
+                "{command}"
+            );
+        }
+        // Replayed as typed (a custom command), it was received.
+        let stored = [prompt("Fix the build"), prompt("/review the diff")];
+        assert_eq!(
+            latest_prompt_after(&stored, &["Fix the build", "/review the diff"]),
+            LatestPrompt::Replayed
+        );
+    }
+
+    /// `Missing` needs the replay to end on the prompt before the newest. A
+    /// replay that ends on something else may hold the newest prompt in a
+    /// form its stored text doesn't match.
+    #[test]
+    fn missing_needs_the_replay_to_end_on_the_prompt_before_the_newest() {
+        let stored = [
+            prompt("Fix the build"),
+            prompt("Now add a test"),
+            prompt("Ship it"),
+        ];
+        assert_eq!(
+            latest_prompt_after(
+                &stored,
+                &["Fix the build", "Now add a test", "Ship it, please"]
+            ),
+            LatestPrompt::Replayed
+        );
+        assert_eq!(
+            latest_prompt_after(
+                &stored,
+                &["Fix the build", "Now add a test", "Ship this to staging"]
+            ),
+            LatestPrompt::Unknown,
+            "the newest prompt may have been re-worded"
+        );
+        assert_eq!(
+            latest_prompt_after(&stored, &["Fix the build", "Now add a test"]),
             LatestPrompt::Missing
         );
     }

@@ -233,6 +233,7 @@ pub(crate) fn skip_dependent_session<R: tauri::Runtime>(
             branch_id: Some(branch_id.to_string()),
             project_id,
             session_type: Some(session_type_for(session).to_string()),
+            dependency_skipped: true,
         },
     );
     Ok(true)

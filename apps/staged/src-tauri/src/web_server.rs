@@ -3499,6 +3499,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         branch_id: event_branch_id,
                         project_id: event_project_id.or(mcp_project_id.clone()),
                         session_type,
+                        dependency_skipped: false,
                     },
                 );
 

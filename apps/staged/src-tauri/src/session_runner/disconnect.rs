@@ -13,19 +13,24 @@
 
 use acp_client::{SessionSettleReason, TransportLoss, TransportLossPhase};
 
-use crate::store::{Session, Store};
+use super::{RegistrationEpoch, SessionRegistry};
+use crate::store::{CompletionReason, Session, Store};
 
 /// Whether a finished run leaves its session `disconnected` rather than
-/// terminal: a remote run that failed (`error`) because its connection was
-/// lost — or detached — with the turn in flight, so the turn may still be
-/// running on the workstation.
+/// terminal: a remote run whose connection was lost — or detached — while
+/// something may still be running on the workstation.
 ///
-/// Only a turn in flight counts. A loss during setup sent no prompt, so nothing
-/// is running remotely; a loss during a post-turn hold settles as a completed
-/// turn, never as a failure. Errors the agent answered itself (auth, a refused
-/// prompt, a bridge-relayed "process exited") carry no transport loss at all.
-/// A Stop always wins, because the user asked for the turn to end; and a local
-/// run never qualifies, because its agent went down with the connection.
+/// That is a turn in flight: the run failed (`error`) with the loss in the
+/// turn, or detached. Or work the post-turn hold was waiting for: the turn
+/// completed, but the hold lost its connection with background tasks still
+/// live (`background_work_left`), and whatever they do next — the
+/// continuation they trigger included — would be recorded by no one if the
+/// row settled. A loss during setup sent no prompt, so nothing is running
+/// remotely; a hold lost with nothing live settles as the completed turn it
+/// is. Errors the agent answered itself (auth, a refused prompt, a
+/// bridge-relayed "process exited") carry no transport loss at all. A Stop
+/// always wins, because the user asked for the turn to end; and a local run
+/// never qualifies, because its agent went down with the connection.
 ///
 /// The shared proxy's own verdicts count too. Its agent lost for good (bloxlet
 /// reports the process gone, or `sq` exited having started it) leaves nothing
@@ -40,22 +45,46 @@ pub(crate) fn run_leaves_session_disconnected(
     error: Option<&str>,
     settle_reason: Option<SessionSettleReason>,
     transport_loss: Option<TransportLoss>,
+    background_work_left: bool,
 ) -> bool {
-    let Some(error) = error else {
-        return false;
-    };
-    if !is_remote || cancel_requested {
-        return false;
-    }
-    if settle_reason == Some(SessionSettleReason::Detached) {
-        return true;
-    }
-    if acp_client::is_remote_agent_lost_error(error)
-        || acp_client::is_remote_session_cut_off_error(error)
-    {
-        return false;
-    }
-    transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn)
+    let lost_in_turn = error.is_some_and(|error| {
+        settle_reason == Some(SessionSettleReason::Detached)
+            || (!acp_client::is_remote_agent_lost_error(error)
+                && !acp_client::is_remote_session_cut_off_error(error)
+                && transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn))
+    });
+    let lost_holding_live_work = background_work_left
+        && transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Hold);
+    is_remote && !cancel_requested && (lost_in_turn || lost_holding_live_work)
+}
+
+/// Deregister a run that left its session `disconnected`, returning the Stop
+/// that reached its entry after the run decided — between reading its token
+/// and the deregister. That Stop wrote nothing, trusting the run to record
+/// it, and a `disconnected` row records none: the caller hands it to
+/// reconcile. A quit's cancel is no Stop; the turn is left running.
+pub(super) fn deregister_disconnected_run(
+    registry: &SessionRegistry,
+    session_id: &str,
+    epoch: RegistrationEpoch,
+) -> Option<CompletionReason> {
+    registry
+        .deregister_reporting_cancellation_of(session_id, epoch)
+        .filter(|reason| *reason != CompletionReason::AppQuit)
+}
+
+/// Whether a remote run that completed with a Stop during its post-turn hold
+/// must cancel the held work again over a fresh connection: the hold's
+/// `session/cancel` went out of turn, so nothing answers it, and nothing
+/// showed the work stopping (`background_work_left`) — over a hung transport
+/// it may never have arrived. `stopped` excludes a quit's cancel, which
+/// leaves remote work running on purpose.
+pub(crate) fn held_work_needs_fresh_cancel(
+    is_remote: bool,
+    stopped: bool,
+    background_work_left: bool,
+) -> bool {
+    is_remote && stopped && background_work_left
 }
 
 /// Whether a remote run that ended `cancelled` must cancel its turn again over
@@ -122,7 +151,8 @@ mod tests {
             false,
             Some(LOST),
             Some(SessionSettleReason::Failed),
-            TURN
+            TURN,
+            false
         ));
         // A quit's detach with the turn in flight.
         assert!(run_leaves_session_disconnected(
@@ -130,7 +160,8 @@ mod tests {
             false,
             Some(LOST),
             Some(SessionSettleReason::Detached),
-            TURN
+            TURN,
+            false
         ));
     }
 
@@ -143,14 +174,16 @@ mod tests {
             false,
             Some(LOST),
             Some(SessionSettleReason::Failed),
-            TURN
+            TURN,
+            false
         ));
         assert!(!run_leaves_session_disconnected(
             false,
             false,
             Some(LOST),
             Some(SessionSettleReason::Detached),
-            TURN
+            TURN,
+            false
         ));
     }
 
@@ -161,12 +194,13 @@ mod tests {
             true,
             Some(LOST),
             Some(SessionSettleReason::Failed),
-            TURN
+            TURN,
+            false
         ));
     }
 
     /// Nothing runs remotely after a loss before the prompt, and a loss
-    /// during the hold ends the run as a completed turn.
+    /// during the hold with nothing live ends the run as a completed turn.
     #[test]
     fn only_a_turn_in_flight_counts() {
         for phase in [TransportLossPhase::Setup, TransportLossPhase::Hold] {
@@ -176,7 +210,8 @@ mod tests {
                     false,
                     Some(LOST),
                     Some(SessionSettleReason::Failed),
-                    loss(phase)
+                    loss(phase),
+                    false
                 ),
                 "{phase:?}"
             );
@@ -186,7 +221,51 @@ mod tests {
             false,
             None,
             Some(SessionSettleReason::HoldStopped),
-            loss(TransportLossPhase::Hold)
+            loss(TransportLossPhase::Hold),
+            false
+        ));
+    }
+
+    /// A hold lost with background work still live on the workstation: the
+    /// completed turn is left for reconcile, as a lost turn is, rather than
+    /// settled — and its queue drained — under work no one records.
+    #[test]
+    fn a_hold_lost_with_work_live_leaves_the_session_disconnected() {
+        let hold = loss(TransportLossPhase::Hold);
+        assert!(run_leaves_session_disconnected(
+            true,
+            false,
+            None,
+            Some(SessionSettleReason::HoldStopped),
+            hold,
+            true
+        ));
+        // Not when the user stopped it, and never for a local run.
+        assert!(!run_leaves_session_disconnected(
+            true,
+            true,
+            None,
+            Some(SessionSettleReason::HoldStopped),
+            hold,
+            true
+        ));
+        assert!(!run_leaves_session_disconnected(
+            false,
+            false,
+            None,
+            Some(SessionSettleReason::HoldStopped),
+            hold,
+            true
+        ));
+        // Work outliving a Stop's cancel, with the transport intact, is the
+        // Stop's to finish (see `held_work_needs_fresh_cancel`).
+        assert!(!run_leaves_session_disconnected(
+            true,
+            false,
+            None,
+            Some(SessionSettleReason::HoldStopped),
+            None,
+            true
         ));
     }
 
@@ -200,14 +279,16 @@ mod tests {
             false,
             Some(refused),
             Some(SessionSettleReason::Failed),
-            None
+            None,
+            false
         ));
         assert!(!run_leaves_session_disconnected(
             true,
             false,
             Some(refused),
             None,
-            None
+            None,
+            false
         ));
     }
 
@@ -226,7 +307,8 @@ mod tests {
                     false,
                     Some(error),
                     Some(SessionSettleReason::Failed),
-                    TURN
+                    TURN,
+                    false
                 ),
                 "{error}"
             );
@@ -236,7 +318,8 @@ mod tests {
                     false,
                     Some(error),
                     Some(SessionSettleReason::Detached),
-                    TURN
+                    TURN,
+                    false
                 ),
                 "{error}"
             );
@@ -248,7 +331,8 @@ mod tests {
             false,
             Some("Remote agent detached: the `sq blox acp` proxy exited"),
             None,
-            TURN
+            TURN,
+            false
         ));
     }
 
@@ -281,5 +365,62 @@ mod tests {
         assert!(!stopped_turn_needs_fresh_cancel(true, false, true, TURN));
         // Local: the agent went down with the connection.
         assert!(!stopped_turn_needs_fresh_cancel(false, true, true, TURN));
+    }
+
+    #[test]
+    fn held_work_outliving_a_stop_cancels_again_over_a_fresh_connection() {
+        assert!(held_work_needs_fresh_cancel(true, true, true));
+        // The cancel showed landing, there was no Stop (or only a quit's), or
+        // the agent was local: nothing to do.
+        assert!(!held_work_needs_fresh_cancel(true, true, false));
+        assert!(!held_work_needs_fresh_cancel(true, false, true));
+        assert!(!held_work_needs_fresh_cancel(false, true, true));
+    }
+
+    /// A Stop that lands between the run reading its token and deregistering
+    /// is reported, so the run can hand it to reconcile; once the entry is
+    /// gone a Stop no longer finds it and records itself.
+    #[test]
+    fn a_stop_landing_as_the_run_disconnects_is_handed_on() {
+        let registry = SessionRegistry::new();
+        let (_token, epoch) = registry.register("s1");
+        registry.mark_finished("s1", epoch);
+        assert!(
+            registry.cancel("s1"),
+            "a finished entry still takes the Stop"
+        );
+
+        assert_eq!(
+            deregister_disconnected_run(&registry, "s1", epoch),
+            Some(CompletionReason::Interrupted)
+        );
+        assert!(!registry.is_live("s1"));
+        assert!(!registry.cancel("s1"));
+    }
+
+    #[test]
+    fn no_stop_or_a_quit_is_not_handed_on() {
+        let registry = SessionRegistry::new();
+        let (_token, epoch) = registry.register("s1");
+        assert_eq!(deregister_disconnected_run(&registry, "s1", epoch), None);
+        assert!(!registry.is_live("s1"));
+
+        let (_token, epoch) = registry.register("s2");
+        registry.cancel_with_completion_reason("s2", CompletionReason::AppQuit);
+        assert_eq!(deregister_disconnected_run(&registry, "s2", epoch), None);
+    }
+
+    /// A successor's entry under the same id is neither removed nor read.
+    #[test]
+    fn a_successor_entry_is_left_alone() {
+        let registry = SessionRegistry::new();
+        let (_token, stale) = registry.register("s1");
+        registry.mark_finished("s1", stale);
+        registry.deregister("s1", stale);
+        let (_token, _current) = registry.register("s1");
+        registry.cancel("s1");
+
+        assert_eq!(deregister_disconnected_run(&registry, "s1", stale), None);
+        assert!(registry.is_live("s1"));
     }
 }

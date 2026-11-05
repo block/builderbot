@@ -8,7 +8,7 @@ use acp_client::CancelOutcome;
 use super::{
     ReconcileBlox, ReconcilePhase, ReconcileTarget, Reconciler, RowOutcome, WorkspaceProbe,
 };
-use crate::store::{CompletionReason, SessionStatus, Store};
+use crate::store::{CompletionReason, Session, SessionStatus, Store};
 
 /// How long a cancel over a fresh connection waits for the turn to stop.
 const STOP_DEADLINE: Duration = Duration::from_secs(20);
@@ -106,6 +106,52 @@ fn cancel_over_fresh_connection(
             Some(MAY_STILL_RUN.to_string())
         }
     }
+}
+
+/// Cancel a `disconnected` row's remote turn, best effort and in the
+/// background, for a caller about to end or delete the row itself: a branch
+/// teardown that leaves the workstation standing, or a session delete. Once
+/// the row is gone nothing — reconcile included — could stop the turn, and it
+/// would run on in a checkout other work is using.
+///
+/// The target is resolved now, while the row and its branch still exist; the
+/// cancel, which can take [`STOP_DEADLINE`], runs on a thread of its own.
+/// `None` when there is nothing to cancel: the row isn't `disconnected`, or
+/// can't be resolved to a turn.
+pub(crate) fn cancel_abandoned_turn(
+    store: &Store,
+    session: &Session,
+) -> Option<std::thread::JoinHandle<()>> {
+    cancel_abandoned_turn_with(store, std::sync::Arc::new(super::LiveBlox), session)
+}
+
+pub(super) fn cancel_abandoned_turn_with(
+    store: &Store,
+    blox: std::sync::Arc<dyn ReconcileBlox>,
+    session: &Session,
+) -> Option<std::thread::JoinHandle<()>> {
+    if session.status != SessionStatus::Disconnected {
+        return None;
+    }
+    let target = match ReconcileTarget::resolve(store, session) {
+        Ok(target) => target,
+        Err(why) => {
+            log::info!(
+                "[reconcile] Session {}: nothing to cancel before it goes ({why:?})",
+                session.id
+            );
+            return None;
+        }
+    };
+    log::info!(
+        "[reconcile] Session {}: cancelling its remote turn before the row goes",
+        session.id
+    );
+    Some(std::thread::spawn(move || {
+        if let Some(message) = cancel_over_fresh_connection(blox.as_ref(), &target) {
+            log::warn!("[reconcile] Session {}: {message}", target.session_id);
+        }
+    }))
 }
 
 /// A Stop on a running Blox session whose `session/cancel` went unanswered

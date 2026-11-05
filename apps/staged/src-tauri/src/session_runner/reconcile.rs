@@ -43,7 +43,7 @@ pub(crate) use blox::{
     AttachControl, LiveBlox, ReconcileBlox, ReconcileTarget, UnreachableKind, WorkspaceProbe,
 };
 pub(crate) use host::{LiveHost, ReconcileHost};
-pub(crate) use stop::stop_unacknowledged_turn;
+pub(crate) use stop::{cancel_abandoned_turn, stop_unacknowledged_turn};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

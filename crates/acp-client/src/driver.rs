@@ -1009,6 +1009,20 @@ pub struct SessionSettled {
     /// running on its workstation, behind a hung transport, and the caller
     /// should stop it over a fresh connection ([`AcpDriver::attach_cancel`]).
     pub cancel_unacknowledged: bool,
+    /// The connection settled out of a background hold with the work the
+    /// hold was waiting for still going, as far as it last saw (tasks live,
+    /// or a continuation cycle busy): the transport went (a detach
+    /// included), or a Stop's `session/cancel` — sent out of turn, so never
+    /// answered — went out and nothing showed the work stopping within
+    /// `HOLDING_CANCEL_DRAIN`. The turn itself completed and stands.
+    ///
+    /// A local agent's background work goes down with it. A remote one's
+    /// goes on on the workstation, and any continuation it triggers is
+    /// recorded by no one: after a loss the caller should leave the session
+    /// for reconcile to catch up with rather than treat it as settled, and
+    /// after a Stop cancel it again over a fresh connection
+    /// ([`AcpDriver::attach_cancel`]).
+    pub background_work_left: bool,
 }
 
 impl SessionSettled {
@@ -2728,6 +2742,7 @@ impl AcpDriver {
                 reason: settle_reason,
                 transport_loss,
                 cancel_unacknowledged: transport.cancel_unacknowledged(),
+                background_work_left: transport.background_work_left(),
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -5937,6 +5952,12 @@ const STEER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// (which the bridge answers by aborting the turn).
 const HOLDING_CANCEL_DRAIN: Duration = Duration::from_millis(500);
 
+/// Whether the background work a hold waits for is still going, as far as
+/// the connection last saw: tasks live, or a continuation cycle busy.
+fn background_work_live(activity: &BackgroundActivity) -> bool {
+    activity.live_tasks > 0 || activity.session_state == Some(SdkSessionState::Busy)
+}
+
 /// How long a Stop waits for the agent to answer the turn's prompt after
 /// `session/cancel` before settling cancelled anyway (and reporting
 /// [`SessionSettled::cancel_unacknowledged`]).
@@ -6318,7 +6339,15 @@ async fn hold_for_background_quiescence(
         }
         tokio::select! {
             _ = cancel_token.cancelled() => break HoldOutcome::Cancelled,
-            _ = child_exited.cancelled() => break HoldOutcome::ChildExited,
+            // A remote session's `child_exited` is its leased proxy's exit,
+            // which the proxy's thread announces before its routed stream
+            // ends: the transport went, and the agent's background work may
+            // run on behind it.
+            _ = child_exited.cancelled() => break if handler.transport.through_lease() {
+                HoldOutcome::TransportLost
+            } else {
+                HoldOutcome::ChildExited
+            },
             _ = handler.transport.lost().cancelled() => break HoldOutcome::TransportLost,
             turn = prompt_rx.recv(), if prompts_open => match turn {
                 Some(turn) => break HoldOutcome::NewTurn(turn),
@@ -6802,6 +6831,16 @@ async fn run_acp_session(
                     log::warn!("{e}");
                 }
                 tokio::time::sleep(HOLDING_CANCEL_DRAIN).await;
+                // Out of turn the cancel has no answer to wait for: the only
+                // sign it landed is the work going away. Over a hung remote
+                // transport it never arrives, and the work would run on.
+                if background_work_live(&handler.subscribe_background_activity().borrow()) {
+                    log::warn!(
+                        "ACP session {our_session_id}: background work still live after the \
+                         hold's session/cancel"
+                    );
+                    transport.note_background_work_left();
+                }
                 transition_lifetime(our_session_id, &mut lifetime, SessionLifetime::TornDown);
                 return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
             }
@@ -6824,8 +6863,12 @@ async fn run_acp_session(
                 // Like `ChildExited`: the turn completed before the transport
                 // went, so it stands with its wait truncated. A detach lands
                 // here on purpose, leaving any background work running
-                // remotely.
+                // remotely. Work still live is reported, so a remote session
+                // is left for reconcile rather than settled under it.
                 transport.confirm(TransportLossPhase::Hold);
+                if background_work_live(&handler.subscribe_background_activity().borrow()) {
+                    transport.note_background_work_left();
+                }
                 if transport.detach_requested() {
                     log::info!(
                         "ACP session {our_session_id}: detached while holding for background \
@@ -12759,6 +12802,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             reason,
             transport_loss: None,
             cancel_unacknowledged: false,
+            background_work_left: false,
         };
 
         // A hold that was cancelled or failed after the turn completed is the

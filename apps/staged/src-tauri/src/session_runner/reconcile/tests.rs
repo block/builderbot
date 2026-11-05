@@ -33,6 +33,9 @@ struct FakeBlox {
     process: Mutex<Result<RemoteProcess, String>>,
     recorded: Mutex<Result<RecordedTurn, String>>,
     attach: Mutex<Arc<AttachFn>>,
+    /// Whether an attach catches up and reports itself connected before
+    /// running the scripted attach, as one to a live process does.
+    connects: std::sync::atomic::AtomicBool,
     cancel: Mutex<Result<CancelOutcome, String>>,
     calls: Mutex<Vec<String>>,
 }
@@ -45,6 +48,7 @@ impl FakeBlox {
             process: Mutex::new(Ok(process(RemoteProcessStatus::Idle, Some("cmd-1")))),
             recorded: Mutex::new(Ok(RecordedTurn::Unknown)),
             attach: Mutex::new(Arc::new(|_, _, _| Ok(ended_turn()))),
+            connects: std::sync::atomic::AtomicBool::new(true),
             cancel: Mutex::new(Ok(CancelOutcome::Stopped)),
             calls: Mutex::new(Vec::new()),
         }
@@ -70,6 +74,12 @@ impl FakeBlox {
             + 'static,
     ) {
         *self.attach.lock().unwrap() = Arc::new(attach);
+    }
+
+    /// Attaches fail before they catch up: `on_connected` is never called.
+    fn never_connects(&self) {
+        self.connects
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn during_workspace(&self, hook: impl FnMut() + Send + 'static) {
@@ -147,6 +157,9 @@ impl ReconcileBlox for FakeBlox {
         control: &AttachControl,
     ) -> Result<AttachOutcome, String> {
         self.log(format!("attach:{:?}", target.command_id));
+        if self.connects.load(std::sync::atomic::Ordering::SeqCst) {
+            (control.on_connected)();
+        }
         let attach = Arc::clone(&self.attach.lock().unwrap());
         attach(target, store, control)
     }
@@ -825,6 +838,85 @@ fn an_errored_turn_settles_failed() {
     assert_eq!(fx.host.statuses(), vec!["running", "error"]);
 }
 
+/// A turn that ended before the attach was made: its `result` went to the
+/// lost connection and the replay holds none, so the recording decides.
+#[test]
+fn an_idle_turn_that_errored_settles_failed_from_its_recording() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Failed {
+            message: Some("API Error: 529 overloaded".to_string()),
+        }),
+    });
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Error,
+        Some("API Error: 529 overloaded"),
+        CompletionReason::Crashed,
+    );
+    assert!(fx.blox.called("recorded:cmd-1"));
+}
+
+#[test]
+fn an_idle_turn_that_was_aborted_settles_cancelled_from_its_recording() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Stopped(StopReason::Cancelled)),
+    });
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        None,
+        CompletionReason::Interrupted,
+    );
+}
+
+/// With nothing in the recording either, an ended turn reads as completed,
+/// as before; and a result the attach saw needs no recording at all.
+#[test]
+fn an_idle_turn_with_no_result_anywhere_settles_completed() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Unknown);
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    assert_eq!(fx.row(&session.id).status, SessionStatus::Completed);
+    assert!(fx.blox.called("recorded:cmd-1"));
+
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.reconcile(&session);
+    assert_eq!(fx.row(&session.id).status, SessionStatus::Completed);
+    assert!(!fx.blox.called("recorded"));
+}
+
 #[test]
 fn a_recorded_errored_turn_settles_failed() {
     let fx = Fixture::new();
@@ -850,6 +942,7 @@ fn a_recorded_errored_turn_settles_failed() {
 fn a_failed_attach_leaves_the_row_disconnected_and_backs_off() {
     let fx = Fixture::new();
     let session = fx.disconnected_commit_session();
+    fx.blox.never_connects();
     fx.blox
         .on_attach(|_, _, _| Err("ACP protocol failed: connection reset".to_string()));
 
@@ -859,7 +952,9 @@ fn a_failed_attach_leaves_the_row_disconnected_and_backs_off() {
     assert_eq!(row.status, SessionStatus::Disconnected);
     assert_eq!(row.owner_pid, None);
     assert!(!fx.registry.is_live(&session.id));
-    assert_eq!(fx.host.statuses(), vec!["running", "disconnected"]);
+    // Never connected, so never announced running: the frontend only hears
+    // the row is still disconnected.
+    assert_eq!(fx.host.statuses(), vec!["disconnected"]);
     assert!(fx.host.drains().is_empty());
     let event = fx.host.last_reconcile_event().unwrap();
     assert_eq!(event.phase, ReconcilePhase::Waiting);
@@ -867,6 +962,66 @@ fn a_failed_attach_leaves_the_row_disconnected_and_backs_off() {
         event.reason.unwrap().kind,
         ReconcileReasonKind::AttachFailed
     );
+}
+
+// =============================================================================
+// Rows ended or deleted outside reconcile
+// =============================================================================
+
+/// A `disconnected` row a teardown or delete is about to take: its remote
+/// turn is cancelled first, on a thread of its own, and the row is left to
+/// the caller.
+#[test]
+fn a_disconnected_row_about_to_go_has_its_turn_cancelled() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    let blox: Arc<dyn ReconcileBlox> = fx.blox.clone();
+
+    let cancel = super::stop::cancel_abandoned_turn_with(&fx.store, blox, &session)
+        .expect("a cancel for a disconnected row");
+    cancel.join().unwrap();
+
+    assert_eq!(fx.blox.calls(), vec!["cancel:acp-1"]);
+    fx.assert_untouched(&session);
+    assert!(fx.host.statuses().is_empty());
+}
+
+/// An unconfirmed cancel is only logged: there is no row left to say so on.
+#[test]
+fn an_abandoned_turn_whose_cancel_fails_is_only_logged() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_cancel(Err("unreachable".to_string()));
+    let blox: Arc<dyn ReconcileBlox> = fx.blox.clone();
+
+    super::stop::cancel_abandoned_turn_with(&fx.store, blox, &session)
+        .unwrap()
+        .join()
+        .unwrap();
+
+    fx.assert_untouched(&session);
+}
+
+#[test]
+fn only_a_disconnected_row_with_a_turn_is_cancelled_before_it_goes() {
+    let fx = Fixture::new();
+    let blox: Arc<dyn ReconcileBlox> = fx.blox.clone();
+
+    // Settled: nothing runs.
+    let settled = fx.disconnected_commit_session();
+    fx.reconcile(&settled);
+    let settled = fx.row(&settled.id);
+    assert_eq!(settled.status, SessionStatus::Completed);
+    let calls = fx.blox.calls().len();
+    assert!(
+        super::stop::cancel_abandoned_turn_with(&fx.store, Arc::clone(&blox), &settled).is_none()
+    );
+
+    // No agent session: no turn to cancel.
+    let mut never_prompted = fx.disconnected_commit_session();
+    never_prompted.agent_id = None;
+    assert!(super::stop::cancel_abandoned_turn_with(&fx.store, blox, &never_prompted).is_none());
+    assert_eq!(fx.blox.calls().len(), calls);
 }
 
 // =============================================================================

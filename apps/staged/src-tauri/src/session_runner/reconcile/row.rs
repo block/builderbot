@@ -255,7 +255,18 @@ impl Reconciler {
         error_message: Option<String>,
         reason: Option<&CompletionReason>,
     ) {
-        self.host.emit_status(SessionStatusEvent {
+        self.host
+            .emit_status(self.status_event(target, status, error_message, reason));
+    }
+
+    fn status_event(
+        &self,
+        target: &ReconcileTarget,
+        status: &SessionStatus,
+        error_message: Option<String>,
+        reason: Option<&CompletionReason>,
+    ) -> SessionStatusEvent {
+        SessionStatusEvent {
             session_id: target.session_id.clone(),
             status: status.as_str().to_string(),
             error_message,
@@ -267,7 +278,8 @@ impl Reconciler {
             // cleared the frontend's record of the session) is the only
             // place its completion handling can learn it from.
             session_type: target.session_type.clone(),
-        });
+            dependency_skipped: false,
+        }
     }
 
     /// Claim the row `running`, attach, and settle from what the attach saw.
@@ -301,11 +313,12 @@ impl Reconciler {
             // reached this entry meanwhile wrote nothing, trusting this
             // attempt to record it: pass it on. A quit's cancel is no Stop:
             // the turn is left running.
+            // Read with the removal, so a Stop either lands before it and is
+            // passed on here or finds no entry and goes its own way.
             let stop = self
                 .registry
-                .cancellation_completion_reason_of(session_id, epoch)
+                .deregister_reporting_cancellation_of(session_id, epoch)
                 .filter(|reason| *reason != CompletionReason::AppQuit);
-            self.registry.deregister(session_id, epoch);
             if let Some(reason) = stop {
                 if self.disconnected_row(session_id).is_some() {
                     return self.stop_disconnected(session_id, reason);
@@ -315,14 +328,25 @@ impl Reconciler {
             return RowOutcome::Done;
         }
         log::info!("[reconcile] Session {session_id}: attaching to its workstation turn");
-        self.emit_status(target, &SessionStatus::Running, None, None);
 
         let registry = std::sync::Arc::clone(&self.registry);
         let detach_session_id = session_id.to_string();
+        // `running` goes out once the attach is caught up and following, not
+        // at the claim: an attach that keeps failing to connect would
+        // otherwise flip the row running and back to disconnected on every
+        // attempt.
+        let host = std::sync::Arc::clone(&self.host);
+        let running = self.status_event(target, &SessionStatus::Running, None, None);
+        let announced = std::sync::atomic::AtomicBool::new(false);
         let control = AttachControl {
             token: token.clone(),
             on_detach_handle: Box::new(move |handle| {
                 registry.set_detach_handle(&detach_session_id, handle);
+            }),
+            on_connected: Box::new(move || {
+                if !announced.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    host.emit_status(running.clone());
+                }
             }),
         };
         let attached = self.blox.attach(target, &self.store, &control);
@@ -351,7 +375,20 @@ impl Reconciler {
             Ok(AttachOutcome::Ended {
                 result,
                 latest_prompt,
-            }) => from_ended_turn(result, latest_prompt, stop),
+            }) => {
+                // A turn that ended before the attach was made sent its
+                // `result` frame to the connection that is gone, and the
+                // replay re-sends none: the process's recording still holds
+                // it. Without it an errored or aborted turn would read as
+                // completed.
+                let result = result.or_else(|| {
+                    match recorded.unwrap_or_else(|| self.read_recorded_turn(target)) {
+                        RecordedTurn::Ended { result } => result,
+                        RecordedTurn::InFlight | RecordedTurn::Unknown => None,
+                    }
+                });
+                from_ended_turn(result, latest_prompt, stop)
+            }
             Ok(AttachOutcome::ProcessGone {
                 message,
                 latest_prompt,

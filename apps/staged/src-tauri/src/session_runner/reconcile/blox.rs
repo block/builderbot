@@ -130,6 +130,10 @@ pub(crate) struct AttachControl {
     /// Receives the attach's detach handle once it is connected, so a quit
     /// can let go of the turn the way it does for any remote session.
     pub on_detach_handle: Box<dyn Fn(DetachHandle) + Send + Sync>,
+    /// Called once the attach has caught the transcript up and follows the
+    /// session's live stream: the turn is reattached. Not called for an
+    /// attach that ends before that.
+    pub on_connected: Box<dyn Fn() + Send + Sync>,
 }
 
 /// Blox, as reconcile uses it. Every method blocks.
@@ -267,7 +271,7 @@ impl ReconcileBlox for LiveBlox {
                 target.session_id.clone(),
                 Arc::clone(store),
             ));
-            let attached = driver.attach(
+            let mut attached = driver.attach(
                 &target.session_id,
                 &target.agent_session_id,
                 target.command_id.as_deref(),
@@ -278,6 +282,13 @@ impl ReconcileBlox for LiveBlox {
             )?;
             let detach = attached.detach_handle();
             (control.on_detach_handle)(detach.clone());
+            let caught_up = tokio::select! {
+                caught_up = attached.caught_up() => caught_up,
+                () = control.token.cancelled() => false,
+            };
+            if caught_up {
+                (control.on_connected)();
+            }
             let settled = attached.settled();
             tokio::pin!(settled);
             tokio::select! {

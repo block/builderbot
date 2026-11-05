@@ -818,6 +818,11 @@ export interface SessionStatusPayload {
   branchId?: string;
   projectId?: string;
   sessionType?: string;
+  /**
+   * Set only on the `cancelled` of a queued session skipped because the
+   * session it was gated on did not succeed: it never ran.
+   */
+  dependencySkipped?: boolean;
 }
 
 // =============================================================================

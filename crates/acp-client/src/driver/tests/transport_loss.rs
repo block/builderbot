@@ -526,6 +526,10 @@ log=$1; mode=$2
 trap 'echo SIGINT >> "$log"' INT
 reply() { printf '{"jsonrpc":"2.0","id":"%s","result":%s}\n' "$1" "$2"; }
 fail() { printf '{"jsonrpc":"2.0","id":"%s","error":%s}\n' "$1" "$2"; }
+sdk() { printf '{"jsonrpc":"2.0","method":"_claude/sdkMessage","params":{"sessionId":"sess-1","message":%s}}\n' "$1"; }
+task_started='{"type":"system","subtype":"task_started","task_id":"bg-1","tool_use_id":"toolu_bg-1","description":"sleep 60"}'
+task_done='{"type":"system","subtype":"task_notification","task_id":"bg-1","status":"stopped"}'
+eof_line='INF Received EOF signal from orchestrator, connection closed'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$log"
   id=$(printf '%s' "$line" | sed -n 's/^.*"id":"\([^"]*\)".*$/\1/p')
@@ -539,8 +543,15 @@ while IFS= read -r line; do
       echo PROMPT >> "$log"
       case "$mode" in
         hang) ;;
-        orchestrator-eof)
-          echo 'INF Received EOF signal from orchestrator, connection closed' >&2 ;;
+        orchestrator-eof) echo "$eof_line" >&2 ;;
+        hold|hold-cancel-kills)
+          sdk "$task_started"; reply "$id" '{"stopReason":"end_turn"}' ;;
+        hold-eof)
+          sdk "$task_started"; reply "$id" '{"stopReason":"end_turn"}'
+          sleep 1; echo "$eof_line" >&2 ;;
+        hold-eof-settled)
+          sdk "$task_started"; reply "$id" '{"stopReason":"end_turn"}'; sdk "$task_done"
+          sleep 1; echo "$eof_line" >&2 ;;
         exit) exit 0 ;;
         process-exited)
           fail "$id" '{"code":-32603,"message":"Internal error","data":"Claude Code process exited with code 1"}'
@@ -557,8 +568,8 @@ while IFS= read -r line; do
       echo CANCEL >> "$log"
       case "$mode" in
         stop-eof) exit 0 ;;
-        stop-lost)
-          echo 'INF Received EOF signal from orchestrator, connection closed' >&2 ;;
+        stop-lost) echo "$eof_line" >&2 ;;
+        hold-cancel-kills) sdk "$task_done" ;;
       esac ;;
   esac
 done
@@ -573,6 +584,15 @@ mod fake_proxy {
         pub(super) turn: Result<AgentRunOutcome, String>,
         pub(super) log: String,
         pub(super) elapsed: Duration,
+    }
+
+    /// What a test does once the connection starts holding for background
+    /// work.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum OnHold {
+        Nothing,
+        Detach,
+        Stop,
     }
 
     fn driver(log: &Path, mode: &str) -> AcpDriver {
@@ -636,11 +656,36 @@ mod fake_proxy {
         detach_on: Option<&str>,
         stop_on: Option<&str>,
     ) -> Run {
+        run_inner(mode, detach_on, stop_on, None).await
+    }
+
+    /// [`run`] with the post-turn background hold on, doing `on_hold` once
+    /// the connection reports it is holding.
+    pub(super) async fn run_holding(mode: &str, on_hold: OnHold) -> Run {
+        run_inner(mode, None, None, Some(on_hold)).await
+    }
+
+    async fn run_inner(
+        mode: &str,
+        detach_on: Option<&str>,
+        stop_on: Option<&str>,
+        on_hold: Option<OnHold>,
+    ) -> Run {
         let log = log_path(mode);
+        let holding = CancellationToken::new();
         let local = tokio::task::LocalSet::new();
         let run = local
             .run_until(async {
-                let driver = driver(&log, mode);
+                let mut driver = driver(&log, mode);
+                if on_hold.is_some() {
+                    driver.background_hold = Some(super::super::test_hold_config());
+                    let holding = holding.clone();
+                    driver.background_hold_observer = Some(Arc::new(move |status| {
+                        if status.holding {
+                            holding.cancel();
+                        }
+                    }));
+                }
                 let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
                 let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
                 let cancel = CancellationToken::new();
@@ -672,8 +717,27 @@ mod fake_proxy {
                         cancel.cancel();
                     }
                 };
-                let (turn, (), ()) =
-                    tokio::join!(connection.prompt("hello", &[]), detacher, stopper);
+                let hold_action = async {
+                    let Some(action) = on_hold.filter(|action| *action != OnHold::Nothing) else {
+                        return;
+                    };
+                    tokio::time::timeout(Duration::from_secs(10), holding.cancelled())
+                        .await
+                        .expect("the connection holds for the live task");
+                    match action {
+                        OnHold::Detach => assert!(detach.detach(), "the proxy group is armed"),
+                        OnHold::Stop => cancel.cancel(),
+                        OnHold::Nothing => {}
+                    }
+                };
+                // Under a hold the prompt resolves at hold entry; the
+                // connection settles later.
+                let (turn, (), (), ()) = tokio::join!(
+                    connection.prompt("hello", &[]),
+                    detacher,
+                    stopper,
+                    hold_action
+                );
                 let settled = tokio::time::timeout(Duration::from_secs(30), settled_rx)
                     .await
                     .expect("the connection settles")
@@ -803,4 +867,68 @@ async fn another_sessions_permission_request_is_left_unanswered() {
         "the foreign request got an answer: {}",
         run.log
     );
+}
+
+// =============================================================================
+// Losing the connection, or stopping, while holding for background work
+// =============================================================================
+
+fn hold_loss() -> Option<TransportLoss> {
+    Some(TransportLoss {
+        phase: TransportLossPhase::Hold,
+    })
+}
+
+/// The transport goes while the hold waits on a live task: the turn stands,
+/// and the settle says the work is still going, so a remote session is left
+/// for reconcile rather than settled under it.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_hold_lost_with_work_live_leaves_it_behind() {
+    let run = fake_proxy::run_holding("hold-eof", fake_proxy::OnHold::Nothing).await;
+    assert_eq!(run.turn, Ok(AgentRunOutcome::Completed));
+    assert_eq!(run.settled.outcome, Ok(AgentRunOutcome::Completed));
+    assert_eq!(run.settled.reason, SessionSettleReason::HoldStopped);
+    assert_eq!(run.settled.transport_loss, hold_loss());
+    assert!(run.settled.background_work_left);
+    assert!(!run.log.contains("SIGINT"), "{}", run.log);
+
+    // A quit's detach mid-hold leaves the work behind the same way.
+    let run = fake_proxy::run_holding("hold", fake_proxy::OnHold::Detach).await;
+    assert_eq!(run.settled.reason, SessionSettleReason::HoldStopped);
+    assert_eq!(run.settled.transport_loss, hold_loss());
+    assert!(run.settled.background_work_left);
+    assert!(!run.log.contains("session/cancel"), "{}", run.log);
+}
+
+/// The task had already settled when the transport went: nothing is left
+/// running, and the completed turn simply stands.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_hold_lost_with_nothing_live_leaves_nothing_behind() {
+    let run = fake_proxy::run_holding("hold-eof-settled", fake_proxy::OnHold::Nothing).await;
+    assert_eq!(run.settled.outcome, Ok(AgentRunOutcome::Completed));
+    assert_eq!(run.settled.transport_loss, hold_loss());
+    assert!(!run.settled.background_work_left);
+}
+
+/// A Stop during the hold sends `session/cancel`, which out of turn has no
+/// answer: only the work going away confirms it. Work still live after the
+/// drain is reported, so a remote session cancels it again over a fresh
+/// connection.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_hold_stop_nothing_confirmed_leaves_the_work_behind() {
+    let run = fake_proxy::run_holding("hold", fake_proxy::OnHold::Stop).await;
+    assert!(run.log.contains("CANCEL"), "{}", run.log);
+    assert_eq!(run.settled.outcome, Ok(AgentRunOutcome::Completed));
+    assert_eq!(run.settled.reason, SessionSettleReason::HoldStopped);
+    assert_eq!(run.settled.transport_loss, None);
+    assert!(run.settled.background_work_left);
+
+    // The agent reports the task stopped: the cancel landed.
+    let run = fake_proxy::run_holding("hold-cancel-kills", fake_proxy::OnHold::Stop).await;
+    assert!(run.log.contains("CANCEL"), "{}", run.log);
+    assert_eq!(run.settled.reason, SessionSettleReason::HoldStopped);
+    assert!(!run.settled.background_work_left);
 }

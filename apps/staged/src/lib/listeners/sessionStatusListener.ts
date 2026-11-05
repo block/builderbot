@@ -221,6 +221,9 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
   if (hydrationFetchesInFlight > 0) {
     statusWhileFetching.set(sessionId, Date.now());
   }
+  // Read before the clear below: whether this event ends a session this
+  // client knew as disconnected.
+  const wasDisconnected = disconnectedSessionsStore.isDisconnected(sessionId);
   if (status === 'disconnected') {
     disconnectedSessionsStore.markDisconnected(
       sessionId,
@@ -282,26 +285,43 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
     }
-    if (
-      status === 'cancelled' &&
-      sessionType === 'push' &&
-      errorMessage &&
-      eventBranchId &&
-      // Reconcile's settles carry their session type too, and a reason; the
-      // skip never ran, so it has none.
-      !payload.completionReason
-    ) {
+    if (payload.dependencySkipped && sessionType === 'push' && eventBranchId) {
       // A skipped push never ran, so it was never registered: handleSessionEnd
       // would only warn about an unknown session and clean up nothing.
-      handleSkippedPush(sessionId, eventBranchId, errorMessage);
+      handleSkippedPush(
+        sessionId,
+        eventBranchId,
+        errorMessage ?? 'The session it was waiting on did not succeed.'
+      );
       return;
     }
-    handleSessionEnd(sessionId, status, errorMessage, {
-      projectId: eventProjectId,
-      branchId: eventBranchId,
-      sessionType: sessionType as SessionType | undefined,
-    });
+    handleSessionEnd(
+      sessionId,
+      status,
+      errorMessage,
+      settledByReconcile(payload, wasDisconnected)
+        ? {
+            projectId: eventProjectId,
+            branchId: eventBranchId,
+            sessionType: sessionType as SessionType | undefined,
+          }
+        : {}
+    );
   }
+}
+
+/**
+ * Whether a terminal event is reconcile settling a session that went
+ * `disconnected`. That session was cleaned out of the registry when it
+ * disconnected, so its completion handling has to come from the event — but
+ * only for these: every other terminal event keeps to what this client saw
+ * running, so a session it never registered (cancelled while queued, or
+ * skipped for its dependency) still marks nothing unread. This client knew
+ * the session as disconnected, or the event carries the session type, which
+ * among terminal events only reconcile's settles and the dependency skip do.
+ */
+function settledByReconcile(payload: SessionStatusPayload, wasDisconnected: boolean): boolean {
+  return wasDisconnected || (!!payload.sessionType && !payload.dependencySkipped);
 }
 
 // ---------------------------------------------------------------------------
@@ -616,8 +636,8 @@ interface SessionEndContext {
  * Completion handling for a terminal status: unread marking and PR/push/pull
  * outcomes. The registry knows the sessions this client saw running; one that
  * went `disconnected` was cleaned out of it then, so when reconcile settles it
- * later the event's own fields stand in (reconcile's settles carry the
- * session type as well as its branch and project).
+ * later the caller passes the event's own fields to stand in (see
+ * `settledByReconcile`), and an empty context otherwise.
  */
 function handleSessionEnd(
   sessionId: string,

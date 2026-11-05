@@ -440,6 +440,12 @@ pub enum SessionStatus {
     /// branch queue treats it as busy, the same as `Running`. Unlike
     /// `Running` it has no owner (`owner_pid` is NULL), so no process's
     /// orphan recovery will claim it.
+    ///
+    /// Downgrades never see one: the status arrived with migrations 0037 and
+    /// 0038, and a build from before them refuses to open a database whose
+    /// schema is newer than it knows. A build that did read one anyway
+    /// parses unknown statuses as `Error`, ending the row rather than
+    /// failing the load.
     Disconnected,
     Completed,
     Error,

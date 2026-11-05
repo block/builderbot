@@ -1,6 +1,6 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Session, SessionReconcileEvent } from '../../types';
+import type { Session, SessionMessage, SessionReconcileEvent } from '../../types';
 
 /**
  * The chat pane's handling of a `disconnected` Blox session: the alert that
@@ -10,6 +10,7 @@ import type { Session, SessionReconcileEvent } from '../../types';
 
 const {
   sessionRow,
+  transcript,
   eventListeners,
   reconcileSessionMock,
   cancelSessionMock,
@@ -17,8 +18,10 @@ const {
   pollSessionMock,
 } = vi.hoisted(() => {
   const sessionRow = { current: null as Session | null };
+  const transcript = { current: [] as SessionMessage[] };
   return {
     sessionRow,
+    transcript,
     eventListeners: new Map<string, Set<(payload: unknown) => void>>(),
     reconcileSessionMock: vi.fn(async (_id: string) => {}),
     cancelSessionMock: vi.fn(async (_id: string) => {}),
@@ -26,7 +29,7 @@ const {
     pollSessionMock: vi.fn(async (_id: string, _request: unknown) => ({
       session: sessionRow.current,
       queuedMessages: [],
-      messages: [],
+      messages: transcript.current,
       acpMetadataMessages: [],
     })),
   };
@@ -70,7 +73,7 @@ vi.mock('../../transport', async (importOriginal) => ({
 vi.mock('../../commands', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../commands')>()),
   getSession: async () => sessionRow.current,
-  getLatestSessionMessages: async () => ({ data: [] }),
+  getLatestSessionMessages: async () => ({ data: transcript.current }),
   getSessionMessages: async () => ({ data: [] }),
   getFreshSessionMessages: async () => [],
   getSessionMessagesSince: async () => [],
@@ -100,6 +103,10 @@ function row(overrides: Partial<Session> = {}): Session {
     completionReason: null,
     ...overrides,
   } as unknown as Session;
+}
+
+function message(id: number, role: 'user' | 'assistant', content: string): SessionMessage {
+  return { id, sessionId: SESSION_ID, role, content, createdAt: id * 1_000 } as SessionMessage;
 }
 
 function reconcileEvent(
@@ -156,6 +163,7 @@ function button(label: string): HTMLButtonElement | null {
 describe('SessionChatPane with a disconnected Blox session', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
+    transcript.current = [];
     eventListeners.clear();
     reconcileSessionMock.mockClear();
     cancelSessionMock.mockClear();
@@ -251,6 +259,53 @@ describe('SessionChatPane with a disconnected Blox session', () => {
     expect(document.body.textContent).toContain(
       'Staged reconnected to the workstation and caught up. The agent finished this turn.'
     );
+  });
+
+  describe('ties the caught-up note to the turn in flight at the disconnect', () => {
+    // Rows the poll appends slide in; jsdom has no Web Animations, and the
+    // slide itself is beside the point here.
+    beforeEach(() => {
+      Element.prototype.animate = () =>
+        ({ onfinish: null, cancel() {}, playState: 'finished' }) as unknown as Animation;
+    });
+    afterEach(() => {
+      delete (Element.prototype as Partial<Element>).animate;
+    });
+
+    async function settleAfter(laterRows: SessionMessage[]) {
+      transcript.current = [message(1, 'user', 'Fix the bug'), message(2, 'assistant', 'On it')];
+      sessionRow.current = row();
+      await mountPane();
+      expect(alert()).not.toBeNull();
+
+      transcript.current = [...transcript.current, ...laterRows];
+      sessionRow.current = row({ status: 'completed', completionReason: 'turn_complete' });
+      emit('session-status-changed', {
+        sessionId: SESSION_ID,
+        status: 'completed',
+        completionReason: 'turn_complete',
+      });
+      await settle();
+    }
+
+    it('says it caught up when that turn is the one that ended', async () => {
+      await settleAfter([message(3, 'assistant', 'Fixed it')]);
+
+      expect(document.body.textContent).toContain('Fixed it');
+      expect(document.body.textContent).toContain(
+        'Staged reconnected to the workstation and caught up. The agent finished this turn.'
+      );
+    });
+
+    it('says nothing about the reconnect once a later turn has ended', async () => {
+      // Reconcile settled the turn, and a queued follow-up drained from
+      // another client ran its own turn to the end before this pane heard of
+      // either.
+      await settleAfter([message(3, 'user', 'Now add a test'), message(4, 'assistant', 'Added')]);
+
+      expect(document.body.textContent).toContain('Now add a test');
+      expect(document.body.textContent).not.toContain('Staged reconnected');
+    });
   });
 
   it('re-fetches the session when reconcile goes idle for it, in case its settle was missed', async () => {

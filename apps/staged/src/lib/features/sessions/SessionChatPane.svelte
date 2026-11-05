@@ -157,6 +157,7 @@
   import {
     hasXmlBlocks,
     reconnectedOutcomeMessage,
+    newestUserMessageId,
     sessionEndMessage,
     sessionErrorMessage,
     XML_BLOCK_TAGS,
@@ -303,11 +304,13 @@
   } | null>(null);
   let checkNowTimer: ReturnType<typeof setTimeout> | null = null;
   /**
-   * The session this pane last saw `disconnected`, so a turn reconcile
-   * settled can say so instead of ending silently. Cleared when the user
-   * starts a new turn.
+   * The disconnect this pane last saw, so a turn reconcile settled can say so
+   * instead of ending silently: the session, and its newest user message at
+   * the time — the prompt of the turn that was in flight. The note speaks for
+   * that turn only; once a newer prompt shows up (sent here, from another
+   * client, or drained from the queue) the session has moved on.
    */
-  let observedDisconnectedId = $state<string | null>(null);
+  let observedDisconnect = $state<{ sessionId: string; userMessageId: number | null } | null>(null);
   let messagesEl: HTMLDivElement;
   let inputEl: HTMLElement | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -453,12 +456,24 @@
       checkNowRequest.stateAtRequest === reconcileState
   );
   let reconnectedNote = $derived(
-    session && observedDisconnectedId === session.id ? reconnectedOutcomeMessage(session) : null
+    session &&
+      observedDisconnect?.sessionId === session.id &&
+      observedDisconnect.userMessageId === newestUserMessageId(messages)
+      ? reconnectedOutcomeMessage(session)
+      : null
   );
 
   // Remember a disconnect seen here, from the load, a status event or a poll.
   $effect(() => {
-    if (session?.status === 'disconnected') observedDisconnectedId = session.id;
+    if (session?.status !== 'disconnected') return;
+    const sessionId = session.id;
+    const userMessageId = newestUserMessageId(messages);
+    if (
+      observedDisconnect?.sessionId !== sessionId ||
+      observedDisconnect.userMessageId !== userMessageId
+    ) {
+      observedDisconnect = { sessionId, userMessageId };
+    }
   });
   let canSendLive = $derived(isLive && liveDelivery.supported);
   let sendControl = $derived(
@@ -1663,7 +1678,7 @@
       modelSpecificFollowupConfig = null;
       modelSpecificFollowupModelValue = null;
       modelSpecificFollowupSessionId = null;
-      observedDisconnectedId = null;
+      observedDisconnect = null;
       startPolling();
       scrollToBottom();
       return true;

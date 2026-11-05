@@ -78,6 +78,43 @@ describe('disconnectedSessionsStore', () => {
     expect(store.isDisconnected('stale')).toBe(false);
   });
 
+  it('drops a session’s reconcile state with the session, even if its idle never arrives', async () => {
+    const store = await freshStore();
+    store.markDisconnected('s1', 'p1', 'b1');
+    store.applyReconcileEvent(event('s1', 'waiting'));
+
+    store.clear('s1');
+
+    expect(store.getReconcileState('s1')).toBeNull();
+    // Reconcile state alone is pruned too.
+    store.applyReconcileEvent(event('s2', 'checking'));
+    store.clear('s2');
+    expect(store.getReconcileState('s2')).toBeNull();
+  });
+
+  it('prunes reconcile state the snapshot proves stale, except for skipped sessions', async () => {
+    const store = await freshStore();
+    for (const id of ['gone', 'raced', 'kept']) {
+      store.markDisconnected(id, 'p1', null);
+      store.applyReconcileEvent(event(id, 'waiting'));
+    }
+    // Reconcile state for a session this client never knew as disconnected
+    // is the reconcile snapshot's to prune: its event may have landed while
+    // this snapshot was in flight.
+    store.applyReconcileEvent(event('unknown', 'checking'));
+
+    store.applySnapshot(
+      [{ sessionId: 'kept', projectId: 'p1', branchId: null }],
+      (id) => id === 'raced'
+    );
+
+    expect(store.getReconcileState('gone')).toBeNull();
+    expect(store.getReconcileState('unknown')?.phase).toBe('checking');
+    expect(store.getReconcileState('raced')?.phase).toBe('waiting');
+    expect(store.getReconcileState('kept')?.phase).toBe('waiting');
+    expect(store.projectReconcileState('p1')?.phase).toBe('waiting');
+  });
+
   it('follows reconcile events, dropping a session’s state on idle', async () => {
     const store = await freshStore();
     const checking = event('s1', 'checking');

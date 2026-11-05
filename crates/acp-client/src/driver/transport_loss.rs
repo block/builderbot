@@ -169,6 +169,10 @@ struct MonitorState {
     /// a detach never touches a proxy this connection has already let go of,
     /// nor signals a reused pgid.
     detach_target: Option<DetachTarget>,
+    /// The connection reaches its agent through a leased `sq` proxy (see
+    /// [`TransportMonitor::arm_lease`]), so the proxy exiting is the transport
+    /// going, not the agent: that runs on the workstation.
+    leased: bool,
     /// The remote process may serve other sessions too: teardown never sends
     /// SIGINT, which would stop their turns along with this one.
     shared_process: bool,
@@ -178,6 +182,9 @@ struct MonitorState {
     /// A Stop's `session/cancel` went out and the turn's prompt was not
     /// answered within the cancel-ack deadline.
     cancel_unacknowledged: bool,
+    /// A background hold ended with the work it was waiting for still going;
+    /// see [`SessionSettled::background_work_left`].
+    background_work_left: bool,
 }
 
 /// What a [`DetachHandle`] lets go of.
@@ -277,6 +284,18 @@ impl TransportMonitor {
         self.state().cancel_unacknowledged
     }
 
+    /// A background hold ended — its transport lost, or a Stop's
+    /// fire-and-forget `session/cancel` sent — with background work still
+    /// going as far as this connection saw; see
+    /// [`SessionSettled::background_work_left`].
+    pub(super) fn note_background_work_left(&self) {
+        self.state().background_work_left = true;
+    }
+
+    pub(super) fn background_work_left(&self) -> bool {
+        self.state().background_work_left
+    }
+
     pub(super) fn signal(&self, signal: TransportSignal) {
         {
             let mut state = self.state();
@@ -321,7 +340,16 @@ impl TransportMonitor {
 
     /// Record the remote session's lease for [`DetachHandle`].
     pub(super) fn arm_lease(&self, lease: super::remote_process::LeaseDetacher) {
-        self.state().detach_target = Some(DetachTarget::Lease(lease));
+        let mut state = self.state();
+        state.detach_target = Some(DetachTarget::Lease(lease));
+        state.leased = true;
+    }
+
+    /// Whether the connection's agent is reached through a leased proxy, whose
+    /// exit is this transport going rather than the agent's (see
+    /// [`Self::arm_lease`]).
+    pub(super) fn through_lease(&self) -> bool {
+        self.state().leased
     }
 
     /// Record the process-group leader of a proxy this connection spawned for

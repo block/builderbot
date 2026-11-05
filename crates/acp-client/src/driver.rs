@@ -2351,7 +2351,7 @@ impl AcpDriver {
         };
         let reattached_turn = match (&agent_process, reattach) {
             (AgentProcess::Remote(lease), Some(turn)) => {
-                Some(lease.reattached_turn(turn.prompted_at).ok_or_else(|| {
+                Some(lease.reattached_turn(turn).ok_or_else(|| {
                     "This remote agent's workspace is unknown, so its turn cannot be reattached to"
                         .to_string()
                 })?)
@@ -6315,7 +6315,7 @@ async fn observe_reattached_turn(
                 log::info!("Session {our_session_id}: the reattached turn has ended");
                 Ok((AgentRunOutcome::Completed, SessionSettleReason::ResponseComplete))
             }
-            Err(cause) => Err(format!("{REMOTE_AGENT_LOST_PREFIX}{cause}")),
+            Err(error) => Err(error),
         },
     }
 }
@@ -6644,6 +6644,16 @@ pub struct ReattachTurn {
     pub agent_session_id: String,
     /// When the turn was prompted, in ms since the epoch.
     pub prompted_at: i64,
+    /// The pid of the app instance that prompted the turn, when known. The
+    /// agent broadcasts its answer to that `session/prompt` to every
+    /// attachment, under a request id that names the instance but not the
+    /// session.
+    pub owner_pid: Option<u32>,
+    /// Whether this was `owner_pid`'s only turn on the agent process, so
+    /// that the agent answering any of its prompts marks exactly when this
+    /// turn ended. Otherwise only bloxlet reporting the whole process idle
+    /// does, or the turn's session going quiet for long enough.
+    pub sole_turn_of_owner: bool,
 }
 
 // Fragment shared by `setup_acp_session`'s required-transport check and

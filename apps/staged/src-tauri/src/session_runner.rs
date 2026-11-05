@@ -2037,20 +2037,13 @@ fn finish_session_run(
     // is torn down) — under a background hold that is quiescence or the
     // hold cap, not the prompt resolving — so a commit made by an
     // out-of-turn background continuation is visible to these hooks.
-    if completed_successfully {
-        run_post_completion_hooks(
-            &config.session_id,
-            &config.working_dir,
-            config.pre_head_sha.as_deref(),
-            config.workspace_name.as_deref(),
-            config
-                .remote_working_dir
-                .as_deref()
-                .and_then(|dir| dir.to_str()),
-            &store_for_status,
-            turn_start_message_id,
-        );
-    }
+    detect_turn_artifacts(
+        config,
+        completed_successfully,
+        &completion_reason,
+        &store_for_status,
+        turn_start_message_id,
+    );
 
     // The registry entry is still in place during the hooks, so a Stop
     // that lands while they run fires this token: `cancel` answers `true`
@@ -3642,7 +3635,7 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
         }
     };
 
-    for session in sessions {
+    for session in &sessions {
         let should_cancel = match session.owner_pid {
             None => true,
             Some(pid) if pid == std::process::id() => false,
@@ -3651,8 +3644,14 @@ pub fn recover_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
         };
 
         if should_cancel {
-            if dead_owner_recovery(&store, &session) == DeadOwnerRecovery::Reattach {
-                reattach_dead_owner_session(Arc::clone(&store), &app_handle, session);
+            if dead_owner_recovery(&store, session) == DeadOwnerRecovery::Reattach {
+                let sole_turn_of_owner = is_owners_sole_turn(&store, session, &sessions);
+                reattach_dead_owner_session(
+                    Arc::clone(&store),
+                    &app_handle,
+                    session.clone(),
+                    sole_turn_of_owner,
+                );
                 continue;
             }
             let transitioned = store
@@ -3709,11 +3708,51 @@ fn dead_owner_recovery(store: &Store, session: &crate::store::Session) -> DeadOw
     // went before the agent had one.
     let has_agent_session =
         crate::session_commands::resumable_agent_session_id(session.agent_id.as_deref()).is_some();
-    if has_agent_session && session_workspace_name(store, session).is_some() {
+    // A follow-up turn has one from an earlier turn, though, so the agent
+    // must also have answered this turn's prompt: an owner that went while
+    // still connecting never sent it, and the idle agent would read as the
+    // turn having completed.
+    let turn_reached_agent = || {
+        store
+            .get_turn_prompt_message(&session.id)
+            .ok()
+            .flatten()
+            .is_some_and(|prompt| {
+                store
+                    .agent_answered_message(&session.id, prompt.id)
+                    .unwrap_or(false)
+            })
+    };
+    if has_agent_session && session_workspace_name(store, session).is_some() && turn_reached_agent()
+    {
         DeadOwnerRecovery::Reattach
     } else {
         DeadOwnerRecovery::AppQuit
     }
+}
+
+/// Whether `session` was its owner's only running turn on the agent process
+/// it runs on (same workspace, same provider), among the `running` sessions.
+///
+/// The agent answers a turn's `session/prompt` on every connection to that
+/// process, and its request id names the instance that sent it but not the
+/// session, so only then does that answer tell a reattached turn it ended.
+fn is_owners_sole_turn(
+    store: &Store,
+    session: &crate::store::Session,
+    running: &[crate::store::Session],
+) -> bool {
+    let Some(owner_pid) = session.owner_pid else {
+        return false;
+    };
+    let workspace = session_workspace_name(store, session);
+    let shares_its_process = |other: &crate::store::Session| {
+        other.id != session.id
+            && other.owner_pid == Some(owner_pid)
+            && other.provider == session.provider
+            && session_workspace_name(store, other) == workspace
+    };
+    !running.iter().any(shares_its_process)
 }
 
 /// The workspace a session's branch lives on, when it is a remote branch —
@@ -3742,10 +3781,13 @@ fn session_workspace_name(store: &Store, session: &crate::store::Session) -> Opt
 /// workspace, wait for the turn the owner prompted to end, and run the
 /// normal completion path ([`finish_session_run`]) — or fail it as
 /// [`CompletionReason::RemoteAgentLost`] when that agent is gone too.
+/// `sole_turn_of_owner` says whether the agent's answer to the dead owner's
+/// prompts identifies the turn (see [`is_owners_sole_turn`]).
 fn reattach_dead_owner_session(
     store: Arc<Store>,
     app_handle: &AppHandle,
     session: crate::store::Session,
+    sole_turn_of_owner: bool,
 ) {
     use tauri::Manager;
     let Some(registry) = app_handle
@@ -3781,7 +3823,11 @@ fn reattach_dead_owner_session(
         let local = tokio::task::LocalSet::new();
         let reattached = local.block_on(&rt, async {
             let config = crate::session_commands::reattach_session_config(&store, &session).await?;
-            Ok::<_, String>(reattach_turn(&store, config, &cancel_token).await)
+            let owner = TurnOwner {
+                pid: session.owner_pid,
+                sole_turn: sole_turn_of_owner,
+            };
+            Ok::<_, String>(reattach_turn(&store, config, owner, &cancel_token).await)
         });
         match reattached {
             Ok((config, turn_start_message_id, result)) => finish_session_run(
@@ -3828,18 +3874,15 @@ fn reattach_dead_owner_session(
 async fn reattach_turn(
     store: &Arc<Store>,
     mut config: SessionConfig,
+    owner: TurnOwner,
     cancel_token: &CancellationToken,
 ) -> (SessionConfig, i64, Result<AgentRunOutcome, String>) {
-    // The turn starts at its prompt, the session's latest user message.
+    // The turn starts at its prompt — not at a steer delivered during it,
+    // which is a later user message.
     let turn_start = store
-        .get_session_messages(&config.session_id)
+        .get_turn_prompt_message(&config.session_id)
         .ok()
-        .and_then(|messages| {
-            messages
-                .into_iter()
-                .rev()
-                .find(|message| message.role == MessageRole::User)
-        });
+        .flatten();
     let turn_start_message_id = turn_start.as_ref().map_or(0, |message| message.id);
     let turn_started_at = turn_start.map(|message| message.created_at);
     if let Some(turn_started_at) = turn_started_at {
@@ -3862,7 +3905,7 @@ async fn reattach_turn(
                     workspace_name.as_deref(),
                     remote_dir,
                 );
-                head_before(&git, turn_started_at)
+                head_at(&git, turn_started_at)
             })
             .await
             .unwrap_or_else(|e| Err(format!("HEAD lookup task failed: {e}")))
@@ -3879,16 +3922,26 @@ async fn reattach_turn(
     }
 
     let prompted_at = turn_started_at.unwrap_or(0);
-    let result = reattach_agent(store, &config, cancel_token, prompted_at).await;
+    let result = reattach_agent(store, &config, cancel_token, prompted_at, owner).await;
     (config, turn_start_message_id, result)
+}
+
+/// The app instance that prompted a turn being reattached to.
+#[derive(Clone, Copy, Debug)]
+struct TurnOwner {
+    /// Its PID, which the request ids of its prompts carry.
+    pid: Option<u32>,
+    /// Whether the turn was its only one on the agent process (see
+    /// [`acp_client::ReattachTurn::sole_turn_of_owner`]).
+    sole_turn: bool,
 }
 
 /// How many times [`reattach_agent`] reconnects to a turn whose `sq` proxy
 /// keeps going while bloxlet still runs its agent, before failing with that.
 const DETACHED_TURN_REATTACH_LIMIT: usize = 3;
 
-/// Reattach to the turn of remote session `config` prompted at `prompted_at`
-/// (ms since the epoch) and wait for it to end (see
+/// Reattach to the turn of remote session `config` that `owner` prompted at
+/// `prompted_at` (ms since the epoch) and wait for it to end (see
 /// [`AcpDriver::reattach`]), reconnecting when its `sq` proxy goes again
 /// while bloxlet still runs the agent.
 async fn reattach_agent(
@@ -3896,6 +3949,7 @@ async fn reattach_agent(
     config: &SessionConfig,
     cancel_token: &CancellationToken,
     prompted_at: i64,
+    owner: TurnOwner,
 ) -> Result<AgentRunOutcome, String> {
     let agent_session_id = config
         .agent_session_id
@@ -3918,6 +3972,8 @@ async fn reattach_agent(
     let turn = acp_client::ReattachTurn {
         agent_session_id,
         prompted_at,
+        owner_pid: owner.pid,
+        sole_turn_of_owner: owner.sole_turn,
     };
     let mut attempt = 1;
     loop {
@@ -3975,16 +4031,77 @@ async fn reattach_detached_turn(
     let Some(prompted_at) = prompted_at else {
         return Err(error);
     };
+    // A proxy that went while the session was still setting up may never
+    // have sent the prompt, and the idle agent would then read as the turn
+    // having completed: only a turn the agent has answered is picked up.
+    let turn_reached_agent = store
+        .agent_answered_message(&config.session_id, turn_start_message_id)
+        .unwrap_or(false);
+    if !turn_reached_agent {
+        return Err(error);
+    }
     log::warn!(
         "Session {}: {error}; reattaching to its turn",
         config.session_id
     );
-    reattach_agent(store, config, cancel_token, prompted_at).await
+    // This process sent the prompt, through a proxy that has gone. It may
+    // have had other turns on it, so its answer doesn't mark this turn's end.
+    let owner = TurnOwner {
+        pid: Some(std::process::id()),
+        sole_turn: false,
+    };
+    reattach_agent(store, config, cancel_token, prompted_at, owner).await
+}
+
+/// The HEAD a turn prompted at `at` (ms since the epoch) started from: what
+/// HEAD's reflog says it was then, or — when the reflog can't be read or
+/// doesn't reach back that far — [`head_before`]. The reflog survives
+/// rebases and merges that leave committer dates out of order.
+fn head_at(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<String>, String> {
+    let at_secs = at.div_euclid(1000);
+    // No spaces in the format: a remote runner's arguments pass through
+    // `ws exec`'s command line.
+    let reflog = git(&[
+        "reflog",
+        "show",
+        "--format=%H:%gd",
+        "--date=unix",
+        "HEAD",
+        "--",
+    ]);
+    let entries = match reflog {
+        Ok(reflog) => parse_head_reflog(&reflog),
+        Err(e) => {
+            log::debug!("HEAD reflog unreadable, falling back to commit dates: {e}");
+            Vec::new()
+        }
+    };
+    // Newest first: the first entry made by then is HEAD as of then.
+    let reaches_back = entries.last().is_some_and(|(_, time)| *time <= at_secs);
+    if reaches_back {
+        let sha = entries.into_iter().find(|(_, time)| *time <= at_secs);
+        return Ok(sha.map(|(sha, _)| sha));
+    }
+    head_before(git, at)
+}
+
+/// `(sha, unix time)` of each entry of `git reflog show --format=%H:%gd
+/// --date=unix`, newest first (`<sha>:HEAD@{<time>}` per line).
+fn parse_head_reflog(reflog: &str) -> Vec<(String, i64)> {
+    reflog
+        .lines()
+        .filter_map(|line| {
+            let (sha, selector) = line.trim().split_once(':')?;
+            let time = selector.strip_prefix("HEAD@{")?.strip_suffix('}')?;
+            Some((sha.to_string(), time.parse().ok()?))
+        })
+        .collect()
 }
 
 /// The branch's HEAD as of `at` (ms since the epoch): its newest commit made
 /// before then, or `None` when it has none that old. A turn's commits come
-/// after its prompt, so this is the HEAD a turn prompted at `at` started from.
+/// after its prompt, so this approximates the HEAD a turn prompted at `at`
+/// started from.
 fn head_before(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<String>, String> {
     let before = format!("--before=@{}", at.div_euclid(1000));
     let sha = git(&["rev-list", "-1", &before, "HEAD"])?;
@@ -4103,134 +4220,14 @@ fn run_post_completion_hooks(
     store: &Arc<Store>,
     turn_start_message_id: i64,
 ) {
-    // --- Commit detection ---
-    if let Some(pre_sha) = pre_head_sha {
-        // Look for any commit linked to this session — not just pending (sha IS NULL)
-        // ones — so we also detect amended commits on resumed sessions.
-        if let Ok(Some(commit)) = store.get_commit_by_session(session_id) {
-            // Get current HEAD from the checkout the session ran in — the
-            // branch's clone directory on a remote workspace, which is not
-            // where a bare `ws exec` lands when the workspace holds more than
-            // one repo. The same runner is handed to reassociation below, so
-            // the two can't end up describing different repos.
-            let git = crate::branches::git_runner(
-                working_dir,
-                workspace_name,
-                remote_working_dir.map(str::to_string),
-            );
-
-            match crate::branches::head_sha(&git) {
-                Ok(current_head) if current_head != pre_sha => {
-                    // A rebase pipeline that handed off to AI (conflicts, a
-                    // failed fetch) lands here instead of
-                    // `finalize_rebase_pipeline_without_ai`. If its turn ended
-                    // with the rebase still stopped on a conflict, HEAD is
-                    // detached on a partially applied commit — a SHA `git
-                    // rebase --abort` erases — so nothing may claim it: not
-                    // the pending row, not an amend, and no diff cache keyed
-                    // on it. Skip the whole arm; the rows self-resolve on a
-                    // later turn, because resumed sessions re-capture
-                    // `pre_head_sha` and land back here once HEAD is attached
-                    // again (after `--continue` finishes or `--abort`
-                    // restores, reassociation plus the duplicate-SHA branch of
-                    // `complete_pending_commit_sha` settle every row), while a
-                    // turn that never comes leaves the pending row
-                    // `sha IS NULL` — an ordinary failed commit attempt.
-                    //
-                    // Asking is the same call that does the work: the rebase
-                    // rewrote SHAs just the same as the no-AI path, and
-                    // reassociation has to check the attached HEAD anyway
-                    // before it repoints anything, so it reports which way it
-                    // went. That also keeps the load-bearing ordering — reattach
-                    // the orphaned rows before the pending row below claims the
-                    // new HEAD, see `finalize_rebase_pipeline_without_ai` for
-                    // why — true by construction.
-                    let rebase_pipeline = session_is_rebase_pipeline(store, session_id);
-                    let mid_rebase = rebase_pipeline
-                        && reassociate_rebased_commits(store, &commit.branch_id, &git)
-                            == Reassociation::MidRebase;
-                    if mid_rebase {
-                        log::info!(
-                            "Session {session_id}: rebase still in flight (HEAD detached), \
-                             leaving commit detection for a later turn"
-                        );
-                    } else {
-                        log::info!(
-                            "Session {session_id}: new commit detected ({} → {})",
-                            &pre_sha[..7.min(pre_sha.len())],
-                            &current_head[..7.min(current_head.len())]
-                        );
-                        let recorded = if commit.sha.is_none() {
-                            match store.complete_pending_commit_sha(
-                                &commit.id,
-                                &commit.branch_id,
-                                &current_head,
-                            ) {
-                                Ok(recorded) => recorded,
-                                Err(e) => {
-                                    log::error!("Failed to update pending commit SHA: {e}");
-                                    false
-                                }
-                            }
-                        } else {
-                            match store.get_commit_by_sha(&commit.branch_id, &current_head) {
-                                Ok(Some(existing)) if existing.id != commit.id => {
-                                    log::warn!(
-                                        "Session {session_id}: target commit SHA already has metadata row {}, skipping update",
-                                        existing.id
-                                    );
-                                    false
-                                }
-                                Ok(_) => {
-                                    if let Err(e) =
-                                        store.update_commit_sha(&commit.id, &current_head)
-                                    {
-                                        log::error!("Failed to update commit SHA: {e}");
-                                        false
-                                    } else {
-                                        true
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to check existing commit SHA: {e}");
-                                    false
-                                }
-                            }
-                        };
-
-                        if recorded {
-                            // Spawn background diff caching for remote branches.
-                            if let Some(ws_name) = workspace_name {
-                                let commit_shas: Vec<String> = store
-                                    .list_commits_for_branch(&commit.branch_id)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .filter_map(|c| c.sha)
-                                    .collect();
-                                crate::diff_cache::spawn_cache_branch_diff(
-                                    Arc::clone(store),
-                                    commit.branch_id.clone(),
-                                    ws_name.to_string(),
-                                    current_head.clone(),
-                                    commit_shas,
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(_) => {
-                    if commit.sha.is_none() {
-                        log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
-                    } else {
-                        log::info!("Session {session_id}: no commit change (HEAD unchanged)");
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to get HEAD SHA after session: {e}");
-                }
-            }
-        }
-    }
+    detect_session_commit(
+        session_id,
+        working_dir,
+        pre_head_sha,
+        workspace_name,
+        remote_working_dir,
+        store,
+    );
 
     // --- Note extraction (repo notes and project notes) ---
     //
@@ -4482,6 +4479,209 @@ fn run_post_completion_hooks(
                             log::error!("Failed to add review comment: {e}");
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Which post-completion hooks a turn's terminal state calls for.
+#[derive(Debug, PartialEq, Eq)]
+enum TurnArtifactHooks {
+    /// The turn completed: detect every artifact it produced.
+    All,
+    /// The turn's remote agent was lost: link the commit it may have made
+    /// before it went. The commit survives on the workspace, and a resume
+    /// re-captures `pre_head_sha`, so no later turn would link it. Its notes
+    /// and pr/push output are a cut-off turn's, so they are not extracted.
+    CommitOnly,
+    /// Nothing the turn left is trusted as its result.
+    Skip,
+}
+
+fn turn_artifact_hooks(
+    completed_successfully: bool,
+    completion_reason: &CompletionReason,
+) -> TurnArtifactHooks {
+    if completed_successfully {
+        TurnArtifactHooks::All
+    } else if *completion_reason == CompletionReason::RemoteAgentLost {
+        TurnArtifactHooks::CommitOnly
+    } else {
+        TurnArtifactHooks::Skip
+    }
+}
+
+/// Run the post-completion hooks a turn that has reached its terminal state
+/// calls for (see [`turn_artifact_hooks`]).
+fn detect_turn_artifacts(
+    config: &SessionConfig,
+    completed_successfully: bool,
+    completion_reason: &CompletionReason,
+    store: &Arc<Store>,
+    turn_start_message_id: i64,
+) {
+    let remote_working_dir = config
+        .remote_working_dir
+        .as_deref()
+        .and_then(|dir| dir.to_str());
+    match turn_artifact_hooks(completed_successfully, completion_reason) {
+        TurnArtifactHooks::All => run_post_completion_hooks(
+            &config.session_id,
+            &config.working_dir,
+            config.pre_head_sha.as_deref(),
+            config.workspace_name.as_deref(),
+            remote_working_dir,
+            store,
+            turn_start_message_id,
+        ),
+        TurnArtifactHooks::CommitOnly => detect_session_commit(
+            &config.session_id,
+            &config.working_dir,
+            config.pre_head_sha.as_deref(),
+            config.workspace_name.as_deref(),
+            remote_working_dir,
+            store,
+        ),
+        TurnArtifactHooks::Skip => {}
+    }
+}
+
+/// Link the commit session `session_id` made: when HEAD of the checkout it
+/// ran in has moved past `pre_head_sha` (HEAD when its turn started), record
+/// the new HEAD on the session's commit row. See
+/// [`run_post_completion_hooks`].
+fn detect_session_commit(
+    session_id: &str,
+    working_dir: &std::path::Path,
+    pre_head_sha: Option<&str>,
+    workspace_name: Option<&str>,
+    remote_working_dir: Option<&str>,
+    store: &Arc<Store>,
+) {
+    if let Some(pre_sha) = pre_head_sha {
+        // Look for any commit linked to this session — not just pending (sha IS NULL)
+        // ones — so we also detect amended commits on resumed sessions.
+        if let Ok(Some(commit)) = store.get_commit_by_session(session_id) {
+            // Get current HEAD from the checkout the session ran in — the
+            // branch's clone directory on a remote workspace, which is not
+            // where a bare `ws exec` lands when the workspace holds more than
+            // one repo. The same runner is handed to reassociation below, so
+            // the two can't end up describing different repos.
+            let git = crate::branches::git_runner(
+                working_dir,
+                workspace_name,
+                remote_working_dir.map(str::to_string),
+            );
+
+            match crate::branches::head_sha(&git) {
+                Ok(current_head) if current_head != pre_sha => {
+                    // A rebase pipeline that handed off to AI (conflicts, a
+                    // failed fetch) lands here instead of
+                    // `finalize_rebase_pipeline_without_ai`. If its turn ended
+                    // with the rebase still stopped on a conflict, HEAD is
+                    // detached on a partially applied commit — a SHA `git
+                    // rebase --abort` erases — so nothing may claim it: not
+                    // the pending row, not an amend, and no diff cache keyed
+                    // on it. Skip the whole arm; the rows self-resolve on a
+                    // later turn, because resumed sessions re-capture
+                    // `pre_head_sha` and land back here once HEAD is attached
+                    // again (after `--continue` finishes or `--abort`
+                    // restores, reassociation plus the duplicate-SHA branch of
+                    // `complete_pending_commit_sha` settle every row), while a
+                    // turn that never comes leaves the pending row
+                    // `sha IS NULL` — an ordinary failed commit attempt.
+                    //
+                    // Asking is the same call that does the work: the rebase
+                    // rewrote SHAs just the same as the no-AI path, and
+                    // reassociation has to check the attached HEAD anyway
+                    // before it repoints anything, so it reports which way it
+                    // went. That also keeps the load-bearing ordering — reattach
+                    // the orphaned rows before the pending row below claims the
+                    // new HEAD, see `finalize_rebase_pipeline_without_ai` for
+                    // why — true by construction.
+                    let rebase_pipeline = session_is_rebase_pipeline(store, session_id);
+                    let mid_rebase = rebase_pipeline
+                        && reassociate_rebased_commits(store, &commit.branch_id, &git)
+                            == Reassociation::MidRebase;
+                    if mid_rebase {
+                        log::info!(
+                            "Session {session_id}: rebase still in flight (HEAD detached), \
+                             leaving commit detection for a later turn"
+                        );
+                    } else {
+                        log::info!(
+                            "Session {session_id}: new commit detected ({} → {})",
+                            &pre_sha[..7.min(pre_sha.len())],
+                            &current_head[..7.min(current_head.len())]
+                        );
+                        let recorded = if commit.sha.is_none() {
+                            match store.complete_pending_commit_sha(
+                                &commit.id,
+                                &commit.branch_id,
+                                &current_head,
+                            ) {
+                                Ok(recorded) => recorded,
+                                Err(e) => {
+                                    log::error!("Failed to update pending commit SHA: {e}");
+                                    false
+                                }
+                            }
+                        } else {
+                            match store.get_commit_by_sha(&commit.branch_id, &current_head) {
+                                Ok(Some(existing)) if existing.id != commit.id => {
+                                    log::warn!(
+                                        "Session {session_id}: target commit SHA already has metadata row {}, skipping update",
+                                        existing.id
+                                    );
+                                    false
+                                }
+                                Ok(_) => {
+                                    if let Err(e) =
+                                        store.update_commit_sha(&commit.id, &current_head)
+                                    {
+                                        log::error!("Failed to update commit SHA: {e}");
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to check existing commit SHA: {e}");
+                                    false
+                                }
+                            }
+                        };
+
+                        if recorded {
+                            // Spawn background diff caching for remote branches.
+                            if let Some(ws_name) = workspace_name {
+                                let commit_shas: Vec<String> = store
+                                    .list_commits_for_branch(&commit.branch_id)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter_map(|c| c.sha)
+                                    .collect();
+                                crate::diff_cache::spawn_cache_branch_diff(
+                                    Arc::clone(store),
+                                    commit.branch_id.clone(),
+                                    ws_name.to_string(),
+                                    current_head.clone(),
+                                    commit_shas,
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    if commit.sha.is_none() {
+                        log::info!("Session {session_id}: no new commit (HEAD unchanged), leaving pending commit as failed");
+                    } else {
+                        log::info!("Session {session_id}: no commit change (HEAD unchanged)");
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to get HEAD SHA after session: {e}");
                 }
             }
         }
@@ -5256,11 +5456,31 @@ mod tests {
         let remote = crate::store::Branch::new_remote(&project.id, "remote", "main", "ws-1");
         store.create_branch(&remote).unwrap();
         let dir = std::env::temp_dir();
+        // The rows a run writes once the agent has started answering it.
+        let answered_run = |session: &crate::store::Session| {
+            store
+                .add_session_message(&session.id, MessageRole::User, "go")
+                .unwrap();
+            store
+                .add_acp_metadata_message(
+                    &session.id,
+                    &crate::store::AcpMessageMetadata {
+                        acp_event_kind: Some("initialize".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            store
+                .add_session_message(&session.id, MessageRole::Assistant, "On it")
+                .unwrap();
+        };
 
         // A local agent ends with the app that ran it.
         let session = crate::store::Session::new_running("go", &dir)
             .with_branch(&local.id)
             .with_agent("agent-local");
+        store.create_session(&session).unwrap();
+        answered_run(&session);
         assert_eq!(
             dead_owner_recovery(&store, &session),
             DeadOwnerRecovery::AppQuit
@@ -5271,6 +5491,8 @@ mod tests {
         let session = crate::store::Session::new_running("go", &dir)
             .with_branch(&remote.id)
             .with_agent("agent-remote");
+        store.create_session(&session).unwrap();
+        answered_run(&session);
         assert_eq!(
             dead_owner_recovery(&store, &session),
             DeadOwnerRecovery::Reattach
@@ -5279,6 +5501,44 @@ mod tests {
         store.create_session(&session).unwrap();
         let commit = crate::store::Commit::new_pending(&remote.id).with_session(&session.id);
         store.create_commit(&commit).unwrap();
+        answered_run(&session);
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::Reattach
+        );
+
+        // A follow-up run has the earlier run's agent session, but an owner
+        // that went while it was still connecting never sent its prompt: the
+        // idle agent must not read as that run having completed.
+        let session = crate::store::Session::new_running("go", &dir)
+            .with_branch(&remote.id)
+            .with_agent("agent-follow-up");
+        store.create_session(&session).unwrap();
+        answered_run(&session);
+        store
+            .add_session_message(&session.id, MessageRole::User, "and push it")
+            .unwrap();
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::AppQuit
+        );
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &crate::store::AcpMessageMetadata {
+                    acp_event_kind: Some("initialize".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            dead_owner_recovery(&store, &session),
+            DeadOwnerRecovery::AppQuit,
+            "a connection that set up but has no answer may not have sent the prompt"
+        );
+        store
+            .add_session_message(&session.id, MessageRole::ToolCall, "git push")
+            .unwrap();
         assert_eq!(
             dead_owner_recovery(&store, &session),
             DeadOwnerRecovery::Reattach
@@ -5343,6 +5603,136 @@ mod tests {
         assert_eq!(head_before(&git, 999_999_999_000).unwrap(), None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A turn that brings in a commit dated before its prompt (a rebase onto
+    /// or a reset to older upstream work) leaves commit dates out of order.
+    /// HEAD's reflog still says where HEAD was when the turn started.
+    #[test]
+    fn head_at_reads_the_reflog_rather_than_commit_dates() {
+        let dir = std::env::temp_dir().join(format!(
+            "staged-head-at-{}-{}",
+            std::process::id(),
+            crate::store::now_timestamp()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.email", "test@example.com"]);
+        run_git(&dir, &["config", "user.name", "Test User"]);
+        // Commit and reflog times both follow the committer date.
+        let git_at = |secs: i64, args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            command.args(args).current_dir(&dir);
+            strip_git_env(&mut command);
+            let date = format!("@{secs} +0000");
+            command
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date);
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        std::fs::write(dir.join("file.txt"), "one\n").unwrap();
+        run_git(&dir, &["add", "file.txt"]);
+        git_at(1_000_000_000, &["commit", "-m", "start"]);
+        let start = run_git(&dir, &["rev-parse", "HEAD"]);
+        let tree = run_git(&dir, &["write-tree"]);
+        let upstream = git_at(
+            1_000_000_200,
+            &["commit-tree", &tree, "-p", &start, "-m", "upstream"],
+        );
+        // The turn, prompted at 1_000_000_500, resets onto it at 600.
+        git_at(1_000_000_600, &["reset", "--hard", &upstream]);
+        let git: crate::branches::GitRunner<'_> = Box::new(|args| Ok(run_git(&dir, args)));
+
+        assert_eq!(
+            head_before(&git, 1_000_000_500_000).unwrap(),
+            Some(upstream.clone()),
+            "commit dates alone put the turn's own change before it"
+        );
+        assert_eq!(
+            head_at(&git, 1_000_000_500_000).unwrap(),
+            Some(start.clone())
+        );
+        assert_eq!(head_at(&git, 1_000_000_700_000).unwrap(), Some(upstream));
+        // Before the reflog begins, commit dates are all there is.
+        assert_eq!(head_at(&git, 999_999_000_000).unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn head_reflog_lines_parse_and_noise_is_skipped() {
+        assert_eq!(
+            parse_head_reflog(
+                "ede99057:HEAD@{1000000600}\n\
+                 Last login: today\n\
+                 f933ae9c:HEAD@{1000000000}\n\
+                 abc:HEAD@{soon}\n"
+            ),
+            vec![
+                ("ede99057".to_string(), 1_000_000_600),
+                ("f933ae9c".to_string(), 1_000_000_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_remote_agent_lost_turn_links_its_commit_without_completing() {
+        assert_eq!(
+            turn_artifact_hooks(true, &CompletionReason::TurnComplete),
+            TurnArtifactHooks::All
+        );
+        assert_eq!(
+            turn_artifact_hooks(false, &CompletionReason::RemoteAgentLost),
+            TurnArtifactHooks::CommitOnly
+        );
+        for reason in [
+            CompletionReason::Crashed,
+            CompletionReason::AppQuit,
+            CompletionReason::Interrupted,
+            CompletionReason::Unknown,
+        ] {
+            assert_eq!(
+                turn_artifact_hooks(false, &reason),
+                TurnArtifactHooks::Skip,
+                "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dead_owners_answer_identifies_a_turn_only_when_it_was_its_sole_one() {
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let on_ws = |workspace: &str| {
+            let branch =
+                crate::store::Branch::new_remote(&project.id, workspace, "main", workspace);
+            store.create_branch(&branch).unwrap();
+            branch.id
+        };
+        let (ws_1, ws_2) = (on_ws("ws-1"), on_ws("ws-2"));
+        let dir = std::env::temp_dir();
+        let running = |branch: &str, owner_pid: u32, provider: &str| {
+            let mut session = crate::store::Session::new_running("go", &dir).with_branch(branch);
+            session.owner_pid = Some(owner_pid);
+            session.provider = Some(provider.to_string());
+            session
+        };
+
+        let turn = running(&ws_1, 4242, "claude");
+        let elsewhere = [
+            running(&ws_2, 4242, "claude"),
+            running(&ws_1, 5151, "claude"),
+            running(&ws_1, 4242, "goose"),
+        ];
+        let mut sessions = vec![turn.clone()];
+        sessions.extend(elsewhere);
+        assert!(is_owners_sole_turn(&store, &turn, &sessions));
+
+        sessions.push(running(&ws_1, 4242, "claude"));
+        assert!(!is_owners_sole_turn(&store, &turn, &sessions));
     }
 
     #[test]

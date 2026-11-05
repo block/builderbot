@@ -359,6 +359,54 @@ async fn a_connection_detaching_mid_turn_cancels_its_prompt() {
     );
 }
 
+/// A session reattached to a dead instance's turn watches for the agent's
+/// answer to that instance's prompt, which reaches every attachment.
+#[test]
+fn a_foreign_prompts_answer_ends_only_the_watch_on_its_instance() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let router = RemoteSessionRouter::new();
+    let (_client, mut rx) = attach(&router);
+    let mut ended = router.watch_foreign_prompts(4242, None);
+    let mut cancelled = router.watch_foreign_prompts(4242, Some("cancelled"));
+    let mut other = router.watch_foreign_prompts(5151, None);
+    // A watch nobody waits on any more is forgotten, and answers nothing.
+    drop(router.watch_foreign_prompts(4242, None));
+
+    router.incoming(&response(&json!("staged-4242-3:load-1"), json!({})));
+    router.incoming(&response(
+        &json!("staged-42420-3:p"),
+        json!({"stopReason": "end_turn"}),
+    ));
+    router.incoming(&response(&json!(7), json!({"stopReason": "end_turn"})));
+    assert_eq!(
+        ended.try_recv(),
+        Err(TryRecvError::Empty),
+        "only a stop reason from that instance ends its prompt"
+    );
+
+    router.incoming(&response(
+        &json!("staged-4242-3:p"),
+        json!({"stopReason": "end_turn"}),
+    ));
+    assert_eq!(ended.try_recv(), Ok(()));
+    assert_eq!(
+        cancelled.try_recv(),
+        Err(TryRecvError::Empty),
+        "a watch on one stop reason ignores the others"
+    );
+    router.incoming(&response(
+        &json!("staged-4242-4:q"),
+        json!({"stopReason": "cancelled"}),
+    ));
+    assert_eq!(cancelled.try_recv(), Ok(()));
+    assert_eq!(other.try_recv(), Err(TryRecvError::Empty));
+    assert!(
+        received(&mut rx).is_empty(),
+        "another instance's responses still reach no session"
+    );
+}
+
 #[test]
 fn request_cancellation_names_the_namespaced_id() {
     let router = RemoteSessionRouter::new();

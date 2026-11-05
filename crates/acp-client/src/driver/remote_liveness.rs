@@ -49,6 +49,24 @@ pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_secs(15);
 #[cfg(test)]
 pub(super) const REATTACHED_TURN_POLL: Duration = Duration::from_millis(50);
 
+/// How long a reattached turn bloxlet still runs may go without a frame for
+/// its session before it is cancelled. bloxlet reports idle per process, so
+/// busy co-tenants can hide a turn's end; and a permission request the
+/// earlier connection never answered is not re-sent to a new one, so a turn
+/// blocked on one would otherwise run (and hold its branch's queue) forever.
+#[cfg(not(test))]
+pub(super) const REATTACHED_TURN_QUIET_CAP: Duration = Duration::from_secs(30 * 60);
+#[cfg(test)]
+pub(super) const REATTACHED_TURN_QUIET_CAP: Duration = Duration::from_millis(3000);
+
+/// How long, after cancelling a quiet reattached turn, to wait for the agent
+/// to answer its prompt as cancelled, which says the turn was still running.
+/// claude-agent-acp forces a wedged turn to end 30 s after a cancel.
+#[cfg(not(test))]
+pub(super) const CANCELLED_TURN_ANSWER_WAIT: Duration = Duration::from_secs(45);
+#[cfg(test)]
+pub(super) const CANCELLED_TURN_ANSWER_WAIT: Duration = Duration::from_millis(3000);
+
 /// How long one `sq blox ws commands` call may take. Checks made while a
 /// session waits on the verdict use [`QUICK_CHECK_TIMEOUT`].
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);

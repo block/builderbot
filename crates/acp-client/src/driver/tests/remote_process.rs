@@ -25,7 +25,10 @@ const WAIT: Duration = Duration::from_secs(30);
 /// - "exit": ends its output.
 ///
 /// A session it loads while reusing a process is one an earlier connection
-/// prompted: once `finish` exists, the agent streams the rest of that turn.
+/// prompted: once `finish` exists, the agent streams the rest of that turn,
+/// then answers the earlier connection's prompt with `owner_response`, if
+/// that exists. A cancel with no held prompt answers `blocked_prompt`, if
+/// that exists, as cancelled: the earlier connection's turn was blocked.
 ///
 /// As `sq blox ws commands` it prints `active.json` or `history.json` and
 /// records the call in `checks`.
@@ -61,6 +64,7 @@ while IFS= read -r line; do
         (
           while [ ! -f "$dir/finish" ] && kill -0 $$ 2>/dev/null; do sleep 0.02; done
           printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Committed the fix."}}}}\n' "$sid"
+          cat "$dir/owner_response" 2>/dev/null
         ) &
       fi ;;
     *'"method":"session/prompt"'*'hold me'*) held=$id; continue ;;
@@ -81,6 +85,9 @@ while IFS= read -r line; do
       if [ -n "$held" ]; then
         printf '{"jsonrpc":"2.0","id":"%s","result":{"stopReason":"cancelled"}}\n' "$held"
         held=
+      elif [ -f "$dir/blocked_prompt" ]; then
+        printf '{"jsonrpc":"2.0","id":"%s","result":{"stopReason":"cancelled"}}\n' "$(cat "$dir/blocked_prompt")"
+        rm -f "$dir/blocked_prompt"
       fi
       continue ;;
   esac
@@ -165,6 +172,25 @@ impl FakeSq {
     /// connection prompted.
     fn finish_turn(&self) {
         std::fs::write(self.dir.join("finish"), "").unwrap();
+    }
+
+    /// Have the agent answer the earlier connection's prompt, request `id`,
+    /// once it finishes the turn.
+    fn answer_earlier_prompt(&self, id: &str) {
+        std::fs::write(
+            self.dir.join("owner_response"),
+            format!(
+                "{}\n",
+                serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}})
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Leave the earlier connection's prompt, request `id`, blocked until a
+    /// `session/cancel` arrives, as on a permission request nobody answers.
+    fn block_earlier_prompt(&self, id: &str) {
+        std::fs::write(self.dir.join("blocked_prompt"), id).unwrap();
     }
 
     /// Answer `sq blox ws commands` with these active commands and full
@@ -604,7 +630,7 @@ fn reattach_in_background(
     sq: &FakeSq,
     writer: Arc<BasicMessageWriter>,
 ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
-    reattach_turn_in_background(driver, sq, writer, now_ms())
+    reattach_turn_in_background(driver, sq, writer, now_ms(), None, false)
 }
 
 fn now_ms() -> i64 {
@@ -619,6 +645,8 @@ fn reattach_turn_in_background(
     sq: &FakeSq,
     writer: Arc<BasicMessageWriter>,
     prompted_at: i64,
+    owner_pid: Option<u32>,
+    sole_turn_of_owner: bool,
 ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
     let dir = sq.dir.clone();
     tokio::task::spawn_local(async move {
@@ -635,6 +663,8 @@ fn reattach_turn_in_background(
                 &ReattachTurn {
                     agent_session_id: "sess-earlier".to_string(),
                     prompted_at,
+                    owner_pid,
+                    sole_turn_of_owner,
                 },
             ),
         )
@@ -776,6 +806,8 @@ async fn a_reattachment_joining_a_running_proxy_checks_the_process_predates_the_
                 &sq,
                 Arc::new(BasicMessageWriter::new()),
                 started_at_ms - 60_000,
+                None,
+                false,
             )
             .await
             .unwrap()
@@ -791,6 +823,8 @@ async fn a_reattachment_joining_a_running_proxy_checks_the_process_predates_the_
                 &sq,
                 Arc::new(BasicMessageWriter::new()),
                 started_at_ms + 60_000,
+                None,
+                false,
             )
             .await
             .unwrap();
@@ -800,6 +834,172 @@ async fn a_reattachment_joining_a_running_proxy_checks_the_process_predates_the_
                  {outcome:?}"
             );
             assert_eq!(sq.launches().len(), 1, "both reattachments joined the proxy");
+        })
+        .await;
+}
+
+/// bloxlet reports idle per process, so with another session keeping the
+/// process busy only the agent's answer to the dead instance's prompt tells
+/// that the reattached turn has ended.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reattached_turn_ends_when_the_agent_answers_its_owners_prompt() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-answered");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            // Another instance's prompt ends first, without ending this turn.
+            sq.answer_earlier_prompt("staged-424242-3:9f1c");
+            let writer = Arc::new(BasicMessageWriter::new());
+            let reattached = reattach_turn_in_background(
+                sq.workspace_driver(),
+                &sq,
+                writer.clone(),
+                now_ms(),
+                Some(424_242),
+                true,
+            );
+            wait_until("bloxlet is asked about the turn", || sq.checks() > 0).await;
+
+            sq.finish_turn();
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert_eq!(writer.get_text().await, "Committed the fix.");
+            assert!(
+                sq.received("session/cancel").is_empty(),
+                "a turn that ended is not cancelled"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn another_instances_prompt_ending_does_not_end_a_reattached_turn() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-foreign-answer");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            sq.answer_earlier_prompt("staged-515151-3:9f1c");
+            let reattached = reattach_turn_in_background(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+                now_ms(),
+                Some(424_242),
+                true,
+            );
+            sq.finish_turn();
+            wait_until("bloxlet is asked about the turn twice", || {
+                sq.checks() > 1 || reattached.is_finished()
+            })
+            .await;
+            // Under load the quiet cap can beat the second check; a turn it
+            // ended was cancelled first, which a foreign answer never is.
+            assert!(
+                !reattached.is_finished() || !sq.received("session/cancel").is_empty(),
+                "the other instance's answer ended the turn"
+            );
+
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_IDLE"}]"#,
+                "[]",
+            );
+            let outcome = reattached.await.unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+        })
+        .await;
+}
+
+/// A turn that ended while other sessions keep the process busy looks like
+/// this: bloxlet runs the process, and the turn's session hears nothing. The
+/// wait is capped: the turn is cancelled, and since the agent answers no
+/// prompt of its owner's as cancelled, it had ended on its own.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reattached_turn_quiet_past_the_cap_that_had_ended_is_taken_as_ended() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-quiet");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let started = tokio::time::Instant::now();
+
+            let outcome = reattach_turn_in_background(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+                now_ms(),
+                Some(424_242),
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            assert!(
+                started.elapsed()
+                    >= crate::driver::remote_liveness::REATTACHED_TURN_QUIET_CAP
+                        + crate::driver::remote_liveness::CANCELLED_TURN_ANSWER_WAIT
+            );
+            let cancels = sq.received("session/cancel");
+            assert_eq!(cancels.len(), 1, "{cancels:?}");
+            assert!(
+                cancels[0].contains(r#""sessionId":"sess-earlier""#),
+                "{cancels:?}"
+            );
+        })
+        .await;
+}
+
+/// A turn the dead instance left blocked on a permission request (which is
+/// not re-sent to a new connection) looks the same until it is cancelled:
+/// then the agent answers its prompt as cancelled, so the turn was cut
+/// short and fails as lost, rather than reading as a completed one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reattached_turn_quiet_past_the_cap_that_was_blocked_fails_as_lost() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-blocked");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            sq.block_earlier_prompt("staged-424242-3:9f1c");
+
+            // Its sole turn, so the answer also reaches the watch that would
+            // otherwise take it as the turn ending.
+            let outcome = reattach_turn_in_background(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+                now_ms(),
+                Some(424_242),
+                true,
+            )
+            .await
+            .unwrap();
+            let error = outcome.expect_err("a turn cut short by the cap is not completed");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(error.contains("permission request"), "{error}");
+            assert_eq!(sq.received("session/cancel").len(), 1);
         })
         .await;
 }

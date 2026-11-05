@@ -20,6 +20,11 @@
 //! [`RemoteSessionRouter::has_stalled_prompt`]). A client that detaches with
 //! a prompt still in flight has that session cancelled: the shared process
 //! would otherwise keep serving a turn nobody is waiting on.
+//!
+//! Responses to requests other app instances sent reach every attachment
+//! too. They are dropped, except that one ending a prompt can be watched for
+//! (see [`RemoteSessionRouter::watch_foreign_prompts`]): it is how a session
+//! reattached to a dead instance's turn learns that turn has ended.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// One client (one Staged session's ACP connection) on a router.
@@ -43,6 +48,14 @@ const MAX_EARLY_FRAMES: usize = 256;
 
 /// Buffer size of each client's in-process pipes.
 const CLIENT_PIPE_BYTES: usize = 64 * 1024;
+
+/// How long `sq` is given to relay a `session/cancel` written to its stdin
+/// before it may be interrupted: it drops input it has not yet sent on to
+/// the orchestrator when it stops.
+#[cfg(not(test))]
+const CANCEL_RELAY_GRACE: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const CANCEL_RELAY_GRACE: Duration = Duration::from_millis(300);
 
 const SESSION_NEW_METHOD: &str = "session/new";
 const SESSION_PROMPT_METHOD: &str = "session/prompt";
@@ -73,6 +86,19 @@ struct RouterState {
     /// How the attached sessions lost their agent, when the router closed
     /// other than by [`RemoteSessionRouter::close`].
     loss: Option<RemoteLoss>,
+    /// Watches for the end of prompts another app instance sent.
+    foreign_prompt_watches: Vec<ForeignPromptWatch>,
+    /// When a `session/cancel` was last queued for the agent.
+    last_cancel_at: Option<Instant>,
+}
+
+/// Answers `ended` once a response ending a prompt whose request id starts
+/// with `id_prefix` arrives (with stop reason `stop_reason`, when set).
+/// Dropped once its receiver is.
+struct ForeignPromptWatch {
+    id_prefix: String,
+    stop_reason: Option<&'static str>,
+    ended: oneshot::Sender<()>,
 }
 
 /// How the sessions on a remote transport lost their agent.
@@ -178,6 +204,40 @@ impl RemoteSessionRouter {
     /// How the agent was lost, if it was.
     pub(super) fn loss(&self) -> Option<RemoteLoss> {
         self.state().loss.clone()
+    }
+
+    /// When the agent last sent a frame naming `session_id`, unless the
+    /// client owning the session has since detached.
+    pub(super) fn last_heard(&self, session_id: &str) -> Option<Instant> {
+        self.state().last_frame_at.get(session_id).copied()
+    }
+
+    /// Answered once the agent answers a `session/prompt` that the app
+    /// instance with pid `owner_pid` sent through some other connection —
+    /// a request this router never saw, whose response the agent broadcasts
+    /// to every attachment — and, when `stop_reason` is set, ends it for
+    /// that reason. Prompts this router sent never count.
+    pub(super) fn watch_foreign_prompts(
+        &self,
+        owner_pid: u32,
+        stop_reason: Option<&'static str>,
+    ) -> oneshot::Receiver<()> {
+        let (ended, answered) = oneshot::channel();
+        let mut state = self.state();
+        state
+            .foreign_prompt_watches
+            .retain(|watch| !watch.ended.is_closed());
+        state.foreign_prompt_watches.push(ForeignPromptWatch {
+            id_prefix: request_id_prefix(owner_pid),
+            stop_reason,
+            ended,
+        });
+        answered
+    }
+
+    /// Note that a `session/cancel` is being queued for the agent.
+    fn note_cancel(&self) {
+        self.state().last_cancel_at = Some(Instant::now());
     }
 
     /// Whether a session has a prompt in flight and has heard nothing from
@@ -339,6 +399,7 @@ impl RouterState {
             .and_then(Value::as_str)
             .and_then(|wire_id| self.pending.remove(wire_id));
         let Some(pending) = pending else {
+            self.note_foreign_prompt_end(&frame);
             // Another client's response, or the proxy's liveness probe.
             log::debug!(
                 "Dropping remote ACP response for a request this connection did not send (id {})",
@@ -357,6 +418,39 @@ impl RouterState {
         match serde_json::to_string(&frame) {
             Ok(line) => self.deliver(pending.client, line),
             Err(error) => log::warn!("Failed to re-encode remote ACP response: {error}"),
+        }
+    }
+
+    /// Answer the watches on other connections' prompts that `frame`, a
+    /// response to a request this router does not have pending, ends. Only a
+    /// result carrying a stop reason ends a prompt; the other requests of
+    /// the instance that sent it are answered without one.
+    fn note_foreign_prompt_end(&mut self, frame: &Map<String, Value>) {
+        let Some(wire_id) = frame.get("id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(stop_reason) = frame
+            .get("result")
+            .and_then(|result| result.get("stopReason"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let watches = std::mem::take(&mut self.foreign_prompt_watches);
+        for watch in watches {
+            if watch.ended.is_closed() {
+                continue;
+            }
+            let ends_watched_prompt = wire_id.starts_with(&watch.id_prefix)
+                && watch.stop_reason.is_none_or(|reason| reason == stop_reason);
+            if ends_watched_prompt {
+                log::info!(
+                    "A prompt another connection sent (request {wire_id}) has ended: {stop_reason}"
+                );
+                let _ = watch.ended.send(());
+            } else {
+                self.foreign_prompt_watches.push(watch);
+            }
         }
     }
 
@@ -411,7 +505,15 @@ fn wire_request_id(client: RemoteClientId, original_id: &Value) -> String {
         Value::String(id) => id.clone(),
         other => other.to_string(),
     };
-    format!("staged-{}-{client}:{original}", std::process::id())
+    format!(
+        "{}{client}:{original}",
+        request_id_prefix(std::process::id())
+    )
+}
+
+/// How every request id the app instance with pid `pid` sends begins.
+fn request_id_prefix(pid: u32) -> String {
+    format!("staged-{pid}-")
 }
 
 /// One agent process's stdio, routed: clients attach to get their own
@@ -419,7 +521,7 @@ fn wire_request_id(client: RemoteClientId, original_id: &Value) -> String {
 #[derive(Clone)]
 pub(super) struct RemoteTransport {
     router: Arc<RemoteSessionRouter>,
-    to_agent: mpsc::UnboundedSender<String>,
+    to_agent: mpsc::UnboundedSender<ToAgent>,
     /// Cancelled once the agent's output has ended, which the transport
     /// leaves for its owner to explain (see [`Self::output_end`]).
     output_ended: CancellationToken,
@@ -427,6 +529,13 @@ pub(super) struct RemoteTransport {
     /// Cancelled once the transport has closed: every client has been told
     /// the agent's output ended.
     closed: CancellationToken,
+}
+
+/// What is queued for the agent's stdin.
+enum ToAgent {
+    Frame(String),
+    /// Answered once every frame queued before it has been written.
+    Flush(oneshot::Sender<()>),
 }
 
 /// One client's ends of a [`RemoteTransport`], for `ByteStreams`.
@@ -520,6 +629,43 @@ impl RemoteTransport {
         self.router.has_stalled_prompt(quiet_for)
     }
 
+    /// See [`RemoteSessionRouter::last_heard`].
+    pub(super) fn last_heard(&self, session_id: &str) -> Option<Instant> {
+        self.router.last_heard(session_id)
+    }
+
+    /// See [`RemoteSessionRouter::watch_foreign_prompts`].
+    pub(super) fn watch_foreign_prompts(
+        &self,
+        owner_pid: u32,
+        stop_reason: Option<&'static str>,
+    ) -> oneshot::Receiver<()> {
+        self.router.watch_foreign_prompts(owner_pid, stop_reason)
+    }
+
+    /// Ask the agent to cancel `session_id`'s turn, whoever prompted it.
+    pub(super) fn cancel_session(&self, session_id: &str) {
+        self.router.note_cancel();
+        let _ = self
+            .to_agent
+            .send(ToAgent::Frame(session_cancel_frame(session_id)));
+    }
+
+    /// Before the proxy is stopped: wait (up to `limit`) until every frame
+    /// queued for the agent has been written, and give `sq` a moment to
+    /// relay a recent `session/cancel`, so stopping it cannot drop one.
+    pub(super) async fn deliver_queued_frames(&self, limit: Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        let (flushed, written) = oneshot::channel();
+        if self.to_agent.send(ToAgent::Flush(flushed)).is_ok() {
+            let _ = tokio::time::timeout_at(deadline, written).await;
+        }
+        let last_cancel_at = self.router.state().last_cancel_at;
+        if let Some(relayed_by) = last_cancel_at.map(|at| at + CANCEL_RELAY_GRACE) {
+            tokio::time::sleep_until(deadline.min(relayed_by.into())).await;
+        }
+    }
+
     /// Attach one ACP connection. It detaches once it stops writing.
     pub(super) fn attach(&self) -> RoutedClientStreams {
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
@@ -539,9 +685,16 @@ impl RemoteTransport {
 
 async fn write_agent_stdin<W: AsyncWrite + Unpin>(
     mut stdin: W,
-    mut frames: mpsc::UnboundedReceiver<String>,
+    mut frames: mpsc::UnboundedReceiver<ToAgent>,
 ) {
-    while let Some(line) = frames.recv().await {
+    while let Some(frame) = frames.recv().await {
+        let line = match frame {
+            ToAgent::Frame(line) => line,
+            ToAgent::Flush(flushed) => {
+                let _ = flushed.send(());
+                continue;
+            }
+        };
         let mut bytes = line.into_bytes();
         bytes.push(b'\n');
         let written = async {
@@ -577,14 +730,17 @@ async fn forward_client_frames(
     router: Arc<RemoteSessionRouter>,
     client: RemoteClientId,
     from_client: DuplexStream,
-    to_agent: mpsc::UnboundedSender<String>,
+    to_agent: mpsc::UnboundedSender<ToAgent>,
 ) {
     let mut lines = BufReader::new(from_client).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => {}
             Ok(Some(line)) => {
-                if to_agent.send(router.outgoing(client, &line)).is_err() {
+                if to_agent
+                    .send(ToAgent::Frame(router.outgoing(client, &line)))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -604,7 +760,8 @@ async fn forward_client_frames(
             "Cancelling remote ACP session {session_id}: its connection detached with a \
              prompt in flight"
         );
-        let _ = to_agent.send(session_cancel_frame(&session_id));
+        router.note_cancel();
+        let _ = to_agent.send(ToAgent::Frame(session_cancel_frame(&session_id)));
     }
 }
 

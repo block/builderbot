@@ -589,6 +589,74 @@ impl Store {
         }
     }
 
+    /// The user message that opened a session's latest run — the prompt
+    /// `start_session` wrote, which its `turn_start_message_id` names.
+    ///
+    /// A run's prompt is written before its connection exists, so the next
+    /// row the run writes is the connection's `initialize` — or nothing yet,
+    /// while it is still connecting. A steer delivered mid-turn is a later
+    /// user row too, as is a follow-up a held connection serves, but the
+    /// turn's output follows those instead, so they don't count. Background
+    /// output from an earlier turn (`acp_origin` set) can land in between and
+    /// is skipped. A steer nothing has followed yet looks like a prompt
+    /// whose connection never started, and is taken for one: the turn then
+    /// reads as never having reached the agent (see
+    /// [`Self::agent_answered_message`]), which errs away from a false
+    /// completion.
+    pub fn get_turn_prompt_message(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages AS prompt
+             WHERE session_id = ?1 AND role = 'user' AND acp_event_kind IS NULL
+               AND COALESCE(
+                 (SELECT COALESCE(next.acp_event_kind, '') = 'initialize'
+                  FROM session_messages AS next
+                  WHERE next.session_id = ?1 AND next.id > prompt.id
+                    AND next.acp_origin IS NULL
+                  ORDER BY next.id
+                  LIMIT 1),
+                 1)
+             ORDER BY id DESC
+             LIMIT 1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![session_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(session_message_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether the agent has answered message `message_id` of a session: a
+    /// row of its own output for the turn — text, a tool call or its result,
+    /// a plan, the turn's response — follows it. The rows a connection writes
+    /// before it sends the prompt (`initialize`, mode, config and command
+    /// updates) don't count, nor does background output from an earlier turn.
+    pub fn agent_answered_message(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM session_messages
+               WHERE session_id = ?1 AND id > ?2 AND acp_origin IS NULL
+                 AND (role IN ('tool_call', 'tool_result')
+                      OR (role = 'assistant'
+                          AND (acp_event_kind IS NULL
+                               OR acp_event_kind IN ('agent_message_chunk', 'plan_update',
+                                                     'response_result', 'prompt_response')))))",
+            params![session_id, message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     /// Count assistant messages created after a given timestamp.
     pub fn count_assistant_messages_after(
         &self,

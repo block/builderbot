@@ -5271,3 +5271,66 @@ fn change_feed_deletes_publish_only_when_a_row_is_removed() {
     store.delete_project_repo(&repo.id).unwrap();
     assert!(rx.try_recv().is_err());
 }
+
+/// The rows a run writes, in order: its prompt, then its connection's
+/// `initialize` and setup, then the agent's answer. A reattachment anchors on
+/// that prompt and asks whether the agent answered it.
+#[test]
+fn a_runs_prompt_is_the_user_row_its_connection_followed() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("go", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let event = |kind: &str, origin: Option<&str>| {
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &AcpMessageMetadata {
+                    acp_event_kind: Some(kind.to_string()),
+                    acp_origin: origin.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let message =
+        |role: MessageRole, text: &str| store.add_session_message(&session.id, role, text).unwrap();
+    let prompt_id = || {
+        store
+            .get_turn_prompt_message(&session.id)
+            .unwrap()
+            .map(|message| message.id)
+    };
+    let answered = |id: i64| store.agent_answered_message(&session.id, id).unwrap();
+
+    assert_eq!(prompt_id(), None);
+
+    // Still connecting: nothing follows the prompt yet.
+    let first = message(MessageRole::User, "go");
+    assert_eq!(prompt_id(), Some(first));
+    assert!(!answered(first));
+    // The connection's setup rows don't answer it.
+    event("initialize", None);
+    event("config_options_update", None);
+    event("session_mode_state", None);
+    assert_eq!(prompt_id(), Some(first));
+    assert!(!answered(first));
+    message(MessageRole::Assistant, "Looking into it");
+    assert!(answered(first));
+
+    // A steer the turn's output follows is not the run's prompt.
+    message(MessageRole::User, "also check the tests");
+    message(MessageRole::ToolCall, "Run the tests");
+    assert_eq!(prompt_id(), Some(first));
+
+    // A follow-up run: background output from the earlier turn landing
+    // between its prompt and its connection neither displaces nor answers it.
+    let second = message(MessageRole::User, "now push");
+    event("agent_message_chunk", Some("background"));
+    assert_eq!(prompt_id(), Some(second));
+    assert!(!answered(second));
+    event("initialize", None);
+    assert_eq!(prompt_id(), Some(second));
+    assert!(!answered(second));
+    message(MessageRole::ToolCall, "git push");
+    assert!(answered(second));
+}

@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, Command};
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::remote_liveness::{self, Liveness};
@@ -176,15 +176,24 @@ impl RemoteProcessLease {
         self.process.transport.loss()
     }
 
-    /// For a session reattaching to a turn prompted at `prompted_at` (ms
-    /// since the epoch) by an app instance that is gone: a watch on that
-    /// turn, when bloxlet can be asked about its agent.
-    pub(super) fn reattached_turn(&self, prompted_at: i64) -> Option<ReattachedTurn> {
+    /// For a session reattaching to `turn`, which a connection that is gone
+    /// prompted: a watch on that turn, when bloxlet can be asked about its
+    /// agent.
+    pub(super) fn reattached_turn(&self, turn: &super::ReattachTurn) -> Option<ReattachedTurn> {
+        let target = remote_liveness::Target::of(&self.key.program, &self.key.args)?;
         Some(ReattachedTurn {
             process: Arc::clone(&self.process),
-            target: remote_liveness::Target::of(&self.key.program, &self.key.args)?,
+            target,
             trust_attachment: self.created_proxy,
-            prompted_at_secs: prompted_at.div_euclid(1000),
+            prompted_at_secs: turn.prompted_at.div_euclid(1000),
+            agent_session_id: turn.agent_session_id.clone(),
+            owner_pid: turn.owner_pid,
+            // Watched from before the session is loaded: the answer can
+            // arrive as soon as the agent relays the turn to this connection.
+            prompt_answered: turn
+                .owner_pid
+                .filter(|_| turn.sole_turn_of_owner)
+                .map(|pid| self.process.transport.watch_foreign_prompts(pid, None)),
         })
     }
 
@@ -267,29 +276,58 @@ pub(super) struct ReattachedTurn {
     trust_attachment: bool,
     /// When the turn was prompted, in seconds since the epoch.
     prompted_at_secs: i64,
+    /// The agent's id for the turn's session.
+    agent_session_id: String,
+    /// The pid of the app instance that prompted the turn, when known.
+    owner_pid: Option<u32>,
+    /// Answered once the agent answers the turn's `session/prompt`, when
+    /// that response can be told apart from other sessions'.
+    prompt_answered: Option<oneshot::Receiver<()>>,
 }
 
 impl ReattachedTurn {
-    /// Wait for the turn to end, which is when bloxlet reports its agent
-    /// process idle. bloxlet tracks prompts per process, so this also waits
-    /// out prompts other sessions on it have in flight.
+    /// Wait for the turn to end: when the agent answers its prompt (see
+    /// [`super::ReattachTurn::sole_turn_of_owner`]), or else when bloxlet
+    /// reports its agent process idle. bloxlet tracks prompts per process, so
+    /// the latter also waits out prompts other sessions on it have in flight
+    /// — at most until the turn's session has heard nothing for
+    /// [`remote_liveness::REATTACHED_TURN_QUIET_CAP`], when the turn is
+    /// cancelled (see [`Self::cancel_quiet_turn`]).
     ///
-    /// Fails, naming the cause, when the process that ran the turn is gone:
-    /// `sq` found none to attach to and started a new one, or bloxlet reports
-    /// it stopped. Also fails when the proxy loses its connection to it.
-    pub(super) async fn ended(self) -> Result<(), String> {
-        let command_id = self.surviving_command().await?;
+    /// Fails with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the
+    /// cause when the process that ran the turn is gone: `sq` found none to
+    /// attach to and started a new one, or bloxlet reports it stopped. Also
+    /// fails when the proxy loses its connection to it, and when cancelling
+    /// the quiet turn shows it had not ended.
+    pub(super) async fn ended(mut self) -> Result<(), String> {
+        let prompt_answered = self.prompt_answered.take();
+        let command_id = self
+            .surviving_command()
+            .await
+            .map_err(|cause| format!("{}{cause}", super::REMOTE_AGENT_LOST_PREFIX))?;
         log::info!(
             "{}: reattached to agent process (command {command_id}); waiting for its turn to end",
             self.process.describe()
         );
         let closed = self.process.transport.closed().clone();
+        let watching_from = Instant::now();
         let poll = async {
             loop {
                 match remote_liveness::check(&self.target, &command_id).await {
                     Ok(Liveness::Idle) => return Ok(()),
-                    Ok(Liveness::Running) => {}
-                    Ok(Liveness::Gone(cause)) => return Err(cause),
+                    Ok(Liveness::Running) => {
+                        let heard_at = self
+                            .process
+                            .transport
+                            .last_heard(&self.agent_session_id)
+                            .map_or(watching_from, |at| at.max(watching_from));
+                        if heard_at.elapsed() >= remote_liveness::REATTACHED_TURN_QUIET_CAP {
+                            return self.cancel_quiet_turn(heard_at.elapsed()).await;
+                        }
+                    }
+                    Ok(Liveness::Gone(cause)) => {
+                        return Err(format!("{}{cause}", super::REMOTE_AGENT_LOST_PREFIX))
+                    }
                     Err(error) => log::warn!(
                         "{}: could not check command {command_id}: {error}",
                         self.process.describe()
@@ -298,15 +336,85 @@ impl ReattachedTurn {
                 tokio::time::sleep(remote_liveness::REATTACHED_TURN_POLL).await;
             }
         };
+        let answered = async {
+            if let Some(answered) = prompt_answered {
+                if answered.await.is_ok() {
+                    return;
+                }
+            }
+            std::future::pending::<()>().await
+        };
         tokio::select! {
+            // The answer to a prompt cancelled for going quiet reaches both
+            // watches at once, and it is `poll`'s verdict that counts.
+            biased;
             ended = poll => ended,
+            () = answered => {
+                log::info!(
+                    "{}: the agent answered the reattached turn's prompt",
+                    self.process.describe()
+                );
+                Ok(())
+            }
             // Nothing streams the rest of the turn to the session any more.
-            _ = closed.cancelled() => Err(self
-                .process
+            _ = closed.cancelled() => Err(format!(
+                "{}{}",
+                super::REMOTE_AGENT_LOST_PREFIX,
+                self.process
+                    .transport
+                    .loss()
+                    .map(|loss| loss.cause)
+                    .unwrap_or_else(|| "the remote agent proxy stopped".to_string())
+            )),
+        }
+    }
+
+    /// Stop waiting on a turn whose session has heard nothing for
+    /// `quiet_for` while bloxlet still reports its agent process running.
+    ///
+    /// Either the turn has ended and other sessions keep the process busy,
+    /// or it is still running, usually blocked on a permission request the
+    /// connection that prompted it never answered (which is not re-sent to
+    /// a new one). Cancelling ends the latter and is a no-op for the former.
+    /// Then, when the instance that prompted the turn is known, the agent
+    /// answering one of its prompts as cancelled tells the two apart: the
+    /// turn fails as lost, since it was cut short. With no such answer (or
+    /// no way to recognise one) it is taken as having ended on its own.
+    async fn cancel_quiet_turn(&self, quiet_for: Duration) -> Result<(), String> {
+        log::warn!(
+            "{}: the reattached turn on session {} has been quiet for {}s while bloxlet still \
+             runs its agent; cancelling it",
+            self.process.describe(),
+            self.agent_session_id,
+            quiet_for.as_secs()
+        );
+        let cancelled = self.owner_pid.map(|pid| {
+            self.process
                 .transport
-                .loss()
-                .map(|loss| loss.cause)
-                .unwrap_or_else(|| "the remote agent proxy stopped".to_string())),
+                .watch_foreign_prompts(pid, Some("cancelled"))
+        });
+        self.process
+            .transport
+            .cancel_session(&self.agent_session_id);
+        let Some(cancelled) = cancelled else {
+            return Ok(());
+        };
+        match tokio::time::timeout(remote_liveness::CANCELLED_TURN_ANSWER_WAIT, cancelled).await {
+            Ok(Ok(())) => Err(format!(
+                "{}its turn went {} min without output while bloxlet still ran the agent, most \
+                 likely waiting on a permission request only the connection that prompted it \
+                 could answer, so it was cancelled",
+                super::REMOTE_AGENT_LOST_PREFIX,
+                quiet_for.as_secs() / 60
+            )),
+            _ => {
+                log::info!(
+                    "{}: the agent did not answer the quiet turn's prompt as cancelled, so it had \
+                     already ended",
+                    self.process.describe()
+                );
+                Ok(())
+            }
         }
     }
 
@@ -531,6 +639,12 @@ async fn run_proxy(
             loss.cause
         );
     }
+    // A session cancelled on its way out (see `forward_client_frames`) must
+    // reach an agent the proxy leaves running.
+    process
+        .transport
+        .deliver_queued_frames(Duration::from_secs(2))
+        .await;
     super::graceful_stop(&mut child, true).await;
     process.transport.close();
     process.exited.cancel();

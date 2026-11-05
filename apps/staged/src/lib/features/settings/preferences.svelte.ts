@@ -28,7 +28,7 @@ import { hydrateDialogWidths } from '../../components/ui/dialog/dialogWidth.svel
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
 import { darkMode } from '../../stores/isDark.svelte';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
-import type { AcpConfigValueSelection } from '../../types';
+import type { AcpConfigValueSelection, ProjectLocation } from '../../types';
 import {
   DEFAULT_PROJECT_STATUS_OPTIONS,
   normalizeProjectStatusOptions,
@@ -96,6 +96,11 @@ const PROJECT_STATUS_OPTIONS_STORE_KEY = 'project-status-options';
  * or repo (frontend-only).
  */
 const COMPOSER_SEND_MODE_STORE_KEY = 'composer-send-mode';
+/**
+ * The Local / Remote choice a new project was last created with, from the
+ * new-project form or the note transfer picker alike. Global (frontend-only).
+ */
+const NEW_PROJECT_LOCATION_STORE_KEY = 'new-project-location';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -208,6 +213,12 @@ export const preferences = $state({
    * agent can take a message now. Remembered globally; defaults to queueing.
    */
   composerSendMode: DEFAULT_COMPOSER_SEND_MODE as ComposerSendMode,
+  /**
+   * The location the last new project was created with where Remote was on
+   * offer, which every new-project location picker starts on. Hosts fall back
+   * to local while remote can't be used. Defaults to local.
+   */
+  newProjectLocation: 'local' as ProjectLocation,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -291,9 +302,12 @@ function ensureSystemModeListener() {
 function syncedPreference(key: string, apply: (value: unknown) => void) {
   let unlisten: (() => void) | undefined;
   let revision = 0;
+  // Whether a value has landed (a notification, local edit, or applied read).
+  let hasValue = false;
 
   function receive(value: unknown): void {
     revision += 1;
+    hasValue = true;
     apply(value);
   }
 
@@ -301,15 +315,23 @@ function syncedPreference(key: string, apply: (value: unknown) => void) {
     const current = ++revision;
     try {
       const value = await getStoreValue<unknown>(key);
-      // A notification, local edit, or newer refresh wins over an older snapshot.
-      if (current === revision) apply(value);
+      // A notification, local edit, or newer refresh wins over an older
+      // snapshot. Until one lands, though, the older snapshot is still the
+      // freshest value, and a newer refresh overwrites it when it arrives.
+      if (current === revision || !hasValue) {
+        hasValue = true;
+        apply(value);
+      }
     } catch (error) {
       console.error(`[Preferences] Failed to refresh ${key}:`, error);
     }
   }
 
   return {
-    /** Subscribe (once) and load the current value. */
+    /**
+     * Subscribe (once) and load the current value, resolving once a value
+     * has landed (or this read failed). It doesn't wait on a newer refresh.
+     */
     start(): Promise<void> {
       unlisten ??= listenToStoreKeyChange(key, receive, {
         // Close the initial registration gap and recover missed web events on reconnect.
@@ -320,11 +342,14 @@ function syncedPreference(key: string, apply: (value: unknown) => void) {
     /** Persist a value the caller has already applied locally. */
     save(value: unknown): void {
       revision += 1;
+      hasValue = true;
       setStoreValue(key, value);
     },
     dispose(): void {
       unlisten?.();
+      // No in-flight read applies after this, not even a first one.
       revision += 1;
+      hasValue = true;
     },
   };
 }
@@ -340,10 +365,15 @@ const composerSendModeSync = syncedPreference(COMPOSER_SEND_MODE_STORE_KEY, (val
   preferences.composerSendMode = normalizeComposerSendMode(value);
 });
 
+const newProjectLocationSync = syncedPreference(NEW_PROJECT_LOCATION_STORE_KEY, (value) => {
+  preferences.newProjectLocation = value === 'remote' ? 'remote' : 'local';
+});
+
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     projectStatusOptionsSync.dispose();
     composerSendModeSync.dispose();
+    newProjectLocationSync.dispose();
   });
 }
 
@@ -358,9 +388,12 @@ export async function initPreferences(): Promise<void> {
   // belong to the first project paint, ahead of the slower diff-theme loading.
   await projectStatusOptionsSync.start();
 
+  // The new-project location seeds forms that can be in the first paint (the
+  // splash screen's), so it loads alongside these rather than after `loaded`.
   const [savedSize, savedMode] = await Promise.all([
     getStoreValue<number>(SIZE_STORE_KEY),
     getStoreValue<AppMode>(APP_MODE_STORE_KEY),
+    newProjectLocationSync.start(),
   ]);
 
   // Load size
@@ -515,6 +548,20 @@ export function setBranchPrefix(prefix: string): void {
 export function setComposerSendMode(mode: ComposerSendMode): void {
   preferences.composerSendMode = mode;
   composerSendModeSync.save(mode);
+}
+
+// =============================================================================
+// New Project Location Actions
+// =============================================================================
+
+/**
+ * Remember the location a new project was just created with, so the next
+ * new-project location picker (in either host) starts on it. Hosts call this
+ * only when Remote was on offer: a fallback to local isn't a choice.
+ */
+export function setNewProjectLocation(location: ProjectLocation): void {
+  preferences.newProjectLocation = location;
+  newProjectLocationSync.save(location);
 }
 
 // =============================================================================

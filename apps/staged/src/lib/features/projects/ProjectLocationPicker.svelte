@@ -8,7 +8,10 @@
   helper line below the tiles rather than inside the faded tile. The group
   and the tile are both described by it, since a disabled tile takes no focus.
   A second click on the chosen tile would clear a single-select toggle group,
-  so that click is ignored: a project always has a location.
+  so that click picks the chosen tile again instead: a project always has a
+  location. It still writes the value back, so a host whose shown `value`
+  stands in for one it holds (the transfer picker shows Local while a
+  remembered Remote waits on a repo lookup) gets the click as a choice.
 -->
 <script lang="ts">
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -63,7 +66,7 @@
 <ToggleGroup.Root
   type="single"
   {orientation}
-  bind:value={() => value, (next) => next && (value = next as ProjectLocation)}
+  bind:value={() => value, (next) => (value = (next || value) as ProjectLocation)}
   {disabled}
   spacing={2}
   aria-label="Project location"

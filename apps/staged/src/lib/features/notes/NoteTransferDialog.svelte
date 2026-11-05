@@ -8,10 +8,12 @@
   before the note goes there. Whenever confirming would create a project —
   that row picked, or the only row left for Enter — a Local / Remote choice
   is offered for it when remote projects are available (the `sq` CLI is
-  installed), defaulting to local like the new-project form. A remote project
-  starts from the note's repo, looked up from the stored note on each open
-  through `loadNoteRepo` (the host's idea of the repo can be missing or
-  stale), so Remote waits on that lookup.
+  installed). Like the new-project form, it starts on the location the last
+  new project was created with (`preferences.newProjectLocation`, which
+  creating one here with Remote on offer updates), showing local while Remote
+  can't be picked. A remote project starts from the note's repo, looked up
+  from the stored note on each open through `loadNoteRepo` (the host's idea
+  of the repo can be missing or stale), so Remote waits on that lookup.
   `onPrepare` runs before anything is created, so a transfer refused up front
   leaves no project behind — a remote one starts provisioning its workspace
   as soon as it exists. Failures — from those checks, creating the project,
@@ -37,6 +39,7 @@
   import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { sqState } from '../settings/sq.svelte';
+  import { preferences, setNewProjectLocation } from '../settings/preferences.svelte';
   import * as commands from '../../api/commands';
   import { filterMoveTargets, nextMoveTargetIndex } from '../branches/moveBranchTarget';
   import {
@@ -90,7 +93,7 @@
   const searchId = `note-transfer-search-${++inputCounter}`;
   let query = $state('');
   let selection = $state<NoteTransferSelection | null>(null);
-  let location = $state<ProjectLocation>('local');
+  let location = $state<ProjectLocation>(preferences.newProjectLocation);
   let error = $state<string | null>(null);
   let working = $state(false);
   let searchElement = $state<HTMLInputElement | null>(null);
@@ -99,8 +102,9 @@
   // Bumped per lookup, so one from an earlier open that lands late is dropped.
   let noteRepoLookupId = 0;
   // The default branch for a new remote project, fetched once per open from
-  // the moment Remote is picked (as the new-project form prefetches when a
-  // repo is chosen) and awaited on confirm, so creating doesn't wait on GitHub.
+  // the moment the location picker shows Remote (as the new-project form
+  // prefetches when a repo is chosen) and awaited on confirm, so creating
+  // doesn't wait on GitHub. A transfer into an existing project never fetches.
   let defaultBranchPrefetch: { githubRepo: string; branch: Promise<string | undefined> } | null =
     null;
 
@@ -108,7 +112,7 @@
     if (open && !wasOpen) {
       query = '';
       selection = null;
-      location = 'local';
+      location = preferences.newProjectLocation;
       error = null;
       working = false;
       defaultBranchPrefetch = null;
@@ -144,11 +148,13 @@
   let target = $derived(noteTransferTarget(selected, query, filtered, createName));
   let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
   let remoteBlocker = $derived(newRemoteProjectBlocker(noteRepo));
-  let effectiveLocation = $derived<ProjectLocation>(
-    remoteProjectsAvailable && !remoteBlocker ? location : 'local'
-  );
+  let remoteSelectable = $derived(remoteProjectsAvailable && !remoteBlocker);
+  // The picker shows this, so a remembered Remote doesn't sit selected on a
+  // disabled tile while it is blocked; it applies once the blocker clears,
+  // unless the Local shown meanwhile was clicked (which commits it).
+  let effectiveLocation = $derived<ProjectLocation>(remoteSelectable ? location : 'local');
   $effect(() => {
-    if (open && effectiveLocation === 'remote' && repo) {
+    if (open && target?.kind === 'new' && effectiveLocation === 'remote' && repo) {
       void defaultBranchFor(repo.githubRepo);
     }
   });
@@ -212,12 +218,21 @@
     return defaultBranchPrefetch.branch;
   }
 
-  async function createTargetProject(name: string): Promise<Project> {
-    if (effectiveLocation === 'remote' && repo) {
+  /**
+   * Create `name` at `at`, remembering that location only when `remember`
+   * (Remote was on offer): otherwise Local was the only option, not a choice.
+   */
+  async function createTargetProject(
+    name: string,
+    at: ProjectLocation,
+    remember: boolean
+  ): Promise<Project> {
+    let project: Project;
+    if (at === 'remote' && repo) {
       // Its workspace is provisioned from the repo it is created with; the
       // transfer then finds that repo tracked and adds nothing.
       const defaultBranch = await defaultBranchFor(repo.githubRepo);
-      return commands.createProject(
+      project = await commands.createProject(
         name,
         'remote',
         repo.githubRepo,
@@ -226,8 +241,11 @@
         undefined,
         defaultBranch
       );
+    } else {
+      project = await commands.createProject(name, 'local');
     }
-    return commands.createProject(name, 'local');
+    if (remember) setNewProjectLocation(at);
+    return project;
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
@@ -243,6 +261,15 @@
     e.preventDefault();
     const chosen = target;
     if (working || !chosen) return;
+    // The location as the picker shows it now. `onPrepare` can await the same
+    // repo lookup the picker is waiting on, and that landing would otherwise
+    // turn the Local on screen into a remembered Remote.
+    const newLocation = effectiveLocation;
+    // Whether Remote was on offer, making the location a choice to remember.
+    // A Local clicked while the lookup is pending and confirmed before it
+    // lands therefore commits Local for this project only: the preference is
+    // left alone, so a remembered Remote survives.
+    const rememberLocation = remoteSelectable;
 
     working = true;
     error = null;
@@ -251,7 +278,7 @@
       await onPrepare?.();
       let projectId: string;
       if (chosen.kind === 'new') {
-        created = await createTargetProject(chosen.name);
+        created = await createTargetProject(chosen.name, newLocation, rememberLocation);
         projectsDataStore.projectCreated(created);
         projectId = created.id;
         // Keep the created project selected so a transfer failure retries
@@ -363,7 +390,7 @@
         <div class="location-field">
           <span class="field-label">New project location</span>
           <ProjectLocationPicker
-            bind:value={location}
+            bind:value={() => effectiveLocation, (next) => (location = next)}
             orientation="horizontal"
             disabled={working}
             remoteDisabledReason={remoteBlocker}

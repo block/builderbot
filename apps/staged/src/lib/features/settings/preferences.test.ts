@@ -144,8 +144,9 @@ describe.each([true, false])('project status synchronization (native=%s)', (nati
     const client = await newClient(native);
     await client.initPreferences();
     await client.initPreferences();
-    // One listener per synced key (project statuses first, then composer send mode).
-    expect(listeners).toHaveLength(2);
+    // One listener per synced key (project statuses first, then new-project
+    // location, then composer send mode).
+    expect(listeners).toHaveLength(3);
 
     values.set(key, [custom]);
     listeners[0].options?.onEstablished?.();
@@ -256,7 +257,7 @@ describe.each([true, false])('composer send mode (native=%s)', (native) => {
     const client = await newClient(native);
     await client.initPreferences();
     values.set(modeKey, 'send');
-    listeners[1].options?.onEstablished?.();
+    listeners[2].options?.onEstablished?.();
     await vi.waitFor(() => expect(client.preferences.composerSendMode).toBe('send'));
   });
 
@@ -277,5 +278,100 @@ describe.each([true, false])('composer send mode (native=%s)', (native) => {
     resolve('queue');
     await initialized;
     expect(client.preferences.composerSendMode).toBe('send');
+  });
+});
+
+describe.each([true, false])('new project location (native=%s)', (native) => {
+  const locationKey = 'new-project-location';
+
+  it('defaults to local and persists the chosen location globally', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.newProjectLocation).toBe('local');
+
+    client.setNewProjectLocation('remote');
+    expect(client.preferences.newProjectLocation).toBe('remote');
+    expect(values.get(locationKey)).toBe('remote');
+
+    // A fresh client (an app restart) reads the remembered location back.
+    const reopened = await newClient(native);
+    await reopened.initPreferences();
+    expect(reopened.preferences.newProjectLocation).toBe('remote');
+  });
+
+  it('falls back to local for a malformed stored value', async () => {
+    values.set(locationKey, 'cloud');
+    const client = await newClient(native);
+    await client.initPreferences();
+    expect(client.preferences.newProjectLocation).toBe('local');
+    expect(set).not.toHaveBeenCalledWith(locationKey, expect.anything());
+  });
+
+  it('follows a location chosen in another client without echoing it back', async () => {
+    const a = await newClient(native);
+    await a.initPreferences();
+    const b = await newClient(!native);
+    await b.initPreferences();
+
+    a.setNewProjectLocation('remote');
+    expect(b.preferences.newProjectLocation).toBe('remote');
+    b.setNewProjectLocation('local');
+    expect(a.preferences.newProjectLocation).toBe('local');
+    expect(set).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to local when another client deletes or corrupts it', async () => {
+    const client = await newClient(native);
+    await client.initPreferences();
+    emit('remote', { key: locationKey });
+    emit(null, { key: locationKey, exists: false });
+    expect(client.preferences.newProjectLocation).toBe('local');
+    emit('remote', { key: locationKey });
+    emit('cloud', { key: locationKey });
+    expect(client.preferences.newProjectLocation).toBe('local');
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('loads before enabling the UI, since forms in the first paint start on it', async () => {
+    const reads: ((value: unknown) => void)[] = [];
+    get.mockImplementation(async (changedKey: string) =>
+      changedKey === locationKey
+        ? new Promise((done) => reads.push(done))
+        : structuredClone(values.get(changedKey))
+    );
+    const client = await newClient(native);
+    const initialized = client.initPreferences();
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+    expect(client.preferences.loaded).toBe(false);
+
+    reads[0]('remote');
+    await vi.waitFor(() => expect(client.preferences.loaded).toBe(true));
+    expect(client.preferences.newProjectLocation).toBe('remote');
+    await initialized;
+  });
+
+  it('loads a superseded first read when nothing newer has landed, then takes the newer one', async () => {
+    const reads: ((value: unknown) => void)[] = [];
+    get.mockImplementation(async (changedKey: string) =>
+      changedKey === locationKey
+        ? new Promise((done) => reads.push(done))
+        : structuredClone(values.get(changedKey))
+    );
+    const client = await newClient(native);
+    const initialized = client.initPreferences();
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+
+    // The subscription is established mid-read and its refresh supersedes the
+    // first. The first read is still the freshest value when it lands, so it
+    // applies and unblocks the UI without waiting on the second.
+    listeners[1].options?.onEstablished?.();
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    reads[0]('remote');
+    await initialized;
+    expect(client.preferences.loaded).toBe(true);
+    expect(client.preferences.newProjectLocation).toBe('remote');
+
+    reads[1]('local');
+    await vi.waitFor(() => expect(client.preferences.newProjectLocation).toBe('local'));
   });
 });

@@ -4,9 +4,11 @@
  *
  * A project is marked as "unread" when:
  * - A session completes in that project while the user is viewing a different project
+ * - The user marks it, or one of its notes, unread
  *
  * A project is marked as "read" when:
  * - The user navigates to that project
+ * - The user reads again every note whose "Mark as unread" flagged it
  *
  * Running sessions are tracked to show spinners on project cards
  * Unread state is persisted to disk and the macOS dock badge is kept in sync.
@@ -34,6 +36,15 @@ class ProjectStateStore {
 
   // Track version for manual reactivity triggering
   private version = $state(0);
+
+  /**
+   * Project id -> keys of the notes whose "Mark as unread" is all that holds
+   * the project's unread flag, so reading them all again clears it. Any other
+   * write to the flag drops the entry: a flag set some other way is left for
+   * the user to clear by opening the project. In memory only, so a flag
+   * restored at startup has no note holding it.
+   */
+  private noteUnreads = new Map<string, Set<string>>();
 
   /**
    * Get the state for a project without creating it
@@ -90,6 +101,7 @@ class ProjectStateStore {
    * Mark a project as read (called when user navigates to the project)
    */
   markAsRead(projectId: string): void {
+    this.noteUnreads.delete(projectId);
     const state = this.getOrCreateState(projectId);
     state.unread = false;
     this.version++; // Trigger reactivity
@@ -101,10 +113,50 @@ class ProjectStateStore {
    * while the user is viewing a different project)
    */
   markAsUnread(projectId: string): void {
+    this.noteUnreads.delete(projectId);
     const state = this.getOrCreateState(projectId);
     state.unread = true;
     this.version++; // Trigger reactivity
     this.persistAndBadge();
+  }
+
+  /**
+   * Mark a project unread because the user marked one of its notes unread.
+   * Reading that note again (`releaseNoteUnread`) clears the flag, unless
+   * another note still holds it. A project already flagged some other way
+   * stays flagged that way, so no note read clears it.
+   */
+  markUnreadForNote(projectId: string, noteKey: string): void {
+    const state = this.getOrCreateState(projectId);
+    const held = this.noteUnreads.get(projectId);
+    if (held) {
+      held.add(noteKey);
+      return;
+    }
+    if (state.unread) return;
+    this.noteUnreads.set(projectId, new Set([noteKey]));
+    state.unread = true;
+    this.version++; // Trigger reactivity
+    this.persistAndBadge();
+  }
+
+  /** The projects whose unread flag the note's "Mark as unread" helps hold. */
+  projectsFlaggedByNote(noteKey: string): string[] {
+    const projectIds: string[] = [];
+    for (const [projectId, held] of this.noteUnreads) {
+      if (held.has(noteKey)) projectIds.push(projectId);
+    }
+    return projectIds;
+  }
+
+  /**
+   * The user read a note whose "Mark as unread" flagged the project: clears
+   * the flag once no such note is left unread.
+   */
+  releaseNoteUnread(projectId: string, noteKey: string): void {
+    const held = this.noteUnreads.get(projectId);
+    if (!held?.delete(noteKey) || held.size > 0) return;
+    this.markAsRead(projectId);
   }
 
   /**
@@ -274,6 +326,7 @@ class ProjectStateStore {
     const ids = await getStoreValue<string[]>(UNREAD_PROJECTS_STORE_KEY);
     if (ids && ids.length > 0) {
       for (const id of ids) {
+        this.noteUnreads.delete(id);
         const state = this.getOrCreateState(id);
         state.unread = true;
       }
@@ -301,6 +354,7 @@ class ProjectStateStore {
     // Also update in-memory state if it has been initialized
     for (const id of ids) {
       if (!existingProjectIds.has(id)) {
+        this.noteUnreads.delete(id);
         const state = this.states.get(id);
         if (state) state.unread = false;
       }

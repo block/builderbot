@@ -179,9 +179,10 @@ impl Store {
 
     /// Update a note's title, content, and optional suggested next steps.
     ///
-    /// This is the session runner's write, so a change is the agent revising
-    /// the note: it clears `read_at`, and the note reads as unread until the
-    /// user sees the new content. User edits go through
+    /// This is the session runner's write, so a new title or body is the agent
+    /// revising the note: it clears `read_at`, and the note reads as unread
+    /// until the user sees the new content. A change to the suggested next
+    /// steps alone leaves it read. User edits go through
     /// [`Store::update_written_note`], which leaves it alone.
     pub fn update_note_title_and_content(
         &self,
@@ -215,7 +216,7 @@ impl Store {
         }
         let now = now_timestamp();
         conn.execute(
-            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, read_at = NULL WHERE id = ?7",
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, read_at = CASE WHEN title = ?1 AND content = ?2 THEN read_at ELSE NULL END WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
         self.publish_with(|| StoreChange::Notes {

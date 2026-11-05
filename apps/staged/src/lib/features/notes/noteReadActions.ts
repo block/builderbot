@@ -4,16 +4,16 @@
  * mark-on-open through `writeNoteRead`.
  *
  * Marking a note unread also marks its project unread, so the project carries
- * the sidebar's unread dot until it is next opened — as when one of its
- * sessions finishes while the user is elsewhere. Marking one read in the
- * project on screen clears that dot again, as viewing the project would.
+ * the sidebar's unread dot — as when one of its sessions finishes while the
+ * user is elsewhere. Reading the note again, however that happens, takes the
+ * dot away with it, unless another note marked unread still holds it or the
+ * project was flagged some other way (see `projectStateStore.markUnreadForNote`).
  */
 
 import { toast } from 'svelte-sonner';
 import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
-import { navigation } from '../layout/navigation.svelte';
 import type { BranchNote, ProjectNote } from '../../types';
 
 export type NoteKind = 'branch' | 'project';
@@ -28,11 +28,32 @@ export interface NoteReadTarget {
   projectId?: string | null;
 }
 
-/** Write a note's read state, with no side effects beyond the store's. */
-export function writeNoteRead(kind: NoteKind, noteId: string, read: boolean): Promise<NoteReadRow> {
-  return kind === 'project'
+function noteKey(kind: NoteKind, noteId: string): string {
+  return `${kind}:${noteId}`;
+}
+
+/**
+ * Write a note's read state. Every way a note gets read goes through here — the
+ * viewer showing it, the editor opening it, "Mark as read" — so marking it read
+ * also releases the project unread flag its "Mark as unread" set.
+ */
+export async function writeNoteRead(
+  kind: NoteKind,
+  noteId: string,
+  read: boolean
+): Promise<NoteReadRow> {
+  const row = await (kind === 'project'
     ? commands.setProjectNoteRead(noteId, read)
-    : commands.setNoteRead(noteId, read);
+    : commands.setNoteRead(noteId, read));
+  if (read) {
+    const key = noteKey(kind, noteId);
+    for (const projectId of projectStateStore.projectsFlaggedByNote(key)) {
+      if (!projectsDataStore.isProjectDeleting(projectId)) {
+        projectStateStore.releaseNoteUnread(projectId, key);
+      }
+    }
+  }
+  return row;
 }
 
 /**
@@ -53,15 +74,8 @@ export async function setNoteReadState(
     return null;
   }
   const projectId = 'projectId' in row ? row.projectId : target.projectId;
-  if (projectId && !projectsDataStore.isProjectDeleting(projectId)) {
-    if (!read) {
-      projectStateStore.markAsUnread(projectId);
-    } else if (
-      navigation.selectedProjectId === projectId &&
-      projectStateStore.isUnread(projectId)
-    ) {
-      projectStateStore.markAsRead(projectId);
-    }
+  if (!read && projectId && !projectsDataStore.isProjectDeleting(projectId)) {
+    projectStateStore.markUnreadForNote(projectId, noteKey(target.kind, target.noteId));
   }
   return row;
 }

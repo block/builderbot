@@ -3301,6 +3301,18 @@ fn test_set_note_read_marks_landed_notes_only() {
         store.get_note(&note.id).unwrap().unwrap().read_at,
         Some(read_at)
     );
+    // New suggested next steps alone are no new content to read: the write
+    // lands, but the note stays read.
+    store
+        .update_note_title_and_content(&note.id, "Plan", "body", Some("Commit it"), None)
+        .unwrap();
+    let stepped = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(
+        stepped.suggested_next_commit_step.as_deref(),
+        Some("Commit it")
+    );
+    assert!(stepped.updated_at > landed.updated_at);
+    assert_eq!(stepped.read_at, Some(read_at));
     // A revision is new content the user hasn't seen: it reads as unread
     // again, and opening it marks it read again.
     store
@@ -3376,6 +3388,22 @@ fn test_set_project_note_read_round_trips_and_lists() {
     store
         .update_project_note_title_and_content(&note.id, "Overview", "body", None, None)
         .unwrap();
+    assert!(read_at_in_list().is_some());
+    // New suggested next steps alone leave it read.
+    store
+        .update_project_note_title_and_content(
+            &note.id,
+            "Overview",
+            "body",
+            None,
+            Some("Write the plan"),
+        )
+        .unwrap();
+    let stepped = store.get_project_note(&note.id).unwrap().unwrap();
+    assert_eq!(
+        stepped.suggested_next_note_step.as_deref(),
+        Some("Write the plan")
+    );
     assert!(read_at_in_list().is_some());
     store
         .update_project_note_title_and_content(&note.id, "Overview", "revised", None, None)

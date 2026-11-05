@@ -5983,15 +5983,7 @@ async fn run_acp_session(
         handler.transition_to_waiting_for_prompt().await;
     }
     if let Some(turn) = reattached_turn {
-        return observe_reattached_turn(
-            connection,
-            &setup,
-            handler,
-            our_session_id,
-            cancel_token,
-            turn,
-        )
-        .await;
+        return observe_reattached_turn(&setup, handler, our_session_id, cancel_token, turn).await;
     }
 
     // Prompt loop: the connection lifetime is hoisted above the turn
@@ -6288,7 +6280,6 @@ async fn run_acp_session(
 /// it ends. Nothing is prompted: the agent is still serving the turn, and its
 /// updates for the session reach this connection now that it has loaded it.
 async fn observe_reattached_turn(
-    connection: &ConnectionTo<Agent>,
     setup: &AcpSessionSetup,
     handler: &Arc<AcpNotificationHandler>,
     our_session_id: &str,
@@ -6302,12 +6293,14 @@ async fn observe_reattached_turn(
         .lock()
         .await
         .start_prompt(setup.agent_session_id.to_string());
+    let stop = turn.stopper();
     tokio::select! {
         _ = cancel_token.cancelled() => {
             handler.cancel_pending_permissions();
-            if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
-                log::warn!("{e}");
-            }
+            // Nothing here waits for the agent to answer the cancel, so it
+            // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
+            // rather than through this connection, which is about to close.
+            stop.cancel();
             Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
         }
         ended = turn.ended() => match ended {
@@ -6642,8 +6635,16 @@ pub fn is_remote_agent_detached_error(error: &str) -> bool {
 pub struct ReattachTurn {
     /// The agent's id for the session the turn is on.
     pub agent_session_id: String,
-    /// When the turn was prompted, in ms since the epoch.
+    /// When the turn was prompted, in ms since the epoch. The prompt is
+    /// recorded before its connection starts, and so before any agent
+    /// process that connection launched.
     pub prompted_at: i64,
+    /// When the connection that prompted the turn had initialized with the
+    /// agent, in ms since the epoch, when known: the agent process that ran
+    /// the turn was running by then. A process bloxlet says started later is
+    /// a different one. Without it, the latest the connection could have
+    /// initialized after `prompted_at` stands in.
+    pub connected_at: Option<i64>,
     /// The pid of the app instance that prompted the turn, when known. The
     /// agent broadcasts its answer to that `session/prompt` to every
     /// attachment, under a request id that names the instance but not the

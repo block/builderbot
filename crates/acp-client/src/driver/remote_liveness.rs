@@ -152,19 +152,34 @@ pub(super) async fn check(target: &Target, command_id: &str) -> Result<Liveness,
     }))
 }
 
-/// When active command `command_id` started, in seconds since the epoch, or
-/// `None` when bloxlet lists it without a start time. An error means the
-/// check failed, or the command is no longer active.
+/// What bloxlet says about when a command started.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CommandStart {
+    /// Active, and started at this time, in seconds since the epoch.
+    At(i64),
+    /// Active, but listed without a start time.
+    Unknown,
+    /// No longer active.
+    NotActive,
+}
+
+/// When command `command_id` started. An error means the check itself
+/// failed and says nothing about the command.
 pub(super) async fn command_started_at(
     target: &Target,
     command_id: &str,
-) -> Result<Option<i64>, String> {
+) -> Result<CommandStart, String> {
     let active = list_commands(target, &["--status=active"], QUICK_CHECK_TIMEOUT).await?;
-    active
-        .into_iter()
-        .find(|command| command.id == command_id)
-        .map(|command| command.started_at)
-        .ok_or_else(|| format!("bloxlet does not list command {command_id} as running"))
+    Ok(
+        match active.into_iter().find(|command| command.id == command_id) {
+            Some(CommandRecord {
+                started_at: Some(started_at),
+                ..
+            }) => CommandStart::At(started_at),
+            Some(_) => CommandStart::Unknown,
+            None => CommandStart::NotActive,
+        },
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]

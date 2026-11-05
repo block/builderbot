@@ -1,7 +1,7 @@
 //! Routing of remote ACP frames between sessions sharing one agent process.
 
 use super::*;
-use crate::driver::remote_routing::{RemoteSessionRouter, RemoteTransport};
+use crate::driver::remote_routing::{RemoteLoss, RemoteSessionRouter, RemoteTransport};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -318,12 +318,74 @@ fn detaching_names_the_sessions_left_with_a_prompt_in_flight() {
     assert_eq!(router.detach(a), ["sess-a"]);
     assert_eq!(router.detach(a), Vec::<String>::new(), "already detached");
 
+    // The proxy being stopped leaves a process `sq` reused running.
     router.close();
+    assert_eq!(router.detach(b), ["sess-b"]);
+}
+
+#[test]
+fn detaching_from_a_lost_agent_names_nothing_to_cancel() {
+    let router = RemoteSessionRouter::new();
+    let (a, _a_rx) = attach(&router);
+    router.outgoing(a, &prompt(1, "sess-a"));
+
+    router.lose(RemoteLoss {
+        cause: "the agent process exited".to_string(),
+        agent_may_survive: false,
+    });
     assert_eq!(
-        router.detach(b),
+        router.detach(a),
         Vec::<String>::new(),
-        "nothing can be cancelled once the agent's output has ended"
+        "nothing can be cancelled once the agent is lost"
     );
+
+    // Nor once only the proxy went: those turns are left for reattaching.
+    let router = RemoteSessionRouter::new();
+    let (a, _a_rx) = attach(&router);
+    router.outgoing(a, &prompt(1, "sess-a"));
+    router.lose(RemoteLoss {
+        cause: "`sq` exited".to_string(),
+        agent_may_survive: true,
+    });
+    assert_eq!(router.detach(a), Vec::<String>::new());
+}
+
+/// A stopped session's `session/cancel` can still be on its way through its
+/// connection when the proxy is stopped: stopping waits for the connection
+/// to forward it, and for `sq` to relay it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancel_a_departing_connection_sends_is_delivered_before_the_proxy_stops() {
+    let (transport_stdin, agent_stdin) = tokio::io::duplex(64 * 1024);
+    let (_agent_stdout, transport_stdout) = tokio::io::duplex(64 * 1024);
+    let transport = RemoteTransport::spawn(transport_stdin, transport_stdout);
+    let mut agent_stdin = BufReader::new(agent_stdin).lines();
+
+    let streams = transport.attach();
+    let mut outgoing = streams.outgoing;
+    let cancel =
+        json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "sess-a"}});
+    outgoing
+        .write_all(format!("{cancel}\n").as_bytes())
+        .await
+        .unwrap();
+    drop(outgoing);
+    drop(streams.incoming);
+    transport.close();
+
+    let started = tokio::time::Instant::now();
+    transport
+        .deliver_queued_frames(Duration::from_secs(5))
+        .await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "`sq` is given time to relay the cancel"
+    );
+    let written = tokio::time::timeout(Duration::from_millis(100), agent_stdin.next_line())
+        .await
+        .expect("the cancel was written before stopping")
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&written).unwrap(), cancel);
 }
 
 /// A connection that goes away mid-turn cancels its prompt on the shared
@@ -389,7 +451,7 @@ fn a_foreign_prompts_answer_ends_only_the_watch_on_its_instance() {
         &json!("staged-4242-3:p"),
         json!({"stopReason": "end_turn"}),
     ));
-    assert_eq!(ended.try_recv(), Ok(()));
+    assert_eq!(ended.try_recv(), Ok("end_turn".to_string()));
     assert_eq!(
         cancelled.try_recv(),
         Err(TryRecvError::Empty),
@@ -399,7 +461,7 @@ fn a_foreign_prompts_answer_ends_only_the_watch_on_its_instance() {
         &json!("staged-4242-4:q"),
         json!({"stopReason": "cancelled"}),
     ));
-    assert_eq!(cancelled.try_recv(), Ok(()));
+    assert_eq!(cancelled.try_recv(), Ok("cancelled".to_string()));
     assert_eq!(other.try_recv(), Err(TryRecvError::Empty));
     assert!(
         received(&mut rx).is_empty(),

@@ -3922,8 +3922,27 @@ async fn reattach_turn(
     }
 
     let prompted_at = turn_started_at.unwrap_or(0);
-    let result = reattach_agent(store, &config, cancel_token, prompted_at, owner).await;
+    let connected_at = turn_connected_at(store, &config.session_id, turn_start_message_id);
+    let result = reattach_agent(
+        store,
+        &config,
+        cancel_token,
+        prompted_at,
+        connected_at,
+        owner,
+    )
+    .await;
     (config, turn_start_message_id, result)
+}
+
+/// When the connection serving the run that message `prompt_id` opened had
+/// initialized with the agent (see [`acp_client::ReattachTurn::connected_at`]).
+fn turn_connected_at(store: &Store, session_id: &str, prompt_id: i64) -> Option<i64> {
+    store
+        .get_turn_initialize_message(session_id, prompt_id)
+        .ok()
+        .flatten()
+        .map(|message| message.created_at)
 }
 
 /// The app instance that prompted a turn being reattached to.
@@ -3936,19 +3955,33 @@ struct TurnOwner {
     sole_turn: bool,
 }
 
-/// How many times [`reattach_agent`] reconnects to a turn whose `sq` proxy
-/// keeps going while bloxlet still runs its agent, before failing with that.
-const DETACHED_TURN_REATTACH_LIMIT: usize = 3;
+/// How long [`reattach_agent`] waits before each further attempt at a turn
+/// whose `sq` proxy went again while bloxlet still runs its agent; after the
+/// last, it fails with that. `sq` going is usually transient — an expired
+/// login, a network blip, bloxlet briefly unreachable — so attempts made
+/// back to back would tend to fail the same way.
+#[cfg(not(test))]
+const DETACHED_TURN_REATTACH_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(30),
+];
+#[cfg(test)]
+const DETACHED_TURN_REATTACH_DELAYS: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(10),
+    std::time::Duration::from_millis(30),
+];
 
 /// Reattach to the turn of remote session `config` that `owner` prompted at
-/// `prompted_at` (ms since the epoch) and wait for it to end (see
-/// [`AcpDriver::reattach`]), reconnecting when its `sq` proxy goes again
-/// while bloxlet still runs the agent.
+/// `prompted_at`, through a connection that had initialized by
+/// `connected_at` (both ms since the epoch), and wait for it to end (see
+/// [`AcpDriver::reattach`]), reconnecting after a delay when its `sq` proxy
+/// goes again while bloxlet still runs the agent.
 async fn reattach_agent(
     store: &Arc<Store>,
     config: &SessionConfig,
     cancel_token: &CancellationToken,
     prompted_at: i64,
+    connected_at: Option<i64>,
     owner: TurnOwner,
 ) -> Result<AgentRunOutcome, String> {
     let agent_session_id = config
@@ -3972,38 +4005,67 @@ async fn reattach_agent(
     let turn = acp_client::ReattachTurn {
         agent_session_id,
         prompted_at,
+        connected_at,
         owner_pid: owner.pid,
         sole_turn_of_owner: owner.sole_turn,
     };
-    let mut attempt = 1;
-    loop {
+    let (driver, store_trait, turn) = (&driver, &store_trait, &turn);
+    retry_detached_reattach(&config.session_id, cancel_token, move || async move {
         let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::new(
             config.session_id.clone(),
             Arc::clone(store),
         ));
-        let result = driver
+        driver
             .reattach(
                 &config.session_id,
                 &config.working_dir,
-                &store_trait,
+                store_trait,
                 &writer,
                 cancel_token,
-                &turn,
+                turn,
             )
-            .await;
-        match result {
+            .await
+    })
+    .await
+}
+
+/// Run `reattach` until it ends other than detached (see
+/// [`acp_client::is_remote_agent_detached_error`]), waiting out each of
+/// [`DETACHED_TURN_REATTACH_DELAYS`] before trying again; after the last it
+/// fails with the detached error.
+async fn retry_detached_reattach<F, Fut>(
+    session_id: &str,
+    cancel_token: &CancellationToken,
+    mut reattach: F,
+) -> Result<AgentRunOutcome, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<AgentRunOutcome, String>>,
+{
+    let mut delays = DETACHED_TURN_REATTACH_DELAYS.iter();
+    loop {
+        let result = reattach().await;
+        let error = match result {
             Err(error)
                 if acp_client::is_remote_agent_detached_error(&error)
-                    && !cancel_token.is_cancelled()
-                    && attempt < DETACHED_TURN_REATTACH_LIMIT =>
+                    && !cancel_token.is_cancelled() =>
             {
-                log::warn!(
-                    "Session {}: {error}; reattaching to its turn again",
-                    config.session_id
-                );
-                attempt += 1;
+                error
             }
             result => return result,
+        };
+        let Some(delay) = delays.next() else {
+            return Err(error);
+        };
+        log::warn!(
+            "Session {session_id}: {error}; reattaching to its turn again in {}s",
+            delay.as_secs_f32()
+        );
+        // A stop while waiting ends the session at once. No connection is
+        // watching the turn then, so nothing cancels it on the agent.
+        tokio::select! {
+            _ = tokio::time::sleep(*delay) => {}
+            _ = cancel_token.cancelled() => return Ok(AgentRunOutcome::Cancelled),
         }
     }
 }
@@ -4031,6 +4093,7 @@ async fn reattach_detached_turn(
     let Some(prompted_at) = prompted_at else {
         return Err(error);
     };
+    let connected_at = turn_connected_at(store, &config.session_id, turn_start_message_id);
     // A proxy that went while the session was still setting up may never
     // have sent the prompt, and the idle agent would then read as the turn
     // having completed: only a turn the agent has answered is picked up.
@@ -4050,7 +4113,15 @@ async fn reattach_detached_turn(
         pid: Some(std::process::id()),
         sole_turn: false,
     };
-    reattach_agent(store, config, cancel_token, prompted_at, owner).await
+    reattach_agent(
+        store,
+        config,
+        cancel_token,
+        prompted_at,
+        connected_at,
+        owner,
+    )
+    .await
 }
 
 /// The HEAD a turn prompted at `at` (ms since the epoch) started from: what
@@ -5699,6 +5770,59 @@ mod tests {
                 "{reason:?}"
             );
         }
+    }
+
+    /// `sq` going is usually transient, so a turn it detached from is tried
+    /// again only after a growing wait — and a stop during one ends it.
+    #[tokio::test(start_paused = true)]
+    async fn a_detached_reattachment_is_retried_after_growing_delays() {
+        let detached = || Err("Remote agent detached: the `sq blox acp` proxy exited".to_string());
+        let cancel = CancellationToken::new();
+        let started = tokio::time::Instant::now();
+
+        let mut attempts = Vec::new();
+        let result = retry_detached_reattach("s", &cancel, || {
+            attempts.push(started.elapsed());
+            std::future::ready(detached())
+        })
+        .await;
+        let [first, second] = DETACHED_TURN_REATTACH_DELAYS;
+        assert_eq!(
+            attempts,
+            [std::time::Duration::ZERO, first, first + second],
+            "each attempt after the first waits longer"
+        );
+        assert!(first < second);
+        assert!(acp_client::is_remote_agent_detached_error(
+            &result.unwrap_err()
+        ));
+
+        // Anything else ends it at once.
+        let mut attempts = 0;
+        let result = retry_detached_reattach("s", &cancel, || {
+            attempts += 1;
+            std::future::ready(if attempts == 1 {
+                detached()
+            } else {
+                Ok(AgentRunOutcome::Completed)
+            })
+        })
+        .await;
+        assert_eq!((attempts, result), (2, Ok(AgentRunOutcome::Completed)));
+
+        // A stop during the wait.
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(first / 2).await;
+            stop.cancel();
+        });
+        let mut attempts = 0;
+        let result = retry_detached_reattach("s", &cancel, || {
+            attempts += 1;
+            std::future::ready(detached())
+        })
+        .await;
+        assert_eq!((attempts, result), (1, Ok(AgentRunOutcome::Cancelled)));
     }
 
     #[test]

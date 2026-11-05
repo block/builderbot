@@ -5274,7 +5274,8 @@ fn change_feed_deletes_publish_only_when_a_row_is_removed() {
 
 /// The rows a run writes, in order: its prompt, then its connection's
 /// `initialize` and setup, then the agent's answer. A reattachment anchors on
-/// that prompt and asks whether the agent answered it.
+/// that prompt, asks whether the agent answered it, and takes when that
+/// connection initialized for when the turn's agent process was up.
 #[test]
 fn a_runs_prompt_is_the_user_row_its_connection_followed() {
     let store = Store::in_memory().unwrap();
@@ -5301,6 +5302,12 @@ fn a_runs_prompt_is_the_user_row_its_connection_followed() {
             .map(|message| message.id)
     };
     let answered = |id: i64| store.agent_answered_message(&session.id, id).unwrap();
+    let initialize_id = |prompt: i64| {
+        store
+            .get_turn_initialize_message(&session.id, prompt)
+            .unwrap()
+            .map(|message| message.id)
+    };
 
     assert_eq!(prompt_id(), None);
 
@@ -5308,12 +5315,14 @@ fn a_runs_prompt_is_the_user_row_its_connection_followed() {
     let first = message(MessageRole::User, "go");
     assert_eq!(prompt_id(), Some(first));
     assert!(!answered(first));
+    assert_eq!(initialize_id(first), None);
     // The connection's setup rows don't answer it.
-    event("initialize", None);
+    let first_initialize = event("initialize", None);
     event("config_options_update", None);
     event("session_mode_state", None);
     assert_eq!(prompt_id(), Some(first));
     assert!(!answered(first));
+    assert_eq!(initialize_id(first), Some(first_initialize));
     message(MessageRole::Assistant, "Looking into it");
     assert!(answered(first));
 
@@ -5322,15 +5331,29 @@ fn a_runs_prompt_is_the_user_row_its_connection_followed() {
     message(MessageRole::ToolCall, "Run the tests");
     assert_eq!(prompt_id(), Some(first));
 
-    // A follow-up run: background output from the earlier turn landing
-    // between its prompt and its connection neither displaces nor answers it.
-    let second = message(MessageRole::User, "now push");
-    event("agent_message_chunk", Some("background"));
-    assert_eq!(prompt_id(), Some(second));
-    assert!(!answered(second));
+    // A reattachment's connection initializes after the turn's output; the
+    // turn's own connection is still the one that initialized first.
     event("initialize", None);
+    message(MessageRole::Assistant, "The tests pass");
+    assert_eq!(prompt_id(), Some(first));
+    assert_eq!(initialize_id(first), Some(first_initialize));
+
+    // Background output from the earlier turn, as the writer records it: a
+    // plain assistant row, with a hidden `agent_message_chunk` row beside it
+    // that carries the origin. It comes before the follow-up run's prompt,
+    // as it does for a remote session, whose next run starts once the
+    // earlier connection has settled.
+    message(MessageRole::Assistant, "The background build passed");
+    event("agent_message_chunk", Some("background"));
+
+    // A follow-up run.
+    let second = message(MessageRole::User, "now push");
     assert_eq!(prompt_id(), Some(second));
     assert!(!answered(second));
+    let second_initialize = event("initialize", None);
+    assert_eq!(prompt_id(), Some(second));
+    assert!(!answered(second));
+    assert_eq!(initialize_id(second), Some(second_initialize));
     message(MessageRole::ToolCall, "git push");
     assert!(answered(second));
 }

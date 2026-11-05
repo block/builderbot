@@ -17,8 +17,11 @@
 //!
 //! A worktree an earlier transfer to local made may have entries in its
 //! clone's `info/exclude`, which every other worktree of the clone reads:
-//! they come out as the project leaves this machine, whether or not the
-//! worktree could be removed (see [`super::super::excludes`]).
+//! they come out once the worktree is removed (see
+//! [`super::super::excludes`]). A worktree that is kept keeps them, so the
+//! ignored files carried into it don't turn up as untracked there, where
+//! the warning sends the user to save what changed; a start's sweep takes
+//! them out once it is gone.
 
 use std::path::Path;
 
@@ -45,13 +48,13 @@ impl Run<'_> {
         match self.direction {
             TransferDirection::ToRemote => {
                 for leg in legs.iter_mut() {
-                    if let Err(issue) = self.remove_local_source(leg) {
-                        warnings.push(issue);
+                    match self.remove_local_source(leg) {
+                        // Only once it is gone: the check that the worktree
+                        // is unchanged hashes its untracked files, which
+                        // these entries keep out of it.
+                        Ok(()) => warnings.extend(self.release_excludes(leg)),
+                        Err(issue) => warnings.push(issue),
                     }
-                    // Only now: the check that the worktree is unchanged
-                    // hashes its untracked files, which these entries keep
-                    // out of it.
-                    warnings.extend(self.release_excludes(leg));
                 }
                 // The bundles at the destination have served their purpose.
                 if let (Some(workspace), Some(dir)) = (
@@ -137,10 +140,9 @@ impl Run<'_> {
     }
 
     /// Take out the entries earlier transfers to local added to the clone's
-    /// `info/exclude` for a carried leg's worktree, whatever became of it:
-    /// what is left of it here is no longer the project's. What can't be
-    /// taken out is said; its record stays, for a start's prune to try again
-    /// once the worktree is gone.
+    /// `info/exclude` for a carried leg's worktree, which has just been
+    /// removed. What can't be taken out is said; its record stays, for a
+    /// start's prune to try again.
     fn release_excludes(&self, leg: &Leg) -> Option<TransferIssue> {
         let dir = leg.plan.as_ref()?.source_dir.as_str();
         let problems = match self.host.transfers_dir() {

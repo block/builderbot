@@ -17,12 +17,14 @@
 //! did, [`registry`] keeps one transfer per project and refuses conflicting
 //! work meanwhile, [`backups`] describes and prunes what is kept,
 //! [`excludes`] takes a transfer's `info/exclude` entries out when their
-//! worktree goes, and [`commands`] is the Tauri and web surface.
+//! worktree goes (under the lock in [`exclude_file`]), and [`commands`] is
+//! the Tauri and web surface.
 
 mod backups;
 mod carry;
 pub(crate) mod commands;
 mod endpoint;
+mod exclude_file;
 mod excludes;
 mod host;
 mod orchestrator;

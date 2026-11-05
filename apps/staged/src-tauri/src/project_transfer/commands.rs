@@ -1,6 +1,7 @@
 //! The transfer commands, over Tauri and (through the `_impl`s) the web
 //! transport.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tauri::AppHandle;
@@ -241,11 +242,17 @@ pub(crate) fn recover_interrupted_transfers(store: &Store) {
 }
 
 /// Remove transfer backups past their retention. Run once at startup.
-pub(crate) fn prune_backups() {
+pub(crate) fn prune_backups(store: Option<&Store>) {
     let Ok(dir) = LiveHost.transfers_dir() else {
         return;
     };
-    let pruned = backups::prune(&dir, backups::RETENTION, std::time::SystemTime::now());
+    let workdirs = store.map(workdir_paths).unwrap_or_default();
+    let pruned = backups::prune(
+        &dir,
+        backups::RETENTION,
+        std::time::SystemTime::now(),
+        &workdirs,
+    );
     if !pruned.removed.is_empty() || !pruned.trimmed.is_empty() {
         log::info!(
             "[project_transfer] pruned {} transfer backups older than {} days, keeping only the \
@@ -255,4 +262,22 @@ pub(crate) fn prune_backups() {
             pruned.trimmed.len()
         );
     }
+}
+
+/// Every workdir path the store has, as it names them: what a worktree git
+/// lists by its real path is recorded as, when it is one of them.
+fn workdir_paths(store: &Store) -> Vec<PathBuf> {
+    let projects = match store.list_projects() {
+        Ok(projects) => projects,
+        Err(e) => {
+            log::warn!("[project_transfer] cannot list projects: {e}");
+            return Vec::new();
+        }
+    };
+    projects
+        .iter()
+        .filter_map(|project| store.list_workdirs_for_project(&project.id).ok())
+        .flatten()
+        .map(|workdir| PathBuf::from(workdir.path))
+        .collect()
 }

@@ -32,9 +32,11 @@
 //! (`/<path>`) in its `info/exclude` first, as its rules can't be expected
 //! there: a fresh workspace clone has none. That file is the repository's,
 //! read by each of its worktrees, so a path another worktree has anything at
-//! gets no entry and is left out; and each entry is noted, before it is
-//! added, where the caller says, so a rollback can take exactly those back
-//! out (see [`super::super::undo::AddedExcludes`]). And an archived
+//! gets no entry and is left out; each entry is noted, before it is added,
+//! where the caller says, so a rollback can take exactly those back out (see
+//! [`super::super::undo::AddedExcludes`]); and they are added under the lock
+//! Staged's own rewrites of the file take (see
+//! [`super::super::exclude_file`]). And an archived
 //! `.gitignore` — a cache directory's own `*` (`.pytest_cache/`,
 //! `.mypy_cache/`, a uv `.venv/`), which ignores itself and everything beside
 //! it — is put in place before asking, as until it is there nothing it
@@ -47,11 +49,51 @@ use super::{BundleFile, ScriptReport, TransferError};
 /// they are neither backed up nor carried.
 pub const IGNORED_FILES_CAP: u64 = 256 * 1024 * 1024;
 
+/// `ignored_lock`/`ignored_unlock`: the lock beside a clone's
+/// `info/exclude` that Staged's own rewrites of it take too
+/// ([`ExcludeLock`](super::super::exclude_file::ExcludeLock)), the same file
+/// with the same ages, so the two never interleave.
+macro_rules! exclude_lock_functions {
+    () => {
+        concat!(
+            // Take `$1.staged-lock`: made exclusively (`set -C`), holding this
+            // shell's pid; waited for for up to `_wait` seconds; and taken
+            // over once it is `_stale` seconds old, as whoever made it has
+            // gone without removing it. Fails when the wait runs out.
+            // `ignored_unlock` lets go of it, as does the script's exit — a
+            // `fail` included — but only while it still holds this pid, so a
+            // lock taken over isn't removed from under whoever took it.
+            "ignored_lock() {\n",
+            "  _lk=$1.staged-lock _stale=30 _wait=40 _t0=''\n",
+            "  until ( set -C; printf '%s\\n' \"$$\" > \"$_lk\" ) 2>/dev/null; do\n",
+            "    _now=$(date +%s)\n",
+            "    [ -n \"$_t0\" ] || _t0=$_now\n",
+            "    [ $((_now - _t0)) -lt \"$_wait\" ] || return 1\n",
+            "    _m=$(stat -c %Y -- \"$_lk\" 2>/dev/null || stat -f %m -- \"$_lk\" 2>/dev/null)\n",
+            "    case $_m in ''|*[!0-9]*) ;; *) [ $((_now - _m)) -lt \"$_stale\" ] || rm -f -- \"$_lk\" ;; esac\n",
+            "    sleep 0.05 2>/dev/null || sleep 1\n",
+            "  done\n",
+            "  trap ignored_unlock EXIT\n",
+            "}\n",
+            "ignored_unlock() {\n",
+            "  [ \"$(cat -- \"$_lk\" 2>/dev/null)\" != \"$$\" ] || rm -f -- \"$_lk\"\n",
+            "  trap - EXIT\n",
+            "}\n",
+        )
+    };
+}
+
+/// [`exclude_lock_functions!`], for a test to run against Staged's side of
+/// the lock.
+#[cfg(test)]
+pub const EXCLUDE_LOCK_FUNCTIONS: &str = exclude_lock_functions!();
+
 /// Definitions for the scripts that list, pack or place ignored files, after
 /// `prelude!`.
 macro_rules! ignored_prelude {
     () => {
         concat!(
+            exclude_lock_functions!(),
             // One `./<path>` line per ignored file to carry, for the checkout
             // at `.`. `-z` gives names as they are; `--no-renames` keeps
             // every record one path. A record ending in `/` is a directory an
@@ -164,15 +206,20 @@ macro_rules! ignored_prelude {
             "  fi\n",
             // The journal says, before each change is made, what file it is,
             // whether this made it, whether this ended its last line, and
-            // each line this added: what a rollback takes back out.
+            // each line this added: what a rollback takes back out. All of
+            // that, from whether the file is there to the last line added,
+            // under the lock Staged takes to take entries back out, which it
+            // does by rewriting the file: an append between its read and its
+            // rename would be lost.
             "  if [ -s \"$_st/local_add\" ]; then\n",
             "    _ex=$(G rev-parse --git-path info/exclude) || fail 'cannot find info/exclude'\n",
             "    case $_ex in /*) ;; *) _ex=$PWD/$_ex ;; esac\n",
+            "    mkdir -p -- \"$(dirname -- \"$_ex\")\" || fail \"cannot create the directory for $_ex\"\n",
+            "    ignored_lock \"$_ex\" || fail \"cannot add to $_ex: $_ex.staged-lock is still held\"\n",
             "    _jr=$ignored_excludes_journal\n",
             "    if [ -n \"$_jr\" ]; then\n",
             "      { printf 'file=%s\\n' \"$_ex\"; [ -e \"$_ex\" ] || printf 'created=1\\n'; } > \"$_jr\" || fail \"cannot write $_jr\"\n",
             "    fi\n",
-            "    mkdir -p -- \"$(dirname -- \"$_ex\")\" || fail \"cannot create the directory for $_ex\"\n",
             "    if [ -s \"$_ex\" ] && [ -n \"$(tail -c 1 -- \"$_ex\")\" ]; then\n",
             "      [ -z \"$_jr\" ] || printf 'terminated=1\\n' >> \"$_jr\" || fail \"cannot write $_jr\"\n",
             "      printf '\\n' >> \"$_ex\" || fail \"cannot write $_ex\"\n",
@@ -183,6 +230,7 @@ macro_rules! ignored_prelude {
             "      [ -z \"$_jr\" ] || printf 'line=%s\\n' \"$_e\" >> \"$_jr\" || fail \"cannot write $_jr\"\n",
             "      printf '%s\\n' \"$_e\" >> \"$_ex\" || fail \"cannot write $_ex\"\n",
             "    done < \"$_st/local_add\"\n",
+            "    ignored_unlock\n",
             "    printf 'ignored_excluded=%s\\n' \"$(ignored_count \"$_st/local_add\")\"\n",
             "  fi\n",
             // Then each free `.gitignore`, so what it ignores is ignored when

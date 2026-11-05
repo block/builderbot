@@ -32,6 +32,8 @@ use super::TransferError;
 #[macro_use]
 mod lfs;
 
+#[cfg(test)]
+pub use ignored::EXCLUDE_LOCK_FUNCTIONS;
 pub use ignored::{
     archive_args as ignored_archive_args, IgnoredFiles, IgnoredPlacement, IGNORED_ARCHIVE_SCRIPT,
     IGNORED_FILES_CAP,

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::carry::cleanup;
+use super::exclude_file::{self, ExcludeLock};
 use super::host::TransferHost;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,12 +286,33 @@ pub fn remove_added_excludes(added: &AddedExcludes) -> Result<(), String> {
 /// Take `lines` back out of the `info/exclude` at `file`, as
 /// [`remove_added_excludes`] does: `created` when the transfer made the file,
 /// `terminated` when it ended the file's last line before adding them.
+///
+/// Every worktree of the clone reads the file, and a finish in any of them
+/// may be appending to it, so this reads and rewrites it under
+/// [`ExcludeLock`], which the finish takes too, and replaces it in one
+/// rename: no `git status` reads it empty, and no line appended meanwhile is
+/// lost.
 pub fn remove_exclude_lines(
     file: &Path,
     lines: &[String],
     created: bool,
     terminated: bool,
 ) -> Result<(), String> {
+    let failed = |e: std::io::Error| {
+        format!(
+            "cannot take the transfer's entries out of {}: {e}",
+            file.display()
+        )
+    };
+    if std::fs::symlink_metadata(file).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(());
+    }
+    let _lock = match ExcludeLock::acquire(file) {
+        Ok(lock) => lock,
+        // Its directory went, and the file with it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(failed(e)),
+    };
     let text = match std::fs::read(file) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -299,17 +321,12 @@ pub fn remove_exclude_lines(
     let Some(kept) = without_lines(&text, lines, terminated) else {
         return Ok(());
     };
-    let written = if kept.is_empty() && created {
+    if kept.is_empty() && created {
         std::fs::remove_file(file)
     } else {
-        std::fs::write(file, kept)
-    };
-    written.map_err(|e| {
-        format!(
-            "cannot take the transfer's entries out of {}: {e}",
-            file.display()
-        )
-    })
+        exclude_file::replace(file, &kept)
+    }
+    .map_err(failed)
 }
 
 /// `text` without the last line exactly matching each of `lines`, or `None`

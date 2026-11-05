@@ -349,9 +349,10 @@ fn a_rolled_back_transfer_to_local_takes_its_info_exclude_entries_back_out() {
 /// clone's `info/exclude` are kept with its repo in the manifest, and come
 /// out when the project goes back to remote: the clone's other worktrees,
 /// and later ones, read that file. What anyone else wrote there stays. They
-/// come out even when the old worktree is kept because it changed — but
-/// only once it was checked, as they keep its file out of the working-tree
-/// snapshot that check compares.
+/// come out only once the old worktree is removed: one kept because it
+/// changed keeps them, so the file carried into it doesn't turn up as
+/// untracked where the user is sent to save what changed, until a start's
+/// sweep finds it gone.
 #[test]
 fn a_transfer_back_to_remote_takes_out_the_entries_its_transfer_to_local_added() {
     let f = Fixture::new(&[(WIDGETS, "feature")]);
@@ -432,8 +433,7 @@ fn a_transfer_back_to_remote_takes_out_the_entries_its_transfer_to_local_added()
     );
 
     // Down again (to the same worktree path), and back up with the worktree
-    // changing after its snapshot: kept, but no longer the project's, so the
-    // entries still come out, and its file shows.
+    // changing after its snapshot: kept, and its entries with it.
     let again = f.transfer_options(with_ignored(), &|_| {});
     again.result.expect("to local again");
     let worktree = f.worktree(0);
@@ -453,6 +453,29 @@ fn a_transfer_back_to_remote_takes_out_the_entries_its_transfer_to_local_added()
 
     assert_eq!(codes(&kept.warnings), vec!["worktree_left"]);
     assert!(worktree.is_dir());
+    assert!(lines().iter().any(|l| l == entry), "{:?}", lines());
+    assert!(f.manifest(&again.transfer_id).unwrap().repos[0]
+        .added_excludes
+        .is_some());
+    let status = git(
+        &worktree,
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(status.contains("?? late.txt"), "{status}");
+    assert!(!status.contains("only-in-the-workspace.txt"), "{status}");
+
+    // Removed by hand, it is the next start's sweep that takes them out.
+    git(
+        &f.host.clone_of(WIDGETS),
+        &["worktree", "remove", "--force", worktree.to_str().unwrap()],
+    );
+    let transfers = f.host.root.join("transfers");
+    backups::prune(
+        &transfers,
+        backups::RETENTION,
+        std::time::SystemTime::now(),
+        &[],
+    );
     let now = lines();
     assert!(!now.iter().any(|l| l == entry), "{now:?}");
     assert!(now.iter().any(|l| l == "mine-before") && now.iter().any(|l| l == "mine-after"));
@@ -460,7 +483,6 @@ fn a_transfer_back_to_remote_takes_out_the_entries_its_transfer_to_local_added()
         f.manifest(&again.transfer_id).unwrap().repos[0].added_excludes,
         None
     );
-    assert!(git(&worktree, &["status", "--porcelain"]).contains("?? only-in-the-workspace.txt"));
 }
 
 /// An ignored file only the workspace ignored, at a path another worktree of
@@ -523,7 +545,7 @@ fn past_the_retention_only_the_ignored_files_left_behind_are_kept() {
     let later =
         std::time::SystemTime::now() + backups::RETENTION + std::time::Duration::from_secs(60);
 
-    let pruned = backups::prune(&transfers, backups::RETENTION, later);
+    let pruned = backups::prune(&transfers, backups::RETENTION, later, &[]);
 
     assert_eq!(pruned.trimmed, vec![dir.clone()]);
     assert!(pruned.removed.is_empty());
@@ -559,7 +581,7 @@ fn past_the_retention_only_the_ignored_files_left_behind_are_kept() {
     assert_eq!(marked.status, backups::COMPLETED);
     assert_eq!(marked.bundles_pruned_at, trimmed.bundles_pruned_at);
     assert_eq!(
-        backups::prune(&transfers, backups::RETENTION, later),
+        backups::prune(&transfers, backups::RETENTION, later, &[]),
         backups::Pruned::default()
     );
 
@@ -576,7 +598,7 @@ fn past_the_retention_only_the_ignored_files_left_behind_are_kept() {
         vec![(tid.clone(), Recovered::RolledBack { left: vec![] })]
     );
     assert_eq!(
-        backups::prune(&transfers, backups::RETENTION, later).removed,
+        backups::prune(&transfers, backups::RETENTION, later, &[]).removed,
         vec![dir.clone()]
     );
     assert!(!dir.exists());

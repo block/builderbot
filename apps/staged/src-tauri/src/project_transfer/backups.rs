@@ -279,8 +279,14 @@ pub struct Pruned {
 /// while it still holds them; and so does one recording `info/exclude`
 /// entries for a worktree, with just its manifest. First, whatever their
 /// age, the entries of a worktree that went without Staged noticing are
-/// taken out (see [`excludes::sweep`]).
-pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Pruned {
+/// taken out, and a record whose worktree moved follows it, named as the
+/// store's `workdirs` name it (see [`excludes::sweep`]).
+pub fn prune(
+    transfers_dir: &Path,
+    retention: Duration,
+    now: SystemTime,
+    workdirs: &[PathBuf],
+) -> Pruned {
     let mut pruned = Pruned::default();
     let Ok(entries) = std::fs::read_dir(transfers_dir) else {
         return pruned;
@@ -294,7 +300,7 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Prun
         }
         let mut manifest = read_manifest(&dir);
         if let Some(m) = manifest.as_mut().filter(|m| m.holds_added_excludes()) {
-            if excludes::sweep(m) {
+            if excludes::sweep(m, workdirs) {
                 if let Err(e) = write_manifest(&dir, m) {
                     log::warn!("[project_transfer] {e}");
                 }
@@ -475,7 +481,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(transfers.join("not a transfer")).unwrap();
 
-        let pruned = prune(&transfers, RETENTION, now);
+        let pruned = prune(&transfers, RETENTION, now, &[]);
 
         assert_eq!(
             pruned,
@@ -545,7 +551,7 @@ mod tests {
         rolled.undo.clones.push(clone.clone());
         write_manifest(&transfers.join("rolled"), &rolled).unwrap();
 
-        let mut removed = prune(&transfers, RETENTION, now).removed;
+        let mut removed = prune(&transfers, RETENTION, now, &[]).removed;
         removed.sort();
 
         assert_eq!(
@@ -588,7 +594,7 @@ mod tests {
         carried.include_uncommitted = true;
         write_manifest(&transfers.join("carried"), &carried).unwrap();
 
-        let mut removed = prune(&transfers, RETENTION, now).removed;
+        let mut removed = prune(&transfers, RETENTION, now, &[]).removed;
         removed.sort();
 
         assert_eq!(
@@ -665,7 +671,7 @@ mod tests {
         assert!(!read.include_ignored);
         assert_eq!(read.repos[0].ignored, None);
 
-        let mut removed = prune(&transfers, RETENTION, now).removed;
+        let mut removed = prune(&transfers, RETENTION, now, &[]).removed;
         removed.sort();
 
         // The legacy one went by its manifest's age, not its fresh mtime.
@@ -805,7 +811,7 @@ mod tests {
         }
         let everything = names_in(&transfers.join("recent"));
 
-        let mut pruned = prune(&transfers, RETENTION, now);
+        let mut pruned = prune(&transfers, RETENTION, now, &[]);
         pruned.removed.sort();
         pruned.trimmed.sort();
 
@@ -861,7 +867,7 @@ mod tests {
         // recent one's turn comes.
         let later = now + RETENTION;
         assert_eq!(
-            prune(&transfers, RETENTION, later),
+            prune(&transfers, RETENTION, later, &[]),
             Pruned {
                 removed: vec![],
                 trimmed: vec![transfers.join("recent")],
@@ -904,7 +910,7 @@ mod tests {
         populate(&dir, true);
         let before = names_in(&dir);
 
-        assert_eq!(prune(&transfers, RETENTION, now), Pruned::default());
+        assert_eq!(prune(&transfers, RETENTION, now, &[]), Pruned::default());
 
         assert_eq!(names_in(&dir), before);
     }

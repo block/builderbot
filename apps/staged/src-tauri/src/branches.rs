@@ -1108,6 +1108,10 @@ pub(crate) fn cleanup_branch_resources(
                     .ok_or("Cannot determine clone path")?;
                 let worktree_path = Path::new(&wd.path);
                 git::remove_worktree(&repo_path, worktree_path).map_err(|e| e.to_string())?;
+                // Entries a transfer to local added to the clone's
+                // `info/exclude` for this worktree would hide a later
+                // worktree's files. Best-effort, and only logged.
+                crate::project_transfer::release_worktree_excludes(worktree_path);
                 store.delete_workdir(&wd.id).map_err(|e| e.to_string())?;
             }
         }

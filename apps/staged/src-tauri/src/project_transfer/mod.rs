@@ -15,13 +15,15 @@
 //! whole project (rolling back on failure, with [`undo`] recording what to
 //! take back), [`recovery`] finishes off at startup a transfer Staged never
 //! did, [`registry`] keeps one transfer per project and refuses conflicting
-//! work meanwhile, [`backups`] describes and prunes what is kept, and
-//! [`commands`] is the Tauri and web surface.
+//! work meanwhile, [`backups`] describes and prunes what is kept,
+//! [`excludes`] takes a transfer's `info/exclude` entries out when their
+//! worktree goes, and [`commands`] is the Tauri and web surface.
 
 mod backups;
 mod carry;
 pub(crate) mod commands;
 mod endpoint;
+mod excludes;
 mod host;
 mod orchestrator;
 #[cfg(test)]
@@ -43,6 +45,7 @@ pub(crate) use commands::{
     prune_backups, recover_interrupted_transfers, transfer_project_impl,
 };
 pub use endpoint::{BloxEndpoint, LocalEndpoint, ScriptOutput, TransferEndpoint};
+pub(crate) use excludes::release_worktree_excludes;
 pub use orchestrator::{
     ProjectTransferResult, RepoTransferResult, TransferOptions, TransferPhase, TransferProgress,
 };

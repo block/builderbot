@@ -12,7 +12,9 @@
 //! (not carried, or carried and left out at the destination) loses its
 //! bundles, LFS archives and refs after [`RETENTION`] like any other, but
 //! keeps its ignored files' archives and manifest until they are removed by
-//! hand.
+//! hand. And one whose repo still has entries in its clone's `info/exclude`
+//! for a worktree that is still there (see [`super::excludes`]) keeps its
+//! manifest, which records them, until that worktree goes.
 //!
 //! The manifest is also the transfer's journal: it is written before the
 //! transfer makes anything, with what to [`Undo`], and kept up to date as it
@@ -37,6 +39,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use super::excludes::{self, WorktreeExcludes};
 use super::is_valid_transfer_id;
 use super::scripts::IgnoredFiles;
 use super::undo::Undo;
@@ -143,15 +146,32 @@ impl TransferManifest {
                 .any(|r| r.ignored.as_ref().is_some_and(ManifestIgnored::left_behind))
     }
 
+    /// Whether a repo's entries in its clone's `info/exclude` are still
+    /// recorded here, for a worktree that hasn't gone yet as far as anyone
+    /// noticed: [`prune`] keeps the manifest while they are.
+    pub fn holds_added_excludes(&self) -> bool {
+        self.status == COMPLETED && self.repos.iter().any(|r| r.added_excludes.is_some())
+    }
+
     /// Whether [`prune`] keeps the whole directory, whatever its age.
     fn kept_whole(&self) -> bool {
         self.keep_until_removed || self.holds_left_behind_changes()
     }
 
+    /// Whether [`prune`], past [`RETENTION`], keeps part of the directory
+    /// (see [`Self::kept_after_pruning`]) rather than removing it.
+    fn outlives_retention(&self) -> bool {
+        self.holds_left_behind_ignored() || self.holds_added_excludes()
+    }
+
     /// The files [`prune`] keeps once the rest has gone: the manifest, and
-    /// each repo's ignored files' archive and its excludes list.
+    /// while it holds ignored files left behind each repo's ignored files'
+    /// archive and its excludes list.
     fn kept_after_pruning(&self) -> HashSet<OsString> {
         let mut kept = HashSet::from([OsString::from(MANIFEST_FILE)]);
+        if !self.holds_left_behind_ignored() {
+            return kept;
+        }
         for repo in &self.repos {
             if let Some(archive) = repo.ignored.as_ref().and_then(|i| i.archive.as_deref()) {
                 kept.insert(archive.into());
@@ -159,6 +179,14 @@ impl TransferManifest {
             }
         }
         kept
+    }
+
+    /// After a rollback, which took every entry the transfer added to an
+    /// `info/exclude` back out with the rest of its undo list.
+    pub fn forget_added_excludes(&mut self) {
+        for repo in &mut self.repos {
+            repo.added_excludes = None;
+        }
     }
 }
 
@@ -183,6 +211,12 @@ pub struct ManifestRepo {
     /// The source's ignored files, when it had any.
     #[serde(default)]
     pub ignored: Option<ManifestIgnored>,
+    /// The entries a transfer to local added to the clone's `info/exclude`
+    /// for the worktree it made, until that worktree goes (see
+    /// [`super::excludes`]). Left out of the JSON when there are none, so
+    /// that a manifest without any can be told apart unparsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_excludes: Option<WorktreeExcludes>,
 }
 
 /// A repo's ignored files, as the transfer archived them.
@@ -228,7 +262,8 @@ pub fn read_manifest(dir: &Path) -> Option<TransferManifest> {
 pub struct Pruned {
     /// Removed whole.
     pub removed: Vec<PathBuf>,
-    /// Left with only the ignored files' archives and the manifest.
+    /// Left with only the manifest, and any ignored files' archives left
+    /// behind.
     pub trimmed: Vec<PathBuf>,
 }
 
@@ -239,9 +274,12 @@ pub struct Pruned {
 /// the manifest, or the directory's mtime without one; only directories
 /// named like a transfer id are touched. Never one that holds uncommitted
 /// changes left behind (or whose manifest keeps it until it is removed by
-/// hand); and one that holds ignored files left behind keeps their archives
-/// and the manifest, which records when the rest went and is then left
-/// alone while it still holds them.
+/// hand); one that holds ignored files left behind keeps their archives and
+/// the manifest, which records when the rest went and is then left alone
+/// while it still holds them; and so does one recording `info/exclude`
+/// entries for a worktree, with just its manifest. First, whatever their
+/// age, the entries of a worktree that went without Staged noticing are
+/// taken out (see [`excludes::sweep`]).
 pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Pruned {
     let mut pruned = Pruned::default();
     let Ok(entries) = std::fs::read_dir(transfers_dir) else {
@@ -254,9 +292,16 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Prun
         if !dir.is_dir() || !name.to_str().is_some_and(is_valid_transfer_id) {
             continue;
         }
-        let manifest = read_manifest(&dir);
+        let mut manifest = read_manifest(&dir);
+        if let Some(m) = manifest.as_mut().filter(|m| m.holds_added_excludes()) {
+            if excludes::sweep(m) {
+                if let Err(e) = write_manifest(&dir, m) {
+                    log::warn!("[project_transfer] {e}");
+                }
+            }
+        }
         if manifest.as_ref().is_some_and(|m| {
-            m.kept_whole() || (m.bundles_pruned_at.is_some() && m.holds_left_behind_ignored())
+            m.kept_whole() || (m.bundles_pruned_at.is_some() && m.outlives_retention())
         }) {
             continue;
         }
@@ -278,8 +323,8 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Prun
             }
         }
         match manifest {
-            Some(mut manifest) if manifest.holds_left_behind_ignored() => {
-                match trim_to_ignored(&dir, &mut manifest, now) {
+            Some(mut manifest) if manifest.outlives_retention() => {
+                match trim(&dir, &mut manifest, now) {
                     Ok(()) => pruned.trimmed.push(dir),
                     Err(e) => log::warn!("[project_transfer] {e}"),
                 }
@@ -297,11 +342,7 @@ pub fn prune(transfers_dir: &Path, retention: Duration, now: SystemTime) -> Prun
 /// [`TransferManifest::kept_after_pruning`]), then say so in the manifest.
 /// The manifest is only written once every other file is gone, so one that
 /// could not be removed is tried again at the next prune.
-fn trim_to_ignored(
-    dir: &Path,
-    manifest: &mut TransferManifest,
-    now: SystemTime,
-) -> Result<(), String> {
+fn trim(dir: &Path, manifest: &mut TransferManifest, now: SystemTime) -> Result<(), String> {
     let kept = manifest.kept_after_pruning();
     let entries =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
@@ -385,6 +426,7 @@ mod tests {
                 local_clone: Some(clone.to_string_lossy().into_owned()),
                 backup_ref: Some(backup_ref.to_string()),
                 ignored: None,
+                added_excludes: None,
             }],
             ..TransferManifest::default()
         }

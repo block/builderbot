@@ -2,6 +2,7 @@
 //! down, carried when asked, and what stops either.
 
 use super::super::backups::ManifestIgnored;
+use super::super::excludes::WorktreeExcludes;
 use super::super::scripts::IGNORED_ARCHIVE_SCRIPT;
 use super::*;
 
@@ -342,6 +343,124 @@ fn a_rolled_back_transfer_to_local_takes_its_info_exclude_entries_back_out() {
         after.lines().any(|l| l == "/only-in-the-workspace.txt"),
         "{after}"
     );
+}
+
+/// Once a transfer to local is through, the entries it added to the local
+/// clone's `info/exclude` are kept with its repo in the manifest, and come
+/// out when the project goes back to remote: the clone's other worktrees,
+/// and later ones, read that file. What anyone else wrote there stays. They
+/// come out even when the old worktree is kept because it changed — but
+/// only once it was checked, as they keep its file out of the working-tree
+/// snapshot that check compares.
+#[test]
+fn a_transfer_back_to_remote_takes_out_the_entries_its_transfer_to_local_added() {
+    let f = Fixture::new(&[(WIDGETS, "feature")]);
+    let entry = "/only-in-the-workspace.txt";
+    let exclude = f.host.clone_of(WIDGETS).join(".git/info/exclude");
+    let lines = || -> Vec<String> {
+        fs::read_to_string(&exclude)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    f.transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("to remote");
+    let checkout = f.checkout(0);
+    // Only the workspace's clone ignores it (a name no global excludes file
+    // here should match, as the fixture's ends share this machine's).
+    let mut rules = fs::read_to_string(checkout.join(".git/info/exclude")).unwrap_or_default();
+    rules.push_str("only-in-the-workspace.txt\n");
+    fs::write(checkout.join(".git/info/exclude"), rules).unwrap();
+    write(&checkout, "only-in-the-workspace.txt", "pen\n");
+    let mut mine = fs::read_to_string(&exclude).unwrap_or_default();
+    mine.push_str("mine-before\n");
+    fs::write(&exclude, &mine).unwrap();
+
+    let to_local = f.transfer_options(with_ignored(), &|_| {});
+    to_local.result.expect("to local");
+
+    let worktree = f.worktree(0);
+    assert_eq!(
+        read(&worktree, "only-in-the-workspace.txt").as_deref(),
+        Some("pen\n")
+    );
+    assert!(lines().iter().any(|l| l == entry), "{:?}", lines());
+    let record = f.manifest(&to_local.transfer_id).unwrap().repos[0]
+        .added_excludes
+        .clone()
+        .expect("the entries are recorded with the repo");
+    let WorktreeExcludes {
+        worktree: for_worktree,
+        file,
+        created,
+        terminated,
+        lines: added,
+    } = record;
+    assert_eq!(for_worktree, worktree);
+    assert_eq!(
+        file.canonicalize().unwrap(),
+        exclude.canonicalize().unwrap()
+    );
+    assert!(!created && !terminated);
+    assert_eq!(added, vec![entry.to_string()]);
+    let mut later = fs::read_to_string(&exclude).unwrap();
+    later.push_str("mine-after\n");
+    fs::write(&exclude, later).unwrap();
+
+    let back = f
+        .transfer_options(with_ignored(), &|_| {})
+        .result
+        .expect("back to remote");
+
+    assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+    assert!(!worktree.exists(), "an unchanged worktree is removed");
+    let now = lines();
+    assert!(!now.iter().any(|l| l == entry), "{now:?}");
+    assert!(now.iter().any(|l| l == "mine-before"), "{now:?}");
+    assert_eq!(now.last().map(String::as_str), Some("mine-after"));
+    assert_eq!(
+        f.manifest(&to_local.transfer_id).unwrap().repos[0].added_excludes,
+        None,
+        "released, so never taken out twice"
+    );
+    // The file went with the project, its rule with it.
+    assert_eq!(
+        read(&f.checkout(0), "only-in-the-workspace.txt").as_deref(),
+        Some("pen\n")
+    );
+
+    // Down again (to the same worktree path), and back up with the worktree
+    // changing after its snapshot: kept, but no longer the project's, so the
+    // entries still come out, and its file shows.
+    let again = f.transfer_options(with_ignored(), &|_| {});
+    again.result.expect("to local again");
+    let worktree = f.worktree(0);
+    assert!(lines().iter().any(|l| l == entry), "{:?}", lines());
+    assert!(f.manifest(&again.transfer_id).unwrap().repos[0]
+        .added_excludes
+        .is_some());
+
+    let kept = f
+        .transfer_options(with_ignored(), &|progress| {
+            if progress.phase == TransferPhase::Committing {
+                write(&worktree, "late.txt", "saved late\n");
+            }
+        })
+        .result
+        .expect("back to remote again");
+
+    assert_eq!(codes(&kept.warnings), vec!["worktree_left"]);
+    assert!(worktree.is_dir());
+    let now = lines();
+    assert!(!now.iter().any(|l| l == entry), "{now:?}");
+    assert!(now.iter().any(|l| l == "mine-before") && now.iter().any(|l| l == "mine-after"));
+    assert_eq!(
+        f.manifest(&again.transfer_id).unwrap().repos[0].added_excludes,
+        None
+    );
+    assert!(git(&worktree, &["status", "--porcelain"]).contains("?? only-in-the-workspace.txt"));
 }
 
 /// An ignored file only the workspace ignored, at a path another worktree of

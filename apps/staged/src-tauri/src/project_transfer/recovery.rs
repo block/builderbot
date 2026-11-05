@@ -97,6 +97,7 @@ fn recover_one(
             }
         );
         manifest.status = backups::ROLLED_BACK.to_string();
+        manifest.forget_added_excludes();
         manifest
             .warnings
             .push("Staged stopped during this transfer; it was undone at the next start.".into());

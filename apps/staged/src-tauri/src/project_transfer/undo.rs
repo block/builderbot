@@ -279,15 +279,27 @@ pub fn remove_added_excludes(added: &AddedExcludes) -> Result<(), String> {
     let Some(file) = &added.file else {
         return Ok(());
     };
+    remove_exclude_lines(file, &added.lines, added.created, added.terminated)
+}
+
+/// Take `lines` back out of the `info/exclude` at `file`, as
+/// [`remove_added_excludes`] does: `created` when the transfer made the file,
+/// `terminated` when it ended the file's last line before adding them.
+pub fn remove_exclude_lines(
+    file: &Path,
+    lines: &[String],
+    created: bool,
+    terminated: bool,
+) -> Result<(), String> {
     let text = match std::fs::read(file) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("cannot read {}: {e}", file.display())),
     };
-    let Some(kept) = without_lines(&text, &added.lines, added.terminated) else {
+    let Some(kept) = without_lines(&text, lines, terminated) else {
         return Ok(());
     };
-    let written = if kept.is_empty() && added.created {
+    let written = if kept.is_empty() && created {
         std::fs::remove_file(file)
     } else {
         std::fs::write(file, kept)

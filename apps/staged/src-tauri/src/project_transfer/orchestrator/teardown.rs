@@ -14,11 +14,17 @@
 //! machine with [`back_up_ignored`], whether or not the transfer carried
 //! them: a source whose files can't be archived and brought here is kept.
 //! Only files over the cap go unbacked, with a warning.
+//!
+//! A worktree an earlier transfer to local made may have entries in its
+//! clone's `info/exclude`, which every other worktree of the clone reads:
+//! they come out as the project leaves this machine, whether or not the
+//! worktree could be removed (see [`super::super::excludes`]).
 
 use std::path::Path;
 
 use super::super::backups;
 use super::super::carry::{back_up_ignored, cleanup, unchanged, unchanged_all, CarryPlan};
+use super::super::excludes;
 use super::super::preflight::{Inspection, TransferDirection, TransferIssue};
 use super::super::scripts::IgnoredFiles;
 use super::super::undo;
@@ -42,6 +48,10 @@ impl Run<'_> {
                     if let Err(issue) = self.remove_local_source(leg) {
                         warnings.push(issue);
                     }
+                    // Only now: the check that the worktree is unchanged
+                    // hashes its untracked files, which these entries keep
+                    // out of it.
+                    warnings.extend(self.release_excludes(leg));
                 }
                 // The bundles at the destination have served their purpose.
                 if let (Some(workspace), Some(dir)) = (
@@ -124,6 +134,31 @@ impl Run<'_> {
             Err(e) => return Err(failed(format!("couldn't check it is unchanged: {e}"))),
         }
         crate::git::remove_worktree(&clone, worktree).map_err(|e| failed(e.to_string()))
+    }
+
+    /// Take out the entries earlier transfers to local added to the clone's
+    /// `info/exclude` for a carried leg's worktree, whatever became of it:
+    /// what is left of it here is no longer the project's. What can't be
+    /// taken out is said; its record stays, for a start's prune to try again
+    /// once the worktree is gone.
+    fn release_excludes(&self, leg: &Leg) -> Option<TransferIssue> {
+        let dir = leg.plan.as_ref()?.source_dir.as_str();
+        let problems = match self.host.transfers_dir() {
+            Ok(transfers) => excludes::release_for_worktree(&transfers, Path::new(dir)),
+            Err(e) => vec![e],
+        };
+        if problems.is_empty() {
+            return None;
+        }
+        Some(TransferIssue::new(
+            "excludes_left",
+            format!(
+                "Transferred, but couldn't take out the entries an earlier transfer added to \
+                 the local clone's info/exclude for {dir}, so other worktrees of the clone may \
+                 still ignore those paths: {}",
+                problems.join("; ")
+            ),
+        ))
     }
 
     /// Keep the snapshot of each branch carried out of `workspace` under a
@@ -236,7 +271,11 @@ impl Run<'_> {
         self.emit(TransferPhase::RollingBack, None, None, None);
         let recorded = self.journal.borrow().undo.clone();
         let left = undo::roll_back(&recorded, self.host, self.guard.transfer_id());
-        self.journal.borrow_mut().warnings.extend(left);
+        {
+            let mut journal = self.journal.borrow_mut();
+            journal.warnings.extend(left);
+            journal.forget_added_excludes();
+        }
         self.close_journal(backups::ROLLED_BACK, None, None);
     }
 }

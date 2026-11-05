@@ -37,6 +37,7 @@ use super::carry::{
     Landing,
 };
 use super::endpoint::TransferEndpoint;
+use super::excludes::WorktreeExcludes;
 use super::host::{TransferHost, WorkspaceState};
 use super::preflight::{
     self, BranchSource, Inspection, RepoPreflight, RepoTransferState, TransferDirection,
@@ -267,6 +268,9 @@ struct Leg {
     outcome: Option<CarryOutcome>,
     /// The worktree added for it locally.
     worktree: Option<PathBuf>,
+    /// The entries the finish added to the local clone's `info/exclude` for
+    /// that worktree, which outlive the transfer.
+    added_excludes: Option<WorktreeExcludes>,
     backup_ref: Option<String>,
     /// The source's ignored files as archived into the backup right before
     /// it came down.
@@ -387,6 +391,7 @@ impl Run<'_> {
                 plan: None,
                 outcome: None,
                 worktree: None,
+                added_excludes: None,
                 backup_ref: None,
                 ignored_backup: None,
                 warnings: Vec::new(),
@@ -787,7 +792,7 @@ impl Run<'_> {
             add_worktree(&clone, &leg.dest_branch, &worktree)
                 .map_err(|e| format!("Cannot add the worktree for {}: {e}", leg.dest_branch))?;
             let endpoint = self.host.local_endpoint(&worktree)?;
-            let finished = self.finish_recording_excludes(
+            let (finished, added) = self.finish_recording_excludes(
                 endpoint.as_ref(),
                 &plan,
                 &outcome,
@@ -796,6 +801,7 @@ impl Run<'_> {
             outcome.applied.warnings.extend(finished.warnings);
             outcome.applied.lfs_unavailable |= finished.lfs_unavailable;
             outcome.applied.ignored = outcome.applied.ignored.take().or(finished.ignored);
+            leg.added_excludes = added.and_then(|a| WorktreeExcludes::new(worktree.clone(), &a));
             leg.worktree = Some(worktree);
         }
         leg.plan = Some(plan);
@@ -807,36 +813,42 @@ impl Run<'_> {
     /// excludes list, the entries it may add to the clone's `info/exclude` —
     /// which outlives the worktree, and every other worktree of the clone
     /// reads — are recorded first, by the journal the finish notes them in,
-    /// and then, whatever the finish did, as the journal has them.
+    /// and then, whatever the finish did, as the journal has them. Returns
+    /// them with the report, for the manifest to keep once the transfer is
+    /// over.
     fn finish_recording_excludes(
         &self,
         endpoint: &dyn TransferEndpoint,
         plan: &CarryPlan,
         outcome: &CarryOutcome,
         worktree: &str,
-    ) -> Result<ApplyReport, Failure> {
+    ) -> Result<(ApplyReport, Option<AddedExcludes>), Failure> {
         if outcome.dest_ignored_excludes.is_none() {
-            return Ok(finish(endpoint, plan, outcome, worktree)?);
+            return Ok((finish(endpoint, plan, outcome, worktree)?, None));
         }
         let journal = plan.local_excludes_journal();
         self.record(|undo| undo.excludes.push(AddedExcludes::noted_in(journal.clone())))?;
         let finished = finish(endpoint, plan, outcome, worktree);
-        match AddedExcludes::read_journal(&journal) {
+        let added = match AddedExcludes::read_journal(&journal) {
             Ok(Some(added)) => {
                 let recorded = self.record(|undo| {
                     if let Some(entry) = undo.excludes.iter_mut().find(|e| e.journal == journal) {
-                        *entry = added;
+                        *entry = added.clone();
                     }
                 });
                 // The entry still names the journal, which rollback reads.
                 if let Err(e) = recorded {
                     log::warn!("[project_transfer] {e}");
                 }
+                Some(added)
             }
-            Ok(None) => {}
-            Err(e) => log::warn!("[project_transfer] {e}"),
-        }
-        Ok(finished?)
+            Ok(None) => None,
+            Err(e) => {
+                log::warn!("[project_transfer] {e}");
+                None
+            }
+        };
+        Ok((finished?, added))
     }
 
     /// Before `plan`'s branch lands in a local clone: record its config as it
@@ -1073,6 +1085,7 @@ impl Run<'_> {
                 .map(|p| p.to_string_lossy().into_owned()),
             backup_ref: leg.backup_ref.clone(),
             ignored: manifest_ignored(plan, outcome, leg.ignored_backup.as_ref()),
+            added_excludes: leg.added_excludes.clone(),
         })
     }
 

@@ -863,6 +863,10 @@ where
 }
 
 /// See [`BranchGitStateQuery`] for the `branch_name` / `remote_branch` split.
+///
+/// `env_source` is `Lite` or `Captured`. A `CapturedBounded` build goes
+/// through [`compute_local_branch_git_state_bounded`], since a read that only
+/// failed because the capture wasn't ready would read here as an answer.
 pub fn compute_local_branch_git_state(
     repo: &Path,
     branch_name: &str,
@@ -882,37 +886,119 @@ pub fn compute_local_branch_git_state(
     compute_local_branch_git_state_with(repo, query, env_source, |_| ()).0
 }
 
-/// [`compute_branch_git_state_with`] against a local checkout.
+/// [`compute_branch_git_state_with`] against a local checkout. `env_source`
+/// is `Lite` or `Captured`, as for [`compute_local_branch_git_state`].
 pub fn compute_local_branch_git_state_with<T: Send>(
     repo: &Path,
     query: BranchGitStateQuery<'_>,
     env_source: EnvSource,
     with_base_merge_base: impl FnOnce(Option<&str>) -> T + Send,
 ) -> (BranchGitState, T) {
-    let cache_key = format!(
+    debug_assert!(
+        !matches!(env_source, EnvSource::CapturedBounded),
+        "use compute_local_branch_git_state_bounded"
+    );
+    compute_branch_git_state_with(
+        &local_cache_key(repo, &query),
+        |args| local_git(repo, env_source, args).map_err(|e| e.to_string()),
+        query,
+        with_base_merge_base,
+    )
+}
+
+/// [`compute_local_branch_git_state`] for a display refresh, with
+/// [`EnvSource::CapturedBounded`] reads: they wait at most
+/// [`cli::run_bounded`]'s bound for the captured env, while the fetch waits
+/// for it however long it takes.
+///
+/// A read that gave up on the capture and then failed in a way the captured
+/// env might have avoided ([`GitError::CapturedEnvPending`]) makes this an
+/// `Err` instead of a state. The build would read a failed `git status` as a
+/// clean tree and a failed count as zero: during a cold capture, a checkout
+/// with LFS files and git-lfs missing from the inherited PATH would show no
+/// uncommitted changes and offer Pull. The caller keeps the state it has,
+/// and a refresh after the capture lands gets the real one. Nothing retries
+/// here: a retry with the captured env would wait out the capture this
+/// build exists not to wait for, and a second bounded read of the same
+/// capture returns at once without it.
+pub fn compute_local_branch_git_state_bounded(
+    repo: &Path,
+    branch_name: &str,
+    remote_branch: &str,
+    base_branch: &str,
+    fetch_mode: FetchMode,
+    worktree_scope: WorktreeStatusScope,
+) -> Result<BranchGitState, GitError> {
+    let query = BranchGitStateQuery {
+        branch_name,
+        remote_branch,
+        base_branch,
+        fetch_mode,
+        worktree_scope,
+    };
+    compute_branch_git_state_settled(
+        &local_cache_key(repo, &query),
+        |args| local_git(repo, EnvSource::CapturedBounded, args),
+        query,
+    )
+}
+
+/// Fetch-TTL cache key for a local checkout's state builds.
+fn local_cache_key(repo: &Path, query: &BranchGitStateQuery<'_>) -> String {
+    format!(
         "local:{}:{}:{}",
         repo.display(),
         query.branch_name,
         query.base_branch
-    );
-    compute_branch_git_state_with(
-        &cache_key,
-        |args| match env_source {
-            EnvSource::Lite => cli::run_smart(repo, args).map_err(|e| e.to_string()),
-            // Every op the build issues reads refs, the index or the work
-            // tree, except the fetch: that one goes through the user's
-            // credential helpers and ssh config, so it waits for the capture
-            // however long it takes.
-            EnvSource::CapturedBounded if args.first() != Some(&"fetch") => {
-                cli::run_bounded(repo, args).map_err(|e| e.to_string())
-            }
-            EnvSource::CapturedBounded | EnvSource::Captured => {
-                cli::run(repo, args).map_err(|e| e.to_string())
-            }
+    )
+}
+
+/// Run one of a state build's git ops in `repo` with `env_source`'s env.
+fn local_git(repo: &Path, env_source: EnvSource, args: &[&str]) -> Result<String, GitError> {
+    match env_source {
+        EnvSource::Lite => cli::run_smart(repo, args),
+        // Every op the build issues reads refs, the index or the work tree,
+        // except the fetch: that one goes through the user's credential
+        // helpers and ssh config, so it waits for the capture however long
+        // it takes.
+        EnvSource::CapturedBounded if args.first() != Some(&"fetch") => {
+            cli::run_bounded(repo, args)
+        }
+        EnvSource::CapturedBounded | EnvSource::Captured => cli::run(repo, args),
+    }
+}
+
+/// [`compute_branch_git_state`] over a runner whose reads may fail with
+/// [`GitError::CapturedEnvPending`]. Any such read makes the build an `Err`
+/// carrying the first one's error, rather than a state that took the failure
+/// for an answer. Other failures are read as the build always reads them.
+pub(super) fn compute_branch_git_state_settled<F>(
+    cache_key: &str,
+    run_git: F,
+    query: BranchGitStateQuery<'_>,
+) -> Result<BranchGitState, GitError>
+where
+    F: Fn(&[&str]) -> Result<String, GitError> + Sync,
+{
+    let pending = OnceLock::new();
+    let (state, ()) = compute_branch_git_state_with(
+        cache_key,
+        |args| {
+            run_git(args).map_err(|error| {
+                let message = error.to_string();
+                if matches!(error, GitError::CapturedEnvPending(_)) {
+                    let _ = pending.set(error);
+                }
+                message
+            })
         },
         query,
-        with_base_merge_base,
-    )
+        |_| (),
+    );
+    match pending.into_inner() {
+        Some(error) => Err(error),
+        None => Ok(state),
+    }
 }
 
 // ---------------------------------------------------------------------------

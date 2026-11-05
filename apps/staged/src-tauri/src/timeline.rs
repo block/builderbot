@@ -751,19 +751,29 @@ pub(crate) fn refresh_branch_git_state_impl(
     } else if let Some(ref wd) = workdir {
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
-            // Display only, so the reads don't sit out a cold capture: the
-            // next refresh corrects anything the inherited env got wrong. The
-            // pull, reset and discard builds below keep the unbounded wait,
-            // because they guard a mutation that waits for the capture anyway.
-            Some(git::compute_local_branch_git_state(
+            // Display only, so the reads don't sit out a cold capture. A read
+            // the inherited env may have got wrong leaves the card on the
+            // state it has, and a refresh after the capture lands corrects
+            // it. The pull, reset and discard builds below keep the unbounded
+            // wait, because they guard a mutation that waits for the capture
+            // anyway.
+            match git::compute_local_branch_git_state_bounded(
                 worktree_path,
                 &branch.branch_name,
                 &git::upstream_branch_name(worktree_path, &branch.branch_name, &branch.base_branch),
                 &branch.base_branch,
                 fetch_mode,
                 git::WorktreeStatusScope::Full,
-                git::EnvSource::CapturedBounded,
-            ))
+            ) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    log::info!(
+                        "Keeping branch {branch_id}'s git state until its shell env is captured: \
+                         {error}"
+                    );
+                    None
+                }
+            }
         } else {
             None
         }

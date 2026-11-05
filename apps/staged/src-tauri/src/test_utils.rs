@@ -120,6 +120,25 @@ pub fn run_git_in(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+/// A repo whose committed `data.bin` goes through a `required` clean filter
+/// that can't run, rewritten since, so `git status` has to run the filter and
+/// fails. That is a checkout with LFS files, seen by a git whose PATH lacks
+/// git-lfs: an app launched from Finder before the login shell's env is in.
+pub fn repo_with_unrunnable_clean_filter() -> TempGitRepo {
+    let repo = TempGitRepo::new();
+    repo.write_file(".gitattributes", "*.bin filter=unrunnable\n");
+    repo.write_file("data.bin", "v1\n");
+    repo.commit("init");
+    repo.run_git(&[
+        "config",
+        "filter.unrunnable.clean",
+        "staged-test-no-such-filter",
+    ]);
+    repo.run_git(&["config", "filter.unrunnable.required", "true"]);
+    repo.write_file("data.bin", "v2\n");
+    repo
+}
+
 /// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
 ///
 /// Hold the returned handle for the test's lifetime — dropping it removes

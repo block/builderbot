@@ -1,28 +1,30 @@
-//! The capture limit, home's place ahead of the queue, and the per-capture
-//! wait summary.
+//! The capture limit, the queue's tiers, home's place ahead of the queue,
+//! the capture timeout, per-capture bounds, and the per-capture wait summary.
 //!
 //! The fake shells here sleep for whatever a `.delay` file in the capture
-//! directory says (none means no sleep), so one shell can serve fast and
-//! slow directories in the same test.
+//! directory says when they start (none means no sleep), so one shell can
+//! serve fast and slow directories in the same test.
 
 use super::*;
 use crate::test_utils::write_fake_shell;
 
-/// Fake `$SHELL` that logs each launch's directory to `log/launches` and,
-/// while it sleeps, keeps a marker file in `log/`. On start it appends how
-/// many markers exist, its own included, to `log/peaks`. Its marker lives
-/// inside its capture slot, so the largest peak is the most shells that ran
-/// at once.
+/// Fake `$SHELL` that reads its delay, then logs its directory to
+/// `log/launches` and, while it sleeps, keeps a marker file
+/// `log/inflight.<pid>`. On start it appends how many markers exist, its own
+/// included, to `log/peaks`. Its marker lives inside its capture slot, so the
+/// largest peak is the most shells that ran at once. A launch logged has
+/// already read its delay, so a test can change `.delay` for the next one.
 fn tracking_shell(log: &Path) -> tempfile::TempPath {
     let log = single_quote(&log.to_string_lossy());
     write_fake_shell(&format!(
         "#!/bin/sh\n\
          PATH=/usr/bin:/bin\n\
          export PATH\n\
+         delay=\"$(cat .delay 2>/dev/null || echo 0)\"\n\
          pwd >> {log}/launches\n\
          : > {log}/inflight.$$\n\
          ls {log} | grep -c '^inflight\\.' >> {log}/peaks\n\
-         sleep \"$(cat .delay 2>/dev/null || echo 0)\"\n\
+         sleep \"$delay\"\n\
          rm -f {log}/inflight.$$\n\
          exec /bin/sh -s\n"
     ))
@@ -63,16 +65,24 @@ fn dir_with_delay(scratch: &Path, name: &str, delay: &str) -> PathBuf {
     dir
 }
 
-/// A cache using [`tracking_shell`], with `home` as its `$HOME` if given.
-/// Hold the returned shell for the test's lifetime.
-fn tracking_cache(log: &Path, home: Option<&Path>) -> (Arc<ShellEnvCache>, tempfile::TempPath) {
+/// A cache using [`tracking_shell`], with `home` as its `$HOME`. Passing the
+/// scratch dir keeps the env-root walk inside it, so directories beneath it
+/// are their own keys whatever checkout `TMPDIR` sits in. Hold the returned
+/// shell for the test's lifetime.
+fn tracking_cache(log: &Path, home: &Path) -> (Arc<ShellEnvCache>, tempfile::TempPath) {
+    tracking_cache_with(log, home, |cache| cache)
+}
+
+/// [`tracking_cache`], adjusted by `configure`.
+fn tracking_cache_with(
+    log: &Path,
+    home: &Path,
+    configure: impl FnOnce(ShellEnvCache) -> ShellEnvCache,
+) -> (Arc<ShellEnvCache>, tempfile::TempPath) {
     let shell = tracking_shell(log);
-    let mut cache =
-        ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
-    if let Some(home) = home {
-        cache = cache.with_home(home);
-    }
-    (Arc::new(cache), shell)
+    let cache = ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+        .with_home(home);
+    (Arc::new(configure(cache)), shell)
 }
 
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
@@ -81,6 +91,13 @@ fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// Take every capture slot, as captures of other directories would.
+fn hold_every_slot(cache: &ShellEnvCache) -> Vec<capture_slots::CaptureSlot<'_>> {
+    (0..CAPTURE_LIMIT)
+        .map(|_| cache.slots.acquire(&Urgency::default()))
+        .collect()
 }
 
 fn entry_is_ready(cache: &ShellEnvCache, key: &Path) -> bool {
@@ -111,7 +128,7 @@ fn in_flight_promise(cache: &ShellEnvCache, key: &Path) -> Arc<InFlightPromise> 
 async fn captures_never_exceed_the_limit_across_paths() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
-    let (cache, _shell) = tracking_cache(log.path(), None);
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
     let dirs: Vec<PathBuf> = (0..6)
         .map(|i| dir_with_delay(scratch.path(), &format!("wt{i}"), "0.6"))
         .collect();
@@ -172,7 +189,7 @@ fn home_capture_skips_the_queue() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
     let home = dir_with_delay(scratch.path(), "home", "0");
-    let (cache, _shell) = tracking_cache(log.path(), Some(&home));
+    let (cache, _shell) = tracking_cache(log.path(), &home);
     let busy = [
         dir_with_delay(scratch.path(), "wt-a", "3"),
         dir_with_delay(scratch.path(), "wt-b", "3"),
@@ -240,7 +257,7 @@ async fn home_timeout_falls_back_but_the_capture_lands() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
     let home = dir_with_delay(scratch.path(), "home", "1");
-    let (cache, _shell) = tracking_cache(log.path(), Some(&home));
+    let (cache, _shell) = tracking_cache(log.path(), &home);
 
     let started = Instant::now();
     let fallback =
@@ -280,10 +297,10 @@ fn bounded_read_falls_back_at_the_bound_while_queued() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
     let dir = dir_with_delay(scratch.path(), "wt", "0");
-    let (cache, _shell) = tracking_cache(log.path(), None);
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
 
     // Two captures elsewhere hold both slots.
-    let storm: Vec<_> = (0..CAPTURE_LIMIT).map(|_| cache.slots.acquire()).collect();
+    let storm = hold_every_slot(&cache);
 
     let bound = Duration::from_millis(300);
     let started = Instant::now();
@@ -344,4 +361,313 @@ fn wait_summary_counts_every_waiter_once() {
     );
     let first_wait = promise.waits.lock().unwrap().longest_gave_up;
     assert!(first_wait >= Duration::from_millis(30) && first_wait < summary.longest);
+}
+
+/// L6: A shell that never finishes is killed at the capture timeout, with
+/// what it started, whether the capture ran inline for a sync caller or on a
+/// capture thread for an async one. Each capture fails, frees its slot and
+/// evicts its entry, so the next caller for the same key starts afresh.
+#[test]
+fn hung_shell_is_killed_at_the_capture_timeout() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    // Short enough to keep the test quick, long enough that on a loaded
+    // machine the hung shells get as far as their markers and the fresh
+    // captures at the end finish in time.
+    let timeout = Duration::from_secs(5);
+    let (cache, _shell) = tracking_cache_with(log.path(), scratch.path(), |cache| {
+        cache.with_capture_timeout(timeout)
+    });
+    let inline_dir = dir_with_delay(scratch.path(), "wt-inline", "30");
+    let async_dir = dir_with_delay(scratch.path(), "wt-async", "30");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let started = Instant::now();
+    let inline = std::thread::spawn({
+        let (cache, dir) = (cache.clone(), inline_dir.clone());
+        move || cache.get_blocking(&dir).map(|_| ())
+    });
+    let async_err = runtime
+        .block_on(cache.get(&async_dir))
+        .map(|_| ())
+        .expect_err("the hung background capture fails");
+    let inline_err = inline
+        .join()
+        .expect("sync thread")
+        .expect_err("the hung inline capture fails");
+    let waited = started.elapsed();
+
+    // Waiters get the error as text through the in-flight promise, as for
+    // any failed capture, so its message is what both callers share.
+    for error in [&inline_err, &async_err] {
+        assert!(error.to_string().contains("still running after"), "{error}");
+    }
+    assert!(
+        waited >= timeout && waited < timeout * 3,
+        "each capture should end at its timeout: {waited:?}"
+    );
+    assert_eq!(cache.slots.in_use(), 0, "both slots are free again");
+    for dir in [&inline_dir, &async_dir] {
+        assert!(
+            cache.inner.lock().unwrap().get(dir).is_none(),
+            "{} kept its entry",
+            dir.display()
+        );
+    }
+
+    // Each killed shell left its marker behind, named for its pid, which is
+    // also its process group: nothing in either group survives the kill.
+    let groups: Vec<libc::pid_t> = std::fs::read_dir(log.path())
+        .expect("read log dir")
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            name.to_str()?.strip_prefix("inflight.")?.parse().ok()
+        })
+        .collect();
+    assert_eq!(groups.len(), 2, "one marker per killed shell");
+    for group in groups {
+        wait_until("the killed shell's process group to be gone", || {
+            // SAFETY: signal 0 only checks whether the group exists.
+            unsafe { libc::kill(-group, 0) == -1 }
+        });
+    }
+
+    for dir in [&inline_dir, &async_dir] {
+        std::fs::write(dir.join(".delay"), "0").expect("write .delay");
+    }
+    let inline_env = cache
+        .get_blocking(&inline_dir)
+        .expect("a fresh inline capture");
+    let async_env = runtime
+        .block_on(cache.get(&async_dir))
+        .expect("a fresh async capture");
+    for env in [inline_env, async_env] {
+        assert!(env
+            .vars()
+            .iter()
+            .any(|(k, v)| k == "PATH" && v == "/usr/bin:/bin"));
+    }
+    assert_eq!(
+        launch_dirs(log.path()).len(),
+        4,
+        "a fresh shell per directory after the timeout"
+    );
+}
+
+/// L7: The bound is per capture. Once one bounded read has waited out its
+/// bound on a capture, the next bounded read of that same capture returns
+/// at once rather than waiting out a bound of its own.
+#[test]
+fn bound_runs_out_once_per_capture_not_once_per_read() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let dir = dir_with_delay(scratch.path(), "wt", "5");
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
+    let bound = Duration::from_secs(1);
+
+    let started = Instant::now();
+    let first = cache.get_blocking_within(&dir, bound).expect("first read");
+    let first_waited = started.elapsed();
+    let started = Instant::now();
+    let second = cache.get_blocking_within(&dir, bound).expect("second read");
+    let second_waited = started.elapsed();
+
+    assert!(
+        matches!(first, BoundedEnv::StillCapturing { first: true }),
+        "{first:?}"
+    );
+    assert!(first_waited >= bound, "gave up early: {first_waited:?}");
+    assert!(
+        matches!(second, BoundedEnv::StillCapturing { first: false }),
+        "{second:?}"
+    );
+    assert!(
+        second_waited < bound / 2,
+        "the second read waited out a bound of its own: {second_waited:?}"
+    );
+    let waits = in_flight_promise(&cache, &dir)
+        .waits
+        .lock()
+        .unwrap()
+        .waiters;
+    assert_eq!(
+        waits, 1,
+        "the read that didn't wait isn't counted as a waiter"
+    );
+
+    // An unbounded caller still gets the capture, which ran once.
+    cache.get_blocking(&dir).expect("capture");
+    assert_eq!(launch_dirs(log.path()), vec![canonical(&dir)]);
+}
+
+/// L7b: The state build's shape, which the before/after benchmark pinned
+/// at about two bounds per refresh. Phase 1's reads wait on a cold capture
+/// side by side and give up together at the bound. Phase 2's `rev-list` and
+/// `merge-base`, issued one after the other once phase 1 is done, return at
+/// once, including from a subdirectory sharing the worktree's capture. So a
+/// refresh waits about one bound in all.
+#[test]
+fn later_phases_of_a_state_build_dont_wait_again() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let worktree = dir_with_delay(scratch.path(), "wt", "6");
+    std::fs::create_dir(worktree.join(".git")).expect("mkdir .git");
+    let subdir = worktree.join("apps/staged");
+    std::fs::create_dir_all(&subdir).expect("mkdir subdir");
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
+    let bound = Duration::from_secs(1);
+
+    let started = Instant::now();
+    let phase_1: Vec<_> = ["rev-parse", "status", "for-each-ref", "merge-base"]
+        .into_iter()
+        .map(|_| {
+            let (cache, dir) = (cache.clone(), worktree.clone());
+            std::thread::spawn(move || cache.get_blocking_within(&dir, bound))
+        })
+        .collect();
+    for read in phase_1 {
+        let read = read.join().expect("phase 1 read").expect("bounded read");
+        assert!(
+            matches!(read, BoundedEnv::StillCapturing { .. }),
+            "{read:?}"
+        );
+    }
+    let phase_1_took = started.elapsed();
+
+    let started = Instant::now();
+    for dir in [&worktree, &worktree, &subdir] {
+        let read = cache.get_blocking_within(dir, bound).expect("bounded read");
+        assert!(
+            matches!(read, BoundedEnv::StillCapturing { first: false }),
+            "{read:?}"
+        );
+    }
+    let phase_2_took = started.elapsed();
+
+    assert!(
+        phase_1_took >= bound && phase_1_took < bound * 3,
+        "phase 1 should give up together at the bound: {phase_1_took:?}"
+    );
+    assert!(
+        phase_2_took < bound / 2,
+        "phase 2 waited out the bound again: {phase_2_took:?}"
+    );
+    assert_eq!(launch_dirs(log.path()), vec![canonical(&worktree)]);
+}
+
+/// L8: With both slots held and two prewarms queued, a capture with a caller
+/// waiting on it without a bound goes ahead of them: one prewarm that an
+/// async caller then joins, and a sync caller's capture queued after both.
+/// The other prewarm goes last.
+#[test]
+fn captures_a_caller_is_blocked_on_go_ahead_of_prewarms() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
+    let prewarm_only = dir_with_delay(scratch.path(), "wt-prewarm", "0");
+    let joined = dir_with_delay(scratch.path(), "wt-joined", "0");
+    let sync_needed = dir_with_delay(scratch.path(), "wt-sync", "0");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let mut held = hold_every_slot(&cache);
+    cache.prewarm(&prewarm_only);
+    wait_until("the first prewarm to queue", || cache.slots.queued() == 1);
+    cache.prewarm(&joined);
+    wait_until("the second prewarm to queue", || cache.slots.queued() == 2);
+    let async_caller = runtime.spawn({
+        let (cache, dir) = (cache.clone(), joined.clone());
+        async move { cache.get(&dir).await.map(|_| ()) }
+    });
+    wait_until("the async caller to join", || {
+        in_flight_promise(&cache, &joined)
+            .waits
+            .lock()
+            .unwrap()
+            .waiters
+            == 1
+    });
+    let sync_caller = std::thread::spawn({
+        let (cache, dir) = (cache.clone(), sync_needed.clone());
+        move || cache.get_blocking(&dir).map(|_| ())
+    });
+    wait_until("the sync capture to queue", || cache.slots.queued() == 3);
+    assert!(launch_dirs(log.path()).is_empty());
+
+    // One slot frees up and the queue drains through it one capture at a
+    // time, so the launch order is whose turn each release gave.
+    drop(held.pop());
+    runtime
+        .block_on(async_caller)
+        .expect("async task")
+        .expect("capture");
+    sync_caller.join().expect("sync thread").expect("capture");
+    wait_until("the prewarm to land", || {
+        entry_is_ready(&cache, &prewarm_only)
+    });
+    drop(held);
+
+    assert_eq!(
+        launch_dirs(log.path()),
+        vec![
+            canonical(&joined),
+            canonical(&sync_needed),
+            canonical(&prewarm_only)
+        ]
+    );
+}
+
+/// L9: A capture that finishes after its key was invalidated doesn't
+/// overwrite the newer capture started since. Its own waiter still gets its
+/// result, and the newer capture is what lands in the cache.
+#[test]
+fn capture_finishing_after_invalidate_leaves_the_newer_entry() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let dir = dir_with_delay(scratch.path(), "wt", "0.3");
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
+
+    cache.prewarm(&dir);
+    wait_until("the first shell to start", || {
+        launch_dirs(log.path()).len() == 1
+    });
+    let older = in_flight_promise(&cache, &dir);
+    cache.invalidate(&dir);
+    std::fs::write(dir.join(".delay"), "3").expect("write .delay");
+    cache.prewarm(&dir);
+    let newer = in_flight_promise(&cache, &dir);
+    assert!(!Arc::ptr_eq(&older, &newer));
+
+    let older_env = older
+        .wait_blocking()
+        .expect("published")
+        .expect("older capture");
+    match cache.inner.lock().unwrap().get(&dir) {
+        Some(CachedEntry::InFlight(handle)) => assert!(
+            Arc::ptr_eq(&handle.promise, &newer),
+            "the newer capture's entry was replaced"
+        ),
+        Some(CachedEntry::Ready(_)) => panic!("the older capture overwrote the newer one"),
+        None => panic!("the newer capture's entry was removed"),
+    }
+
+    let newer_env = newer
+        .wait_blocking()
+        .expect("published")
+        .expect("newer capture");
+    match cache.inner.lock().unwrap().get(&dir) {
+        Some(CachedEntry::Ready(env)) => {
+            assert_eq!(env.captured_at(), newer_env.captured_at());
+            assert_ne!(env.captured_at(), older_env.captured_at());
+        }
+        _ => panic!("the newer capture didn't land"),
+    }
+    assert_eq!(launch_dirs(log.path()).len(), 2);
 }

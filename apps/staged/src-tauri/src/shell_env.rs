@@ -15,10 +15,12 @@
 //!
 //! Concurrent first-callers for the same root are coalesced through one
 //! `InFlight` entry, so only one shell is spawned per (root, miss). At most
-//! two shells (`CAPTURE_LIMIT`) run at once across all roots; the rest queue
-//! in arrival order (see `capture_slots.rs`). `$HOME`'s capture skips the
-//! queue, and startup begins it before anything else
-//! ([`prewarm_home_env`]), so worktree captures can never hold it up.
+//! two shells (`CAPTURE_LIMIT`) run at once across all roots; the rest queue,
+//! captures a caller is blocked on ahead of prewarms and bounded reads (see
+//! `capture_slots.rs`). `$HOME`'s capture skips the queue, and startup begins
+//! it before anything else ([`prewarm_home_env`]), so worktree captures can
+//! never hold it up. A shell still running after [`SHELL_CAPTURE_TIMEOUT`] is
+//! killed, so a hung rc file can't keep a slot, or its root's entry, forever.
 //!
 //! A capture never belongs to a caller's future. Async callers, bounded
 //! reads and prewarms run it on a `shell-env-capture` thread; a sync caller
@@ -30,7 +32,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -43,7 +45,7 @@ mod env_root;
 #[cfg(all(test, unix))]
 mod capture_limit_tests;
 
-use capture_slots::{CaptureSlots, CAPTURE_LIMIT};
+use capture_slots::{CaptureSlots, Urgency, CAPTURE_LIMIT};
 use env_root::resolve_env_root;
 
 /// Default cache TTL — long enough that pipeline runs amortise the capture
@@ -54,15 +56,24 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
 /// How long a home-env caller waits before going on with the fallback env.
 /// A cold first shell measured 23 s, so this covers it with room to spare.
 /// Running out doesn't stop the capture; it lands in the cache for the next
-/// caller.
+/// caller, unless the shell is still going at [`SHELL_CAPTURE_TIMEOUT`].
 const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// A capture that kept any caller waiting this long gets a warning.
-const SLOW_CAPTURE_WAIT: Duration = Duration::from_secs(1);
+/// How long a capture's shell may run before it is killed and the capture
+/// fails. Well past the 23 s a cold first shell measured, so it only catches
+/// a shell that would never finish on its own: an rc file stuck on a
+/// keychain prompt, a network call with no timeout, or a stalled Hermit
+/// download. Failing frees the capture's slot and evicts its entry, so the
+/// next caller starts a fresh capture instead of joining the hung one.
+const SHELL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// A capture that took this long from start to finish, queue included, gets
-/// a warning even if nobody waited on it.
-const SLOW_CAPTURE: Duration = Duration::from_secs(5);
+/// a warning. One shell measured about 9 s on its own and about 12 s with
+/// another running, so a normal capture, and its callers' wait for it, stays
+/// well under this. Twice the standalone cost means the shell itself is
+/// slow or the queue is backed up. Nobody can wait on a capture longer than
+/// it ran, so this covers slow waits too.
+const SLOW_CAPTURE: Duration = Duration::from_secs(20);
 
 /// Captured environment from a single interactive login shell invocation,
 /// as seen from the directory it was requested for.
@@ -376,9 +387,14 @@ struct InFlightPromise {
     state: Mutex<InFlightState>,
     cv: Condvar,
     /// Set by the first bounded waiter whose bound ran out on this capture.
+    /// Later bounded reads of it then don't wait at all (see
+    /// [`ShellEnvCache::get_blocking_within`]).
     bound_expired: AtomicBool,
     /// Who waited on this capture, for its one summary line.
     waits: Mutex<WaitStats>,
+    /// Set once a caller waits on this capture without a bound, which moves
+    /// it ahead of prewarms and bounded reads in the slot queue.
+    urgency: Urgency,
 }
 
 enum InFlightState {
@@ -460,6 +476,7 @@ impl InFlightPromise {
             cv: Condvar::new(),
             bound_expired: AtomicBool::new(false),
             waits: Mutex::new(WaitStats::default()),
+            urgency: Urgency::default(),
         })
     }
 
@@ -518,6 +535,20 @@ impl InFlightPromise {
     /// to run out on this capture.
     fn first_bound_expiry(&self) -> bool {
         !self.bound_expired.swap(true, Ordering::Relaxed)
+    }
+
+    /// Whether a bounded wait has already run out on this capture.
+    fn bound_has_expired(&self) -> bool {
+        self.bound_expired.load(Ordering::Relaxed)
+    }
+
+    /// [`register_waiter`] for a caller that waits for the result however
+    /// long it takes, which moves the capture to the front of `slots`' queue.
+    ///
+    /// [`register_waiter`]: InFlightPromise::register_waiter
+    fn register_unbounded_waiter(self: &Arc<Self>, slots: &CaptureSlots) -> Waiter {
+        slots.promote(&self.urgency);
+        self.register_waiter()
     }
 
     /// Count a caller as waiting on this capture until the returned
@@ -580,6 +611,8 @@ pub struct ShellEnvCache {
     ttl: Duration,
     shell: PathBuf,
     temp_root: PathBuf,
+    /// [`SHELL_CAPTURE_TIMEOUT`], shorter in tests.
+    capture_timeout: Duration,
 }
 
 /// What [`ShellEnvCache::lookup_or_start`] found for an env root.
@@ -624,6 +657,8 @@ struct CaptureJob {
     key: PathBuf,
     shell: PathBuf,
     temp_root: PathBuf,
+    /// Kill the shell if it is still running after this long.
+    timeout: Duration,
     /// `$HOME`'s capture runs without waiting for a slot.
     priority: bool,
     handle: InFlightHandle,
@@ -647,31 +682,39 @@ impl CaptureJob {
         Ok(handle)
     }
 
-    /// Run the capture on this thread, counting this caller as a waiter.
+    /// Run the capture on this thread, counting this caller as a waiter
+    /// without a bound.
     fn run_inline(self) -> io::Result<ShellEnv> {
-        let _waiter = self.handle.promise.register_waiter();
+        let _waiter = self.handle.promise.register_unbounded_waiter(&self.slots);
         self.run(CaptureMode::Inline)
     }
 
     fn run(mut self, mode: CaptureMode) -> io::Result<ShellEnv> {
         // The slot is taken before the shell is spawned, and given back as
-        // soon as it exits.
-        let slot = (!self.priority).then(|| self.slots.acquire());
+        // soon as it exits or is killed.
+        let slot = (!self.priority).then(|| self.slots.acquire(&self.handle.promise.urgency));
         let started = Instant::now();
-        let outcome = capture_shell_env(&self.key, &self.shell, &self.temp_root);
+        let outcome = capture_shell_env(&self.key, &self.shell, &self.temp_root, self.timeout);
         let finished = Instant::now();
         drop(slot);
 
         let result = outcome.map(ShellEnv::captured);
         {
             let mut map = self.entries.lock().unwrap();
-            match &result {
-                Ok(env) => {
-                    map.insert(self.key.clone(), CachedEntry::Ready(env.clone()));
+            if self.owns_entry(&map) {
+                match &result {
+                    Ok(env) => {
+                        map.insert(self.key.clone(), CachedEntry::Ready(env.clone()));
+                    }
+                    // No negative caching: the next caller starts afresh.
+                    Err(_) => {
+                        map.remove(&self.key);
+                    }
                 }
-                // No negative caching: the next caller starts afresh.
-                Err(_) => self.remove_own_entry(&mut map),
             }
+            // Otherwise the entry was invalidated while this capture ran,
+            // and may since hold a newer capture. Either way this result is
+            // only for the callers already waiting on it.
         }
         let published = result.as_ref().cloned().map_err(ToString::to_string);
         self.published = true;
@@ -690,15 +733,13 @@ impl CaptureJob {
         result
     }
 
-    /// Remove this job's `InFlight` entry, leaving any newer entry for the
-    /// key (started after an `invalidate`) alone.
-    fn remove_own_entry(&self, map: &mut HashMap<PathBuf, CachedEntry>) {
-        if matches!(
+    /// Whether the key's entry is still this job's `InFlight` one, rather
+    /// than gone or a newer capture started after an `invalidate`.
+    fn owns_entry(&self, map: &HashMap<PathBuf, CachedEntry>) -> bool {
+        matches!(
             map.get(&self.key),
             Some(CachedEntry::InFlight(handle)) if Arc::ptr_eq(&handle.promise, &self.handle.promise)
-        ) {
-            map.remove(&self.key);
-        }
+        )
     }
 }
 
@@ -709,15 +750,17 @@ impl Drop for CaptureJob {
         }
         {
             let mut map = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            self.remove_own_entry(&mut map);
+            if self.owns_entry(&map) {
+                map.remove(&self.key);
+            }
         }
         self.handle.promise.set_cancelled();
     }
 }
 
 /// One line per finished capture, in place of a line per waiter. It warns
-/// when the capture kept someone waiting [`SLOW_CAPTURE_WAIT`] or longer,
-/// took [`SLOW_CAPTURE`] or longer, or failed.
+/// when the capture took [`SLOW_CAPTURE`] or longer, queue included, or
+/// failed, and is a debug line otherwise.
 fn log_capture(
     key: &Path,
     mode: CaptureMode,
@@ -741,7 +784,7 @@ fn log_capture(
     );
     if let Some(error) = error {
         log::warn!("{line} failed: {error}");
-    } else if waits.longest >= SLOW_CAPTURE_WAIT || queued + capture >= SLOW_CAPTURE {
+    } else if queued + capture >= SLOW_CAPTURE {
         log::warn!("{line} (slow)");
     } else {
         log::debug!("{line}");
@@ -783,14 +826,24 @@ impl ShellEnvCache {
             ttl,
             shell,
             temp_root,
+            capture_timeout: SHELL_CAPTURE_TIMEOUT,
         }
     }
 
     /// Treat `home` as `$HOME`: its capture skips the slot queue and the
-    /// env-root walk stops there.
+    /// env-root walk stops there. Tests pass their scratch dir so the walk
+    /// never leaves it, whatever checkout `TMPDIR` happens to sit in.
     #[cfg(test)]
-    fn with_home(mut self, home: &Path) -> Self {
+    pub(crate) fn with_home(mut self, home: &Path) -> Self {
         self.home = Some(home.to_path_buf());
+        self
+    }
+
+    /// Kill capture shells after `timeout` instead of
+    /// [`SHELL_CAPTURE_TIMEOUT`].
+    #[cfg(test)]
+    fn with_capture_timeout(mut self, timeout: Duration) -> Self {
+        self.capture_timeout = timeout;
         self
     }
 
@@ -842,6 +895,7 @@ impl ShellEnvCache {
             key: key.to_path_buf(),
             shell: self.shell.clone(),
             temp_root: self.temp_root.clone(),
+            timeout: self.capture_timeout,
             priority: self.home.as_deref() == Some(key),
             handle,
             tx,
@@ -884,7 +938,7 @@ impl ShellEnvCache {
                 Lookup::InFlight(handle) => handle,
                 Lookup::Start(job) => job.spawn()?,
             };
-            let _waiter = handle.promise.register_waiter();
+            let _waiter = handle.promise.register_unbounded_waiter(&self.slots);
             let mut rx = handle.async_rx;
             while rx.borrow().is_none() {
                 if rx.changed().await.is_err() {
@@ -925,7 +979,7 @@ impl ShellEnvCache {
                 Lookup::InFlight(handle) => handle.promise,
                 Lookup::Start(job) => return job.run_inline(),
             };
-            let _waiter = promise.register_waiter();
+            let _waiter = promise.register_unbounded_waiter(&self.slots);
             match promise.wait_blocking() {
                 Some(Ok(env)) => return Ok(env),
                 Some(Err(msg)) => return Err(io::Error::other(msg)),
@@ -942,6 +996,13 @@ impl ShellEnvCache {
     /// a slot counts against the bound. If the bound runs out first, the
     /// capture is left alone: it keeps running, caches its result and wakes
     /// every other waiter as usual. Only this caller goes without it.
+    ///
+    /// The bound is per capture, not per call. Once one bounded wait has run
+    /// out on a capture, later bounded reads of it return `StillCapturing`
+    /// at once. A state refresh or `has_unpushed_commits` issues its reads
+    /// one after another, so otherwise each would sit out its own bound on
+    /// the same cold capture. Those reads don't count as waiters in the
+    /// capture's summary line, since they never waited.
     ///
     /// [`get_blocking`]: ShellEnvCache::get_blocking
     pub fn get_blocking_within(
@@ -962,6 +1023,9 @@ impl ShellEnvCache {
         loop {
             let promise = match self.lookup_or_start(key) {
                 Lookup::Ready(env) => return Ok(BoundedEnv::Ready(env)),
+                Lookup::InFlight(handle) if handle.promise.bound_has_expired() => {
+                    return Ok(BoundedEnv::StillCapturing { first: false });
+                }
                 Lookup::InFlight(handle) => handle.promise,
                 // The capture has to outlive this caller's wait.
                 Lookup::Start(job) => job.spawn()?.promise,
@@ -1013,13 +1077,22 @@ fn resolve_shell() -> PathBuf {
 }
 
 /// Allocate a unique tempfile path for the env dump inside `temp_root`.
+///
+/// The per-process sequence number is what makes it unique. macOS rounds
+/// `SystemTime` to whole microseconds, so two captures spawned in the same
+/// microsecond got one path: the first to finish removed the file under the
+/// second, which failed with ENOENT, and with other timing one capture could
+/// have read the other directory's env. The pid and time keep names apart
+/// across processes, including a later one reusing this pid.
 fn dump_path(temp_root: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let pid = std::process::id();
-    temp_root.join(format!("staged-shell-env-{pid}-{nanos}"))
+    temp_root.join(format!("staged-shell-env-{pid}-{nanos}-{seq}"))
 }
 
 /// Build the shell script that dumps the interactive-login env NUL-delimited
@@ -1051,11 +1124,14 @@ fn parse_env_dump(bytes: &[u8]) -> Vec<(String, String)> {
 
 /// Run `$SHELL -ils` in `working_dir` and return the environment it ends up
 /// with. Blocks the current thread on the shell's startup; callers run it on
-/// a thread of its own (see [`CaptureJob`]).
+/// a thread of its own (see [`CaptureJob`]). A shell still running after
+/// `timeout` is killed, with everything it started, and the capture fails
+/// with [`io::ErrorKind::TimedOut`].
 fn capture_shell_env(
     working_dir: &Path,
     shell: &Path,
     temp_root: &Path,
+    timeout: Duration,
 ) -> io::Result<Vec<(String, String)>> {
     use std::io::Write as _;
 
@@ -1091,18 +1167,29 @@ fn capture_shell_env(
         });
     }
 
+    let deadline = Instant::now() + timeout;
     let mut child = cmd.spawn()?;
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("Failed to open shell stdin for env capture"))?;
-        stdin.write_all(script.as_bytes())?;
-        stdin.flush()?;
-        // Drop stdin → shell sees EOF after `exit` and terminates cleanly.
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("Failed to open shell stdin for env capture"))
+        .and_then(|mut stdin| {
+            stdin.write_all(script.as_bytes())?;
+            stdin.flush()
+            // Drop stdin → shell sees EOF after `exit` and terminates cleanly.
+        });
+    if let Err(error) = written {
+        kill_capture_shell(&mut child);
+        return Err(error);
     }
 
-    let status = child.wait()?;
+    let Some(status) = wait_or_kill(&mut child, deadline)? else {
+        let _ = std::fs::remove_file(&dump_path);
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("Shell env capture still running after {timeout:?}; killed it"),
+        ));
+    };
     if !status.success() {
         let _ = std::fs::remove_file(&dump_path);
         return Err(io::Error::other(format!(
@@ -1120,6 +1207,59 @@ fn capture_shell_env(
     let _ = std::fs::remove_file(&dump_path);
 
     Ok(parse_env_dump(&bytes))
+}
+
+/// Wait for the capture shell to exit, or kill it at `deadline`. `None`
+/// means it was killed.
+///
+/// Polls rather than blocking in `wait`, backing off to
+/// [`CAPTURE_POLL_MAX`]: std has no wait with a timeout, and a watchdog
+/// thread killing by pid could hit a reused pid once the shell is reaped.
+/// Here the shell is only ever killed while it is still this process's
+/// unreaped child.
+fn wait_or_kill(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    let mut pause = Duration::from_millis(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(Some(status)),
+            Ok(None) => {}
+            Err(error) => {
+                kill_capture_shell(child);
+                return Err(error);
+            }
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            kill_capture_shell(child);
+            return Ok(None);
+        }
+        std::thread::sleep(pause.min(left));
+        pause = (pause * 2).min(CAPTURE_POLL_MAX);
+    }
+}
+
+/// Longest pause between checks on a capture shell, and so the most a
+/// capture's result can lag the shell's exit.
+const CAPTURE_POLL_MAX: Duration = Duration::from_millis(50);
+
+/// Kill a capture shell and whatever it is stuck on, then reap it.
+fn kill_capture_shell(child: &mut std::process::Child) {
+    // The shell called `setsid()`, so it leads a process group of its own,
+    // which holds whatever its rc files started: the `security` prompt or
+    // `curl` it is blocked on. Kill the group, not just the shell.
+    #[cfg(unix)]
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `kill` has no memory-safety preconditions. The group is
+        // the unreaped child's own, so its id can't have been reused.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn single_quote(value: &str) -> String {
@@ -1350,6 +1490,26 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("PATH="));
+    }
+
+    /// Dump paths allocated back to back, on one thread or several, never
+    /// collide, though many share a microsecond.
+    #[test]
+    fn dump_paths_are_unique_per_capture() {
+        let temp_root = Path::new("/tmp");
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    (0..2_000).map(|_| dump_path(temp_root)).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let paths: Vec<PathBuf> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        let unique: HashSet<&PathBuf> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len());
     }
 
     #[test]

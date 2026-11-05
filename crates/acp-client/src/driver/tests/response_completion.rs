@@ -454,6 +454,7 @@ async fn session_loop_finishes_successfully_for_initial_and_background_artifacts
                     &mut turn_control_rx,
                     &active,
                     &pending_reply,
+                    None,
                 );
                 let complete_background = async {
                     if continuation {

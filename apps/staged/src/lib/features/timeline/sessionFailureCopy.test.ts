@@ -20,4 +20,10 @@ describe('failedArtifactSubtitle', () => {
       'Session stopped waiting on background work — no commit created'
     );
   });
+
+  it('names a lost workspace agent', () => {
+    expect(failedArtifactSubtitle('remote_agent_lost', 'commit')).toBe(
+      'Workspace agent lost — no commit created'
+    );
+  });
 });

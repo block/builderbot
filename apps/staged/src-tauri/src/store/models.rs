@@ -481,6 +481,10 @@ pub enum CompletionReason {
     ProjectSessionInterrupted,
     /// Agent process exited or connection was lost.
     Crashed,
+    /// The session's remote (Blox) agent process was lost under it: its
+    /// output ended, or bloxlet reports it stopped — e.g. bloxlet restarted
+    /// under it. The error message names the cause.
+    RemoteAgentLost,
     /// Staged closed while the session was still running.
     AppQuit,
     /// Legacy sessions or indeterminate cause.
@@ -496,6 +500,7 @@ impl CompletionReason {
             Self::Interrupted => "interrupted",
             Self::ProjectSessionInterrupted => "project_session_interrupted",
             Self::Crashed => "crashed",
+            Self::RemoteAgentLost => "remote_agent_lost",
             Self::AppQuit => "app_quit",
             Self::Unknown => "unknown",
         }
@@ -509,6 +514,7 @@ impl CompletionReason {
             "interrupted" => Some(Self::Interrupted),
             "project_session_interrupted" => Some(Self::ProjectSessionInterrupted),
             "crashed" => Some(Self::Crashed),
+            "remote_agent_lost" => Some(Self::RemoteAgentLost),
             "app_quit" => Some(Self::AppQuit),
             "unknown" => Some(Self::Unknown),
             _ => None,
@@ -528,6 +534,7 @@ impl CompletionReason {
             | Self::Interrupted
             | Self::ProjectSessionInterrupted
             | Self::Crashed
+            | Self::RemoteAgentLost
             | Self::AppQuit => true,
             Self::TurnComplete | Self::Unknown => false,
         }

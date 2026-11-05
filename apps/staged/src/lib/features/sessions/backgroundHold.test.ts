@@ -428,11 +428,19 @@ describe('held_until_cap', () => {
       'project_session_interrupted',
       'crashed',
       'app_quit',
+      'remote_agent_lost',
       'unknown',
     ] as const) {
       expect(isCompletedTurnReason(reason)).toBe(false);
     }
     expect(isCompletedTurnReason(null)).toBe(false);
     expect(isCompletedTurnReason(undefined)).toBe(false);
+  });
+});
+
+describe('remote_agent_lost', () => {
+  it('is resumable so a session whose workspace agent died can be picked up again', () => {
+    expect(RESUMABLE_REASONS.has('remote_agent_lost')).toBe(true);
+    expect(isResumableReason('remote_agent_lost')).toBe(true);
   });
 });

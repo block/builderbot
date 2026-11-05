@@ -589,6 +589,110 @@ impl Store {
         }
     }
 
+    /// The user message that opened a session's latest run — the prompt
+    /// `start_session` wrote, which its `turn_start_message_id` names.
+    ///
+    /// A run's prompt is written before its connection exists, so the next
+    /// row the run writes is the connection's `initialize` — or nothing yet,
+    /// while it is still connecting. A steer delivered mid-turn is a later
+    /// user row too, as is a follow-up a held connection serves, but the
+    /// turn's output follows those instead, so they don't count. A steer
+    /// nothing has followed yet looks like a prompt whose connection never
+    /// started, and is taken for one: the turn then reads as never having
+    /// reached the agent (see [`Self::agent_answered_message`]), which errs
+    /// away from a false completion.
+    ///
+    /// Hidden rows tagged with an `acp_origin` are passed over, but that does
+    /// not set an earlier turn's background output apart: its text and tool
+    /// rows are plain ones, and only the hidden `agent_message_chunk` row
+    /// written beside its text carries the origin. A row of it between a
+    /// run's prompt and that run's `initialize` would hide the prompt. None
+    /// lands there for a remote session, the only kind this is asked about:
+    /// a new run starts once the previous connection has settled, and no
+    /// frame for the session reaches the new connection before it loads it.
+    pub fn get_turn_prompt_message(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages AS prompt
+             WHERE session_id = ?1 AND role = 'user' AND acp_event_kind IS NULL
+               AND COALESCE(
+                 (SELECT COALESCE(next.acp_event_kind, '') = 'initialize'
+                  FROM session_messages AS next
+                  WHERE next.session_id = ?1 AND next.id > prompt.id
+                    AND next.acp_origin IS NULL
+                  ORDER BY next.id
+                  LIMIT 1),
+                 1)
+             ORDER BY id DESC
+             LIMIT 1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![session_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(session_message_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The `initialize` row of the connection that served the run message
+    /// `prompt_id` opened (see [`Self::get_turn_prompt_message`]): the first
+    /// one after it. Any agent process that connection ran on was up by the
+    /// time it was written. A later connection to the same turn, such as a
+    /// reattachment, writes its own after the turn's output.
+    pub fn get_turn_initialize_message(
+        &self,
+        session_id: &str,
+        prompt_id: i64,
+    ) -> Result<Option<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ?1 AND id > ?2 AND acp_event_kind = 'initialize'
+             ORDER BY id
+             LIMIT 1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![session_id, prompt_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(session_message_from_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether the agent has answered message `message_id` of a session: a
+    /// row of its own output for the turn — text, a tool call or its result,
+    /// a plan, the turn's response — follows it. The rows a connection writes
+    /// before it sends the prompt (`initialize`, mode, config and command
+    /// updates) don't count. Nor do hidden rows tagged with an `acp_origin`,
+    /// but an earlier turn's background output would: its text and tool rows
+    /// are plain ones. None follows a remote run's prompt (see
+    /// [`Self::get_turn_prompt_message`]).
+    pub fn agent_answered_message(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM session_messages
+               WHERE session_id = ?1 AND id > ?2 AND acp_origin IS NULL
+                 AND (role IN ('tool_call', 'tool_result')
+                      OR (role = 'assistant'
+                          AND (acp_event_kind IS NULL
+                               OR acp_event_kind IN ('agent_message_chunk', 'plan_update',
+                                                     'response_result', 'prompt_response')))))",
+            params![session_id, message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     /// Count assistant messages created after a given timestamp.
     pub fn count_assistant_messages_after(
         &self,

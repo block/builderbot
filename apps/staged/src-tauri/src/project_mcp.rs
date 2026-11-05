@@ -822,7 +822,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`; note content references attached images and videos by local file path. `wait_for_completion_seconds` defaults to 240. Calls without an MCP progress token return within 30 seconds; repeat the wait if the session is still queued or running. A `failed` session reports `completion_reason` and `error_message`; `remote_agent_lost` means its remote workspace agent died under it (the message names why, such as the workstation restarting), so work it left may be uncommitted on the workspace."
     )]
     async fn wait_for_repo_session(
         &self,
@@ -2049,6 +2049,39 @@ mod tests {
             .unwrap()
             .contains("still starting"));
         assert_eq!(f.status(), SessionStatus::Running);
+    }
+
+    /// A child whose remote agent died under it must not look like it is
+    /// still running: the parent sees it failed, and why.
+    #[test]
+    fn a_child_whose_remote_agent_was_lost_reports_failed_with_the_cause() {
+        use crate::store::{CompletionReason, Session, SessionStatus, Store};
+
+        let store = Store::in_memory().unwrap();
+        let session = Session::new_running("fix the flake", std::path::Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        let error = "Remote agent lost: bloxlet reports the agent process (command 27101663) \
+                     as failed: bloxlet restarted while command was running";
+        store
+            .transition_from_running(
+                &session.id,
+                SessionStatus::Error,
+                Some(error),
+                Some(&CompletionReason::RemoteAgentLost),
+            )
+            .unwrap();
+        let handle = RepoSessionHandle {
+            session_id: session.id.clone(),
+            artifact_kind: RepoArtifactKind::Commit,
+            artifact_id: "commit-artifact".to_string(),
+        };
+
+        let payload =
+            ProjectToolsHandler::repo_session_payload(&store, "repo-session", &handle).unwrap();
+
+        assert_eq!(payload["state"], "failed");
+        assert_eq!(payload["completion_reason"], "remote_agent_lost");
+        assert_eq!(payload["error_message"], error);
     }
 
     /// A parent project agent reads a child's note through this payload, so

@@ -728,6 +728,40 @@ fn test_transition_from_owned_active_does_not_overwrite_completed_session() {
     assert_eq!(final_state.status, SessionStatus::Completed);
 }
 
+/// A remote session a dead instance left running is taken over by whichever
+/// instance sweeps it first; the next sweep (here or elsewhere) finds it owned.
+#[test]
+fn test_adopt_running_session_takes_a_dead_owners_row_once() {
+    let store = Store::in_memory().unwrap();
+    let dead_pid = std::process::id().wrapping_add(1);
+
+    let mut orphaned = Session::new_running("orphaned", Path::new("/tmp"));
+    orphaned.owner_pid = Some(dead_pid);
+    store.create_session(&orphaned).unwrap();
+
+    assert!(store
+        .adopt_running_session(&orphaned.id, Some(dead_pid))
+        .unwrap());
+    let adopted = store.get_session(&orphaned.id).unwrap().unwrap();
+    assert_eq!(adopted.status, SessionStatus::Running);
+    assert_eq!(adopted.owner_pid, Some(std::process::id()));
+
+    assert!(
+        !store
+            .adopt_running_session(&orphaned.id, Some(dead_pid))
+            .unwrap(),
+        "a row already taken over is not taken again"
+    );
+
+    let mut finished = Session::new_running("finished", Path::new("/tmp"));
+    finished.owner_pid = None;
+    store.create_session(&finished).unwrap();
+    store
+        .update_session_status(&finished.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    assert!(!store.adopt_running_session(&finished.id, None).unwrap());
+}
+
 #[test]
 fn test_transition_queued_to_running_claims_queued_session() {
     let store = Store::in_memory().unwrap();
@@ -1876,6 +1910,7 @@ fn test_completion_reason_round_trips() {
         CompletionReason::Interrupted,
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
+        CompletionReason::RemoteAgentLost,
         CompletionReason::AppQuit,
         CompletionReason::Unknown,
     ] {
@@ -1905,6 +1940,7 @@ fn test_completion_reason_resumability() {
         CompletionReason::Interrupted,
         CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
+        CompletionReason::RemoteAgentLost,
         CompletionReason::AppQuit,
     ] {
         assert!(reason.is_resumable(), "{reason:?} should be resumable");
@@ -5234,4 +5270,90 @@ fn change_feed_deletes_publish_only_when_a_row_is_removed() {
 
     store.delete_project_repo(&repo.id).unwrap();
     assert!(rx.try_recv().is_err());
+}
+
+/// The rows a run writes, in order: its prompt, then its connection's
+/// `initialize` and setup, then the agent's answer. A reattachment anchors on
+/// that prompt, asks whether the agent answered it, and takes when that
+/// connection initialized for when the turn's agent process was up.
+#[test]
+fn a_runs_prompt_is_the_user_row_its_connection_followed() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("go", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let event = |kind: &str, origin: Option<&str>| {
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &AcpMessageMetadata {
+                    acp_event_kind: Some(kind.to_string()),
+                    acp_origin: origin.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+    };
+    let message =
+        |role: MessageRole, text: &str| store.add_session_message(&session.id, role, text).unwrap();
+    let prompt_id = || {
+        store
+            .get_turn_prompt_message(&session.id)
+            .unwrap()
+            .map(|message| message.id)
+    };
+    let answered = |id: i64| store.agent_answered_message(&session.id, id).unwrap();
+    let initialize_id = |prompt: i64| {
+        store
+            .get_turn_initialize_message(&session.id, prompt)
+            .unwrap()
+            .map(|message| message.id)
+    };
+
+    assert_eq!(prompt_id(), None);
+
+    // Still connecting: nothing follows the prompt yet.
+    let first = message(MessageRole::User, "go");
+    assert_eq!(prompt_id(), Some(first));
+    assert!(!answered(first));
+    assert_eq!(initialize_id(first), None);
+    // The connection's setup rows don't answer it.
+    let first_initialize = event("initialize", None);
+    event("config_options_update", None);
+    event("session_mode_state", None);
+    assert_eq!(prompt_id(), Some(first));
+    assert!(!answered(first));
+    assert_eq!(initialize_id(first), Some(first_initialize));
+    message(MessageRole::Assistant, "Looking into it");
+    assert!(answered(first));
+
+    // A steer the turn's output follows is not the run's prompt.
+    message(MessageRole::User, "also check the tests");
+    message(MessageRole::ToolCall, "Run the tests");
+    assert_eq!(prompt_id(), Some(first));
+
+    // A reattachment's connection initializes after the turn's output; the
+    // turn's own connection is still the one that initialized first.
+    event("initialize", None);
+    message(MessageRole::Assistant, "The tests pass");
+    assert_eq!(prompt_id(), Some(first));
+    assert_eq!(initialize_id(first), Some(first_initialize));
+
+    // Background output from the earlier turn, as the writer records it: a
+    // plain assistant row, with a hidden `agent_message_chunk` row beside it
+    // that carries the origin. It comes before the follow-up run's prompt,
+    // as it does for a remote session, whose next run starts once the
+    // earlier connection has settled.
+    message(MessageRole::Assistant, "The background build passed");
+    event("agent_message_chunk", Some("background"));
+
+    // A follow-up run.
+    let second = message(MessageRole::User, "now push");
+    assert_eq!(prompt_id(), Some(second));
+    assert!(!answered(second));
+    let second_initialize = event("initialize", None);
+    assert_eq!(prompt_id(), Some(second));
+    assert!(!answered(second));
+    assert_eq!(initialize_id(second), Some(second_initialize));
+    message(MessageRole::ToolCall, "git push");
+    assert!(answered(second));
 }

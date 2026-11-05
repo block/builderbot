@@ -49,7 +49,12 @@ use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
 
+mod remote_liveness;
+mod remote_process;
+mod remote_routing;
 mod response_completion;
+
+use remote_routing::RemoteLoss;
 
 static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -2035,6 +2040,78 @@ impl AcpDriver {
         config_options: &[AcpSessionConfigOptionSelection],
         auth_selection: Option<&AcpAuthenticationSelection>,
     ) -> Result<SessionConnection, String> {
+        self.open_connection(
+            session_id,
+            working_dir,
+            store,
+            writer,
+            cancel_token,
+            agent_session_id,
+            config_options,
+            auth_selection,
+            None,
+        )
+        .await
+    }
+
+    /// Reattach to `turn` of a remote session, which an earlier connection
+    /// prompted and was then gone before it ended, and wait for that turn to
+    /// end.
+    ///
+    /// The session is loaded through the shared proxy (so `sq` attaches to
+    /// the agent process still serving the turn) and the rest of the turn is
+    /// recorded as it streams. It completes once bloxlet reports the agent
+    /// process idle, and fails as remote agent lost (see
+    /// [`is_remote_agent_lost_error`]) when that process is gone. Must be
+    /// called from within a Tokio `LocalSet`, like [`Self::connect`].
+    pub async fn reattach(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        cancel_token: &CancellationToken,
+        turn: &ReattachTurn,
+    ) -> Result<AgentRunOutcome, String> {
+        if !self.is_remote {
+            return Err("Only a remote session's turn can be reattached to".to_string());
+        }
+        let mut connection = self
+            .open_connection(
+                session_id,
+                working_dir,
+                store,
+                writer,
+                cancel_token,
+                Some(&turn.agent_session_id),
+                &[],
+                None,
+                Some(turn),
+            )
+            .await?;
+        let Some(settled) = connection.take_settled_receiver() else {
+            return Err("The reattached connection has no settled event".to_string());
+        };
+        settled
+            .await
+            .map_err(|_| "The reattached connection ended without settling".to_string())?
+            .outcome
+    }
+
+    /// [`Self::connect`], or with `reattach` [`Self::reattach`]'s connection.
+    #[allow(clippy::too_many_arguments)]
+    async fn open_connection(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        cancel_token: &CancellationToken,
+        agent_session_id: Option<&str>,
+        config_options: &[AcpSessionConfigOptionSelection],
+        auth_selection: Option<&AcpAuthenticationSelection>,
+        reattach: Option<&ReattachTurn>,
+    ) -> Result<SessionConnection, String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
         let acp_working_dir = resolve_acp_working_dir(
             working_dir,
@@ -2157,91 +2234,101 @@ impl AcpDriver {
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().map_err(|e| {
+        let spawn_error = |e: std::io::Error| {
             format!(
                 "Failed to spawn {} (binary: {}, cwd: {}): {e}",
                 self.agent_label,
                 self.binary_path.display(),
                 spawn_working_dir.display()
             )
-        })?;
+        };
 
-        // Fires when the agent process is observed to be gone (stderr EOF).
-        // The post-turn holding wait keys its involuntary-exit trigger off
-        // this: a dead bridge otherwise looks identical to a quiet one, and
-        // the hold would burn its full cap waiting on a process that can
-        // never report its background tasks again.
-        let child_exited = CancellationToken::new();
-
-        // Drain the agent's stderr to the log so spawn/shebang failures are
-        // visible instead of vanishing into a generic "server shut down".
-        if let Some(stderr) = child.stderr.take() {
-            let agent_label = self.agent_label.clone();
-            let session_id = session_id.to_string();
-            let exited = child_exited.clone();
-            tokio::task::spawn_local(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    log::warn!("[{agent_label} stderr][session {session_id}] {line}");
-                }
-                // stderr EOF (or a read error) means the agent process has
-                // exited or torn down its stderr — either way it can no
-                // longer be trusted to report background state.
-                exited.cancel();
-            });
-        }
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Failed to get stdin".to_string())?;
-
-        // For the shell-spawn fallback, write the exec command to stdin. By the
-        // time the shell reads from stdin, init is complete and `precmd` has
-        // fired in the working directory (activating Hermit). `exec` replaces
-        // the shell with the agent binary — from this point on, stdin belongs
-        // to the agent's JSON-RPC transport. When a snapshot was applied the
-        // agent binary is already the child process, so there is nothing to
-        // exec.
-        if use_shell_spawn {
-            // If the fallback shell's initialized PATH already provides an
-            // env-shebang interpreter, keep it unchanged. Otherwise add the
-            // agent bin dir only as an interpreter fallback, preserving broad
-            // toolchain dirs behind project-managed PATH entries.
-            let exec_line = shell_exec_line(
-                &self.binary_path,
-                &self.acp_args,
-                self.interpreter_env_snapshot.as_deref(),
-            );
-            stdin
-                .write_all(exec_line.as_bytes())
+        // `child_exited` fires when the agent process is observed to be gone
+        // (stderr EOF). The post-turn holding wait keys its involuntary-exit
+        // trigger off this: a dead bridge otherwise looks identical to a quiet
+        // one, and the hold would burn its full cap waiting on a process that
+        // can never report its background tasks again.
+        let (agent_process, child_exited, outgoing_writer, incoming_reader): (
+            AgentProcess,
+            CancellationToken,
+            Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+            Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+        ) = if self.is_remote {
+            // `sq blox acp` attaches every session on this workspace and
+            // agent to one workstation process, so they share one proxy that
+            // stops only when the last of them is done, and its output is
+            // routed so only this session's frames reach this connection.
+            let (lease, streams) = remote_process::attach(cmd, &self.agent_label)
                 .await
-                .map_err(|e| format!("Failed to write exec command to shell stdin: {e}"))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| format!("Failed to flush shell stdin: {e}"))?;
-        }
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Failed to get stdout".to_string())?;
-
-        let stdin_compat = stdin.compat_write();
-        let incoming_reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = if self.is_remote {
-            let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
-            tokio::task::spawn_local(async move {
-                if let Err(error) =
-                    normalize_remote_acp_stdout(stdout, normalized_stdout_writer).await
-                {
-                    log::error!("remote ACP stdout normalization failed: {error}");
-                }
-            });
-            Box::new(normalized_stdout_reader)
+                .map_err(spawn_error)?;
+            let exited = lease.exited().clone();
+            (
+                AgentProcess::Remote(lease),
+                exited,
+                Box::new(streams.outgoing),
+                Box::new(streams.incoming),
+            )
         } else {
+            let mut child = cmd.spawn().map_err(spawn_error)?;
+            let child_exited = CancellationToken::new();
+
+            // Drain the agent's stderr to the log so spawn/shebang failures are
+            // visible instead of vanishing into a generic "server shut down".
+            if let Some(stderr) = child.stderr.take() {
+                let agent_label = self.agent_label.clone();
+                let session_id = session_id.to_string();
+                let exited = child_exited.clone();
+                tokio::task::spawn_local(async move {
+                    let mut lines = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        log::warn!("[{agent_label} stderr][session {session_id}] {line}");
+                    }
+                    // stderr EOF (or a read error) means the agent process has
+                    // exited or torn down its stderr — either way it can no
+                    // longer be trusted to report background state.
+                    exited.cancel();
+                });
+            }
+
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "Failed to get stdin".to_string())?;
+
+            // For the shell-spawn fallback, write the exec command to stdin. By the
+            // time the shell reads from stdin, init is complete and `precmd` has
+            // fired in the working directory (activating Hermit). `exec` replaces
+            // the shell with the agent binary — from this point on, stdin belongs
+            // to the agent's JSON-RPC transport. When a snapshot was applied the
+            // agent binary is already the child process, so there is nothing to
+            // exec.
+            if use_shell_spawn {
+                // If the fallback shell's initialized PATH already provides an
+                // env-shebang interpreter, keep it unchanged. Otherwise add the
+                // agent bin dir only as an interpreter fallback, preserving broad
+                // toolchain dirs behind project-managed PATH entries.
+                let exec_line = shell_exec_line(
+                    &self.binary_path,
+                    &self.acp_args,
+                    self.interpreter_env_snapshot.as_deref(),
+                );
+                stdin
+                    .write_all(exec_line.as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write exec command to shell stdin: {e}"))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| format!("Failed to flush shell stdin: {e}"))?;
+            }
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "Failed to get stdout".to_string())?;
+
             // On the shell-spawn fallback, shell init (.zshrc, plugin banners,
             // Hermit activation) may write to stdout before `exec` replaces the
             // shell. Filter out any non-JSON lines so they don't reach the
@@ -2255,8 +2342,23 @@ impl AcpDriver {
                     log::error!("local ACP stdout normalization failed: {error}");
                 }
             });
-            Box::new(normalized_stdout_reader)
+            (
+                AgentProcess::Local(child),
+                child_exited,
+                Box::new(stdin),
+                Box::new(normalized_stdout_reader),
+            )
         };
+        let reattached_turn = match (&agent_process, reattach) {
+            (AgentProcess::Remote(lease), Some(turn)) => {
+                Some(lease.reattached_turn(turn).ok_or_else(|| {
+                    "This remote agent's workspace is unknown, so its turn cannot be reattached to"
+                        .to_string()
+                })?)
+            }
+            _ => None,
+        };
+        let stdin_compat = outgoing_writer.compat_write();
         let stdout_compat = incoming_reader.compat();
 
         let is_resuming = agent_session_id.is_some();
@@ -2312,21 +2414,20 @@ impl AcpDriver {
         let mcp_servers = self.mcp_servers.clone();
         let agent_label = self.agent_label.clone();
         let steering_disabled = self.steering_disabled;
-        let is_remote = self.is_remote;
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
 
         let connection_task = tokio::task::spawn_local(async move {
             // Reply sender for the turn in flight, stashed by the session
             // loop. The outcome is delivered only after finalize() +
-            // graceful_stop() below, so `SessionConnection::prompt` resumes
+            // release() below, so `SessionConnection::prompt` resumes
             // with the child already stopped — the old per-turn ordering.
             let pending_reply: RefCell<Option<oneshot::Sender<SessionTurnResult>>> =
                 RefCell::new(None);
             let permission_handler = Arc::clone(&handler);
             let notification_handler = Arc::clone(&handler);
             let ext_notification_handler = Arc::clone(&handler);
-            let protocol_result = Client
+            let protocol_result: Result<_, String> = Client
                 .builder()
                 .name("staged-acp-client")
                 .on_receive_request(
@@ -2417,12 +2518,53 @@ impl AcpDriver {
                         &mut turn_control_rx,
                         &hold_active_for_task,
                         &pending_reply,
+                        reattached_turn,
                     )
                     .await
                     .map_err(agent_client_protocol::util::internal_error)
                 })
                 .await
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
+            // A remote agent lost under the session ends its connection with
+            // whatever error the ended stream produced; report the loss. A
+            // session cut off for falling behind the agent's output reports
+            // that instead: it is why its stream ended, even if the agent was
+            // lost afterwards.
+            let protocol_result = match (
+                protocol_result,
+                agent_process.cut_off(),
+                agent_process.loss(),
+            ) {
+                (Err(error), Some(cause), _) if !cancel_token.is_cancelled() => {
+                    log::warn!(
+                        "Session {our_session_id}: cut off from the remote agent ({cause}); \
+                         its connection ended with: {error}"
+                    );
+                    Err(format!("{REMOTE_SESSION_CUT_OFF_PREFIX}{cause}"))
+                }
+                (Err(error), None, Some(loss)) if !cancel_token.is_cancelled() => {
+                    let RemoteLoss {
+                        cause,
+                        agent_may_survive,
+                    } = loss;
+                    log::warn!(
+                        "Session {our_session_id}: {} ({cause}); its connection ended \
+                         with: {error}",
+                        if agent_may_survive {
+                            "lost its connection to the remote agent"
+                        } else {
+                            "remote agent lost"
+                        }
+                    );
+                    let prefix = if agent_may_survive {
+                        REMOTE_AGENT_DETACHED_PREFIX
+                    } else {
+                        REMOTE_AGENT_LOST_PREFIX
+                    };
+                    Err(format!("{prefix}{cause}"))
+                }
+                (result, _, _) => result,
+            };
 
             // Nothing serves the turn-control channel past this point: fail
             // new requests fast at the handle and answer any already queued.
@@ -2430,7 +2572,7 @@ impl AcpDriver {
             reject_queued_turn_control_requests(&mut turn_control_rx, "the ACP connection closed");
 
             writer.finalize().await;
-            graceful_stop(&mut child, is_remote).await;
+            agent_process.release().await;
 
             let (result, settle_reason) = match protocol_result {
                 Ok((outcome, reason)) => (Ok(outcome), reason),
@@ -2445,7 +2587,7 @@ impl AcpDriver {
             };
 
             // The settled event marks actual teardown: finalize() and
-            // graceful_stop() have run, so post-completion work keyed off it
+            // release() have run, so post-completion work keyed off it
             // cannot race still-live background continuations.
             let _ = settled_tx.send(SessionSettled {
                 outcome: result.clone(),
@@ -2517,6 +2659,42 @@ impl AgentDriver for AcpDriver {
                 Err(_) => turn_result,
             },
             None => turn_result,
+        }
+    }
+}
+
+/// The agent process behind one session's connection.
+enum AgentProcess {
+    /// A local agent this session spawned and owns.
+    Local(tokio::process::Child),
+    /// This session's lease on a remote agent proxy other sessions may share.
+    Remote(remote_process::RemoteProcessLease),
+}
+
+impl AgentProcess {
+    /// How the remote agent was lost under this session, if it was.
+    fn loss(&self) -> Option<RemoteLoss> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(lease) => lease.loss(),
+        }
+    }
+
+    /// Why this session was cut off from a remote agent it fell behind, if
+    /// it was.
+    fn cut_off(&self) -> Option<String> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(lease) => lease.cut_off(),
+        }
+    }
+
+    /// Stop a local agent; detach from a remote one, which stops only once no
+    /// other session is attached.
+    async fn release(self) {
+        match self {
+            Self::Local(mut child) => graceful_stop(&mut child, false).await,
+            Self::Remote(lease) => lease.release().await,
         }
     }
 }
@@ -2660,7 +2838,7 @@ fn remote_acp_segments(decoded_line: &str) -> impl Iterator<Item = &str> {
 
 async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
     stdout: R,
-    mut writer: tokio::io::DuplexStream,
+    mut emit: impl FnMut(String),
 ) -> Result<(), std::io::Error> {
     let mut reader = BufReader::new(stdout);
     let mut raw_line = Vec::new();
@@ -2680,10 +2858,7 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
 
         for segment in remote_acp_segments(&decoded_line) {
             match consume_remote_acp_line(&mut pending, segment) {
-                RemoteLineOutcome::Emit(line) => {
-                    writer.write_all(line.as_bytes()).await?;
-                    writer.write_all(b"\n").await?;
-                }
+                RemoteLineOutcome::Emit(line) => emit(line),
                 RemoteLineOutcome::Pending => {}
                 RemoteLineOutcome::Dropped => {
                     if !segment.trim().is_empty() {
@@ -2698,7 +2873,7 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
         log::warn!("Dropped incomplete ACP proxy output at EOF");
     }
 
-    writer.shutdown().await
+    Ok(())
 }
 
 /// Filter local ACP stdout, forwarding only valid JSON lines.
@@ -5759,6 +5934,7 @@ async fn run_acp_session(
     turn_control_rx: &mut mpsc::UnboundedReceiver<TurnControlRequest>,
     hold_active: &AtomicBool,
     pending_reply: &RefCell<Option<oneshot::Sender<SessionTurnResult>>>,
+    reattached_turn: Option<remote_process::ReattachedTurn>,
 ) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
     let setup_task = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
@@ -5828,6 +6004,9 @@ async fn run_acp_session(
     }
     if acp_session_id.is_some() {
         handler.transition_to_waiting_for_prompt().await;
+    }
+    if let Some(turn) = reattached_turn {
+        return observe_reattached_turn(&setup, handler, our_session_id, cancel_token, turn).await;
     }
 
     // Prompt loop: the connection lifetime is hoisted above the turn
@@ -6117,6 +6296,43 @@ async fn run_acp_session(
                 return Ok((AgentRunOutcome::Completed, SessionSettleReason::HoldStopped));
             }
         }
+    }
+}
+
+/// Record a reattached turn (see [`AcpDriver::reattach`]) as it streams until
+/// it ends. Nothing is prompted: the agent is still serving the turn, and its
+/// updates for the session reach this connection now that it has loaded it.
+async fn observe_reattached_turn(
+    setup: &AcpSessionSetup,
+    handler: &Arc<AcpNotificationHandler>,
+    our_session_id: &str,
+    cancel_token: &CancellationToken,
+    turn: remote_process::ReattachedTurn,
+) -> Result<(AgentRunOutcome, SessionSettleReason), String> {
+    handler.begin_turn_permissions();
+    handler.transition_to_live().await;
+    handler
+        .response
+        .lock()
+        .await
+        .start_prompt(setup.agent_session_id.to_string());
+    let stop = turn.stopper();
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            handler.cancel_pending_permissions();
+            // Nothing here waits for the agent to answer the cancel, so it
+            // goes straight onto the proxy (see `ReattachedTurnStop::cancel`)
+            // rather than through this connection, which is about to close.
+            stop.cancel();
+            Ok((AgentRunOutcome::Cancelled, SessionSettleReason::Cancelled))
+        }
+        ended = turn.ended() => match ended {
+            Ok(()) => {
+                log::info!("Session {our_session_id}: the reattached turn has ended");
+                Ok((AgentRunOutcome::Completed, SessionSettleReason::ResponseComplete))
+            }
+            Err(error) => Err(error),
+        },
     }
 }
 
@@ -6412,6 +6628,64 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
         || (error.contains(CONFIG_SELECTION_STALE_PREFIX)
             && (error.contains(CONFIG_SELECTION_STALE_UNAVAILABLE)
                 || error.contains(CONFIG_SELECTION_STALE_NOT_SELECT)))
+}
+
+/// Starts the error a session ends with when its remote agent process was
+/// lost under it — its output ended, or bloxlet reports it stopped — followed
+/// by the cause.
+const REMOTE_AGENT_LOST_PREFIX: &str = "Remote agent lost: ";
+
+/// Whether a session error means its remote agent process was lost under it,
+/// rather than the agent failing the session.
+pub fn is_remote_agent_lost_error(error: &str) -> bool {
+    error.contains(REMOTE_AGENT_LOST_PREFIX)
+}
+
+/// Starts the error a session ends with when the `sq` proxy connecting it to
+/// its remote agent went while bloxlet still runs (or cannot say whether it
+/// runs) the agent process, followed by the cause. The turn may still be
+/// going there; [`AcpDriver::reattach`] can pick it back up.
+const REMOTE_AGENT_DETACHED_PREFIX: &str = "Remote agent detached: ";
+
+/// Whether a session error means it lost its connection to a remote agent
+/// that may still be serving its turn.
+pub fn is_remote_agent_detached_error(error: &str) -> bool {
+    error.contains(REMOTE_AGENT_DETACHED_PREFIX)
+}
+
+/// Starts the error a session ends with when it stopped taking its remote
+/// agent's output and fell so far behind that it was cut off (see
+/// `remote_routing::MAX_CLIENT_BACKLOG_BYTES`), followed by the cause.
+/// Nothing went wrong on the workstation, unlike a lost or detached agent:
+/// the session's connection was let go, and any turn it had in flight
+/// cancelled there, so the session fails as an ordinary crash.
+const REMOTE_SESSION_CUT_OFF_PREFIX: &str = "Remote session cut off: ";
+
+/// The turn [`AcpDriver::reattach`] picks back up.
+#[derive(Clone, Debug)]
+pub struct ReattachTurn {
+    /// The agent's id for the session the turn is on.
+    pub agent_session_id: String,
+    /// When the turn was prompted, in ms since the epoch. The prompt is
+    /// recorded before its connection starts, and so before any agent
+    /// process that connection launched.
+    pub prompted_at: i64,
+    /// When the connection that prompted the turn had initialized with the
+    /// agent, in ms since the epoch, when known: the agent process that ran
+    /// the turn was running by then. A process bloxlet says started later is
+    /// a different one. Without it, the latest the connection could have
+    /// initialized after `prompted_at` stands in.
+    pub connected_at: Option<i64>,
+    /// The pid of the app instance that prompted the turn, when known. The
+    /// agent broadcasts its answer to that `session/prompt` to every
+    /// attachment, under a request id that names the instance but not the
+    /// session.
+    pub owner_pid: Option<u32>,
+    /// Whether this was `owner_pid`'s only turn on the agent process, so
+    /// that the agent answering any of its prompts marks exactly when this
+    /// turn ended. Otherwise only bloxlet reporting the whole process idle
+    /// does, or the turn's session going quiet for long enough.
+    pub sole_turn_of_owner: bool,
 }
 
 // Fragment shared by `setup_acp_session`'s required-transport check and
@@ -7425,6 +7699,10 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     mod real_bridge;
+    mod remote_liveness;
+    #[cfg(unix)]
+    mod remote_process;
+    mod remote_routing;
     mod response_completion;
     mod settlement;
     mod turn_control;

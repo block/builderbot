@@ -244,6 +244,7 @@ fn driver(log: &Path, mode: &str, probe: Arc<ScriptedProbe>, dedicated: bool) ->
         steering_disabled: false,
         unattended_session_mode: None,
         blox_process: Some(BloxProcess {
+            workspace_name: "ws".to_string(),
             command: BloxAcpCommand {
                 argv: vec!["fake-agent".to_string()],
                 explicit: true,

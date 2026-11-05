@@ -46,6 +46,9 @@ pub(crate) enum KickSource {
     Sweep,
     /// Launch resume put rows the last quit ended back on the branch queue.
     LaunchResume,
+    /// The reconcile service settled a `disconnected` Blox row on the
+    /// branch.
+    Reconciled,
 }
 
 impl KickSource {
@@ -66,6 +69,7 @@ impl KickSource {
             Self::DeadOwnerRecovered => "dead owner recovered",
             Self::Sweep => "sweep",
             Self::LaunchResume => "launch resume",
+            Self::Reconciled => "reconciled",
         }
     }
 }

@@ -732,6 +732,22 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// The id of the session's newest user message: where its latest turn
+    /// starts. `None` for a session with no user message.
+    ///
+    /// The runner gets this from the prompt it persists; a turn finished by
+    /// someone else (the reconcile service, after the runner is gone) reads
+    /// it back to scope note extraction to that turn.
+    pub fn latest_user_message_id(&self, session_id: &str) -> Result<Option<i64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let id = conn.query_row(
+            "SELECT MAX(id) FROM session_messages WHERE session_id = ?1 AND role = 'user'",
+            params![session_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+        Ok(id)
+    }
+
     /// Get messages with id >= since_id, plus fresh copies of `refetch_ids`.
     ///
     /// The inclusive `>=` re-fetches the last known message so the caller

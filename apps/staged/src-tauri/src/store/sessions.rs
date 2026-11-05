@@ -280,15 +280,73 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Settle a `disconnected` row, if it is still exactly the row the
+    /// caller read: `status = 'disconnected'` and `updated_at` still
+    /// `observed_updated_at`.
+    ///
+    /// The reconcile service's write for an outcome it reached without
+    /// reattaching (the workstation is gone, a Stop it could not deliver).
+    /// Every other writer of a disconnected row (a Stop's fallback, a claim,
+    /// a branch teardown) restamps `updated_at`, so a reconcile that lost the
+    /// row to one of them fails this predicate and leaves that write alone,
+    /// and a second reconcile of the same snapshot is a no-op.
+    ///
+    /// Like [`Self::transition_from_running`], `error_message` is kept for
+    /// `Cancelled` as well as `Error`.
+    pub fn transition_from_disconnected_observed_at(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let error_msg = if matches!(new_status, SessionStatus::Error | SessionStatus::Cancelled) {
+            error_message
+        } else {
+            None
+        };
+        let rows = conn.execute(
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
+             WHERE id = ?5 AND status = 'disconnected' AND updated_at = ?6",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id, observed_updated_at],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Claim a `disconnected` row for this process, as `running`, to follow
+    /// its remote turn: the same compare-and-swap on the row the caller read
+    /// as [`Self::transition_from_disconnected_observed_at`], stamping
+    /// `owner_pid` like every other move into `running`.
+    ///
+    /// The caller registers in the session registry *before* this, as every
+    /// owner of a `running` row does, and from here on finishes the row with
+    /// the ordinary `transition_from_running` writes.
+    pub fn claim_disconnected_session(
+        &self,
+        id: &str,
+        observed_updated_at: i64,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2
+             WHERE id = ?3 AND status = 'disconnected' AND updated_at = ?4",
+            params![now_timestamp(), std::process::id(), id, observed_updated_at],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Atomically claim a queued session for execution by this process.
     ///
     /// Returns `true` if the row was updated, `false` if the session was no
     /// longer queued, for example because it was cancelled after the queue was
-    /// snapshotted.
+    /// snapshotted. Like every new turn, it forgets a pinned Blox process
+    /// (see [`Self::transition_to_running_clearing_agent_id`]).
     pub fn transition_queued_to_running(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2, blox_command_id = NULL
              WHERE id = ?3 AND status = 'queued'",
             params![now_timestamp(), std::process::id(), id],
         )?;
@@ -310,6 +368,11 @@ impl Store {
     /// Atomically transition a session to `Running`, clearing a caller-owned
     /// temporary `agent_id` marker at the same time.
     ///
+    /// A new turn also forgets the Blox process the last one was pinned to
+    /// (`blox_command_id`, see [`Self::set_session_blox_command_id`]): it may
+    /// run on a different process, and a pin to the old one would make a
+    /// later reconcile read that process instead.
+    ///
     /// Real ACP session ids are preserved. The optional clear is for rows that
     /// were visible as `running` before an ACP session existed; if a user stops
     /// and resumes such a row before the original startup finishes, clearing
@@ -330,7 +393,8 @@ impl Store {
                  agent_id = CASE
                      WHEN ?3 IS NOT NULL AND agent_id = ?3 THEN NULL
                      ELSE agent_id
-                 END
+                 END,
+                 blox_command_id = NULL
              WHERE id = ?4 AND status NOT IN ('running', 'disconnected')",
             params![now_timestamp(), std::process::id(), agent_id_to_clear, id],
         )?;
@@ -447,16 +511,34 @@ impl Store {
         Ok(count.max(0) as usize)
     }
 
-    /// Get all running and queued sessions, oldest first.
+    /// Every `disconnected` row: Blox sessions whose turn may still be
+    /// running on a workstation with no Staged process attached. The
+    /// reconcile service's work list.
+    pub fn get_disconnected_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {SESSION_COLUMNS}
+             FROM sessions WHERE status = 'disconnected'
+             ORDER BY created_at ASC"
+        ))?;
+        let sessions = stmt
+            .query_map([], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
+    /// Get all running, queued and disconnected sessions, oldest first.
     ///
     /// Backs the `get_active_sessions` busy-state snapshot command, which
     /// clients hydrate from on load or reconnect instead of relying solely on
-    /// accumulated `session-status-changed` events.
+    /// accumulated `session-status-changed` events. A `disconnected` row is
+    /// in it because it still holds its branch: its remote turn may be
+    /// running, and no client can tell that from a terminal row.
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {SESSION_COLUMNS}
-             FROM sessions WHERE status IN ('running', 'queued')
+             FROM sessions WHERE status IN ('running', 'queued', 'disconnected')
              ORDER BY created_at ASC"
         ))?;
         let sessions = stmt
@@ -578,6 +660,28 @@ impl Store {
         conn.execute(
             "UPDATE sessions SET pre_head_sha = ?1 WHERE id = ?2",
             params![pre_head_sha, id],
+        )?;
+        Ok(())
+    }
+
+    /// Pin the Blox process a `disconnected` row's turn ran on, by its
+    /// command id (`None` to forget it), so every later read and attach for
+    /// that turn finds the same process rather than whatever now runs the
+    /// session's argv. Set by the reconcile service the first time it finds
+    /// the process; cleared when a new turn starts
+    /// ([`Self::transition_to_running_clearing_agent_id`]).
+    ///
+    /// Leaves `updated_at` alone, like [`Self::set_session_pre_head_sha`]: the
+    /// reconcile's own compare-and-swap is on it.
+    pub fn set_session_blox_command_id(
+        &self,
+        id: &str,
+        blox_command_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET blox_command_id = ?1 WHERE id = ?2",
+            params![blox_command_id, id],
         )?;
         Ok(())
     }

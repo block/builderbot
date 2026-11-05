@@ -623,8 +623,10 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_head_sha: Option<String>,
     /// Blox `ws` command id of the remote agent process serving this
-    /// session, when known. Reserved for reconnecting a `Disconnected`
-    /// session; not yet populated.
+    /// session, when known: pinned by the reconcile service the first time
+    /// it finds a `Disconnected` session's process, so later reads and
+    /// attaches reach that process rather than a replacement Blox started in
+    /// its place. Cleared when a new turn starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blox_command_id: Option<String>,
 }

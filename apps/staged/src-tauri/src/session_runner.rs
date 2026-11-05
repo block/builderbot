@@ -38,6 +38,7 @@
 
 pub(crate) mod attachments;
 mod disconnect;
+pub(crate) mod reconcile;
 
 pub(crate) use disconnect::{may_still_run_on_workstation, runs_on_blox};
 
@@ -1596,6 +1597,7 @@ pub fn start_session(
                         config.session_id.clone(),
                         config.branch_id.clone(),
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
                 return Err(failure.error);
@@ -1637,6 +1639,10 @@ pub fn start_session(
         // (see `disconnect::run_leaves_session_disconnected`). Reset with
         // `settle_reason`, for the same reason.
         let transport_loss: Cell<Option<acp_client::TransportLoss>> = Cell::new(None);
+        // Whether a Stop's `session/cancel` went unanswered on the last
+        // connection, so a remote turn may still be running behind it. Reset
+        // with `settle_reason`.
+        let cancel_unacknowledged = Cell::new(false);
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
@@ -1877,6 +1883,7 @@ pub fn start_session(
                 // connection's settle reason describes how the session ended.
                 settle_reason.set(None);
                 transport_loss.set(None);
+                cancel_unacknowledged.set(false);
                 let turn_result = match driver
                     .connect(
                         &config.session_id,
@@ -1919,6 +1926,7 @@ pub fn start_session(
                                 Ok(settled) => {
                                     settle_reason.set(Some(settled.reason));
                                     transport_loss.set(settled.transport_loss);
+                                    cancel_unacknowledged.set(settled.cancel_unacknowledged);
                                     match settled.reason {
                                         acp_client::SessionSettleReason::HeldUntilCap => {
                                             log::warn!(
@@ -2021,7 +2029,7 @@ pub fn start_session(
         // still be finishing the turn: pick it back up there. The reattached
         // turn ends like a dead owner's does, with no settle reason; it was in
         // flight on the agent, so losing it again leaves it there.
-        let (result, settle_reason, transport_loss) = match result {
+        let (result, settle_reason, transport_loss, cancel_unacknowledged) = match result {
             Err(error)
                 if acp_client::is_remote_agent_detached_error(&error)
                     && !cancel_token.is_cancelled() =>
@@ -2041,11 +2049,21 @@ pub fn start_session(
                     ),
                 );
                 match reattached {
-                    Some(result) => (result, None, Some(REATTACHED_TURN_IN_FLIGHT)),
-                    None => (Err(error), settle_reason.get(), transport_loss.get()),
+                    Some(result) => (result, None, Some(REATTACHED_TURN_IN_FLIGHT), false),
+                    None => (
+                        Err(error),
+                        settle_reason.get(),
+                        transport_loss.get(),
+                        cancel_unacknowledged.get(),
+                    ),
                 }
             }
-            result => (result, settle_reason.get(), transport_loss.get()),
+            result => (
+                result,
+                settle_reason.get(),
+                transport_loss.get(),
+                cancel_unacknowledged.get(),
+            ),
         };
 
         // A remote turn the connection lost — dropped transport, or a quit's
@@ -2073,6 +2091,7 @@ pub fn start_session(
             &config,
             result,
             settle_reason,
+            cancel_unacknowledged,
             turn_start_message_id,
             &cancel_token,
             registration,
@@ -2139,6 +2158,7 @@ fn finish_session_run(
     config: &SessionConfig,
     result: Result<AgentRunOutcome, String>,
     settle_reason: Option<acp_client::SessionSettleReason>,
+    cancel_unacknowledged: bool,
     turn_start_message_id: i64,
     cancel_token: &CancellationToken,
     registration: RegistrationEpoch,
@@ -2200,6 +2220,25 @@ fn finish_session_run(
             ("error", Some(e.clone()), failed_run_completion_reason(e))
         }
     };
+
+    // A remote Stop the agent never acknowledged may have left the turn
+    // running behind a hung transport: cancel it again over a fresh
+    // connection, and say so on the row if that can't be confirmed either.
+    let error_msg =
+        if new_status == "cancelled" && config.workspace_name.is_some() && cancel_unacknowledged {
+            log::warn!(
+                "Session {session_id_for_status}: Stop went unacknowledged; cancelling over a \
+                 fresh connection"
+            );
+            reconcile::stop_unacknowledged_turn(
+                &store_for_status,
+                &reconcile::LiveBlox,
+                &session_id_for_status,
+            )
+            .or(error_msg)
+        } else {
+            error_msg
+        };
 
     let completed_successfully =
         terminal_state_completed_successfully(new_status, &completion_reason);
@@ -2616,6 +2655,7 @@ pub fn start_pipeline_session(
                         session_id.clone(),
                         config.branch_id.clone(),
                         true,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -2708,6 +2748,7 @@ pub fn start_pipeline_session(
                             session_id.clone(),
                             config.branch_id.clone(),
                             false,
+                            crate::session_queue::KickSource::TerminalState,
                         );
                     }
                 }
@@ -2767,6 +2808,7 @@ pub fn start_pipeline_session(
                         session_id.clone(),
                         config.branch_id.clone(),
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -2802,6 +2844,7 @@ pub fn start_pipeline_session(
                         session_id.clone(),
                         config.branch_id.clone(),
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }
@@ -3159,6 +3202,7 @@ pub(crate) fn drain_queued_after_terminal_state(
     session_id: String,
     branch_id: Option<String>,
     drain_message: bool,
+    kick_source: crate::session_queue::KickSource,
 ) {
     if !drain_message && branch_id.is_none() {
         return;
@@ -3185,11 +3229,7 @@ pub(crate) fn drain_queued_after_terminal_state(
         }
 
         if let Some(branch_id) = branch_id {
-            crate::session_queue::kick(
-                &app_handle,
-                &branch_id,
-                crate::session_queue::KickSource::TerminalState,
-            );
+            crate::session_queue::kick(&app_handle, &branch_id, kick_source);
         }
     });
 }
@@ -4063,6 +4103,7 @@ fn reattach_dead_owner_session(
                 &config,
                 result,
                 None,
+                false,
                 turn_start_message_id,
                 &cancel_token,
                 registration,
@@ -4089,6 +4130,7 @@ fn reattach_dead_owner_session(
                         session.id,
                         session.branch_id,
                         false,
+                        crate::session_queue::KickSource::TerminalState,
                     );
                 }
             }

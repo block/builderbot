@@ -9,15 +9,25 @@
 //! process by reading its recorded output.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
 
-use crate::{run, BloxError, QUICK_TIMEOUT};
+use crate::{
+    run, run_bytes_full, strip_ansi_escape_sequences, BloxError, WsExecOutput, QUICK_TIMEOUT,
+};
 
 /// Most records a full listing asks for. `ws commands` returns only the 50
 /// newest without a limit, and a busy workstation's finished processes would
 /// push an older session's record out of that window.
 const FULL_LISTING_LIMIT: &str = "500";
+
+/// How long a full `ws output` read may take. A Staged session's recording
+/// is typically 0.5–1 MB and reads in about 2 s.
+const OUTPUT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How the CLI starts the stderr line of a failure of its own.
+const CLI_ERROR_PREFIX: &str = "blox: error:";
 
 /// Tag Blox puts on every process `blox acp` starts.
 const ACP_ROLE_TAG: &str = "blox:role";
@@ -133,6 +143,40 @@ pub fn ws_command_list(
         CommandFilter::All => args.extend(["-n", FULL_LISTING_LIMIT]),
     }
     parse_command_list(&run(&args, QUICK_TIMEOUT)?)
+}
+
+/// Everything a workstation command wrote to stdout, from the start: for an
+/// ACP process, one agent-to-client JSON-RPC frame per line (the client's own
+/// requests are not recorded here).
+///
+/// Runs: `sq blox ws output <name> <command_id>`. Every read is a full read:
+/// the CLI never reports the resume cursor `--resume-id` takes. The
+/// recording outlives the process and a suspend (though the read fails
+/// while the workstation is suspended), and is lost with the workstation.
+pub fn ws_output(name: &str, command_id: &str) -> Result<String, BloxError> {
+    recording_from(run_bytes_full(
+        &["ws", "output", name, command_id],
+        OUTPUT_TIMEOUT,
+    )?)
+}
+
+/// The recording in a `ws output` read. Once the process has ended the CLI
+/// exits with the process's own status (143 for one a bloxlet restart
+/// killed) and forwards the process's stderr, with the whole recording still
+/// on stdout; only the CLI's own failures (workstation suspended or missing,
+/// command not found, a broken stream) print a `blox: error:` line.
+fn recording_from(output: WsExecOutput) -> Result<String, BloxError> {
+    if !output.success {
+        let stderr = strip_ansi_escape_sequences(&String::from_utf8_lossy(&output.stderr));
+        if stderr
+            .lines()
+            .any(|line| line.trim_start().starts_with(CLI_ERROR_PREFIX))
+        {
+            return Err(BloxError::CommandFailed(stderr));
+        }
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|e| BloxError::ParseError(format!("invalid UTF-8 in sq blox output: {e}")))
 }
 
 fn parse_command_list(stdout: &str) -> Result<Vec<WorkstationCommand>, BloxError> {
@@ -335,5 +379,46 @@ mod tests {
             find_ended_acp_process(&commands, Some("27260000"), &claude).map(|c| &c.status),
             Some(&CommandStatus::Succeeded)
         );
+    }
+
+    fn read(success: bool, stdout: &str, stderr: &str) -> Result<String, BloxError> {
+        recording_from(WsExecOutput {
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+            success,
+        })
+    }
+
+    #[test]
+    fn a_process_exit_status_still_yields_its_recording() {
+        let frame = r#"{"jsonrpc":"2.0","method":"_claude/sdkMessage","params":{}}"#;
+        assert_eq!(read(true, frame, "").unwrap(), frame);
+        // Live, after a suspend: the process reads `FAILED` "bloxlet
+        // restarted" and the read exits 143 with nothing on stderr.
+        assert_eq!(read(false, frame, "").unwrap(), frame);
+        // An agent that died on its own forwards its stderr.
+        assert_eq!(
+            read(
+                false,
+                "",
+                "error: unexpected argument '--staged-session' found\n"
+            )
+            .unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_cli_own_failures_are_errors() {
+        for stderr in [
+            "blox: error: stream error: failed_precondition: workstation is in WORKSTATION_STATUS_SUSPENDED state\n",
+            "blox: error: stream error: not_found: command not found: command not found: 99999999\n",
+            "goose otel: signals disabled\n\u{1b}[31mblox: error:\u{1b}[0m stream error: unavailable\n",
+        ] {
+            match read(false, "{\"partial\"", stderr) {
+                Err(BloxError::CommandFailed(message)) => assert!(message.contains("blox: error:")),
+                other => panic!("{stderr:?} read as {other:?}"),
+            }
+        }
     }
 }

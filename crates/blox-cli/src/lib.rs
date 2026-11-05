@@ -13,8 +13,8 @@ use wait_timeout::ChildExt;
 mod commands;
 
 pub use commands::{
-    find_acp_process, find_ended_acp_process, ws_command_list, CommandFilter, CommandStatus,
-    WorkstationCommand,
+    find_acp_process, find_ended_acp_process, ws_command_list, ws_output, CommandFilter,
+    CommandStatus, WorkstationCommand,
 };
 
 const COMMON_PATHS: &[&str] = &[

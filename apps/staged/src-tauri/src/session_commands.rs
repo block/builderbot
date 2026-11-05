@@ -2906,9 +2906,26 @@ pub(crate) fn cancel_session_impl<R: tauri::Runtime>(
     if !was_running {
         let store = get_store(store)?;
         if let Ok(Some(session)) = store.get_session(session_id) {
-            // A `disconnected` row has no runner anywhere, so this write is
-            // the only way it ends. It only ends the row: the remote turn, if
-            // still going, is left running on its workstation.
+            // A `disconnected` row has no runner anywhere. The reconcile
+            // service cancels its remote turn over a fresh connection and
+            // then ends the row (reporting a Stop it couldn't confirm), or
+            // hands the Stop to its attempt in flight.
+            if session.status == store::SessionStatus::Disconnected {
+                if let Some(reconciler) = session_runner::reconcile::active() {
+                    reconciler.request_stop(session_id, store::CompletionReason::Interrupted);
+                    return Ok(());
+                }
+            }
+            // The row turned `running` since the registry was asked — a
+            // reconcile attempt claimed it, say. Its owner registered before
+            // writing it, so ask again.
+            if session.status == store::SessionStatus::Running && registry.cancel(session_id) {
+                return Ok(());
+            }
+            // Without one (tests, or before the store's services start) this
+            // write is the only way the row ends. It only ends the row: the
+            // remote turn, if still going, is left running on its
+            // workstation.
             if matches!(
                 session.status,
                 store::SessionStatus::Running
@@ -4974,6 +4991,7 @@ fn fail_session_start_on_error<T>(
                 session_id.to_string(),
                 branch_id,
                 false,
+                crate::session_queue::KickSource::TerminalState,
             );
         }
     }

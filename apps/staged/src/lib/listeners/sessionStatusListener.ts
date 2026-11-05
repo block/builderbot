@@ -258,7 +258,13 @@ export async function hydrateActiveSessions(): Promise<void> {
   try {
     let active: ActiveSessionInfo[];
     try {
-      active = await commands.getActiveSessions();
+      // `disconnected` rows are in the snapshot because they still hold
+      // their branch, but nothing here is connected to them: like their
+      // status event, they carry no live busy state, so a registered one is
+      // swept and none is registered or adopted.
+      active = (await commands.getActiveSessions()).filter(
+        (session) => session.status !== 'disconnected'
+      );
     } catch (e) {
       console.error('Failed to fetch active-sessions snapshot:', e);
       return;

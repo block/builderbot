@@ -175,6 +175,9 @@ struct MonitorState {
     /// The proxy reported relaying for a replacement process
     /// ([`PROCESS_REPLACED_LINES`]).
     process_replaced: bool,
+    /// A Stop's `session/cancel` went out and the turn's prompt was not
+    /// answered within the cancel-ack deadline.
+    cancel_unacknowledged: bool,
 }
 
 /// What a [`DetachHandle`] lets go of.
@@ -260,6 +263,18 @@ impl TransportMonitor {
     /// logs the line before it relays anything.
     pub(super) fn process_replaced(&self) -> bool {
         self.state().process_replaced
+    }
+
+    /// A Stop's `session/cancel` got no answer in time. Over a remote
+    /// connection that is what a hung transport looks like (the socket stays
+    /// open, nothing comes back), so the cancel may never have reached the
+    /// turn; see [`SessionSettled::cancel_unacknowledged`].
+    pub(super) fn note_cancel_unacknowledged(&self) {
+        self.state().cancel_unacknowledged = true;
+    }
+
+    pub(super) fn cancel_unacknowledged(&self) -> bool {
+        self.state().cancel_unacknowledged
     }
 
     pub(super) fn signal(&self, signal: TransportSignal) {

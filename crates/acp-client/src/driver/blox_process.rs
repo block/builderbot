@@ -38,10 +38,21 @@ pub(crate) trait RemoteProcessProbe: Send + Sync {
     async fn ended_message(&self, command_id: Option<&str>) -> Result<Option<String>, String>;
 }
 
+/// A Blox session's remote process as one listing found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteProcess {
+    pub status: RemoteProcessStatus,
+    /// The process's Blox command id: the active process's, or the ended
+    /// record's when it is gone. `None` when the listing holds no record of
+    /// it at all.
+    pub command_id: Option<String>,
+}
+
 /// The Blox side of a remote driver: which workstation process serves the
 /// Staged session, and how to read its status.
 #[derive(Clone)]
 pub(crate) struct BloxProcess {
+    pub(crate) workspace_name: String,
     pub(crate) command: BloxAcpCommand,
     pub(crate) probe: Arc<dyn RemoteProcessProbe>,
 }
@@ -52,7 +63,11 @@ impl BloxProcess {
             workspace_name: workspace_name.to_string(),
             argv: command.argv.clone(),
         });
-        Self { command, probe }
+        Self {
+            workspace_name: workspace_name.to_string(),
+            command,
+            probe,
+        }
     }
 }
 
@@ -99,25 +114,43 @@ impl RemoteProcessProbe for BloxCommandsProbe {
     }
 }
 
-/// The active listing first (cheap, and what reuse is decided by); the full
-/// one only to say why a process that is not active ended.
 fn read_process_status(
     workspace_name: &str,
     command_id: Option<&str>,
     argv: &[String],
 ) -> Result<RemoteProcessStatus, blox_cli::BloxError> {
+    locate_process(workspace_name, command_id, argv).map(|process| process.status)
+}
+
+/// The active listing first (cheap, and what reuse is decided by); the full
+/// one only to say why a process that is not active ended, and which record
+/// that was.
+fn locate_process(
+    workspace_name: &str,
+    command_id: Option<&str>,
+    argv: &[String],
+) -> Result<RemoteProcess, blox_cli::BloxError> {
     let active = blox_cli::ws_command_list(workspace_name, blox_cli::CommandFilter::Active)?;
     if let Some(command) = blox_cli::find_acp_process(&active, command_id, argv) {
-        return Ok(match command.status {
-            blox_cli::CommandStatus::Idle => RemoteProcessStatus::Idle,
-            _ => RemoteProcessStatus::Running,
+        return Ok(RemoteProcess {
+            status: match command.status {
+                blox_cli::CommandStatus::Idle => RemoteProcessStatus::Idle,
+                _ => RemoteProcessStatus::Running,
+            },
+            command_id: Some(command.command_id.clone()),
         });
     }
     let all = blox_cli::ws_command_list(workspace_name, blox_cli::CommandFilter::All)?;
-    let message = blox_cli::find_acp_process(&all, command_id, argv)
-        .filter(|command| !command.status.is_active())
-        .and_then(|command| command.message.clone());
-    Ok(RemoteProcessStatus::Gone { message })
+    let ended = blox_cli::find_acp_process(&all, command_id, argv)
+        .filter(|command| !command.status.is_active());
+    Ok(RemoteProcess {
+        status: RemoteProcessStatus::Gone {
+            message: ended.and_then(|command| command.message.clone()),
+        },
+        command_id: ended
+            .map(|command| command.command_id.clone())
+            .or_else(|| command_id.map(str::to_string)),
+    })
 }
 
 impl AcpDriver {
@@ -130,5 +163,24 @@ impl AcpDriver {
     ) -> Option<Result<RemoteProcessStatus, String>> {
         let blox = self.blox_process.as_ref()?;
         Some(blox.probe.status(command_id).await)
+    }
+
+    /// Find this Blox session's remote process, as
+    /// [`AcpDriver::remote_process_status`] does, and also say which Blox
+    /// command it is, so a caller can pin that process for later reads and
+    /// attaches. Blocking (one or two `sq` calls); `None` for a local driver.
+    ///
+    /// Pinning is what keeps a gone process gone: matched by argv alone, the
+    /// replacement a later attach starts in its place (idle, having run no
+    /// prompt) would read as a turn that ended.
+    pub fn locate_remote_process(
+        &self,
+        command_id: Option<&str>,
+    ) -> Option<Result<RemoteProcess, String>> {
+        let blox = self.blox_process.as_ref()?;
+        Some(
+            locate_process(&blox.workspace_name, command_id, &blox.command.argv)
+                .map_err(|e| e.to_string()),
+        )
     }
 }

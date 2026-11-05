@@ -66,7 +66,11 @@ pub fn ws_delete(name: &str) -> Result<(), BloxError> {
 ///
 /// Runs: `sq blox ws info <name> --json`
 pub fn ws_info(name: &str) -> Result<WorkspaceInfo, BloxError> {
-    blox_cli::ws_info(name)
+    let info = blox_cli::ws_info(name);
+    if matches!(&info, Ok(info) if info.status.as_deref() == Some("running")) {
+        crate::session_runner::reconcile::note_workspace_reachable(name);
+    }
+    info
 }
 
 /// List all Blox workspaces.
@@ -84,7 +88,7 @@ pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
 pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    blox_cli::ws_exec(name, args)
+    reachable_on_success(name, blox_cli::ws_exec(name, args))
 }
 
 /// Execute a command inside a Blox workspace, returning raw bytes.
@@ -94,7 +98,7 @@ pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
 pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    blox_cli::ws_exec_bytes(name, args)
+    reachable_on_success(name, blox_cli::ws_exec_bytes(name, args))
 }
 
 /// Execute a command inside a Blox workspace, returning full output regardless
@@ -102,7 +106,17 @@ pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
 pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    blox_cli::ws_exec_output(name, args)
+    reachable_on_success(name, blox_cli::ws_exec_output(name, args))
+}
+
+/// A call that reached the workstation proves it reachable: `disconnected`
+/// sessions on it that failed to reconcile are worth another try (see
+/// [`crate::session_runner::reconcile::note_workspace_reachable`]).
+fn reachable_on_success<T>(name: &str, result: Result<T, BloxError>) -> Result<T, BloxError> {
+    if result.is_ok() {
+        crate::session_runner::reconcile::note_workspace_reachable(name);
+    }
+    result
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.

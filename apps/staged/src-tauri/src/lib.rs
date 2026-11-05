@@ -292,6 +292,13 @@ fn start_store_services(
     app_handle: tauri::AppHandle,
 ) {
     background_sync::spawn(Arc::clone(&store), app_handle.clone());
+    // Settles `disconnected` Blox sessions against their workstations; its
+    // launch pass runs after startup recovery, below.
+    session_runner::reconcile::install(
+        Arc::clone(&store),
+        Arc::clone(&registry),
+        app_handle.clone(),
+    );
     session_queue::sweep::spawn(Arc::clone(&store), registry, app_handle.clone());
     // The startup dead-owner recovery only helps the instance that restarts:
     // an instance that dies later leaves its sessions `running` in every other
@@ -2042,6 +2049,9 @@ pub fn run() {
             // anyone connected.
             if let Ok(store) = get_store(&app.state::<Mutex<Option<Arc<Store>>>>()) {
                 session_runner::recover_dead_sessions(Arc::clone(&store), app.handle().clone());
+                // Recovery has left every orphaned Blox turn `disconnected`;
+                // ask the workstations how each one ended.
+                session_runner::reconcile::reconcile_all();
                 session_queue::kick_all_with_queued_work(
                     app.handle(),
                     &store,
@@ -2333,6 +2343,8 @@ pub fn run() {
             session_commands::cancel_session,
             session_commands::stop_session_async_task,
             session_commands::get_session_background_hold,
+            session_runner::reconcile::reconcile_session,
+            session_runner::reconcile::get_session_reconcile_states,
             session_commands::delete_session,
             session_commands::start_branch_session,
             session_commands::start_or_queue_branch_session,

@@ -564,17 +564,6 @@ impl ProjectToolsHandler {
         }
         Ok(payload)
     }
-
-    /// Returns true if the store still records this session as running. Used to
-    /// decide whether to defer a cancellation during the startup window where
-    /// the DB row is already `running` but the runner hasn't registered its
-    /// cancellation token yet.
-    fn session_is_running(&self, session_id: &str) -> bool {
-        matches!(
-            self.store.get_session(session_id),
-            Ok(Some(session)) if session.status == SessionStatus::Running
-        )
-    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -921,11 +910,26 @@ impl ProjectToolsHandler {
             // takes instead of racing a fixed-delay retry that a slow remote
             // startup could outlast. The DB gate keeps an already-terminal
             // session from leaving a stale pending entry behind.
-            if !cancelled && self.session_is_running(&handle.session_id) {
-                self.registry.cancel_or_defer(
-                    &handle.session_id,
-                    CompletionReason::ProjectSessionInterrupted,
-                );
+            if !cancelled {
+                match self.store.get_session(&handle.session_id) {
+                    Ok(Some(session)) if session.status == SessionStatus::Running => {
+                        self.registry.cancel_or_defer(
+                            &handle.session_id,
+                            CompletionReason::ProjectSessionInterrupted,
+                        );
+                    }
+                    // A Blox session no runner owns: the reconcile service
+                    // cancels its remote turn and ends the row.
+                    Ok(Some(session)) if session.status == SessionStatus::Disconnected => {
+                        if let Some(reconciler) = crate::session_runner::reconcile::active() {
+                            reconciler.request_stop(
+                                &handle.session_id,
+                                CompletionReason::ProjectSessionInterrupted,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 

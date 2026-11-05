@@ -54,6 +54,7 @@ mod attach;
 mod blox_process;
 mod catch_up;
 mod connection_io;
+mod recorded_turn;
 mod remote_liveness;
 mod remote_process;
 mod remote_routing;
@@ -64,8 +65,9 @@ pub use attach::{AttachOutcome, AttachedSession, CancelOutcome};
 pub(crate) use blox_process::BloxProcess;
 #[cfg(test)]
 pub(crate) use blox_process::RemoteProcessProbe;
-pub use blox_process::RemoteProcessStatus;
+pub use blox_process::{RemoteProcess, RemoteProcessStatus};
 use connection_io::{normalized_stdout, spawn_stderr_reader, staged_client};
+pub use recorded_turn::RecordedTurn;
 
 use transport_loss::{
     formatted_error_is_transport_closed, kill_without_interrupt, ProxyStop, TransportMonitor,
@@ -998,6 +1000,13 @@ pub struct SessionSettled {
     /// than because the agent said so (see [`TransportLoss`]). A remote
     /// session lost with its turn in flight may still be running.
     pub transport_loss: Option<TransportLoss>,
+    /// A Stop's `session/cancel` was sent and the turn's prompt went
+    /// unanswered past [`CANCEL_ACK_DEADLINE`]: the connection settled
+    /// cancelled without the agent confirming it. For a remote session the
+    /// turn may still be running on its workstation, behind a hung
+    /// transport, and the caller should stop it over a fresh connection
+    /// ([`AcpDriver::attach_cancel`]).
+    pub cancel_unacknowledged: bool,
 }
 
 impl SessionSettled {
@@ -2716,6 +2725,7 @@ impl AcpDriver {
                 outcome: result.clone(),
                 reason: settle_reason,
                 transport_loss,
+                cancel_unacknowledged: transport.cancel_unacknowledged(),
             });
 
             if let Some(reply) = pending_reply.borrow_mut().take() {
@@ -5884,6 +5894,11 @@ const STEER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// (which the bridge answers by aborting the turn).
 const HOLDING_CANCEL_DRAIN: Duration = Duration::from_millis(500);
 
+/// How long a Stop waits for the agent to answer the turn's prompt after
+/// `session/cancel` before settling cancelled anyway (and reporting
+/// [`SessionSettled::cancel_unacknowledged`]).
+const CANCEL_ACK_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How one prompt turn ended, from the session loop's point of view.
 enum TurnStep {
     /// The turn ran to its own stop reason (or the user cancelled it).
@@ -6925,7 +6940,7 @@ async fn run_prompt_turn(
                     log::warn!("{e}");
                 }
 
-                match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
+                match tokio::time::timeout(CANCEL_ACK_DEADLINE, &mut prompt_task).await {
                     Ok(result) => {
                         break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
                     }
@@ -6933,6 +6948,7 @@ async fn run_prompt_turn(
                         log::warn!(
                             "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
                         );
+                        transport.note_cancel_unacknowledged();
                         return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
                     }
                 }
@@ -12615,6 +12631,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             outcome,
             reason,
             transport_loss: None,
+            cancel_unacknowledged: false,
         };
 
         // A hold that was cancelled or failed after the turn completed is the

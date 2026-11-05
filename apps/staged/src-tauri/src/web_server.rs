@@ -3839,6 +3839,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let stopped = handle.stop(&task_id).await?;
             Ok(serde_json::to_value(stopped).unwrap())
         }
+        "reconcile_session" => {
+            let session_id: String = arg(&args, "sessionId")?;
+            session_runner::reconcile::reconcile_session(session_id)?;
+            Ok(Value::Null)
+        }
+        "get_session_reconcile_states" => {
+            let states = session_runner::reconcile::get_session_reconcile_states();
+            Ok(serde_json::to_value(states).unwrap())
+        }
         "get_session_background_hold" => {
             let session_id: String = arg(&args, "sessionId")?;
             let snapshot: session_runner::SessionBackgroundHoldSnapshot =

@@ -288,6 +288,34 @@ describe('sessionStatusListener busy-state hydration', () => {
     expect(sessionRegistry.getMetadata('gone-1')).toBeNull();
   });
 
+  it('sweeps a registered session the snapshot reports as disconnected', async () => {
+    // Its `disconnected` event was missed: the row still holds its branch, so
+    // the snapshot carries it, but no live busy state may remain.
+    sessionRegistry.sessions.set('blox-1', {
+      sessionId: 'blox-1',
+      projectId: 'project-1',
+      type: 'commit',
+      timestamp: 500,
+    });
+    getActiveSessions.mockResolvedValue([
+      {
+        sessionId: 'blox-1',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'commit',
+        status: 'disconnected',
+        holding: false,
+      },
+    ]);
+
+    const { hydrateActiveSessions } = await import('./sessionStatusListener');
+    await hydrateActiveSessions();
+
+    expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('blox-1');
+    expect(sessionRegistry.register).not.toHaveBeenCalled();
+    expect(projectStateStore.setSessionBackgroundHold).not.toHaveBeenCalled();
+  });
+
   it('does not sweep entries registered while the snapshot fetch was in flight', async () => {
     sessionRegistry.sessions.set('stale-1', {
       sessionId: 'stale-1',
@@ -925,6 +953,19 @@ describe('sessionStatusListener busy-state hydration', () => {
 
       expect(getSession).toHaveBeenCalledTimes(1);
       expect(getSession).toHaveBeenCalledWith('running-push');
+    });
+
+    it('adopts the queued push behind a disconnected one on the same branch', async () => {
+      getActiveSessions.mockResolvedValue([
+        { ...activePush('blox-push', 'queued'), status: 'disconnected' },
+        activePush('queued-push', 'queued'),
+      ]);
+      getSession.mockResolvedValue(pushSession('queued-push', 'queued', false));
+
+      await hydrate();
+
+      expect(getSession).toHaveBeenCalledTimes(1);
+      expect(getSession).toHaveBeenCalledWith('queued-push');
     });
 
     it('skips a branch whose chip already follows a push', async () => {

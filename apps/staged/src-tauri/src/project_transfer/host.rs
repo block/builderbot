@@ -97,6 +97,11 @@ pub trait TransferHost: Send + Sync {
 
     /// Apply Staged's git config to a fresh workspace clone. Best-effort.
     fn configure_workspace_clone(&self, name: &str, repo_dir: &str);
+
+    /// The most a transfer archives of one repository's ignored files.
+    fn ignored_files_cap(&self) -> u64 {
+        super::scripts::IGNORED_FILES_CAP
+    }
 }
 
 /// [`TransferHost`] over `~/.staged`, git and `sq blox`.

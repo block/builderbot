@@ -8,12 +8,19 @@
 //! and so is anything that can't be checked; the transfer still succeeds,
 //! with a warning saying what was left and why. A workspace's checkouts are
 //! checked together, in one exec, right before the delete.
+//!
+//! Before that, each checkout's ignored files (`.env`; never an ignored
+//! directory such as `node_modules/`) are archived into the backup on this
+//! machine with [`back_up_ignored`], whether or not the transfer carried
+//! them: a source whose files can't be archived and brought here is kept.
+//! Only files over the cap go unbacked, with a warning.
 
 use std::path::Path;
 
 use super::super::backups;
-use super::super::carry::{cleanup, unchanged, unchanged_all};
+use super::super::carry::{back_up_ignored, cleanup, unchanged, unchanged_all, CarryPlan};
 use super::super::preflight::{Inspection, TransferDirection, TransferIssue};
+use super::super::scripts::IgnoredFiles;
 use super::super::undo;
 use super::{Leg, Run, TransferPhase};
 
@@ -68,8 +75,9 @@ impl Run<'_> {
     }
 
     /// Keep a carried worktree's snapshot under a backup ref in the shared
-    /// clone, drop the temporary ref, and — unless the worktree changed since
-    /// the snapshot — remove the worktree (and its branch).
+    /// clone, drop the temporary ref, back its ignored files up, and — unless
+    /// the worktree changed since the snapshot — remove the worktree (and its
+    /// branch).
     fn remove_local_source(&self, leg: &mut Leg) -> Result<(), TransferIssue> {
         let (Some(plan), Some(outcome)) = (&leg.plan, &leg.outcome) else {
             return Ok(());
@@ -96,8 +104,12 @@ impl Run<'_> {
         if let Err(e) = cleanup(endpoint.as_ref(), dir, self.guard.transfer_id(), false) {
             log::warn!("[project_transfer] cannot drop the temporary ref: {e}");
         }
-        let check = unchanged(endpoint.as_ref(), plan, &outcome.snapshot);
         leg.backup_ref = Some(backup_ref);
+        let ignored = back_up_ignored(endpoint.as_ref(), plan, outcome.ignored.as_ref())
+            .map_err(|e| failed(format!("couldn't back its ignored files up: {e}")))?;
+        leg.warnings.extend(skipped_warning(&ignored, plan));
+        leg.ignored_backup = Some(ignored);
+        let check = unchanged(endpoint.as_ref(), plan, &outcome.snapshot);
         match check {
             Ok(None) => {}
             Ok(Some(what)) => {
@@ -115,8 +127,9 @@ impl Run<'_> {
     }
 
     /// Keep the snapshot of each branch carried out of `workspace` under a
-    /// backup ref in its local clone, then — unless one of its clones changed
-    /// since the snapshot — delete the workspace.
+    /// backup ref in its local clone and its ignored files in the backup,
+    /// then — unless one of its clones changed since the snapshot — delete
+    /// the workspace.
     fn remove_workspace_source(
         &self,
         workspace: &str,
@@ -129,6 +142,7 @@ impl Run<'_> {
                 && leg.plan.is_some()
                 && leg.outcome.is_some()
         };
+        let endpoint = self.host.workspace_endpoint(workspace);
         for leg in legs.iter_mut().filter(|l| from_here(l)) {
             let (Some(plan), Some(outcome)) = (&leg.plan, &leg.outcome) else {
                 continue;
@@ -141,6 +155,16 @@ impl Run<'_> {
                 Ok(backup_ref) => leg.backup_ref = Some(backup_ref),
                 Err(e) => failures.push(format!("{}: {e}", leg.row.branch_name)),
             }
+            match back_up_ignored(endpoint.as_ref(), plan, outcome.ignored.as_ref()) {
+                Ok(ignored) => {
+                    leg.warnings.extend(skipped_warning(&ignored, plan));
+                    leg.ignored_backup = Some(ignored);
+                }
+                Err(e) => failures.push(format!(
+                    "{}: couldn't back its ignored files up: {e}",
+                    leg.row.branch_name
+                )),
+            }
         }
         // Every check in one exec, as close to the delete as it can be.
         let checks: Vec<_> = legs
@@ -149,7 +173,6 @@ impl Run<'_> {
             .filter_map(|l| Some((l.plan.as_ref()?, &l.outcome.as_ref()?.snapshot)))
             .collect();
         if !checks.is_empty() {
-            let endpoint = self.host.workspace_endpoint(workspace);
             match unchanged_all(endpoint.as_ref(), &checks) {
                 Ok(answers) => {
                     for ((plan, _), answer) in checks.iter().zip(answers) {
@@ -216,4 +239,26 @@ impl Run<'_> {
         self.journal.borrow_mut().warnings.extend(left);
         self.close_journal(backups::ROLLED_BACK, None, None);
     }
+}
+
+/// Said when a source's ignored files were too many to back up, so removing
+/// the source deletes them.
+fn skipped_warning(ignored: &IgnoredFiles, plan: &CarryPlan) -> Option<TransferIssue> {
+    if !ignored.over_cap {
+        return None;
+    }
+    let mb = |bytes: u64| bytes.div_ceil(1024 * 1024);
+    let (files, were, they) = match ignored.files {
+        1 => ("1 ignored file".to_string(), "wasn't", "it's"),
+        n => (format!("{n} ignored files"), "weren't", "they're"),
+    };
+    Some(TransferIssue::new(
+        "ignored_backup_skipped",
+        format!(
+            "{}'s {files} ({} MB) {were} backed up: {they} over the {} MB a transfer keeps.",
+            plan.source_branch,
+            mb(ignored.bytes),
+            mb(plan.ignored_cap)
+        ),
+    ))
 }

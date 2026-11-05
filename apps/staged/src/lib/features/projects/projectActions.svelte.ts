@@ -32,9 +32,14 @@ import { projectStateStore } from '../../stores/projectState.svelte';
 import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
 import { focusIfDropped, type FocusAfterRemove } from './focusAfterRemove';
 import { workspaceLifecycle } from './workspaceLifecycle.svelte';
-import { setTransferUncommittedChanges } from '../settings/preferences.svelte';
 import {
+  setTransferIgnoredFiles,
+  setTransferUncommittedChanges,
+} from '../settings/preferences.svelte';
+import {
+  asksAboutIgnored,
   asksAboutUncommitted,
+  ignoredTransferBlocked,
   isTransferCancelledError,
   issueMessage,
   transferDestinationLabel,
@@ -232,11 +237,19 @@ class ProjectActionsController {
    * remembered) when some repo has, or may have, uncommitted changes (see
    * asksAboutUncommitted). Without it there is nothing to opt out of, so
    * whatever turns up meanwhile is carried.
+   *
+   * `includeIgnored` is the second checkbox, which shows only when some repo
+   * has ignored files (asksAboutIgnored) and can't be ticked when they are
+   * over the cap (ignoredTransferBlocked). It is remembered, and sent, only
+   * when it was shown and could be ticked; otherwise ignored files stay in
+   * the backup, as they always did.
    */
   async confirmPendingTransfer({
     includeUncommitted,
+    includeIgnored,
   }: {
     includeUncommitted: boolean;
+    includeIgnored: boolean;
   }): Promise<void> {
     const pending = this._pendingTransfer;
     if (pending?.status !== 'ready' || !pending.preflight.canTransfer) return;
@@ -247,7 +260,14 @@ class ProjectActionsController {
     if (asked) {
       setTransferUncommittedChanges(includeUncommitted);
     }
-    await this.transferProject(project, preflight, asked ? includeUncommitted : true);
+    const askedIgnored = asksAboutIgnored(preflight) && ignoredTransferBlocked(preflight) === null;
+    if (askedIgnored) {
+      setTransferIgnoredFiles(includeIgnored);
+    }
+    await this.transferProject(project, preflight, {
+      includeUncommitted: asked ? includeUncommitted : true,
+      includeIgnored: askedIgnored && includeIgnored,
+    });
   }
 
   /** Dismiss the transfer dialog without transferring. */
@@ -273,7 +293,7 @@ class ProjectActionsController {
   private async transferProject(
     project: Project,
     preflight: ProjectTransferPreflight,
-    includeUncommitted: boolean
+    { includeUncommitted, includeIgnored }: { includeUncommitted: boolean; includeIgnored: boolean }
   ): Promise<void> {
     const id = project.id;
     if (projectsDataStore.isProjectDeleting(id) || projectsDataStore.isProjectTransferring(id)) {
@@ -284,7 +304,7 @@ class ProjectActionsController {
     const destination = transferDestinationLabel(direction);
     projectsDataStore.projectTransferStarted(id, direction);
     try {
-      const result = await commands.transferProject(id, includeUncommitted);
+      const result = await commands.transferProject(id, includeUncommitted, includeIgnored);
       projectsDataStore.projectTransferFinished(id, result.transferId);
       const warnings = transferResultWarnings(result, preflight);
       const notes = warnings.map(issueMessage);

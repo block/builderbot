@@ -1,12 +1,14 @@
 //! Carrying one repository's branch from one end to the other.
 //!
 //! [`carry_repo`] snapshots the source, brings the bundle — and the LFS
-//! archive beside it, when the snapshot has one — to this machine (where they
-//! stay as the backup), sends them on to the destination, and lands them
+//! archive beside it, when the snapshot has one, and an archive of the
+//! source's ignored files when the plan carries them — to this machine (where
+//! they stay as the backup), sends them on to the destination, and lands them
 //! there. The steps either side of it — preparing the destination and
 //! reporting its [`origin_tips`] first, adding a local worktree and running
-//! [`finish`] in it after, [`cleanup`] on failure, and checking the source is
-//! [`unchanged`] before deleting it — are the orchestrator's.
+//! [`finish`] in it after, [`cleanup`] on failure, and before deleting the
+//! source, [`back_up_ignored`] and checking it is [`unchanged`] — are the
+//! orchestrator's.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -16,8 +18,8 @@ use sha2::{Digest, Sha256};
 
 use super::endpoint::TransferEndpoint;
 use super::scripts::{
-    self, ApplyMode, ApplyReport, ApplyRequest, BundleFile, LfsPayload, OriginTips, ScriptReport,
-    Snapshot,
+    self, ApplyMode, ApplyReport, ApplyRequest, BundleFile, IgnoredFiles, LfsPayload, OriginTips,
+    ScriptReport, Snapshot,
 };
 use super::{is_valid_transfer_id, TransferError};
 
@@ -73,6 +75,14 @@ pub struct CarryPlan {
     /// The LFS objects the source has for the branch, by the preflight's
     /// count: what the snapshot packs beside the bundle.
     pub lfs_bytes: u64,
+    /// Carry the source's ignored files and place them at the destination.
+    /// Off, they are only backed up, when the source is removed.
+    pub include_ignored: bool,
+    /// The most to archive of them; past it they are neither carried nor
+    /// backed up.
+    pub ignored_cap: u64,
+    /// Their size by the preflight's count: what archiving them reads.
+    pub ignored_bytes: u64,
 }
 
 impl CarryPlan {
@@ -82,6 +92,17 @@ impl CarryPlan {
         let mut path = self.local_bundle.as_os_str().to_owned();
         path.push(".lfs.tar");
         PathBuf::from(path)
+    }
+
+    /// The ignored files' archive's name at each end.
+    pub fn ignored_name(&self) -> String {
+        IgnoredFiles::archive_name(&self.bundle_name)
+    }
+
+    /// Where the ignored files' archive is kept on this machine, beside the
+    /// bundle.
+    pub fn local_ignored(&self) -> PathBuf {
+        self.local_bundle.with_file_name(self.ignored_name())
     }
 }
 
@@ -96,6 +117,11 @@ pub struct CarryOutcome {
     pub dest_bundle: String,
     /// The LFS archive's, when the snapshot has one.
     pub dest_lfs: Option<String>,
+    /// The ignored files archived for the destination, when the plan carries
+    /// them.
+    pub ignored: Option<IgnoredFiles>,
+    /// Their archive's path at the destination, when there was one to send.
+    pub dest_ignored: Option<String>,
     pub applied: ApplyReport,
     /// Whether the destination lacked the commits the first bundle was cut
     /// against, so it was re-bundled whole.
@@ -106,7 +132,8 @@ pub struct CarryOutcome {
 #[derive(Debug, Clone, Copy)]
 pub enum CarryStep<'a> {
     Snapshotting,
-    /// Moving a bundle (and any LFS archive) of this many bytes.
+    /// Moving a bundle (and any LFS or ignored files' archive) of this many
+    /// bytes.
     Moving {
         bytes: u64,
     },
@@ -157,10 +184,28 @@ pub fn carry_repo_with(
         started.elapsed().as_millis()
     );
 
+    let ignored = if plan.include_ignored {
+        let ignored = archive_ignored(source, plan)?;
+        if ignored.over_cap {
+            return Err(TransferError::Script {
+                step: "ignored files",
+                endpoint: source.describe(),
+                message: format!(
+                    "the ignored files come to {} bytes, more than the {} a transfer carries",
+                    ignored.bytes, plan.ignored_cap
+                ),
+            });
+        }
+        Some(ignored)
+    } else {
+        None
+    };
+    let ignored_archive = ignored.as_ref().and_then(|i| i.archive.as_ref());
+
     let mut bundle = snapshot.bundle.clone();
     let lfs_bytes = snapshot.lfs.as_ref().map_or(0, |lfs| lfs.archive.size);
     on_step(CarryStep::Moving {
-        bytes: bundle.size + lfs_bytes,
+        bytes: bundle.size + lfs_bytes + ignored_archive.map_or(0, |a| a.size),
     })?;
     move_file(
         source,
@@ -187,6 +232,22 @@ pub fn carry_repo_with(
         }
         None => None,
     };
+    let dest_ignored = match ignored_archive {
+        Some(archive) => {
+            let dest_ignored = dest.scratch_path(&plan.transfer_id, &plan.ignored_name())?;
+            move_file(
+                source,
+                dest,
+                "the ignored files",
+                &source.scratch_path(&plan.transfer_id, &plan.ignored_name())?,
+                &plan.local_ignored(),
+                &dest_ignored,
+                archive,
+            )?;
+            Some(dest_ignored)
+        }
+        None => None,
+    };
     on_step(CarryStep::Applying {
         snapshot: &snapshot,
     })?;
@@ -199,6 +260,7 @@ pub fn carry_repo_with(
             &dest_bundle,
             bundle,
             dest_lfs.as_deref(),
+            dest_ignored.as_deref().zip(ignored_archive),
         )
     };
     let applied = match land_bundle(&bundle) {
@@ -239,9 +301,57 @@ pub fn carry_repo_with(
         bundle,
         dest_bundle,
         dest_lfs,
+        ignored,
+        dest_ignored,
         applied,
         retried_without_exclusions: retried,
     })
+}
+
+/// Archive the source's ignored files into the transfer's backup on this
+/// machine, `plan.local_ignored()`, right before the source is removed: an
+/// archive the source writes, brought here and checked. Over the cap, or with
+/// none, nothing is written (see [`IgnoredFiles`]). `carried` is what the
+/// carry already brought, which is not fetched again when the source's
+/// archive comes out the same.
+pub fn back_up_ignored(
+    source: &dyn TransferEndpoint,
+    plan: &CarryPlan,
+    carried: Option<&IgnoredFiles>,
+) -> Result<IgnoredFiles, TransferError> {
+    check_transfer_id(&plan.transfer_id)?;
+    let ignored = archive_ignored(source, plan)?;
+    if let Some(archive) = &ignored.archive {
+        let local = plan.local_ignored();
+        let same = carried.and_then(|c| c.archive.as_ref()) == Some(archive)
+            && sha256_file(&local).is_ok_and(|sha| sha == archive.sha256);
+        if !same {
+            fetch_file(
+                source,
+                "the ignored files",
+                &source.scratch_path(&plan.transfer_id, &plan.ignored_name())?,
+                &local,
+                archive,
+            )?;
+        }
+    }
+    Ok(ignored)
+}
+
+/// Run [`scripts::IGNORED_ARCHIVE_SCRIPT`] in the source's scratch directory.
+fn archive_ignored(
+    source: &dyn TransferEndpoint,
+    plan: &CarryPlan,
+) -> Result<IgnoredFiles, TransferError> {
+    let archive = source.scratch_path(&plan.transfer_id, &plan.ignored_name())?;
+    let report = run_step_sized(
+        source,
+        "ignored files",
+        scripts::IGNORED_ARCHIVE_SCRIPT,
+        &scripts::ignored_archive_args(&plan.source_dir, &archive, plan.ignored_cap),
+        plan.ignored_bytes.min(plan.ignored_cap),
+    )?;
+    IgnoredFiles::parse(&report)
 }
 
 /// Fetch `branches` from origin at `endpoint` and report their tips.
@@ -280,10 +390,26 @@ pub fn finish(
             snapshot: &outcome.snapshot,
             restore: plan.include_uncommitted,
             lfs_path: outcome.dest_lfs.as_deref(),
+            ignored: outcome
+                .dest_ignored
+                .as_deref()
+                .zip(carried_archive(outcome)),
         },
         // Checking LFS content out writes every object again.
-        plan.untracked_bytes + outcome.bundle.size + lfs_archive_bytes(&outcome.snapshot),
+        plan.untracked_bytes
+            + outcome.bundle.size
+            + lfs_archive_bytes(&outcome.snapshot)
+            + placing_bytes(carried_archive(outcome)),
     )
+}
+
+fn carried_archive(outcome: &CarryOutcome) -> Option<&BundleFile> {
+    outcome.ignored.as_ref().and_then(|i| i.archive.as_ref())
+}
+
+/// Placing ignored files unpacks their archive and copies each file out.
+fn placing_bytes(archive: Option<&BundleFile>) -> u64 {
+    archive.map_or(0, |a| a.size * 2)
 }
 
 /// Whether `plan`'s source checkout is still what `snapshot` captured: on
@@ -445,11 +571,14 @@ fn land(
     dest_bundle: &str,
     bundle: &BundleFile,
     dest_lfs: Option<&str>,
+    dest_ignored: Option<(&str, &BundleFile)>,
 ) -> Result<ApplyReport, TransferError> {
     let mode = match plan.landing {
         Landing::Checkout => ApplyMode::Checkout,
+        // The worktree's `finish` places them.
         Landing::Branch => ApplyMode::Branch,
     };
+    let dest_ignored = dest_ignored.filter(|_| mode == ApplyMode::Checkout);
     // Unpacking the LFS objects writes them, and fetching what the source
     // lacked downloads the rest.
     let lfs_bytes = snapshot
@@ -468,8 +597,9 @@ fn land(
             snapshot,
             restore: plan.include_uncommitted,
             lfs_path: dest_lfs,
+            ignored: dest_ignored,
         },
-        plan.untracked_bytes + bundle.size + lfs_bytes,
+        plan.untracked_bytes + bundle.size + lfs_bytes + placing_bytes(dest_ignored.map(|d| d.1)),
     )
 }
 
@@ -503,7 +633,7 @@ fn apply(
     Ok(applied)
 }
 
-/// Bring a bundle or LFS archive from the source to `local` on this machine,
+/// Bring a bundle or archive from the source to `local` on this machine,
 /// check it, and send it to the destination. Either leg is a no-op when the
 /// file is already there.
 fn move_file(
@@ -515,6 +645,19 @@ fn move_file(
     dest_path: &str,
     file: &BundleFile,
 ) -> Result<(), TransferError> {
+    fetch_file(source, file_name, source_path, local, file)?;
+    dest.put_file(local, dest_path)
+}
+
+/// Bring a file from the source to `local` on this machine, and check it is
+/// what the source described.
+fn fetch_file(
+    source: &dyn TransferEndpoint,
+    file_name: &'static str,
+    source_path: &str,
+    local: &Path,
+    file: &BundleFile,
+) -> Result<(), TransferError> {
     source.get_file(source_path, local, file.size)?;
     let actual = sha256_file(local)?;
     if actual != file.sha256 {
@@ -524,7 +667,7 @@ fn move_file(
             actual,
         });
     }
-    dest.put_file(local, dest_path)
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String, TransferError> {

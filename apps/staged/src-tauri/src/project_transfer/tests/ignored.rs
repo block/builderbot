@@ -1,0 +1,493 @@
+//! Ignored files: which ones a transfer archives, the cap, and placing them
+//! at the destination, under every shell.
+
+use std::os::unix::fs::symlink;
+
+use super::*;
+use scripts::{IgnoredFiles, IgnoredPlacement, IGNORED_ARCHIVE_SCRIPT, IGNORED_FILES_CAP};
+
+pub(in crate::project_transfer) type Files = BTreeMap<String, Vec<u8>>;
+
+/// Put `feature` in `repo` with an ignore file of its own and a file of
+/// every kind beside it; returns the ignored files a transfer archives.
+pub(in crate::project_transfer) fn ignored_fixture(repo: &Path) -> Files {
+    git(repo, &["checkout", "-q", "-b", "feature"]);
+    write(
+        repo,
+        ".gitignore",
+        "*.log\n.env\nnode_modules/\nbuild/\n*.tmp\n",
+    );
+    write(repo, "src/tracked.txt", "tracked\n");
+    // Tracked, though a pattern matches it: the branch's own.
+    write(repo, "kept.log", "tracked log\n");
+    git(repo, &["add", "-f", "kept.log"]);
+    commit(repo, "ignore things");
+
+    let archived: Files = [
+        (".env", b"SECRET=1\n".to_vec()),
+        ("debug.log", b"debug\n".to_vec()),
+        // In a tracked directory.
+        ("src/local.log", b"local\n".to_vec()),
+        // An untracked directory holding nothing but ignored files.
+        ("only-ignored/a.tmp", b"a\n".to_vec()),
+        ("only-ignored/deep/b.log", b"b\n".to_vec()),
+        // Beside an untracked file.
+        ("mixed/x.log", b"x\n".to_vec()),
+        ("ünïcødé.log", "ü\n".as_bytes().to_vec()),
+        ("with space.log", b"space\n".to_vec()),
+        ("-dash.log", b"dash\n".to_vec()),
+        ("noise.tmp", noise(10_000, 5)),
+    ]
+    .into_iter()
+    .map(|(p, c)| (p.to_string(), c))
+    .collect();
+    for (path, content) in &archived {
+        write(repo, path, content);
+    }
+    // Never archived: in ignored directories, at the top or nested, not
+    // ignored, or symlinks.
+    for path in [
+        "node_modules/pkg/index.js",
+        "node_modules/.env",
+        "src/node_modules/x.js",
+        "src/build/y.log",
+        "build/out.log",
+        "mixed/todo.txt",
+        "notes.txt",
+    ] {
+        write(repo, path, "left\n");
+    }
+    write(repo, "kept.log", "tracked log, edited\n");
+    symlink("a.txt", repo.join("link.log")).unwrap();
+    symlink("src", repo.join("dirlink.tmp")).unwrap();
+    archived
+}
+
+/// Every file under `dir`, by its path from there.
+pub(in crate::project_transfer) fn files_under(dir: &Path) -> Files {
+    fn walk(root: &Path, dir: &Path, files: &mut Files) {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                walk(root, &path, files);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                files.insert(rel, fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut files = Files::new();
+    walk(dir, dir, &mut files);
+    files
+}
+
+/// Unpack an archive into `into`, and check it held `expected` and nothing
+/// else.
+fn assert_archive_holds(archive: &Path, into: &Path, expected: &Files, what: &str) {
+    fs::create_dir_all(into).unwrap();
+    let status = Command::new("tar")
+        .arg("-xf")
+        .arg(archive)
+        .arg("-C")
+        .arg(into)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_holds(into, expected, what);
+}
+
+/// `dir` holds `expected` and nothing else. By lookup, as macOS tar writes
+/// the names it unpacks decomposed (NFD), which the filesystem finds either
+/// way.
+fn assert_holds(dir: &Path, expected: &Files, what: &str) {
+    assert_eq!(ignored_in(dir, expected), *expected, "{what}");
+    assert_eq!(files_under(dir).len(), expected.len(), "{what}");
+}
+
+fn archive(
+    endpoint: &LocalEndpoint,
+    checkout: &Path,
+    archive: &Path,
+    cap: u64,
+) -> Result<IgnoredFiles, String> {
+    let output = endpoint
+        .run_script(
+            IGNORED_ARCHIVE_SCRIPT,
+            &scripts::ignored_archive_args(
+                checkout.to_str().unwrap(),
+                archive.to_str().unwrap(),
+                cap,
+            ),
+        )
+        .unwrap();
+    if !output.success {
+        return Err(format!("{}{}", output.stdout, output.stderr));
+    }
+    IgnoredFiles::parse(&output.stdout).map_err(|e| e.to_string())
+}
+
+fn total(files: &Files) -> u64 {
+    files.values().map(|c| c.len() as u64).sum()
+}
+
+#[test]
+fn archives_ignored_files_outside_ignored_directories_and_counts_them_alike() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let expected = ignored_fixture(&w.source);
+        let endpoint = w.endpoint(&w.local_scratch);
+        let path = w.local_scratch.join("x.ignored.tar");
+
+        let ignored = archive(&endpoint, &w.source, &path, IGNORED_FILES_CAP).unwrap();
+
+        assert_archive_holds(&path, &w.root.join("unpacked"), &expected, shell);
+        assert_eq!(ignored.files, expected.len() as u64, "{shell}");
+        assert_eq!(ignored.bytes, total(&expected), "{shell}");
+        assert!(!ignored.over_cap);
+        let archive_file = ignored.archive.unwrap();
+        assert_eq!(archive_file.size, fs::metadata(&path).unwrap().len());
+        assert_eq!(
+            archive_file.sha256,
+            hex::encode(Sha256::digest(fs::read(&path).unwrap()))
+        );
+        // Nothing beside it: the list and the partial archive are gone.
+        let names: Vec<String> = fs::read_dir(&w.local_scratch)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["x.ignored.tar"], "{shell}");
+
+        // The preflight counts the same files.
+        let preflight = endpoint
+            .run_script(
+                scripts::PREFLIGHT_SCRIPT,
+                &scripts::preflight_args([(w.source.to_str().unwrap(), "feature")]),
+            )
+            .unwrap();
+        let report = &scripts::sections(&preflight.stdout)[0];
+        assert_eq!(
+            report.get("ignored_files"),
+            Some(expected.len().to_string().as_str()),
+            "{shell}: {}",
+            preflight.stdout
+        );
+        assert_eq!(
+            report.get("ignored_bytes"),
+            Some(total(&expected).to_string().as_str()),
+            "{shell}"
+        );
+        // node_modules/, src/node_modules/, src/build/ and build/.
+        assert_eq!(report.get("ignored_dirs"), Some("4"), "{shell}");
+    }
+}
+
+#[test]
+fn ignored_files_over_the_cap_are_not_archived() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let expected = ignored_fixture(&w.source);
+        let endpoint = w.endpoint(&w.local_scratch);
+        let path = w.local_scratch.join("x.ignored.tar");
+        let bytes = total(&expected);
+
+        let over = archive(&endpoint, &w.source, &path, bytes - 1).unwrap();
+        assert!(over.over_cap, "{shell}");
+        assert_eq!((over.files, over.bytes), (expected.len() as u64, bytes));
+        assert_eq!(over.archive, None);
+        assert!(
+            fs::read_dir(&w.local_scratch).unwrap().next().is_none(),
+            "{shell}: left something behind"
+        );
+
+        let at_cap = archive(&endpoint, &w.source, &path, bytes).unwrap();
+        assert!(!at_cap.over_cap, "{shell}");
+        assert!(at_cap.archive.is_some());
+
+        // A checkout without any: nothing to write.
+        let clean = archive(
+            &endpoint,
+            &w.dest,
+            &w.local_scratch.join("y.ignored.tar"),
+            IGNORED_FILES_CAP,
+        )
+        .unwrap();
+        assert_eq!((clean.files, clean.bytes, clean.archive), (0, 0, None));
+        assert!(!w.local_scratch.join("y.ignored.tar").exists());
+
+        assert!(archive(&endpoint, &w.source, &path, 0).is_ok());
+        let err = archive(&endpoint, &w.root.join("nope"), &path, 1).unwrap_err();
+        assert!(err.contains("cannot enter"), "{shell}: {err}");
+    }
+}
+
+/// The ignored files a checkout has, beside its tracked and untracked ones.
+fn ignored_in(checkout: &Path, paths: &Files) -> Files {
+    paths
+        .keys()
+        .filter_map(|p| Some((p.clone(), fs::read(checkout.join(p)).ok()?)))
+        .collect()
+}
+
+#[test]
+fn ignored_files_arrive_both_ways_when_asked_for() {
+    for shell in shells() {
+        // Local → workspace, landing with a checkout.
+        let w = World::new(shell);
+        let expected = ignored_fixture(&w.source);
+        let source = w.endpoint(&w.local_scratch);
+        let dest = w.endpoint(&w.remote_scratch);
+        let plan = CarryPlan {
+            include_ignored: true,
+            ignored_bytes: total(&expected),
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Checkout,
+                ("feature", "feature"),
+                true,
+                &["main"],
+            )
+        };
+        let before = observe(&w.source);
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+        assert_eq!(ignored_in(&w.dest, &expected), expected, "{shell}");
+        assert_eq!(
+            outcome.applied.ignored,
+            Some(IgnoredPlacement {
+                placed: expected.len() as u64,
+                ..IgnoredPlacement::default()
+            }),
+            "{shell}"
+        );
+        // They don't pass for changes there, and the source is as it was.
+        assert_eq!(observe(&w.dest), before, "{shell}");
+        assert_eq!(observe(&w.source), before, "{shell}");
+        // Kept on this machine, beside the bundle, and unpacked at the
+        // destination only for as long as placing took.
+        assert_archive_holds(
+            &plan.local_ignored(),
+            &w.root.join("kept"),
+            &expected,
+            shell,
+        );
+        let staged = format!("{}.d", outcome.dest_ignored.as_deref().unwrap());
+        assert!(!Path::new(&staged).exists(), "{shell}: {staged} left");
+
+        // Workspace → local, finishing in a new worktree.
+        let w = World::new(shell);
+        let expected = ignored_fixture(&w.source);
+        let source = w.endpoint(&w.remote_scratch);
+        let dest = w.endpoint(&w.local_scratch);
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Branch,
+                ("feature", "feature"),
+                false,
+                &["main"],
+            )
+        };
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+        // A branch landing places nothing: there is no checkout yet.
+        assert_eq!(outcome.applied.ignored, None);
+        let worktree = w.root.join("wt-feature");
+        git(
+            &w.dest,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_str().unwrap(),
+                "feature",
+            ],
+        );
+        let finished = finish(&dest, &plan, &outcome, worktree.to_str().unwrap()).unwrap();
+        assert_eq!(ignored_in(&worktree, &expected), expected, "{shell}");
+        assert_eq!(
+            finished.ignored.map(|p| p.placed),
+            Some(expected.len() as u64)
+        );
+        // With the uncommitted changes left behind, the worktree is clean.
+        let status = git(
+            &worktree,
+            &["status", "--porcelain", "--untracked-files=all"],
+        );
+        assert_eq!(status, "", "{shell}");
+    }
+}
+
+#[test]
+fn placing_ignored_files_never_overwrites_or_follows_a_symlink() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let mut expected = ignored_fixture(&w.source);
+        // Ignored at the source only, so not at the destination.
+        fs::write(w.source.join(".git/info/exclude"), "*.secret\n").unwrap();
+        write(&w.source, "x.secret", "secret\n");
+        // Already there, and ignored on main too, so it isn't untracked.
+        write(&w.dest, "debug.log", "theirs\n");
+        // A symlink out of the checkout where a directory of theirs goes.
+        let outside = w.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, w.dest.join("only-ignored")).unwrap();
+
+        let source = w.endpoint(&w.local_scratch);
+        let dest = w.endpoint(&w.remote_scratch);
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.origin_plan(
+                &source,
+                &dest,
+                Landing::Checkout,
+                ("feature", "feature"),
+                true,
+                &["main"],
+            )
+        };
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+
+        assert_eq!(fs::read(w.dest.join("debug.log")).unwrap(), b"theirs\n");
+        assert!(
+            files_under(&outside).is_empty(),
+            "{shell}: wrote through the symlink"
+        );
+        assert!(!w.dest.join("x.secret").exists(), "{shell}");
+        let placement = outcome.applied.ignored.unwrap();
+        assert_eq!(placement.unignored, 1, "{shell}");
+        assert_eq!(placement.unignored_example.as_deref(), Some("x.secret"));
+        // debug.log, and both files under the symlink.
+        assert_eq!(placement.in_the_way, 3, "{shell}: {placement:?}");
+        assert!(placement.in_the_way_example.is_some());
+        assert_eq!(placement.placed, expected.len() as u64 - 3, "{shell}");
+        for path in ["debug.log", "only-ignored/a.tmp", "only-ignored/deep/b.log"] {
+            expected.remove(path);
+        }
+        assert_eq!(ignored_in(&w.dest, &expected), expected, "{shell}");
+        // The symlink was theirs, and is all that is untracked.
+        let status = git(&w.dest, &["status", "--porcelain", "--untracked-files=all"]);
+        let untracked: Vec<&str> = status.lines().filter(|l| l.starts_with("??")).collect();
+        let source_untracked = git(
+            &w.source,
+            &["status", "--porcelain", "--untracked-files=all"],
+        );
+        let mut wanted: Vec<&str> = source_untracked
+            .lines()
+            .filter(|l| l.starts_with("??"))
+            .collect();
+        wanted.push("?? only-ignored");
+        wanted.sort();
+        assert_eq!(untracked, wanted, "{shell}");
+    }
+}
+
+#[test]
+fn an_ignored_files_archive_that_changed_on_the_way_fails_the_finish() {
+    for shell in shells() {
+        let w = World::new(shell);
+        ignored_fixture(&w.source);
+        let source = w.endpoint(&w.remote_scratch);
+        let dest = w.endpoint(&w.local_scratch);
+        let plan = CarryPlan {
+            include_ignored: true,
+            ..w.plan(
+                &source,
+                Landing::Branch,
+                ("feature", "feature"),
+                true,
+                vec![],
+            )
+        };
+        let outcome = carry_repo(&source, &dest, &plan).unwrap();
+        let archive = outcome.dest_ignored.clone().unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        bytes.extend_from_slice(b"tampered");
+        fs::write(&archive, bytes).unwrap();
+        let worktree = w.root.join("wt-feature");
+        git(
+            &w.dest,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_str().unwrap(),
+                "feature",
+            ],
+        );
+
+        let err = finish(&dest, &plan, &outcome, worktree.to_str().unwrap()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("ignored files do not match their checksum"),
+            "{shell}: {err}"
+        );
+        assert!(!worktree.join(".env").exists());
+    }
+}
+
+/// Teardown archives into the backup whatever the plan carried: off, the
+/// source's archive is the only copy; on, one unchanged since the carry is
+/// not fetched again.
+#[test]
+fn backing_ignored_files_up_brings_them_here_once() {
+    for shell in shells() {
+        let w = World::new(shell);
+        let expected = ignored_fixture(&w.source);
+        let source = Recording::new(w.endpoint(&w.remote_scratch));
+        let fetched = || {
+            source
+                .files()
+                .iter()
+                .filter(|f| f.starts_with("get "))
+                .count()
+        };
+        let plan = w.plan(
+            &source.inner,
+            Landing::Branch,
+            ("feature", "feature"),
+            true,
+            vec![],
+        );
+        let backup = super::super::carry::back_up_ignored(&source, &plan, None).unwrap();
+        assert_eq!(backup.files, expected.len() as u64);
+        assert_archive_holds(
+            &plan.local_ignored(),
+            &w.root.join("backup"),
+            &expected,
+            shell,
+        );
+        assert_eq!(fetched(), 1, "{shell}");
+
+        // The same again, as the carry already brought it.
+        let again = super::super::carry::back_up_ignored(&source, &plan, Some(&backup)).unwrap();
+        assert_eq!(again, backup);
+        assert_eq!(fetched(), 1, "{shell}: fetched it twice");
+
+        // A file changed since: fetched again.
+        write(&w.source, ".env", "SECRET=2\n");
+        let changed = super::super::carry::back_up_ignored(&source, &plan, Some(&backup)).unwrap();
+        assert_ne!(changed.archive, backup.archive);
+        assert_eq!(fetched(), 2, "{shell}");
+        let mut now = expected.clone();
+        now.insert(".env".to_string(), b"SECRET=2\n".to_vec());
+        assert_archive_holds(&plan.local_ignored(), &w.root.join("backup-2"), &now, shell);
+
+        // Over the cap: nothing written or fetched, and what is here stays.
+        let small = CarryPlan {
+            ignored_cap: 1,
+            ..plan.clone()
+        };
+        let over = super::super::carry::back_up_ignored(&source, &small, None).unwrap();
+        assert!(over.over_cap);
+        assert_eq!(fetched(), 2, "{shell}");
+    }
+}

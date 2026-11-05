@@ -9,7 +9,10 @@
   with what it carries. Blockers disable Transfer and say why. When a repo has
   uncommitted changes, or may have (a workspace the transfer resumes first),
   a checkbox (defaulting to the last answer) chooses whether they move or
-  stay behind in the backup.
+  stay behind in the backup. When a repo has ignored files outside ignored
+  folders (`.env`), a second, independent checkbox (also defaulting to the
+  last answer, off at first) chooses whether those move too; ignored files
+  over the cap a transfer carries disable it and say why.
 -->
 <script lang="ts" module>
   let dialogCounter = 0;
@@ -27,13 +30,17 @@
   import { projectActions } from './projectActions.svelte';
   import ProjectTransferRepoRow from './ProjectTransferRepoRow.svelte';
   import {
+    asksAboutIgnored,
     asksAboutUncommitted,
+    ignoredTransferBlocked,
     issueMessage,
     transferActionLabel,
     uncommittedOnlyPossible,
   } from './projectTransfer';
 
-  const checkboxId = `project-transfer-uncommitted-${++dialogCounter}`;
+  const dialogId = ++dialogCounter;
+  const checkboxId = `project-transfer-uncommitted-${dialogId}`;
+  const ignoredCheckboxId = `project-transfer-ignored-${dialogId}`;
 
   let pending = $derived(projectActions.pendingTransfer);
   let preflight = $derived(pending?.status === 'ready' ? pending.preflight : null);
@@ -45,17 +52,32 @@
       ? 'Transfer uncommitted changes, if there are any'
       : 'Transfer uncommitted changes'
   );
+  let asksIgnored = $derived(preflight ? asksAboutIgnored(preflight) : false);
+  let ignoredBlocked = $derived(preflight ? ignoredTransferBlocked(preflight) : null);
+  let backupNote = $derived(
+    !asksIgnored
+      ? ''
+      : pending?.direction === 'toRemote'
+        ? ', after their ignored files are backed up on this machine'
+        : ', after its ignored files are backed up on this machine'
+  );
 
   // Each open starts from the remembered answer; a change made in another
   // window while this one is open doesn't flip the box under the user.
   let includeUncommitted = $state(true);
+  let includeIgnored = $state(false);
   let openedFor: string | null = null;
   $effect(() => {
     const projectId = pending?.project.id ?? null;
     if (projectId === openedFor) return;
     openedFor = projectId;
-    if (projectId) includeUncommitted = preferences.transferUncommittedChanges;
+    if (projectId) {
+      includeUncommitted = preferences.transferUncommittedChanges;
+      includeIgnored = preferences.transferIgnoredFiles;
+    }
   });
+  /** What the transfer would actually do with ignored files, for the rows. */
+  let carryIgnored = $derived(asksIgnored && ignoredBlocked === null && includeIgnored);
 
   function close() {
     projectActions.cancelPendingTransfer();
@@ -64,7 +86,7 @@
   function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     if (!preflight?.canTransfer) return;
-    void projectActions.confirmPendingTransfer({ includeUncommitted });
+    void projectActions.confirmPendingTransfer({ includeUncommitted, includeIgnored });
   }
 </script>
 
@@ -121,14 +143,14 @@
           {#if preflight.repos.length > 0}
             <ul class="repo-list" aria-label="Branches">
               {#each preflight.repos as row (row.branchId)}
-                <ProjectTransferRepoRow {row} />
+                <ProjectTransferRepoRow {row} includeIgnored={carryIgnored} />
               {/each}
             </ul>
           {/if}
 
           {#if asksUncommitted}
-            <div class="uncommitted">
-              <div class="uncommitted-row">
+            <div class="option">
+              <div class="option-row">
                 <Checkbox
                   id={checkboxId}
                   class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
@@ -137,7 +159,7 @@
                 <Label for={checkboxId} class="font-normal">{uncommittedLabel}</Label>
               </div>
               {#if !includeUncommitted}
-                <p class="uncommitted-hint">
+                <p class="option-hint">
                   Uncommitted changes are left behind: they're kept only in a backup on this
                   machine, and each branch starts from its last commit.
                 </p>
@@ -145,10 +167,34 @@
             </div>
           {/if}
 
+          {#if asksIgnored}
+            <div class="option">
+              <div class="option-row">
+                <Checkbox
+                  id={ignoredCheckboxId}
+                  class="data-unchecked:bg-[var(--bg-primary)] dark:data-unchecked:bg-[var(--bg-primary)]"
+                  checked={ignoredBlocked === null && includeIgnored}
+                  onCheckedChange={(checked) => (includeIgnored = checked)}
+                  disabled={ignoredBlocked !== null}
+                  aria-describedby="{ignoredCheckboxId}-hint"
+                />
+                <Label for={ignoredCheckboxId} class="font-normal">
+                  Also transfer ignored files (such as <code>.env</code>)
+                </Label>
+              </div>
+              <p id="{ignoredCheckboxId}-hint" class="option-note">
+                {#if ignoredBlocked}
+                  <span class="option-hint">{ignoredBlocked}</span>
+                {/if}
+                Ignored folders such as <code>node_modules</code> are never transferred.
+              </p>
+            </div>
+          {/if}
+
           <p class="footnote">
-            Ignored files such as <code>.env</code> don't move, and the old
-            {pending.direction === 'toRemote' ? 'worktrees are' : 'workspace is'} removed once the transfer
-            succeeds. Sessions keep their history; follow-ups start a new agent conversation.
+            The old {pending.direction === 'toRemote' ? 'worktrees are' : 'workspace is'} removed once
+            the transfer succeeds{backupNote}. Sessions keep their history; follow-ups start a new
+            agent conversation.
           </p>
 
           {#if !preflight.canTransfer}
@@ -246,22 +292,32 @@
     gap: 6px;
   }
 
-  .uncommitted {
+  .option {
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
 
-  .uncommitted-row {
+  .option-row {
     display: flex;
     align-items: center;
     gap: 8px;
   }
 
-  .uncommitted-hint {
+  .option-hint {
     margin: 0;
     color: var(--status-modified);
     font-size: var(--size-xs);
+  }
+
+  .option-note {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+  }
+
+  .option-note .option-hint {
+    display: block;
   }
 
   .footnote {

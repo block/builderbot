@@ -56,18 +56,44 @@ export function uncommittedBreakdown(row: ProjectTransferRepoPreflight): string 
   );
 }
 
+/** The backend's warning on a repo whose ignored files are over the cap a
+ *  transfer carries or backs up. */
+export const IGNORED_TOO_LARGE = 'ignored_too_large';
+
+function ignoredTooLarge(row: ProjectTransferRepoPreflight): boolean {
+  return row.warnings.some((issue) => issue.code === IGNORED_TOO_LARGE);
+}
+
+/** Whether a transfer asked to carry ignored files moves this repo's. */
+export function carriesIgnoredFiles(
+  row: ProjectTransferRepoPreflight,
+  includeIgnored: boolean
+): boolean {
+  return includeIgnored && row.ignoredFiles > 0 && !ignoredTooLarge(row);
+}
+
 /**
- * What a repo leaves behind as ignored, e.g. "3 ignored files and 2 ignored
- * folders stay behind"; null with nothing ignored.
+ * What happens to a repo's ignored files (outside ignored folders): "3
+ * ignored files will be transferred" when `includeIgnored`, otherwise "…stay
+ * behind (kept in the backup)", or just "…stay behind" over the cap, which
+ * the repo's warning explains. Null with none.
  */
-export function ignoredSummary(row: ProjectTransferRepoPreflight): string | null {
-  const parts = [
-    row.ignoredFiles > 0 && plural(row.ignoredFiles, 'ignored file'),
-    row.ignoredDirs > 0 && plural(row.ignoredDirs, 'ignored folder'),
-  ].filter((part): part is string => Boolean(part));
-  if (parts.length === 0) return null;
-  const one = row.ignoredFiles + row.ignoredDirs === 1;
-  return `${parts.join(' and ')} ${one ? 'stays' : 'stay'} behind`;
+export function ignoredFilesSummary(
+  row: ProjectTransferRepoPreflight,
+  includeIgnored: boolean
+): string | null {
+  if (row.ignoredFiles === 0) return null;
+  const files = plural(row.ignoredFiles, 'ignored file');
+  if (carriesIgnoredFiles(row, includeIgnored)) return `${files} will be transferred`;
+  const stay = `${files} ${row.ignoredFiles === 1 ? 'stays' : 'stay'} behind`;
+  return ignoredTooLarge(row) ? stay : `${stay} (kept in the backup)`;
+}
+
+/** The ignored folders (`node_modules/`) a repo leaves behind, which are never
+ *  carried or backed up, e.g. "2 ignored folders stay behind"; null with none. */
+export function ignoredFoldersSummary(row: ProjectTransferRepoPreflight): string | null {
+  if (row.ignoredDirs === 0) return null;
+  return `${plural(row.ignoredDirs, 'ignored folder')} ${row.ignoredDirs === 1 ? 'stays' : 'stay'} behind`;
 }
 
 /**
@@ -93,6 +119,27 @@ export function asksAboutUncommitted(preflight: ProjectTransferPreflight): boole
  *  but some repo can't be inspected until the transfer resumes it. */
 export function uncommittedOnlyPossible(preflight: ProjectTransferPreflight): boolean {
   return !preflight.hasUncommittedChanges && preflight.repos.some(isUnknown);
+}
+
+/**
+ * Whether the dialog asks about ignored files: only when some repo has some
+ * outside ignored folders. A repo that can't be inspected until its workspace
+ * resumes isn't asked about; its ignored files are backed up.
+ */
+export function asksAboutIgnored(preflight: ProjectTransferPreflight): boolean {
+  return preflight.repos.some((row) => row.ignoredFiles > 0);
+}
+
+/**
+ * Why the ignored-files checkbox can't be ticked, or null when it can: some
+ * repo's ignored files are over the cap, and the backend refuses to start a
+ * transfer asked to carry them. The repo's own warning gives the sizes.
+ */
+export function ignoredTransferBlocked(preflight: ProjectTransferPreflight): string | null {
+  const over = preflight.repos.filter(ignoredTooLarge);
+  if (over.length === 0) return null;
+  const whose = over.length === 1 ? `${over[0].branchName}'s` : "Some branches'";
+  return `${whose} ignored files are too large to transfer, so they can't move this time.`;
 }
 
 function isUnknown(row: { state: ProjectTransferRepoState }): boolean {

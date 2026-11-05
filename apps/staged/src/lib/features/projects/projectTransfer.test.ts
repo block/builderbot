@@ -5,9 +5,13 @@ import type {
   ProjectTransferResult,
 } from '../../types';
 import {
+  asksAboutIgnored,
   asksAboutUncommitted,
+  carriesIgnoredFiles,
   formatBytes,
-  ignoredSummary,
+  ignoredFilesSummary,
+  ignoredFoldersSummary,
+  ignoredTransferBlocked,
   lfsSummary,
   isTransferCancellable,
   isTransferCancelledError,
@@ -41,6 +45,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     conflicted: 0,
     untrackedBytes: 0,
     ignoredFiles: 0,
+    ignoredBytes: 0,
     ignoredDirs: 0,
     lfsPresent: 0,
     lfsPresentBytes: 0,
@@ -90,13 +95,62 @@ describe('labels', () => {
     expect(uncommittedBreakdown(repo())).toBeNull();
   });
 
-  it('sums up what stays behind as ignored, folders included', () => {
-    expect(ignoredSummary(repo())).toBeNull();
-    expect(ignoredSummary(repo({ ignoredFiles: 1 }))).toBe('1 ignored file stays behind');
-    expect(ignoredSummary(repo({ ignoredDirs: 1 }))).toBe('1 ignored folder stays behind');
-    expect(ignoredSummary(repo({ ignoredDirs: 2 }))).toBe('2 ignored folders stay behind');
-    expect(ignoredSummary(repo({ ignoredFiles: 3, ignoredDirs: 1 }))).toBe(
-      '3 ignored files and 1 ignored folder stay behind'
+  it('says whether ignored files move or stay in the backup, and that folders stay', () => {
+    expect(ignoredFilesSummary(repo(), true)).toBeNull();
+    expect(ignoredFilesSummary(repo({ ignoredDirs: 2 }), true)).toBeNull();
+    expect(ignoredFilesSummary(repo({ ignoredFiles: 1 }), false)).toBe(
+      '1 ignored file stays behind (kept in the backup)'
+    );
+    expect(ignoredFilesSummary(repo({ ignoredFiles: 3 }), false)).toBe(
+      '3 ignored files stay behind (kept in the backup)'
+    );
+    expect(ignoredFilesSummary(repo({ ignoredFiles: 1 }), true)).toBe(
+      '1 ignored file will be transferred'
+    );
+    expect(ignoredFilesSummary(repo({ ignoredFiles: 3 }), true)).toBe(
+      '3 ignored files will be transferred'
+    );
+    // Over the cap they neither move nor go in the backup (the warning says so).
+    const tooLarge = repo({
+      ignoredFiles: 3,
+      warnings: [{ code: 'ignored_too_large', message: 'too big' }],
+    });
+    expect(ignoredFilesSummary(tooLarge, true)).toBe('3 ignored files stay behind');
+    expect(ignoredFilesSummary(tooLarge, false)).toBe('3 ignored files stay behind');
+    expect(carriesIgnoredFiles(tooLarge, true)).toBe(false);
+    expect(carriesIgnoredFiles(repo({ ignoredFiles: 3 }), true)).toBe(true);
+    expect(carriesIgnoredFiles(repo({ ignoredFiles: 3 }), false)).toBe(false);
+    expect(carriesIgnoredFiles(repo(), true)).toBe(false);
+
+    expect(ignoredFoldersSummary(repo({ ignoredFiles: 1 }))).toBeNull();
+    expect(ignoredFoldersSummary(repo({ ignoredDirs: 1 }))).toBe('1 ignored folder stays behind');
+    expect(ignoredFoldersSummary(repo({ ignoredDirs: 2 }))).toBe('2 ignored folders stay behind');
+  });
+
+  it('asks about ignored files only when a repo has some, and blocks them over the cap', () => {
+    expect(asksAboutIgnored(preflight())).toBe(false);
+    // Folders never move, and a workspace that isn't resumed yet isn't counted.
+    expect(asksAboutIgnored(preflight({ repos: [repo({ ignoredDirs: 4 })] }))).toBe(false);
+    expect(asksAboutIgnored(preflight({ repos: [repo({ state: 'unknown' })] }))).toBe(false);
+    const some = preflight({ repos: [repo(), repo({ branchId: 'b2', ignoredFiles: 1 })] });
+    expect(asksAboutIgnored(some)).toBe(true);
+    expect(ignoredTransferBlocked(some)).toBeNull();
+
+    const tooLarge = { code: 'ignored_too_large', message: 'too big' };
+    const one = preflight({
+      repos: [repo({ ignoredFiles: 9, warnings: [tooLarge] }), repo({ branchId: 'b2' })],
+    });
+    expect(ignoredTransferBlocked(one)).toBe(
+      "feature's ignored files are too large to transfer, so they can't move this time."
+    );
+    const two = preflight({
+      repos: [
+        repo({ ignoredFiles: 9, warnings: [tooLarge] }),
+        repo({ branchId: 'b2', branchName: 'other', ignoredFiles: 9, warnings: [tooLarge] }),
+      ],
+    });
+    expect(ignoredTransferBlocked(two)).toBe(
+      "Some branches' ignored files are too large to transfer, so they can't move this time."
     );
   });
 

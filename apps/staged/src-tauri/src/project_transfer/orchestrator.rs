@@ -8,7 +8,8 @@
 //! put back, and the temporary refs at both ends are dropped (see
 //! [`super::undo`]). Each is written to the manifest before it is made, so a
 //! transfer Staged never finished is undone at the next start instead. The
-//! bundles on this machine always stay, as the backup. After the commit
+//! bundles on this machine always stay, as the backup, and so do the source's
+//! ignored files, archived there before it comes down. After the commit
 //! nothing is undone: tearing the source down is best-effort — and refused
 //! for a source that changed after its snapshot — and what it leaves comes
 //! back as warnings on a successful transfer (see [`teardown`]), or on the
@@ -30,7 +31,7 @@ use crate::store::{
     WorkspaceStatus,
 };
 
-use super::backups::{self, ManifestRepo, TransferManifest};
+use super::backups::{self, ManifestIgnored, ManifestRepo, TransferManifest};
 use super::carry::{
     carry_repo_with, finish, origin_tips, run_step_sized, CarryOutcome, CarryPlan, CarryStep,
     Landing,
@@ -42,7 +43,7 @@ use super::preflight::{
     TransferIssue,
 };
 use super::registry::TransferGuard;
-use super::scripts::{ApplyReport, Snapshot, CLONE_SCRIPT};
+use super::scripts::{ApplyReport, IgnoredFiles, Snapshot, CLONE_SCRIPT};
 use super::undo::{
     self, AddedRemote, AddedWorktree, CreatedBranch, ReplacedConfig, SourceCheckout, Undo,
 };
@@ -124,6 +125,17 @@ pub struct ProjectTransferResult {
     pub backup_dir: Option<String>,
 }
 
+/// What a transfer carries besides each branch's commits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferOptions {
+    /// Restore the staged, unstaged and untracked changes at the destination.
+    /// Off, they stay behind, in the backup only.
+    pub include_uncommitted: bool,
+    /// Carry the ignored files outside ignored directories (`.env`) and
+    /// place them at the destination. Off, they stay behind, in the backup.
+    pub include_ignored: bool,
+}
+
 /// How a transfer that [`run_transfer`] did not see through ended.
 #[derive(Debug)]
 pub enum TransferStopped {
@@ -148,9 +160,13 @@ pub(super) fn run_transfer(
     store: &Store,
     host: &dyn TransferHost,
     guard: &TransferGuard,
-    include_uncommitted: bool,
+    options: TransferOptions,
     on_progress: &dyn Fn(&TransferProgress),
 ) -> Result<ProjectTransferResult, TransferStopped> {
+    let TransferOptions {
+        include_uncommitted,
+        include_ignored,
+    } = options;
     let project = store
         .get_project(guard.project_id())
         .map_err(|e| e.to_string())?
@@ -161,6 +177,7 @@ pub(super) fn run_transfer(
         host,
         guard,
         include_uncommitted,
+        include_ignored,
         on_progress,
         direction,
         transfer_dir: host.transfers_dir()?.join(guard.transfer_id()),
@@ -171,6 +188,7 @@ pub(super) fn run_transfer(
             direction: direction.as_str().to_string(),
             created_at: crate::store::now_timestamp(),
             include_uncommitted,
+            include_ignored,
             status: backups::CARRYING.to_string(),
             owner_pid: Some(std::process::id()),
             ..TransferManifest::default()
@@ -249,6 +267,9 @@ struct Leg {
     /// The worktree added for it locally.
     worktree: Option<PathBuf>,
     backup_ref: Option<String>,
+    /// The source's ignored files as archived into the backup right before
+    /// it came down.
+    ignored_backup: Option<IgnoredFiles>,
     warnings: Vec<TransferIssue>,
 }
 
@@ -257,6 +278,7 @@ struct Run<'a> {
     host: &'a dyn TransferHost,
     guard: &'a TransferGuard,
     include_uncommitted: bool,
+    include_ignored: bool,
     on_progress: &'a dyn Fn(&TransferProgress),
     direction: TransferDirection,
     transfer_dir: PathBuf,
@@ -365,6 +387,7 @@ impl Run<'_> {
                 outcome: None,
                 worktree: None,
                 backup_ref: None,
+                ignored_backup: None,
                 warnings: Vec::new(),
             })
             .collect();
@@ -454,6 +477,25 @@ impl Run<'_> {
                 .map(|issue| issue.message.as_str())
                 .collect();
             return Err(format!("Can't transfer the project: {}", reasons.join(" ")).into());
+        }
+        // Asked to carry ignored files it can't: stop, rather than quietly
+        // leave them behind.
+        if self.include_ignored {
+            let too_large: Vec<&str> = preflight
+                .repos
+                .iter()
+                .flat_map(|r| &r.warnings)
+                .filter(|w| w.code == preflight::IGNORED_TOO_LARGE)
+                .map(|w| w.message.as_str())
+                .collect();
+            if !too_large.is_empty() {
+                return Err(format!(
+                    "Can't transfer the ignored files: {} Transfer without them, or delete \
+                     some first.",
+                    too_large.join(" ")
+                )
+                .into());
+            }
         }
         Ok(inspection)
     }
@@ -683,6 +725,9 @@ impl Run<'_> {
             repo_bytes: leg.source.repo_bytes,
             untracked_bytes: leg.row.untracked_bytes,
             lfs_bytes: leg.row.lfs_present_bytes,
+            include_ignored: self.include_ignored && leg.row.ignored_files > 0,
+            ignored_cap: self.host.ignored_files_cap(),
+            ignored_bytes: leg.row.ignored_bytes,
         };
 
         self.record(|undo| {
@@ -744,6 +789,7 @@ impl Run<'_> {
             let finished = finish(endpoint.as_ref(), &plan, &outcome, &path_str(&worktree)?)?;
             outcome.applied.warnings.extend(finished.warnings);
             outcome.applied.lfs_unavailable |= finished.lfs_unavailable;
+            outcome.applied.ignored = outcome.applied.ignored.take().or(finished.ignored);
             leg.worktree = Some(worktree);
         }
         leg.plan = Some(plan);
@@ -984,7 +1030,55 @@ impl Run<'_> {
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned()),
             backup_ref: leg.backup_ref.clone(),
+            ignored: manifest_ignored(plan, outcome, leg.ignored_backup.as_ref()),
         })
+    }
+
+    /// The ignored files the destination is without, after an apply that
+    /// placed them.
+    fn ignored_warnings(&self, applied: &ApplyReport) -> Vec<TransferIssue> {
+        let Some(placement) = &applied.ignored else {
+            return Vec::new();
+        };
+        let there = match self.direction {
+            TransferDirection::ToRemote => "the workspace",
+            TransferDirection::ToLocal => "the new worktree",
+        };
+        // "2 ignored files weren't put in …, which doesn't ignore them (a.log,
+        // for one); they're in the backup."
+        let not_placed = |n: u64, why: &str, example: &Option<String>| {
+            let (files, were, them, they) = match n {
+                1 => ("1 ignored file".to_string(), "wasn't", "it", "it's"),
+                n => (format!("{n} ignored files"), "weren't", "them", "they're"),
+            };
+            let why = why.replace("{them}", them);
+            let example = example.as_deref().unwrap_or("?");
+            let example = if n == 1 {
+                example.to_string()
+            } else {
+                format!("{example}, for one")
+            };
+            TransferIssue::new(
+                "ignored_not_placed",
+                format!("{files} {were} put in {there}, {why} ({example}); {they} in the backup."),
+            )
+        };
+        let mut warnings = Vec::new();
+        if placement.unignored > 0 {
+            warnings.push(not_placed(
+                placement.unignored,
+                "which doesn't ignore {them}",
+                &placement.unignored_example,
+            ));
+        }
+        if placement.in_the_way > 0 {
+            warnings.push(not_placed(
+                placement.in_the_way,
+                "where something was already in the way",
+                &placement.in_the_way_example,
+            ));
+        }
+        warnings
     }
 
     /// What the destination is still without, LFS-wise, after an apply.
@@ -1046,6 +1140,7 @@ impl Run<'_> {
                             .map(|w| TransferIssue::new("apply", w.clone())),
                     );
                     warnings.extend(self.lfs_warnings(&outcome.applied));
+                    warnings.extend(self.ignored_warnings(&outcome.applied));
                 }
                 RepoTransferResult {
                     branch_id: leg.source.branch.id,
@@ -1080,4 +1175,26 @@ impl Run<'_> {
             backup_dir: carried_any.then(|| self.transfer_dir.to_string_lossy().into_owned()),
         }
     }
+}
+
+/// What the manifest says of a leg's ignored files: the backup taken as the
+/// source came down, or without one (the source stayed, or the transfer was
+/// cut off) what the carry archived. `None` with none to speak of.
+fn manifest_ignored(
+    plan: &CarryPlan,
+    outcome: &CarryOutcome,
+    backup: Option<&IgnoredFiles>,
+) -> Option<ManifestIgnored> {
+    let records = || [backup, outcome.ignored.as_ref()].into_iter().flatten();
+    // The backup's count, unless it found none left (deleted since the carry).
+    let archived = records().find(|i| i.files > 0)?;
+    // A carry's archive stays even when the backup found too many to take.
+    let kept = records().any(|i| i.archive.is_some());
+    Some(ManifestIgnored {
+        archive: kept.then(|| plan.ignored_name()),
+        files: archived.files,
+        bytes: archived.bytes,
+        over_cap: archived.over_cap,
+        placed: outcome.applied.ignored.as_ref().map_or(0, |p| p.placed),
+    })
 }

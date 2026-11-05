@@ -32,6 +32,10 @@ use super::TransferError;
 #[macro_use]
 mod lfs;
 
+pub use ignored::{
+    archive_args as ignored_archive_args, IgnoredFiles, IgnoredPlacement, IGNORED_ARCHIVE_SCRIPT,
+    IGNORED_FILES_CAP,
+};
 pub use lfs::{LfsCounts, LfsPayload};
 
 /// Definitions every script starts with.
@@ -67,6 +71,10 @@ macro_rules! prelude {
         )
     };
 }
+
+// After `prelude!`, which its scripts start with.
+#[macro_use]
+mod ignored;
 
 /// Snapshot a checkout and bundle the snapshot.
 ///
@@ -327,10 +335,15 @@ pub const ORIGIN_TIPS_SCRIPT: &str = concat!(
 /// once the working tree is in place. A failure leaves the unpacked objects
 /// and the filter config behind: objects are named by their hash, and the
 /// filter is what this repository's attributes ask for.
+///
+/// With `ignored=<archive>` (and `ignored_sha256`), `checkout` and `finish`
+/// then place the source's ignored files into the checkout (see [`ignored`])
+/// and report `ignored_placed` and what they left out.
 pub const APPLY_SCRIPT: &str = concat!(
     prelude!(),
     lfs_prelude!(),
-    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256=''\n",
+    ignored_prelude!(),
+    "mode='' dir='' bundle='' sha256='' tid='' branch='' head='' snapshot='' tree_i='' tree_w='' restore=0 lfs='' lfs_sha256='' ignored='' ignored_sha256=''\n",
     "while [ $# -gt 0 ]; do\n",
     "  case $1 in\n",
     "    --) shift; break ;;\n",
@@ -347,6 +360,8 @@ pub const APPLY_SCRIPT: &str = concat!(
     "    restore=*) restore=${1#restore=} ;;\n",
     "    lfs=*) lfs=${1#lfs=} ;;\n",
     "    lfs_sha256=*) lfs_sha256=${1#lfs_sha256=} ;;\n",
+    "    ignored=*) ignored=${1#ignored=} ;;\n",
+    "    ignored_sha256=*) ignored_sha256=${1#ignored_sha256=} ;;\n",
     "    *) fail \"unknown argument: $1\" ;;\n",
     "  esac\n",
     "  shift\n",
@@ -521,6 +536,9 @@ pub const APPLY_SCRIPT: &str = concat!(
     "  else\n",
     "    lfs_checkout\n",
     "  fi\n",
+    // Once the working tree is the branch's, so whatever it put there is in
+    // the way of an ignored file rather than the other way round.
+    "  [ -z \"$ignored\" ] || ignored_place\n",
     "  G update-ref -d \"$snap_ref\" >/dev/null 2>&1\n",
     "fi\n",
     "printf 'applied=%s\\n' \"$head\"\n",
@@ -558,7 +576,9 @@ pub const CLONE_SCRIPT: &str = concat!(
 /// `untracked` leaves out), `untracked_bytes` when there are untracked files,
 /// `ignored` (ignored files outside ignored directories, each counted) and
 /// `ignored_dirs` (directories an ignore pattern matches, each counted once
-/// however much they hold) — none of which is carried — `repo_kib` (the
+/// however much they hold) — no directory of which is carried — then, when
+/// there are ignored files, `ignored_files` and `ignored_bytes` for the ones
+/// a transfer would archive (see [`ignored`]), `repo_kib` (the
 /// object store's size), `unpushed` (commits on no remote-tracking ref),
 /// `upstream`, and the same `warning=`s as
 /// [`SNAPSHOT_SCRIPT`]. In a repository that uses LFS it also prints the
@@ -573,6 +593,7 @@ pub const CLONE_SCRIPT: &str = concat!(
 pub const PREFLIGHT_SCRIPT: &str = concat!(
     prelude!(),
     lfs_prelude!(),
+    ignored_prelude!(),
     "i=0\n",
     "while [ $# -ge 2 ]; do\n",
     "  dir=$1 branch=$2\n",
@@ -606,6 +627,11 @@ pub const PREFLIGHT_SCRIPT: &str = concat!(
     "    *untracked=0*) ;;\n",
     "    *) printf 'untracked_bytes=%s\\n' \"$(G ls-files -z --others --exclude-standard | xargs -0 ls -lnd -- 2>/dev/null | awk '{ s += $5 } END { print s + 0 }')\" ;;\n",
     "  esac\n",
+    // Not `set --`: the loop is walking the arguments.
+    "  if [ \"$(printf '%s\\n' \"$counts\" | sed -n 's/^ignored=//p')\" != 0 ]; then\n",
+    "    ig=$(ignored_list | ignored_sizes)\n",
+    "    printf 'ignored_files=%s\\nignored_bytes=%s\\n' \"${ig% *}\" \"${ig#* }\"\n",
+    "  fi\n",
     "  printf 'repo_kib=%s\\n' \"$(G count-objects -v 2>/dev/null | awk '$1 == \"size:\" || $1 == \"size-pack:\" { s += $2 } END { print s + 0 }')\"\n",
     "  if [ -n \"${head:-}\" ]; then\n",
     "    printf 'unpushed=%s\\n' \"$(G rev-list --count HEAD --not --remotes 2>/dev/null)\"\n",
@@ -942,6 +968,8 @@ pub struct ApplyReport {
     pub lfs_missing_bytes: u64,
     /// LFS objects came, but git-lfs isn't installed here to check them out.
     pub lfs_unavailable: bool,
+    /// What placing the source's ignored files did, when they came.
+    pub ignored: Option<IgnoredPlacement>,
 }
 
 impl ApplyReport {
@@ -962,6 +990,7 @@ impl ApplyReport {
             lfs_missing: count("lfs_missing"),
             lfs_missing_bytes: count("lfs_missing_bytes"),
             lfs_unavailable: report.get("lfs_unavailable") == Some("1"),
+            ignored: IgnoredPlacement::from_report(&report),
         })
     }
 }
@@ -1120,6 +1149,9 @@ pub struct ApplyRequest<'a> {
     /// The snapshot's LFS archive at the destination, when it has one.
     /// Unread by `Finish`, which only needs to know there is one.
     pub lfs_path: Option<&'a str>,
+    /// The source's ignored files at the destination, to place into the
+    /// checkout (`Checkout`, `Finish`; `Branch` ignores them).
+    pub ignored: Option<(&'a str, &'a BundleFile)>,
 }
 
 impl ApplyRequest<'_> {
@@ -1145,6 +1177,10 @@ impl ApplyRequest<'_> {
         if let (Some(path), Some(lfs)) = (self.lfs_path, &self.snapshot.lfs) {
             args.push(format!("lfs={path}"));
             args.push(format!("lfs_sha256={}", lfs.archive.sha256));
+        }
+        if let Some((path, archive)) = self.ignored.filter(|_| self.mode != ApplyMode::Branch) {
+            args.push(format!("ignored={path}"));
+            args.push(format!("ignored_sha256={}", archive.sha256));
         }
         args.push("--".to_string());
         if self.mode == ApplyMode::Finish {
@@ -1397,6 +1433,7 @@ mod tests {
             snapshot: &snapshot,
             restore: true,
             lfs_path: Some("/t/x.bundle.lfs.tar"),
+            ignored: None,
         };
         let args = request.args();
         let tail = &args[args.iter().position(|a| a == "--").unwrap() + 1..];
@@ -1433,5 +1470,17 @@ mod tests {
         let args = request.args();
         assert!(args.contains(&"lfs=/t/x.bundle.lfs.tar".to_string()));
         assert!(args.contains(&format!("lfs_sha256={}", "ef".repeat(32))));
+
+        // Ignored files are placed by a checkout or a finish, never `branch`.
+        let ignored = BundleFile {
+            size: 1,
+            sha256: "cd".repeat(32),
+        };
+        request.ignored = Some(("/t/x.ignored.tar", &ignored));
+        let args = request.args();
+        assert!(args.contains(&"ignored=/t/x.ignored.tar".to_string()));
+        assert!(args.contains(&format!("ignored_sha256={}", "cd".repeat(32))));
+        request.mode = ApplyMode::Branch;
+        assert!(!request.args().iter().any(|a| a.starts_with("ignored")));
     }
 }

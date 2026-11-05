@@ -12,7 +12,7 @@ const { actions, prefs } = vi.hoisted(() => ({
     confirmPendingTransfer: vi.fn(async () => {}),
     cancelPendingTransfer: vi.fn(),
   },
-  prefs: { transferUncommittedChanges: true },
+  prefs: { transferUncommittedChanges: true, transferIgnoredFiles: false },
 }));
 
 vi.mock('$lib/components/ui/dialog', () =>
@@ -64,6 +64,7 @@ function repo(overrides: Partial<ProjectTransferRepoPreflight> = {}): ProjectTra
     conflicted: 0,
     untrackedBytes: 0,
     ignoredFiles: 0,
+    ignoredBytes: 0,
     ignoredDirs: 0,
     lfsPresent: 0,
     lfsPresentBytes: 0,
@@ -121,7 +122,19 @@ const submitButton = () =>
   (() => {
     throw new Error('no submit button');
   })();
-const checkbox = () => document.querySelector<HTMLButtonElement>('[role="checkbox"]');
+const checkbox = () =>
+  document.querySelector<HTMLButtonElement>(
+    '[role="checkbox"][id^="project-transfer-uncommitted"]'
+  );
+const ignoredCheckbox = () =>
+  document.querySelector<HTMLButtonElement>('[role="checkbox"][id^="project-transfer-ignored"]');
+const rowTexts = () =>
+  [...document.querySelectorAll('.repo-row')].map((r) => r.textContent?.replace(/\s+/g, ' '));
+const tooLarge = {
+  code: 'ignored_too_large',
+  message:
+    "feature's ignored files come to 300 MB, more than the 256 MB a transfer can carry or back up, so they are deleted with the worktree.",
+};
 
 describe('ProjectTransferDialog', () => {
   beforeEach(() => {
@@ -129,6 +142,7 @@ describe('ProjectTransferDialog', () => {
     actions.confirmPendingTransfer.mockClear();
     actions.cancelPendingTransfer.mockClear();
     prefs.transferUncommittedChanges = true;
+    prefs.transferIgnoredFiles = false;
   });
 
   it('shows the preflight loading with Transfer disabled', async () => {
@@ -161,11 +175,17 @@ describe('ProjectTransferDialog', () => {
     expect(rows[1].querySelector('.upstream')?.textContent?.trim()).toBe('no upstream');
     expect(rows[1].textContent).toContain('0 unpushed commits');
     expect(checkbox()).toBeNull();
+    expect(ignoredCheckbox()).toBeNull();
+    expect(document.body.textContent).not.toContain('Also transfer ignored files');
+    expect(document.body.textContent).not.toContain('backed up');
     expect(submitButton().disabled).toBe(false);
 
     submitButton().click();
     await settle();
-    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({ includeUncommitted: true });
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
     unmount(dialog);
   });
 
@@ -199,7 +219,10 @@ describe('ProjectTransferDialog', () => {
 
     submitButton().click();
     await settle();
-    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({ includeUncommitted: true });
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
     unmount(dialog);
   });
 
@@ -268,7 +291,10 @@ describe('ProjectTransferDialog', () => {
 
     submitButton().click();
     await settle();
-    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({ includeUncommitted: false });
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: false,
+      includeIgnored: false,
+    });
     unmount(dialog);
   });
 
@@ -287,14 +313,144 @@ describe('ProjectTransferDialog', () => {
       )
     );
     await settle();
-    const rows = [...document.querySelectorAll('.repo-row')].map((r) =>
-      r.textContent?.replace(/\s+/g, ' ')
-    );
-    expect(rows[0]).toContain('3 ignored files stay behind');
-    expect(rows[1]).toContain('1 ignored file stays behind');
+    const rows = rowTexts();
+    expect(rows[0]).toContain('3 ignored files stay behind (kept in the backup)');
+    expect(rows[1]).toContain('1 ignored file stays behind (kept in the backup)');
     expect(rows[2]).not.toContain('ignored');
-    expect(rows[3]).toContain('1 ignored file and 2 ignored folders stay behind');
+    expect(rows[3]).toContain('1 ignored file stays behind (kept in the backup)');
+    expect(rows[3]).toContain('2 ignored folders stay behind');
     expect(rows[4]).toContain('1 ignored folder stays behind');
+    expect(rows[4]).not.toContain('backup');
+    unmount(dialog);
+  });
+
+  it('asks about ignored files only when some repo has them, from the remembered answer', async () => {
+    // Ignored folders alone don't ask: they never move.
+    let dialog = mountDialog(ready(preflight({ repos: [repo({ ignoredDirs: 2 })] })));
+    await settle();
+    expect(ignoredCheckbox()).toBeNull();
+    unmount(dialog);
+
+    document.body.innerHTML = '';
+    const pf = preflight({
+      repos: [repo({ ignoredFiles: 2, ignoredDirs: 1 }), repo({ branchId: 'b2' })],
+    });
+    dialog = mountDialog(ready(pf));
+    await settle();
+    const box = ignoredCheckbox();
+    expect(box).not.toBeNull();
+    expect(box!.disabled).toBe(false);
+    expect(box!.getAttribute('aria-checked')).toBe('false');
+    const label = document.querySelector(`label[for="${box!.id}"]`);
+    expect(label?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      'Also transfer ignored files (such as .env)'
+    );
+    expect(document.getElementById(box!.getAttribute('aria-describedby')!)?.textContent).toContain(
+      'Ignored folders such as node_modules are never transferred.'
+    );
+    expect(document.body.textContent?.replace(/\s+/g, ' ')).toContain(
+      'after their ignored files are backed up on this machine'
+    );
+    expect(rowTexts()[0]).toContain('2 ignored files stay behind (kept in the backup)');
+
+    box!.click();
+    await settle();
+    expect(box!.getAttribute('aria-checked')).toBe('true');
+    expect(rowTexts()[0]).toContain('2 ignored files will be transferred');
+    expect(rowTexts()[0]).toContain('1 ignored folder stays behind');
+    expect(document.querySelector('.repo-row')?.textContent).not.toContain('kept in the backup');
+
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: true,
+    });
+    unmount(dialog);
+
+    // Each open starts from the preference.
+    document.body.innerHTML = '';
+    prefs.transferIgnoredFiles = true;
+    dialog = mountDialog(ready(pf, { ...project, id: 'p2' }));
+    await settle();
+    expect(ignoredCheckbox()!.getAttribute('aria-checked')).toBe('true');
+    expect(rowTexts()[0]).toContain('2 ignored files will be transferred');
+    unmount(dialog);
+  });
+
+  it('keeps the two checkboxes independent', async () => {
+    const dialog = mountDialog(
+      ready(
+        preflight({
+          repos: [repo({ unstaged: 1, hasUncommittedChanges: true, ignoredFiles: 1 })],
+          hasUncommittedChanges: true,
+        })
+      )
+    );
+    await settle();
+    const uncommitted = checkbox()!;
+    const ignored = ignoredCheckbox()!;
+    expect(uncommitted.id).not.toBe(ignored.id);
+    expect([uncommitted, ignored].map((b) => b.getAttribute('aria-checked'))).toEqual([
+      'true',
+      'false',
+    ]);
+
+    ignored.click();
+    await settle();
+    expect([uncommitted, ignored].map((b) => b.getAttribute('aria-checked'))).toEqual([
+      'true',
+      'true',
+    ]);
+    uncommitted.click();
+    await settle();
+    expect([uncommitted, ignored].map((b) => b.getAttribute('aria-checked'))).toEqual([
+      'false',
+      'true',
+    ]);
+    // Leaving uncommitted changes behind doesn't hold the ignored files back.
+    expect(rowTexts()[0]).toContain('1 ignored file will be transferred');
+
+    submitButton().click();
+    await settle();
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: false,
+      includeIgnored: true,
+    });
+    unmount(dialog);
+  });
+
+  it('blocks the ignored-files checkbox when they are over the cap and says why', async () => {
+    prefs.transferIgnoredFiles = true;
+    const dialog = mountDialog(
+      ready(
+        preflight({
+          repos: [
+            repo({ ignoredFiles: 4, ignoredBytes: 300 * 1024 * 1024, warnings: [tooLarge] }),
+            repo({ branchId: 'b2', branchName: 'other', ignoredFiles: 1 }),
+          ],
+        })
+      )
+    );
+    await settle();
+    const box = ignoredCheckbox()!;
+    expect(box.disabled).toBe(true);
+    expect(box.getAttribute('aria-checked')).toBe('false');
+    expect(document.getElementById(box.getAttribute('aria-describedby')!)?.textContent).toContain(
+      "feature's ignored files are too large to transfer"
+    );
+    // Neither repo's move, and the big ones aren't in the backup either.
+    const rows = rowTexts();
+    expect(rows[0]).toContain('4 ignored files stay behind');
+    expect(rows[0]).not.toContain('kept in the backup');
+    expect(rows[0]).toContain('more than the 256 MB a transfer can carry');
+    expect(rows[1]).toContain('1 ignored file stays behind (kept in the backup)');
+    // A warning, not a blocker: the transfer can go without them.
+    expect(submitButton().disabled).toBe(false);
+
+    box.click();
+    await settle();
+    expect(box.getAttribute('aria-checked')).toBe('false');
     unmount(dialog);
   });
 
@@ -352,7 +508,10 @@ describe('ProjectTransferDialog', () => {
 
     submitButton().click();
     await settle();
-    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({ includeUncommitted: true });
+    expect(actions.confirmPendingTransfer).toHaveBeenCalledWith({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
     unmount(dialog);
   });
 

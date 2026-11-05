@@ -328,15 +328,18 @@ export function getProjectTransferPreflight(projectId: string): Promise<ProjectT
 /**
  * Move a project to its other location, emitting `project-transfer-progress`
  * as it goes. Resolves once the project has switched; rejects with everything
- * undone.
+ * undone. `includeIgnored` also carries ignored files (`.env`) outside ignored
+ * folders; they are backed up either way.
  */
 export async function transferProject(
   projectId: string,
-  includeUncommitted: boolean
+  includeUncommitted: boolean,
+  includeIgnored: boolean
 ): Promise<ProjectTransferResult> {
   const result = await invokeCommand<ProjectTransferResult>('transfer_project', {
     projectId,
     includeUncommitted,
+    includeIgnored,
   });
   await Promise.all([
     invalidateCacheByCommand('list_projects'),

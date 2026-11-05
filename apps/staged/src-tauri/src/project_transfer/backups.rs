@@ -20,7 +20,11 @@
 //! A repository that uses Git LFS also has `<bundle>.lfs.tar` beside its
 //! bundle: the LFS objects the snapshot refers to, in the object store's
 //! `objects/xx/yy/<oid>` layout. `tar -xf <bundle>.lfs.tar -C .git/lfs objects`
-//! then `git lfs checkout` restores their content.
+//! then `git lfs checkout` restores their content. And one with ignored files
+//! (`.env`, but no ignored directory such as `node_modules/`) has them in
+//! `<bundle stem>.ignored.tar`, archived from the source right before it was
+//! removed, or when they were carried: `tar -xf` it in a checkout to put them
+//! back. It goes with the rest of the directory.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -50,6 +54,9 @@ pub struct TransferManifest {
     /// Milliseconds since the epoch.
     pub created_at: i64,
     pub include_uncommitted: bool,
+    /// Whether the transfer carried the ignored files.
+    #[serde(default)]
+    pub include_ignored: bool,
     /// `carrying` until the database switches, `committed` while the source
     /// comes down, then `completed`; or `rolledBack`. The first two are a
     /// transfer still running, or one Staged never finished.
@@ -125,6 +132,24 @@ pub struct ManifestRepo {
     /// once the source comes down.
     pub local_clone: Option<String>,
     pub backup_ref: Option<String>,
+    /// The source's ignored files, when it had any.
+    #[serde(default)]
+    pub ignored: Option<ManifestIgnored>,
+}
+
+/// A repo's ignored files, as the transfer archived them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestIgnored {
+    /// The archive's file name in this directory; `None` when there were too
+    /// many to archive.
+    pub archive: Option<String>,
+    pub files: u64,
+    pub bytes: u64,
+    /// More than a transfer archives, so they weren't backed up.
+    pub over_cap: bool,
+    /// How many were put in the destination checkout.
+    pub placed: u64,
 }
 
 /// Write `manifest` into `dir`, whole or not at all.
@@ -246,6 +271,7 @@ mod tests {
                 has_uncommitted_changes: true,
                 local_clone: Some(clone.to_string_lossy().into_owned()),
                 backup_ref: Some(backup_ref.to_string()),
+                ignored: None,
             }],
             ..TransferManifest::default()
         }
@@ -410,5 +436,77 @@ mod tests {
         );
         assert!(transfers.join("flagged").join(MANIFEST_FILE).exists());
         assert!(transfers.join("unflagged").join(MANIFEST_FILE).exists());
+    }
+
+    /// An ignored-files archive is one more file in the transfer's directory:
+    /// it goes with an old transfer, stays with one kept until removed, and a
+    /// manifest from before it existed still reads (and prunes by its age).
+    #[test]
+    fn prunes_ignored_files_backups_with_their_transfer() {
+        let root = crate::test_utils::TempDir::new("transfer-prune-ignored");
+        let clone = root.path().join("clone");
+        let transfers = root.path().join("transfers");
+        let now = SystemTime::now();
+        let old_ms = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 15 * 24 * 60 * 60 * 1000;
+        let archive = "0-widgets.ignored.tar";
+        let with_archive = |id: &str, kept: bool| {
+            let mut m = manifest(id, old_ms, &clone, &backup_ref(id, "feature"));
+            m.keep_until_removed = kept;
+            m.repos[0].ignored = Some(ManifestIgnored {
+                archive: Some(archive.to_string()),
+                files: 2,
+                bytes: 20,
+                over_cap: false,
+                placed: 0,
+            });
+            let dir = transfers.join(id);
+            write_manifest(&dir, &m).unwrap();
+            std::fs::write(dir.join(archive), b"tar").unwrap();
+            assert_eq!(
+                read_manifest(&dir).unwrap().repos[0].ignored,
+                m.repos[0].ignored
+            );
+        };
+        with_archive("old", false);
+        with_archive("kept", true);
+        // Written before ignored files were archived: neither key.
+        let mut legacy = serde_json::to_value(manifest(
+            "legacy",
+            old_ms,
+            &clone,
+            &backup_ref("legacy", "feature"),
+        ))
+        .unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("includeIgnored")
+            .unwrap();
+        legacy["repos"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("ignored")
+            .unwrap();
+        let legacy_dir = transfers.join("legacy");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        std::fs::write(
+            legacy_dir.join(MANIFEST_FILE),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        let read = read_manifest(&legacy_dir).expect("an old manifest still reads");
+        assert!(!read.include_ignored);
+        assert_eq!(read.repos[0].ignored, None);
+
+        let mut removed = prune(&transfers, RETENTION, now);
+        removed.sort();
+
+        // The legacy one went by its manifest's age, not its fresh mtime.
+        assert_eq!(removed, vec![legacy_dir, transfers.join("old")]);
+        assert!(transfers.join("kept").join(archive).exists());
     }
 }

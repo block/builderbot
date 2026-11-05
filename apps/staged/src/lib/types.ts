@@ -459,10 +459,14 @@ export interface ProjectTransferRepoPreflight {
   untracked: number;
   conflicted: number;
   untrackedBytes: number;
-  /** Ignored files outside ignored directories, each counted; none of them is carried. */
+  /** Ignored files outside ignored directories (`.env`, `debug.log`), each counted. A
+   *  transfer backs them up before removing the source, and carries them when asked. */
   ignoredFiles: number;
+  /** Their total size. Over the cap the backend warns `ignored_too_large`: they are
+   *  neither carried nor backed up. */
+  ignoredBytes: number;
   /** Directories matched by an ignore pattern (`node_modules/`, `.venv/`), each counted
-   *  once; none of them is carried. */
+   *  once; they are never carried or backed up. */
   ignoredDirs: number;
   /** Git LFS objects the source has, carried beside the bundle (counting modified and
    *  untracked LFS files, which the snapshot stores as new objects). */

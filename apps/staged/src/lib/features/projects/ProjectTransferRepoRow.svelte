@@ -1,16 +1,19 @@
 <!--
   ProjectTransferRepoRow.svelte — one branch in the transfer dialog: its repo
   and branch, the upstream it tracks, what it carries (unpushed commits,
-  uncommitted changes, by kind, and Git LFS objects), the ignored files and
-  folders that stay behind, and whatever blocks or warns about it. Blockers and warnings differ in colour and in a screen-reader
-  prefix.
+  uncommitted changes, by kind, and Git LFS objects), whether its ignored
+  files move or stay behind in the backup, the ignored folders that stay
+  behind, and whatever blocks or warns about it. Blockers and warnings differ
+  in colour and in a screen-reader prefix.
 -->
 <script lang="ts">
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectTransferRepoPreflight } from '../../types';
   import {
-    ignoredSummary,
+    carriesIgnoredFiles,
+    ignoredFilesSummary,
+    ignoredFoldersSummary,
     issueMessage,
     lfsSummary,
     plural,
@@ -20,13 +23,18 @@
 
   interface Props {
     row: ProjectTransferRepoPreflight;
+    /** Whether the transfer carries ignored files: the dialog's checkbox, when
+     *  it is shown and can be ticked. */
+    includeIgnored?: boolean;
   }
 
-  let { row }: Props = $props();
+  let { row, includeIgnored = false }: Props = $props();
 
   let changes = $derived(uncommittedCount(row));
   let breakdown = $derived(uncommittedBreakdown(row));
-  let ignored = $derived(ignoredSummary(row));
+  let ignoredFiles = $derived(ignoredFilesSummary(row, includeIgnored));
+  let ignoredFolders = $derived(ignoredFoldersSummary(row));
+  let ignoredFilesMove = $derived(carriesIgnoredFiles(row, includeIgnored));
   let lfs = $derived(lfsSummary(row));
   let renamed = $derived(row.destBranchName !== row.branchName);
 </script>
@@ -65,8 +73,11 @@
       {#if lfs}
         <span>{lfs}</span>
       {/if}
-      {#if ignored}
-        <span class="ignored">{ignored}</span>
+      {#if ignoredFiles}
+        <span class:ignored={!ignoredFilesMove}>{ignoredFiles}</span>
+      {/if}
+      {#if ignoredFolders}
+        <span class="ignored">{ignoredFolders}</span>
       {/if}
     {/if}
   </div>

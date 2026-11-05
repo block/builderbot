@@ -102,6 +102,12 @@ const NEW_PROJECT_LOCATION_STORE_KEY = 'new-project-location';
  * the last answer to the transfer dialog's checkbox (frontend-only).
  */
 const TRANSFER_UNCOMMITTED_CHANGES_STORE_KEY = 'transfer-uncommitted-changes';
+/**
+ * Whether a project transfer carries ignored files (`.env`) to the
+ * destination: the last answer to the transfer dialog's second checkbox
+ * (frontend-only).
+ */
+const TRANSFER_IGNORED_FILES_STORE_KEY = 'transfer-ignored-files';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -225,6 +231,11 @@ export const preferences = $state({
    * only when the checkbox was shown. Defaults to carrying them.
    */
   transferUncommittedChanges: true,
+  /**
+   * The transfer dialog's last "Also transfer ignored files" answer, saved
+   * only when the checkbox was shown. Defaults to leaving them in the backup.
+   */
+  transferIgnoredFiles: false,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -322,12 +333,17 @@ const transferUncommittedChangesSync = syncedPreference(
   }
 );
 
+const transferIgnoredFilesSync = syncedPreference(TRANSFER_IGNORED_FILES_STORE_KEY, (value) => {
+  preferences.transferIgnoredFiles = value === true;
+});
+
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     projectStatusOptionsSync.dispose();
     composerSendModeSync.dispose();
     newProjectLocationSync.dispose();
     transferUncommittedChangesSync.dispose();
+    transferIgnoredFilesSync.dispose();
   });
 }
 
@@ -443,6 +459,8 @@ export async function initPreferences(): Promise<void> {
 
   // Load and follow the transfer dialog's last uncommitted-changes answer
   await transferUncommittedChangesSync.start();
+  // ...and its ignored-files answer
+  await transferIgnoredFilesSync.start();
 }
 
 // =============================================================================
@@ -529,6 +547,12 @@ export function setNewProjectLocation(location: ProjectLocation): void {
 export function setTransferUncommittedChanges(include: boolean): void {
   preferences.transferUncommittedChanges = include;
   transferUncommittedChangesSync.save(include);
+}
+
+/** Remember whether project transfers carry ignored files. */
+export function setTransferIgnoredFiles(include: boolean): void {
+  preferences.transferIgnoredFiles = include;
+  transferIgnoredFilesSync.save(include);
 }
 
 // =============================================================================

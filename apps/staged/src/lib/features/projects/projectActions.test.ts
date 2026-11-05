@@ -95,6 +95,7 @@ function repoPreflight(
     conflicted: 0,
     untrackedBytes: 0,
     ignoredFiles: 0,
+    ignoredBytes: 0,
     ignoredDirs: 0,
     lfsPresent: 0,
     lfsPresentBytes: 0,
@@ -161,6 +162,7 @@ let cancelProjectTransfer: ReturnType<typeof vi.fn>;
 let projectTransferStarted: ReturnType<typeof vi.fn>;
 let projectTransferFinished: ReturnType<typeof vi.fn>;
 let setTransferUncommittedChanges: ReturnType<typeof vi.fn>;
+let setTransferIgnoredFiles: ReturnType<typeof vi.fn>;
 let toastSuccess: ReturnType<typeof vi.fn>;
 let toastWarning: ReturnType<typeof vi.fn>;
 let toastInfo: ReturnType<typeof vi.fn>;
@@ -229,6 +231,7 @@ beforeEach(() => {
     storeState.transferringProjects.delete(projectId);
   });
   setTransferUncommittedChanges = vi.fn();
+  setTransferIgnoredFiles = vi.fn();
   toastSuccess = vi.fn();
   toastWarning = vi.fn();
   toastInfo = vi.fn();
@@ -270,6 +273,7 @@ beforeEach(() => {
   }));
   vi.doMock('../settings/preferences.svelte', () => ({
     setTransferUncommittedChanges,
+    setTransferIgnoredFiles,
   }));
   vi.doMock('../layout/navigation.svelte', () => ({
     navigation: navigationState,
@@ -1090,7 +1094,7 @@ describe('confirmPendingTransfer', () => {
       return transferResult();
     });
 
-    await actions.confirmPendingTransfer({ includeUncommitted: true });
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
 
     expect(actions.pendingTransfer).toBeNull();
     expect(projectTransferStarted).toHaveBeenCalledWith('p1', 'toRemote');
@@ -1106,31 +1110,69 @@ describe('confirmPendingTransfer', () => {
     // Nothing uncommitted: no checkbox, nothing remembered, and the transfer
     // carries whatever turns up rather than applying a stale answer.
     let actions = await readyActions(preflight());
-    await actions.confirmPendingTransfer({ includeUncommitted: false });
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
     expect(setTransferUncommittedChanges).not.toHaveBeenCalled();
-    expect(transferProject).toHaveBeenLastCalledWith('p1', true);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', true, false);
 
     const dirty = preflight({
       repos: [repoPreflight({ unstaged: 2, hasUncommittedChanges: true })],
       hasUncommittedChanges: true,
     });
     actions = await readyActions(dirty);
-    await actions.confirmPendingTransfer({ includeUncommitted: false });
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
     expect(setTransferUncommittedChanges).toHaveBeenCalledWith(false);
-    expect(transferProject).toHaveBeenLastCalledWith('p1', false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', false, false);
 
     actions = await readyActions(dirty);
-    await actions.confirmPendingTransfer({ includeUncommitted: true });
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
     expect(setTransferUncommittedChanges).toHaveBeenLastCalledWith(true);
-    expect(transferProject).toHaveBeenLastCalledWith('p1', true);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', true, false);
 
     // A workspace the transfer resumes first may have changes nobody has
     // counted yet: the checkbox shows for it, and its answer applies.
     setTransferUncommittedChanges.mockClear();
     actions = await readyActions(preflight({ repos: [repoPreflight({ state: 'unknown' })] }));
-    await actions.confirmPendingTransfer({ includeUncommitted: false });
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
     expect(setTransferUncommittedChanges).toHaveBeenCalledWith(false);
-    expect(transferProject).toHaveBeenLastCalledWith('p1', false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', false, false);
+  });
+
+  it('remembers and sends the ignored-files answer only when it could be given', async () => {
+    // No ignored files: no checkbox, nothing remembered, nothing carried.
+    let actions = await readyActions(preflight({ repos: [repoPreflight({ ignoredDirs: 3 })] }));
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: true });
+    expect(setTransferIgnoredFiles).not.toHaveBeenCalled();
+    expect(transferProject).toHaveBeenLastCalledWith('p1', true, false);
+
+    const ignored = preflight({ repos: [repoPreflight({ ignoredFiles: 2, ignoredBytes: 40 })] });
+    actions = await readyActions(ignored);
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: true });
+    expect(setTransferIgnoredFiles).toHaveBeenLastCalledWith(true);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', true, true);
+
+    actions = await readyActions(ignored);
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
+    expect(setTransferIgnoredFiles).toHaveBeenLastCalledWith(false);
+    expect(transferProject).toHaveBeenLastCalledWith('p1', true, false);
+    // Independent of the uncommitted-changes answer, which wasn't asked.
+    expect(setTransferUncommittedChanges).not.toHaveBeenCalled();
+
+    // Over the cap: the box is disabled, so its (remembered) value is neither
+    // saved nor sent, which the backend would refuse.
+    setTransferIgnoredFiles.mockClear();
+    actions = await readyActions(
+      preflight({
+        repos: [
+          repoPreflight({
+            ignoredFiles: 2,
+            warnings: [{ code: 'ignored_too_large', message: 'too big' }],
+          }),
+        ],
+      })
+    );
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: true });
+    expect(setTransferIgnoredFiles).not.toHaveBeenCalled();
+    expect(transferProject).toHaveBeenLastCalledWith('p1', true, false);
   });
 
   it('refuses a blocked preflight', async () => {
@@ -1140,7 +1182,7 @@ describe('confirmPendingTransfer', () => {
         blockers: [{ code: 'sq_unavailable', message: 'no sq' }],
       })
     );
-    await actions.confirmPendingTransfer({ includeUncommitted: true });
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
     expect(transferProject).not.toHaveBeenCalled();
     expect(actions.pendingTransfer?.status).toBe('ready');
   });
@@ -1159,7 +1201,7 @@ describe('confirmPendingTransfer', () => {
     result.repos[0].uncommittedLeftBehind = true;
     transferProject.mockResolvedValue(result);
 
-    await actions.confirmPendingTransfer({ includeUncommitted: true });
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
 
     expect(toastWarning).toHaveBeenCalledWith('Transferred "Alpha" to Blox', {
       description:
@@ -1175,7 +1217,7 @@ describe('confirmPendingTransfer', () => {
     result.repos[0].uncommittedLeftBehind = true;
     transferProject.mockResolvedValue(result);
 
-    await actions.confirmPendingTransfer({ includeUncommitted: false });
+    await actions.confirmPendingTransfer({ includeUncommitted: false, includeIgnored: false });
 
     // It carries the backup path, the only way back to those changes.
     expect(toastSuccess).toHaveBeenCalledWith('Transferred "Alpha" to Blox', {
@@ -1189,7 +1231,7 @@ describe('confirmPendingTransfer', () => {
     transferProject.mockRejectedValue(new Error('bundle verify failed'));
     const actions = await readyActions(preflight());
 
-    await actions.confirmPendingTransfer({ includeUncommitted: true });
+    await actions.confirmPendingTransfer({ includeUncommitted: true, includeIgnored: false });
 
     expect(projectTransferFinished).toHaveBeenCalledWith('p1');
     expect(storeState.transferringProjects.has('p1')).toBe(false);
@@ -1203,7 +1245,10 @@ describe('confirmPendingTransfer', () => {
     transferProject.mockRejectedValue(new Error('the transfer was cancelled'));
     const actions = await readyActions(preflight());
 
-    const confirmed = actions.confirmPendingTransfer({ includeUncommitted: true });
+    const confirmed = actions.confirmPendingTransfer({
+      includeUncommitted: true,
+      includeIgnored: false,
+    });
     await expect(actions.cancelTransfer('p1')).resolves.toBe(true);
     expect(cancelProjectTransfer).toHaveBeenCalledWith('p1');
     await confirmed;

@@ -82,6 +82,7 @@ pub(super) fn noise(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
+pub(super) mod ignored;
 pub(super) mod lfs;
 
 const TID: &str = "0b5e7d3c-1f2a-4c6b-9e8d-7a6b5c4d3e2f";
@@ -192,6 +193,9 @@ impl World {
             repo_bytes: 0,
             untracked_bytes: 0,
             lfs_bytes: 0,
+            include_ignored: false,
+            ignored_cap: scripts::IGNORED_FILES_CAP,
+            ignored_bytes: 0,
         }
     }
 
@@ -748,6 +752,7 @@ fn a_bundle_missing_prerequisites_is_refused_as_such() {
                     snapshot: &snapshot,
                     restore: true,
                     lfs_path: None,
+                    ignored: None,
                 }
                 .args(),
             )
@@ -1101,6 +1106,7 @@ fn a_branch_landing_reports_only_a_branch_it_created_and_undoes_it_on_failure() 
             snapshot: &reused.snapshot,
             restore: false,
             lfs_path: None,
+            ignored: None,
         };
         let mut args = request.args();
         args.push("bogus".to_string());
@@ -1333,6 +1339,7 @@ fn script_name(script: &str) -> &'static str {
         ("apply", scripts::APPLY_SCRIPT),
         ("origin_tips", scripts::ORIGIN_TIPS_SCRIPT),
         ("cleanup", scripts::CLEANUP_SCRIPT),
+        ("ignored", scripts::IGNORED_ARCHIVE_SCRIPT),
     ]
     .into_iter()
     .find(|(_, s)| *s == script)

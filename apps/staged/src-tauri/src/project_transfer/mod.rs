@@ -44,7 +44,7 @@ pub(crate) use commands::{
 };
 pub use endpoint::{BloxEndpoint, LocalEndpoint, ScriptOutput, TransferEndpoint};
 pub use orchestrator::{
-    ProjectTransferResult, RepoTransferResult, TransferPhase, TransferProgress,
+    ProjectTransferResult, RepoTransferResult, TransferOptions, TransferPhase, TransferProgress,
 };
 pub use preflight::{
     ProjectTransferPreflight, RepoPreflight, RepoTransferState, TransferDirection, TransferIssue,

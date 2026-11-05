@@ -14,7 +14,9 @@ use std::sync::{Arc, Mutex};
 use super::backups;
 use super::commands::{preflight_for, runs_prerun, settle};
 use super::host::{BloxUnavailable, TransferHost, WorkspaceState};
-use super::orchestrator::{run_transfer, ProjectTransferResult, TransferPhase, TransferProgress};
+use super::orchestrator::{
+    run_transfer, ProjectTransferResult, TransferOptions, TransferPhase, TransferProgress,
+};
 use super::preflight::{
     ProjectTransferPreflight, RepoTransferState, TransferDirection, TransferIssue,
 };
@@ -36,6 +38,7 @@ use crate::store::{
 };
 use crate::test_utils::TempDir;
 
+mod ignored;
 mod lfs;
 
 const WIDGETS: &str = "acme/widgets";
@@ -190,6 +193,8 @@ struct FakeHost {
     bootstrap: Mutex<Option<fn(&Path)>>,
     /// Set for every script, at either end.
     script_vars: Mutex<Vec<(String, String)>>,
+    /// The ignored files' cap, when a test lowers it.
+    ignored_cap: Mutex<Option<u64>>,
 }
 
 impl FakeHost {
@@ -208,6 +213,7 @@ impl FakeHost {
             blox: Mutex::default(),
             bootstrap: Mutex::default(),
             script_vars: Mutex::default(),
+            ignored_cap: Mutex::default(),
         };
         for repo in repos {
             let origin = host.origin(repo);
@@ -473,6 +479,13 @@ impl TransferHost for FakeHost {
     fn configure_workspace_clone(&self, _name: &str, repo_dir: &str) {
         configure_identity(Path::new(repo_dir));
     }
+
+    fn ignored_files_cap(&self) -> u64 {
+        self.ignored_cap
+            .lock()
+            .unwrap()
+            .unwrap_or(super::scripts::IGNORED_FILES_CAP)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +618,19 @@ impl Fixture {
         include_uncommitted: bool,
         hook: &dyn Fn(&TransferProgress),
     ) -> Transfer {
+        let options = TransferOptions {
+            include_uncommitted,
+            include_ignored: false,
+        };
+        self.transfer_options(options, hook)
+    }
+
+    /// [`Self::transfer_with`], with every option.
+    fn transfer_options(
+        &self,
+        options: TransferOptions,
+        hook: &dyn Fn(&TransferProgress),
+    ) -> Transfer {
         let transfer_id = uuid::Uuid::new_v4().to_string();
         let branch_ids = self.branches.iter().map(|b| b.id.clone()).collect();
         let guard = registry::begin(
@@ -615,22 +641,16 @@ impl Fixture {
         )
         .unwrap();
         let events = Mutex::new(Vec::new());
-        let outcome = run_transfer(
-            &self.store,
-            &self.host,
-            &guard,
-            include_uncommitted,
-            &|progress| {
-                // A window that loads now reads the same phase from the registry.
-                let listed = registry::list()
-                    .into_iter()
-                    .find(|p| p.transfer_id == transfer_id)
-                    .map(|p| p.phase);
-                assert_eq!(listed, Some(progress.phase));
-                events.lock().unwrap().push(progress.clone());
-                hook(progress);
-            },
-        );
+        let outcome = run_transfer(&self.store, &self.host, &guard, options, &|progress| {
+            // A window that loads now reads the same phase from the registry.
+            let listed = registry::list()
+                .into_iter()
+                .find(|p| p.transfer_id == transfer_id)
+                .map(|p| p.phase);
+            assert_eq!(listed, Some(progress.phase));
+            events.lock().unwrap().push(progress.clone());
+            hook(progress);
+        });
         drop(guard);
         assert!(!registry::is_project_transferring(&self.project.id));
         let mut after_switch = None;

@@ -11,7 +11,8 @@ use crate::store::{ProjectLocation, Store};
 use super::backups;
 use super::host::{LiveHost, TransferHost};
 use super::orchestrator::{
-    run_transfer, ProjectTransferResult, RepoTransferResult, TransferProgress, TransferStopped,
+    run_transfer, ProjectTransferResult, RepoTransferResult, TransferOptions, TransferProgress,
+    TransferStopped,
 };
 use super::preflight::{inspect, ProjectTransferPreflight, TransferDirection, TransferIssue};
 use super::{recovery, registry};
@@ -67,6 +68,7 @@ pub async fn transfer_project(
     act_registry: tauri::State<'_, Arc<ActionRegistry>>,
     project_id: String,
     include_uncommitted: bool,
+    include_ignored: bool,
 ) -> Result<ProjectTransferResult, String> {
     let store = crate::get_store(&store)?;
     transfer_project_impl(
@@ -75,7 +77,10 @@ pub async fn transfer_project(
         Arc::clone(&executor),
         Arc::clone(&act_registry),
         project_id,
-        include_uncommitted,
+        TransferOptions {
+            include_uncommitted,
+            include_ignored,
+        },
     )
     .await
 }
@@ -86,7 +91,7 @@ pub(crate) async fn transfer_project_impl(
     executor: Arc<ActionExecutor>,
     act_registry: Arc<ActionRegistry>,
     project_id: String,
-    include_uncommitted: bool,
+    options: TransferOptions,
 ) -> Result<ProjectTransferResult, String> {
     let project = store
         .get_project(&project_id)
@@ -116,7 +121,7 @@ pub(crate) async fn transfer_project_impl(
             };
             // The guard drops as this returns: the project is free again
             // before anything below runs.
-            run_transfer(&store, &LiveHost, &guard, include_uncommitted, &emit)
+            run_transfer(&store, &LiveHost, &guard, options, &emit)
         })
         .await
         .map_err(|e| format!("The transfer stopped unexpectedly: {e}"))?

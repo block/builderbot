@@ -22,6 +22,10 @@ use super::scripts::{self, LfsCounts, ScriptReport, PREFLIGHT_SCRIPT};
 /// Untracked content past this size gets a warning: it is carried in full.
 const LARGE_PAYLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
+/// A row's warning that its ignored files are over the cap, which stops a
+/// transfer asked to carry them.
+pub(super) const IGNORED_TOO_LARGE: &str = "ignored_too_large";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TransferDirection {
@@ -113,13 +117,16 @@ pub struct RepoPreflight {
     pub untracked: u32,
     pub conflicted: u32,
     pub untracked_bytes: u64,
-    /// Ignored files outside ignored directories, each counted — including
-    /// every file of an untracked directory that holds nothing else. None of
-    /// them is carried, and removing the source deletes them.
+    /// Ignored regular files outside ignored directories, each counted —
+    /// including every file of an untracked directory that holds nothing
+    /// else. The transfer backs them up before it removes the source, and
+    /// carries them when asked to, unless together they are over the cap
+    /// (an `ignored_too_large` warning).
     pub ignored_files: u32,
+    pub ignored_bytes: u64,
     /// Directories an ignore pattern matches (`node_modules/`, `.venv/`),
-    /// each counted once however much they hold. Like [`Self::ignored_files`],
-    /// never carried.
+    /// each counted once however much they hold: never carried or backed
+    /// up, and deleted with the source.
     pub ignored_dirs: u32,
     /// LFS objects the branch refers to that the source has, and will carry
     /// beside the bundle; counting the modified and untracked files the LFS
@@ -288,6 +295,7 @@ pub(super) fn inspect_after_resuming(
             conflicted: 0,
             untracked_bytes: 0,
             ignored_files: 0,
+            ignored_bytes: 0,
             ignored_dirs: 0,
             lfs_present: 0,
             lfs_present_bytes: 0,
@@ -347,6 +355,13 @@ pub(super) fn inspect_after_resuming(
                 inspect_remote_sources(host, resumed, &mut sources, &mut preflight);
             plan_local_names(host, &sources, &mut preflight);
         }
+    }
+    let kind = match direction {
+        TransferDirection::ToRemote => "worktree",
+        TransferDirection::ToLocal => "workspace",
+    };
+    for row in &mut preflight.repos {
+        ignored_cap_warning(row, host.ignored_files_cap(), kind);
     }
     preflight.finalize();
     Ok(Inspection {
@@ -772,6 +787,25 @@ fn repo_bytes(report: &ScriptReport) -> u64 {
         .saturating_mul(1024)
 }
 
+/// Ignored files over `cap` can be neither carried nor backed up: say so, as
+/// removing the source deletes them.
+fn ignored_cap_warning(row: &mut RepoPreflight, cap: u64, kind: &str) {
+    if row.ignored_bytes <= cap {
+        return;
+    }
+    let mb = |bytes: u64| bytes.div_ceil(1024 * 1024);
+    row.warnings.push(TransferIssue::new(
+        IGNORED_TOO_LARGE,
+        format!(
+            "{}'s ignored files come to {} MB, more than the {} MB a transfer can carry or \
+             back up, so they are deleted with the {kind}.",
+            row.branch_name,
+            mb(row.ignored_bytes),
+            mb(cap)
+        ),
+    ));
+}
+
 /// Fill `row` from its section of the report. Returns whether there is a
 /// checkout to carry (blocked or not).
 fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> bool {
@@ -805,7 +839,13 @@ fn read_checkout(row: &mut RepoPreflight, report: &ScriptReport, kind: &str) -> 
         .get("untracked_bytes")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    row.ignored_files = count("ignored");
+    // `ignored` counts every ignored entry outside an ignored directory;
+    // `ignored_files` only those a transfer archives (no symlinks).
+    row.ignored_files = count("ignored_files");
+    row.ignored_bytes = report
+        .get("ignored_bytes")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     row.ignored_dirs = count("ignored_dirs");
     if let Some(lfs) = LfsCounts::from_report(report) {
         let changed = |key: &str| report.get(key).and_then(|v| v.parse::<u64>().ok());

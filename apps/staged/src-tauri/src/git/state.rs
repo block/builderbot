@@ -1,4 +1,4 @@
-use super::cli::{self, EnvSource, GitError};
+use super::cli::{self, BoundedRead, EnvSource, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
 use super::status_parse::is_conflicted_status;
 use super::upstream::upstream_branch_name_from_config;
@@ -6,6 +6,7 @@ use super::worktree::BRANCH_COMMIT_LOG_FORMAT;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -925,6 +926,12 @@ pub fn compute_local_branch_git_state_with<T: Send>(
 /// Nothing retries here: a retry with the captured env would wait out the
 /// capture this build exists not to wait for, and a second bounded read of
 /// the same capture returns at once without it.
+///
+/// A read that went without the captured env and succeeded is no more
+/// certain ([`BoundedRead::provisional`]): a clean filter that isn't
+/// `required` and is only on the captured `PATH` is skipped, and `git
+/// status` exits 0 reporting the file as modified. Such a build is
+/// [`BoundedGitState::provisional`], which gets the same follow-up refresh.
 pub fn compute_local_branch_git_state_bounded(
     repo: &Path,
     branch_name: &str,
@@ -932,7 +939,7 @@ pub fn compute_local_branch_git_state_bounded(
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
-) -> Result<BranchGitState, GitError> {
+) -> Result<BoundedGitState, GitError> {
     let query = BranchGitStateQuery {
         branch_name,
         remote_branch,
@@ -942,9 +949,20 @@ pub fn compute_local_branch_git_state_bounded(
     };
     compute_branch_git_state_settled(
         &local_cache_key(repo, &query),
-        |args| local_git(repo, EnvSource::CapturedBounded, args),
+        |args| local_git_bounded(repo, args),
         query,
     )
+}
+
+/// A display refresh's [`BranchGitState`]
+/// ([`compute_local_branch_git_state_bounded`]).
+#[derive(Debug, Clone)]
+pub struct BoundedGitState {
+    pub state: BranchGitState,
+    /// Some read behind `state` was [`BoundedRead::provisional`]: it ran
+    /// with the inherited env while the captured env is still to come, so
+    /// `state` may differ from what the captured env would show.
+    pub provisional: bool,
 }
 
 /// Fetch-TTL cache key for a local checkout's state builds.
@@ -972,36 +990,58 @@ fn local_git(repo: &Path, env_source: EnvSource, args: &[&str]) -> Result<String
     }
 }
 
+/// [`local_git`] with [`EnvSource::CapturedBounded`], saying which reads are
+/// provisional. The fetch waits for the captured env, so it never is.
+fn local_git_bounded(repo: &Path, args: &[&str]) -> Result<BoundedRead, GitError> {
+    if args.first() == Some(&"fetch") {
+        cli::run(repo, args).map(BoundedRead::settled)
+    } else {
+        cli::run_bounded_read(repo, args)
+    }
+}
+
 /// [`compute_branch_git_state`] over a runner whose reads may fail with
-/// [`GitError::CapturedEnvPending`]. Any such read makes the build an `Err`
-/// carrying the first one's error, rather than a state that took the failure
-/// for an answer. Other failures are read as the build always reads them.
+/// [`GitError::CapturedEnvPending`] or succeed provisionally. Any pending
+/// failure makes the build an `Err` carrying the first one's error, rather
+/// than a state that took the failure for an answer. Other failures are read
+/// as the build always reads them. A build with no pending failure but a
+/// provisional read is [`BoundedGitState::provisional`].
 pub(super) fn compute_branch_git_state_settled<F>(
     cache_key: &str,
     run_git: F,
     query: BranchGitStateQuery<'_>,
-) -> Result<BranchGitState, GitError>
+) -> Result<BoundedGitState, GitError>
 where
-    F: Fn(&[&str]) -> Result<String, GitError> + Sync,
+    F: Fn(&[&str]) -> Result<BoundedRead, GitError> + Sync,
 {
     let pending = OnceLock::new();
+    let provisional = AtomicBool::new(false);
     let (state, ()) = compute_branch_git_state_with(
         cache_key,
-        |args| {
-            run_git(args).map_err(|error| {
+        |args| match run_git(args) {
+            Ok(read) => {
+                if read.provisional {
+                    provisional.store(true, Ordering::Relaxed);
+                }
+                Ok(read.stdout)
+            }
+            Err(error) => {
                 let message = error.to_string();
                 if matches!(error, GitError::CapturedEnvPending(_)) {
                     let _ = pending.set(error);
                 }
-                message
-            })
+                Err(message)
+            }
         },
         query,
         |_| (),
     );
     match pending.into_inner() {
         Some(error) => Err(error),
-        None => Ok(state),
+        None => Ok(BoundedGitState {
+            state,
+            provisional: provisional.into_inner(),
+        }),
     }
 }
 

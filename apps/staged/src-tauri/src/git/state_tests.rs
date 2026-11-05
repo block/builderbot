@@ -1,8 +1,9 @@
-use super::cli::{self, run_bounded_while_capturing, EnvSource, GitError};
+use super::cli::{self, run_bounded_while_capturing, BoundedRead, EnvSource, GitError};
 use super::state::{
     compute_branch_git_state_settled, compute_branch_git_state_with,
-    compute_local_branch_git_state, compute_local_branch_git_state_bounded, BranchGitState,
-    BranchGitStateQuery, FetchMode, FetchStatus, UpstreamRelation, WorktreeStatusScope,
+    compute_local_branch_git_state, compute_local_branch_git_state_bounded, BoundedGitState,
+    BranchGitState, BranchGitStateQuery, FetchMode, FetchStatus, UpstreamRelation,
+    WorktreeStatusScope,
 };
 use super::strip_git_env;
 use crate::test_utils::{repo_with_unrunnable_clean_filter, TempGitRepo};
@@ -154,6 +155,8 @@ fn bounded_build_still_fetches() {
         WorktreeStatusScope::Full,
     )
     .expect("nothing pending in the test build");
+    assert!(!state.provisional, "the test build reads with the lite env");
+    let state = state.state;
 
     assert_eq!(state.fetch.status, FetchStatus::Fresh);
     assert_eq!(state.upstream.relation, UpstreamRelation::OriginAhead);
@@ -163,8 +166,8 @@ fn bounded_build_still_fetches() {
 
 fn settled_state(
     repo: &Path,
-    run_git: impl Fn(&[&str]) -> Result<String, GitError> + Sync,
-) -> Result<BranchGitState, GitError> {
+    run_git: impl Fn(&[&str]) -> Result<BoundedRead, GitError> + Sync,
+) -> Result<BoundedGitState, GitError> {
     compute_branch_git_state_settled(
         &format!("settled:{}", repo.display()),
         run_git,
@@ -176,6 +179,11 @@ fn settled_state(
             worktree_scope: WorktreeStatusScope::Full,
         },
     )
+}
+
+/// A read with the env it asked for, as a settled [`BoundedRead`].
+fn lite_read(repo: &Path, args: &[&str]) -> Result<BoundedRead, GitError> {
+    cli::run_lite(repo, args).map(BoundedRead::settled)
 }
 
 /// A bounded `git status` that gave up on a running capture and couldn't run
@@ -195,8 +203,9 @@ fn bounded_build_declines_a_status_that_failed_while_capturing() {
         "{error:?}"
     );
 
-    let coerced = settled_state(repo.path(), |args| cli::run_lite(repo.path(), args))
-        .expect("a lite failure isn't pending");
+    let coerced = settled_state(repo.path(), |args| lite_read(repo.path(), args))
+        .expect("a lite failure isn't pending")
+        .state;
     assert!(
         !coerced.worktree.dirty,
         "the coercion the bounded build avoids"
@@ -207,8 +216,9 @@ fn bounded_build_declines_a_status_that_failed_while_capturing() {
         run_bounded_while_capturing(repo.path(), args)
     })
     .expect("every read ran");
-    assert!(state.worktree.dirty);
-    assert_eq!(state.worktree.modified, 1);
+    assert!(state.provisional);
+    assert!(state.state.worktree.dirty);
+    assert_eq!(state.state.worktree.modified, 1);
 }
 
 /// While a root's timed-out mark is live, its bounded reads go without the
@@ -300,7 +310,7 @@ fn bounded_build_declines_a_status_whose_capture_timed_out_while_it_waited() {
     let status_waited = Mutex::new(None);
     let error = settled_state(repo.path(), |args| {
         if args.first() != Some(&"status") {
-            return cli::run_lite(repo.path(), args);
+            return lite_read(repo.path(), args);
         }
         let started = Instant::now();
         let read = cli::run_bounded_with_cache(&cache, repo.path(), args, bound);
@@ -322,6 +332,56 @@ fn bounded_build_declines_a_status_whose_capture_timed_out_while_it_waited() {
     );
 }
 
+/// A bounded `git status` that gave up on a running capture and skipped a
+/// clean filter that isn't `required` still exits 0, but reads the filtered
+/// file as modified. The build is a state, not an `Err`, and is provisional
+/// so the refresh looks again once the capture lands. With the filter on
+/// `PATH` the same tree reads as clean, and a build whose reads all ran with
+/// the env they asked for is settled.
+#[test]
+fn bounded_build_that_skipped_an_optional_filter_is_provisional() {
+    let repo = TempGitRepo::new();
+    repo.write_file(".gitattributes", "*.txt filter=upper\n");
+    repo.run_git(&["config", "filter.upper.clean", "tr a-z A-Z"]);
+    repo.write_file("data.txt", "hello\n");
+    repo.commit("init");
+    repo.run_git(&["config", "filter.upper.clean", "staged-test-no-such-filter"]);
+    // A new mtime makes `git status` look at the file again rather than
+    // trust the index's stat data.
+    fs::File::options()
+        .write(true)
+        .open(repo.path().join("data.txt"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+
+    let status = repo.run_git(&["status", "--porcelain=1"]);
+    assert!(
+        status.contains("data.txt"),
+        "git skipped the filter: {status:?}"
+    );
+
+    let provisional = settled_state(repo.path(), |args| {
+        run_bounded_while_capturing(repo.path(), args)
+    })
+    .expect("status exited 0, so nothing is pending");
+    assert!(provisional.provisional);
+    assert!(
+        provisional.state.worktree.dirty,
+        "the answer the follow-up replaces"
+    );
+
+    repo.run_git(&["config", "filter.upper.clean", "tr a-z A-Z"]);
+    let settled =
+        settled_state(repo.path(), |args| lite_read(repo.path(), args)).expect("every read ran");
+    assert!(!settled.provisional);
+    assert!(
+        !settled.state.worktree.dirty,
+        "{:?}",
+        settled.state.worktree
+    );
+}
+
 /// A pending failure in any read, not just `status`, declines the build,
 /// and reads that fail the same way with any env, such as a `merge-base`
 /// against a missing `origin/main`, don't.
@@ -335,7 +395,7 @@ fn bounded_build_declines_any_pending_read_but_not_env_independent_ones() {
         run_bounded_while_capturing(repo.path(), args)
     })
     .expect("no origin is an answer, not a pending env");
-    assert!(state.base.sha.is_none());
+    assert!(state.state.base.sha.is_none());
 
     let error = settled_state(repo.path(), |args| {
         if args.first() == Some(&"rev-parse") {
@@ -343,7 +403,7 @@ fn bounded_build_declines_any_pending_read_but_not_env_independent_ones() {
                 GitError::GitNotFound,
             )))
         } else {
-            cli::run_lite(repo.path(), args)
+            lite_read(repo.path(), args)
         }
     })
     .expect_err("HEAD's read was pending");

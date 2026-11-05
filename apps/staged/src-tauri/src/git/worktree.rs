@@ -223,10 +223,13 @@ pub fn move_worktree(repo: &Path, from: &Path, to: &Path) -> Result<(), GitError
 /// The branch_name parameter is optional - if provided, the local branch will be deleted.
 /// This is important for allowing the branch to be recreated later.
 ///
-/// Every git call here goes through `cli::run_lite_or_captured`: they only
-/// touch `.git` admin files and the filesystem, so waiting on the clone's
-/// shell-env capture (which nothing else may have warmed) would only delay
-/// the teardown.
+/// The worktree's own git calls go through `cli::run_lite_or_captured`:
+/// they only touch `.git` admin files and the filesystem, so waiting on the
+/// clone's shell-env capture (which nothing else may have warmed) would only
+/// delay the teardown. The branch delete goes through [`force_delete_branch`],
+/// which waits on the capture only if the lite env's delete fails in a way
+/// the captured env might fix, and its failure fails the teardown, after the
+/// worktree itself is gone.
 pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError> {
     // First, get the branch name from the worktree before removing it
     let branch_name = get_worktree_branch(repo, worktree_path);
@@ -269,11 +272,79 @@ pub fn remove_worktree(repo: &Path, worktree_path: &Path) -> Result<(), GitError
     // Delete the local branch if we found one
     // Use -D (force delete) since the branch may not be fully merged
     if let Some(branch) = branch_name {
-        // Ignore errors - branch may already be deleted or may be checked out elsewhere
-        let _ = cli::run_lite_or_captured(repo, &["branch", "-D", &branch]);
+        force_delete_branch(repo, &branch)?;
     }
 
     Ok(())
+}
+
+/// `git branch -D <branch>` as the last step of a teardown, so the branch
+/// can be created again later.
+///
+/// Runs with the lite env first, so a teardown doesn't wait on the clone's
+/// shell-env capture. The delete fires the `reference-transaction` hook,
+/// which can abort it, and a hook that needs a tool only the login shell's
+/// `PATH` has fails to start under the lite env. So does a lite env with no
+/// usable git. Any failure but the two below is tried again with the
+/// captured env, and if that fails too the error is returned, rather than
+/// reporting a teardown that left the branch behind as done.
+///
+/// A branch that is already gone, or checked out in another worktree, is
+/// fine: git's answer is the same with any env, and a branch in use
+/// elsewhere isn't this teardown's to delete.
+pub(crate) fn force_delete_branch(repo: &Path, branch: &str) -> Result<(), GitError> {
+    force_delete_branch_with(repo, branch, cli::run_lite, cli::run)
+}
+
+/// [`force_delete_branch`] with the lite-env and captured-env runners
+/// passed in, so tests can stand in for the captured env.
+fn force_delete_branch_with(
+    repo: &Path,
+    branch: &str,
+    lite: impl FnOnce(&Path, &[&str]) -> Result<String, GitError>,
+    captured: impl FnOnce(&Path, &[&str]) -> Result<String, GitError>,
+) -> Result<(), GitError> {
+    let args = ["branch", "-D", branch];
+    let error = match lite(repo, &args) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    if let Some(settled) = settled_branch_delete(branch, error.to_string()) {
+        return settled;
+    }
+    if matches!(
+        error,
+        GitError::NotARepo(_) | GitError::InvalidUtf8 | GitError::InvalidPath(_)
+    ) {
+        return Err(error);
+    }
+    log::info!(
+        "Deleting branch '{branch}' in {} with the inherited env failed; retrying with the \
+         captured env: {error}",
+        repo.display()
+    );
+    match captured(repo, &args) {
+        Ok(_) => Ok(()),
+        Err(error) => settled_branch_delete(branch, error.to_string()).unwrap_or(Err(error)),
+    }
+}
+
+/// `Ok` when a failed `branch -D` leaves nothing for the teardown to do: the
+/// branch is already gone, or another worktree has it checked out. Matched
+/// against the `LC_ALL=C` wording `cli` pins: newer git says "used by
+/// worktree at", older git "checked out at".
+fn settled_branch_delete(branch: &str, message: String) -> Option<Result<(), GitError>> {
+    if message.contains(&format!("branch '{branch}' not found")) {
+        return Some(Ok(()));
+    }
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("cannot delete branch")
+        && (lower.contains("checked out at") || lower.contains("used by worktree at"))
+    {
+        log::info!("Leaving branch '{branch}', which another worktree has checked out: {message}");
+        return Some(Ok(()));
+    }
+    None
 }
 
 /// Get the branch name associated with a worktree.
@@ -1196,6 +1267,147 @@ mod tests {
 
         assert!(!worktree.exists());
         assert_eq!(local_branches(&repo).trim(), "main");
+    }
+
+    /// Point `repo` at a `reference-transaction` hook whose interpreter,
+    /// `staged-test-hook-interp`, is on no `PATH` but the one a test adds,
+    /// as a hook that needs a tool only the login shell's `PATH` has. Returns
+    /// a dir holding that interpreter, for the test's captured env.
+    #[cfg(unix)]
+    fn hook_needing_captured_path(
+        repo: &crate::test_utils::TempGitRepo,
+        root: &Path,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let write_executable = |path: &Path, content: &str| {
+            std::fs::write(path, content).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let hooks = root.join("hooks");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        write_executable(
+            &hooks.join("reference-transaction"),
+            "#!/usr/bin/env staged-test-hook-interp\n",
+        );
+        write_executable(
+            &bin.join("staged-test-hook-interp"),
+            "#!/bin/sh\ncat >/dev/null\nexit 0\n",
+        );
+        repo.run_git(&["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        bin
+    }
+
+    /// `branch -D` in `repo` with `bin` ahead of the inherited `PATH`, as the
+    /// captured env would run it.
+    #[cfg(unix)]
+    fn run_with_path(bin: &Path, repo: &Path, args: &[&str]) -> Result<String, GitError> {
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(repo).args(args);
+        crate::git::strip_git_env(&mut command);
+        let path = std::env::var("PATH").unwrap_or_default();
+        command.env("PATH", format!("{}:{path}", bin.display()));
+        command.env("LC_ALL", "C");
+        let output = command.output().unwrap();
+        if output.status.success() {
+            Ok(String::from_utf8(output.stdout).unwrap())
+        } else {
+            Err(GitError::CommandFailed(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+        }
+    }
+
+    /// A `reference-transaction` hook that can't start under the inherited
+    /// env aborts the branch delete, and the teardown says so instead of
+    /// reporting success with the branch left behind. The worktree itself
+    /// is still removed with the lite env.
+    #[cfg(unix)]
+    #[test]
+    fn remove_worktree_fails_when_a_hook_aborts_the_branch_delete() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["branch", "feature"]);
+
+        let root = crate::test_utils::TempDir::new("remove-worktree-hook");
+        let worktree = root.path().join("wt");
+        create_worktree_for_existing_branch_at_path(repo.path(), "feature", &worktree).unwrap();
+        hook_needing_captured_path(&repo, root.path());
+
+        // The test build's captured env is the lite one, so the retry fails
+        // the same way.
+        let error = remove_worktree(repo.path(), &worktree)
+            .expect_err("the hook aborted the branch delete");
+        assert!(
+            error.to_string().contains("reference-transaction"),
+            "{error}"
+        );
+        assert!(!worktree.exists());
+        assert!(local_branches(&repo).lines().any(|b| b == "feature"));
+    }
+
+    /// A delete the lite env's hook aborted is tried again with the captured
+    /// env, which has what the hook needs.
+    #[cfg(unix)]
+    #[test]
+    fn force_delete_branch_retries_a_hook_failure_with_the_captured_env() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["branch", "feature"]);
+        let root = crate::test_utils::TempDir::new("force-delete-branch-hook");
+        let bin = hook_needing_captured_path(&repo, root.path());
+
+        let lite_error = cli::run_lite(repo.path(), &["branch", "-D", "feature"])
+            .expect_err("the hook can't start under the inherited env");
+        assert!(
+            settled_branch_delete("feature", lite_error.to_string()).is_none(),
+            "{lite_error}"
+        );
+
+        let retried = std::cell::Cell::new(false);
+        force_delete_branch_with(repo.path(), "feature", cli::run_lite, |repo, args| {
+            retried.set(true);
+            run_with_path(&bin, repo, args)
+        })
+        .unwrap();
+        assert!(retried.get());
+        assert_eq!(local_branches(&repo).trim(), "main");
+    }
+
+    /// A branch that is already gone, or checked out in another worktree, is
+    /// git's answer with any env: the delete succeeds without waiting on the
+    /// captured env, and leaves a branch in use alone.
+    #[test]
+    fn force_delete_branch_settles_routine_failures_without_the_captured_env() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["branch", "feature"]);
+        let root = crate::test_utils::TempDir::new("force-delete-branch-routine");
+        let worktree = root.path().join("wt");
+        create_worktree_for_existing_branch_at_path(repo.path(), "feature", &worktree).unwrap();
+
+        let no_retry = |_: &Path, args: &[&str]| -> Result<String, GitError> {
+            panic!("retried {args:?} with the captured env")
+        };
+        force_delete_branch_with(repo.path(), "feature", cli::run_lite, no_retry).unwrap();
+        assert!(local_branches(&repo).lines().any(|b| b == "feature"));
+        force_delete_branch_with(repo.path(), "no-such-branch", cli::run_lite, no_retry).unwrap();
+
+        assert!(settled_branch_delete(
+            "feature",
+            "error: Cannot delete branch 'feature' checked out at '/tmp/wt'\n".into()
+        )
+        .is_some());
+        assert!(settled_branch_delete(
+            "feature",
+            "fatal: in 'preparing' phase, update aborted by the reference-transaction hook\n"
+                .into()
+        )
+        .is_none());
     }
 
     /// git records a worktree by its real path, so a worktree created through

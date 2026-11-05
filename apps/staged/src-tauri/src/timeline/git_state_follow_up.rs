@@ -1,12 +1,28 @@
-//! One more git-state refresh for a branch whose refresh declined while its
-//! worktree's shell env was still being captured.
+//! One more git-state refresh for a branch whose refresh declined, or showed
+//! a provisional state, while its worktree's shell env was still being
+//! captured.
 //!
 //! A display refresh's reads wait at most a couple of seconds for the
 //! captured env (`git::compute_local_branch_git_state_bounded`). If one of
 //! them ran with the inherited env and failed in a way the captured env might
 //! have avoided, the refresh declines and the card keeps the state it has.
+//! If one ran with the inherited env and succeeded, its answer may still not
+//! be the captured env's (a clean filter only on the captured `PATH` that
+//! git skipped), so the refresh shows the state but it is provisional.
 //! Nothing on the frontend refreshes again when the capture lands, so
-//! [`FollowUps::schedule`] queues one refresh for then.
+//! [`FollowUps::schedule`] queues one refresh for then, in both cases
+//! ([`settle_bounded_build`]).
+//!
+//! A provisional state is shown rather than held back. The inherited env
+//! gets the same answer as the captured one unless the repo needs a tool
+//! only the login shell's `PATH` has, and holding every state back until
+//! the capture lands would leave a card without a first state for the
+//! 9–30 s a cold capture takes, which the bounded reads exist to avoid. A
+//! wrong provisional state is display only: the pull, reset and discard
+//! builds read with the captured env before they act, and the follow-up
+//! replaces it once the capture lands. A failed read is different: the
+//! build would take it for an answer (a failed `git status` for a clean
+//! tree), so that build declines instead.
 //!
 //! The follow-up rides on the capture (`ShellEnvCache::after_capture`):
 //! nothing waits on it, so it isn't moved up the slot queue or counted as a
@@ -20,8 +36,56 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+use crate::git::{BoundedGitState, BranchGitState, GitError};
 use crate::shell_env::ShellEnvCache;
 use crate::store::Store;
+
+/// What a display refresh emits for `branch_id`, given its bounded `build`:
+/// the state, provisional or not, or nothing when the build declined.
+/// `follow_up` queues a refresh for when the capture lands and returns
+/// whether one is queued ([`refresh_after_capture`]); it runs when the build
+/// declined or is provisional, never for a settled one, so a follow-up that
+/// reads with the captured env queues nothing more.
+pub(super) fn settle_bounded_build(
+    branch_id: &str,
+    build: Result<BoundedGitState, GitError>,
+    follow_up: impl FnOnce() -> bool,
+) -> Option<BranchGitState> {
+    let landing = |queued: bool| {
+        if queued {
+            "refreshing again once it lands"
+        } else {
+            "no capture left to wait for"
+        }
+    };
+    match build {
+        Ok(BoundedGitState {
+            state,
+            provisional: false,
+        }) => Some(state),
+        Ok(BoundedGitState {
+            state,
+            provisional: true,
+        }) => {
+            let queued = follow_up();
+            log::debug!(
+                "Branch {branch_id}'s git state was read before its shell env was captured \
+                 ({})",
+                landing(queued)
+            );
+            Some(state)
+        }
+        Err(error) => {
+            let queued = follow_up();
+            log::info!(
+                "Keeping branch {branch_id}'s git state until its shell env is captured \
+                 ({}): {error}",
+                landing(queued)
+            );
+            None
+        }
+    }
+}
 
 /// Queue one more [`super::refresh_branch_git_state_impl`] for `branch_id`,
 /// with the fetch TTL, for when `worktree`'s shell env capture lands. Returns
@@ -151,6 +215,49 @@ mod tests {
             matches!(read, BoundedEnv::StillCapturing { .. }),
             "{read:?}"
         );
+    }
+
+    /// Some state, for builds that don't need a repo.
+    fn any_state() -> BranchGitState {
+        crate::git::compute_branch_git_state(
+            "follow-up-tests",
+            |_| Err("no repo".to_string()),
+            "main",
+            "main",
+            "main",
+            crate::git::FetchMode::Never,
+            crate::git::WorktreeStatusScope::Full,
+        )
+    }
+
+    /// A settled build is emitted with no follow-up. A provisional one is
+    /// emitted and queues one, as a declined build queues one and emits
+    /// nothing, whether or not a capture is left to queue on.
+    #[test]
+    fn provisional_and_declined_builds_queue_a_follow_up() {
+        let settle = |build, queued| {
+            let asked = std::cell::Cell::new(false);
+            let shown = settle_bounded_build("a", build, || {
+                asked.set(true);
+                queued
+            });
+            (shown, asked.get())
+        };
+        let build = |provisional| {
+            Ok(BoundedGitState {
+                state: any_state(),
+                provisional,
+            })
+        };
+
+        assert_eq!(settle(build(false), true), (Some(any_state()), false));
+        for queued in [true, false] {
+            assert_eq!(settle(build(true), queued), (Some(any_state()), true));
+            let declined = Err(GitError::CapturedEnvPending(Box::new(
+                GitError::GitNotFound,
+            )));
+            assert_eq!(settle(declined, queued), (None, true));
+        }
     }
 
     /// A refresh that counts itself on `runs`.

@@ -863,9 +863,12 @@ pub(crate) fn pr_head_is_in_fork(
 /// starts from nothing rather than from a half-made checkout. Best effort:
 /// the caller is already returning the error that got it here.
 ///
-/// Lite env with the captured-env fallback for an unusable git, like
-/// [`git::remove_worktree`]: both commands only touch the repo's admin files
-/// and refs, so teardown never waits on a shell capture.
+/// Like [`git::remove_worktree`]: the worktree removal runs with the lite
+/// env, with the captured-env fallback for an unusable git, since it only
+/// touches the repo's admin files. The branch delete goes through
+/// [`git::force_delete_branch`], which retries with the captured env when
+/// the lite one fails in a way it might fix, such as a
+/// `reference-transaction` hook that needs the login shell's `PATH`.
 fn discard_incomplete_worktree(
     repo_path: &Path,
     worktree_path: &Path,
@@ -883,7 +886,7 @@ fn discard_incomplete_worktree(
         );
     }
     if let Some(branch) = created_branch {
-        if let Err(e) = git::cli_run_lite_or_captured(repo_path, &["branch", "-D", branch]) {
+        if let Err(e) = git::force_delete_branch(repo_path, branch) {
             log::warn!("Could not delete incomplete branch '{branch}': {e}");
         }
     }

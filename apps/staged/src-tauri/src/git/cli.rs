@@ -62,7 +62,56 @@ pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 /// would read a failure as an answer (no changes, no commits) can tell it
 /// apart.
 pub fn run_bounded(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    run_with_env(repo, args, EnvSource::CapturedBounded)
+    run_bounded_read(repo, args).map(|read| read.stdout)
+}
+
+/// What a successful [`run_bounded_read`] printed, and whether it is only
+/// provisional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedRead {
+    pub stdout: String,
+    /// The read ran with the inherited env while the captured env is still
+    /// to come (`AppliedEnv::LiteFallback { capture_pending: true }`), and
+    /// git exiting 0 doesn't make its answer the captured env's. Git treats
+    /// a clean filter that isn't `required` and can't run as passthrough,
+    /// so with the filter only on the captured `PATH`, `git status`
+    /// succeeds and reports a filtered file as modified. A failure the
+    /// captured env might have avoided is
+    /// [`GitError::CapturedEnvPending`] instead.
+    pub provisional: bool,
+}
+
+impl BoundedRead {
+    /// A read that ran with the env it asked for, or with the only env
+    /// there will be.
+    pub fn settled(stdout: String) -> Self {
+        Self {
+            stdout,
+            provisional: false,
+        }
+    }
+}
+
+/// [`run_bounded`], also saying whether a successful read is provisional
+/// ([`BoundedRead::provisional`]), for callers that put the answer on
+/// screen and can look again once the capture lands.
+pub fn run_bounded_read(repo: &Path, args: &[&str]) -> Result<BoundedRead, GitError> {
+    let (output, env) = spawn_git_with_applied_env(repo, args, EnvSource::CapturedBounded)?;
+    bounded_read_of(repo, output, env)
+}
+
+/// A bounded run's [`BoundedRead`], or the error a failed one stands for,
+/// flagged as for [`run_with_env`].
+fn bounded_read_of(
+    repo: &Path,
+    output: std::process::Output,
+    env: AppliedEnv,
+) -> Result<BoundedRead, GitError> {
+    let stdout = stdout_of(repo, output).map_err(|e| flag_pending_capture(e, env))?;
+    Ok(BoundedRead {
+        stdout,
+        provisional: env.capture_pending(),
+    })
 }
 
 /// Run a git command with the lite env (parent env minus `GIT_*`).
@@ -97,7 +146,9 @@ pub fn run_lite(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 /// These commands do run hooks: `branch -D` fires the
 /// `reference-transaction` hook, which can abort the delete. If a hook
 /// needs a tool that only the login shell's `PATH` provides, it fails under
-/// the lite env, and that failure is not retried.
+/// the lite env, and that failure is not retried here. The teardown's
+/// `branch -D` goes through [`super::worktree::force_delete_branch`], which
+/// retries such failures with the captured env.
 pub fn run_lite_or_captured(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     match run_with_env(repo, args, EnvSource::Lite) {
         Err(e) if is_unusable_git(&e) => {
@@ -265,6 +316,18 @@ enum AppliedEnv {
     },
 }
 
+impl AppliedEnv {
+    /// Whether the run went without a captured env that is still to come.
+    fn capture_pending(self) -> bool {
+        matches!(
+            self,
+            AppliedEnv::LiteFallback {
+                capture_pending: true
+            }
+        )
+    }
+}
+
 /// Spawn `git -C <repo> <args>` with `source`'s env, non-interactive and
 /// detached from the controlling TTY, and wait for it. Only failing to run
 /// git at all is an error here; the exit status is the caller's to read.
@@ -392,32 +455,36 @@ fn is_missing_ref_error(stderr: &str) -> bool {
         .any(|p| stderr.contains(p))
 }
 
-/// [`run_bounded`] as it runs once the bound has run out on a capture still
-/// in progress: with the lite env, flagging failures the way that run does.
-/// The test build's [`apply_env`] only ever applies the lite env, so tests
-/// that need such a read's result use this.
+/// [`run_bounded_read`] as it runs once the bound has run out on a capture
+/// still in progress: with the lite env, flagging failures and marking
+/// successes provisional the way that run does. The test build's
+/// [`apply_env`] only ever applies the lite env, so tests that need such a
+/// read's result use this.
 #[cfg(test)]
-pub(super) fn run_bounded_while_capturing(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    run_lite(repo, args).map_err(|error| {
-        flag_pending_capture(
-            error,
-            AppliedEnv::LiteFallback {
-                capture_pending: true,
-            },
-        )
-    })
+pub(super) fn run_bounded_while_capturing(
+    repo: &Path,
+    args: &[&str],
+) -> Result<BoundedRead, GitError> {
+    let output = spawn_git(repo, args, EnvSource::Lite)?;
+    bounded_read_of(
+        repo,
+        output,
+        AppliedEnv::LiteFallback {
+            capture_pending: true,
+        },
+    )
 }
 
-/// [`run_bounded`] as the app build runs it, but against `cache` and with
-/// `bound` in place of the app's cache and [`CAPTURED_ENV_READ_BOUND`], so
-/// tests can drive the bounded arm with a hermetic shell.
+/// [`run_bounded_read`] as the app build runs it, but against `cache` and
+/// with `bound` in place of the app's cache and [`CAPTURED_ENV_READ_BOUND`],
+/// so tests can drive the bounded arm with a hermetic shell.
 #[cfg(test)]
 pub(super) fn run_bounded_with_cache(
     cache: &Arc<ShellEnvCache>,
     repo: &Path,
     args: &[&str],
     bound: Duration,
-) -> Result<String, GitError> {
+) -> Result<BoundedRead, GitError> {
     let mut command = Command::new("git");
     command.arg("-C").arg(repo).args(args);
     let env = apply_captured_env_within(&mut command, repo, cache, bound);
@@ -426,7 +493,7 @@ pub(super) fn run_bounded_with_cache(
     let output = command
         .output()
         .map_err(|e| GitError::CommandFailed(e.to_string()))?;
-    stdout_of(repo, output).map_err(|e| flag_pending_capture(e, env))
+    bounded_read_of(repo, output, env)
 }
 
 /// Fire-and-forget warm-up of the captured shell env for `repo`: starts the
@@ -937,6 +1004,49 @@ mod tests {
             apply_captured_env_within(&mut command, &dir, &cache, Duration::from_secs(30));
         assert_eq!(applied, AppliedEnv::Captured);
         assert_eq!(capture_marker(&command).as_deref(), Some("captured"));
+    }
+
+    /// A bounded read that succeeds with the inherited env while the capture
+    /// is still running is provisional; the same read once the capture has
+    /// landed is settled. A read after a capture that failed for good is
+    /// settled too: the lite env is all there will be.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_read_is_provisional_only_while_the_capture_is_to_come() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "hello\n");
+        repo.commit("init");
+        let (cache, _shell) = marker_cache("1", repo.path().parent().expect("repo parent"));
+
+        let read = run_bounded_with_cache(
+            &cache,
+            repo.path(),
+            &["rev-parse", "HEAD"],
+            Duration::from_millis(100),
+        )
+        .expect("rev-parse ran");
+        assert!(read.provisional, "{read:?}");
+        assert!(!read.stdout.trim().is_empty());
+
+        cache.get_blocking(repo.path()).expect("the capture lands");
+        let read =
+            run_bounded_with_cache(&cache, repo.path(), &["rev-parse", "HEAD"], Duration::ZERO)
+                .expect("rev-parse ran");
+        assert!(!read.provisional, "{read:?}");
+
+        let failing = crate::test_utils::write_fake_shell("#!/bin/sh\nexit 3\n");
+        let failed_cache = Arc::new(
+            ShellEnvCache::with_shell_and_ttl(failing.to_path_buf(), Duration::from_secs(3600))
+                .with_home(repo.path().parent().expect("repo parent")),
+        );
+        let read = run_bounded_with_cache(
+            &failed_cache,
+            repo.path(),
+            &["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
+        .expect("rev-parse ran");
+        assert!(!read.provisional, "{read:?}");
     }
 
     /// A read in a repo subdirectory uses the snapshot captured at the repo's

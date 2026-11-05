@@ -755,39 +755,23 @@ pub(crate) fn refresh_branch_git_state_impl(
         if worktree_path.exists() {
             // Display only, so the reads don't sit out a cold capture. If one
             // the inherited env may have got wrong makes the build decline,
-            // the card keeps the state it has, and a follow-up refresh queued
-            // on the capture puts the real one there once it lands (see
-            // `git_state_follow_up`). The pull, reset and discard builds keep
-            // the unbounded wait, because they guard a mutation that waits
-            // for the capture anyway.
-            match git::compute_local_branch_git_state_bounded(
+            // the card keeps the state it has; if one ran without the
+            // captured env and succeeded, the card shows that state for now.
+            // Either way a follow-up refresh queued on the capture puts the
+            // real state there once it lands (see `git_state_follow_up`). The
+            // pull, reset and discard builds keep the unbounded wait, because
+            // they guard a mutation that waits for the capture anyway.
+            let build = git::compute_local_branch_git_state_bounded(
                 worktree_path,
                 &branch.branch_name,
                 &git::upstream_branch_name(worktree_path, &branch.branch_name, &branch.base_branch),
                 &branch.base_branch,
                 fetch_mode,
                 git::WorktreeStatusScope::Full,
-            ) {
-                Ok(state) => Some(state),
-                Err(error) => {
-                    let follow_up = git_state_follow_up::refresh_after_capture(
-                        app,
-                        store,
-                        worktree_path,
-                        branch_id,
-                    );
-                    log::info!(
-                        "Keeping branch {branch_id}'s git state until its shell env is captured \
-                         ({}): {error}",
-                        if follow_up {
-                            "refreshing again once it lands"
-                        } else {
-                            "no capture left to wait for"
-                        }
-                    );
-                    None
-                }
-            }
+            );
+            git_state_follow_up::settle_bounded_build(branch_id, build, || {
+                git_state_follow_up::refresh_after_capture(app, store, worktree_path, branch_id)
+            })
         } else {
             None
         }

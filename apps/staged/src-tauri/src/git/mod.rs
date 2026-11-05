@@ -50,11 +50,13 @@ pub use state::{
     compute_branch_git_state_batched, compute_local_branch_git_state,
     compute_local_branch_git_state_bounded, compute_local_branch_git_state_with,
     ensure_fast_forward_pullable, fast_forward_to_ref, update_repo_fetch_cache, BaseGitState,
-    BatchedBranchGitSnapshot, BranchGitState, BranchGitStateQuery, FetchGitState, FetchMode,
-    FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState, WorktreeStatusScope,
+    BatchedBranchGitSnapshot, BoundedGitState, BranchGitState, BranchGitStateQuery, FetchGitState,
+    FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState,
+    WorktreeStatusScope,
 };
 pub use types::*;
 pub use upstream::{upstream_branch_name, upstream_branch_name_with};
+pub(crate) use worktree::force_delete_branch;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,

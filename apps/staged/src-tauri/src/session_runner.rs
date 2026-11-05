@@ -4128,8 +4128,12 @@ async fn reattach_detached_turn(
 /// HEAD's reflog says it was then, or — when the reflog can't be read or
 /// doesn't reach back that far — [`head_before`]. The reflog survives
 /// rebases and merges that leave committer dates out of order.
+///
+/// Git stamps reflog entries in whole seconds, so one made in the prompt's
+/// own second can't be ordered against it. Such an entry is taken as the
+/// turn's (see [`prompt_second`]).
 fn head_at(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<String>, String> {
-    let at_secs = at.div_euclid(1000);
+    let prompt_second = prompt_second(at);
     // No spaces in the format: a remote runner's arguments pass through
     // `ws exec`'s command line.
     let reflog = git(&[
@@ -4147,13 +4151,37 @@ fn head_at(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<Strin
             Vec::new()
         }
     };
-    // Newest first: the first entry made by then is HEAD as of then.
-    let reaches_back = entries.last().is_some_and(|(_, time)| *time <= at_secs);
+    // Newest first: the first entry certainly made before the prompt is
+    // HEAD as it started.
+    let reaches_back = entries
+        .last()
+        .is_some_and(|(_, time)| *time < prompt_second);
     if reaches_back {
-        let sha = entries.into_iter().find(|(_, time)| *time <= at_secs);
+        let sha = entries.into_iter().find(|(_, time)| *time < prompt_second);
         return Ok(sha.map(|(sha, _)| sha));
     }
     head_before(git, at)
+}
+
+/// The whole second (since the epoch) holding `at` (ms since the epoch).
+///
+/// Git dates commits and reflog entries in whole seconds, so one in this
+/// second may have come before or after `at`. [`head_at`] and
+/// [`head_before`] take it as having come after, as part of the turn
+/// prompted at `at`. Taking it as before would treat a commit the turn made
+/// within a second of its prompt as the HEAD it started from, and leave the
+/// turn's commit unlinked. Taking it as after errs only when HEAD moved in
+/// that second before the prompt and the turn then made no commit: the
+/// turn is credited with the commit HEAD started on. After a follow-up
+/// that is the session's own earlier commit, which changes nothing, and a
+/// commit another row already holds is not claimed twice.
+///
+/// The stamps come from the workstation's clock and `at` from the app's, so
+/// a workstation running behind by less than the time from prompt to a
+/// first commit is tolerated too. On a remote turn that gap is at least the
+/// seconds `sq` takes to connect.
+fn prompt_second(at: i64) -> i64 {
+    at.div_euclid(1000)
 }
 
 /// `(sha, unix time)` of each entry of `git reflog show --format=%H:%gd
@@ -4169,12 +4197,15 @@ fn parse_head_reflog(reflog: &str) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// The branch's HEAD as of `at` (ms since the epoch): its newest commit made
-/// before then, or `None` when it has none that old. A turn's commits come
-/// after its prompt, so this approximates the HEAD a turn prompted at `at`
-/// started from.
+/// The branch's HEAD as of `at` (ms since the epoch): its newest commit dated
+/// before `at`'s second, or `None` when it has none that old. A turn's
+/// commits come after its prompt, so this approximates the HEAD a turn
+/// prompted at `at` started from; one dated in the prompt's own second is
+/// taken as the turn's (see [`prompt_second`]).
 fn head_before(git: &crate::branches::GitRunner<'_>, at: i64) -> Result<Option<String>, String> {
-    let before = format!("--before=@{}", at.div_euclid(1000));
+    // `--before` keeps commits dated at its bound, so bound it a second
+    // earlier.
+    let before = format!("--before=@{}", prompt_second(at) - 1);
     let sha = git(&["rev-list", "-1", &before, "HEAD"])?;
     let sha = sha.trim();
     Ok((!sha.is_empty()).then(|| sha.to_string()))
@@ -5668,7 +5699,19 @@ mod tests {
             head_before(&git, 1_000_000_150_000).unwrap(),
             Some(second.clone())
         );
-        assert_eq!(head_before(&git, 1_000_000_100_999).unwrap(), Some(second));
+        assert_eq!(
+            head_before(&git, 1_000_000_101_000).unwrap(),
+            Some(second.clone())
+        );
+        // A commit dated in the prompt's own second may be the turn's.
+        assert_eq!(
+            head_before(&git, 1_000_000_100_999).unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            head_before(&git, 1_000_000_100_000).unwrap(),
+            Some(first.clone())
+        );
         assert_eq!(head_before(&git, 1_000_000_099_000).unwrap(), Some(first));
         assert_eq!(head_before(&git, 1_100_000_000_000).unwrap(), Some(third));
         assert_eq!(head_before(&git, 999_999_999_000).unwrap(), None);
@@ -5729,6 +5772,94 @@ mod tests {
         // Before the reflog begins, commit dates are all there is.
         assert_eq!(head_at(&git, 999_999_000_000).unwrap(), None);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repo whose HEAD starts at a commit dated `start` and whose turn,
+    /// prompted at `prompted_at` (ms), commits at `turn_commit` (seconds),
+    /// with a pending commit row for that turn's session. Returns the repo,
+    /// the store, the commit row id, the session id and the two SHAs.
+    fn turn_committed_at(
+        label: &str,
+        start: i64,
+        turn_commit: i64,
+    ) -> (PathBuf, Store, String, String, String, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "staged-{label}-{}-{}",
+            std::process::id(),
+            crate::store::now_timestamp()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.email", "test@example.com"]);
+        run_git(&dir, &["config", "user.name", "Test User"]);
+        let commit_at = |secs: i64, message: &str| {
+            std::fs::write(dir.join("file.txt"), message).unwrap();
+            run_git(&dir, &["add", "file.txt"]);
+            let mut command = std::process::Command::new("git");
+            command.args(["commit", "-m", message]).current_dir(&dir);
+            strip_git_env(&mut command);
+            // Commit and reflog times both follow the committer date.
+            let date = format!("@{secs} +0000");
+            command
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date);
+            assert!(command.output().unwrap().status.success());
+            run_git(&dir, &["rev-parse", "HEAD"])
+        };
+        let start_sha = commit_at(start, "start");
+        let turn_sha = commit_at(turn_commit, "turn");
+
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let session = crate::store::Session::new_running("Commit the fix", &dir);
+        store.create_session(&session).unwrap();
+        let commit = crate::store::Commit::new_pending(&branch.id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+        (dir, store, commit.id, session.id, start_sha, turn_sha)
+    }
+
+    /// Git stamps reflog entries in whole seconds. One in the prompt's own
+    /// second can't be ordered against it, and may be the turn's own commit,
+    /// so it is not taken for the HEAD the turn started from.
+    #[test]
+    fn head_at_takes_a_reflog_entry_in_the_prompts_second_as_the_turns() {
+        let (dir, _store, _commit, _session, start, turn) =
+            turn_committed_at("head-at-same-second", 1_000_000_000, 1_000_000_500);
+        let git: crate::branches::GitRunner<'_> = Box::new(|args| Ok(run_git(&dir, args)));
+
+        for prompted_at in [1_000_000_500_000, 1_000_000_500_200, 1_000_000_500_999] {
+            assert_eq!(
+                head_at(&git, prompted_at).unwrap(),
+                Some(start.clone()),
+                "prompted at {prompted_at}"
+            );
+        }
+        // A second later the commit certainly came first.
+        assert_eq!(head_at(&git, 1_000_000_501_000).unwrap(), Some(turn));
+        assert_eq!(head_at(&git, 1_000_000_499_999).unwrap(), Some(start));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The review's case end to end: a reattached turn whose agent committed
+    /// in the same second as its prompt still links that commit.
+    #[test]
+    fn a_reattached_turn_links_a_commit_made_in_its_prompts_second() {
+        let (dir, store, commit, session, start, turn) =
+            turn_committed_at("same-second-commit", 1_000_000_000, 1_000_000_500);
+        let store = Arc::new(store);
+        let git: crate::branches::GitRunner<'_> = Box::new(|args| Ok(run_git(&dir, args)));
+        let pre_head = head_at(&git, 1_000_000_500_200).unwrap();
+        assert_eq!(pre_head.as_deref(), Some(start.as_str()));
+
+        detect_session_commit(&session, &dir, pre_head.as_deref(), None, None, &store);
+
+        let linked = store.get_commit(&commit).unwrap().unwrap();
+        assert_eq!(linked.sha.as_deref(), Some(turn.as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

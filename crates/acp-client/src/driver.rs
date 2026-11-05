@@ -2526,9 +2526,23 @@ impl AcpDriver {
                 .await
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
             // A remote agent lost under the session ends its connection with
-            // whatever error the cut-off stream produced; report the loss.
-            let protocol_result = match (protocol_result, agent_process.loss()) {
-                (Err(error), Some(loss)) if !cancel_token.is_cancelled() => {
+            // whatever error the ended stream produced; report the loss. A
+            // session cut off for falling behind the agent's output reports
+            // that instead: it is why its stream ended, even if the agent was
+            // lost afterwards.
+            let protocol_result = match (
+                protocol_result,
+                agent_process.cut_off(),
+                agent_process.loss(),
+            ) {
+                (Err(error), Some(cause), _) if !cancel_token.is_cancelled() => {
+                    log::warn!(
+                        "Session {our_session_id}: cut off from the remote agent ({cause}); \
+                         its connection ended with: {error}"
+                    );
+                    Err(format!("{REMOTE_SESSION_CUT_OFF_PREFIX}{cause}"))
+                }
+                (Err(error), None, Some(loss)) if !cancel_token.is_cancelled() => {
                     let RemoteLoss {
                         cause,
                         agent_may_survive,
@@ -2549,7 +2563,7 @@ impl AcpDriver {
                     };
                     Err(format!("{prefix}{cause}"))
                 }
-                (result, _) => result,
+                (result, _, _) => result,
             };
 
             // Nothing serves the turn-control channel past this point: fail
@@ -2663,6 +2677,15 @@ impl AgentProcess {
         match self {
             Self::Local(_) => None,
             Self::Remote(lease) => lease.loss(),
+        }
+    }
+
+    /// Why this session was cut off from a remote agent it fell behind, if
+    /// it was.
+    fn cut_off(&self) -> Option<String> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(lease) => lease.cut_off(),
         }
     }
 
@@ -6629,6 +6652,14 @@ const REMOTE_AGENT_DETACHED_PREFIX: &str = "Remote agent detached: ";
 pub fn is_remote_agent_detached_error(error: &str) -> bool {
     error.contains(REMOTE_AGENT_DETACHED_PREFIX)
 }
+
+/// Starts the error a session ends with when it stopped taking its remote
+/// agent's output and fell so far behind that it was cut off (see
+/// `remote_routing::MAX_CLIENT_BACKLOG_BYTES`), followed by the cause.
+/// Nothing went wrong on the workstation, unlike a lost or detached agent:
+/// the session's connection was let go, and any turn it had in flight
+/// cancelled there, so the session fails as an ordinary crash.
+const REMOTE_SESSION_CUT_OFF_PREFIX: &str = "Remote session cut off: ";
 
 /// The turn [`AcpDriver::reattach`] picks back up.
 #[derive(Clone, Debug)]

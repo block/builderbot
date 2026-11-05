@@ -47,7 +47,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::remote_liveness::{self, CommandStart, Liveness};
 use super::remote_routing::{
-    RemoteLoss, RemoteTransport, RoutedClientStreams, CANCELLED_STOP_REASON,
+    RemoteClientId, RemoteLoss, RemoteTransport, RoutedClientStreams, CANCELLED_STOP_REASON,
 };
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -208,6 +208,8 @@ impl SharedProcess {
 pub(super) struct RemoteProcessLease {
     key: ProxyKey,
     process: Arc<SharedProcess>,
+    /// The session's client on the proxy's router.
+    client: RemoteClientId,
     /// This lease started the proxy, rather than joining one already
     /// running, so what `sq` said about its process is about this session.
     created_proxy: bool,
@@ -224,6 +226,12 @@ impl RemoteProcessLease {
     /// How the agent was lost under the attached sessions, if it was.
     pub(super) fn loss(&self) -> Option<RemoteLoss> {
         self.process.transport.loss()
+    }
+
+    /// Why this session was cut off for falling behind the agent's output,
+    /// if it was (see [`RemoteTransport::cut_off`]).
+    pub(super) fn cut_off(&self) -> Option<String> {
+        self.process.transport.cut_off(self.client)
     }
 
     /// For a session reattaching to `turn`, which a connection that is gone
@@ -707,6 +715,7 @@ fn lease(
     let lease = RemoteProcessLease {
         key,
         process,
+        client: streams.client,
         created_proxy,
         released: false,
     };

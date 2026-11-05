@@ -23,13 +23,20 @@
 //! the proxy is being stopped too, since `sq` leaves a process it reused
 //! running; only once the agent is lost are such cancels pointless.
 //!
+//! Each client's frames queue for its connection, so one connection that
+//! stops reading (its handler blocked on storage, say) holds up no other
+//! session sharing the process. The queue is bounded, though: a connection
+//! that falls [`MAX_CLIENT_BACKLOG_BYTES`] behind is cut off — its backlog
+//! dropped, its stream ended, the turns it had in flight cancelled — rather
+//! than left to grow the app's memory for as long as the agent writes.
+//!
 //! Responses to requests other app instances sent reach every attachment
 //! too. They are dropped, except that one ending a prompt can be watched for
 //! (see [`RemoteSessionRouter::watch_foreign_prompts`]): it is how a session
 //! reattached to a dead instance's turn learns that turn has ended.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -50,6 +57,17 @@ const MAX_EARLY_FRAMES: usize = 256;
 
 /// Buffer size of each client's in-process pipes.
 const CLIENT_PIPE_BYTES: usize = 64 * 1024;
+
+/// How far a client may fall behind the agent's output — bytes routed to it
+/// that its connection has not yet taken — before it is cut off. The shared
+/// proxy has to keep reading for the other sessions, so a connection that
+/// stops reading gets no backpressure to `sq`; without a bound its frames
+/// would queue for as long as the agent writes. Far beyond the bursts a
+/// connection that is reading lets build up.
+#[cfg(not(test))]
+pub(super) const MAX_CLIENT_BACKLOG_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(test)]
+pub(super) const MAX_CLIENT_BACKLOG_BYTES: usize = 256 * 1024;
 
 /// How long `sq` is given to relay a `session/cancel` written to its stdin
 /// before it may be interrupted: it drops input it has not yet sent on to
@@ -75,7 +93,14 @@ pub(super) struct RemoteSessionRouter {
 #[derive(Default)]
 struct RouterState {
     /// Where each attached client's frames are delivered.
-    clients: HashMap<RemoteClientId, mpsc::UnboundedSender<String>>,
+    clients: HashMap<RemoteClientId, ClientOutbox>,
+    /// Clients cut off for falling behind, and why (see
+    /// [`RouterState::cut_off`]). Kept after they detach, so their sessions
+    /// can still tell why their streams ended.
+    cut_off: HashMap<RemoteClientId, String>,
+    /// Sessions whose client was cut off with a prompt in flight, still to
+    /// be cancelled (see [`RemoteSessionRouter::incoming`]).
+    to_cancel: Vec<String>,
     /// Requests awaiting a response, keyed by their rewritten wire id.
     pending: HashMap<String, PendingRequest>,
     /// ACP session id → the client that owns it.
@@ -131,6 +156,50 @@ struct EarlyFrame {
     line: String,
 }
 
+/// The router's end of one client's frame queue.
+struct ClientOutbox {
+    frames: mpsc::UnboundedSender<String>,
+    /// Bytes of the frames queued that the client has not yet taken.
+    backlog: Arc<AtomicUsize>,
+    /// Cancelled when the client is cut off.
+    cut_off: CancellationToken,
+}
+
+/// Where the frames routed to one client wait for its connection to take
+/// them.
+pub(super) struct ClientInbox {
+    frames: mpsc::UnboundedReceiver<String>,
+    backlog: Arc<AtomicUsize>,
+    cut_off: CancellationToken,
+}
+
+impl ClientInbox {
+    /// The next frame routed to the client, or `None` once the router has
+    /// let it go (closed, or cut it off) and nothing is left queued.
+    pub(super) async fn recv(&mut self) -> Option<String> {
+        let line = self.frames.recv().await?;
+        Some(self.taken(line))
+    }
+
+    /// The next frame already routed to the client, if any.
+    #[cfg(test)]
+    pub(super) fn try_recv(&mut self) -> Option<String> {
+        let line = self.frames.try_recv().ok()?;
+        Some(self.taken(line))
+    }
+
+    fn taken(&self, line: String) -> String {
+        self.backlog.fetch_sub(line.len(), Ordering::Relaxed);
+        line
+    }
+
+    /// Cancelled once the client is cut off for falling behind: what is
+    /// still queued for it is dropped rather than delivered.
+    pub(super) fn cut_off(&self) -> &CancellationToken {
+        &self.cut_off
+    }
+}
+
 impl RemoteSessionRouter {
     pub(super) fn new() -> Self {
         Self {
@@ -142,16 +211,32 @@ impl RemoteSessionRouter {
         self.state.lock().unwrap()
     }
 
-    /// Register a client; frames routed to it are sent on `inbound`. Once the
-    /// router is closed, `inbound` is dropped at once, so the client sees
-    /// end-of-stream instead of waiting on output that will never come.
-    pub(super) fn attach(&self, inbound: mpsc::UnboundedSender<String>) -> RemoteClientId {
+    /// Register a client; frames routed to it queue in the returned inbox.
+    /// Once the router is closed, the inbox's queue is dropped at once, so
+    /// the client sees end-of-stream instead of waiting on output that will
+    /// never come.
+    pub(super) fn attach(&self) -> (RemoteClientId, ClientInbox) {
         let client = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
+        let (frames, inbound) = mpsc::unbounded_channel();
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let cut_off = CancellationToken::new();
+        let inbox = ClientInbox {
+            frames: inbound,
+            backlog: Arc::clone(&backlog),
+            cut_off: cut_off.clone(),
+        };
         let mut state = self.state();
         if !state.closed {
-            state.clients.insert(client, inbound);
+            state.clients.insert(
+                client,
+                ClientOutbox {
+                    frames,
+                    backlog,
+                    cut_off,
+                },
+            );
         }
-        client
+        (client, inbox)
     }
 
     /// Forget a client along with its sessions and in-flight requests,
@@ -161,34 +246,18 @@ impl RemoteSessionRouter {
     /// `sq` leaves a process it reused running, so they need cancelling.
     pub(super) fn detach(&self, client: RemoteClientId) -> Vec<String> {
         let mut state = self.state();
-        let state = &mut *state;
         state.clients.remove(&client);
-        state.owners.retain(|session_id, owner| {
-            let keep = *owner != client;
-            if !keep {
-                state.last_frame_at.remove(session_id);
-            }
-            keep
-        });
-        let mut abandoned = Vec::new();
-        state.pending.retain(|_, pending| {
-            if pending.client != client {
-                return true;
-            }
-            if let Some(session_id) = pending.prompts.take() {
-                abandoned.push(session_id);
-            }
-            false
-        });
+        let abandoned = state.forget(client);
         if !state.session_new_pending() {
             state.drop_early_frames();
         }
-        if state.loss.is_some() {
-            abandoned.clear();
-        }
-        abandoned.sort();
-        abandoned.dedup();
         abandoned
+    }
+
+    /// Why `client` was cut off for falling behind the agent's output, if it
+    /// was (see [`MAX_CLIENT_BACKLOG_BYTES`]).
+    pub(super) fn cut_off(&self, client: RemoteClientId) -> Option<String> {
+        self.state().cut_off.get(&client).cloned()
     }
 
     /// Drop every client's delivery channel, so each sees end-of-stream,
@@ -271,14 +340,33 @@ impl RemoteSessionRouter {
 
     /// Prepare one frame `client` is sending to the agent, returning the line
     /// to write. Requests get a namespaced id; any `params.sessionId` marks
-    /// that session as the client's.
-    pub(super) fn outgoing(&self, client: RemoteClientId, line: &str) -> String {
+    /// that session as the client's. A client cut off for falling behind has
+    /// been detached from the agent: nothing it sends is written (`None`).
+    pub(super) fn outgoing(&self, client: RemoteClientId, line: &str) -> Option<String> {
+        let mut state = self.state();
+        if state.cut_off.contains_key(&client) {
+            return None;
+        }
+        Some(state.outgoing(client, line))
+    }
+
+    /// Deliver one frame from the agent to the client it belongs to,
+    /// returning the sessions to cancel on the agent: those a client cut off
+    /// for falling behind had a prompt in flight on.
+    pub(super) fn incoming(&self, line: &str) -> Vec<String> {
+        let mut state = self.state();
+        state.incoming(line);
+        std::mem::take(&mut state.to_cancel)
+    }
+}
+
+impl RouterState {
+    fn outgoing(&mut self, client: RemoteClientId, line: &str) -> String {
         let Ok(Value::Object(mut frame)) = serde_json::from_str::<Value>(line) else {
             return line.to_string();
         };
-        let mut state = self.state();
         if let Some(session_id) = session_id_in(&frame, "params") {
-            state.claim(session_id, client);
+            self.claim(session_id, client);
         }
         let method = frame
             .get("method")
@@ -291,7 +379,7 @@ impl RemoteSessionRouter {
                 let prompts = (method == SESSION_PROMPT_METHOD)
                     .then(|| session_id_in(&frame, "params").map(str::to_owned))
                     .flatten();
-                state.pending.insert(
+                self.pending.insert(
                     wire_id.clone(),
                     PendingRequest {
                         client,
@@ -312,7 +400,7 @@ impl RemoteSessionRouter {
                     return line.to_string();
                 };
                 let wire_id = wire_request_id(client, request_id);
-                if !state.pending.contains_key(&wire_id) {
+                if !self.pending.contains_key(&wire_id) {
                     return line.to_string();
                 }
                 *request_id = Value::String(wire_id);
@@ -320,7 +408,7 @@ impl RemoteSessionRouter {
             // Noted, so that stopping the proxy right after gives `sq` time
             // to relay it (see `RemoteTransport::deliver_queued_frames`).
             (Some(SESSION_CANCEL_METHOD), None) => {
-                state.last_cancel_at = Some(Instant::now());
+                self.last_cancel_at = Some(Instant::now());
                 return line.to_string();
             }
             // Notifications and answers to the agent's own requests pass
@@ -330,37 +418,60 @@ impl RemoteSessionRouter {
         serde_json::to_string(&frame).unwrap_or_else(|_| line.to_string())
     }
 
-    /// Deliver one frame from the agent to the client it belongs to.
-    pub(super) fn incoming(&self, line: &str) {
+    fn incoming(&mut self, line: &str) {
         let Ok(Value::Object(frame)) = serde_json::from_str::<Value>(line) else {
             log::warn!("Dropping remote ACP frame that is not a JSON-RPC object");
             return;
         };
-        let mut state = self.state();
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
-            state.route_response(frame);
+            self.route_response(frame);
             return;
         };
         let is_request = frame.get("id").is_some_and(|id| !id.is_null());
         match session_id_in(&frame, "params") {
             Some(session_id) => {
-                state
-                    .last_frame_at
+                self.last_frame_at
                     .insert(session_id.to_string(), Instant::now());
-                state.route_session_frame(session_id, line);
+                self.route_session_frame(session_id, line);
             }
-            None if is_request => state.route_sessionless_request(method, line),
+            None if is_request => self.route_sessionless_request(method, line),
             None => {
-                let clients: Vec<_> = state.clients.keys().copied().collect();
+                let clients: Vec<_> = self.clients.keys().copied().collect();
                 for client in clients {
-                    state.deliver(client, line.to_string());
+                    self.deliver(client, line.to_string());
                 }
             }
         }
     }
-}
 
-impl RouterState {
+    /// Forget `client`'s sessions and in-flight requests, returning the
+    /// sessions it had a prompt in flight on, unless the agent was lost.
+    fn forget(&mut self, client: RemoteClientId) -> Vec<String> {
+        self.owners.retain(|session_id, owner| {
+            let keep = *owner != client;
+            if !keep {
+                self.last_frame_at.remove(session_id);
+            }
+            keep
+        });
+        let mut abandoned = Vec::new();
+        self.pending.retain(|_, pending| {
+            if pending.client != client {
+                return true;
+            }
+            if let Some(session_id) = pending.prompts.take() {
+                abandoned.push(session_id);
+            }
+            false
+        });
+        if self.loss.is_some() {
+            abandoned.clear();
+        }
+        abandoned.sort();
+        abandoned.dedup();
+        abandoned
+    }
+
     fn claim(&mut self, session_id: &str, client: RemoteClientId) {
         if let Some(previous) = self.owners.insert(session_id.to_string(), client) {
             if previous != client {
@@ -502,11 +613,47 @@ impl RouterState {
     }
 
     fn deliver(&mut self, client: RemoteClientId, line: String) {
-        if let Some(inbound) = self.clients.get(&client) {
-            if inbound.send(line).is_err() {
-                self.clients.remove(&client);
-            }
+        let Some(outbox) = self.clients.get(&client) else {
+            return;
+        };
+        let queued = outbox.backlog.fetch_add(line.len(), Ordering::Relaxed);
+        // A client that has taken everything gets the frame, however large.
+        let backlog = queued + line.len();
+        if queued > 0 && backlog > MAX_CLIENT_BACKLOG_BYTES {
+            self.cut_off(client, backlog);
+            return;
         }
+        if outbox.frames.send(line).is_err() {
+            self.clients.remove(&client);
+        }
+    }
+
+    /// Cut off `client`, which has fallen `backlog` bytes behind: drop what
+    /// is queued for it and end its stream, forget its sessions — so the
+    /// agent's further frames for them are dropped as nobody's — and queue
+    /// cancels for the turns it had in flight, which nobody is following any
+    /// more. What it sends from now on is not written to the agent.
+    fn cut_off(&mut self, client: RemoteClientId, backlog: usize) {
+        if let Some(outbox) = self.clients.remove(&client) {
+            outbox.cut_off.cancel();
+        }
+        let abandoned = self.forget(client);
+        let cause = format!(
+            "its connection stopped taking the remote agent's output and fell {:.1} MiB \
+             behind, so it was disconnected from the agent{}",
+            backlog as f64 / (1024.0 * 1024.0),
+            if abandoned.is_empty() {
+                ""
+            } else {
+                " and its turn there cancelled"
+            }
+        );
+        log::warn!(
+            "Cutting off remote ACP client {client} (sessions with a prompt in flight: \
+             {abandoned:?}): {cause}"
+        );
+        self.cut_off.insert(client, cause);
+        self.to_cancel.extend(abandoned);
     }
 }
 
@@ -563,6 +710,8 @@ enum ToAgent {
 
 /// One client's ends of a [`RemoteTransport`], for `ByteStreams`.
 pub(super) struct RoutedClientStreams {
+    /// The client these streams are, for [`RemoteTransport::cut_off`].
+    pub(super) client: RemoteClientId,
     /// The ACP connection writes its frames here.
     pub(super) outgoing: DuplexStream,
     /// The ACP connection reads the frames routed to it here.
@@ -585,6 +734,7 @@ impl RemoteTransport {
         tokio::spawn(read_agent_stdout(
             stdout,
             Arc::clone(&router),
+            to_agent.clone(),
             Arc::clone(&output_end),
             output_ended.clone(),
         ));
@@ -653,6 +803,11 @@ impl RemoteTransport {
         self.router.has_stalled_prompt(quiet_for)
     }
 
+    /// See [`RemoteSessionRouter::cut_off`].
+    pub(super) fn cut_off(&self, client: RemoteClientId) -> Option<String> {
+        self.router.cut_off(client)
+    }
+
     /// See [`RemoteSessionRouter::last_heard`].
     pub(super) fn last_heard(&self, session_id: &str) -> Option<Instant> {
         self.router.last_heard(session_id)
@@ -671,10 +826,7 @@ impl RemoteTransport {
     /// The cancel is queued on the agent's stdin directly, so it is written
     /// even when no connection is left to send it.
     pub(super) fn cancel_session(&self, session_id: &str) {
-        self.router.note_cancel();
-        let _ = self
-            .to_agent
-            .send(ToAgent::Frame(session_cancel_frame(session_id)));
+        queue_cancel(&self.router, &self.to_agent, session_id);
     }
 
     /// Close the agent's stdin once the frames already queued are written.
@@ -705,8 +857,7 @@ impl RemoteTransport {
 
     /// Attach one ACP connection. It detaches once it stops writing.
     pub(super) fn attach(&self) -> RoutedClientStreams {
-        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
-        let client = self.router.attach(inbound_tx);
+        let (client, inbox) = self.router.attach();
         let (outgoing, from_client) = tokio::io::duplex(CLIENT_PIPE_BYTES);
         let (to_client, incoming) = tokio::io::duplex(CLIENT_PIPE_BYTES);
         self.forwarding.send_modify(|count| *count += 1);
@@ -717,8 +868,12 @@ impl RemoteTransport {
             forward_client_frames(router, client, from_client, to_agent).await;
             drop(forwarding);
         });
-        tokio::spawn(deliver_client_frames(inbound_rx, to_client));
-        RoutedClientStreams { outgoing, incoming }
+        tokio::spawn(deliver_client_frames(inbox, to_client));
+        RoutedClientStreams {
+            client,
+            outgoing,
+            incoming,
+        }
     }
 }
 
@@ -773,17 +928,24 @@ async fn write_agent_stdin<W: AsyncWrite + Unpin>(
 async fn read_agent_stdout<R: AsyncRead + Unpin>(
     stdout: R,
     router: Arc<RemoteSessionRouter>,
+    to_agent: mpsc::UnboundedSender<ToAgent>,
     output_end: Arc<Mutex<Option<String>>>,
     output_ended: CancellationToken,
 ) {
-    let cause =
-        match super::normalize_remote_acp_stdout(stdout, |line| router.incoming(&line)).await {
-            Ok(()) => "the remote agent's output stream ended".to_string(),
-            Err(error) => {
-                log::error!("remote ACP stdout normalization failed: {error}");
-                format!("reading the remote agent's output failed: {error}")
-            }
-        };
+    let route = |line: String| {
+        // Turns a client cut off for falling behind had in flight: nobody
+        // follows them any more.
+        for session_id in router.incoming(&line) {
+            queue_cancel(&router, &to_agent, &session_id);
+        }
+    };
+    let cause = match super::normalize_remote_acp_stdout(stdout, route).await {
+        Ok(()) => "the remote agent's output stream ended".to_string(),
+        Err(error) => {
+            log::error!("remote ACP stdout normalization failed: {error}");
+            format!("reading the remote agent's output failed: {error}")
+        }
+    };
     *output_end.lock().unwrap() = Some(cause);
     output_ended.cancel();
 }
@@ -799,10 +961,12 @@ async fn forward_client_frames(
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => {}
             Ok(Some(line)) => {
-                if to_agent
-                    .send(ToAgent::Frame(router.outgoing(client, &line)))
-                    .is_err()
-                {
+                // A client cut off for falling behind keeps being read, so
+                // its writes don't block, but nothing it sends goes on.
+                let Some(line) = router.outgoing(client, &line) else {
+                    continue;
+                };
+                if to_agent.send(ToAgent::Frame(line)).is_err() {
                     break;
                 }
             }
@@ -822,9 +986,18 @@ async fn forward_client_frames(
             "Cancelling remote ACP session {session_id}: its connection detached with a \
              prompt in flight"
         );
-        router.note_cancel();
-        let _ = to_agent.send(ToAgent::Frame(session_cancel_frame(&session_id)));
+        queue_cancel(&router, &to_agent, &session_id);
     }
+}
+
+/// Queue a `session/cancel` for `session_id` on the agent's stdin.
+fn queue_cancel(
+    router: &RemoteSessionRouter,
+    to_agent: &mpsc::UnboundedSender<ToAgent>,
+    session_id: &str,
+) {
+    router.note_cancel();
+    let _ = to_agent.send(ToAgent::Frame(session_cancel_frame(session_id)));
 }
 
 /// A `session/cancel` notification for `session_id`.
@@ -837,14 +1010,28 @@ pub(super) fn session_cancel_frame(session_id: &str) -> String {
     .to_string()
 }
 
-async fn deliver_client_frames(
-    mut inbound: mpsc::UnboundedReceiver<String>,
-    mut to_client: DuplexStream,
-) {
-    while let Some(line) = inbound.recv().await {
+/// Write the frames routed to one client into its connection's pipe. Once
+/// the client is cut off, the frames still queued are dropped and the pipe
+/// with them: the connection reads what the pipe holds, then end-of-stream.
+async fn deliver_client_frames(mut inbox: ClientInbox, mut to_client: DuplexStream) {
+    let cut_off = inbox.cut_off().clone();
+    loop {
+        let line = tokio::select! {
+            biased;
+            _ = cut_off.cancelled() => return,
+            line = inbox.recv() => line,
+        };
+        let Some(line) = line else {
+            break;
+        };
         let mut bytes = line.into_bytes();
         bytes.push(b'\n');
-        if to_client.write_all(&bytes).await.is_err() {
+        let written = tokio::select! {
+            biased;
+            _ = cut_off.cancelled() => return,
+            written = to_client.write_all(&bytes) => written,
+        };
+        if written.is_err() {
             return;
         }
     }

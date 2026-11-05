@@ -24,7 +24,9 @@ const WAIT: Duration = Duration::from_secs(30);
 /// - "orchestrator eof": answers, then logs that the orchestrator ended its
 ///   output stream, as `sq` does once the agent process exits, and like
 ///   `sq` relays nothing more;
-/// - "exit": ends its output.
+/// - "exit": ends its output;
+/// - "flood": streams 200 chunks of 4000 bytes, then holds the prompt like
+///   "hold me".
 ///
 /// Once its stdin closes it notes that in `stdin_closed` and exits — unless
 /// `linger` exists, when it keeps running until `release` does.
@@ -96,6 +98,15 @@ while IFS= read -r line; do
       eof=1
       continue ;;
     *'"method":"session/prompt"'*'exit'*) exit 0 ;;
+    *'"method":"session/prompt"'*'flood'*)
+      sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
+      pad=$(printf '%4000s' '' | tr ' ' x)
+      i=0
+      while [ $i -lt 200 ]; do
+        printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"%s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"%s"}}}}\n' "$sid" "$pad"
+        i=$((i+1))
+      done
+      held=$id; continue ;;
     *'"method":"session/prompt"'*) result='{"stopReason":"end_turn"}' ;;
     *'"method":"session/cancel"'*)
       sid=$(printf '%s\n' "$line" | sed -n 's/.*"sessionId":"\([^"]*\)".*/\1/p')
@@ -1313,6 +1324,134 @@ async fn stopping_a_reattached_turn_cancels_it_before_the_proxy_stops() {
                 cancelled_at < interrupted_at,
                 "the cancel reached the agent before the proxy stopped: {received}"
             );
+        })
+        .await;
+}
+
+/// Blocks the thread on the first text it is given until `release` is set,
+/// the way a storage write stalled on the database lock blocks a session's
+/// message writer.
+struct StalledWriter {
+    inner: BasicMessageWriter,
+    stalled: std::sync::atomic::AtomicBool,
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl MessageWriter for StalledWriter {
+    async fn append_text(&self, text: &str) {
+        use std::sync::atomic::Ordering;
+        if !self.stalled.swap(true, Ordering::SeqCst) {
+            let deadline = std::time::Instant::now() + WAIT;
+            while !self.release.load(Ordering::SeqCst) {
+                assert!(std::time::Instant::now() < deadline, "never released");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        self.inner.append_text(text).await;
+    }
+
+    async fn finalize(&self) {
+        self.inner.finalize().await;
+    }
+
+    async fn record_tool_call(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        raw_input: Option<&serde_json::Value>,
+    ) {
+        self.inner
+            .record_tool_call(tool_call_id, title, raw_input)
+            .await;
+    }
+
+    async fn update_tool_call_title(
+        &self,
+        tool_call_id: &str,
+        title: Option<&str>,
+        raw_input: Option<&serde_json::Value>,
+    ) {
+        self.inner
+            .update_tool_call_title(tool_call_id, title, raw_input)
+            .await;
+    }
+
+    async fn record_tool_result(&self, tool_call_id: &str, content: &str) {
+        self.inner.record_tool_result(tool_call_id, content).await;
+    }
+}
+
+/// A session whose writer blocks its thread while the shared agent streams
+/// it output falls behind and is cut off: the proxy, on a thread of its own,
+/// cancels its turn on the agent, and once the session's thread is free its
+/// run ends with the cut-off error rather than the queue having grown with
+/// everything the agent wrote.
+#[tokio::test(flavor = "current_thread")]
+async fn a_session_that_stops_taking_its_output_is_cut_off_and_its_turn_cancelled() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("cut-off");
+            let driver = sq.driver();
+            let store = Arc::new(RecordingStore::default());
+            let dyn_store: Arc<dyn Store> = Arc::clone(&store) as Arc<dyn Store>;
+            let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer: Arc<dyn MessageWriter> = Arc::new(StalledWriter {
+                inner: BasicMessageWriter::new(),
+                stalled: std::sync::atomic::AtomicBool::new(false),
+                release: Arc::clone(&release),
+            });
+            let cancel = CancellationToken::new();
+            let mut connection = timeout(
+                WAIT,
+                driver.connect(
+                    "stalled",
+                    &sq.dir,
+                    &dyn_store,
+                    &writer,
+                    &cancel,
+                    None,
+                    &[],
+                    None,
+                ),
+            )
+            .await
+            .expect("connect should not hang")
+            .expect("the fake sq should spawn");
+
+            // This thread is about to block: release it from another once the
+            // proxy has cancelled the turn.
+            let received = sq.dir.join("received");
+            let releaser = std::thread::spawn({
+                let release = Arc::clone(&release);
+                move || {
+                    let deadline = std::time::Instant::now() + WAIT;
+                    loop {
+                        let frames = std::fs::read_to_string(&received).unwrap_or_default();
+                        if frames.contains("\"method\":\"session/cancel\"") {
+                            break;
+                        }
+                        assert!(std::time::Instant::now() < deadline, "no cancel arrived");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    release.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            });
+
+            let outcome = timeout(WAIT, connection.prompt("flood", &[]))
+                .await
+                .expect("the prompt should resolve");
+            releaser.join().unwrap();
+
+            let error = outcome.expect_err("the session was cut off");
+            assert!(error.starts_with("Remote session cut off: "), "{error}");
+            assert!(error.contains("cancelled"), "{error}");
+            assert!(!is_remote_agent_lost_error(&error), "{error}");
+            assert!(!is_remote_agent_detached_error(&error), "{error}");
+            let agent_session = store.agent_session_ids.lock().unwrap()[0].1.clone();
+            let cancels = sq.received("session/cancel");
+            assert_eq!(cancels.len(), 1, "{cancels:?}");
+            assert!(cancels[0].contains(&agent_session), "{cancels:?}");
         })
         .await;
 }

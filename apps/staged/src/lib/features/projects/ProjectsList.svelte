@@ -168,13 +168,14 @@
   let searchData = $derived(searchActive ? searchSnapshot() : null);
   // The cards left on screen, best match first, and why each matched when
   // its name and repos don't say, from one pass. See visibleProjects for the
-  // composition. Ranked when the query is edited and only then: a data change
-  // under a held query hides or appends cards but never moves one
-  // (searchOrderHold).
+  // composition. Ranked when the query or the chips are edited and only then:
+  // a data change under a held query, a visit's read-state change included,
+  // hides or appends cards but never moves one (searchOrderHold).
   const holdOrder = searchOrderHold();
   let search = $derived(
     holdOrder(
       gridQuery.current,
+      projectFiltersStore.activeFilters,
       visibleProjects(
         projects,
         projectFiltersStore.filteredProjects,

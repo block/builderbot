@@ -15,8 +15,9 @@
  * Re-keying moves rows rather than rebuilding them (keyed {#each}), and a
  * row moved between a press and its click loses the click in WebKit, so the
  * wait holds while a pointer is down on the rows and starts over once it is
- * released. Settling only runs while the surface's layer is on screen; a
- * ranking made while it was hidden settles after it comes back.
+ * released, or once the window loses focus mid-press. Settling only runs
+ * while the surface's layer is on screen; a ranking made while it was hidden
+ * settles after it comes back.
  */
 
 import { flushSync, untrack } from 'svelte';
@@ -103,8 +104,16 @@ export function searchRowOrder(
       if (pressed) pressed = false;
     };
     for (const type of PRESS_END_EVENTS) window.addEventListener(type, release, true);
+    // A press whose end the page never sees — ⌘-Tab away mid-press — ends
+    // when the window loses focus. Not one of PRESS_END_EVENTS, and not
+    // capturing: a capturing window listener gets every element's blur too,
+    // and the search field blurs right after a row's pointerdown, which
+    // would end every press as it starts. Blur doesn't bubble, so a plain
+    // listener hears only the window's own.
+    window.addEventListener('blur', release);
     return () => {
       for (const type of PRESS_END_EVENTS) window.removeEventListener(type, release, true);
+      window.removeEventListener('blur', release);
     };
   });
 

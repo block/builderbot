@@ -132,7 +132,7 @@
   // Matched on branches, PRs, repo labels and titles too (projectSearch),
   // prepared once per data change and only while searching, like the grid;
   // rows found that way say why on their meta line. Ranked like the grid,
-  // too, and like it re-ranked only when the query is edited
+  // too, and like it re-ranked only when the query or the chips are edited
   // (searchOrderHold).
   const searchSnapshot = projectSearchSnapshots();
   let searchData = $derived(searching ? searchSnapshot() : null);
@@ -140,6 +140,7 @@
   let projectMatches = $derived(
     holdOrder(
       searchQuery.current,
+      projectFiltersStore.activeFilters,
       sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
     )
   );

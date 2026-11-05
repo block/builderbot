@@ -22,7 +22,8 @@
  * attributes and styles on rows that already exist rather than re-keying an
  * `{#each}`; once the query settles, the rows are re-keyed into rank order
  * once, so DOM order matches the screen (Row order, searchRowOrder). A
- * held query is re-ranked only when it is edited (searchOrderHold).
+ * held query is re-ranked only when it or the chip filters are edited
+ * (searchOrderHold).
  *
  * `visibleProjects` is the whole composition the grid shows — chip filters,
  * sticky return-target card, then the query — lifted out of the component so
@@ -677,6 +678,8 @@ function sameIds(a: readonly Project[], b: readonly Project[]): boolean {
 /** What searchOrderHold remembers about the query it holds. */
 interface HeldOrder {
   query: string;
+  /** The chip filters the query was ranked under, by identity. */
+  filters: ReadonlySet<string>;
   /** Every id ranked under `query`, in the order on screen, including ones
    *  that have since stopped matching: one that matches again goes back to
    *  its slot. Ids first seen later are appended. */
@@ -720,40 +723,48 @@ function inHeldOrder(held: HeldOrder, next: ProjectSearchResult): ProjectSearchR
 }
 
 /**
- * A surface's search results, re-ranked only when its query is edited. Call
- * the returned function with every fresh result and the query it ran for,
- * inside the `$derived` that runs the search.
+ * A surface's search results, re-ranked only when the user edits the search:
+ * its query, or its chip filters. Call the returned function with every fresh
+ * result, the query it ran for and the active filter Set
+ * (projectFiltersStore.activeFilters), inside the `$derived` that runs the
+ * search.
  *
- * While the query stays the one the results were last ranked for, a fresh
- * result keeps the order already on screen: projects that still match keep
- * their places, ones that stopped matching drop out, and new matches follow
- * the rest, best first. A project that drops out and matches again — the
- * sticky return card, after visiting it marked it read and the Unread chip
- * dropped it, or a chip toggled off and on — goes back to the slot it had,
- * not to the end. So a PR poll bringing a title, an index refetch while a
- * session writes notes, a rename or a filter change under a held query can
- * hide a card or add one at the end, but never move the card under the
- * cursor, or the one ⌘N was about to open. Reasons are always the fresh
- * result's. When the rows on screen are unchanged, so is the rank map. Any
- * edit to the query, a space included, ranks afresh and forgets the slots;
- * a blank query passes through.
+ * While the query and the filter Set stay the ones the results were last
+ * ranked for, a fresh result keeps the order already on screen: projects
+ * that still match keep their places, ones that stopped matching drop out,
+ * and new matches follow the rest, best first. A project that drops out and
+ * matches again — the sticky return card, after visiting it marked it read
+ * and the Unread chip dropped it — goes back to the slot it had, not to the
+ * end. So a PR poll bringing a title, an index refetch while a session
+ * writes notes, a rename or a read-state change under a held query can hide
+ * a card or add one at the end, but never move the card under the cursor,
+ * or the one ⌘N was about to open. Reasons are always the fresh result's.
+ * When the rows on screen are unchanged, so is the rank map.
+ *
+ * Any edit to the query, a space included, ranks afresh and forgets the
+ * slots, and so does a chip toggle: the store replaces the filter Set on
+ * every toggle or clear and only then, so the Set's identity is the signal
+ * (the grid's sticky card goes by it too). Widening the filters then ranks
+ * the cards they bring back among the rest rather than after them. A blank
+ * query passes through.
  */
 export function searchOrderHold(): (
   query: string,
+  filters: ReadonlySet<string>,
   result: ProjectSearchResult
 ) => ProjectSearchResult {
   let held: HeldOrder | null = null;
-  return (query, result) => {
+  return (query, filters, result) => {
     if (result.rank === null) {
       held = null;
       return result;
     }
-    if (held !== null && held.query === query) {
+    if (held !== null && held.query === query && held.filters === filters) {
       held.last = inHeldOrder(held, result);
       return held.last;
     }
     const order = result.projects.map((p) => p.id);
-    held = { query, order, seen: new Set(order), last: result };
+    held = { query, filters, order, seen: new Set(order), last: result };
     return result;
   };
 }

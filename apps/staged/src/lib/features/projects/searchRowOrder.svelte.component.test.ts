@@ -160,6 +160,34 @@ describe('searchRowOrder', () => {
       }
     );
 
+    it('holds the wait until the window loses focus, then waits afresh', () => {
+      setRank(rankOf('c', 'a'));
+      order.rowsPointerdown();
+      flushSync();
+      wait(SEARCH_SETTLE_MS * 3);
+      // ⌘-Tab away mid-press: the release goes to another app.
+      window.dispatchEvent(new FocusEvent('blur'));
+      flushSync();
+      wait(SEARCH_SETTLE_MS - 1);
+      expect(ids()).toEqual(['a', 'b', 'c', 'd']);
+      wait(1);
+      expect(ids()).toEqual(['c', 'a', 'b', 'd']);
+    });
+
+    it("doesn't end on an element's blur, like the search field's as the press starts", () => {
+      const field = document.createElement('input');
+      document.body.append(field);
+      setRank(rankOf('c', 'a'));
+      order.rowsPointerdown();
+      // What a row's pointerdown does to the focused field, right after:
+      // a blur, which window listeners see in their capture phase.
+      field.dispatchEvent(new FocusEvent('blur'));
+      flushSync();
+      wait(SEARCH_SETTLE_MS * 3);
+      expect(ids()).toEqual(['a', 'b', 'c', 'd']);
+      field.remove();
+    });
+
     it('still settles on Tab', () => {
       setRank(rankOf('c', 'a'));
       order.rowsPointerdown();
@@ -174,6 +202,8 @@ describe('searchRowOrder', () => {
       for (const type of ['pointerup', 'pointercancel', 'click']) {
         expect(remove).toHaveBeenCalledWith(type, expect.any(Function), true);
       }
+      expect(remove).toHaveBeenCalledWith('blur', expect.any(Function));
+      expect(remove).not.toHaveBeenCalledWith('blur', expect.any(Function), true);
       cleanup = () => {};
     });
   });

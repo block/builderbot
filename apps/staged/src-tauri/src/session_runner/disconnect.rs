@@ -58,6 +58,25 @@ pub(crate) fn run_leaves_session_disconnected(
     transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn)
 }
 
+/// Whether a remote run that ended `cancelled` must cancel its turn again over
+/// a fresh connection: the turn may still be running on the workstation,
+/// because the Stop's `session/cancel` went unanswered (`cancel_unacknowledged`)
+/// or never reached it — the transport went under with the turn in flight,
+/// before or while the Stop was sent. A Stop wins over that loss in
+/// [`run_leaves_session_disconnected`], so the row is not left `disconnected`
+/// for reconcile to settle; the cancel has to happen here.
+pub(crate) fn stopped_turn_needs_fresh_cancel(
+    is_remote: bool,
+    cancelled: bool,
+    cancel_unacknowledged: bool,
+    transport_loss: Option<TransportLoss>,
+) -> bool {
+    is_remote
+        && cancelled
+        && (cancel_unacknowledged
+            || transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Turn))
+}
+
 /// Whether a `running` row that no live process owns any more should be left
 /// `disconnected` rather than ended: it runs on a Blox workstation and has an
 /// agent session there whose turn may still be going.
@@ -231,5 +250,36 @@ mod tests {
             None,
             TURN
         ));
+    }
+
+    #[test]
+    fn an_unanswered_stop_cancels_again_over_a_fresh_connection() {
+        assert!(stopped_turn_needs_fresh_cancel(true, true, true, None));
+    }
+
+    /// The Stop won over a transport that went under mid-turn, so its
+    /// `session/cancel` may never have reached the workstation.
+    #[test]
+    fn a_stop_over_a_lost_turn_cancels_again_over_a_fresh_connection() {
+        assert!(stopped_turn_needs_fresh_cancel(true, true, false, TURN));
+    }
+
+    #[test]
+    fn an_answered_stop_or_a_loss_outside_the_turn_needs_no_fresh_cancel() {
+        assert!(!stopped_turn_needs_fresh_cancel(true, true, false, None));
+        for phase in [TransportLossPhase::Setup, TransportLossPhase::Hold] {
+            assert!(
+                !stopped_turn_needs_fresh_cancel(true, true, false, loss(phase)),
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_cancelled_remote_run_cancels_again() {
+        // Completed or failed: nothing was stopped.
+        assert!(!stopped_turn_needs_fresh_cancel(true, false, true, TURN));
+        // Local: the agent went down with the connection.
+        assert!(!stopped_turn_needs_fresh_cancel(false, true, true, TURN));
     }
 }

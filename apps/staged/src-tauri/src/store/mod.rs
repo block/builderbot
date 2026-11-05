@@ -257,6 +257,7 @@ pub struct ResolvedSession {
     pub session_id: Option<String>,
     pub status: Option<String>,
     pub completion_reason: Option<String>,
+    pub error_message: Option<String>,
     pub provider: Option<String>,
     /// Latest ACP-provided session title, if the agent pushed one.
     pub acp_title: Option<String>,
@@ -366,6 +367,7 @@ impl Store {
                     completion_reason: session
                         .as_ref()
                         .and_then(|s| s.completion_reason.as_ref().map(|r| r.as_str().to_string())),
+                    error_message: session.as_ref().and_then(|s| s.error_message.clone()),
                     provider: session.as_ref().and_then(|s| s.provider.clone()),
                     acp_title: session.as_ref().and_then(|s| s.acp_title.clone()),
                 }

@@ -168,6 +168,9 @@ pub struct CommitTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, for the copy a failed row shows (a
+    /// deleted workstation reads differently from a crash).
+    pub session_error_message: Option<String>,
     /// Kind of the git pipeline behind this row's session. Only set on pending
     /// rows: it is how the frontend tells a queued/running rebase or squash
     /// apart from a plain commit session, since the subject is a display label
@@ -187,6 +190,9 @@ pub struct NoteTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, for the copy a failed row shows (a
+    /// deleted workstation reads differently from a crash).
+    pub session_error_message: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
@@ -214,6 +220,9 @@ pub struct ReviewTimelineItem {
     pub session_status: Option<String>,
     pub session_provider: Option<String>,
     pub completion_reason: Option<String>,
+    /// The session's `error_message`, for the copy a failed row shows (a
+    /// deleted workstation reads differently from a crash).
+    pub session_error_message: Option<String>,
     pub title: Option<String>,
     /// Active non-`information` comments (what the detail view lists as comments).
     pub comment_count: usize,
@@ -1014,6 +1023,7 @@ async fn get_repo_default_branch_timeline(
                     session_id: None,
                     session_status: None,
                     completion_reason: None,
+                    session_error_message: None,
                     pipeline_kind: None,
                     is_own_commit: false,
                 })

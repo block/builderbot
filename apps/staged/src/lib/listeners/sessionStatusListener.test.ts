@@ -452,6 +452,68 @@ describe('sessionStatusListener busy-state hydration', () => {
     expect(sessionRegistry.getMetadata('blox-1')).toBeNull();
   });
 
+  describe('a disconnected session reconcile settles later', () => {
+    async function disconnect(sessionId: string, sessionType: string) {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+      const emit = eventCallbacks.get('session-status-changed')!;
+      emit({
+        sessionId,
+        status: 'running',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType,
+      });
+      emit({ sessionId, status: 'disconnected', projectId: 'project-1', branchId: 'branch-1' });
+      // The disconnect cleaned it out of the registry.
+      expect(sessionRegistry.getMetadata(sessionId)).toBeNull();
+      return emit;
+    }
+
+    it('still marks the project unread and settles the PR chip from the event', async () => {
+      const emit = await disconnect('blox-pr', 'pr');
+
+      emit({
+        sessionId: 'blox-pr',
+        status: 'completed',
+        completionReason: null,
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'pr',
+      });
+
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-1',
+        'PR session completed but no PR URL was found in the output.'
+      );
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('settles a cancelled push as a cancellation, not a skipped force push', async () => {
+      const emit = await disconnect('blox-push', 'push');
+
+      emit({
+        sessionId: 'blox-push',
+        status: 'cancelled',
+        errorMessage: "Staged couldn't tell whether this turn finished on the workstation",
+        completionReason: 'interrupted',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'push',
+      });
+
+      expect(toastError).not.toHaveBeenCalled();
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith(
+        'branch-1',
+        'Push session was cancelled.'
+      );
+      expect(pushStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+      expect(projectStateStore.markAsUnread).toHaveBeenCalledWith('project-1');
+    });
+  });
+
   describe('disconnected sessions', () => {
     const disconnectedRow = (sessionId: string, projectId: string) => ({
       sessionId,

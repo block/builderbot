@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use acp_client::{
-    AttachOutcome, CancelOutcome, RecordedTurn, RemoteProcess, RemoteProcessStatus, StopReason,
+    AttachOutcome, CancelOutcome, LatestPrompt, RecordedTurn, RemoteProcess, RemoteProcessStatus,
+    StopReason, TurnResult,
 };
 use tauri::Manager;
 
 use super::blox::probe_from_ws_info;
-use super::row::{TURN_UNDETERMINED, WORKSTATION_GONE};
+use super::row::{PROMPT_NOT_RECEIVED, TURN_UNDETERMINED, WORKSTATION_GONE};
 use super::stop::MAY_STILL_RUN;
 use super::*;
 use crate::session_queue::{BranchQueueKicker, KickSource};
@@ -43,11 +44,7 @@ impl FakeBlox {
             during_workspace: Mutex::new(None),
             process: Mutex::new(Ok(process(RemoteProcessStatus::Idle, Some("cmd-1")))),
             recorded: Mutex::new(Ok(RecordedTurn::Unknown)),
-            attach: Mutex::new(Arc::new(|_, _, _| {
-                Ok(AttachOutcome::Completed {
-                    stop_reason: Some(StopReason::EndTurn),
-                })
-            })),
+            attach: Mutex::new(Arc::new(|_, _, _| Ok(ended_turn()))),
             cancel: Mutex::new(Ok(CancelOutcome::Stopped)),
             calls: Mutex::new(Vec::new()),
         }
@@ -100,6 +97,23 @@ fn process(status: RemoteProcessStatus, command_id: Option<&str>) -> RemoteProce
     RemoteProcess {
         status,
         command_id: command_id.map(str::to_string),
+    }
+}
+
+/// An attach that saw the newest prompt's turn end normally.
+fn ended_turn() -> AttachOutcome {
+    AttachOutcome::Ended {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+        latest_prompt: LatestPrompt::Replayed,
+    }
+}
+
+/// An attach that found the process gone, after a replay holding the newest
+/// prompt.
+fn process_gone(message: Option<String>) -> AttachOutcome {
+    AttachOutcome::ProcessGone {
+        message,
+        latest_prompt: LatestPrompt::Replayed,
     }
 }
 
@@ -452,16 +466,16 @@ fn a_suspended_workstation_waits_then_settles_from_the_recording_once_resumed() 
         Some("cmd-old"),
     );
     fx.blox.set_recorded(RecordedTurn::Ended {
-        stop_reason: Some(StopReason::EndTurn),
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
     });
     fx.blox.on_attach(|target, store, _| {
         // The replacement process replays the session, final message and all.
         store
             .add_session_message(&target.session_id, MessageRole::Assistant, "All done.")
             .unwrap();
-        Ok(AttachOutcome::ProcessGone {
-            message: Some("bloxlet restarted while command was running".to_string()),
-        })
+        Ok(process_gone(Some(
+            "bloxlet restarted while command was running".to_string(),
+        )))
     });
 
     fx.reconcile(&session);
@@ -522,9 +536,7 @@ fn a_running_turn_is_reattached_and_followed_to_its_end() {
             row.owner_pid,
             registry.is_live(&target.session_id),
         ));
-        Ok(AttachOutcome::Completed {
-            stop_reason: Some(StopReason::EndTurn),
-        })
+        Ok(ended_turn())
     });
 
     fx.reconcile(&session);
@@ -551,6 +563,9 @@ fn a_running_turn_is_reattached_and_followed_to_its_end() {
         Some(fx.branch.id.as_str())
     );
     assert_eq!(statuses[1].status, "completed");
+    // The terminal emit carries it too: the frontend dropped its record of
+    // the session when it went `disconnected`.
+    assert_eq!(statuses[1].session_type.as_deref(), Some("commit"));
 }
 
 /// The offline turn committed and wrote its final message while nothing
@@ -572,9 +587,7 @@ fn an_idle_turn_is_backfilled_and_its_commit_linked_before_completing() {
                 "Committed the change.",
             )
             .unwrap();
-        Ok(AttachOutcome::Completed {
-            stop_reason: Some(StopReason::EndTurn),
-        })
+        Ok(ended_turn())
     });
 
     fx.reconcile(&session);
@@ -633,9 +646,7 @@ fn a_note_session_extracts_its_note_from_the_backfilled_message() {
                 "Here it is.\n\n---\n\n# Offline findings\n\nWritten while Staged was away.",
             )
             .unwrap();
-        Ok(AttachOutcome::Completed {
-            stop_reason: Some(StopReason::EndTurn),
-        })
+        Ok(ended_turn())
     });
 
     fx.reconcile(&fx.row(&session.id));
@@ -661,8 +672,7 @@ fn a_failed_process_is_backfilled_then_ends_with_blox_s_message() {
         Some("cmd-1"),
     );
     fx.blox.set_recorded(RecordedTurn::InFlight);
-    fx.blox
-        .on_attach(|_, _, _| Ok(AttachOutcome::ProcessGone { message: None }));
+    fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
 
     fx.reconcile(&session);
 
@@ -690,8 +700,7 @@ fn a_turn_nothing_describes_settles_resumable_rather_than_completed() {
     fx.blox
         .set_process(RemoteProcessStatus::Gone { message: None }, Some("cmd-1"));
     fx.blox.set_recorded(RecordedTurn::Unknown);
-    fx.blox
-        .on_attach(|_, _, _| Ok(AttachOutcome::ProcessGone { message: None }));
+    fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
 
     fx.reconcile(&session);
 
@@ -711,10 +720,9 @@ fn a_recorded_cancelled_turn_settles_cancelled() {
     fx.blox
         .set_process(RemoteProcessStatus::Gone { message: None }, Some("cmd-1"));
     fx.blox.set_recorded(RecordedTurn::Ended {
-        stop_reason: Some(StopReason::Cancelled),
+        result: Some(TurnResult::Stopped(StopReason::Cancelled)),
     });
-    fx.blox
-        .on_attach(|_, _, _| Ok(AttachOutcome::ProcessGone { message: None }));
+    fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
 
     fx.reconcile(&session);
 
@@ -724,6 +732,116 @@ fn a_recorded_cancelled_turn_settles_cancelled() {
         None,
         CompletionReason::Interrupted,
     );
+}
+
+/// Staged recorded a resumed turn's prompt, then lost the connection before
+/// the agent got it: the turn the attach saw end is the one before. The row
+/// ends resumable, saying why, with no hooks run for a turn that never ran.
+#[test]
+fn a_prompt_the_agent_never_received_settles_resumable_not_completed() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.repo
+        .write_file("README.md", "an earlier turn's change\n");
+    fx.repo.commit("earlier change");
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+            latest_prompt: LatestPrompt::Missing,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        Some(PROMPT_NOT_RECEIVED),
+        CompletionReason::Interrupted,
+    );
+    let commit = fx
+        .store
+        .get_commit_by_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(commit.sha, None, "no commit hook ran");
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)]
+    );
+}
+
+/// The same for a gone process whose recording ends idle: the idle is the
+/// previous turn's.
+#[test]
+fn a_gone_process_that_never_received_the_prompt_settles_resumable() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Gone { message: None }, Some("cmd-1"));
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::ProcessGone {
+            message: None,
+            latest_prompt: LatestPrompt::Missing,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        Some(PROMPT_NOT_RECEIVED),
+        CompletionReason::Interrupted,
+    );
+}
+
+/// An error result fails the turn, as the live path fails it when the
+/// bridge answers the prompt with that error.
+#[test]
+fn an_errored_turn_settles_failed() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Failed {
+                message: Some("API Error: 500".to_string()),
+            }),
+            latest_prompt: LatestPrompt::Replayed,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Error,
+        Some("API Error: 500"),
+        CompletionReason::Crashed,
+    );
+    assert_eq!(fx.host.statuses(), vec!["running", "error"]);
+}
+
+#[test]
+fn a_recorded_errored_turn_settles_failed() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Gone { message: None }, Some("cmd-1"));
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Failed { message: None }),
+    });
+    fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
+
+    fx.reconcile(&session);
+
+    let row = fx.row(&session.id);
+    assert_eq!(row.status, SessionStatus::Error);
+    assert_eq!(row.completion_reason, Some(CompletionReason::Crashed));
+    assert!(row.error_message.is_some());
 }
 
 /// A failed attach hands the row back as it found it — `disconnected`, owned
@@ -1273,6 +1391,52 @@ fn states_report_rows_being_reconciled() {
     fx.blox.set_workspace(WorkspaceProbe::Running);
     fx.reconcile(&session);
     assert!(fx.reconciler.states().is_empty());
+}
+
+#[test]
+fn the_sweep_forgets_rows_that_moved_on_without_it() {
+    let fx = Fixture::new();
+    let moved_on = fx.disconnected_commit_session();
+    let waiting = fx.disconnected_commit_session();
+    fx.blox.set_workspace(WorkspaceProbe::Unreachable {
+        kind: UnreachableKind::Unreachable,
+        message: "timed out".to_string(),
+    });
+    fx.reconcile(&moved_on);
+    fx.reconcile(&waiting);
+    assert_eq!(fx.reconciler.states().len(), 2);
+
+    // Settled by something other than this reconciler (a resume, another
+    // instance, recovery), while its last attempt still reads `Waiting`.
+    let row = fx.row(&moved_on.id);
+    assert!(fx
+        .store
+        .transition_from_disconnected_observed_at(
+            &moved_on.id,
+            row.updated_at,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::Interrupted),
+        )
+        .unwrap());
+
+    // Both rows are inside their backoff: the sweep starts no attempt.
+    let calls = fx.blox.calls().len();
+    assert_eq!(fx.reconciler.reconcile_due(Trigger::Sweep), 0);
+    assert_eq!(fx.blox.calls().len(), calls);
+
+    let states = fx.reconciler.states();
+    assert_eq!(states.len(), 1, "only the still-disconnected row is kept");
+    assert_eq!(states[0].session_id, waiting.id);
+    assert_eq!(states[0].phase, ReconcilePhase::Waiting);
+
+    let event = fx.host.last_reconcile_event().unwrap();
+    assert_eq!(event.session_id, moved_on.id);
+    assert_eq!(event.phase, ReconcilePhase::Idle);
+    assert_eq!(event.reason, None);
+    assert_eq!(event.attempts, 0);
+    assert_eq!(event.next_attempt_at, None);
+    assert_eq!(event.branch_id.as_deref(), Some(fx.branch.id.as_str()));
 }
 
 #[test]

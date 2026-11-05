@@ -31,6 +31,12 @@ export const RECONCILE_TURN_UNDETERMINED =
   "Staged couldn't tell whether this turn finished on the workstation";
 /** `cancelled`/`interrupted`: the row's branch has no workstation to ask. */
 export const RECONCILE_NO_WORKSPACE = "Staged couldn't find this session's workstation";
+/**
+ * `cancelled`/`interrupted`, resumable: the connection went before the newest
+ * message reached the agent, so the turn that ended was an earlier one.
+ */
+export const RECONCILE_PROMPT_NOT_RECEIVED =
+  'Staged lost its connection before this message reached the workstation';
 /** `error`/`crashed`: the workstation was deleted. */
 export const RECONCILE_WORKSTATION_GONE = 'The workstation no longer exists';
 
@@ -43,6 +49,7 @@ const RECONCILE_CANCEL_NOTICES: ReadonlySet<string> = new Set([
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_NO_WORKSPACE,
+  RECONCILE_PROMPT_NOT_RECEIVED,
 ]);
 
 /** Whether a `cancelled` row's message is one of reconcile's explanatory notices. */

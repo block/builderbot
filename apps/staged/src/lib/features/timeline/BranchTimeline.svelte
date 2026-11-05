@@ -714,7 +714,11 @@
       if (isFailed) {
         phase = 'failed';
         type = 'failed-commit';
-        secondaryMeta = failedArtifactSubtitle(commit.completionReason, 'commit');
+        secondaryMeta = failedArtifactSubtitle(
+          commit.completionReason,
+          'commit',
+          commit.sessionErrorMessage
+        );
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-commit';
@@ -781,7 +785,11 @@
 
       if (phase === 'failed') {
         type = 'failed-note';
-        secondaryMeta = failedArtifactSubtitle(note.completionReason, 'note');
+        secondaryMeta = failedArtifactSubtitle(
+          note.completionReason,
+          'note',
+          note.sessionErrorMessage
+        );
       } else if (phase === 'queued') {
         type = 'queued-note';
         secondaryMeta = 'Queued';
@@ -844,7 +852,11 @@
       if (isFailed) {
         phase = 'failed';
         type = 'failed-review';
-        meta = failedArtifactSubtitle(review.completionReason, 'review');
+        meta = failedArtifactSubtitle(
+          review.completionReason,
+          'review',
+          review.sessionErrorMessage
+        );
       } else if (isQueued) {
         phase = 'queued';
         type = 'queued-review';

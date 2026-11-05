@@ -440,6 +440,9 @@
 
   let isLive = $derived(session?.status === 'running');
   let isDisconnected = $derived(session?.status === 'disconnected');
+  /** How often an open pane re-fetches a `disconnected` session, in case it
+   *  missed the status event reconcile ends it with. */
+  const DISCONNECTED_REFETCH_MS = 15_000;
   /** Where the backend's attempts to catch up with this session stand. */
   let reconcileState = $derived(
     session ? disconnectedSessionsStore.getReconcileState(session.id) : null
@@ -969,6 +972,35 @@
     return () => {
       unlistenStatus?.();
       unlistenStatus = null;
+    };
+  });
+
+  // A `disconnected` session ends when reconcile settles it, and only that
+  // status event tells this pane. Should it be missed (a web socket that
+  // reconnects across it, say), the pane would go on showing "Running on Blox"
+  // for a turn that finished. So while the session is disconnected, re-fetch
+  // it on a slow timer, and at once when reconcile goes idle for it (it has
+  // stopped working on the row, usually because it settled it). Each fetch
+  // also brings in the transcript reconcile backfills while catching up.
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id || !isDisconnected) return;
+
+    const refetch = () => {
+      if (closed || sessionId !== id) return;
+      void poll().then(() => {
+        // A live reattach took the session back to running.
+        if (!closed && sessionId === id && session?.status === 'running') startPolling();
+      });
+    };
+    const timer = setInterval(refetch, DISCONNECTED_REFETCH_MS);
+    const unlisten = listenToEvent<SessionReconcileEvent>('session-reconcile-changed', (event) => {
+      if (event.sessionId === id && event.phase === 'idle') refetch();
+    });
+    return () => {
+      clearInterval(timer);
+      unlisten();
     };
   });
 

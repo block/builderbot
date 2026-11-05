@@ -6,7 +6,8 @@
 use super::*;
 use crate::driver::attach::AttachTiming;
 use crate::driver::{
-    AttachOutcome, BloxProcess, CancelOutcome, RemoteProcessProbe, RemoteProcessStatus,
+    AttachOutcome, BloxProcess, CancelOutcome, LatestPrompt, RemoteProcessProbe,
+    RemoteProcessStatus, TurnResult,
 };
 use crate::types::BloxAcpCommand;
 use std::collections::VecDeque;
@@ -21,6 +22,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 ///   tool call; then the turn finishes live: the tool's result, a closing
 ///   message, the session's `result`, the dead connection's prompt
 ///   response, and `idle`.
+/// - `streaming`: as `claude`, with a message still streaming when the
+///   proxy attaches: it relays part of it before the load, the replay has
+///   none of it, and its last chunk comes live.
 /// - `plain`: an agent with no message ids and no raw SDK frames; the
 ///   replay adds one message and nothing follows.
 /// - `replaced`: the pinned process is gone and the proxy started another.
@@ -53,10 +57,13 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/^.*"id":"\([^"]*\)".*$/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
-      if [ "$mode" = claude ]; then
-        tool t1
-        text '"messageId":"m1",' ' wor'
-      fi
+      case "$mode" in
+        claude)
+          tool t1
+          text '"messageId":"m1",' ' wor' ;;
+        streaming)
+          text '"messageId":"m3",' 'Half ' ;;
+      esac
       reply "$id" '{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}' ;;
     *'"method":"session/load"'*)
       case "$mode" in
@@ -80,6 +87,10 @@ while IFS= read -r line; do
           text '"messageId":"m2",' ' now'
           sdk '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"stop_reason":"end_turn","terminal_reason":"completed","result":"Done now","uuid":"result-1","parent_tool_use_id":null}'
           reply old-prompt '{"stopReason":"end_turn"}'
+          idle ;;
+        streaming)
+          text '"messageId":"m3",' 'rest.'
+          sdk '{"type":"result","subtype":"success","is_error":false,"num_turns":2,"stop_reason":"end_turn","terminal_reason":"completed","result":"Half rest.","uuid":"result-1","parent_tool_use_id":null}'
           idle ;;
         eof) echo 'INF Received EOF signal from orchestrator, connection closed' >&2 ;;
       esac ;;
@@ -108,7 +119,7 @@ fn stored_transcript() -> Vec<ReplayBoundary> {
             acp_tool_call_id: tool.map(str::to_string),
         };
     vec![
-        boundary("user", "hi", Some("u1"), None),
+        boundary("user", "hi", None, None),
         boundary("assistant", "Earlier.", Some("m0"), None),
         boundary("assistant", "Earlier.", None, None),
         boundary("tool_call", "Run", None, Some("t0")),
@@ -282,13 +293,33 @@ async fn attach(
     command_id: Option<&str>,
     detach: bool,
 ) -> Attached {
+    attach_to(
+        mode,
+        probe,
+        dedicated,
+        command_id,
+        detach,
+        stored_transcript(),
+    )
+    .await
+}
+
+/// [`attach`] over a transcript holding `stored`.
+async fn attach_to(
+    mode: &str,
+    probe: Arc<ScriptedProbe>,
+    dedicated: bool,
+    command_id: Option<&str>,
+    detach: bool,
+    stored: Vec<ReplayBoundary>,
+) -> Attached {
     let log = log_path(mode);
     let transcript = Arc::new(TranscriptLog::default());
     let local = tokio::task::LocalSet::new();
     let (outcome, caught_up) = local
         .run_until(async {
             let driver = driver(&log, mode, probe, dedicated);
-            let store: Arc<dyn Store> = Arc::new(TranscriptStore(stored_transcript()));
+            let store: Arc<dyn Store> = Arc::new(TranscriptStore(stored));
             let writer: Arc<dyn MessageWriter> = transcript.clone();
             let mut attached = driver
                 .attach_with_timing(
@@ -369,8 +400,9 @@ async fn attach_records_only_what_the_transcript_lacks_and_settles_on_its_own_id
     .await;
     assert_eq!(
         run.outcome,
-        Ok(AttachOutcome::Completed {
-            stop_reason: Some(StopReason::EndTurn)
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+            latest_prompt: LatestPrompt::Replayed,
         })
     );
     assert!(run.caught_up);
@@ -398,6 +430,69 @@ async fn attach_records_only_what_the_transcript_lacks_and_settles_on_its_own_id
     );
 }
 
+/// Staged stored a resumed turn's prompt, then lost the connection before
+/// the agent got it: the session's last turn, which the attach sees end, is
+/// the one before, and the attach says so.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_reports_a_newest_prompt_the_agent_never_received() {
+    let mut stored = stored_transcript();
+    stored.push(ReplayBoundary {
+        role: "user".to_string(),
+        content: "Now add a test".to_string(),
+        acp_message_id: None,
+        acp_tool_call_id: None,
+    });
+    let run = attach_to(
+        "claude",
+        ScriptedProbe::running(),
+        true,
+        Some("27294439"),
+        false,
+        stored,
+    )
+    .await;
+    assert_eq!(
+        run.outcome,
+        Ok(AttachOutcome::Ended {
+            result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+            latest_prompt: LatestPrompt::Missing,
+        })
+    );
+}
+
+/// The text of a message still streaming when the proxy attached, relayed
+/// before the load and never replayed, is recorded ahead of its live tail.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn text_relayed_before_the_load_of_a_streaming_message_is_kept() {
+    let run = attach(
+        "streaming",
+        ScriptedProbe::running(),
+        true,
+        Some("27294439"),
+        false,
+    )
+    .await;
+    assert!(
+        matches!(run.outcome, Ok(AttachOutcome::Ended { .. })),
+        "{:?}",
+        run.outcome
+    );
+    let text: String = run
+        .rows
+        .iter()
+        .filter_map(|row| row.strip_prefix("text:"))
+        .collect();
+    assert_eq!(text, "worldHalf rest.", "{:?}", run.rows);
+    let position = |row: &str| run.rows.iter().position(|r| r == row);
+    assert!(
+        position("tool_call:t1") < run.rows.iter().position(|r| r.starts_with("text:Half")),
+        "the held text follows the replay: {:?}",
+        run.rows
+    );
+}
+
 /// An agent with no message ids is matched by position, and with no raw SDK
 /// frames the turn settles when the process reads `IDLE`.
 #[cfg(unix)]
@@ -410,7 +505,10 @@ async fn without_frames_the_attach_settles_when_the_process_reads_idle() {
     let run = attach("plain", Arc::clone(&probe), true, None, false).await;
     assert_eq!(
         run.outcome,
-        Ok(AttachOutcome::Completed { stop_reason: None })
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+        })
     );
     assert_eq!(run.rows, ["text:More."]);
     assert!(probe.reads.load(Ordering::SeqCst) >= 3);
@@ -430,7 +528,8 @@ async fn a_process_that_is_gone_settles_process_gone() {
     assert_eq!(
         run.outcome,
         Ok(AttachOutcome::ProcessGone {
-            message: Some("bloxlet restarted while command was running".to_string())
+            message: Some("bloxlet restarted while command was running".to_string()),
+            latest_prompt: LatestPrompt::Replayed,
         })
     );
 }
@@ -453,7 +552,8 @@ async fn a_replaced_process_is_backfilled_and_settles_process_gone() {
     assert_eq!(
         run.outcome,
         Ok(AttachOutcome::ProcessGone {
-            message: Some("bloxlet restarted while command was running".to_string())
+            message: Some("bloxlet restarted while command was running".to_string()),
+            latest_prompt: LatestPrompt::Replayed,
         })
     );
     assert_eq!(run.rows, ["text:world", "tool_call:t1"]);
@@ -477,7 +577,7 @@ async fn an_orchestrator_eof_settles_transport_lost_without_sigint() {
 async fn a_shared_process_attach_tears_down_without_sigint() {
     let run = attach("claude", ScriptedProbe::running(), false, None, false).await;
     assert!(
-        matches!(run.outcome, Ok(AttachOutcome::Completed { .. })),
+        matches!(run.outcome, Ok(AttachOutcome::Ended { .. })),
         "{:?}",
         run.outcome
     );

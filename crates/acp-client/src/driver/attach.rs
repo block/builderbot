@@ -14,15 +14,21 @@ use super::*;
 use tokio::process::ChildStdin;
 use tokio_util::compat::Compat;
 
-use catch_up::CatchUpStage;
+use catch_up::LatestPrompt;
 
 /// How an [`AcpDriver::attach`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttachOutcome {
-    /// The turn is over, and the transcript caught up with it. `stop_reason`
+    /// The turn is over, and the transcript caught up with it. `result`
     /// comes from the session's last `result` frame: `None` when the agent
     /// sends none, or the turn ended before the attach could see it.
-    Completed { stop_reason: Option<StopReason> },
+    /// `latest_prompt` says whether the agent ever received the newest
+    /// prompt the transcript holds: if it didn't, the turn that ended is an
+    /// earlier prompt's.
+    Ended {
+        result: Option<TurnResult>,
+        latest_prompt: LatestPrompt,
+    },
     /// Detached ([`AttachedSession::detach_handle`]) before the turn was
     /// seen to end: it may still be running remotely.
     Live,
@@ -30,10 +36,24 @@ pub enum AttachOutcome {
     /// as ended (`message` is what it recorded, e.g. "bloxlet restarted
     /// while command was running"), or the proxy started a new process in
     /// its place, whose replay the transcript caught up from.
-    ProcessGone { message: Option<String> },
+    /// `latest_prompt` is as for [`AttachOutcome::Ended`].
+    ProcessGone {
+        message: Option<String>,
+        latest_prompt: LatestPrompt,
+    },
     /// The connection to the workstation was lost, the proxy's report that
     /// its remote process went away included; the turn's fate is unknown.
     TransportLost,
+}
+
+/// How a turn ended, by the Claude Agent SDK `result` frame that closed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnResult {
+    /// The turn ended for this reason.
+    Stopped(StopReason),
+    /// The turn failed: the bridge answered (or would have answered) its
+    /// prompt with an error. `message` is the error the result carries.
+    Failed { message: Option<String> },
 }
 
 /// How an [`AcpDriver::attach_cancel`] ended.
@@ -496,10 +516,11 @@ async fn run_attach(
             ))
         }
     }
-    handler.set_catch_up_stage(CatchUpStage::Live).await;
+    handler.finish_catch_up().await;
+    let latest_prompt = handler.latest_prompt().await;
     let _ = caught_up.send(true);
     log::info!(
-        "ACP session {}: attach caught up for session {}",
+        "ACP session {}: attach caught up for session {} (newest prompt: {latest_prompt:?})",
         context.agent_session_id,
         context.our_session_id
     );
@@ -508,14 +529,19 @@ async fn run_attach(
     if transport.process_replaced() {
         return Ok(AttachOutcome::ProcessGone {
             message: ended_message(context.blox.as_ref(), command_id).await,
+            latest_prompt,
         });
     }
     Ok(
         match wait_for_turn_end(handler, context.blox.as_ref(), command_id, context.timing).await {
-            TurnEnd::Idle => AttachOutcome::Completed {
-                stop_reason: handler.last_result().as_ref().and_then(result_stop_reason),
+            TurnEnd::Idle => AttachOutcome::Ended {
+                result: handler.last_result().as_ref().and_then(result_turn),
+                latest_prompt,
             },
-            TurnEnd::ProcessGone { message } => AttachOutcome::ProcessGone { message },
+            TurnEnd::ProcessGone { message } => AttachOutcome::ProcessGone {
+                message,
+                latest_prompt,
+            },
             TurnEnd::TransportLost => lost_outcome(transport),
         },
     )
@@ -635,21 +661,55 @@ async fn stop_proxy(child: &mut tokio::process::Child, transport: &TransportMoni
     }
 }
 
-/// The ACP stop reason a Claude Agent SDK `result` frame stands for, when it
-/// says.
-pub(super) fn result_stop_reason(message: &serde_json::Value) -> Option<StopReason> {
+/// How the turn a Claude Agent SDK `result` frame closes ended, when it says,
+/// read as the Claude bridge reads it to answer the turn's prompt: an
+/// interrupt is a cancel, a refusal and the token limit are their stop
+/// reasons, an error result fails the turn (the bridge answers it with an
+/// error), and otherwise the turn ended, or hit a turn or budget limit.
+/// `error_during_execution` is an error unless it says it is not.
+pub(super) fn result_turn(message: &serde_json::Value) -> Option<TurnResult> {
     let field = |name: &str| message.get(name).and_then(serde_json::Value::as_str);
-    match field("subtype")? {
-        "success" => Some(match field("stop_reason") {
-            Some("max_tokens") => StopReason::MaxTokens,
-            Some("refusal") => StopReason::Refusal,
-            _ => StopReason::EndTurn,
-        }),
-        "error_max_turns" => Some(StopReason::MaxTurnRequests),
-        "error_during_execution"
-            if field("terminal_reason").is_some_and(|reason| reason.starts_with("aborted")) =>
-        {
-            Some(StopReason::Cancelled)
+    let subtype = field("subtype")?;
+    if field("terminal_reason")
+        .is_some_and(|reason| reason == "aborted_streaming" || reason == "aborted_tools")
+    {
+        return Some(TurnResult::Stopped(StopReason::Cancelled));
+    }
+    match field("stop_reason") {
+        Some("refusal") => return Some(TurnResult::Stopped(StopReason::Refusal)),
+        Some("max_tokens") => return Some(TurnResult::Stopped(StopReason::MaxTokens)),
+        _ => {}
+    }
+    let is_error = message.get("is_error").and_then(serde_json::Value::as_bool);
+    if is_error == Some(true) || (is_error.is_none() && subtype == "error_during_execution") {
+        let text = if subtype == "success" {
+            field("result").map(str::to_string)
+        } else {
+            let errors = message
+                .get("errors")
+                .and_then(serde_json::Value::as_array)
+                .map(|errors| {
+                    errors
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            Some(if errors.is_empty() {
+                subtype.to_string()
+            } else {
+                errors
+            })
+        };
+        return Some(TurnResult::Failed {
+            message: text.filter(|text| !text.trim().is_empty()),
+        });
+    }
+    match subtype {
+        "success" | "error_during_execution" => Some(TurnResult::Stopped(StopReason::EndTurn)),
+        "error_max_turns" | "error_max_budget_usd" | "error_max_structured_output_retries" => {
+            Some(TurnResult::Stopped(StopReason::MaxTurnRequests))
         }
         _ => None,
     }
@@ -660,35 +720,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn result_frames_map_to_stop_reasons() {
-        let reason = |frame: serde_json::Value| result_stop_reason(&frame);
+    fn result_frames_map_to_how_the_turn_ended() {
+        let turn = |frame: serde_json::Value| result_turn(&frame);
+        let stopped = |reason| Some(TurnResult::Stopped(reason));
         assert_eq!(
-            reason(serde_json::json!({
+            turn(serde_json::json!({
                 "type": "result", "subtype": "success", "is_error": false,
                 "stop_reason": "end_turn", "terminal_reason": "completed"
             })),
-            Some(StopReason::EndTurn)
+            stopped(StopReason::EndTurn)
         );
         // Observed on a live cancel.
         assert_eq!(
-            reason(serde_json::json!({
+            turn(serde_json::json!({
                 "type": "result", "subtype": "error_during_execution", "is_error": true,
                 "stop_reason": "tool_use", "terminal_reason": "aborted_tools"
             })),
-            Some(StopReason::Cancelled)
+            stopped(StopReason::Cancelled)
         );
         assert_eq!(
-            reason(serde_json::json!({"subtype": "success", "stop_reason": "max_tokens"})),
-            Some(StopReason::MaxTokens)
+            turn(serde_json::json!({"subtype": "success", "stop_reason": "max_tokens"})),
+            stopped(StopReason::MaxTokens)
+        );
+        // A refusal can come on any subtype, error or not.
+        assert_eq!(
+            turn(serde_json::json!({
+                "subtype": "error_during_execution", "is_error": true, "stop_reason": "refusal"
+            })),
+            stopped(StopReason::Refusal)
+        );
+        for subtype in [
+            "error_max_turns",
+            "error_max_budget_usd",
+            "error_max_structured_output_retries",
+        ] {
+            assert_eq!(
+                turn(serde_json::json!({"subtype": subtype, "is_error": false})),
+                stopped(StopReason::MaxTurnRequests),
+                "{subtype}"
+            );
+        }
+        assert_eq!(turn(serde_json::json!({})), None);
+        assert_eq!(turn(serde_json::json!({"subtype": "something_new"})), None);
+    }
+
+    /// The live path fails a turn the bridge answers with an error; an attach
+    /// must settle the same turn the same way.
+    #[test]
+    fn error_results_fail_the_turn() {
+        let turn = |frame: serde_json::Value| result_turn(&frame);
+        let failed = |message: &str| {
+            Some(TurnResult::Failed {
+                message: Some(message.to_string()),
+            })
+        };
+        assert_eq!(
+            turn(serde_json::json!({
+                "subtype": "error_during_execution", "is_error": true,
+                "terminal_reason": "completed", "errors": ["API Error: 529", "overloaded"]
+            })),
+            failed("API Error: 529, overloaded")
         );
         assert_eq!(
-            reason(serde_json::json!({"subtype": "error_max_turns"})),
-            Some(StopReason::MaxTurnRequests)
+            turn(serde_json::json!({"subtype": "error_during_execution"})),
+            failed("error_during_execution"),
+            "an execution error that doesn't say otherwise is an error"
         );
         assert_eq!(
-            reason(serde_json::json!({"subtype": "error_during_execution"})),
-            None
+            turn(serde_json::json!({"subtype": "error_during_execution", "is_error": false})),
+            Some(TurnResult::Stopped(StopReason::EndTurn)),
+            "as the bridge reads it"
         );
-        assert_eq!(reason(serde_json::json!({})), None);
+        assert_eq!(
+            turn(serde_json::json!({
+                "subtype": "success", "is_error": true, "result": "Credit balance is too low"
+            })),
+            failed("Credit balance is too low")
+        );
+        assert_eq!(
+            turn(serde_json::json!({"subtype": "error_max_turns", "is_error": true, "errors": []})),
+            failed("error_max_turns")
+        );
+        assert_eq!(
+            turn(serde_json::json!({"subtype": "success", "is_error": true, "result": " "})),
+            Some(TurnResult::Failed { message: None })
+        );
     }
 }

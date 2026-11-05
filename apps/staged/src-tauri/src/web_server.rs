@@ -1432,6 +1432,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             session_id: None,
                             session_status: None,
                             completion_reason: None,
+                            session_error_message: None,
                             pipeline_kind: None,
                             is_own_commit: false,
                         })

@@ -11,16 +11,16 @@
 //! a `result` frame with the session id, because Staged asks for them on
 //! `session/new` and `session/load`. Other agents send no per-session turn
 //! state, and their recording says nothing reliable about the turn.
-use super::attach::result_stop_reason;
+use super::attach::{result_turn, TurnResult};
 use super::*;
 
 /// How a session's last turn stands in a process recording.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordedTurn {
     /// The session's last state frame was `idle`: its turn ended before the
-    /// process did. `stop_reason` comes from the `result` frame before it,
-    /// when there was one.
-    Ended { stop_reason: Option<StopReason> },
+    /// process did. `result` comes from the `result` frame before it, when
+    /// there was one.
+    Ended { result: Option<TurnResult> },
     /// The recording stops with the turn running, or waiting on a
     /// permission: the process died under it.
     InFlight,
@@ -37,7 +37,7 @@ const RAW_SDK_MESSAGE_WIRE_METHOD: &str = "_claude/sdkMessage";
 /// Lines that are not JSON, and other sessions' frames, are skipped.
 pub(crate) fn recorded_turn(output: &str, agent_session_id: &str) -> RecordedTurn {
     let mut turn = RecordedTurn::Unknown;
-    let mut last_result: Option<StopReason> = None;
+    let mut last_result: Option<TurnResult> = None;
     for line in output.lines() {
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
@@ -53,13 +53,13 @@ pub(crate) fn recorded_turn(output: &str, agent_session_id: &str) -> RecordedTur
         }
         let message = &params["message"];
         if message.get("type").and_then(serde_json::Value::as_str) == Some("result") {
-            last_result = result_stop_reason(message);
+            last_result = result_turn(message);
             continue;
         }
         match sdk_message_session_state(message) {
             Some(SdkSessionState::Idle) => {
                 turn = RecordedTurn::Ended {
-                    stop_reason: last_result,
+                    result: last_result.clone(),
                 };
             }
             Some(SdkSessionState::Busy) => {
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(
             recorded_turn(&output, SESSION),
             RecordedTurn::Ended {
-                stop_reason: Some(StopReason::EndTurn)
+                result: Some(TurnResult::Stopped(StopReason::EndTurn))
             }
         );
     }
@@ -171,7 +171,40 @@ mod tests {
         assert_eq!(
             recorded_turn(&lines.join("\n"), SESSION),
             RecordedTurn::Ended {
-                stop_reason: Some(StopReason::Cancelled)
+                result: Some(TurnResult::Stopped(StopReason::Cancelled))
+            }
+        );
+    }
+
+    #[test]
+    fn a_turn_that_errored_ended_failed() {
+        let mut lines = ended_turn(SESSION);
+        lines.push(state(SESSION, "running"));
+        lines.push(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "_claude/sdkMessage",
+                "params": {
+                    "sessionId": SESSION,
+                    "message": {
+                        "type": "result",
+                        "subtype": "error_during_execution",
+                        "is_error": true,
+                        "errors": ["API Error: 500"],
+                        "terminal_reason": "completed",
+                        "session_id": SESSION,
+                    },
+                },
+            })
+            .to_string(),
+        );
+        lines.push(state(SESSION, "idle"));
+        assert_eq!(
+            recorded_turn(&lines.join("\n"), SESSION),
+            RecordedTurn::Ended {
+                result: Some(TurnResult::Failed {
+                    message: Some("API Error: 500".to_string())
+                })
             }
         );
     }
@@ -199,7 +232,7 @@ mod tests {
         lines.push(state(SESSION, "idle"));
         assert_eq!(
             recorded_turn(&lines.join("\n"), SESSION),
-            RecordedTurn::Ended { stop_reason: None }
+            RecordedTurn::Ended { result: None }
         );
     }
 
@@ -211,7 +244,7 @@ mod tests {
         assert_eq!(
             recorded_turn(&lines.join("\n"), SESSION),
             RecordedTurn::Ended {
-                stop_reason: Some(StopReason::EndTurn)
+                result: Some(TurnResult::Stopped(StopReason::EndTurn))
             }
         );
     }

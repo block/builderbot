@@ -61,11 +61,12 @@ mod remote_routing;
 mod response_completion;
 mod transport_loss;
 
-pub use attach::{AttachOutcome, AttachedSession, CancelOutcome};
+pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, TurnResult};
 pub(crate) use blox_process::BloxProcess;
 #[cfg(test)]
 pub(crate) use blox_process::RemoteProcessProbe;
 pub use blox_process::{RemoteProcess, RemoteProcessStatus};
+pub use catch_up::LatestPrompt;
 use connection_io::{normalized_stdout, spawn_stderr_reader, staged_client};
 pub use recorded_turn::RecordedTurn;
 
@@ -1000,12 +1001,13 @@ pub struct SessionSettled {
     /// than because the agent said so (see [`TransportLoss`]). A remote
     /// session lost with its turn in flight may still be running.
     pub transport_loss: Option<TransportLoss>,
-    /// A Stop's `session/cancel` was sent and the turn's prompt went
-    /// unanswered past [`CANCEL_ACK_DEADLINE`]: the connection settled
-    /// cancelled without the agent confirming it. For a remote session the
-    /// turn may still be running on its workstation, behind a hung
-    /// transport, and the caller should stop it over a fresh connection
-    /// ([`AcpDriver::attach_cancel`]).
+    /// A `session/cancel` was sent — for a Stop, or an interrupt — and the
+    /// turn's prompt went unanswered: past [`CANCEL_ACK_DEADLINE`] (an
+    /// interrupt's `INTERRUPT_ACK_TIMEOUT`), or because the transport went
+    /// first under a Stop. The connection settled cancelled without the
+    /// agent confirming it. For a remote session the turn may still be
+    /// running on its workstation, behind a hung transport, and the caller
+    /// should stop it over a fresh connection ([`AcpDriver::attach_cancel`]).
     pub cancel_unacknowledged: bool,
 }
 
@@ -3155,7 +3157,7 @@ enum HandlerPhase {
     /// An attach ([`AcpDriver::attach`]) for the life of its connection: no
     /// prompt of its own, only a replay and a turn it catches up on, recorded
     /// past what the transcript already holds (see [`catch_up`]).
-    CatchingUp(catch_up::CatchUpLedger),
+    CatchingUp(Box<catch_up::CatchUpLedger>),
 }
 
 /// One background continuation: everything an out-of-turn burst records
@@ -4348,8 +4350,8 @@ impl AcpNotificationHandler {
     /// Catch up on a session instead of prompting it (see
     /// [`HandlerPhase::CatchingUp`]): `stored` is what the transcript holds.
     fn catching_up(mut self, stored: &[ReplayBoundary]) -> Self {
-        self.phase = Mutex::new(HandlerPhase::CatchingUp(catch_up::CatchUpLedger::new(
-            stored,
+        self.phase = Mutex::new(HandlerPhase::CatchingUp(Box::new(
+            catch_up::CatchUpLedger::new(stored),
         )));
         self
     }
@@ -4358,6 +4360,47 @@ impl AcpNotificationHandler {
     async fn set_catch_up_stage(&self, stage: catch_up::CatchUpStage) {
         if let HandlerPhase::CatchingUp(ledger) = &mut *self.phase.lock().await {
             ledger.set_stage(stage);
+        }
+    }
+
+    /// End a catch-up's replay: every frame from here is the turn's live
+    /// stream. Text held from before the load that the replay never re-sent
+    /// is recorded first (see [`catch_up::CatchUpLedger::go_live`]), under
+    /// the gate, so no live frame can land ahead of it. A no-op for any
+    /// other phase.
+    async fn finish_catch_up(&self) {
+        let gate = self.session_gate.lock().await;
+        let session_id = match &*gate {
+            SessionGate::Named(own) => Some(own.clone()),
+            SessionGate::Unnamed(_) => None,
+        };
+        let mut response = self.response.lock().await;
+        let pending = match &mut *self.phase.lock().await {
+            HandlerPhase::CatchingUp(ledger) => ledger.go_live(),
+            _ => return,
+        };
+        let Some(session_id) = session_id else {
+            return;
+        };
+        for update in pending {
+            let notification = SessionNotification::new(session_id.clone(), update);
+            if let Err(e) = self
+                .session_notification_inner(notification, &mut response)
+                .await
+            {
+                log::warn!(
+                    "ACP session {session_id}: recording text held before the load failed: {e:?}"
+                );
+            }
+        }
+    }
+
+    /// Whether a catch-up's replay showed the agent holding the newest
+    /// prompt the transcript has; `Unknown` for any other phase.
+    async fn latest_prompt(&self) -> catch_up::LatestPrompt {
+        match &*self.phase.lock().await {
+            HandlerPhase::CatchingUp(ledger) => ledger.latest_prompt(),
+            _ => catch_up::LatestPrompt::Unknown,
         }
     }
 
@@ -6939,18 +6982,9 @@ async fn run_prompt_turn(
                 if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
                     log::warn!("{e}");
                 }
-
-                match tokio::time::timeout(CANCEL_ACK_DEADLINE, &mut prompt_task).await {
-                    Ok(result) => {
-                        break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
-                        );
-                        transport.note_cancel_unacknowledged();
-                        return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
-                    }
+                match await_stopped_turn(&mut prompt_task, transport, our_session_id).await? {
+                    Some(response) => break response,
+                    None => return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled)),
                 }
             }
             request = turn_control_rx.recv(), if control_open => match request {
@@ -7002,14 +7036,14 @@ async fn run_prompt_turn(
                     // caller is not told it was.
                     let acked = tokio::select! {
                         biased;
-                        result = tokio::time::timeout(INTERRUPT_ACK_TIMEOUT, &mut prompt_task) => Some(result),
+                        ack = await_cancel_ack(&mut prompt_task, INTERRUPT_ACK_TIMEOUT, transport) => Some(ack),
                         _ = cancel_token.cancelled() => None,
                     };
                     match acked {
                         // Whatever the stop reason (`cancelled`, or `end_turn`
                         // if the turn finished under the cancel), the turn is
                         // over and the message is the next one.
-                        Some(Ok(Ok(response))) => {
+                        Some(CancelAck::Answered(Ok(response))) => {
                             if let Some(metadata) = prompt_response_metadata(&response) {
                                 handler.writer.record_acp_event_metadata(metadata).await;
                             }
@@ -7021,7 +7055,7 @@ async fn run_prompt_turn(
                                 control: Some(TurnControlReply::Interrupt(reply)),
                             }));
                         }
-                        Some(Ok(Err(e))) => {
+                        Some(CancelAck::Answered(Err(e))) => {
                             if agent_client_protocol::is_incoming_transport_closed(&e) {
                                 transport.confirm(TransportLossPhase::Turn);
                             }
@@ -7029,9 +7063,20 @@ async fn run_prompt_turn(
                             let _ = reply.send(Err(message.clone()));
                             return Err(message);
                         }
+                        // Lost with the turn in flight, as the wait above
+                        // would be: the turn may still be running remotely.
+                        Some(CancelAck::TransportLost) => {
+                            transport.confirm(TransportLossPhase::Turn);
+                            let message = transport
+                                .lost_error("while an interrupt awaited the cancel acknowledgment");
+                            let _ = reply.send(Err(message.clone()));
+                            return Err(message);
+                        }
                         // A wedged bridge should not get a second prompt:
-                        // settle the turn cancelled, as a plain cancel would.
-                        Some(Err(_)) => {
+                        // settle the turn cancelled, as a plain cancel would,
+                        // and leave the turn to a fresh connection's cancel
+                        // (the wait noted it unacknowledged).
+                        Some(CancelAck::TimedOut) => {
                             log::warn!(
                                 "Timed out waiting for ACP prompt response after session/cancel \
                                  for session {our_session_id}; dropping the re-prompt"
@@ -7054,16 +7099,9 @@ async fn run_prompt_turn(
                                 "Session stopped before the message could be sent".to_string(),
                             ));
                             handler.cancel_pending_permissions();
-                            match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
-                                Ok(result) => {
-                                    break result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?;
-                                }
-                                Err(_) => {
-                                    log::warn!(
-                                        "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
-                                    );
-                                    return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled));
-                                }
+                            match await_stopped_turn(&mut prompt_task, transport, our_session_id).await? {
+                                Some(response) => break response,
+                                None => return Ok(TurnStep::Settled(AgentRunOutcome::Cancelled)),
                             }
                         }
                     }
@@ -7088,6 +7126,95 @@ async fn run_prompt_turn(
     Ok(TurnStep::Settled(AgentRunOutcome::from_stop_reason(
         prompt_response.stop_reason,
     )))
+}
+
+/// How a wait for a cancelled turn's prompt answer ended.
+// Not boxed: it lives only from the wait to the match on it, once per Stop or
+// interrupt.
+#[allow(clippy::large_enum_variant)]
+enum CancelAck {
+    /// The agent answered the prompt.
+    Answered(agent_client_protocol::Result<PromptResponse>),
+    /// The deadline passed with no answer.
+    TimedOut,
+    /// The transport was lost first (a proxy that lost its remote process
+    /// keeps stdout open), and no reply came within the usual grace.
+    TransportLost,
+}
+
+/// Wait up to `deadline` for the prompt of a turn just sent `session/cancel`
+/// to be answered. A wait that gets no answer notes the cancel
+/// unacknowledged: over a remote connection the cancel may never have
+/// reached the turn, which a fresh connection's cancel can still stop (see
+/// [`SessionSettled::cancel_unacknowledged`]).
+async fn await_cancel_ack<F>(
+    prompt_task: &mut std::pin::Pin<&mut F>,
+    deadline: Duration,
+    transport: &TransportMonitor,
+) -> CancelAck
+where
+    F: std::future::Future<Output = agent_client_protocol::Result<PromptResponse>>,
+{
+    let ack = tokio::select! {
+        result = tokio::time::timeout(deadline, prompt_task.as_mut()) => match result {
+            Ok(result) => CancelAck::Answered(result),
+            Err(_) => CancelAck::TimedOut,
+        },
+        _ = transport.lost().cancelled() => {
+            match tokio::time::timeout(TRANSPORT_LOSS_REPLY_GRACE, prompt_task.as_mut()).await {
+                Ok(result) => CancelAck::Answered(result),
+                Err(_) => CancelAck::TransportLost,
+            }
+        }
+    };
+    if matches!(ack, CancelAck::TimedOut | CancelAck::TransportLost) {
+        transport.note_cancel_unacknowledged();
+    }
+    ack
+}
+
+/// Wait out a Stop's cancel for [`CANCEL_ACK_DEADLINE`]: the turn's prompt
+/// response, or `None` to settle the turn cancelled without one. A Stop always
+/// ends the turn locally, so losing the transport under it is no
+/// disconnect; like a cancel that times out, it is noted unacknowledged, so
+/// the turn is cancelled again over a fresh connection.
+async fn await_stopped_turn<F>(
+    prompt_task: &mut std::pin::Pin<&mut F>,
+    transport: &TransportMonitor,
+    our_session_id: &str,
+) -> Result<Option<PromptResponse>, String>
+where
+    F: std::future::Future<Output = agent_client_protocol::Result<PromptResponse>>,
+{
+    match await_cancel_ack(prompt_task, CANCEL_ACK_DEADLINE, transport).await {
+        CancelAck::Answered(Ok(response)) => Ok(Some(response)),
+        CancelAck::Answered(Err(e)) => {
+            if agent_client_protocol::is_incoming_transport_closed(&e)
+                || transport.first_signal().is_some()
+            {
+                log::warn!(
+                    "ACP session {our_session_id}: the transport closed before session/cancel \
+                     was acknowledged"
+                );
+                transport.note_cancel_unacknowledged();
+            }
+            Err(format!("Prompt failed after cancellation: {e:?}"))
+        }
+        CancelAck::TimedOut => {
+            log::warn!(
+                "Timed out waiting for ACP prompt response after session/cancel for session \
+                 {our_session_id}"
+            );
+            Ok(None)
+        }
+        CancelAck::TransportLost => {
+            log::warn!(
+                "ACP session {our_session_id}: {} — settling the stopped turn cancelled",
+                transport.lost_error("before session/cancel was acknowledged")
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// The text a failed `session/prompt` surfaces to the user.

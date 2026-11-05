@@ -177,6 +177,11 @@ export interface CommitTimelineItem {
   sessionStatus: string | null;
   completionReason: string | null;
   /**
+   * The session's error message, for a failed row's copy (a deleted
+   * workstation reads differently from a crash).
+   */
+  sessionErrorMessage?: string | null;
+  /**
    * Kind of the git pipeline behind this row's session. Only set on pending
    * rows: it is how a queued/running rebase or squash is told apart from a
    * plain commit session, since the subject is a display label an agent-pushed
@@ -194,6 +199,11 @@ export interface NoteTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  /**
+   * The session's error message, for a failed row's copy (a deleted
+   * workstation reads differently from a crash).
+   */
+  sessionErrorMessage?: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -245,6 +255,11 @@ export interface ReviewTimelineItem {
   sessionStatus: string | null;
   sessionProvider: string | null;
   completionReason: string | null;
+  /**
+   * The session's error message, for a failed row's copy (a deleted
+   * workstation reads differently from a crash).
+   */
+  sessionErrorMessage?: string | null;
   title: string | null;
   /** Active non-`information` comments (what the detail view lists as comments). */
   commentCount: number;

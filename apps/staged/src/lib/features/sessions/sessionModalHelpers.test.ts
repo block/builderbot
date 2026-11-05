@@ -12,6 +12,7 @@ import {
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
+  RECONCILE_PROMPT_NOT_RECEIVED,
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
 } from '../../shared/disconnectedSession';
@@ -256,6 +257,17 @@ describe('sessionEndMessage', () => {
     expect(
       sessionEndMessage({ completionReason: 'interrupted', errorMessage: RECONCILE_NO_WORKSPACE })
     ).toBe('Staged couldn’t find this session’s workstation.');
+  });
+
+  it('says the newest message never reached the agent', () => {
+    expect(
+      sessionEndMessage({
+        completionReason: 'interrupted',
+        errorMessage: RECONCILE_PROMPT_NOT_RECEIVED,
+      })
+    ).toBe(
+      'Staged lost its connection before your last message reached the workstation, so the agent never saw it.'
+    );
   });
 
   it('ignores messages it doesn’t recognise', () => {

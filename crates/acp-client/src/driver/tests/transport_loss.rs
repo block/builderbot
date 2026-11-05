@@ -553,6 +553,13 @@ while IFS= read -r line; do
           printf '{"jsonrpc":"2.0","id":"perm-own","method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"toolCallId":"tc-own","title":"y"},%s}}\n' "$opts" ;;
       esac ;;
     *'"id":"perm-own"'*) reply "$prompt_id" '{"stopReason":"end_turn"}' ;;
+    *'"method":"session/cancel"'*)
+      echo CANCEL >> "$log"
+      case "$mode" in
+        stop-eof) exit 0 ;;
+        stop-lost)
+          echo 'INF Received EOF signal from orchestrator, connection closed' >&2 ;;
+      esac ;;
   esac
 done
 "#;
@@ -620,6 +627,15 @@ mod fake_proxy {
     /// Connect, prompt, and (when `detach_on` names a log marker) detach once
     /// the proxy logs it; returns what the connection settled with.
     pub(super) async fn run(mode: &str, detach_on: Option<&str>) -> Run {
+        run_with(mode, detach_on, None).await
+    }
+
+    /// [`run`], with a Stop once the proxy logs `stop_on`.
+    pub(super) async fn run_with(
+        mode: &str,
+        detach_on: Option<&str>,
+        stop_on: Option<&str>,
+    ) -> Run {
         let log = log_path(mode);
         let local = tokio::task::LocalSet::new();
         let run = local
@@ -650,7 +666,14 @@ mod fake_proxy {
                         assert!(detach.detach(), "the proxy group is armed");
                     }
                 };
-                let (turn, ()) = tokio::join!(connection.prompt("hello", &[]), detacher);
+                let stopper = async {
+                    if let Some(marker) = stop_on {
+                        wait_for_log(&log, marker).await;
+                        cancel.cancel();
+                    }
+                };
+                let (turn, (), ()) =
+                    tokio::join!(connection.prompt("hello", &[]), detacher, stopper);
                 let settled = tokio::time::timeout(Duration::from_secs(30), settled_rx)
                     .await
                     .expect("the connection settles")
@@ -715,6 +738,26 @@ async fn the_proxys_orchestrator_eof_line_is_a_turn_loss() {
     assert!(run.settled.outcome.is_err());
     assert!(!run.log.contains("SIGINT"), "{}", run.log);
     assert!(!run.log.contains("session/cancel"), "{}", run.log);
+}
+
+/// A Stop whose `session/cancel` the transport took down with it: nothing
+/// says the cancel reached the turn, so the settle asks for another cancel
+/// over a fresh connection.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_stop_the_transport_went_under_is_unacknowledged() {
+    let run = fake_proxy::run_with("stop-eof", None, Some("PROMPT")).await;
+    assert!(run.log.contains("CANCEL"), "{}", run.log);
+    assert_eq!(run.settled.outcome, Ok(AgentRunOutcome::Cancelled));
+    assert!(run.settled.cancel_unacknowledged);
+
+    // Lost with stdout still open: the wait ends on the loss, not the
+    // deadline, and the cancel is noted unacknowledged.
+    let run = fake_proxy::run_with("stop-lost", None, Some("PROMPT")).await;
+    assert!(run.log.contains("CANCEL"), "{}", run.log);
+    assert_eq!(run.settled.outcome, Ok(AgentRunOutcome::Cancelled));
+    assert!(run.settled.cancel_unacknowledged);
+    assert!(!run.log.contains("SIGINT"), "{}", run.log);
 }
 
 /// The proxy's stdout closing under the prompt: the SDK fails it with its

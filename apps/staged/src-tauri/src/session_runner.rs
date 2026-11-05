@@ -2028,43 +2028,48 @@ pub fn start_session(
         // The `sq` proxy went while bloxlet still runs the agent, which may
         // still be finishing the turn: pick it back up there. The reattached
         // turn ends like a dead owner's does, with no settle reason; it was in
-        // flight on the agent, so losing it again leaves it there.
-        let (result, settle_reason, transport_loss, cancel_unacknowledged) = match result {
-            Err(error)
-                if acp_client::is_remote_agent_detached_error(&error)
-                    && !cancel_token.is_cancelled() =>
-            {
-                let on_detach_handle = |handle: acp_client::DetachHandle| {
-                    registry.set_detach_handle(&session_id_for_status, handle)
-                };
-                let reattached = local.block_on(
-                    &rt,
-                    reattach_detached_turn(
-                        &store_for_status,
-                        &config,
-                        turn_start_message_id,
-                        &cancel_token,
-                        &error,
-                        &on_detach_handle,
-                    ),
-                );
-                match reattached {
-                    Some(result) => (result, None, Some(REATTACHED_TURN_IN_FLIGHT), false),
-                    None => (
-                        Err(error),
-                        settle_reason.get(),
-                        transport_loss.get(),
-                        cancel_unacknowledged.get(),
-                    ),
+        // flight on the agent, so losing it again leaves it there. Its Stop
+        // went over the reattached connection, whose transport is not
+        // tracked, so it is never cancelled again over a fresh one.
+        let (result, settle_reason, transport_loss, cancel_unacknowledged, reattached) =
+            match result {
+                Err(error)
+                    if acp_client::is_remote_agent_detached_error(&error)
+                        && !cancel_token.is_cancelled() =>
+                {
+                    let on_detach_handle = |handle: acp_client::DetachHandle| {
+                        registry.set_detach_handle(&session_id_for_status, handle)
+                    };
+                    let reattached = local.block_on(
+                        &rt,
+                        reattach_detached_turn(
+                            &store_for_status,
+                            &config,
+                            turn_start_message_id,
+                            &cancel_token,
+                            &error,
+                            &on_detach_handle,
+                        ),
+                    );
+                    match reattached {
+                        Some(result) => (result, None, None, false, true),
+                        None => (
+                            Err(error),
+                            settle_reason.get(),
+                            transport_loss.get(),
+                            cancel_unacknowledged.get(),
+                            false,
+                        ),
+                    }
                 }
-            }
-            result => (
-                result,
-                settle_reason.get(),
-                transport_loss.get(),
-                cancel_unacknowledged.get(),
-            ),
-        };
+                result => (
+                    result,
+                    settle_reason.get(),
+                    transport_loss.get(),
+                    cancel_unacknowledged.get(),
+                    false,
+                ),
+            };
 
         // A remote turn the connection lost — dropped transport, or a quit's
         // detach — may still be running on the workstation: record the row
@@ -2074,7 +2079,11 @@ pub fn start_session(
             cancel_token.is_cancelled(),
             result.as_ref().err().map(String::as_str),
             settle_reason,
-            transport_loss,
+            if reattached {
+                Some(REATTACHED_TURN_IN_FLIGHT)
+            } else {
+                transport_loss
+            },
         ) {
             finish_disconnected_run(
                 &config,
@@ -2092,6 +2101,7 @@ pub fn start_session(
             result,
             settle_reason,
             cancel_unacknowledged,
+            transport_loss,
             turn_start_message_id,
             &cancel_token,
             registration,
@@ -2159,6 +2169,7 @@ fn finish_session_run(
     result: Result<AgentRunOutcome, String>,
     settle_reason: Option<acp_client::SessionSettleReason>,
     cancel_unacknowledged: bool,
+    transport_loss: Option<acp_client::TransportLoss>,
     turn_start_message_id: i64,
     cancel_token: &CancellationToken,
     registration: RegistrationEpoch,
@@ -2221,24 +2232,30 @@ fn finish_session_run(
         }
     };
 
-    // A remote Stop the agent never acknowledged may have left the turn
-    // running behind a hung transport: cancel it again over a fresh
-    // connection, and say so on the row if that can't be confirmed either.
-    let error_msg =
-        if new_status == "cancelled" && config.workspace_name.is_some() && cancel_unacknowledged {
-            log::warn!(
-                "Session {session_id_for_status}: Stop went unacknowledged; cancelling over a \
-                 fresh connection"
-            );
-            reconcile::stop_unacknowledged_turn(
-                &store_for_status,
-                &reconcile::LiveBlox,
-                &session_id_for_status,
-            )
-            .or(error_msg)
-        } else {
-            error_msg
-        };
+    // A remote Stop the agent never acknowledged — or one that won over a
+    // transport lost mid-turn — may have left the turn running on the
+    // workstation: cancel it again over a fresh connection, and say so on the
+    // row if that can't be confirmed either.
+    let error_msg = if disconnect::stopped_turn_needs_fresh_cancel(
+        config.workspace_name.is_some(),
+        new_status == "cancelled",
+        cancel_unacknowledged,
+        transport_loss,
+    ) {
+        log::warn!(
+            "Session {session_id_for_status}: Stop went unacknowledged ({:?}); cancelling \
+                 over a fresh connection",
+            transport_loss
+        );
+        reconcile::stop_unacknowledged_turn(
+            &store_for_status,
+            &reconcile::LiveBlox,
+            &session_id_for_status,
+        )
+        .or(error_msg)
+    } else {
+        error_msg
+    };
 
     let completed_successfully =
         terminal_state_completed_successfully(new_status, &completion_reason);
@@ -3887,47 +3904,78 @@ pub(crate) fn recover_dead_sessions_with<R: tauri::Runtime>(
             Some(pid) if !is_process_alive(pid) => true,
             Some(_pid) => false,
         };
-
         if should_cancel {
             if reattach(&store, session, &sessions) {
                 continue;
             }
-            let disconnected = disconnect::may_still_run_on_workstation(&store, session);
-            let (status, reason) = if disconnected {
-                (SessionStatus::Disconnected, None)
-            } else {
-                (SessionStatus::Error, Some(CompletionReason::AppQuit))
-            };
-            let transitioned = store
-                .transition_from_running(&session.id, status.clone(), None, reason.as_ref())
-                .unwrap_or(false);
-            let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
-            let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
-            if transitioned {
-                log::info!(
-                    "Recovered session {} whose owner process {:?} is gone",
-                    session.id,
-                    session.owner_pid
-                );
-            }
-            emit_status(
-                &app_handle,
-                &session.id,
-                status.as_str(),
-                None,
-                reason.as_ref(),
-                recovered_branch_id.clone(),
-                recovered_project_id,
+            recover_dead_session(&store, &app_handle, session);
+        }
+    }
+}
+
+/// End `session` — read `running`, with its owner process gone — or leave it
+/// `disconnected`, and announce the status it now has.
+///
+/// `session` is a snapshot, so the row may have moved on since it was read. A
+/// write that lost to the same recovery by another instance's sweep is still
+/// announced: that sweep's event reached only its own windows, and this
+/// instance's would otherwise keep the row `running`. A row anything else
+/// moved on — resumed, settled by reconcile, deleted — is announced by
+/// whatever moved it, and repeating this sweep's status would tell the
+/// frontend it went back (`disconnected` after `completed`, say).
+fn recover_dead_session<R: tauri::Runtime>(
+    store: &Store,
+    app_handle: &AppHandle<R>,
+    session: &crate::store::Session,
+) {
+    let disconnected = disconnect::may_still_run_on_workstation(store, session);
+    let (status, reason) = if disconnected {
+        (SessionStatus::Disconnected, None)
+    } else {
+        (SessionStatus::Error, Some(CompletionReason::AppQuit))
+    };
+    let transitioned = store
+        .transition_from_running(&session.id, status.clone(), None, reason.as_ref())
+        .unwrap_or(false);
+    if transitioned {
+        log::info!(
+            "Recovered session {} whose owner process {:?} is gone",
+            session.id,
+            session.owner_pid
+        );
+    }
+    let holds_status = transitioned
+        || store
+            .get_session(&session.id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| row.status == status);
+    if !holds_status {
+        log::debug!(
+            "Session {} moved on before its dead-owner recovery; not announcing {}",
+            session.id,
+            status.as_str()
+        );
+        return;
+    }
+    let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+    let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
+    emit_status(
+        app_handle,
+        &session.id,
+        status.as_str(),
+        None,
+        reason.as_ref(),
+        recovered_branch_id.clone(),
+        recovered_project_id,
+    );
+    if transitioned && !disconnected {
+        if let Some(branch_id) = recovered_branch_id {
+            crate::session_queue::kick(
+                app_handle,
+                &branch_id,
+                crate::session_queue::KickSource::DeadOwnerRecovered,
             );
-            if transitioned && !disconnected {
-                if let Some(branch_id) = recovered_branch_id {
-                    crate::session_queue::kick(
-                        &app_handle,
-                        &branch_id,
-                        crate::session_queue::KickSource::DeadOwnerRecovered,
-                    );
-                }
-            }
         }
     }
 }
@@ -4104,6 +4152,7 @@ fn reattach_dead_owner_session(
                 result,
                 None,
                 false,
+                None,
                 turn_start_message_id,
                 &cancel_token,
                 registration,
@@ -7666,7 +7715,7 @@ mod tests {
         assert_eq!(row.completion_reason, Some(CompletionReason::AppQuit));
         assert!(!registry.is_running(&session.id));
         assert!(
-            registry.wait_for_sessions(&[session.id.clone()], Duration::ZERO),
+            registry.wait_for_sessions(std::slice::from_ref(&session.id), Duration::ZERO),
             "shutdown must not wait on a session the refusal took over"
         );
     }
@@ -7699,6 +7748,99 @@ mod tests {
             refused_start_completion_reason(&registry, "session-handoff"),
             CompletionReason::Interrupted
         );
+    }
+
+    /// A `running` Blox session with an agent session, as the dead-owner
+    /// sweep reads it.
+    fn running_blox_session(store: &Store) -> crate::store::Session {
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new_remote(&project.id, "remote", "main", "ws-1");
+        store.create_branch(&branch).unwrap();
+        let mut session =
+            crate::store::Session::new_running("prompt", std::path::Path::new("/tmp"))
+                .with_branch(&branch.id);
+        session.agent_id = Some("acp-1".to_string());
+        store.create_session(&session).unwrap();
+        store.get_session(&session.id).unwrap().unwrap()
+    }
+
+    fn status_events(
+        app: &tauri::App<tauri::test::MockRuntime>,
+    ) -> Arc<std::sync::Mutex<Vec<String>>> {
+        use tauri::Listener;
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        app.handle()
+            .listen_any("session-status-changed", move |event| {
+                seen.lock().unwrap().push(event.payload().to_string());
+            });
+        events
+    }
+
+    #[test]
+    fn a_dead_owners_blox_session_is_left_disconnected_and_announced() {
+        let store = Store::in_memory().unwrap();
+        let session = running_blox_session(&store);
+        let app = mock_app();
+        let events = status_events(&app);
+
+        recover_dead_session(&store, app.handle(), &session);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Disconnected);
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains("\"disconnected\""), "{events:?}");
+    }
+
+    /// Another instance's sweep wrote the same status first: its event only
+    /// reached its own windows, so this one still announces it.
+    #[test]
+    fn a_recovery_another_sweep_made_first_is_still_announced() {
+        let store = Store::in_memory().unwrap();
+        let session = running_blox_session(&store);
+        assert!(store
+            .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+            .unwrap());
+        let app = mock_app();
+        let events = status_events(&app);
+
+        recover_dead_session(&store, app.handle(), &session);
+
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].contains("\"disconnected\""), "{events:?}");
+    }
+
+    /// The row went `disconnected` and was then settled (reconcile in
+    /// another instance) between the sweep's read and its write: announcing
+    /// `disconnected` would send the settled session back in the UI.
+    #[test]
+    fn a_row_that_moved_on_since_the_sweep_read_it_is_not_announced() {
+        let store = Store::in_memory().unwrap();
+        let session = running_blox_session(&store);
+        assert!(store
+            .transition_from_running(&session.id, SessionStatus::Disconnected, None, None)
+            .unwrap());
+        let disconnected = store.get_session(&session.id).unwrap().unwrap();
+        assert!(store
+            .transition_from_disconnected_observed_at(
+                &session.id,
+                disconnected.updated_at,
+                SessionStatus::Completed,
+                None,
+                None,
+            )
+            .unwrap());
+        let app = mock_app();
+        let events = status_events(&app);
+
+        recover_dead_session(&store, app.handle(), &session);
+
+        let row = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(row.status, SessionStatus::Completed);
+        assert!(events.lock().unwrap().is_empty());
     }
 
     /// A mock app so the refusal's status event has somewhere to go. Nothing

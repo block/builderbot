@@ -282,13 +282,25 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
     }
-    if (status === 'cancelled' && sessionType === 'push' && errorMessage && eventBranchId) {
+    if (
+      status === 'cancelled' &&
+      sessionType === 'push' &&
+      errorMessage &&
+      eventBranchId &&
+      // Reconcile's settles carry their session type too, and a reason; the
+      // skip never ran, so it has none.
+      !payload.completionReason
+    ) {
       // A skipped push never ran, so it was never registered: handleSessionEnd
       // would only warn about an unknown session and clean up nothing.
       handleSkippedPush(sessionId, eventBranchId, errorMessage);
       return;
     }
-    handleSessionEnd(sessionId, status, errorMessage);
+    handleSessionEnd(sessionId, status, errorMessage, {
+      projectId: eventProjectId,
+      branchId: eventBranchId,
+      sessionType: sessionType as SessionType | undefined,
+    });
   }
 }
 
@@ -593,10 +605,29 @@ function handlePushCompleted(payload: PushCompletedPayload): void {
   }
 }
 
-function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage?: string | null) {
-  const sessionProjectId = sessionRegistry.getProjectId(sessionId);
-  const sessionType = sessionRegistry.getType(sessionId);
-  const branchId = sessionRegistry.getBranchId(sessionId);
+/** What a terminal status event says about its session. */
+interface SessionEndContext {
+  projectId?: string | null;
+  branchId?: string | null;
+  sessionType?: SessionType | null;
+}
+
+/**
+ * Completion handling for a terminal status: unread marking and PR/push/pull
+ * outcomes. The registry knows the sessions this client saw running; one that
+ * went `disconnected` was cleaned out of it then, so when reconcile settles it
+ * later the event's own fields stand in (reconcile's settles carry the
+ * session type as well as its branch and project).
+ */
+function handleSessionEnd(
+  sessionId: string,
+  status: SessionStatus,
+  errorMessage?: string | null,
+  event: SessionEndContext = {}
+) {
+  const sessionProjectId = sessionRegistry.getProjectId(sessionId) ?? event.projectId ?? null;
+  const sessionType = sessionRegistry.getType(sessionId) ?? event.sessionType ?? null;
+  const branchId = sessionRegistry.getBranchId(sessionId) ?? event.branchId ?? null;
   const currentProjectId = navigation.selectedProjectId;
 
   if (!sessionProjectId && !sessionType && !branchId) {

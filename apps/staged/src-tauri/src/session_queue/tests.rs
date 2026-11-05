@@ -878,8 +878,13 @@ fn deleting_a_branch_cancels_its_queued_rows_and_signals_its_running_ones() {
     });
     let hold = registry.hold(&held.id);
 
-    let mut owned =
-        signal_branch_sessions(&store, &registry, app.handle(), &[branch.clone()]).unwrap();
+    let mut owned = signal_branch_sessions(
+        &store,
+        &registry,
+        app.handle(),
+        std::slice::from_ref(&branch),
+    )
+    .unwrap();
     owned.sort();
     let mut expected = vec![registered.id.clone(), held.id.clone()];
     expected.sort();
@@ -903,7 +908,7 @@ fn deleting_a_branch_cancels_its_queued_rows_and_signals_its_running_ones() {
         &store,
         &registry,
         app.handle(),
-        &[branch.clone()],
+        std::slice::from_ref(&branch),
     ))
     .unwrap();
     thread.join().unwrap();

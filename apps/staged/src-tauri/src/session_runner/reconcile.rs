@@ -45,7 +45,7 @@ pub(crate) use blox::{
 pub(crate) use host::{LiveHost, ReconcileHost};
 pub(crate) use stop::stop_unacknowledged_turn;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -231,7 +231,8 @@ impl Reconciler {
         true
     }
 
-    /// Try every `disconnected` row `trigger` allows.
+    /// Try every `disconnected` row `trigger` allows, after forgetting the
+    /// rows that no longer are.
     pub(crate) fn reconcile_due(self: &Arc<Self>, trigger: Trigger) -> usize {
         let rows = match self.store.get_disconnected_sessions() {
             Ok(rows) => rows,
@@ -240,9 +241,38 @@ impl Reconciler {
                 return 0;
             }
         };
+        self.forget_rows_not_in(rows.iter().map(|row| row.id.as_str()).collect());
         rows.iter()
             .filter(|row| self.spawn_reconcile(&row.id, trigger))
             .count()
+    }
+
+    /// Forget every row this process remembers that is not `disconnected`
+    /// any more and has nothing in flight, announcing each `idle`. A row
+    /// moves on without an attempt of this process's settling it — a resume
+    /// or delete, another Staged instance's reconcile, a recovery sweep —
+    /// and its last attempt's state (`Waiting`, a failure reason) would
+    /// otherwise stay on in [`Self::states`] and in the UI.
+    fn forget_rows_not_in(&self, disconnected: HashSet<&str>) {
+        let events: Vec<SessionReconcileEvent> = {
+            let mut rows = self.rows.lock().unwrap();
+            let stale: Vec<String> = rows
+                .iter()
+                .filter(|(id, row)| !row.in_flight && !disconnected.contains(id.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect();
+            stale
+                .into_iter()
+                .filter_map(|id| rows.remove(&id).map(|row| forgotten(&id, row)))
+                .collect()
+        };
+        for event in &events {
+            log::info!(
+                "[reconcile] Session {} is no longer disconnected; forgetting it",
+                event.session_id
+            );
+            self.host.emit_reconcile(event);
+        }
     }
 
     /// A Blox call for `workspace_name` succeeded: retry the rows on it that
@@ -406,13 +436,9 @@ impl Reconciler {
                 }
             }
             match outcome {
-                RowOutcome::Done => rows.remove(session_id).map(|mut row| {
-                    row.phase = ReconcilePhase::Idle;
-                    row.reason = None;
-                    row.failures = 0;
-                    row.next_attempt_at = None;
-                    event_for(session_id, &row)
-                }),
+                RowOutcome::Done => rows
+                    .remove(session_id)
+                    .map(|row| forgotten(session_id, row)),
                 RowOutcome::Backoff(reason) => rows.get_mut(session_id).map(|row| {
                     row.in_flight = false;
                     row.failures += 1;
@@ -446,6 +472,15 @@ impl Reconciler {
         }
         None
     }
+}
+
+/// The `idle` event for a row the reconciler forgets.
+fn forgotten(session_id: &str, mut row: RowState) -> SessionReconcileEvent {
+    row.phase = ReconcilePhase::Idle;
+    row.reason = None;
+    row.failures = 0;
+    row.next_attempt_at = None;
+    event_for(session_id, &row)
 }
 
 fn event_for(session_id: &str, row: &RowState) -> SessionReconcileEvent {

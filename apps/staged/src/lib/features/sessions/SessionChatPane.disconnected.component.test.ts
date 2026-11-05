@@ -8,14 +8,29 @@ import type { Session, SessionReconcileEvent } from '../../types';
  * notices a reconciled session ends with.
  */
 
-const { sessionRow, eventListeners, reconcileSessionMock, cancelSessionMock, resumeSessionMock } =
-  vi.hoisted(() => ({
-    sessionRow: { current: null as Session | null },
+const {
+  sessionRow,
+  eventListeners,
+  reconcileSessionMock,
+  cancelSessionMock,
+  resumeSessionMock,
+  pollSessionMock,
+} = vi.hoisted(() => {
+  const sessionRow = { current: null as Session | null };
+  return {
+    sessionRow,
     eventListeners: new Map<string, Set<(payload: unknown) => void>>(),
     reconcileSessionMock: vi.fn(async (_id: string) => {}),
     cancelSessionMock: vi.fn(async (_id: string) => {}),
     resumeSessionMock: vi.fn(async () => {}),
-  }));
+    pollSessionMock: vi.fn(async (_id: string, _request: unknown) => ({
+      session: sessionRow.current,
+      queuedMessages: [],
+      messages: [],
+      acpMetadataMessages: [],
+    })),
+  };
+});
 
 vi.mock('./ChatComposer.svelte', async () => {
   const { default: PromptInputStub } = await import('./testStubs/PromptInputStub.svelte');
@@ -65,6 +80,7 @@ vi.mock('../../commands', async (importOriginal) => ({
   reconcileSession: reconcileSessionMock,
   cancelSession: cancelSessionMock,
   resumeSession: resumeSessionMock,
+  pollSession: pollSessionMock,
 }));
 
 import SessionChatPane from './SessionChatPane.svelte';
@@ -144,6 +160,7 @@ describe('SessionChatPane with a disconnected Blox session', () => {
     reconcileSessionMock.mockClear();
     cancelSessionMock.mockClear();
     resumeSessionMock.mockClear();
+    pollSessionMock.mockClear();
     disconnectedSessionsStore.applyReconcileSnapshot([], () => false);
     vi.spyOn(console, 'error').mockImplementation(() => {});
   });
@@ -151,6 +168,7 @@ describe('SessionChatPane with a disconnected Blox session', () => {
   afterEach(() => {
     if (pane) unmount(pane);
     pane = null;
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -233,6 +251,56 @@ describe('SessionChatPane with a disconnected Blox session', () => {
     expect(document.body.textContent).toContain(
       'Staged reconnected to the workstation and caught up. The agent finished this turn.'
     );
+  });
+
+  it('re-fetches the session when reconcile goes idle for it, in case its settle was missed', async () => {
+    sessionRow.current = row();
+    await mountPane();
+
+    // The row settled, but its status event never reached this pane.
+    sessionRow.current = row({ status: 'completed', completionReason: 'turn_complete' });
+    emit('session-reconcile-changed', reconcileEvent('idle', { sessionId: 'another-session' }));
+    emit('session-reconcile-changed', reconcileEvent('checking'));
+    await settle();
+    expect(pollSessionMock).not.toHaveBeenCalled();
+
+    emit('session-reconcile-changed', reconcileEvent('idle'));
+    await settle();
+    expect(pollSessionMock).toHaveBeenCalledTimes(1);
+    expect(pollSessionMock.mock.calls[0][0]).toBe(SESSION_ID);
+    expect(alert()).toBeNull();
+    expect(document.body.textContent).toContain(
+      'Staged reconnected to the workstation and caught up. The agent finished this turn.'
+    );
+  });
+
+  it('re-fetches a disconnected session on a slow timer until it settles', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    sessionRow.current = row();
+    await mountPane();
+
+    vi.advanceTimersByTime(14_999);
+    expect(pollSessionMock).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    await settle();
+    expect(pollSessionMock).toHaveBeenCalledTimes(1);
+    expect(alert()).not.toBeNull();
+
+    sessionRow.current = row({
+      status: 'cancelled',
+      completionReason: 'interrupted',
+      errorMessage: RECONCILE_MAY_STILL_RUN,
+    });
+    vi.advanceTimersByTime(15_000);
+    await settle();
+    expect(pollSessionMock).toHaveBeenCalledTimes(2);
+    expect(alert()).toBeNull();
+    expect(button('Resume')).not.toBeNull();
+
+    // Settled: no more re-fetching.
+    vi.advanceTimersByTime(60_000);
+    await settle();
+    expect(pollSessionMock).toHaveBeenCalledTimes(2);
   });
 
   it('says nothing extra for a completed session it never saw disconnected', async () => {

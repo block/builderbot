@@ -3,6 +3,7 @@ import type { Session } from '../../types';
 import {
   RECONCILE_MAY_STILL_RUN,
   RECONCILE_NO_WORKSPACE,
+  RECONCILE_PROMPT_NOT_RECEIVED,
   RECONCILE_TURN_UNDETERMINED,
   RECONCILE_WORKSTATION_GONE,
 } from '../../shared/disconnectedSession';
@@ -85,6 +86,8 @@ export function sessionEndMessage(
       return 'Staged couldn’t tell whether this turn finished on the workstation.';
     case RECONCILE_NO_WORKSPACE:
       return 'Staged couldn’t find this session’s workstation.';
+    case RECONCILE_PROMPT_NOT_RECEIVED:
+      return 'Staged lost its connection before your last message reached the workstation, so the agent never saw it.';
     case RECONCILE_MAY_STILL_RUN:
       return `${endReasonMessage(current.completionReason)} The workstation didn’t confirm the stop, so the turn may still be running there.`;
     default:

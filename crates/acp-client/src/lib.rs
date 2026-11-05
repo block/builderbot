@@ -38,10 +38,10 @@ pub use driver::{
     AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver, AgentRunOutcome,
     AsyncTaskStopHandle, AttachOutcome, AttachedSession, BackgroundHoldConfig,
     BackgroundHoldObserver, BackgroundHoldStatus, BackgroundHoldTask, BasicMessageWriter,
-    CancelOutcome, DetachHandle, MessageWriter, OutOfTurnPermissionPolicy, PromptImage,
-    ReattachTurn, RecordedTurn, RemoteProcess, RemoteProcessStatus, ReplayBoundary,
+    CancelOutcome, DetachHandle, LatestPrompt, MessageWriter, OutOfTurnPermissionPolicy,
+    PromptImage, ReattachTurn, RecordedTurn, RemoteProcess, RemoteProcessStatus, ReplayBoundary,
     SessionConnection, SessionLifetime, SessionSettleReason, SessionSettled, SteerError,
-    SteerOutcome, Store, TransportLoss, TransportLossPhase, TurnControlHandle,
+    SteerOutcome, Store, TransportLoss, TransportLossPhase, TurnControlHandle, TurnResult,
     BACKGROUND_CONTINUATION_ORIGIN,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};

@@ -1,6 +1,8 @@
 //! One attempt at settling a `disconnected` row.
 
-use acp_client::{AttachOutcome, RecordedTurn, RemoteProcessStatus, StopReason};
+use acp_client::{
+    AttachOutcome, LatestPrompt, RecordedTurn, RemoteProcessStatus, StopReason, TurnResult,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::blox::Unresolvable;
@@ -20,6 +22,13 @@ const PROCESS_DIED_MID_TURN: &str =
 pub(super) const TURN_UNDETERMINED: &str =
     "Staged couldn't tell whether this turn finished on the workstation";
 const NO_WORKSPACE: &str = "Staged couldn't find this session's workstation";
+/// The newest prompt never reached the agent: the connection went between
+/// Staged recording it and sending it, so the turn that ended was an earlier
+/// one.
+pub(super) const PROMPT_NOT_RECEIVED: &str =
+    "Staged lost its connection before this message reached the workstation";
+/// An error result the agent gave no text for.
+const TURN_FAILED: &str = "The agent's turn on the workstation ended with an error";
 
 /// How a claimed row ends this attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,11 +262,11 @@ impl Reconciler {
             completion_reason: reason.map(|r| r.as_str().to_string()),
             branch_id: target.branch_id.clone(),
             project_id: target.project_id.clone(),
-            // A running emit carries it so the frontend can label the work;
-            // terminal emits leave it to the row, like every other runner's.
-            session_type: (*status == SessionStatus::Running)
-                .then(|| target.session_type.clone())
-                .flatten(),
+            // Every emit carries it: the frontend labels running work with
+            // it, and a terminal emit after a `disconnected` one (which
+            // cleared the frontend's record of the session) is the only
+            // place its completion handling can learn it from.
+            session_type: target.session_type.clone(),
         });
     }
 
@@ -339,19 +348,16 @@ impl Reconciler {
         let stop = cancellation.filter(|reason| *reason != CompletionReason::AppQuit);
 
         match attached {
-            Ok(AttachOutcome::Completed { stop_reason }) => {
-                if stop_reason == Some(StopReason::Cancelled) {
-                    Verdict::Cancelled {
-                        message: None,
-                        reason: stop.unwrap_or(CompletionReason::Interrupted),
-                    }
-                } else {
-                    Verdict::Completed
-                }
-            }
-            Ok(AttachOutcome::ProcessGone { message }) => {
+            Ok(AttachOutcome::Ended {
+                result,
+                latest_prompt,
+            }) => from_ended_turn(result, latest_prompt, stop),
+            Ok(AttachOutcome::ProcessGone {
+                message,
+                latest_prompt,
+            }) => {
                 let recorded = recorded.unwrap_or_else(|| self.read_recorded_turn(target));
-                from_gone_process(recorded, message.or(gone_message))
+                from_gone_process(recorded, latest_prompt, message.or(gone_message), stop)
             }
             // The attach let go of a turn that may still be running.
             Ok(AttachOutcome::Live) | Ok(AttachOutcome::TransportLost) | Err(_)
@@ -496,17 +502,54 @@ impl Reconciler {
     }
 }
 
-/// The verdict for a turn whose process is gone, from its recording and what
-/// Blox recorded about the process.
-fn from_gone_process(recorded: RecordedTurn, process_message: Option<String>) -> Verdict {
-    match recorded {
-        RecordedTurn::Ended {
-            stop_reason: Some(StopReason::Cancelled),
-        } => Verdict::Cancelled {
+/// The verdict for a newest prompt the agent never received: whatever the
+/// session shows ended is an earlier turn, and this one never ran. Ended
+/// resumable, with the message saying why, so it can be sent again.
+fn prompt_not_received(stop: Option<CompletionReason>) -> Verdict {
+    Verdict::Cancelled {
+        message: Some(PROMPT_NOT_RECEIVED.to_string()),
+        reason: stop.unwrap_or(CompletionReason::Interrupted),
+    }
+}
+
+/// The verdict for a turn an attach saw end, from the session's last
+/// `result` frame — read as the live path reads the prompt's answer — and
+/// whether the agent received the newest prompt at all. `stop` is a Stop
+/// that reached the attempt meanwhile.
+fn from_ended_turn(
+    result: Option<TurnResult>,
+    latest_prompt: LatestPrompt,
+    stop: Option<CompletionReason>,
+) -> Verdict {
+    if latest_prompt == LatestPrompt::Missing {
+        return prompt_not_received(stop);
+    }
+    match result {
+        Some(TurnResult::Stopped(StopReason::Cancelled)) => Verdict::Cancelled {
             message: None,
-            reason: CompletionReason::Interrupted,
+            reason: stop.unwrap_or(CompletionReason::Interrupted),
         },
-        RecordedTurn::Ended { .. } => Verdict::Completed,
+        Some(TurnResult::Failed { message }) => Verdict::Failed {
+            message: message.unwrap_or_else(|| TURN_FAILED.to_string()),
+        },
+        Some(TurnResult::Stopped(_)) | None => Verdict::Completed,
+    }
+}
+
+/// The verdict for a turn whose process is gone, from its recording, what
+/// Blox recorded about the process, and whether the replay showed the agent
+/// receiving the newest prompt.
+fn from_gone_process(
+    recorded: RecordedTurn,
+    latest_prompt: LatestPrompt,
+    process_message: Option<String>,
+    stop: Option<CompletionReason>,
+) -> Verdict {
+    if latest_prompt == LatestPrompt::Missing {
+        return prompt_not_received(stop);
+    }
+    match recorded {
+        RecordedTurn::Ended { result } => from_ended_turn(result, latest_prompt, None),
         RecordedTurn::InFlight => Verdict::Failed {
             message: process_message.unwrap_or_else(|| PROCESS_DIED_MID_TURN.to_string()),
         },

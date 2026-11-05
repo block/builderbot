@@ -265,4 +265,82 @@ describe('ProjectSearchIndexStore', () => {
     expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
     expect(store.index).not.toBeNull();
   });
+
+  it('keystrokes through a burst of writes wait for the coalesced refetch', async () => {
+    const store = await makeStore({ value: true });
+    store.ensureLoaded();
+    await flush();
+    const { REFETCH_DELAY_MS } = await import('./projectSearchIndex.svelte');
+
+    // A running session publishes notes-changed while the user keeps typing:
+    // each keystroke calls ensureLoaded, none of them reads on its own.
+    for (let i = 0; i < 4; i++) {
+      emit('notes-changed');
+      store.ensureLoaded();
+      await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS / 5);
+    }
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+
+    // Fresh again: further keystrokes cost nothing.
+    store.ensureLoaded();
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed reload retries on the next keystroke, even with a refetch pending', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const store = await makeStore({ value: true });
+    store.ensureLoaded();
+    await flush();
+    const { REFETCH_DELAY_MS } = await import('./projectSearchIndex.svelte');
+
+    getProjectSearchIndex.mockRejectedValueOnce(new Error('boom'));
+    emit('notes-changed');
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalled();
+    // The previous index keeps matching meanwhile.
+    expect(store.index).not.toBeNull();
+
+    // Another write schedules a refetch, but the failure doesn't wait on it.
+    getProjectSearchIndex.mockResolvedValue([item({ title: 'Recovered' })]);
+    emit('notes-changed');
+    store.ensureLoaded();
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(3);
+    expect(store.index?.get('p1')?.[0]).toMatchObject({ text: 'recovered' });
+
+    // That read covered the write, so the timer finds nothing to do, and the
+    // cleared failure means the next write waits for the timer again.
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(3);
+    emit('notes-changed');
+    store.ensureLoaded();
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(4);
+  });
+
+  it('a write while no search ran is read by the keystroke that starts one', async () => {
+    const searching = { value: false };
+    const store = await makeStore(searching);
+    store.ensureLoaded();
+    await flush();
+
+    // No search, so no refetch is scheduled: only the next query can pick
+    // the write up, and it does at once rather than waiting for another.
+    emit('review-changed');
+    searching.value = true;
+    store.ensureLoaded();
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+  });
 });

@@ -1,7 +1,8 @@
 /**
  * How ProjectMatchReason shows a match reason's label: the terms highlighted
- * the way the label writes them, the text windowed so the first highlight
- * survives the line's ellipsis, and a tooltip that can't run to kilobytes.
+ * the way the label writes them, the text windowed so the first highlight of
+ * a term the item itself matched survives the line's ellipsis, and a tooltip
+ * that can't run to kilobytes.
  *
  * Plain module so the windowing is unit-testable without a Svelte runtime.
  */
@@ -50,19 +51,37 @@ function windowStart(label: string, start: number): number {
   }
 }
 
+/** Where the first highlighted run starts, or -1 if none does. */
+function firstMatchOffset(segments: readonly HighlightSegment[]): number {
+  let offset = 0;
+  for (const segment of segments) {
+    if (segment.match) return offset;
+    offset += segment.text.length;
+  }
+  return -1;
+}
+
 /**
- * `label` split into highlighted and plain runs (highlightSegments). When
- * the first highlight starts past MATCH_LEAD_CHARS, the runs start a few
- * words before it instead, behind a leading `…`: the line ellipsises its
- * end, and a long title would otherwise hide the very term that explains
- * the match.
+ * `label` split into runs with every one of `terms` highlighted
+ * (highlightSegments). When the first highlight of `windowTerms` — the terms
+ * the item had to match itself (MatchReason.itemTerms), as the label writes
+ * them — starts past MATCH_LEAD_CHARS, the runs start a few words before it
+ * instead, behind a leading `…`: the line ellipsises its end, and a long
+ * title would otherwise hide the very term that explains the match. Other
+ * terms don't move the window: a `pr` lighting up the `PR #123` prefix, or a
+ * term the project's name already matched, would otherwise pin it to the
+ * label's start. `windowTerms` defaults to `terms`; with none, the label
+ * shows from its start.
  */
-export function matchLabelSegments(label: string, terms: readonly string[]): HighlightSegment[] {
+export function matchLabelSegments(
+  label: string,
+  terms: readonly string[],
+  windowTerms: readonly string[] = terms
+): HighlightSegment[] {
   const segments = highlightSegments(label, terms);
-  const first = segments.findIndex((s) => s.match);
-  if (first === -1) return segments;
-  let start = 0;
-  for (let i = 0; i < first; i++) start += segments[i].text.length;
+  const start = firstMatchOffset(
+    windowTerms === terms ? segments : highlightSegments(label, windowTerms)
+  );
   if (start <= MATCH_LEAD_CHARS) return segments;
 
   const cut = windowStart(label, start);

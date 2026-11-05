@@ -2,12 +2,13 @@
   ProjectMatchReason.svelte — the one line a search result shows when the
   project matched through something other than its name or repos: the
   matching item's icon and label with the query's terms highlighted, and how
-  many other items matched besides (see matchProject).
+  many other items matched besides (see searchProjects and matchEntry in
+  projectSearch.ts).
 
   Shared by the landing-grid cards and the sidebar rows. Single line,
   ellipsised; the parent sets the font size and colour. A long label starts
-  a few words before its first highlight so the ellipsis can't hide it (see
-  matchReasonLabel).
+  a few words before the first highlight of a term the item itself matched,
+  so the ellipsis can't hide it (see matchReasonLabel).
 -->
 <script lang="ts">
   import FileSearch from '@lucide/svelte/icons/file-search';
@@ -43,7 +44,9 @@
   };
 
   let Icon = $derived(ICONS[reason.kind]);
-  let segments = $derived(matchLabelSegments(reason.label, labelTerms(terms)));
+  let segments = $derived(
+    matchLabelSegments(reason.label, labelTerms(terms), labelTerms(reason.itemTerms))
+  );
   let tooltip = $derived(`${KIND_NAMES[reason.kind]}: ${clampText(reason.label)}`);
 </script>
 

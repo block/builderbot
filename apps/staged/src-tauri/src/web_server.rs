@@ -4012,7 +4012,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         ) {
                             Ok(true) => {}
                             // Relinked or unlinked during the fetch: this
-                            // status is another PR's, so don't emit it either.
+                            // status is another PR's, so don't emit or count
+                            // it — neutral, as `BranchRefresh::Skipped` is in
+                            // `prs::refresh_project_pr_statuses`.
                             Ok(false) => continue,
                             Err(e) => {
                                 log::warn!(

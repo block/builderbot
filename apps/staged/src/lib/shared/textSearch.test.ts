@@ -102,10 +102,50 @@ describe('highlightSegments', () => {
     ]);
   });
 
-  it('gives up on highlighting when lower-casing shifts the offsets', () => {
-    // 'İ' lower-cases to two code units.
+  it('still lands highlights when lower-casing changes the length', () => {
+    // 'İ' lower-cases to 'i̇' (i + combining dot), two code units, so every
+    // offset after it in the lower-cased text is one past the original.
+    expect('İ'.toLowerCase()).toHaveLength(2);
     expect(highlightSegments('İstanbul fix', ['fix'])).toEqual([
-      { text: 'İstanbul fix', match: false },
+      { text: 'İstanbul ', match: false },
+      { text: 'fix', match: true },
+    ]);
+    expect(highlightSegments('Fix İzmir, then fix İzmit', ['fix', 'zmi'])).toEqual([
+      { text: 'Fix', match: true },
+      { text: ' İ', match: false },
+      { text: 'zmi', match: true },
+      { text: 'r, then ', match: false },
+      { text: 'fix', match: true },
+      { text: ' İ', match: false },
+      { text: 'zmi', match: true },
+      { text: 't', match: false },
+    ]);
+  });
+
+  it('highlights a whole code point when a match covers part of its lower case', () => {
+    // A query typed with the 'İ' lower-cases the same way.
+    expect(highlightSegments('İstanbul', queryTerms('İst'))).toEqual([
+      { text: 'İst', match: true },
+      { text: 'anbul', match: false },
+    ]);
+    // 'i' matches only the first half of the lower-cased 'İ'.
+    expect(highlightSegments('aİb', ['i'])).toEqual([
+      { text: 'a', match: false },
+      { text: 'İ', match: true },
+      { text: 'b', match: false },
+    ]);
+  });
+
+  it('keeps offsets right around astral characters and a final sigma', () => {
+    expect(highlightSegments('😀 İ fix', ['fix'])).toEqual([
+      { text: '😀 İ ', match: false },
+      { text: 'fix', match: true },
+    ]);
+    // Whole-string lower-casing makes a word-final Σ 'ς', as queryTerms does
+    // for the query, so a final-sigma term still matches.
+    expect(highlightSegments('İ ΟΔΟΣ', ['οδος'])).toEqual([
+      { text: 'İ ', match: false },
+      { text: 'ΟΔΟΣ', match: true },
     ]);
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Branch, Project, ProjectRepo } from '../../types';
+import { queryTerms } from '../../shared/textSearch';
+import { labelTerms, matchLabelSegments } from './matchReasonLabel';
 import {
   buildSearchSnapshot,
   projectShortcutNumbers,
@@ -214,7 +216,7 @@ describe('the matching rule', () => {
     it('matches a branch name, with the branch as the reason', () => {
       expect(match(app, 'typos', ctx)).toEqual({
         matched: true,
-        reason: { kind: 'branch', label: 'tidy-typos', more: 0 },
+        reason: { kind: 'branch', label: 'tidy-typos', more: 0, itemTerms: ['typos'] },
       });
     });
 
@@ -223,6 +225,7 @@ describe('the matching rule', () => {
         kind: 'pr',
         label: 'PR #123 · fix-login-redirect',
         more: 0,
+        itemTerms: ['redirect'],
       });
     });
 
@@ -238,6 +241,8 @@ describe('the matching rule', () => {
 
     it('still matches a number term as text', () => {
       expect(match(app, '456', ctx).reason?.label).toBe('issue-4567-crash');
+      // No PR explains it, so it is the item's own match.
+      expect(match(app, '456', ctx).reason?.itemTerms).toEqual(['456']);
     });
 
     it('requires every term not in the identity to land in one branch', () => {
@@ -264,6 +269,7 @@ describe('the matching rule', () => {
         kind: 'branch',
         label: 'issue-4567-crash',
         more: 2,
+        itemTerms: ['-'],
       });
     });
 
@@ -285,10 +291,12 @@ describe('the matching rule', () => {
 
     it('matches `pr123`, `pr#123`, `PR #123` and `pr 123` to PR 123', () => {
       for (const query of ['pr123', 'pr#123', 'PR#123', 'PR #123', 'pr 123', 'Pr 123']) {
+        // The `PR #123` prefix explains every term, so none moves the window.
         expect(match(app, query, ctx).reason, query).toEqual({
           kind: 'pr',
           label: 'PR #123 · fix-login-redirect',
           more: 0,
+          itemTerms: [],
         });
       }
     });
@@ -304,6 +312,7 @@ describe('the matching rule', () => {
         kind: 'pr',
         label: 'PR #77 · add-metrics',
         more: 1,
+        itemTerms: [],
       });
       expect(match(app, 'pr login', ctx).reason?.label).toBe('PR #123 · fix-login-redirect');
       // tidy-typos has no PR, and `pr` can't pair with another branch's.
@@ -327,6 +336,9 @@ describe('the matching rule', () => {
       });
       expect(match(app, 'pr', texts).reason?.label).toBe('Improve caching');
       expect(match(app, 'pr123', texts).reason?.label).toBe('Notes on pr123');
+      // Matched in the text, not through a PR, so they still window the label.
+      expect(match(app, 'pr', texts).reason?.itemTerms).toEqual(['pr']);
+      expect(match(app, 'pr123', texts).reason?.itemTerms).toEqual(['pr123']);
     });
   });
 
@@ -349,13 +361,50 @@ describe('the matching rule', () => {
     it('matches the title, labelled `PR #123 · <title>`', () => {
       expect(match(app, 'redirect', ctx)).toEqual({
         matched: true,
-        reason: { kind: 'pr', label: 'PR #123 · Fix login redirect', more: 0 },
+        reason: {
+          kind: 'pr',
+          label: 'PR #123 · Fix login redirect',
+          more: 0,
+          itemTerms: ['redirect'],
+        },
       });
     });
 
     it('labels by the title even when the branch name or number matched', () => {
       expect(match(app, 'auth-fix', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
       expect(match(app, '#123', ctx).reason?.label).toBe('PR #123 · Fix login redirect');
+    });
+
+    it('lists as itemTerms only what the item matched beyond the name and its PR', () => {
+      // "checkout" is the project name's; "pr" and "#123" the PR prefix's.
+      expect(match(app, 'checkout pr #123 redirect', ctx).reason?.itemTerms).toEqual(['redirect']);
+      expect(match(app, 'pr redirect', ctx).reason?.itemTerms).toEqual(['redirect']);
+      expect(match(app, 'pr123 login', ctx).reason?.itemTerms).toEqual(['login']);
+    });
+
+    it('windows a long title on `pr redirect` as ProjectMatchReason renders it', () => {
+      const long = context({
+        branches: {
+          p1: [
+            branch({
+              branchName: 'mt/auth-fix',
+              prNumber: 123,
+              prTitle: 'Fix the very long and winding redirect handling for the login page',
+            }),
+          ],
+        },
+      });
+      const query = 'pr redirect';
+      const reason = match(app, query, long).reason!;
+      const terms = queryTerms(query);
+      const shown = matchLabelSegments(
+        reason.label,
+        labelTerms(terms),
+        labelTerms(reason.itemTerms)
+      )
+        .map((s) => (s.match ? `[${s.text}]` : s.text))
+        .join('');
+      expect(shown).toBe('…and winding [redirect] handling for the login page');
     });
 
     it("treats the title as part of its branch's item", () => {
@@ -374,6 +423,7 @@ describe('the matching rule', () => {
         kind: 'branch',
         label: 'mt/auth-fix',
         more: 0,
+        itemTerms: ['auth'],
       });
     });
   });
@@ -398,6 +448,7 @@ describe('the matching rule', () => {
         kind: 'branch',
         label: 'login-page',
         more: 5,
+        itemTerms: ['login'],
       });
       expect(match(app, 'plan', ctx).reason?.kind).toBe('projectNote');
       expect(match(app, 'flow', ctx).reason?.kind).toBe('review');
@@ -409,6 +460,7 @@ describe('the matching rule', () => {
         kind: 'note',
         label: 'Login research',
         more: 1,
+        itemTerms: ['login', 'es'],
       });
     });
 
@@ -472,8 +524,8 @@ describe('searchProjects reasons', () => {
   it('holds a reason for each kept project matched through an item', () => {
     expect(searchProjects(all, 'metrics', snapshot).reasons).toEqual(
       new Map([
-        [alpha.id, { kind: 'branch', label: 'add-metrics', more: 0 }],
-        [beta.id, { kind: 'branch', label: 'metrics-beta', more: 0 }],
+        [alpha.id, { kind: 'branch', label: 'add-metrics', more: 0, itemTerms: ['metrics'] }],
+        [beta.id, { kind: 'branch', label: 'metrics-beta', more: 0, itemTerms: ['metrics'] }],
       ])
     );
   });

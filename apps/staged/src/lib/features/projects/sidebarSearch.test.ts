@@ -183,7 +183,7 @@ describe('sidebarProjectMatches', () => {
       reposByProject: new Map(),
     });
     expect(sidebarProjectMatches(projects, 'login', snapshot).reasons).toEqual(
-      new Map([['p2', { kind: 'branch', label: 'fix-login', more: 0 }]])
+      new Map([['p2', { kind: 'branch', label: 'fix-login', more: 0, itemTerms: ['login'] }]])
     );
     expect(sidebarProjectMatches(projects, 'beta', snapshot).reasons.size).toBe(0);
   });

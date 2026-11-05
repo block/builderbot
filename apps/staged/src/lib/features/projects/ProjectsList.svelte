@@ -318,8 +318,9 @@
 
   // Titles (notes, project notes, reviews) come from the lazily loaded search
   // index: fetch it once a query starts, if focusing the field didn't already.
-  // Asked again on every keystroke, a no-op while the index is fresh, so a
-  // load that failed mid-search retries rather than leaving titles unmatched.
+  // Asked again on every keystroke so a load that failed mid-search retries
+  // rather than leaving titles unmatched; writes during the search wait for
+  // the index's coalesced refetch instead (projectSearchIndex).
   $effect(() => {
     if (!gridQuery.current.trim()) return;
     untrack(() => projectSearchIndex.ensureLoaded());

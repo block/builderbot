@@ -64,6 +64,14 @@ export interface MatchReason {
   label: string;
   /** Matching items other than the one shown. */
   more: number;
+  /**
+   * The query terms (queryTerms) this item had to match itself: the ones the
+   * identity doesn't hold, minus any its PR prefix explains (a bare `pr`, or
+   * the PR's number). The label windows on the first of these, so a term
+   * that highlights early anyway — in the `PR #123` prefix, or one the name
+   * already matched — doesn't hold a long title's match off screen.
+   */
+  itemTerms: readonly string[];
 }
 
 /** A search's result: what it keeps, and why, from one pass. */
@@ -278,9 +286,13 @@ function includedIn(fields: readonly string[], text: string): boolean {
   return false;
 }
 
+/** Whether the item holds the term through its PR: `pr`, or its number. */
+function itemPrHasTerm(item: SearchItem, term: Term): boolean {
+  return item.prNumber !== null && (term.anyPr || term.number === item.prNumber);
+}
+
 function itemHasTerm(item: SearchItem, term: Term): boolean {
-  if (item.prNumber !== null && (term.anyPr || term.number === item.prNumber)) return true;
-  return includedIn(item.texts, term.text);
+  return itemPrHasTerm(item, term) || includedIn(item.texts, term.text);
 }
 
 function itemHasEvery(item: SearchItem, terms: readonly Term[]): boolean {
@@ -318,7 +330,8 @@ function itemLabel(item: SearchItem): string {
  *
  * Matching on identity alone gives no reason: the name or repo badge on
  * screen already explains it. Otherwise the reason is the best matching item
- * by kind (KIND_PRIORITY), then recency, counting the rest as `more`.
+ * by kind (KIND_PRIORITY), then recency, counting the rest as `more`, with
+ * the terms it matched beyond the identity and its PR as `itemTerms`.
  */
 function matchEntry(
   entry: SearchSnapshotEntry,
@@ -338,7 +351,13 @@ function matchEntry(
     if (!best || outranks(item, best)) best = item;
   }
   if (!best) return null;
-  return { kind: best.kind, label: itemLabel(best), more: count - 1 };
+  const shown = best;
+  return {
+    kind: shown.kind,
+    label: itemLabel(shown),
+    more: count - 1,
+    itemTerms: missing.filter((term) => !itemPrHasTerm(shown, term)).map((term) => term.text),
+  };
 }
 
 /**

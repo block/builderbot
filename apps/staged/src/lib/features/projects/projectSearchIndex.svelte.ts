@@ -16,8 +16,15 @@
  * refetches, coalesced so a burst of writes (a session filling in a note, a
  * branch move) costs one read; otherwise it waits for the next search. The
  * stale index keeps matching until the fresh one lands, so results never
- * blank out mid-search. A failed load stays stale too, so the search fields'
- * next keystroke (each calls ensureLoaded) retries it.
+ * blank out mid-search.
+ *
+ * The search fields call ensureLoaded on focus and on every query change.
+ * That loads at once only when nothing else will: the index has never
+ * loaded, the last load failed (so a failure mid-search retries on the next
+ * keystroke), or a write marked it stale while no search ran (so the
+ * keystroke that starts one picks it up). Staleness from a write during a
+ * search is the refetch timer's, so typing through a burst of writes still
+ * costs one read per REFETCH_DELAY_MS, not one per keystroke.
  */
 
 import { getProjectSearchIndex } from '../../commands';
@@ -54,6 +61,8 @@ export class ProjectSearchIndexStore {
   private _index = $state<ProjectSearchIndex | null>(null);
   /** Whether the backend may hold titles this index doesn't. */
   private stale = true;
+  /** Whether the last load failed; cleared by the next one that lands. */
+  private failed = false;
   private inFlight: Promise<void> | null = null;
   /** A load asked for while one was in flight: run it when that one lands. */
   private queued = false;
@@ -69,14 +78,19 @@ export class ProjectSearchIndexStore {
   }
 
   /**
-   * Load the index if it has never loaded or a write has gone stale since.
+   * Load the index now if it has never loaded, the last load failed, or it
+   * went stale with no refetch scheduled — a write while no search ran.
    * Called when a search field takes focus (prefetch, so the first keystroke
-   * already has titles) and when a query starts. Repeat calls while fresh or
-   * in flight are no-ops.
+   * already has titles) and on every query change. Repeat calls while fresh,
+   * in flight or waiting on the refetch timer are no-ops.
    */
   ensureLoaded(): void {
     this.listen();
-    if (this.stale) this.load();
+    if (!this.stale) return;
+    // A write during a search scheduled a coalesced refetch: leave it to
+    // that, unless there's no index to match with or the last read failed.
+    if (this.refetchTimer && this._index !== null && !this.failed) return;
+    this.load();
   }
 
   /** Tear down the feed listeners (tests, symmetry with ensureLoaded). */
@@ -123,11 +137,13 @@ export class ProjectSearchIndexStore {
     this.inFlight = getProjectSearchIndex()
       .then((items) => {
         this._index = groupSearchItems(items);
+        this.failed = false;
       })
       .catch((e) => {
         // Retry on the next ensureLoaded — a keystroke, focus or new search —
         // rather than in a loop.
         this.stale = true;
+        this.failed = true;
         console.error('[projectSearchIndex] Failed to load the search index:', e);
       })
       .finally(() => {

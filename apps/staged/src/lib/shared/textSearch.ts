@@ -46,22 +46,57 @@ export interface HighlightSegment {
 }
 
 /**
+ * Where each code unit of `lower` (`text.toLowerCase()`) came from in
+ * `text`: the start and end of the code point that produced it. Lower-casing
+ * maps code point by code point (the one context rule, Greek final sigma,
+ * keeps the length), so walking `text` and adding up each code point's
+ * lower-cased length lines the two up. Null if they somehow don't.
+ */
+function lowerCaseOrigins(
+  text: string,
+  lower: string
+): { start: Uint32Array; end: Uint32Array } | null {
+  const start = new Uint32Array(lower.length);
+  const end = new Uint32Array(lower.length);
+  let at = 0;
+  let from = 0;
+  for (const ch of text) {
+    const width = ch.toLowerCase().length;
+    if (at + width > lower.length) return null;
+    start.fill(from, at, at + width);
+    end.fill(from + ch.length, at, at + width);
+    at += width;
+    from += ch.length;
+  }
+  return at === lower.length ? { start, end } : null;
+}
+
+/**
  * `text` split into the runs that do and don't contain one of `terms`
  * (lower-cased, as queryTerms returns them), so a result can render its
  * highlights as `<mark>` elements rather than through `{@html}`. Overlapping
- * and adjacent matches merge into one run. No terms, or a text whose
- * lower-cased form changes length (some non-ASCII letters, which would shift
- * every offset after them), yields the whole text as one unmatched run.
+ * and adjacent matches merge into one run. No terms yields the whole text as
+ * one unmatched run.
+ *
+ * Matches are found in the lower-cased text, as matchesAllTerms finds them.
+ * When lower-casing changes the length (`İ` becomes `i̇`, two code units),
+ * offsets past that point no longer line up with `text`, so each match is
+ * mapped back through the code points it covers; one that covers part of a
+ * code point's lower-cased form highlights the whole code point.
  */
 export function highlightSegments(text: string, terms: readonly string[]): HighlightSegment[] {
   if (!text) return [];
+  if (terms.length === 0) return [{ text, match: false }];
   const lower = text.toLowerCase();
-  if (terms.length === 0 || lower.length !== text.length) return [{ text, match: false }];
+  const origins = lower.length === text.length ? null : lowerCaseOrigins(text, lower);
+  if (lower.length !== text.length && !origins) return [{ text, match: false }];
   const marked = new Uint8Array(text.length);
   for (const term of terms) {
     if (!term) continue;
     for (let i = lower.indexOf(term); i !== -1; i = lower.indexOf(term, i + 1)) {
-      marked.fill(1, i, i + term.length);
+      const end = i + term.length;
+      if (origins) marked.fill(1, origins.start[i], origins.end[end - 1]);
+      else marked.fill(1, i, end);
     }
   }
   const segments: HighlightSegment[] = [];

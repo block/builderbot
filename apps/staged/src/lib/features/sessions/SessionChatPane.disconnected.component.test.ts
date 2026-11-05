@@ -329,6 +329,29 @@ describe('SessionChatPane with a disconnected Blox session', () => {
     );
   });
 
+  it('re-fetches a stopped session when its backfill is done, after the row ended', async () => {
+    // A Stop on a Blox turn ends the row first and backfills the stopped
+    // turn's transcript after; reconcile going idle says that is done.
+    // The row the poll appends slides in, and jsdom has no Web Animations.
+    Element.prototype.animate = () =>
+      ({ onfinish: null, cancel() {}, playState: 'finished' }) as unknown as Animation;
+    try {
+      sessionRow.current = row({ status: 'cancelled', completionReason: 'interrupted' });
+      transcript.current = [message(1, 'user', 'Run the migration')];
+      await mountPane();
+      expect(pollSessionMock).not.toHaveBeenCalled();
+
+      transcript.current = [message(2, 'assistant', 'Stopped the migration halfway.')];
+      emit('session-reconcile-changed', reconcileEvent('idle'));
+      await settle();
+
+      expect(pollSessionMock).toHaveBeenCalledTimes(1);
+      expect(document.body.textContent).toContain('Stopped the migration halfway.');
+    } finally {
+      delete (Element.prototype as Partial<Element>).animate;
+    }
+  });
+
   it('re-fetches a disconnected session on a slow timer until it settles', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     sessionRow.current = row();

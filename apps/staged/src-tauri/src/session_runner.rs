@@ -2321,7 +2321,7 @@ fn finish_session_run(
             "Session {session_id_for_status}: background work outlived the hold's Stop; \
              cancelling over a fresh connection"
         );
-        if let Some(message) = reconcile::stop_unacknowledged_turn(
+        if let Some(message) = reconcile::stop_outliving_work(
             &store_for_status,
             &reconcile::LiveBlox,
             &session_id_for_status,
@@ -2335,10 +2335,17 @@ fn finish_session_run(
              a fresh connection",
             settlement.transport_loss
         );
+        // Returns once the cancel is known, the backfill still going: the row
+        // ends now, and the transcript catches up after it (see
+        // `reconcile::stop`).
+        let announce_app = app_handle.clone();
         reconcile::stop_unacknowledged_turn(
             &store_for_status,
-            &reconcile::LiveBlox,
+            Arc::new(reconcile::LiveBlox),
             &session_id_for_status,
+            move |event| {
+                crate::web_server::emit_to_all(&announce_app, "session-reconcile-changed", event)
+            },
         )
         .or(error_msg)
     } else {

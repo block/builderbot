@@ -211,11 +211,7 @@ impl PromptLedger {
     fn new(stored: &[ReplayBoundary]) -> Self {
         let prompts: Vec<String> = stored
             .iter()
-            .filter(|boundary| {
-                boundary.role == "user"
-                    && boundary.acp_message_id.is_none()
-                    && boundary.acp_tool_call_id.is_none()
-            })
+            .filter(|boundary| is_stored_prompt(boundary))
             .map(|boundary| normalize_prompt(&boundary.content))
             .collect();
         let latest_textless = prompts.last().is_some_and(String::is_empty);
@@ -336,6 +332,32 @@ fn settled_tool_calls(stored: &[ReplayBoundary]) -> HashSet<String> {
         .collect()
 }
 
+/// The tool calls `stored` holds unsettled from turns before its newest
+/// prompt: calls that stayed `pending` in an older turn (a connection lost
+/// mid-call that nothing caught up), not the one the newest turn was running
+/// at the disconnect. The replay re-sends them settled, and the rows are
+/// repaired in place, but where those settlings fall in the replay says
+/// nothing about where the stored transcript ends.
+fn stale_tool_calls(stored: &[ReplayBoundary], settled: &HashSet<String>) -> HashSet<String> {
+    let Some(newest_prompt) = stored.iter().rposition(is_stored_prompt) else {
+        return HashSet::new();
+    };
+    stored[..newest_prompt]
+        .iter()
+        .filter(|boundary| boundary.role == "tool_call")
+        .filter_map(|boundary| boundary.acp_tool_call_id.as_ref())
+        .filter(|id| !settled.contains(*id))
+        .cloned()
+        .collect()
+}
+
+/// A prompt Staged stored itself (see [`PromptLedger::new`]).
+fn is_stored_prompt(boundary: &ReplayBoundary) -> bool {
+    boundary.role == "user"
+        && boundary.acp_message_id.is_none()
+        && boundary.acp_tool_call_id.is_none()
+}
+
 /// Whether a stored ACP tool status ends the call.
 fn is_final_tool_status(status: &str) -> bool {
     matches!(status, "completed" | "failed" | "cancelled" | "canceled")
@@ -419,6 +441,10 @@ pub(super) struct CatchUpLedger {
     /// The replay has produced something the transcript did not hold, so the
     /// events it carries from here on (usage, plans) are new too.
     past_boundary: bool,
+    /// Calls left unsettled in turns before the newest stored prompt (see
+    /// [`stale_tool_calls`]): settling one is new, but doesn't pass the
+    /// boundary.
+    stale_tool_calls: HashSet<String>,
     /// Held text per message id, and the order the messages first appeared.
     /// An entry goes once the replay stage shows what its message is.
     held: HashMap<String, HeldMessage>,
@@ -455,6 +481,7 @@ impl CatchUpLedger {
                 },
             }
         }
+        let settled = settled_tool_calls(stored);
         Self {
             stage: CatchUpStage::Held,
             messages: messages
@@ -463,7 +490,8 @@ impl CatchUpLedger {
                 .collect(),
             unidentified: PositionalText::new(unidentified),
             tool_calls,
-            settled_tool_calls: settled_tool_calls(stored),
+            stale_tool_calls: stale_tool_calls(stored, &settled),
+            settled_tool_calls: settled,
             past_boundary: false,
             held: HashMap::new(),
             held_order: Vec::new(),
@@ -553,9 +581,9 @@ impl CatchUpLedger {
                     return LiveAction::Drop;
                 }
                 if settles {
-                    self.settled_tool_calls.insert(id);
+                    self.settled_tool_calls.insert(id.clone());
                 }
-                self.past_boundary = true;
+                self.passes_boundary_unless_stale(&id);
                 live_action_for_update(update)
             }
             SessionUpdate::ToolCallUpdate(tool_update) => {
@@ -569,7 +597,7 @@ impl CatchUpLedger {
                 let action = live_action_for_update(update);
                 let settles = settles_tool_call(tool_update.fields.status.as_ref());
                 if settles {
-                    self.settled_tool_calls.insert(id);
+                    self.settled_tool_calls.insert(id.clone());
                 }
                 if settles
                     || matches!(
@@ -580,7 +608,7 @@ impl CatchUpLedger {
                         }
                     )
                 {
-                    self.past_boundary = true;
+                    self.passes_boundary_unless_stale(&id);
                 }
                 action
             }
@@ -677,6 +705,15 @@ impl CatchUpLedger {
         }
         self.streaming.insert(id.to_string());
         Some(append(chunk, &format!("{}{}", held.text, text.text)))
+    }
+
+    /// Something new for tool call `id` was replayed: the replay is past the
+    /// stored transcript, unless the call is one an older turn left
+    /// unsettled, which the replay reaches long before the transcript's end.
+    fn passes_boundary_unless_stale(&mut self, id: &str) {
+        if !self.stale_tool_calls.contains(id) {
+            self.past_boundary = true;
+        }
     }
 
     /// A replayed event with no identity of its own: new only once the replay
@@ -1073,6 +1110,39 @@ mod tests {
         ledger.action_for(&tool_update("t1", Some(ToolCallStatus::InProgress), None));
         assert!(matches!(ledger.action_for(&plan), LiveAction::Drop));
         ledger.action_for(&tool_result("t1"));
+        assert!(matches!(
+            ledger.action_for(&plan),
+            LiveAction::RecordAcpEvent(_)
+        ));
+    }
+
+    /// A call an older turn left `pending` is repaired from the replay, but
+    /// settling it is no sign the replay has passed the transcript: the
+    /// events after it (the older turns' plans) are still the transcript's
+    /// own. Settling the call the newest turn was running is.
+    #[test]
+    fn settling_a_stale_call_from_an_older_turn_does_not_pass_the_boundary() {
+        let mut ledger = replaying(&[
+            prompt("First"),
+            stored_call("t0", Some("pending")),
+            prompt("Second"),
+            stored_call("t1", Some("pending")),
+        ]);
+        let plan = SessionUpdate::Plan(agent_client_protocol::schema::v1::Plan::new(vec![]));
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_result("t0"))),
+            Some((Some("done".to_string()), Some("completed".to_string()))),
+            "the stale row is repaired in place"
+        );
+        assert!(matches!(ledger.action_for(&plan), LiveAction::Drop));
+        // Re-sent whole and settled, the same.
+        let resent = SessionUpdate::ToolCall(
+            ToolCall::new(ToolCallId::new("t0"), "Run").status(ToolCallStatus::Completed),
+        );
+        assert_eq!(recorded_tool(ledger.action_for(&resent)), None);
+        assert!(matches!(ledger.action_for(&plan), LiveAction::Drop));
+
+        assert!(recorded_tool(ledger.action_for(&tool_result("t1"))).is_some());
         assert!(matches!(
             ledger.action_for(&plan),
             LiveAction::RecordAcpEvent(_)

@@ -68,7 +68,7 @@ pub(crate) use blox_process::RemoteProcessProbe;
 pub use blox_process::{RemoteProcess, RemoteProcessStatus};
 pub use catch_up::LatestPrompt;
 use connection_io::{normalized_stdout, spawn_stderr_reader, staged_client};
-pub use recorded_turn::RecordedTurn;
+pub use recorded_turn::{recording_shows_held_work, RecordedTurn};
 
 use transport_loss::{
     formatted_error_is_transport_closed, kill_without_interrupt, ProxyStop, TransportMonitor,

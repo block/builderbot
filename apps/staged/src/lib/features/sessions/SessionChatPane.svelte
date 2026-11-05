@@ -994,30 +994,39 @@
   // status event tells this pane. Should it be missed (a web socket that
   // reconnects across it, say), the pane would go on showing "Running on Blox"
   // for a turn that finished. So while the session is disconnected, re-fetch
-  // it on a slow timer, and at once when reconcile goes idle for it (it has
-  // stopped working on the row, usually because it settled it). Each fetch
-  // also brings in the transcript reconcile backfills while catching up.
+  // it on a slow timer. Each fetch also brings in the transcript reconcile
+  // backfills while catching up.
   $effect(() => {
     const isActive = active;
     const id = sessionId;
     if (!isActive || !id || !isDisconnected) return;
 
-    const refetch = () => {
-      if (closed || sessionId !== id) return;
-      void poll().then(() => {
-        // A live reattach took the session back to running.
-        if (!closed && sessionId === id && session?.status === 'running') startPolling();
-      });
-    };
-    const timer = setInterval(refetch, DISCONNECTED_REFETCH_MS);
-    const unlisten = listenToEvent<SessionReconcileEvent>('session-reconcile-changed', (event) => {
-      if (event.sessionId === id && event.phase === 'idle') refetch();
-    });
-    return () => {
-      clearInterval(timer);
-      unlisten();
-    };
+    const timer = setInterval(() => refetchReconciled(id), DISCONNECTED_REFETCH_MS);
+    return () => clearInterval(timer);
   });
+
+  // And re-fetch it at once when reconcile goes idle for it: it has stopped
+  // working on the row, usually because it settled it, or a Stop's backfill of
+  // a Blox turn is done. That backfill goes on after the Stop has ended the
+  // row, so this listens whatever the session's status.
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) return;
+
+    return listenToEvent<SessionReconcileEvent>('session-reconcile-changed', (event) => {
+      if (event.sessionId === id && event.phase === 'idle') refetchReconciled(id);
+    });
+  });
+
+  /** Re-fetch session `id`, which reconcile may have moved on or backfilled. */
+  function refetchReconciled(id: string) {
+    if (closed || sessionId !== id) return;
+    void poll().then(() => {
+      // A live reattach took the session back to running.
+      if (!closed && sessionId === id && session?.status === 'running') startPolling();
+    });
+  }
 
   // The session stays `running` while its agent is held open for background
   // work, so the wait arrives on its own event rather than as a status change.

@@ -4,7 +4,7 @@
 //! proxy's stderr markers, teardown, and attach-cancel.
 
 use super::*;
-use crate::driver::attach::AttachTiming;
+use crate::driver::attach::{AttachTiming, CatchUpThrough};
 use crate::driver::{
     AcpToolCallMetadata, AttachOutcome, BloxProcess, CancelOutcome, LatestPrompt,
     RemoteProcessProbe, RemoteProcessStatus, TurnResult,
@@ -399,20 +399,32 @@ async fn attach_cancel(
     probe: Arc<ScriptedProbe>,
     deadline: Duration,
 ) -> (Result<CancelOutcome, String>, String) {
-    let (outcome, _, log) = attach_cancel_with(mode, probe, deadline, None).await;
-    (outcome, log)
+    let caught_up = attach_cancel_with(mode, probe, deadline, None).await;
+    (caught_up.outcome, caught_up.log)
 }
 
-/// [`attach_cancel`], catching up from a transcript holding `stored`:
-/// returns the rows the catch-up recorded too.
+/// What [`attach_cancel_with`] saw.
+struct CaughtUp {
+    outcome: Result<CancelOutcome, String>,
+    /// The rows the catch-up recorded.
+    rows: Vec<String>,
+    /// The agent's log of what it was sent.
+    log: String,
+    /// What `on_cancelled` was told, with the rows recorded and the agent's
+    /// log as it heard it.
+    heard: Option<(CancelOutcome, Vec<String>, String)>,
+}
+
+/// [`attach_cancel`], catching up from a transcript holding `stored`.
 async fn attach_cancel_with(
     mode: &str,
     probe: Arc<ScriptedProbe>,
     deadline: Duration,
     stored: Option<Vec<ReplayBoundary>>,
-) -> (Result<CancelOutcome, String>, Vec<String>, String) {
+) -> CaughtUp {
     let log = log_path(mode);
     let transcript = Arc::new(TranscriptLog::default());
+    let heard = std::cell::RefCell::new(None);
     let local = tokio::task::LocalSet::new();
     let outcome = local
         .run_until(async {
@@ -427,7 +439,17 @@ async fn attach_cancel_with(
                     "sess-1",
                     Some("27294439"),
                     &std::env::temp_dir(),
-                    catch_up.as_ref().map(|(store, writer)| (store, writer)),
+                    catch_up.as_ref().map(|(store, writer)| CatchUpThrough {
+                        store,
+                        writer,
+                        on_cancelled: Box::new(|outcome: &CancelOutcome| {
+                            *heard.borrow_mut() = Some((
+                                outcome.clone(),
+                                transcript.rows(),
+                                std::fs::read_to_string(&log).unwrap_or_default(),
+                            ));
+                        }),
+                    }),
                     deadline,
                     TIMING,
                 )
@@ -436,7 +458,12 @@ async fn attach_cancel_with(
         .await;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
-    (outcome, transcript.rows(), text)
+    CaughtUp {
+        outcome,
+        rows: transcript.rows(),
+        log: text,
+        heard: heard.into_inner(),
+    }
 }
 
 /// [`stored_transcript`] with the tool call that was running when the
@@ -796,7 +823,12 @@ async fn attach_cancel_on_a_replaced_process_sends_nothing() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn attach_cancel_catches_up_after_the_cancel_and_ends_the_running_call() {
-    let (outcome, rows, log) = attach_cancel_with(
+    let CaughtUp {
+        outcome,
+        rows,
+        log,
+        heard,
+    } = attach_cancel_with(
         "interrupt",
         ScriptedProbe::running(),
         Duration::from_secs(10),
@@ -816,6 +848,16 @@ async fn attach_cancel_catches_up_after_the_cancel_and_ends_the_running_call() {
     let load = log.find("\"method\":\"session/load\"").expect("{log}");
     assert!(cancel < load, "the cancel goes out first: {log}");
     assert!(log.contains("emitRawSDKMessages"), "{log}");
+    // The outcome is out before the load: a caller can end the session
+    // without waiting on the catch-up.
+    let (heard, rows_then, log_then) = heard.expect("on_cancelled is called");
+    assert_eq!(heard, CancelOutcome::Stopped);
+    assert!(rows_then.is_empty(), "{rows_then:?}");
+    assert!(
+        log_then.contains("\"method\":\"session/cancel\""),
+        "{log_then}"
+    );
+    assert!(!log_then.contains("session/load"), "{log_then}");
 }
 
 /// A call the agent settled live only, and the replay leaves running, ends
@@ -823,7 +865,7 @@ async fn attach_cancel_catches_up_after_the_cancel_and_ends_the_running_call() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn attach_cancel_records_a_live_only_settling_the_replay_lacks() {
-    let (outcome, rows, _) = attach_cancel_with(
+    let CaughtUp { outcome, rows, .. } = attach_cancel_with(
         "close",
         ScriptedProbe::running(),
         Duration::from_secs(10),
@@ -845,7 +887,12 @@ async fn attach_cancel_records_a_live_only_settling_the_replay_lacks() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn an_unconfirmed_attach_cancel_does_not_catch_up() {
-    let (outcome, rows, log) = attach_cancel_with(
+    let CaughtUp {
+        outcome,
+        rows,
+        log,
+        heard,
+    } = attach_cancel_with(
         "cancel-silent",
         ScriptedProbe::running(),
         Duration::from_millis(1500),
@@ -855,6 +902,11 @@ async fn an_unconfirmed_attach_cancel_does_not_catch_up() {
     assert_eq!(outcome, Ok(CancelOutcome::Unconfirmed));
     assert!(rows.is_empty(), "{rows:?}");
     assert!(!log.contains("session/load"), "{log}");
+    assert_eq!(
+        heard.map(|(outcome, ..)| outcome),
+        Some(CancelOutcome::Unconfirmed),
+        "the outcome is heard whether or not a catch-up follows"
+    );
 }
 
 /// A replaced process sends no cancel, and the catch-up backfills from the
@@ -862,7 +914,9 @@ async fn an_unconfirmed_attach_cancel_does_not_catch_up() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn attach_cancel_on_a_replaced_process_catches_up_from_its_replay() {
-    let (outcome, rows, log) = attach_cancel_with(
+    let CaughtUp {
+        outcome, rows, log, ..
+    } = attach_cancel_with(
         "replaced",
         ScriptedProbe::running(),
         Duration::from_secs(10),
@@ -906,7 +960,11 @@ async fn an_unreadable_transcript_cancels_without_catching_up() {
                     "sess-1",
                     Some("27294439"),
                     &std::env::temp_dir(),
-                    Some((&store, &writer)),
+                    Some(CatchUpThrough {
+                        store: &store,
+                        writer: &writer,
+                        on_cancelled: Box::new(|_: &CancelOutcome| {}),
+                    }),
                     Duration::from_secs(10),
                     TIMING,
                 )

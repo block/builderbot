@@ -46,6 +46,12 @@ pub struct RemoteProcess {
     /// record's when it is gone. `None` when the listing holds no record of
     /// it at all.
     pub command_id: Option<String>,
+    /// For an [`RemoteProcessStatus::Idle`] process, when it last changed
+    /// state, in ms since the epoch (the listing's `updatedAt`): for a
+    /// session's own process, when its last prompt was answered — the end
+    /// of its last turn. `None` for any other status, or when the listing
+    /// gives no time.
+    pub idle_since: Option<i64>,
 }
 
 /// The Blox side of a remote driver: which workstation process serves the
@@ -132,13 +138,7 @@ fn locate_process(
 ) -> Result<RemoteProcess, blox_cli::BloxError> {
     let active = blox_cli::ws_command_list(workspace_name, blox_cli::CommandFilter::Active)?;
     if let Some(command) = blox_cli::find_acp_process(&active, command_id, argv) {
-        return Ok(RemoteProcess {
-            status: match command.status {
-                blox_cli::CommandStatus::Idle => RemoteProcessStatus::Idle,
-                _ => RemoteProcessStatus::Running,
-            },
-            command_id: Some(command.command_id.clone()),
-        });
+        return Ok(active_process(command));
     }
     let all = blox_cli::ws_command_list(workspace_name, blox_cli::CommandFilter::All)?;
     let ended = blox_cli::find_acp_process(&all, command_id, argv)
@@ -150,7 +150,27 @@ fn locate_process(
         command_id: ended
             .map(|command| command.command_id.clone())
             .or_else(|| command_id.map(str::to_string)),
+        idle_since: None,
     })
+}
+
+/// The [`RemoteProcess`] an active listing record describes.
+fn active_process(command: &blox_cli::WorkstationCommand) -> RemoteProcess {
+    let idle = command.status == blox_cli::CommandStatus::Idle;
+    RemoteProcess {
+        status: if idle {
+            RemoteProcessStatus::Idle
+        } else {
+            RemoteProcessStatus::Running
+        },
+        command_id: Some(command.command_id.clone()),
+        idle_since: command
+            .updated_at
+            .as_deref()
+            .filter(|_| idle)
+            .and_then(super::remote_liveness::parse_utc_timestamp)
+            .map(|seconds| seconds * 1000),
+    }
 }
 
 impl AcpDriver {
@@ -182,5 +202,45 @@ impl AcpDriver {
             locate_process(&blox.workspace_name, command_id, &blox.command.argv)
                 .map_err(|e| e.to_string()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listed(status: &str, updated_at: Option<&str>) -> blox_cli::WorkstationCommand {
+        serde_json::from_value(serde_json::json!({
+            "commandId": "27294439",
+            "status": status,
+            "updatedAt": updated_at,
+        }))
+        .unwrap()
+    }
+
+    /// An idle process says since when, in ms: its last turn's end.
+    #[test]
+    fn an_idle_process_carries_when_it_went_idle() {
+        let process = active_process(&listed(
+            "COMMAND_STATUS_IDLE",
+            Some("2026-11-05T01:07:33.250Z"),
+        ));
+        assert_eq!(process.status, RemoteProcessStatus::Idle);
+        assert_eq!(process.command_id.as_deref(), Some("27294439"));
+        assert_eq!(process.idle_since, Some(1_793_840_853_000));
+    }
+
+    #[test]
+    fn a_busy_or_undated_process_has_no_idle_time() {
+        let running = active_process(&listed(
+            "COMMAND_STATUS_RUNNING",
+            Some("2026-11-05T01:07:33Z"),
+        ));
+        assert_eq!(running.status, RemoteProcessStatus::Running);
+        assert_eq!(running.idle_since, None);
+        assert_eq!(
+            active_process(&listed("COMMAND_STATUS_IDLE", None)).idle_since,
+            None
+        );
     }
 }

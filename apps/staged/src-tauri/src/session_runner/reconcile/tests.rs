@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +16,27 @@ use crate::session_queue::{BranchQueueKicker, KickSource};
 use crate::session_runner::SessionStatusEvent;
 use crate::store::{self, CompletionReason, MessageRole, Session, SessionStatus};
 use crate::test_utils::TempGitRepo;
+
+/// The live hold's per-task cap, which reconcile holds a row to.
+fn hold_cap() -> Duration {
+    acp_client::BackgroundHoldConfig::default().hold_cap
+}
+
+fn ms(duration: Duration) -> i64 {
+    duration.as_millis() as i64
+}
+
+/// `ready`'s first `Some`, polled for up to ten seconds.
+fn wait_for<T>(mut ready: impl FnMut() -> Option<T>) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(value) = ready() {
+            return value;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out waiting");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 // =============================================================================
 // Fakes
@@ -37,8 +58,13 @@ struct FakeBlox {
     /// running the scripted attach, as one to a live process does.
     connects: std::sync::atomic::AtomicBool,
     cancel: Mutex<Result<CancelOutcome, String>>,
-    /// Runs inside a cancel that backfills, as its catch-up writes.
+    /// Runs inside a cancel that backfills, as its catch-up writes: after the
+    /// cancel's outcome is told, as the real backfill comes after it.
     backfill: Mutex<Option<BackfillHook>>,
+    /// The checkout each backfilling cancel loaded the session in.
+    backfill_dirs: Mutex<Vec<Option<std::path::PathBuf>>>,
+    /// `Some` fails resolving the branch's checkout on the workstation.
+    working_dir_error: Mutex<Option<String>>,
     calls: Mutex<Vec<String>>,
 }
 
@@ -55,6 +81,8 @@ impl FakeBlox {
             connects: std::sync::atomic::AtomicBool::new(true),
             cancel: Mutex::new(Ok(CancelOutcome::Stopped)),
             backfill: Mutex::new(None),
+            backfill_dirs: Mutex::new(Vec::new()),
+            working_dir_error: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -65,6 +93,22 @@ impl FakeBlox {
 
     fn set_process(&self, status: RemoteProcessStatus, command_id: Option<&str>) {
         *self.process.lock().unwrap() = Ok(process(status, command_id));
+    }
+
+    /// The process reads `IDLE`, as Blox has had it since `idle_since`.
+    fn set_idle_since(&self, idle_since: i64) {
+        *self.process.lock().unwrap() = Ok(RemoteProcess {
+            idle_since: Some(idle_since),
+            ..process(RemoteProcessStatus::Idle, Some("cmd-1"))
+        });
+    }
+
+    fn fail_working_dir(&self, message: &str) {
+        *self.working_dir_error.lock().unwrap() = Some(message.to_string());
+    }
+
+    fn backfill_dirs(&self) -> Vec<Option<std::path::PathBuf>> {
+        self.backfill_dirs.lock().unwrap().clone()
     }
 
     fn set_recorded(&self, recorded: RecordedTurn) {
@@ -116,6 +160,15 @@ fn process(status: RemoteProcessStatus, command_id: Option<&str>) -> RemoteProce
     RemoteProcess {
         status,
         command_id: command_id.map(str::to_string),
+        idle_since: None,
+    }
+}
+
+/// A recording of a turn that is over with background tasks `tasks` live.
+fn holding(tasks: &[&str]) -> RecordedTurn {
+    RecordedTurn::Holding {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+        task_ids: tasks.iter().map(|task| task.to_string()).collect(),
     }
 }
 
@@ -147,7 +200,10 @@ impl ReconcileBlox for FakeBlox {
     }
 
     fn remote_working_dir(&self, _: &str, subpath: &str) -> Result<std::path::PathBuf, String> {
-        Ok(subpath.into())
+        match self.working_dir_error.lock().unwrap().clone() {
+            Some(e) => Err(e),
+            None => Ok(subpath.into()),
+        }
     }
 
     fn process(&self, target: &ReconcileTarget) -> Result<RemoteProcess, String> {
@@ -178,18 +234,33 @@ impl ReconcileBlox for FakeBlox {
     fn cancel(
         &self,
         target: &ReconcileTarget,
-        backfill: Option<&Arc<Store>>,
+        backfill: Option<super::blox::Backfill<'_>>,
         _: Duration,
     ) -> Result<CancelOutcome, String> {
-        let Some(store) = backfill else {
+        let cancelled = self.cancel.lock().unwrap().clone();
+        let Some(super::blox::Backfill {
+            store,
+            on_cancelled,
+        }) = backfill
+        else {
             self.log(format!("cancel:{}", target.agent_session_id));
-            return self.cancel.lock().unwrap().clone();
+            return cancelled;
         };
         self.log(format!("cancel+backfill:{}", target.agent_session_id));
+        self.backfill_dirs
+            .lock()
+            .unwrap()
+            .push(target.remote_working_dir.clone());
+        // As the real one: a cancel that fails outright tells nothing, and
+        // backfills nothing.
+        let Ok(outcome) = &cancelled else {
+            return cancelled;
+        };
+        on_cancelled(outcome);
         if let Some(hook) = self.backfill.lock().unwrap().as_ref() {
             hook(target, store);
         }
-        self.cancel.lock().unwrap().clone()
+        cancelled
     }
 
     fn checkout_workspace<'a>(&self, _: &'a ReconcileTarget) -> Option<&'a str> {
@@ -310,7 +381,14 @@ impl Fixture {
     fn with(store: Arc<Store>, host: RecordingHost) -> Self {
         let project = store::Project::new("test-owner/test-repo");
         store.create_project(&project).unwrap();
-        let branch = store::Branch::new_remote(&project.id, "remote", "main", "ws-1");
+        // A project repo gives the branch a checkout on the workstation
+        // (`home:test-repo`), which the attach and a Stop's backfill load the
+        // session in.
+        let project_repo =
+            store::ProjectRepo::new(&project.id, "test-owner/test-repo", "main", None);
+        store.create_project_repo(&project_repo).unwrap();
+        let branch = store::Branch::new_remote(&project.id, "remote", "main", "ws-1")
+            .with_project_repo(&project_repo.id);
         store.create_branch(&branch).unwrap();
         let repo = TempGitRepo::new();
         repo.write_file("README.md", "base\n");
@@ -362,6 +440,29 @@ impl Fixture {
 
     fn row(&self, session_id: &str) -> Session {
         self.store.get_session(session_id).unwrap().unwrap()
+    }
+
+    /// A session this process is running on the Blox branch.
+    fn running_session(&self) -> Session {
+        let mut session =
+            Session::new_running("work", self.repo.path()).with_branch(&self.branch.id);
+        session.agent_id = Some("acp-1".to_string());
+        session.provider = Some("claude".to_string());
+        self.store.create_session(&session).unwrap();
+        session
+    }
+
+    /// A reconciler over the fixture's store and fakes, telling the time
+    /// from `clock`, with the live hold's cap and ceiling.
+    fn reconciler_on(&self, clock: &Arc<AtomicI64>) -> Reconciler {
+        let clock = Arc::clone(clock);
+        Reconciler::new(
+            Arc::clone(&self.store),
+            Arc::clone(&self.registry),
+            self.blox.clone(),
+            self.host.clone(),
+        )
+        .with_clock(move || clock.load(Ordering::SeqCst))
     }
 
     fn reconcile(&self, session: &Session) -> bool {
@@ -1008,9 +1109,7 @@ fn assert_held(fx: &Fixture, session: &Session) {
 fn an_idle_session_still_working_after_its_turn_is_held_without_claiming_it() {
     let fx = Fixture::new();
     let session = fx.disconnected_commit_session();
-    fx.blox.set_recorded(RecordedTurn::Holding {
-        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
-    });
+    fx.blox.set_recorded(holding(&["t1"]));
 
     assert!(fx.reconcile(&session));
 
@@ -1038,9 +1137,7 @@ fn an_idle_session_still_working_after_its_turn_is_held_without_claiming_it() {
 fn a_held_session_is_checked_until_its_work_ends_then_settles() {
     let fx = Fixture::new();
     let session = fx.disconnected_commit_session();
-    fx.blox.set_recorded(RecordedTurn::Holding {
-        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
-    });
+    fx.blox.set_recorded(holding(&["t1"]));
     fx.reconcile(&session);
     assert_held(&fx, &session);
     let first = fx.host.last_reconcile_event().unwrap().next_attempt_at;
@@ -1104,9 +1201,7 @@ fn a_followed_turn_whose_recording_shows_work_live_is_held() {
     let session = fx.disconnected_commit_session();
     fx.blox
         .set_process(RemoteProcessStatus::Running, Some("cmd-live"));
-    fx.blox.set_recorded(RecordedTurn::Holding {
-        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
-    });
+    fx.blox.set_recorded(holding(&["t1"]));
 
     fx.reconcile(&session);
 
@@ -1114,35 +1209,136 @@ fn a_followed_turn_whose_recording_shows_work_live_is_held() {
     assert_eq!(fx.host.statuses(), vec!["running", "disconnected"]);
 }
 
-/// Work still going at the live hold's ceiling settles the turn anyway: a
-/// hung background shell doesn't hold the branch forever.
+/// The live hold's cap: the same background tasks live for it settle the
+/// turn with the work still going (`held_until_cap`), so a hung background
+/// shell doesn't hold the branch forever. Completed, its hooks run, and its
+/// queued follow-up drains, as when the live hold's cap runs out.
 #[test]
-fn held_work_past_the_hold_ceiling_settles_the_turn() {
+fn the_same_tasks_live_for_the_hold_cap_settle_the_turn() {
     let fx = Fixture::new();
     let session = fx.disconnected_commit_session();
-    fx.blox.set_recorded(RecordedTurn::Holding {
-        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
-    });
-    let reconciler = Reconciler::new(
-        Arc::clone(&fx.store),
-        Arc::clone(&fx.registry),
-        fx.blox.clone(),
-        fx.host.clone(),
-    )
-    .with_held_work_ceiling(Duration::ZERO);
+    let start = now_timestamp();
+    let clock = Arc::new(AtomicI64::new(start));
+    let reconciler = fx.reconciler_on(&clock);
+    fx.blox.set_idle_since(start);
+    fx.blox.set_recorded(holding(&["t1"]));
 
     reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
     assert_held(&fx, &session);
+    clock.store(start + ms(hold_cap()) - 1_000, Ordering::SeqCst);
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
 
+    clock.store(start + ms(hold_cap()), Ordering::SeqCst);
     reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
 
     fx.assert_settled(
         &session,
         SessionStatus::Completed,
         None,
-        CompletionReason::TurnComplete,
+        CompletionReason::HeldUntilCap,
     );
     assert!(fx.blox.called("attach"));
+    assert!(!fx.blox.called("cancel"), "the cap leaves the work be");
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), true)]
+    );
+}
+
+/// The cap runs from when the live tasks were last seen to change: a task
+/// settling, or another starting, is the chain moving, as the live hold
+/// gives each task its own cap.
+#[test]
+fn a_change_in_the_live_tasks_starts_the_cap_over() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    let start = now_timestamp();
+    let clock = Arc::new(AtomicI64::new(start));
+    let reconciler = fx.reconciler_on(&clock);
+    fx.blox.set_idle_since(start);
+    fx.blox.set_recorded(holding(&["t1"]));
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+
+    let changed = start + ms(hold_cap()) - 60_000;
+    clock.store(changed, Ordering::SeqCst);
+    fx.blox.set_recorded(holding(&["t1", "t2"]));
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+    clock.store(start + ms(hold_cap()) + 60_000, Ordering::SeqCst);
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+
+    clock.store(changed + ms(hold_cap()), Ordering::SeqCst);
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::HeldUntilCap,
+    );
+}
+
+/// A reconciler that has never seen the row — the app relaunched — times
+/// the hold from the turn's end, as Blox dates it, not from now: the work
+/// doesn't get a fresh cap for every launch.
+#[test]
+fn a_relaunch_times_held_work_from_the_turn_s_end() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    let turn_end = now_timestamp();
+    let clock = Arc::new(AtomicI64::new(turn_end + ms(hold_cap()) - 60_000));
+    fx.blox.set_idle_since(turn_end);
+    fx.blox.set_recorded(holding(&["t1"]));
+
+    let reconciler = fx.reconciler_on(&clock);
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+
+    // Relaunched a minute later, past the cap from the turn's end.
+    clock.store(turn_end + ms(hold_cap()), Ordering::SeqCst);
+    let relaunched = fx.reconciler_on(&clock);
+    relaunched.reconcile_blocking(&session.id, Trigger::CheckNow);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::HeldUntilCap,
+    );
+}
+
+/// Work that keeps changing never reaches the cap, but the live hold's
+/// ceiling, from the turn's end, settles it all the same.
+#[test]
+fn held_work_past_the_hold_ceiling_settles_the_turn() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    let start = now_timestamp();
+    let clock = Arc::new(AtomicI64::new(start));
+    let (cap, ceiling) = (Duration::from_secs(60 * 60), Duration::from_secs(90 * 60));
+    let reconciler = fx.reconciler_on(&clock).with_held_work_limits(cap, ceiling);
+    fx.blox.set_idle_since(start);
+    fx.blox.set_recorded(holding(&["t1"]));
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+
+    clock.store(start + 50 * 60_000, Ordering::SeqCst);
+    fx.blox.set_recorded(holding(&["t2"]));
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+    assert_held(&fx, &session);
+
+    clock.store(start + ms(ceiling), Ordering::SeqCst);
+    reconciler.reconcile_blocking(&session.id, Trigger::CheckNow);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::HeldUntilCap,
+    );
 }
 
 /// A Stop that reaches a followed turn as it ends with work live does what
@@ -1167,11 +1363,104 @@ fn a_stop_as_a_followed_turn_leaves_work_live_cancels_the_work() {
     fx.reconcile(&session);
 
     assert!(fx.blox.called("cancel+backfill:acp-1"));
+    // As the live hold records a Stop during it: the wait was cut short.
     fx.assert_settled(
         &session,
         SessionStatus::Completed,
         None,
-        CompletionReason::TurnComplete,
+        CompletionReason::HoldStopped,
+    );
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)],
+        "a Stop starts nothing queued"
+    );
+}
+
+/// A Stop on a row held for its session's work ends the work and completes
+/// the turn, over already, as a Stop during the live hold does — not a
+/// cancelled row. The work's cancel backfills the transcript before the row
+/// settles: the completion hooks read it.
+#[test]
+fn a_stop_on_a_held_row_ends_its_work_and_completes_the_turn() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(holding(&["t1"]));
+    fx.reconcile(&session);
+    assert_held(&fx, &session);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_in_backfill = Arc::clone(&seen);
+    fx.blox.on_backfill(move |target, store| {
+        let row = store.get_session(&target.session_id).unwrap().unwrap();
+        seen_in_backfill.lock().unwrap().push(row.status);
+    });
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert_eq!(*seen.lock().unwrap(), vec![SessionStatus::Disconnected]);
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::HoldStopped,
+    );
+    assert!(!fx.blox.called("attach"));
+    assert_eq!(
+        fx.host.side_effects.lock().unwrap().clone(),
+        vec![(session.id.clone(), "completed".to_string())]
+    );
+    assert_eq!(fx.host.statuses(), vec!["completed"]);
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)],
+        "a Stop starts nothing queued"
+    );
+}
+
+/// The same with no check behind it (a Stop right after a relaunch): the
+/// recording shows the work, so the Stop asks it.
+#[test]
+fn a_stop_finds_held_work_in_the_recording_with_no_check_behind_it() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(holding(&["t1"]));
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert_eq!(
+        fx.blox.calls(),
+        vec![
+            "workspace:ws-1",
+            "process:None",
+            "recorded:cmd-1",
+            "cancel+backfill:acp-1"
+        ]
+    );
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::HoldStopped,
+    );
+
+    // A turn still running is an ordinary Stop.
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Running, Some("cmd-1"));
+    fx.blox.set_recorded(holding(&["t1"]));
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert!(!fx.blox.called("recorded"), "{:?}", fx.blox.calls());
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        None,
+        CompletionReason::Interrupted,
     );
 }
 
@@ -1187,6 +1476,7 @@ fn a_gone_process_s_held_turn_settles_from_its_result() {
         result: Some(TurnResult::Failed {
             message: Some("API Error: 500".to_string()),
         }),
+        task_ids: vec!["t1".to_string()],
     });
     fx.blox.on_attach(|_, _, _| Ok(process_gone(None)));
 
@@ -1198,6 +1488,76 @@ fn a_gone_process_s_held_turn_settles_from_its_result() {
         Some("API Error: 500"),
         CompletionReason::Crashed,
     );
+}
+
+/// An `IDLE` process whose recording shows the turn ended: the read that
+/// looked for held work is the one the verdict settles from, not a second.
+#[test]
+fn an_idle_turn_s_recording_is_read_once() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Failed {
+            message: Some("API Error: 500".to_string()),
+        }),
+    });
+    fx.blox.on_attach(|_, _, _| {
+        Ok(AttachOutcome::Ended {
+            result: None,
+            latest_prompt: LatestPrompt::Replayed,
+            background_work_live: false,
+        })
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Error,
+        Some("API Error: 500"),
+        CompletionReason::Crashed,
+    );
+    let calls = fx.blox.calls();
+    let recorded: Vec<&String> = calls.iter().filter(|c| c.starts_with("recorded")).collect();
+    assert_eq!(recorded.len(), 1, "{calls:?}");
+    let attach = calls.iter().position(|c| c.starts_with("attach")).unwrap();
+    assert!(
+        calls
+            .iter()
+            .position(|c| c.starts_with("recorded"))
+            .unwrap()
+            < attach,
+        "{calls:?}"
+    );
+}
+
+/// An agent whose recording never shows held work (anything but the Claude
+/// bridge) has its `IDLE` process's recording read once, after the attach,
+/// not before it as well.
+#[test]
+fn an_agent_that_never_holds_skips_the_check_for_held_work() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.store.set_session_provider(&session.id, "codex").unwrap();
+    fx.blox.set_recorded(RecordedTurn::Answered {
+        result: TurnResult::Stopped(StopReason::EndTurn),
+    });
+
+    fx.reconcile(&session);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::TurnComplete,
+    );
+    let calls = fx.blox.calls();
+    let attach = calls.iter().position(|c| c.starts_with("attach")).unwrap();
+    let recorded: Vec<usize> = (0..calls.len())
+        .filter(|&i| calls[i].starts_with("recorded"))
+        .collect();
+    assert_eq!(recorded.len(), 1, "{calls:?}");
+    assert!(attach < recorded[0], "{calls:?}");
 }
 
 // =============================================================================
@@ -1572,24 +1932,85 @@ async fn the_queue_waits_while_disconnected_and_moves_once_completed() {
 // Stop
 // =============================================================================
 
-/// The Stop's cancel backfills the transcript before the row ends: the
-/// catch-up writes while the row is still `disconnected`, so the tool call
-/// the turn was running ends as the agent ended it, not "Running" for good.
+/// The Stop ends the row as soon as the cancel's outcome is known, and the
+/// backfill catches the transcript up after — the tool call the turn was
+/// running ends as the agent ended it, not "Running" for good — without the
+/// Stop waiting on a `session/load` that grows with the transcript. A resume
+/// meanwhile waits for it; the `idle` reconcile event says it is done, for a
+/// pane showing the session to read it again.
 #[test]
-fn a_stop_backfills_the_transcript_before_the_row_ends() {
+fn a_stop_ends_the_row_then_backfills_and_says_when_it_is_done() {
     let fx = Fixture::new();
     let session = fx.disconnected_commit_session();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_in_backfill = Arc::clone(&seen);
+    let host = Arc::clone(&fx.host);
     fx.blox.on_backfill(move |target, store| {
-        let row = store.get_session(&target.session_id).unwrap().unwrap();
-        seen_in_backfill.lock().unwrap().push(row.status);
+        // The row ends on another thread as the cancel's outcome is told.
+        let row = wait_for(|| {
+            let row = store.get_session(&target.session_id).unwrap().unwrap();
+            (row.status != SessionStatus::Disconnected).then_some(row)
+        });
+        let idle_yet = host
+            .reconcile_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event.phase == ReconcilePhase::Idle);
+        seen_in_backfill.lock().unwrap().push((
+            row.status,
+            super::stop::stop_backfill_in_flight(&target.session_id),
+            idle_yet,
+        ));
+        store
+            .add_session_message(&target.session_id, MessageRole::Assistant, "Stopped.")
+            .unwrap();
     });
 
     fx.reconciler
         .stop_blocking(&session.id, CompletionReason::Interrupted);
 
-    assert_eq!(*seen.lock().unwrap(), vec![SessionStatus::Disconnected]);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(SessionStatus::Cancelled, true, false)]
+    );
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        None,
+        CompletionReason::Interrupted,
+    );
+    assert!(!super::stop::stop_backfill_in_flight(&session.id));
+    assert_eq!(
+        fx.host.last_reconcile_event().unwrap().phase,
+        ReconcilePhase::Idle
+    );
+    let messages = fx.store.get_session_messages(&session.id).unwrap();
+    assert_eq!(messages.last().unwrap().content, "Stopped.");
+}
+
+/// The Stop's backfill loads the session in the branch's checkout on the
+/// workstation, resolved for it; when that can't be resolved the turn is
+/// still cancelled, without a backfill.
+#[test]
+fn a_stop_backfills_in_the_branch_s_checkout_or_cancels_without_one() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert_eq!(fx.blox.backfill_dirs(), vec![Some("home:test-repo".into())]);
+
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.fail_working_dir("ws exec timed out");
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert!(fx.blox.called("cancel:acp-1"), "{:?}", fx.blox.calls());
+    assert!(!fx.blox.called("cancel+backfill"));
     fx.assert_settled(
         &session,
         SessionStatus::Cancelled,
@@ -1606,9 +2027,16 @@ fn a_stop_on_a_disconnected_row_cancels_the_remote_turn_first() {
     fx.reconciler
         .stop_blocking(&session.id, CompletionReason::Interrupted);
 
+    // The process and its recording, for work left after the turn; then
+    // the cancel, on the process found.
     assert_eq!(
         fx.blox.calls(),
-        vec!["workspace:ws-1", "cancel+backfill:acp-1"]
+        vec![
+            "workspace:ws-1",
+            "process:None",
+            "recorded:cmd-1",
+            "cancel+backfill:acp-1"
+        ]
     );
     fx.assert_settled(
         &session,
@@ -1796,16 +2224,29 @@ fn a_stop_while_following_a_turn_cancels_it() {
         assert!(control.token.is_cancelled());
         Ok(AttachOutcome::Live)
     });
+    // As for a Stop on a `disconnected` row, the row ends before the
+    // cancel's backfill does.
+    let seen = Arc::new(Mutex::new(None));
+    let seen_in_backfill = Arc::clone(&seen);
+    fx.blox.on_backfill(move |target, store| {
+        let row = wait_for(|| {
+            let row = store.get_session(&target.session_id).unwrap().unwrap();
+            (row.status != SessionStatus::Running).then_some(row)
+        });
+        *seen_in_backfill.lock().unwrap() = Some(row.status);
+    });
 
     fx.reconcile(&session);
 
-    assert!(fx.blox.called("cancel"));
+    assert!(fx.blox.called("cancel+backfill:acp-1"));
+    assert_eq!(*seen.lock().unwrap(), Some(SessionStatus::Cancelled));
     fx.assert_settled(
         &session,
         SessionStatus::Cancelled,
         None,
         CompletionReason::Interrupted,
     );
+    assert_eq!(fx.host.statuses(), vec!["running", "cancelled"]);
     assert_eq!(
         fx.host.drains(),
         vec![(session.id.clone(), Some(fx.branch.id.clone()), false)]
@@ -1851,24 +2292,92 @@ fn a_quitting_app_starts_no_attempt() {
     fx.assert_untouched(&session);
 }
 
+/// A running session's own Stop that went unanswered: cancelled
+/// again over a fresh connection, in the branch's checkout. The runner gets
+/// the cancel's outcome — and ends the row — before the backfill is done;
+/// the backfill holds back a resume until it is, and announces its end.
 #[test]
 fn an_unacknowledged_remote_stop_is_retried_over_a_fresh_connection() {
     let fx = Fixture::new();
-    let mut session = Session::new_running("work", fx.repo.path()).with_branch(&fx.branch.id);
-    session.agent_id = Some("acp-1".to_string());
-    fx.store.create_session(&session).unwrap();
+    let session = fx.running_session();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    fx.blox.on_backfill(move |_, _| {
+        release_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+    });
+    let (announced_tx, announced_rx) = std::sync::mpsc::channel();
 
     assert_eq!(
-        stop_unacknowledged_turn(&fx.store, fx.blox.as_ref(), &session.id),
+        stop_unacknowledged_turn(&fx.store, fx.blox.clone(), &session.id, move |event| {
+            announced_tx.send(event.clone()).unwrap();
+        }),
         None
     );
+
+    // Back with the backfill still going.
+    assert!(super::stop::stop_backfill_in_flight(&session.id));
+    assert!(announced_rx.try_recv().is_err());
+    release_tx.send(()).unwrap();
+    let announced = announced_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(announced.session_id, session.id);
+    assert_eq!(announced.phase, ReconcilePhase::Idle);
+    assert_eq!(announced.branch_id.as_deref(), Some(fx.branch.id.as_str()));
+    assert!(!super::stop::stop_backfill_in_flight(&session.id));
     assert_eq!(fx.blox.calls(), vec!["cancel+backfill:acp-1"]);
+    assert_eq!(fx.blox.backfill_dirs(), vec![Some("home:test-repo".into())]);
 
     fx.blox.set_cancel(Err("connection refused".to_string()));
     assert_eq!(
-        stop_unacknowledged_turn(&fx.store, fx.blox.as_ref(), &session.id).as_deref(),
+        stop_unacknowledged_turn(&fx.store, fx.blox.clone(), &session.id, |_| {}).as_deref(),
         Some(MAY_STILL_RUN)
     );
+}
+
+/// Work a completed turn left running, which the hold's Stop didn't show
+/// ending: cancelled over a fresh connection, with the backfill done before
+/// this returns, as the turn's completion hooks come next.
+#[test]
+fn work_outliving_a_hold_s_stop_is_cancelled_and_backfilled_first() {
+    let fx = Fixture::new();
+    let session = fx.running_session();
+    let backfilled = Arc::new(AtomicBool::new(false));
+    let backfilled_in_hook = Arc::clone(&backfilled);
+    fx.blox.on_backfill(move |_, _| {
+        backfilled_in_hook.store(true, Ordering::SeqCst);
+    });
+
+    assert_eq!(
+        super::stop::stop_outliving_work(&fx.store, fx.blox.as_ref(), &session.id),
+        None
+    );
+
+    assert!(backfilled.load(Ordering::SeqCst));
+    assert_eq!(fx.blox.calls(), vec!["cancel+backfill:acp-1"]);
+    assert_eq!(fx.blox.backfill_dirs(), vec![Some("home:test-repo".into())]);
+}
+
+/// A resume waits for a Stop's backfill still writing the session's
+/// transcript, and goes straight ahead when there is none.
+#[tokio::test]
+async fn a_resume_waits_for_a_stop_s_backfill() {
+    super::stop::stop_backfill_finished("no-backfill").await;
+
+    let backfilling = super::stop::BackfillInFlight::start("backfilling");
+    let started = std::time::Instant::now();
+    let done = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        drop(backfilling);
+    });
+
+    super::stop::stop_backfill_finished("backfilling").await;
+
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert!(!super::stop::stop_backfill_in_flight("backfilling"));
+    done.join().unwrap();
 }
 
 // =============================================================================

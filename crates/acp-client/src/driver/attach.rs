@@ -133,9 +133,14 @@ impl Default for AttachTiming {
     }
 }
 
-/// Where an attach-cancel's catch-up reads the stored transcript from, and
-/// records what it lacks through.
-type CatchUpThrough<'a> = (&'a Arc<dyn Store>, &'a Arc<dyn MessageWriter>);
+/// Where an attach-cancel's catch-up reads the stored transcript from and
+/// records what it lacks through, and who hears the cancel's outcome before
+/// the catch-up starts (see [`AcpDriver::attach_cancel_and_catch_up`]).
+pub(super) struct CatchUpThrough<'a> {
+    pub(super) store: &'a Arc<dyn Store>,
+    pub(super) writer: &'a Arc<dyn MessageWriter>,
+    pub(super) on_cancelled: Box<dyn FnOnce(&CancelOutcome) + 'a>,
+}
 
 type ProxyStreams =
     ByteStreams<Compat<ChildStdin>, Compat<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>;
@@ -305,6 +310,12 @@ impl AcpDriver {
     /// logged, leaving the outcome as the cancel had it. Nothing is loaded
     /// when the cancel is unconfirmed or the transport is lost.
     ///
+    /// `on_cancelled` hears the cancel's outcome as soon as it is known,
+    /// before any catch-up starts: the load takes longer the longer the
+    /// session's transcript, and a caller ending the session on the outcome
+    /// needn't wait on it. It is not called when the cancel fails outright
+    /// (an `Err`).
+    ///
     /// Must be called from within a Tokio `LocalSet`.
     #[allow(clippy::too_many_arguments)]
     pub async fn attach_cancel_and_catch_up(
@@ -316,13 +327,18 @@ impl AcpDriver {
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
         deadline: Duration,
+        on_cancelled: impl FnOnce(&CancelOutcome),
     ) -> Result<CancelOutcome, String> {
         self.attach_cancel_with_timing(
             session_id,
             agent_session_id,
             command_id,
             working_dir,
-            Some((store, writer)),
+            Some(CatchUpThrough {
+                store,
+                writer,
+                on_cancelled: Box::new(on_cancelled),
+            }),
             deadline,
             AttachTiming::default(),
         )
@@ -343,18 +359,27 @@ impl AcpDriver {
         deadline: Duration,
         timing: AttachTiming,
     ) -> Result<CancelOutcome, String> {
-        let catch_up = catch_up.and_then(|(store, writer)| {
-            match self.cancel_catch_up(session_id, working_dir, store, writer) {
-                Ok(catch_up) => Some(catch_up),
-                Err(e) => {
-                    log::warn!(
-                        "ACP session {agent_session_id}: cancelling without catching session \
-                         {session_id} up: {e}"
-                    );
-                    None
-                }
+        let (catch_up, on_cancelled) = match catch_up {
+            Some(CatchUpThrough {
+                store,
+                writer,
+                on_cancelled,
+            }) => {
+                let catch_up = match self.cancel_catch_up(session_id, working_dir, store, writer) {
+                    Ok(catch_up) => Some(catch_up),
+                    Err(e) => {
+                        log::warn!(
+                            "ACP session {agent_session_id}: cancelling without catching \
+                             session {session_id} up: {e}"
+                        );
+                        None
+                    }
+                };
+                (catch_up, Some(on_cancelled))
             }
-        });
+            None => (None, None),
+        };
+        let on_cancelled = std::cell::RefCell::new(on_cancelled);
         let AttachProxy {
             mut child,
             transport,
@@ -441,6 +466,9 @@ impl AcpDriver {
                         )))
                     }
                 };
+                if let Some(on_cancelled) = on_cancelled.borrow_mut().take() {
+                    on_cancelled(&outcome);
+                }
                 let initialized = initialized.borrow_mut().take();
                 if let (Some(catch_up), Some((init_response, mode))) = (&catch_up, initialized) {
                     let over = matches!(

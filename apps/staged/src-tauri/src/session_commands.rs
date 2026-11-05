@@ -1502,6 +1502,10 @@ async fn prepare_resume(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ResumePlan, String> {
     let session_id = session.id.clone();
+    // A Stop on a Blox turn ends the row before its backfill of the stopped
+    // turn is done; the turn this starts must come after that in the
+    // transcript.
+    session_runner::reconcile::stop_backfill_finished(&session_id).await;
     // Use the provider that originally created this session so the
     // agent's conversation history can be restored correctly.
     let provider = session.provider.clone();

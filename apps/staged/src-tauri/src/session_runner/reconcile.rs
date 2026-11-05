@@ -22,7 +22,7 @@
 //!   the process reading `IDLE` does not rule out: the row stays
 //!   `disconnected` and is checked again ([`RowOutcome::Held`]) until the
 //!   work ends, as the live post-turn hold waits for it, and within the same
-//!   ceiling;
+//!   cap and ceiling (see [`Reconciler::held_work_ran_out`]);
 //! - nothing says how the turn ended: `cancelled`/`interrupted` with a
 //!   message — resumable — rather than a guessed `completed`.
 //!
@@ -36,7 +36,7 @@
 //!
 //! A Stop on a `disconnected` row is handled here too
 //! ([`Reconciler::request_stop`]): it cancels the remote turn over a fresh
-//! connection before ending the row.
+//! connection before ending the row (see [`stop`]).
 
 mod blox;
 mod host;
@@ -49,13 +49,17 @@ pub(crate) use blox::{
     AttachControl, LiveBlox, ReconcileBlox, ReconcileTarget, UnreachableKind, WorkspaceProbe,
 };
 pub(crate) use host::{LiveHost, ReconcileHost};
-pub(crate) use stop::{cancel_abandoned_turn, stop_unacknowledged_turn};
+pub(crate) use stop::{
+    cancel_abandoned_turn, stop_backfill_finished, stop_outliving_work, stop_unacknowledged_turn,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+
+use stop::HeldWork;
 
 use super::SessionRegistry;
 use crate::store::{now_timestamp, CompletionReason, Store};
@@ -181,9 +185,9 @@ struct RowState {
     last_attempt: Option<Instant>,
     next_attempt: Option<Instant>,
     next_attempt_at: Option<i64>,
-    /// When an attempt first found the session still working after its turn
-    /// ([`RowOutcome::Held`]), for [`Reconciler::held_work_ceiling`].
-    held_since: Option<Instant>,
+    /// How long the session has been working after its turn, as attempts
+    /// found it ([`RowOutcome::Held`]), for [`Reconciler::held_work_ran_out`].
+    held: Option<HeldClock>,
     /// Checks in a row that found the work still going, for the recheck
     /// spacing.
     held_checks: u32,
@@ -192,6 +196,18 @@ struct RowState {
     workspace_name: Option<String>,
     branch_id: Option<String>,
     project_id: Option<String>,
+}
+
+/// The clock on a session still working after its turn, in ms since the
+/// epoch.
+#[derive(Debug, Clone)]
+struct HeldClock {
+    /// When the hold began: the turn's end, as far as Blox dates it.
+    entered_at: i64,
+    /// The background tasks last seen live, sorted.
+    tasks: Vec<String>,
+    /// Since when exactly those have been live.
+    since: i64,
 }
 
 /// How an attempt left its row.
@@ -218,13 +234,15 @@ pub struct Reconciler {
     blox: Arc<dyn ReconcileBlox>,
     host: Arc<dyn ReconcileHost>,
     rows: Mutex<HashMap<String, RowState>>,
-    /// How long a row may stay held for its session's work, from the first
-    /// attempt that found it working, before it settles regardless. The live
-    /// post-turn hold's own ceiling: a hung background shell must not hold
-    /// the branch forever, and honest work never reaches it. Reconcile can't
-    /// time tasks one by one from a recording, as the live hold's per-task
-    /// cap does, so only the ceiling applies.
+    /// How long the same background tasks may keep a row held, and how long
+    /// a row may stay held at all from its turn's end, before it settles
+    /// regardless: the live post-turn hold's own cap and ceiling (see
+    /// [`acp_client::BackgroundHoldConfig`]). A hung background shell must
+    /// not hold the branch forever, and honest work never reaches either.
+    held_work_cap: Duration,
     held_work_ceiling: Duration,
+    /// The time, in ms since the epoch ([`now_timestamp`]; tests move it).
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
 }
 
 impl Reconciler {
@@ -240,14 +258,25 @@ impl Reconciler {
             blox,
             host,
             rows: Mutex::new(HashMap::new()),
+            held_work_cap: acp_client::BackgroundHoldConfig::default().hold_cap,
             held_work_ceiling: acp_client::BackgroundHoldConfig::default().hold_ceiling,
+            clock: Arc::new(now_timestamp),
         }
     }
 
-    /// [`Self::new`] with a different [`Self::held_work_ceiling`] (tests).
+    /// [`Self::new`] with a different [`Self::held_work_cap`] and
+    /// [`Self::held_work_ceiling`] (tests).
     #[cfg(test)]
-    pub(super) fn with_held_work_ceiling(mut self, ceiling: Duration) -> Self {
+    pub(super) fn with_held_work_limits(mut self, cap: Duration, ceiling: Duration) -> Self {
+        self.held_work_cap = cap;
         self.held_work_ceiling = ceiling;
+        self
+    }
+
+    /// [`Self::new`] telling the time from `clock` (tests).
+    #[cfg(test)]
+    pub(super) fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
         self
     }
 
@@ -344,14 +373,14 @@ impl Reconciler {
         }
         let this = Arc::clone(self);
         let session_id = session_id.to_string();
-        std::thread::spawn(move || this.run_stop(&session_id, reason));
+        std::thread::spawn(move || this.run_stop(&session_id, reason, HeldWork::Unknown));
     }
 
     /// [`Self::request_stop`] on the calling thread.
     #[cfg(test)]
     pub(super) fn stop_blocking(&self, session_id: &str, reason: CompletionReason) {
         if self.begin_stop(session_id, &reason) {
-            self.run_stop(session_id, reason);
+            self.run_stop(session_id, reason, HeldWork::Unknown);
         }
     }
 
@@ -417,13 +446,17 @@ impl Reconciler {
     fn run_attempt(&self, session_id: &str) {
         self.set_phase(session_id, ReconcilePhase::Checking);
         let outcome = self.reconcile_row(session_id);
+        let held = match outcome {
+            RowOutcome::Held(_) => HeldWork::Held,
+            _ => HeldWork::Unknown,
+        };
         if let Some(reason) = self.finish(session_id, outcome) {
-            self.run_stop(session_id, reason);
+            self.run_stop(session_id, reason, held);
         }
     }
 
-    fn run_stop(&self, session_id: &str, reason: CompletionReason) {
-        let outcome = self.stop_disconnected(session_id, reason);
+    fn run_stop(&self, session_id: &str, reason: CompletionReason, held: HeldWork) {
+        let outcome = self.stop_disconnected(session_id, reason, held);
         // A Stop always ends the row, so nothing is handed back.
         self.finish(session_id, outcome);
     }
@@ -504,7 +537,6 @@ impl Reconciler {
                     // The workstation answered: whatever failed before has
                     // passed.
                     row.failures = 0;
-                    row.held_since.get_or_insert(now);
                     row.held_checks += 1;
                     let delay = held_work_recheck(row.held_checks);
                     row.next_attempt = Some(now + delay);
@@ -538,16 +570,51 @@ impl Reconciler {
 }
 
 impl Reconciler {
-    /// Whether the session's work has kept the row held past
-    /// [`Self::held_work_ceiling`]: the next attempt settles it as if the
-    /// work had ended.
-    fn held_work_outlasted_ceiling(&self, session_id: &str) -> bool {
-        self.rows
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .and_then(|row| row.held_since)
-            .is_some_and(|since| since.elapsed() >= self.held_work_ceiling)
+    /// Whether the session's work, found still going with `tasks` live, has
+    /// held the row as long as the live hold would have waited for it: the
+    /// same tasks live for [`Self::held_work_cap`], or the row held for
+    /// [`Self::held_work_ceiling`] from the turn's end. The attempt then
+    /// settles the row with the work still going (`held_until_cap`).
+    ///
+    /// The live hold times each task from when it first sees it; a
+    /// recording only says which tasks are live now, so the cap runs from
+    /// when this set was first seen, and starts over when it changes (a task
+    /// settled, or a continuation cycle started another). The first sighting
+    /// after a launch dates the hold from `turn_end` — when Blox last saw the
+    /// process go idle — rather than from now, so a relaunch doesn't hand a
+    /// hung task a fresh cap. (A task a continuation cycle started after the
+    /// turn's end gets that much less of its cap, after a relaunch only.)
+    fn held_work_ran_out(
+        &self,
+        session_id: &str,
+        tasks: Vec<String>,
+        turn_end: Option<i64>,
+    ) -> bool {
+        let now = (self.clock)();
+        let mut rows = self.rows.lock().unwrap();
+        let Some(row) = rows.get_mut(session_id) else {
+            return false;
+        };
+        let clock = match &mut row.held {
+            Some(clock) => {
+                if clock.tasks != tasks {
+                    clock.tasks = tasks;
+                    clock.since = now;
+                }
+                clock
+            }
+            None => {
+                let entered_at = turn_end.map_or(now, |end| end.min(now));
+                row.held.insert(HeldClock {
+                    entered_at,
+                    tasks,
+                    since: entered_at,
+                })
+            }
+        };
+        let held_for = |since: i64| Duration::from_millis(now.saturating_sub(since).max(0) as u64);
+        held_for(clock.since) >= self.held_work_cap
+            || held_for(clock.entered_at) >= self.held_work_ceiling
     }
 }
 

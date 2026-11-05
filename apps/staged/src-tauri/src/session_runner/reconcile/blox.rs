@@ -77,6 +77,26 @@ impl ReconcileTarget {
             session_type: info.session_type,
         })
     }
+
+    /// Resolve [`Self::remote_working_dir`] from the branch's subpath, if it
+    /// isn't yet: an attach, and a cancel's backfill, load the session in
+    /// that checkout. A Blox call; only worth making once the workstation is
+    /// known to be running. A branch with no project repo has no subpath
+    /// and nothing to resolve.
+    pub(super) fn resolve_remote_working_dir(
+        &mut self,
+        blox: &dyn ReconcileBlox,
+    ) -> Result<(), String> {
+        if self.remote_working_dir.is_some() {
+            return Ok(());
+        }
+        let Some(subpath) = self.workspace_subpath.as_deref() else {
+            return Ok(());
+        };
+        self.remote_working_dir = Some(blox.remote_working_dir(&self.workspace_name, subpath)?);
+        Ok(())
+    }
+
     /// The routing half of a target, for ending a row that
     /// [`Self::resolve`] refused: the row's events still need its branch and
     /// project.
@@ -136,6 +156,15 @@ pub(crate) struct AttachControl {
     pub on_connected: Box<dyn Fn() + Send + Sync>,
 }
 
+/// What a cancel catches the transcript up through, and who hears the
+/// cancel's outcome before it does (see [`ReconcileBlox::cancel`]).
+pub(crate) struct Backfill<'a> {
+    pub store: &'a Arc<Store>,
+    /// Told the cancel's outcome as soon as it is known, before the backfill
+    /// starts; not called when the cancel fails outright.
+    pub on_cancelled: Box<dyn FnOnce(&CancelOutcome) + Send + 'a>,
+}
+
 /// Blox, as reconcile uses it. Every method blocks.
 pub(crate) trait ReconcileBlox: Send + Sync {
     /// `ws info` for the workstation.
@@ -171,11 +200,11 @@ pub(crate) trait ReconcileBlox: Send + Sync {
     /// caught up through it with the turn the cancel ended, the end of the
     /// tool call that was running included (see
     /// `AcpDriver::attach_cancel_and_catch_up`); best effort, it never
-    /// changes the outcome.
+    /// changes the outcome. Returns once the backfill is over too.
     fn cancel(
         &self,
         target: &ReconcileTarget,
-        backfill: Option<&Arc<Store>>,
+        backfill: Option<Backfill<'_>>,
         deadline: Duration,
     ) -> Result<CancelOutcome, String>;
 
@@ -314,12 +343,16 @@ impl ReconcileBlox for LiveBlox {
     fn cancel(
         &self,
         target: &ReconcileTarget,
-        backfill: Option<&Arc<Store>>,
+        backfill: Option<Backfill<'_>>,
         deadline: Duration,
     ) -> Result<CancelOutcome, String> {
         let driver = Self::driver(target)?;
         block_on_local(async {
-            let Some(store) = backfill else {
+            let Some(Backfill {
+                store,
+                on_cancelled,
+            }) = backfill
+            else {
                 return driver
                     .attach_cancel(
                         &target.session_id,
@@ -344,6 +377,7 @@ impl ReconcileBlox for LiveBlox {
                     &store_trait,
                     &writer,
                     deadline,
+                    on_cancelled,
                 )
                 .await
         })?

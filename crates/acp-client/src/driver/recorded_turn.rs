@@ -28,8 +28,13 @@ pub enum RecordedTurn {
     /// As [`RecordedTurn::Ended`], except that background tasks the session
     /// started never settle in the recording: the turn is over, but its work
     /// goes on, and a task settling may wake the model for a continuation
-    /// cycle of its own.
-    Holding { result: Option<TurnResult> },
+    /// cycle of its own. `task_ids` are the tasks still live, sorted, so a
+    /// caller reading the recording again can tell the same work from new
+    /// work (the live hold times each task from when it first sees it).
+    Holding {
+        result: Option<TurnResult>,
+        task_ids: Vec<String>,
+    },
     /// The recording stops with the session busy: a turn running, a
     /// permission wait inside one, or a continuation cycle a settled task
     /// woke. Of a process that is gone, it died under it; of one that reads
@@ -43,6 +48,16 @@ pub enum RecordedTurn {
     Answered { result: TurnResult },
     /// The recording carries nothing about the session's turns.
     Unknown,
+}
+
+/// Whether a recording of `agent_id`'s process can show the session still
+/// working after its turn ([`RecordedTurn::Holding`] or
+/// [`RecordedTurn::InFlight`] on a process that reads `IDLE`): only the
+/// Claude bridge writes the turn-state and background-task frames that is
+/// read from. For any other agent, a process that has answered every prompt
+/// has nothing left running, and reading its recording to ask is wasted.
+pub fn recording_shows_held_work(agent_id: Option<&str>) -> bool {
+    agent_id == Some("claude")
 }
 
 /// The wire method of the Claude bridge's raw SDK frames (the handler sees it
@@ -105,7 +120,9 @@ pub(crate) fn recorded_turn(output: &str, agent_session_id: &str, dedicated: boo
     }
     match turn {
         RecordedTurn::Ended { result } if !tasks.task_ids.is_empty() => {
-            RecordedTurn::Holding { result }
+            let mut task_ids: Vec<String> = tasks.task_ids.into_iter().collect();
+            task_ids.sort();
+            RecordedTurn::Holding { result, task_ids }
         }
         RecordedTurn::Unknown if dedicated => answers
             .last
@@ -391,7 +408,8 @@ mod tests {
         assert_eq!(
             recorded_turn(&lines.join("\n"), SESSION, true),
             RecordedTurn::Holding {
-                result: Some(TurnResult::Stopped(StopReason::EndTurn))
+                result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+                task_ids: vec!["t1".to_string()],
             }
         );
 
@@ -410,6 +428,35 @@ mod tests {
                 result: Some(TurnResult::Stopped(StopReason::EndTurn))
             }
         );
+    }
+
+    /// The live tasks are named, sorted, so two reads of the same work
+    /// compare equal.
+    #[test]
+    fn a_holding_turn_names_its_live_tasks_in_order() {
+        let mut lines = vec![
+            state(SESSION, "running"),
+            task(SESSION, "task_started", "t2"),
+            task(SESSION, "task_started", "t1"),
+            task(SESSION, "task_started", "t3"),
+            task(SESSION, "task_notification", "t3"),
+        ];
+        lines.extend(ended_turn(SESSION).into_iter().skip(1));
+        assert_eq!(
+            recorded_turn(&lines.join("\n"), SESSION, true),
+            RecordedTurn::Holding {
+                result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+                task_ids: vec!["t1".to_string(), "t2".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn only_the_claude_bridge_records_held_work() {
+        assert!(recording_shows_held_work(Some("claude")));
+        for agent in [Some("codex"), Some("goose"), Some("pi"), Some("amp"), None] {
+            assert!(!recording_shows_held_work(agent), "{agent:?}");
+        }
     }
 
     /// A settled task wakes the model with no prompt in flight: the process

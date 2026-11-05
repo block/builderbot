@@ -16,6 +16,8 @@
 //!    no longer name are unlinked; if it fails, the copies and links are
 //!    removed. A source file is never touched before the commit, so a row
 //!    finds its file at every point, and a crash leaves at worst a spare link.
+//!    Steps 2 and 3 run under one process-wide lock (`TRANSFER_MEDIA`), since
+//!    two moves of the same note link the same destination path.
 //! 4. A move then garbage-collects whatever source media the note no longer
 //!    references, under the same rules a note delete uses.
 //!
@@ -53,7 +55,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::note_media::{cleanup_unreferenced, files, refs};
 use crate::store::images::image_file_path;
@@ -187,7 +189,9 @@ where
             })?
     };
 
-    // Step 2: media files, then step 3: the transaction.
+    // Step 2: media files, then step 3: the transaction. There is no await
+    // past this point, so the lock is never held across one.
+    let _media = lock_transfer_media();
     let (owner_session, rehome) = match mode {
         TransferMode::Move => (
             note.session_id.as_deref(),
@@ -285,6 +289,7 @@ pub(crate) fn transfer_project_note(
         ));
     }
 
+    let _media = lock_transfer_media();
     let (owner_session, rehome) = match mode {
         TransferMode::Move => (
             note.session_id.as_deref(),
@@ -406,6 +411,25 @@ fn quoted(title: &str) -> String {
     }
 }
 
+/// Held from staging a transfer's media to settling it ([`finish`]). Two
+/// moves of one note into one project link the same id-keyed path, so if they
+/// overlapped, one could remove that path while the other's row was about to
+/// name it, or already did: the second replaces the first's link, and the
+/// move that loses the race discards it (see [`StagedMedia::discard`] for the
+/// part a re-read can catch and the part it can't). The desktop app and the
+/// web client share this process, so this covers two windows as well as two
+/// clicks. Everything before staging — the add-repo await above all — stays
+/// outside it; the transaction re-checks what was resolved there.
+static TRANSFER_MEDIA: Mutex<()> = Mutex::new(());
+
+fn lock_transfer_media() -> MutexGuard<'static, ()> {
+    // The lock guards no data, so a transfer that panicked under it left
+    // nothing half-written behind.
+    TRANSFER_MEDIA
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 fn finish<T>(
     store: &Store,
     mode: TransferMode,
@@ -422,7 +446,7 @@ fn finish<T>(
             Ok(value)
         }
         Err(e) => {
-            media.discard();
+            media.discard(store);
             Err(e.to_string())
         }
     }
@@ -435,11 +459,13 @@ struct StagedMedia {
     content: String,
     images: Vec<Image>,
     rehomed: Vec<Image>,
-    /// Files written for this transfer: a copy for each of `images` and a
-    /// hard link for each of `rehomed`.
-    files: Vec<PathBuf>,
+    /// The file written for each of `images`, under the copy's fresh id.
+    copies: Vec<PathBuf>,
+    /// A hard link for each of `rehomed` (by id), at the path its row names
+    /// once re-homed.
+    links: Vec<(String, PathBuf)>,
     /// The paths `rehomed` rows named before the move. Each shares its file
-    /// with a link in `files`, so it goes once the rows name the links.
+    /// with one of `links`, so it goes once the rows name the links.
     superseded: Vec<PathBuf>,
 }
 
@@ -458,9 +484,36 @@ impl StagedMedia {
 
     /// The transaction never happened: remove what was written for it. The
     /// sources were left alone, so every row still finds its file.
-    fn discard(self) {
-        for path in self.files {
+    ///
+    /// Except where another move of the same note committed in the meantime:
+    /// it linked the same path (the name is the row's id), its row names that
+    /// path now, and its commit unlinked the source, so the link is the only
+    /// file left. A link is kept when its row reads as naming it. That covers
+    /// the other move committing first; one that commits between this read and
+    /// the removal is what [`TRANSFER_MEDIA`] keeps from happening.
+    fn discard(self, store: &Store) {
+        for path in self.copies {
             let _ = std::fs::remove_file(path);
+        }
+        for (id, path) in self.links {
+            if !row_names(store, &id, &path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+}
+
+/// Whether media row `id` names `path` as its file. A row that can't be read
+/// counts as naming it: a spare link costs nothing, a missing file costs the
+/// media.
+fn row_names(store: &Store, id: &str, path: &Path) -> bool {
+    match store.get_image(id) {
+        Ok(Some(row)) => image_file_path(&row.project_id, &row.id, &row.filename)
+            .map_or(true, |named| named == path),
+        Ok(None) => false,
+        Err(e) => {
+            log::warn!("Keeping media link {}: {e}", path.display());
+            true
         }
     }
 }
@@ -509,7 +562,8 @@ fn stage_media(
         content: content.to_owned(),
         images: Vec::new(),
         rehomed: Vec::new(),
-        files: Vec::new(),
+        copies: Vec::new(),
+        links: Vec::new(),
         superseded: Vec::new(),
     };
     let owner_session = owner_session.unwrap_or(NOTE_MEDIA_SESSION_ID);
@@ -589,7 +643,7 @@ fn stage_media(
         Ok(())
     })();
     if let Err(e) = result {
-        staged.discard();
+        staged.discard(store);
         return Err(e);
     }
     // Apply back to front so earlier offsets stay valid.
@@ -624,12 +678,12 @@ fn rehome_file(
             return Err(e.to_string());
         }
         // A link an earlier attempt left when it never committed. The path is
-        // keyed by this row's id and the row names the source, so nothing
-        // else can be using it.
+        // keyed by this row's id and the row names the source, and no other
+        // transfer is staging (`TRANSFER_MEDIA`), so nothing else is using it.
         std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         std::fs::hard_link(source_path, &path).map_err(|e| e.to_string())?;
     }
-    staged.files.push(path);
+    staged.links.push((source.id.clone(), path));
     staged.superseded.push(source_path.to_owned());
     Ok(true)
 }
@@ -687,7 +741,7 @@ fn copy_file(
         let _ = std::fs::remove_file(&path);
         return Err(e.to_string());
     }
-    staged.files.push(path);
+    staged.copies.push(path);
     staged.images.push(copy.clone());
     Ok(Some(copy))
 }
@@ -1572,6 +1626,85 @@ mod tests {
             f.store.get_note(&note.id).unwrap().unwrap().branch_id,
             f.source_branch.id
         );
+    }
+
+    /// Two moves of one note into one project link the same id-keyed path,
+    /// the second replacing the first's link. Whichever commits unlinks the
+    /// source, so the link is then the only path to the file, and the move
+    /// that is refused (its note has left the branch) must keep it when it
+    /// discards. The transfer lock stops two moves in one process from
+    /// interleaving at all; this stages them by hand, in both commit orders.
+    #[test]
+    fn a_refused_concurrent_move_keeps_the_link_the_other_committed() {
+        for first_commits in [true, false] {
+            let f = fixture();
+            let (note, image) = f.media_note();
+            f.attach_repo(RepoKey {
+                github_repo: "acme/widgets".into(),
+                subpath: Some("apps/web".into()),
+            })
+            .unwrap();
+            let target_branch = f.target_branch().unwrap();
+            let stage = || {
+                stage_media(
+                    &f.store,
+                    &note.content,
+                    Some(&target_branch.id),
+                    &f.target.id,
+                    None,
+                    Some(MoveSource {
+                        note_id: &note.id,
+                        project_id: &f.source.id,
+                        branch_id: Some(&f.source_branch.id),
+                    }),
+                )
+                .unwrap()
+            };
+            let record = |media: &StagedMedia| {
+                f.store.move_note_to_branch(
+                    &note.id,
+                    &f.source_branch.id,
+                    &target_branch.id,
+                    &media.content,
+                    &media.images,
+                    &media.rehomed,
+                )
+            };
+
+            let first = stage();
+            // Finds the first's link in place and replaces it.
+            let second = stage();
+            let (winner, loser) = if first_commits {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            let committed = record(&winner);
+            finish(
+                &f.store,
+                TransferMode::Move,
+                &note.content,
+                winner,
+                committed,
+            )
+            .unwrap();
+            let refused = record(&loser);
+            let err =
+                finish(&f.store, TransferMode::Move, &note.content, loser, refused).unwrap_err();
+
+            assert!(err.contains("moved or deleted"), "{err}");
+            let row = f.store.get_image(&image.id).unwrap().unwrap();
+            assert_eq!(row.project_id, f.target.id);
+            let path = image_file_path(&row.project_id, &row.id, &row.filename).unwrap();
+            assert_eq!(
+                std::fs::read(&path).ok().as_deref(),
+                Some(PNG),
+                "first_commits = {first_commits}: the committed row lost its file"
+            );
+            assert!(!image_file_path(&f.source.id, &image.id, &image.filename)
+                .unwrap()
+                .exists());
+        }
     }
 
     /// A process that died between linking and committing leaves a link at

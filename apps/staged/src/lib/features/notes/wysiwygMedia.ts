@@ -14,13 +14,14 @@
  * Only the DOM is replaced. The node and its `src` are left alone, so the
  * document still serializes to the stored reference, and selecting, deleting
  * and undoing work as for any inline atom. Images with any other `src` keep
- * the plain `<img>` the preset draws.
+ * the plain `<img>` the preset draws. A selected video takes Space and Enter
+ * for playback (`stagedMediaKeys`) rather than being typed over by them.
  */
 import { imageSchema } from '@milkdown/kit/preset/commonmark';
 import { DOMSerializer, type Node as ProseNode } from '@milkdown/kit/prose/model';
-import { NodeSelection } from '@milkdown/kit/prose/state';
+import { NodeSelection, Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import type { EditorView, NodeView } from '@milkdown/kit/prose/view';
-import { $view } from '@milkdown/kit/utils';
+import { $prose, $view } from '@milkdown/kit/utils';
 
 import { getMediaDimensions } from '../../api/commands';
 import { mediaImageLayout } from '../../shared/markdown/mediaRendering';
@@ -51,12 +52,67 @@ export const stagedMediaView = $view(imageSchema.node, () => (node, view, getPos
     // Everything else (clicking an image, for one) stays with ProseMirror, so
     // the usual select-then-delete applies.
     stopEvent: (event) => video?.contains(event.target as Element) ?? false,
-    // A leaf's DOM is not document content: the dimension lookup below and the
-    // video's own state changes are not edits. Selection changes still count,
-    // so drag-selecting a caption keeps ProseMirror's selection in step.
-    ignoreMutation: (mutation) => mutation.type !== 'selection',
+    // No `ignoreMutation`: for a view without a contentDOM, ProseMirror's
+    // default already ignores every mutation but a selection change. So the
+    // dimension lookup below and the video's own state changes are not taken
+    // for edits, and drag-selecting a caption keeps the selection in step.
   };
 });
+
+/**
+ * Space and Enter play or pause a selected video instead of reaching
+ * ProseMirror, which would type them over the node (Enter splits the block
+ * there). This covers focus in the editor; the video's own keydown handler
+ * (`selectVideoLikeAnImage`) covers focus on the video, whose events this
+ * never sees. It is a DOM-event handler rather than a keymap so it runs ahead
+ * of every keymap, the preset's Enter included. Other keys are left alone:
+ * typing replaces a selected video as it does a selected image.
+ */
+export const stagedMediaKeys = $prose(
+  () =>
+    new Plugin({
+      key: new PluginKey('WRITTEN_NOTE_MEDIA_KEYS'),
+      props: {
+        handleDOMEvents: {
+          keydown: (view, event) => {
+            if (!isPlaybackKey(event)) return false;
+            const video = selectedVideo(view);
+            if (!video) return false;
+            event.preventDefault();
+            togglePlayback(video);
+            return true;
+          },
+        },
+      },
+    })
+);
+
+/** The video drawn for the node-selected media, if that is what is selected. */
+function selectedVideo(view: EditorView): HTMLVideoElement | null {
+  const { selection } = view.state;
+  if (!(selection instanceof NodeSelection) || selection.node.type.name !== 'image') return null;
+  const dom = view.nodeDOM(selection.from);
+  return dom instanceof HTMLElement ? dom.querySelector('video') : null;
+}
+
+function isPlaybackKey(event: KeyboardEvent): boolean {
+  return (
+    (event.key === ' ' || event.key === 'Enter') &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !event.isComposing
+  );
+}
+
+function togglePlayback(video: HTMLVideoElement) {
+  if (video.paused) {
+    // Rejects when the source can't play; the controls show that already.
+    video.play().catch(() => {});
+  } else {
+    video.pause();
+  }
+}
 
 /**
  * Give a video the click-then-delete an image has. Its events are kept from
@@ -67,8 +123,11 @@ export const stagedMediaView = $view(imageSchema.node, () => (node, view, getPos
  * then; nothing is prevented, so the controls still work. Native controls are
  * not in the light DOM, so a click on them selects the video too.
  *
- * The browser may keep focus on the video for its controls, where ProseMirror
- * never sees a key, so Backspace and Delete there remove the selected video.
+ * A click that started playback leaves focus where the browser put it.
+ * Otherwise the editor takes it, unless the browser kept it on the video for
+ * its controls. ProseMirror never sees a key there, so Backspace and Delete on
+ * the selected video remove it, and Space and Enter play or pause it, as
+ * `stagedMediaKeys` does in the editor.
  */
 function selectVideoLikeAnImage(
   video: HTMLVideoElement,
@@ -79,20 +138,38 @@ function selectVideoLikeAnImage(
     const { selection } = view.state;
     return selection instanceof NodeSelection && selection.from === getPos();
   };
+  // Read before the click reaches the controls in the video's shadow tree.
+  // WebKit's (the desktop build's) handle it there, so a click that started
+  // playback reads as one below. Where the toggle is the click's default
+  // action instead, it hasn't happened yet below, and the editor is focused
+  // as for any other click; Space then pauses through `stagedMediaKeys`.
+  let pausedBeforeClick = video.paused;
+  video.addEventListener(
+    'click',
+    () => {
+      pausedBeforeClick = video.paused;
+    },
+    { capture: true }
+  );
   video.addEventListener('click', (event) => {
     const pos = getPos();
     if (event.button !== 0 || pos === undefined || !view.editable) return;
     if (!isSelected()) {
       view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
     }
-    if (document.activeElement !== video) view.focus();
+    const startedPlayback = pausedBeforeClick && !video.paused;
+    if (!startedPlayback && document.activeElement !== video) view.focus();
   });
   video.addEventListener('keydown', (event) => {
-    if (event.key !== 'Backspace' && event.key !== 'Delete') return;
     if (!view.editable || !isSelected()) return;
-    event.preventDefault();
-    view.dispatch(view.state.tr.deleteSelection().scrollIntoView());
-    view.focus();
+    if (isPlaybackKey(event)) {
+      event.preventDefault();
+      togglePlayback(video);
+    } else if (event.key === 'Backspace' || event.key === 'Delete') {
+      event.preventDefault();
+      view.dispatch(view.state.tr.deleteSelection().scrollIntoView());
+      view.focus();
+    }
   });
 }
 

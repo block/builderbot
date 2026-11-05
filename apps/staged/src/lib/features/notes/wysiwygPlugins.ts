@@ -10,7 +10,7 @@ import { $prose } from '@milkdown/kit/utils';
 
 import { stagedCopyHtml } from '../sessions/referenceClipboard';
 import { canBeNoteTitleText } from './noteMarkdown';
-import { stagedMediaView } from './wysiwygMedia';
+import { stagedMediaKeys, stagedMediaView } from './wysiwygMedia';
 
 /**
  * Keep the first line a level-1 heading exactly when it can be the note's title.
@@ -108,4 +108,9 @@ const referencePastePlugin = $prose(() => {
   });
 });
 
-export const wysiwygPlugins = [firstLineTitlePlugin, referencePastePlugin, stagedMediaView];
+export const wysiwygPlugins = [
+  firstLineTitlePlugin,
+  referencePastePlugin,
+  stagedMediaView,
+  stagedMediaKeys,
+];

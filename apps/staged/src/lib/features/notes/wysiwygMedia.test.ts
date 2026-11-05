@@ -54,6 +54,42 @@ function figures(): HTMLElement[] {
   return [...document.querySelectorAll<HTMLElement>('.ProseMirror figure.markdown-media')];
 }
 
+/** Playback for a video, which jsdom does not implement. */
+function stubPlayback(video: HTMLVideoElement) {
+  let paused = true;
+  Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+  video.play = vi.fn(async () => {
+    paused = false;
+  });
+  video.pause = vi.fn(() => {
+    paused = true;
+  });
+}
+
+/**
+ * A key as the browser delivers it: a keydown, then, unless that was
+ * prevented, the keypress ProseMirror types a character from.
+ */
+function press(target: Element, key: string): KeyboardEvent {
+  const keydown = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+  target.dispatchEvent(keydown);
+  if (!keydown.defaultPrevented && key.length === 1) {
+    target.dispatchEvent(
+      new KeyboardEvent('keypress', {
+        key,
+        charCode: key.charCodeAt(0),
+        bubbles: true,
+        cancelable: true,
+      })
+    );
+  }
+  return keydown;
+}
+
+function leftClick(): MouseEvent {
+  return new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+}
+
 /** Position of the first image node whose src is `src`. */
 function positionOf(view: EditorView, src: string): number {
   let found = -1;
@@ -134,7 +170,7 @@ describe('stagedMediaView', () => {
       const view = await createEditor(bare);
       const video = document.querySelector<HTMLVideoElement>('.ProseMirror video')!;
       expect(video.closest('figure')?.querySelector('figcaption')).toBeNull();
-      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      const click = leftClick();
       video.dispatchEvent(click);
       // The browser still gets the click, for the controls.
       expect(click.defaultPrevented).toBe(false);
@@ -171,7 +207,87 @@ describe('stagedMediaView', () => {
       view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1)));
 
       expect(backspace(video).defaultPrevented).toBe(false);
+      expect(press(video, ' ').defaultPrevented).toBe(false);
       expect(currentMarkdown()).toContain(VIDEO);
+    });
+
+    // Focusing the editor after a click on play would hand it the next key.
+    it('leaves focus alone when a click on its controls starts playback', async () => {
+      const view = await createEditor(bare);
+      const video = document.querySelector<HTMLVideoElement>('.ProseMirror video')!;
+      stubPlayback(video);
+      // The controls sit in the video's shadow tree, below its own listeners;
+      // a child element stands in for them.
+      const playButton = document.createElement('span');
+      video.append(playButton);
+      playButton.addEventListener('click', () => {
+        if (video.paused) void video.play();
+        else video.pause();
+      });
+      const focus = vi.spyOn(view, 'focus');
+
+      playButton.dispatchEvent(leftClick());
+      expect(video.paused).toBe(false);
+      expect(view.state.selection).toBeInstanceOf(NodeSelection);
+      expect(focus).not.toHaveBeenCalled();
+
+      // Pausing is an ordinary click.
+      playButton.dispatchEvent(leftClick());
+      expect(video.paused).toBe(true);
+      expect(focus).toHaveBeenCalled();
+    });
+  });
+
+  // Over a selected node, Space and Enter would replace it (Enter by splitting
+  // the block), and clicking play selects the video.
+  describe('a selected video', () => {
+    async function selectVideo(): Promise<{ view: EditorView; video: HTMLVideoElement }> {
+      const view = await createEditor(note);
+      const video = figures()[1].querySelector('video')!;
+      stubPlayback(video);
+      view.dispatch(
+        view.state.tr.setSelection(NodeSelection.create(view.state.doc, positionOf(view, VIDEO)))
+      );
+      return { view, video };
+    }
+
+    it.each([' ', 'Enter'])(
+      'plays and pauses on %j, in the editor or on the video, without editing',
+      async (key) => {
+        const { view, video } = await selectVideo();
+        const before = currentMarkdown();
+
+        for (const target of [view.dom, video]) {
+          expect(press(target, key).defaultPrevented).toBe(true);
+          expect(video.paused).toBe(false);
+          expect(press(target, key).defaultPrevented).toBe(true);
+          expect(video.paused).toBe(true);
+        }
+        expect(currentMarkdown()).toBe(before);
+        expect(view.state.selection).toBeInstanceOf(NodeSelection);
+        expect(view.state.selection.from).toBe(positionOf(view, VIDEO));
+      }
+    );
+
+    it('is typed over by a letter, as a selected image is', async () => {
+      const { view, video } = await selectVideo();
+
+      expect(press(view.dom, 'a').defaultPrevented).toBe(false);
+      expect(currentMarkdown()).not.toContain(VIDEO);
+      expect(currentMarkdown()).toContain('between\n\na');
+      expect(video.play).not.toHaveBeenCalled();
+
+      editor!.action(callCommand(undoCommand.key));
+      expect(currentMarkdown()).toContain(`![Clip](${VIDEO})`);
+    });
+
+    it('leaves Space to the text once something else is selected', async () => {
+      const { view, video } = await selectVideo();
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1)));
+
+      expect(press(view.dom, ' ').defaultPrevented).toBe(false);
+      expect(video.play).not.toHaveBeenCalled();
+      expect(currentMarkdown()).toContain(`![Clip](${VIDEO})`);
     });
   });
 });

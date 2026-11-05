@@ -9,6 +9,31 @@ pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntr
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
+/// Every workspace the `ws_exec*` wrappers were called for in this test
+/// process, so a test can prove a code path never reached its workspace
+/// without faking `sq`. Tests name a workspace no other test uses.
+#[cfg(test)]
+static WS_EXEC_TARGETS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_ws_exec(name: &str) {
+    WS_EXEC_TARGETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(name.to_string());
+}
+
+/// How many `ws_exec*` calls have targeted `name` in this test process.
+#[cfg(test)]
+pub(crate) fn ws_exec_calls_for(name: &str) -> usize {
+    WS_EXEC_TARGETS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|target| *target == name)
+        .count()
+}
+
 /// Check whether the `sq` CLI is available on this system.
 ///
 /// The result is cached for the lifetime of the process since the PATH
@@ -57,6 +82,8 @@ pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
 ///
 /// Returns the command's stdout on success.
 pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
+    #[cfg(test)]
+    record_ws_exec(name);
     blox_cli::ws_exec(name, args)
 }
 
@@ -65,12 +92,16 @@ pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
 /// Like `ws_exec` but returns the raw stdout bytes without UTF-8 validation.
 /// Use this when the command may produce binary output (e.g. `git show` on image files).
 pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
+    #[cfg(test)]
+    record_ws_exec(name);
     blox_cli::ws_exec_bytes(name, args)
 }
 
 /// Execute a command inside a Blox workspace, returning full output regardless
 /// of exit code. Infrastructure errors still return `Err`.
 pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+    #[cfg(test)]
+    record_ws_exec(name);
     blox_cli::ws_exec_output(name, args)
 }
 

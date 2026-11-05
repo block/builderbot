@@ -1,3 +1,4 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -204,4 +205,66 @@ fn cleanup_lanes_follow_the_clone_directory() {
         lane(&remote_branch(&project.id, "r", "feature", "ws-1").with_project_repo(&goose.id)),
         None
     );
+}
+
+/// A panicking lane costs only its own branches. Even when the first lane
+/// every thread claims panics, the lanes after them still run, and the first
+/// panic resurfaces only after the row-delete retry and the remote sweep.
+#[test]
+fn delete_project_cleanup_runs_every_lane_when_lanes_panic() {
+    let panicking: Vec<String> = (0..MAX_PARALLEL_CLONE_CLEANUPS)
+        .map(|n| format!("panics{n}"))
+        .collect();
+    let mut branches: Vec<Branch> = panicking
+        .iter()
+        .map(|id| local_branch("project-1", id))
+        .collect();
+    branches.push(local_branch("project-1", "survivor-1"));
+    branches.push(local_branch("project-1", "survivor-2"));
+    branches.push(remote_branch(
+        "project-1",
+        "remote",
+        "feature-remote",
+        "ws-shared",
+    ));
+
+    let cleanups = CallLog::default();
+    let deletes = CallLog::default();
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        cleanup_project_branches_best_effort(
+            &branches,
+            // One lane per local branch, so each panic is its own lane.
+            |branch| (branch.branch_type == BranchType::Local).then(|| branch.id.clone()),
+            |branch| {
+                cleanups.record(branch);
+                if branch.id.starts_with("panics") {
+                    panic!("simulated cleanup panic");
+                }
+            },
+            |branch| {
+                if deletes.record(branch) == 1 && branch.id == "remote" {
+                    Err("simulated transient delete failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+    }));
+
+    let payload = result.expect_err("the lane panic resurfaces");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"simulated cleanup panic"),
+        "the lane's own payload, not scope's generic one"
+    );
+    for id in &panicking {
+        assert_eq!(cleanups.count(id), 1, "{id} cleaned once");
+        assert_eq!(deletes.count(id), 0, "{id} panicked before its delete");
+    }
+    for id in ["survivor-1", "survivor-2"] {
+        assert_eq!(cleanups.count(id), 1, "{id} cleaned once");
+        assert_eq!(deletes.count(id), 1, "{id} deleted once");
+    }
+    assert_eq!(cleanups.count("remote"), 2, "remote cleaned, then swept");
+    assert_eq!(deletes.count("remote"), 2, "remote deleted, then retried");
 }

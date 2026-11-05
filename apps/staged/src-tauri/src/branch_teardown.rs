@@ -8,7 +8,9 @@
 //! stop its sessions ([`stop_branch_sessions`]), remove its worktree or
 //! workspace, then delete the row, which cascades to everything on it.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -224,8 +226,12 @@ fn cleanup_lane(store: &Arc<Store>, branch: &store::Branch) -> Option<String> {
 /// branches in list order. `worktree remove`, `prune` and `branch -D` in one
 /// clone contend on its `.git` locks, and the remote lane deletes rows as it
 /// goes so the last branch on a shared workspace is the one that deletes it.
-/// A panicking lane does not stop the others; the panic resurfaces once they
-/// finish.
+///
+/// A panic abandons only the rest of its own lane. It is logged with the
+/// lane's key, its thread moves on to the next unclaimed lane, and every
+/// other lane still runs. After the retry and sweep below, the first panic
+/// is re-raised with its own payload, so the caller still sees a crashed
+/// teardown and keeps the project row for a retry.
 pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
     branches: &[store::Branch],
     lane_of: L,
@@ -236,36 +242,56 @@ pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
     F: Fn(&store::Branch) + Sync,
     G: Fn(&store::Branch) -> Result<(), String> + Sync,
 {
-    // Lanes in first-seen order, as indexes into `branches`.
-    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    // Lanes in first-seen order: each lane's key and its indexes into
+    // `branches`.
+    let mut lanes: Vec<(Option<String>, Vec<usize>)> = Vec::new();
     let mut lane_ids: HashMap<Option<String>, usize> = HashMap::new();
     for (index, branch) in branches.iter().enumerate() {
-        let lane = *lane_ids.entry(lane_of(branch)).or_insert_with(|| {
-            lanes.push(Vec::new());
+        let key = lane_of(branch);
+        let lane = *lane_ids.entry(key.clone()).or_insert_with(|| {
+            lanes.push((key, Vec::new()));
             lanes.len() - 1
         });
-        lanes[lane].push(index);
+        lanes[lane].1.push(index);
     }
 
     let failed_branch_deletes = Mutex::new(Vec::new());
+    let first_panic: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
     let next_lane = AtomicUsize::new(0);
     let drain_lanes = || {
-        while let Some(lane) = lanes.get(next_lane.fetch_add(1, Ordering::Relaxed)) {
-            for &index in lane {
-                let branch = &branches[index];
-                cleanup_branch_resources(branch);
-                // Delete branch rows as we go so shared-workspace cleanup can
-                // converge on the final owner and remove the workspace once.
-                if let Err(e) = delete_branch_row(branch) {
-                    log::warn!(
-                        "failed to delete branch '{}' during project cleanup: {e}",
-                        branch.id
-                    );
-                    failed_branch_deletes
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(index);
+        while let Some((key, lane)) = lanes.get(next_lane.fetch_add(1, Ordering::Relaxed)) {
+            // Unwind-safe enough: a panic only abandons the rest of this
+            // lane, and what the other lanes share is atomic or behind a
+            // poison-tolerant lock.
+            let ran = catch_unwind(AssertUnwindSafe(|| {
+                for &index in lane {
+                    let branch = &branches[index];
+                    cleanup_branch_resources(branch);
+                    // Delete branch rows as we go so shared-workspace cleanup
+                    // can converge on the final owner and remove the
+                    // workspace once.
+                    if let Err(e) = delete_branch_row(branch) {
+                        log::warn!(
+                            "failed to delete branch '{}' during project cleanup: {e}",
+                            branch.id
+                        );
+                        failed_branch_deletes
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(index);
+                    }
                 }
+            }));
+            if let Err(payload) = ran {
+                log::error!(
+                    "project cleanup lane '{}' panicked, skipping the rest of its branches: {}",
+                    key.as_deref().unwrap_or("(no clone)"),
+                    panic_message(payload.as_ref())
+                );
+                first_panic
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get_or_insert(payload);
             }
         }
     };
@@ -287,27 +313,43 @@ pub(crate) fn cleanup_project_branches_best_effort<L, F, G>(
     let mut failed_branch_deletes = failed_branch_deletes
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner);
-    if failed_branch_deletes.is_empty() {
-        return;
-    }
-    failed_branch_deletes.sort_unstable();
+    if !failed_branch_deletes.is_empty() {
+        failed_branch_deletes.sort_unstable();
 
-    // One retry can unblock convergence when an early branch-row delete failed.
-    for index in failed_branch_deletes {
-        let branch = &branches[index];
-        if let Err(e) = delete_branch_row(branch) {
-            log::warn!(
-                "failed retry delete for branch '{}' during project cleanup: {e}",
-                branch.id
-            );
+        // One retry can unblock convergence when an early branch-row delete
+        // failed.
+        for index in failed_branch_deletes {
+            let branch = &branches[index];
+            if let Err(e) = delete_branch_row(branch) {
+                log::warn!(
+                    "failed retry delete for branch '{}' during project cleanup: {e}",
+                    branch.id
+                );
+            }
+        }
+
+        // Re-run remote cleanup once after retries so shared workspace
+        // deletion can converge when the first pass observed stale peer rows.
+        for branch in branches {
+            if branch.branch_type == store::BranchType::Remote {
+                cleanup_branch_resources(branch);
+            }
         }
     }
 
-    // Re-run remote cleanup once after retries so shared workspace deletion
-    // can converge when the first pass observed stale peer rows.
-    for branch in branches {
-        if branch.branch_type == store::BranchType::Remote {
-            cleanup_branch_resources(branch);
-        }
+    if let Some(payload) = first_panic
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+    {
+        resume_unwind(payload);
     }
+}
+
+/// The message of a `panic!` payload, which is a `&str` or a `String`.
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(non-string panic payload)")
 }

@@ -19,6 +19,7 @@ mod worktree;
 pub use branch_config::{read_branch_config_snapshot, BranchConfigSnapshot};
 pub(crate) use cli::prewarm_shell_env;
 pub(crate) use cli::run as cli_run;
+pub(crate) use cli::run_lite_or_captured as cli_run_lite_or_captured;
 pub(crate) use cli::run_smart as cli_run_smart;
 pub use cli::{EnvSource, GitError};
 pub use commit::commit;

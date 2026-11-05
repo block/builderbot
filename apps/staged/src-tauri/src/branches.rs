@@ -862,6 +862,10 @@ pub(crate) fn pr_head_is_in_fork(
 /// Undo a worktree whose setup could not be completed, so the next attempt
 /// starts from nothing rather than from a half-made checkout. Best effort:
 /// the caller is already returning the error that got it here.
+///
+/// Lite env with the captured-env fallback for an unusable git, like
+/// [`git::remove_worktree`]: both commands only touch the repo's admin files
+/// and refs, so teardown never waits on a shell capture.
 fn discard_incomplete_worktree(
     repo_path: &Path,
     worktree_path: &Path,
@@ -870,14 +874,16 @@ fn discard_incomplete_worktree(
     let Some(worktree_str) = worktree_path.to_str() else {
         return;
     };
-    if let Err(e) = git::cli_run(repo_path, &["worktree", "remove", "--force", worktree_str]) {
+    if let Err(e) =
+        git::cli_run_lite_or_captured(repo_path, &["worktree", "remove", "--force", worktree_str])
+    {
         log::warn!(
             "Could not remove incomplete worktree '{}': {e}",
             worktree_path.display()
         );
     }
     if let Some(branch) = created_branch {
-        if let Err(e) = git::cli_run(repo_path, &["branch", "-D", branch]) {
+        if let Err(e) = git::cli_run_lite_or_captured(repo_path, &["branch", "-D", branch]) {
             log::warn!("Could not delete incomplete branch '{branch}': {e}");
         }
     }

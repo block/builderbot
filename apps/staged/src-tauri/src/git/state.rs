@@ -899,7 +899,16 @@ pub fn compute_local_branch_git_state_with<T: Send>(
         &cache_key,
         |args| match env_source {
             EnvSource::Lite => cli::run_smart(repo, args).map_err(|e| e.to_string()),
-            EnvSource::Captured => cli::run(repo, args).map_err(|e| e.to_string()),
+            // Every op the build issues reads refs, the index or the work
+            // tree, except the fetch: that one goes through the user's
+            // credential helpers and ssh config, so it waits for the capture
+            // however long it takes.
+            EnvSource::CapturedBounded if args.first() != Some(&"fetch") => {
+                cli::run_bounded(repo, args).map_err(|e| e.to_string())
+            }
+            EnvSource::CapturedBounded | EnvSource::Captured => {
+                cli::run(repo, args).map_err(|e| e.to_string())
+            }
         },
         query,
         with_base_merge_base,

@@ -191,6 +191,11 @@ pub fn create_worktree_for_existing_branch_at_path(
 /// worktree names the repo's admin directory, and that admin directory's
 /// `gitdir` file names the worktree. A rename updates neither, leaving both
 /// dangling; `git worktree move` rewrites both.
+///
+/// Runs via `cli::run_lite_or_captured`, like the teardown in
+/// [`remove_worktree`]: the move renames the directory and rewrites those two
+/// files, nothing more, so it has no use for the clone root's captured env
+/// and shouldn't wait on its capture with the branch's launch lock held.
 pub fn move_worktree(repo: &Path, from: &Path, to: &Path) -> Result<(), GitError> {
     ensure_worktree_parent_exists(to)?;
     ensure_worktree_absent(to)?;
@@ -202,7 +207,7 @@ pub fn move_worktree(repo: &Path, from: &Path, to: &Path) -> Result<(), GitError
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(to.display().to_string()))?;
 
-    cli::run(repo, &["worktree", "move", from_str, to_str])?;
+    cli::run_lite_or_captured(repo, &["worktree", "move", from_str, to_str])?;
     Ok(())
 }
 
@@ -985,14 +990,19 @@ pub fn switch_branch(worktree: &Path, branch_name: &str) -> Result<(), GitError>
 /// de-duplicated PR import. Returns `true` if there are commits in the local
 /// branch that are not in the remote tracking branch, and `true` if the
 /// remote tracking branch doesn't exist (e.g., never pushed).
+///
+/// Runs via `cli::run_bounded`: both reads only walk refs and commits, and the
+/// home page runs this eagerly for the merged branches of every visible
+/// project to decide whether deleting it needs a confirmation, so it shouldn't
+/// queue behind a cold capture of the worktree's shell env.
 pub fn has_unpushed_commits(worktree: &Path, remote_branch: &str) -> Result<bool, GitError> {
     let remote_ref = format!("origin/{remote_branch}");
     // Check that the remote ref exists first
-    if cli::run(worktree, &["rev-parse", "--verify", &remote_ref]).is_err() {
+    if cli::run_bounded(worktree, &["rev-parse", "--verify", &remote_ref]).is_err() {
         // Remote tracking branch doesn't exist — all local commits are unpushed
         return Ok(true);
     }
-    let output = cli::run(worktree, &["rev-list", &format!("{remote_ref}..HEAD")])?;
+    let output = cli::run_bounded(worktree, &["rev-list", &format!("{remote_ref}..HEAD")])?;
     Ok(!output.trim().is_empty())
 }
 

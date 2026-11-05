@@ -1,7 +1,7 @@
 use super::cli::EnvSource;
 use super::state::{
     compute_branch_git_state_with, compute_local_branch_git_state, BranchGitState,
-    BranchGitStateQuery, FetchMode, UpstreamRelation, WorktreeStatusScope,
+    BranchGitStateQuery, FetchMode, FetchStatus, UpstreamRelation, WorktreeStatusScope,
 };
 use super::strip_git_env;
 use crate::test_utils::TempGitRepo;
@@ -133,6 +133,31 @@ fn detects_origin_ahead_branch() {
     assert_eq!(state.upstream.relation, UpstreamRelation::OriginAhead);
     assert_eq!(state.upstream.ahead, 0);
     assert_eq!(state.upstream.behind, 1);
+}
+
+/// `CapturedBounded` only bounds the reads: the fetch still runs, so a
+/// forced refresh sees what landed on origin.
+#[test]
+fn bounded_env_source_still_fetches() {
+    let (origin, clone) = remote_backed_feature();
+    origin.run_git(&["checkout", "feature"]);
+    origin.write_file("origin.txt", "origin\n");
+    origin.commit("origin");
+
+    let state = compute_local_branch_git_state(
+        &clone.path,
+        "feature",
+        "feature",
+        "main",
+        FetchMode::Force,
+        WorktreeStatusScope::Full,
+        EnvSource::CapturedBounded,
+    );
+
+    assert_eq!(state.fetch.status, FetchStatus::Fresh);
+    assert_eq!(state.upstream.relation, UpstreamRelation::OriginAhead);
+    assert_eq!(state.upstream.behind, 1);
+    assert!(state.expected_branch_matches);
 }
 
 #[test]

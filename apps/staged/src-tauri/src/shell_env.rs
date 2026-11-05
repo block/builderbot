@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -280,6 +281,8 @@ struct InFlightHandle {
 struct InFlightPromise {
     state: Mutex<InFlightState>,
     cv: Condvar,
+    /// Set by the first bounded waiter whose bound ran out on this capture.
+    bound_expired: AtomicBool,
 }
 
 enum InFlightState {
@@ -292,11 +295,19 @@ enum InFlightState {
     Cancelled,
 }
 
+/// How a bounded wait on an [`InFlightPromise`] ended.
+enum Waited {
+    Done(Result<ShellEnv, String>),
+    Cancelled,
+    TimedOut,
+}
+
 impl InFlightPromise {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InFlightState::Pending),
             cv: Condvar::new(),
+            bound_expired: AtomicBool::new(false),
         })
     }
 
@@ -332,6 +343,42 @@ impl InFlightPromise {
             InFlightState::Pending => unreachable!(),
         }
     }
+
+    /// [`wait_blocking`] that gives up at `deadline`, leaving the promise
+    /// pending for its capturer to fulfil.
+    ///
+    /// [`wait_blocking`]: InFlightPromise::wait_blocking
+    fn wait_blocking_until(&self, deadline: Instant) -> Waited {
+        let g = self.state.lock().unwrap();
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        let (g, _) = self
+            .cv
+            .wait_timeout_while(g, timeout, |state| matches!(state, InFlightState::Pending))
+            .unwrap();
+        match &*g {
+            InFlightState::Done(r) => Waited::Done(r.clone()),
+            InFlightState::Cancelled => Waited::Cancelled,
+            InFlightState::Pending => Waited::TimedOut,
+        }
+    }
+
+    /// True for the first caller only: whether this is the first bounded wait
+    /// to run out on this capture.
+    fn first_bound_expiry(&self) -> bool {
+        !self.bound_expired.swap(true, Ordering::Relaxed)
+    }
+}
+
+/// Result of [`ShellEnvCache::get_blocking_within`].
+#[derive(Debug)]
+pub enum BoundedEnv {
+    /// A fresh snapshot, cached or captured inside the bound.
+    Ready(ShellEnv),
+    /// The capture was still running when the bound ran out. It keeps running
+    /// and fills the cache for later callers. `first` is true for exactly one
+    /// caller per capture, so a slow capture is reported once rather than once
+    /// per waiter.
+    StillCapturing { first: bool },
 }
 
 /// Cache of [`ShellEnv`] snapshots keyed by working directory.
@@ -553,36 +600,117 @@ impl ShellEnvCache {
                     None => continue, // Capturer cancelled — retry.
                 },
                 Action::Capture { promise, tx } => {
-                    let mut guard = InFlightGuard {
-                        cache: self,
-                        key: &key,
-                        promise: promise.clone(),
-                        promoted: false,
-                    };
-                    let outcome = capture_shell_env_blocking(&key, &self.shell, &self.temp_root);
-                    match outcome {
-                        Ok(vars) => {
-                            let env = ShellEnv {
-                                vars: Arc::new(vars),
-                                captured_at: Instant::now(),
-                            };
-                            self.inner
-                                .lock()
-                                .unwrap()
-                                .insert(key.clone(), CachedEntry::Ready(env.clone()));
-                            guard.promoted = true;
-                            promise.set_done(Ok(env.clone()));
-                            let _ = tx.send(Some(Ok(env.clone())));
-                            return Ok(env);
-                        }
-                        Err(err) => {
-                            let msg = err.to_string();
-                            promise.set_done(Err(msg.clone()));
-                            let _ = tx.send(Some(Err(msg)));
-                            return Err(err);
-                        }
+                    return self.capture_blocking_as_owner(&key, promise, tx);
+                }
+            }
+        }
+    }
+
+    /// [`get_blocking`] that waits at most `bound` for the snapshot.
+    ///
+    /// A fresh snapshot comes back at once. Otherwise the caller waits on the
+    /// directory's in-flight capture, joining one that is already running or
+    /// starting one on a background thread. If the bound runs out first, the
+    /// capture is left alone: it keeps running, caches its result and wakes
+    /// every other waiter as usual. Only this caller goes without it.
+    ///
+    /// [`get_blocking`]: ShellEnvCache::get_blocking
+    pub fn get_blocking_within(
+        self: &Arc<Self>,
+        working_dir: &Path,
+        bound: Duration,
+    ) -> io::Result<BoundedEnv> {
+        let deadline = Instant::now() + bound;
+        let key = working_dir.to_path_buf();
+
+        loop {
+            let promise = {
+                let mut map = self.inner.lock().unwrap();
+                match map.get(&key) {
+                    Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => {
+                        return Ok(BoundedEnv::Ready(env.clone()));
+                    }
+                    Some(CachedEntry::InFlight(handle)) => handle.promise.clone(),
+                    _ => {
+                        let promise = InFlightPromise::new();
+                        let (tx, rx) = watch::channel(None);
+                        // The capture has to outlive this caller's wait, so it
+                        // gets its own thread. The thread starts before the
+                        // entry is published, so if it can't be spawned nobody
+                        // has seen the promise and there is nothing to unwind.
+                        let cache = Arc::clone(self);
+                        let capture_key = key.clone();
+                        let capture_promise = promise.clone();
+                        std::thread::Builder::new()
+                            .name("shell-env-capture".to_string())
+                            .spawn(move || {
+                                let _ = cache.capture_blocking_as_owner(
+                                    &capture_key,
+                                    capture_promise,
+                                    tx,
+                                );
+                            })?;
+                        map.insert(
+                            key.clone(),
+                            CachedEntry::InFlight(InFlightHandle {
+                                promise: promise.clone(),
+                                async_rx: rx,
+                            }),
+                        );
+                        promise
                     }
                 }
+            };
+
+            match promise.wait_blocking_until(deadline) {
+                Waited::Done(Ok(env)) => return Ok(BoundedEnv::Ready(env)),
+                Waited::Done(Err(msg)) => return Err(io::Error::other(msg)),
+                Waited::Cancelled => continue, // Capturer cancelled — retry.
+                Waited::TimedOut => {
+                    return Ok(BoundedEnv::StillCapturing {
+                        first: promise.first_bound_expiry(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Run a blocking capture for `key` as the owner of its `InFlight` entry,
+    /// then cache the result and wake every waiter.
+    fn capture_blocking_as_owner(
+        &self,
+        key: &Path,
+        promise: Arc<InFlightPromise>,
+        tx: watch::Sender<Option<Result<ShellEnv, String>>>,
+    ) -> io::Result<ShellEnv> {
+        // Locals drop before parameters, so on panic the guard evicts the
+        // entry and wakes sync waiters before `tx` drops, as in `get`.
+        let mut guard = InFlightGuard {
+            cache: self,
+            key,
+            promise: promise.clone(),
+            promoted: false,
+        };
+        match capture_shell_env_blocking(key, &self.shell, &self.temp_root) {
+            Ok(vars) => {
+                let env = ShellEnv {
+                    vars: Arc::new(vars),
+                    captured_at: Instant::now(),
+                };
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .insert(key.to_path_buf(), CachedEntry::Ready(env.clone()));
+                guard.promoted = true;
+                promise.set_done(Ok(env.clone()));
+                let _ = tx.send(Some(Ok(env.clone())));
+                Ok(env)
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                promise.set_done(Err(msg.clone()));
+                let _ = tx.send(Some(Err(msg)));
+                Err(err)
             }
         }
     }
@@ -795,35 +923,12 @@ fn single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::test_utils::write_fake_shell;
 
     // ---------------------------------------------------------------------
     // Test helpers
     // ---------------------------------------------------------------------
-
-    /// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
-    ///
-    /// Hold the returned handle for the test's lifetime — dropping it removes
-    /// the file. Returns a `TempPath` (not `NamedTempFile`) so the writable fd
-    /// is closed before the script gets exec'd: Linux's exec path refuses to
-    /// load a binary whose inode has `i_writecount > 0` and returns ETXTBSY.
-    /// macOS has no equivalent check, which is why the prior `NamedTempFile`
-    /// shape passed locally on Darwin but failed on Linux CI. Unix-only
-    /// because we set the executable mode.
-    #[cfg(unix)]
-    fn write_fake_shell(content: &str) -> tempfile::TempPath {
-        use std::os::unix::fs::PermissionsExt;
-        let temp_path = tempfile::Builder::new()
-            .prefix("staged-fake-shell-")
-            .suffix(".sh")
-            .tempfile()
-            .expect("create fake shell tempfile")
-            .into_temp_path();
-        std::fs::write(&temp_path, content).expect("write script");
-        let mut perms = std::fs::metadata(&temp_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&temp_path, perms).expect("chmod 755");
-        temp_path
-    }
 
     /// Collect any `staged-shell-env-*` files left in `temp_root`. Tempfile
     /// cleanup tests point the cache at a per-test tempdir and assert this is
@@ -1727,5 +1832,176 @@ mod tests {
             .map(|(_, v)| v.clone())
             .expect("WEIRD must round-trip into the snapshot");
         assert_eq!(weird, "line1\nline2", "newlines must round-trip verbatim");
+    }
+
+    // ---------------------------------------------------------------------
+    // Bounded waits (`get_blocking_within`)
+    // ---------------------------------------------------------------------
+
+    /// Fake `$SHELL` that takes `delay` seconds to start and appends a line to
+    /// `counter` on every launch, so a test can count captures.
+    #[cfg(unix)]
+    fn counting_shell(counter: &Path, delay: &str) -> tempfile::TempPath {
+        write_fake_shell(&format!(
+            "#!/bin/sh\necho launch >> {}\nsleep {delay}\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
+            single_quote(&counter.to_string_lossy())
+        ))
+    }
+
+    #[cfg(unix)]
+    fn launches(counter: &Path) -> usize {
+        std::fs::read_to_string(counter)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// D1: A bounded wait on a cold dir gives up on time, and the capture it
+    /// started keeps going with nobody waiting: it lands in the cache, and the
+    /// next caller gets that snapshot instead of launching a second shell.
+    /// Only the first waiter to give up on the capture is told it was first.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_wait_times_out_and_leaves_the_capture_running() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let counter = scratch.path().join("launches");
+        let shell = counting_shell(&counter, "1");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let started = Instant::now();
+        let first = cache
+            .get_blocking_within(dir.path(), Duration::from_millis(100))
+            .expect("bounded wait");
+        let waited = started.elapsed();
+        assert!(
+            matches!(first, BoundedEnv::StillCapturing { first: true }),
+            "{first:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(800),
+            "bounded wait overran its bound: {waited:?}"
+        );
+
+        let second = cache
+            .get_blocking_within(dir.path(), Duration::from_millis(100))
+            .expect("bounded wait");
+        assert!(
+            matches!(second, BoundedEnv::StillCapturing { first: false }),
+            "{second:?}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let landed = loop {
+            if let Some(CachedEntry::Ready(env)) = cache.inner.lock().unwrap().get(dir.path()) {
+                break env.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "capture never landed in the cache"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(landed
+            .vars()
+            .iter()
+            .any(|(k, v)| k == "PATH" && v == "/usr/bin:/bin"));
+
+        match cache
+            .get_blocking_within(dir.path(), Duration::ZERO)
+            .expect("cache hit")
+        {
+            BoundedEnv::Ready(env) => assert_eq!(env.captured_at(), landed.captured_at()),
+            other => panic!("expected the landed snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            launches(&counter),
+            1,
+            "giving up must neither evict nor restart the capture"
+        );
+    }
+
+    /// D2: A capture that finishes inside the bound comes back `Ready` and is
+    /// cached like any other.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_wait_returns_a_capture_that_finishes_in_time() {
+        let shell =
+            write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let env = match cache
+            .get_blocking_within(dir.path(), Duration::from_secs(30))
+            .expect("bounded wait")
+        {
+            BoundedEnv::Ready(env) => env,
+            other => panic!("a fast capture should land inside the bound, got {other:?}"),
+        };
+        assert!(env
+            .vars()
+            .iter()
+            .any(|(k, v)| k == "PATH" && v == "/usr/bin:/bin"));
+
+        let again = cache.get_blocking(dir.path()).expect("cache hit");
+        assert_eq!(again.captured_at(), env.captured_at());
+    }
+
+    /// D3: The production shape — `run_smart`'s async warm-up owns the capture
+    /// and a bounded git read joins it. Giving up must not disturb the async
+    /// capturer: it still gets its snapshot, from the one shell, and later
+    /// bounded reads hit the cache.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bounded_wait_on_an_async_capture_leaves_it_running() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let counter = scratch.path().join("launches");
+        let shell = counting_shell(&counter, "1");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+
+        let async_handle = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            async move { cache.get(&dir).await }
+        });
+        // Give the async capturer time to insert `InFlight`.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let bounded = tokio::task::spawn_blocking({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            move || cache.get_blocking_within(&dir, Duration::from_millis(100))
+        })
+        .await
+        .expect("bounded task")
+        .expect("bounded wait");
+        assert!(
+            matches!(bounded, BoundedEnv::StillCapturing { first: true }),
+            "{bounded:?}"
+        );
+
+        let env = async_handle.await.expect("async task").expect("capture");
+        let after = tokio::task::spawn_blocking({
+            let cache = cache.clone();
+            move || cache.get_blocking_within(&dir_path, Duration::ZERO)
+        })
+        .await
+        .expect("bounded task")
+        .expect("cache hit");
+        match after {
+            BoundedEnv::Ready(cached) => assert_eq!(cached.captured_at(), env.captured_at()),
+            other => panic!("expected the async snapshot, got {other:?}"),
+        }
+        assert_eq!(launches(&counter), 1);
     }
 }

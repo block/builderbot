@@ -1,8 +1,11 @@
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 use super::strip_git_env;
+use crate::shell_env::{BoundedEnv, ShellEnvCache};
 
 #[derive(Error, Debug)]
 pub enum GitError {
@@ -22,10 +25,26 @@ pub enum GitError {
     InvalidPath(String),
 }
 
+/// How long [`EnvSource::CapturedBounded`] waits for the captured env before
+/// running with the lite env instead. A capture that is nearly done still
+/// lands inside it, and it is short next to the 9–30 s an interactive login
+/// shell takes to start on a dev machine with nvm and Hermit hooks.
+// The test build stubs `apply_env`, so only `run_bounded`'s docs refer to it.
+#[cfg_attr(test, allow(dead_code))]
+const CAPTURED_ENV_READ_BOUND: Duration = Duration::from_secs(2);
+
 /// Run a git command and return stdout as a string. Uses the project's
 /// captured interactive-login-shell env (see [`apply_env`]).
 pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     run_with_env(repo, args, EnvSource::Captured)
+}
+
+/// [`run`] for read-only git that shouldn't stall on a cold capture. Waits at
+/// most [`CAPTURED_ENV_READ_BOUND`] for the captured env, then runs with the
+/// lite env while the capture finishes in the background for later callers.
+/// See [`EnvSource::CapturedBounded`].
+pub fn run_bounded(repo: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_with_env(repo, args, EnvSource::CapturedBounded)
 }
 
 /// Run a git command with the lite env (parent env minus `GIT_*`).
@@ -184,18 +203,38 @@ pub(crate) fn prewarm_shell_env(repo: &Path) {
 /// Also surfaces at the `state::compute_local_branch_git_state` boundary as a
 /// self-documenting selector between the foreground-optimized cli entry point
 /// (`run_smart`, which tries `Lite` and falls back to `Captured` on env-
-/// sensitive failure) and the captured-only entry point (`run`).
+/// sensitive failure), the bounded entry point (`run_bounded`, with `fetch`
+/// still on `run`), and the captured-only entry point (`run`).
 #[derive(Debug, Clone, Copy)]
 pub enum EnvSource {
     /// Parent env with `GIT_*` variables stripped. Skips the per-project
     /// shell-env capture; correct for foreground reads that don't depend on
     /// Hermit-managed git, LFS smudge filters, or credential helpers.
     Lite,
+    /// `Captured` if the snapshot is ready within [`CAPTURED_ENV_READ_BOUND`],
+    /// otherwise `Lite`. The capture is never cut short: it keeps running and
+    /// fills the cache for later callers. For reads of refs, the index and the
+    /// work tree, where the lite env costs at worst a less faithful answer
+    /// while the capture is still running.
+    CapturedBounded,
     /// Project's cached interactive-login-shell snapshot — sees Hermit, LFS,
     /// credential helpers, etc. Blocks on the capture if it isn't ready.
     /// Required for mutating ops (push, pull, discard) and for repos whose
     /// foreground reads have shown env-sensitivity.
     Captured,
+}
+
+/// The env a spawn actually ran with. It differs from the requested
+/// [`EnvSource`] when the captured env wasn't ready in time or failed to
+/// capture, which belongs next to any measure of the wait: a bounded read
+/// that gave up after the full bound and one whose capture landed just inside
+/// it took about as long, but ran with different envs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppliedEnv {
+    Lite,
+    Captured,
+    /// Asked for the captured env, ran with the lite one.
+    LiteFallback,
 }
 
 /// Spawn `git -C <repo> <args>` with `source`'s env, non-interactive and
@@ -212,7 +251,16 @@ fn spawn_git(
 
     let mut command = Command::new("git");
     command.args(["-C", repo_str]).args(args);
-    apply_env(&mut command, repo, source);
+    // Blocks on the shell-env capture: without limit for `Captured`, for at
+    // most `CAPTURED_ENV_READ_BOUND` for `CapturedBounded`.
+    let env = apply_env(&mut command, repo, source);
+    if env == AppliedEnv::LiteFallback {
+        log::debug!(
+            "git {} in {} ran with the inherited env in place of {source:?}",
+            args.iter().take(2).copied().collect::<Vec<_>>().join(" "),
+            repo.display()
+        );
+    }
     force_non_interactive(&mut command);
     detach_from_ctty(&mut command);
 
@@ -311,27 +359,82 @@ fn warm_shell_env_async(repo: &Path) {
 fn warm_shell_env_async(_repo: &Path) {}
 
 #[cfg(not(test))]
-fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) {
-    match source {
-        EnvSource::Lite => strip_git_env(command),
-        EnvSource::Captured => match crate::session_runner::shell_env_cache().get_blocking(repo) {
-            Ok(env) => env.apply_to_std(command),
+fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) -> AppliedEnv {
+    use crate::session_runner::shell_env_cache;
+
+    let applied = match source {
+        EnvSource::Lite => {
+            strip_git_env(command);
+            AppliedEnv::Lite
+        }
+        EnvSource::CapturedBounded => {
+            apply_captured_env_within(command, repo, shell_env_cache(), CAPTURED_ENV_READ_BOUND)
+        }
+        EnvSource::Captured => match shell_env_cache().get_blocking(repo) {
+            Ok(env) => {
+                env.apply_to_std(command);
+                AppliedEnv::Captured
+            }
             Err(e) => {
-                log::warn!(
-                    "Failed to capture shell env for {}: {e}; falling back to inherited env",
-                    repo.display()
-                );
+                warn_capture_failed(repo, &e);
                 strip_git_env(command);
+                AppliedEnv::LiteFallback
             }
         },
-    }
+    };
     pin_c_locale(command);
+    applied
 }
 
 #[cfg(test)]
-fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) {
+fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) -> AppliedEnv {
     strip_git_env(command);
     pin_c_locale(command);
+    AppliedEnv::Lite
+}
+
+/// The [`EnvSource::CapturedBounded`] arm of [`apply_env`], taking the cache
+/// and bound explicitly so tests can drive it with a hermetic shell.
+///
+/// When the bound runs out the inherited env is used and the capture is left
+/// running. Only the first caller to give up on a given capture warns; the
+/// rest of a refresh's reads, and other branches waiting on the same
+/// directory, would otherwise repeat the line once each.
+fn apply_captured_env_within(
+    command: &mut Command,
+    repo: &Path,
+    cache: &Arc<ShellEnvCache>,
+    bound: Duration,
+) -> AppliedEnv {
+    match cache.get_blocking_within(repo, bound) {
+        Ok(BoundedEnv::Ready(env)) => {
+            env.apply_to_std(command);
+            AppliedEnv::Captured
+        }
+        Ok(BoundedEnv::StillCapturing { first }) => {
+            if first {
+                log::warn!(
+                    "Shell env capture for {} still running after {bound:?}; read-only git \
+                     there uses the inherited env until it finishes",
+                    repo.display()
+                );
+            }
+            strip_git_env(command);
+            AppliedEnv::LiteFallback
+        }
+        Err(e) => {
+            warn_capture_failed(repo, &e);
+            strip_git_env(command);
+            AppliedEnv::LiteFallback
+        }
+    }
+}
+
+fn warn_capture_failed(repo: &Path, error: &std::io::Error) {
+    log::warn!(
+        "Failed to capture shell env for {}: {error}; falling back to inherited env",
+        repo.display()
+    );
 }
 
 /// Make git/ssh refuse to prompt at the semantic level. Even if a future
@@ -635,5 +738,74 @@ mod tests {
         let err = run_lite_output(tmp.path(), &["status"])
             .expect_err("a non-repo path is an error, not an exit status");
         assert!(matches!(err, GitError::NotARepo(_)), "{err:?}");
+    }
+
+    /// Hermetic cache whose `$SHELL` takes `delay` seconds to start and puts a
+    /// marker in its snapshot, so a test can tell the captured env from the
+    /// inherited one. Hold the returned shell for the test's lifetime.
+    #[cfg(unix)]
+    fn marker_cache(delay: &str) -> (Arc<ShellEnvCache>, tempfile::TempPath) {
+        let shell = crate::test_utils::write_fake_shell(&format!(
+            "#!/bin/sh\nsleep {delay}\nPATH=/usr/bin:/bin\nSTAGED_CAPTURE_MARKER=captured\n\
+             export PATH STAGED_CAPTURE_MARKER\nexec /bin/sh -s\n"
+        ));
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        (cache, shell)
+    }
+
+    #[cfg(unix)]
+    fn capture_marker(command: &Command) -> Option<String> {
+        command
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("STAGED_CAPTURE_MARKER"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    /// A bounded read whose capture is still running gets the inherited env
+    /// once the bound runs out, and the capture it left running is what the
+    /// next read gets.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_env_falls_back_to_inherited_env_while_capture_runs() {
+        let (cache, _shell) = marker_cache("1");
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let mut command = Command::new("git");
+        let started = std::time::Instant::now();
+        let applied =
+            apply_captured_env_within(&mut command, dir.path(), &cache, Duration::from_millis(100));
+        let waited = started.elapsed();
+        assert_eq!(applied, AppliedEnv::LiteFallback);
+        assert!(
+            waited < Duration::from_millis(800),
+            "bounded read overran its bound: {waited:?}"
+        );
+        assert_eq!(capture_marker(&command), None);
+
+        cache
+            .get_blocking(dir.path())
+            .expect("the capture left running lands");
+        let mut command = Command::new("git");
+        let applied = apply_captured_env_within(&mut command, dir.path(), &cache, Duration::ZERO);
+        assert_eq!(applied, AppliedEnv::Captured);
+        assert_eq!(capture_marker(&command).as_deref(), Some("captured"));
+    }
+
+    /// A capture that lands inside the bound is the env the read runs with.
+    #[cfg(unix)]
+    #[test]
+    fn bounded_env_uses_captured_env_that_lands_in_time() {
+        let (cache, _shell) = marker_cache("0");
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let mut command = Command::new("git");
+        let applied =
+            apply_captured_env_within(&mut command, dir.path(), &cache, Duration::from_secs(30));
+        assert_eq!(applied, AppliedEnv::Captured);
+        assert_eq!(capture_marker(&command).as_deref(), Some("captured"));
     }
 }

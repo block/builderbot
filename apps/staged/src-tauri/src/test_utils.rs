@@ -119,3 +119,28 @@ pub fn run_git_in(repo: &Path, args: &[&str]) -> String {
     );
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
+
+/// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
+///
+/// Hold the returned handle for the test's lifetime — dropping it removes
+/// the file. Returns a `TempPath` (not `NamedTempFile`) so the writable fd
+/// is closed before the script gets exec'd: Linux's exec path refuses to
+/// load a binary whose inode has `i_writecount > 0` and returns ETXTBSY.
+/// macOS has no equivalent check, which is why the prior `NamedTempFile`
+/// shape passed locally on Darwin but failed on Linux CI. Unix-only
+/// because we set the executable mode.
+#[cfg(unix)]
+pub fn write_fake_shell(content: &str) -> tempfile::TempPath {
+    use std::os::unix::fs::PermissionsExt;
+    let temp_path = tempfile::Builder::new()
+        .prefix("staged-fake-shell-")
+        .suffix(".sh")
+        .tempfile()
+        .expect("create fake shell tempfile")
+        .into_temp_path();
+    fs::write(&temp_path, content).expect("write script");
+    let mut perms = fs::metadata(&temp_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&temp_path, perms).expect("chmod 755");
+    temp_path
+}

@@ -110,19 +110,46 @@ export function highlightMatches(
  * Clear all search highlights from a container element.
  * Removes <mark> tags and restores original text.
  *
+ * Each mark's text is merged back into the text `highlightMatches` split
+ * off around it, by hand rather than with `normalize()`. `normalize()` also
+ * deletes every empty text node in the container, and Svelte uses empty text
+ * nodes as block anchors: a block whose anchor is gone renders nothing the
+ * next time its contents change.
+ *
  * @param container - The container element to clear highlights from
  */
 export function clearHighlights(container: HTMLElement): void {
   const marks = container.querySelectorAll('mark.search-match');
 
   marks.forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
     const text = mark.textContent || '';
-    const textNode = document.createTextNode(text);
-    mark.parentNode?.replaceChild(textNode, mark);
-  });
+    const prev = mark.previousSibling;
+    const next = mark.nextSibling;
 
-  // Normalize to merge adjacent text nodes
-  container.normalize();
+    if (isNonEmptyText(prev)) {
+      prev.data += text;
+      mark.remove();
+      if (isNonEmptyText(next)) {
+        prev.data += next.data;
+        next.remove();
+      }
+    } else if (isNonEmptyText(next)) {
+      next.data = text + next.data;
+      mark.remove();
+    } else {
+      parent.replaceChild(document.createTextNode(text), mark);
+    }
+  });
+}
+
+/**
+ * The pieces `highlightMatches` splits a text node into are never empty, so
+ * only non-empty neighbours are merged: an empty one may be a Svelte anchor.
+ */
+function isNonEmptyText(node: Node | null): node is Text {
+  return node !== null && node.nodeType === Node.TEXT_NODE && (node as Text).data.length > 0;
 }
 
 /**

@@ -576,6 +576,12 @@ pub struct ReplayBoundary {
     pub content: String,
     pub acp_message_id: Option<String>,
     pub acp_tool_call_id: Option<String>,
+    /// A tool call row's last ACP status (`pending`, `in_progress`,
+    /// `completed`, `failed`), as the transcript holds it. An attach's
+    /// catch-up reads it to tell a call that was still running at the
+    /// disconnect, whose replayed updates are new, from one whose final
+    /// state the transcript already holds.
+    pub acp_tool_status: Option<String>,
 }
 
 impl ReplayBoundary {
@@ -585,6 +591,7 @@ impl ReplayBoundary {
             content,
             acp_message_id: None,
             acp_tool_call_id: None,
+            acp_tool_status: None,
         }
     }
 }
@@ -4463,6 +4470,27 @@ impl AcpNotificationHandler {
     /// sends `available_commands_update` right behind it), so the gate holds
     /// them rather than dropping them.
     async fn name_session(&self, session_id: &str) {
+        self.name_session_into(session_id, Some(catch_up::CatchUpStage::Replay))
+            .await;
+    }
+
+    /// [`Self::name_session`] for a connection that sends something else
+    /// before its `session/load`: a catch-up stays held until
+    /// [`Self::begin_replay`].
+    async fn name_session_holding(&self, session_id: &str) {
+        self.name_session_into(session_id, None).await;
+    }
+
+    /// A held catch-up's `session/load` is about to go out (see
+    /// [`Self::name_session_holding`]): what arrives from here is its replay.
+    /// Under the gate, as in [`Self::name_session`].
+    async fn begin_replay(&self) {
+        let _gate = self.session_gate.lock().await;
+        self.set_catch_up_stage(catch_up::CatchUpStage::Replay)
+            .await;
+    }
+
+    async fn name_session_into(&self, session_id: &str, stage: Option<catch_up::CatchUpStage>) {
         let mut gate = self.session_gate.lock().await;
         let held = match &mut *gate {
             SessionGate::Unnamed(held) => std::mem::take(held),
@@ -4491,8 +4519,9 @@ impl AcpNotificationHandler {
         // Anything after the held frames follows the `session/load` about to
         // go out: a catch-up's replay. Still under the gate, so no frame can
         // slip in between.
-        self.set_catch_up_stage(catch_up::CatchUpStage::Replay)
-            .await;
+        if let Some(stage) = stage {
+            self.set_catch_up_stage(stage).await;
+        }
     }
 
     /// Pass a frame stamped `session_id` through the own-session gate: hand
@@ -8000,6 +8029,73 @@ async fn initialize_connection(
     Ok((init_response, task_tracking_mode))
 }
 
+/// `session/load` `existing_id` on a connection `initialize` answered with
+/// `init_response`, then apply the session's modes and config options. The
+/// handler must already have the session named, so the replay passes the
+/// own-session gate.
+async fn load_acp_session(
+    context: &AcpSessionSetupContext<'_>,
+    existing_id: &str,
+    init_response: &InitializeResponse,
+    task_tracking_mode: TaskTrackingMode,
+) -> Result<(), String> {
+    let AcpSessionSetupContext {
+        connection,
+        working_dir,
+        handler,
+        our_session_id,
+        config_options,
+        mcp_servers,
+        agent_label,
+        auth_selection,
+        unattended_session_mode,
+        ..
+    } = *context;
+    let writer = &handler.writer;
+    if !init_response.agent_capabilities.load_session {
+        return Err("Agent does not support load_session — cannot resume conversation".to_string());
+    }
+
+    log::info!("Resuming ACP session {existing_id} via load_session for session {our_session_id}");
+    let load_request = || {
+        LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
+            .mcp_servers(mcp_servers.to_vec())
+            // The Claude bridge recreates the session on load and reads
+            // `_meta.claudeCode.emitRawSDKMessages` there too, so resumed
+            // sessions keep the raw background-task frames flowing.
+            .meta(background_task_tracking_meta(task_tracking_mode))
+    };
+    let load_response = send_session_setup_request(
+        connection,
+        load_request,
+        &init_response.auth_methods,
+        auth_selection,
+        "load ACP session",
+    )
+    .await?;
+
+    if let Some(ref modes) = load_response.modes {
+        writer.on_model_state_update(modes).await;
+    }
+    apply_unattended_session_mode(
+        connection,
+        existing_id,
+        load_response.modes.as_ref(),
+        unattended_session_mode,
+        agent_label,
+    )
+    .await;
+    apply_or_record_session_config_options(
+        connection,
+        existing_id,
+        load_response.config_options.as_deref(),
+        config_options,
+        writer,
+        true,
+    )
+    .await
+}
+
 async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
     let AcpSessionSetupContext {
         connection,
@@ -8029,58 +8125,10 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
 
     match acp_session_id {
         Some(existing_id) => {
-            if !agent_capabilities.load_session {
-                return Err(
-                    "Agent does not support load_session — cannot resume conversation".to_string(),
-                );
-            }
-
-            log::info!(
-                "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
-            );
             // Before the load goes out: its replay streams `session/update`s
             // ahead of the response, and they must pass the own-session gate.
             handler.name_session(existing_id).await;
-
-            let load_request = || {
-                LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
-                    .mcp_servers(mcp_servers.to_vec())
-                    // The Claude bridge recreates the session on load and
-                    // reads `_meta.claudeCode.emitRawSDKMessages` there
-                    // too, so resumed sessions keep the raw
-                    // background-task frames flowing.
-                    .meta(background_task_tracking_meta(task_tracking_mode))
-            };
-            let load_response = send_session_setup_request(
-                connection,
-                load_request,
-                &init_response.auth_methods,
-                auth_selection,
-                "load ACP session",
-            )
-            .await?;
-
-            if let Some(ref modes) = load_response.modes {
-                writer.on_model_state_update(modes).await;
-            }
-            apply_unattended_session_mode(
-                connection,
-                existing_id,
-                load_response.modes.as_ref(),
-                unattended_session_mode,
-                agent_label,
-            )
-            .await;
-            apply_or_record_session_config_options(
-                connection,
-                existing_id,
-                load_response.config_options.as_deref(),
-                config_options,
-                writer,
-                true,
-            )
-            .await?;
-
+            load_acp_session(&context, existing_id, &init_response, task_tracking_mode).await?;
             Ok(AcpSessionSetup {
                 agent_session_id: existing_id.to_string(),
                 agent_capabilities,
@@ -10731,6 +10779,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             content: "persisted text".to_string(),
             acp_message_id: Some("msg-1".to_string()),
             acp_tool_call_id: None,
+            acp_tool_status: None,
         }]);
 
         let completed = buffer.try_match(&ReplayEvent {
@@ -10752,12 +10801,14 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 content: "first".to_string(),
                 acp_message_id: Some("msg-1".to_string()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
             ReplayBoundary {
                 role: "assistant".to_string(),
                 content: "second".to_string(),
                 acp_message_id: Some("msg-2".to_string()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
         ]);
 
@@ -14425,12 +14476,14 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                 content: "build running".to_string(),
                 acp_message_id: Some("msg-1".to_string()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
             ReplayBoundary {
                 role: "assistant".to_string(),
                 content: "build finished".to_string(),
                 acp_message_id: Some(continuation_id.clone()),
                 acp_tool_call_id: None,
+                acp_tool_status: None,
             },
         ]);
 

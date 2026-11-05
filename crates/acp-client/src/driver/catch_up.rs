@@ -4,16 +4,22 @@
 //!
 //! The replay re-sends the whole session. Everything the transcript already
 //! holds is dropped by identity: text by its ACP message id (or, for an agent
-//! that sends none, by position in the stored text), tool calls and their
-//! results by tool-call id. The replay can end mid-turn — its last tool call
-//! may be `pending`, with the result still to come live — so nothing waits for
-//! the replay to "complete"; every frame stands on its own.
+//! that sends none, by position in the stored text), tool calls by tool-call
+//! id. A tool call's updates are dropped only once the transcript holds the
+//! call's final state: the call that was running at the disconnect has its
+//! updates replayed, and they are new. The replay can end mid-turn — its last
+//! tool call may be `pending`, with the result still to come live — so nothing
+//! waits for the replay to "complete"; every frame stands on its own. Once the
+//! load answers, every frame is the turn's live stream, recorded as a live
+//! turn records it.
 //!
 //! The replay also says whether the agent ever received the newest prompt the
 //! transcript holds ([`LatestPrompt`]): Staged persists a prompt before it
 //! sends it, so a connection lost in between leaves a prompt in the transcript
 //! that the agent's session does not have.
 use super::*;
+
+use agent_client_protocol::schema::v1::ToolCallStatus;
 
 /// Which part of an attach a frame arrived in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,10 +29,13 @@ pub(super) enum CatchUpStage {
     /// session was named. The replay re-sends everything they describe, in
     /// transcript order, so they are dropped: recorded here they would land
     /// ahead of the older turns the replay is about to backfill. The one
-    /// exception is text of a message still streaming, which an agent that
+    /// exceptions are text of a message still streaming, which an agent that
     /// writes messages to its transcript only once complete (the Claude
     /// bridge) cannot replay: that is kept, and recorded ahead of the
-    /// message's next live chunk, or once the replay is over (see
+    /// message's next live chunk, or once the replay is over; and an update
+    /// that settles a tool call, which an agent can send live only (the
+    /// Claude bridge closes the calls a cancel left open without writing a
+    /// result): that is kept for a call the replay leaves running (see
     /// [`CatchUpLedger::go_live`]).
     Held,
     /// `session/load` is out: the replay.
@@ -288,6 +297,70 @@ impl PromptLedger {
     }
 }
 
+/// The tool calls whose final state `stored` holds: a call row with a status
+/// that ends the call. A call stored with no status at all (an agent that
+/// sends none) counts as settled once its result is stored, as nothing in a
+/// replay could move it on; so does a result stored with no call row.
+///
+/// A result alone says nothing for a call with a status: the Claude bridge
+/// records a shell command's description as the call's first content (and
+/// so its result row) while the command is still running.
+fn settled_tool_calls(stored: &[ReplayBoundary]) -> HashSet<String> {
+    let mut statuses: HashMap<&str, Option<&str>> = HashMap::new();
+    let mut results: HashSet<&str> = HashSet::new();
+    for boundary in stored {
+        match (boundary.role.as_str(), boundary.acp_tool_call_id.as_deref()) {
+            ("tool_call", Some(id)) => {
+                statuses.insert(id, boundary.acp_tool_status.as_deref());
+            }
+            ("tool_result", Some(id)) => {
+                results.insert(id);
+            }
+            _ => {}
+        }
+    }
+    let settled_calls = statuses
+        .iter()
+        .filter(|(id, status)| match status {
+            Some(status) => is_final_tool_status(status),
+            None => results.contains(*id),
+        })
+        .map(|(id, _)| *id);
+    let orphan_results = results
+        .iter()
+        .copied()
+        .filter(|id| !statuses.contains_key(id));
+    settled_calls
+        .chain(orphan_results)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether a stored ACP tool status ends the call.
+fn is_final_tool_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "canceled")
+}
+
+/// Whether a replayed frame's status ends the call.
+fn settles_tool_call(status: Option<&ToolCallStatus>) -> bool {
+    matches!(
+        status,
+        Some(ToolCallStatus::Completed | ToolCallStatus::Failed)
+    )
+}
+
+/// The tool call `update` settles, if it settles one.
+fn settled_call_id(update: &SessionUpdate) -> Option<String> {
+    let (id, status) = match update {
+        SessionUpdate::ToolCall(call) => (&call.tool_call_id, Some(&call.status)),
+        SessionUpdate::ToolCallUpdate(update) => {
+            (&update.tool_call_id, update.fields.status.as_ref())
+        }
+        _ => return None,
+    };
+    settles_tool_call(status).then(|| id.0.to_string())
+}
+
 /// How many of `stored`'s prompts, counted back from the newest, the replay
 /// re-sent in order: each matched to the latest replayed message before the
 /// one matched to the prompt after it that holds its text, until one isn't
@@ -339,8 +412,10 @@ pub(super) struct CatchUpLedger {
     unidentified: PositionalText,
     /// Tool calls the transcript holds, or this attach recorded.
     tool_calls: HashSet<String>,
-    /// Tool calls whose result the transcript holds, or this attach recorded.
-    tool_results: HashSet<String>,
+    /// Tool calls whose final state the transcript holds, or this attach
+    /// recorded: nothing the replay re-sends for them is new (see
+    /// [`settled_tool_calls`]).
+    settled_tool_calls: HashSet<String>,
     /// The replay has produced something the transcript did not hold, so the
     /// events it carries from here on (usage, plans) are new too.
     past_boundary: bool,
@@ -348,6 +423,9 @@ pub(super) struct CatchUpLedger {
     /// An entry goes once the replay stage shows what its message is.
     held: HashMap<String, HeldMessage>,
     held_order: Vec<String>,
+    /// Held updates that settle a tool call: the first per call, in arrival
+    /// order.
+    held_settlements: Vec<(String, SessionUpdate)>,
     /// Messages with held text that went on streaming live beside the
     /// replay, which does not re-send them: their text is new as it comes.
     streaming: HashSet<String>,
@@ -359,15 +437,12 @@ impl CatchUpLedger {
         let mut messages: HashMap<String, String> = HashMap::new();
         let mut unidentified = String::new();
         let mut tool_calls = HashSet::new();
-        let mut tool_results = HashSet::new();
         for boundary in stored {
             match (boundary.role.as_str(), &boundary.acp_tool_call_id) {
                 ("tool_call", Some(id)) => {
                     tool_calls.insert(id.clone());
                 }
-                ("tool_result", Some(id)) => {
-                    tool_results.insert(id.clone());
-                }
+                ("tool_result", Some(_)) => {}
                 _ => match &boundary.acp_message_id {
                     Some(id) => messages
                         .entry(id.clone())
@@ -388,10 +463,11 @@ impl CatchUpLedger {
                 .collect(),
             unidentified: PositionalText::new(unidentified),
             tool_calls,
-            tool_results,
+            settled_tool_calls: settled_tool_calls(stored),
             past_boundary: false,
             held: HashMap::new(),
             held_order: Vec::new(),
+            held_settlements: Vec::new(),
             streaming: HashSet::new(),
             prompts: PromptLedger::new(stored),
         }
@@ -402,21 +478,26 @@ impl CatchUpLedger {
     }
 
     /// The replay is over; from here every frame is the turn's live stream.
-    /// Returns the text to record before the next live frame: the held text
-    /// of each message the replay stage carried nothing for, in the order
-    /// the messages first appeared.
+    /// Returns what to record before the next live frame: the held text of
+    /// each message the replay stage carried nothing for, in the order the
+    /// messages first appeared, then the held settling of each call the
+    /// transcript or the replay holds that is still running.
     pub(super) fn go_live(&mut self) -> Vec<SessionUpdate> {
         self.prompts.close();
         self.stage = CatchUpStage::Live;
         let mut held = std::mem::take(&mut self.held);
-        std::mem::take(&mut self.held_order)
+        let text = std::mem::take(&mut self.held_order)
             .into_iter()
             .filter_map(|id| held.remove(&id))
             .filter(|message| !message.text.is_empty())
             .map(|message| {
                 SessionUpdate::AgentMessageChunk(with_text(&message.first, &message.text))
-            })
-            .collect()
+            });
+        let settlements = std::mem::take(&mut self.held_settlements)
+            .into_iter()
+            .filter(|(id, _)| self.tool_calls.contains(id) && !self.settled_tool_calls.contains(id))
+            .map(|(_, update)| update);
+        text.chain(settlements).collect()
     }
 
     /// Whether the replay re-sent the newest stored prompt (see
@@ -433,50 +514,77 @@ impl CatchUpLedger {
 
     /// What `update` records.
     pub(super) fn action_for(&mut self, update: &SessionUpdate) -> LiveAction {
-        if self.stage == CatchUpStage::Held {
-            self.hold(update);
-            return LiveAction::Drop;
+        match self.stage {
+            CatchUpStage::Held => {
+                self.hold(update);
+                return LiveAction::Drop;
+            }
+            // Nothing live is a copy of something stored: a tool call's
+            // updates in particular must all land, as in a live turn. The
+            // Claude bridge's first update of a call carries its input (a
+            // shell command's description) as content, which records as the
+            // call's result until the real one replaces it.
+            CatchUpStage::Live => return live_action_for_update(update),
+            CatchUpStage::Replay => {}
         }
-        if self.stage == CatchUpStage::Replay {
-            match update {
-                SessionUpdate::UserMessageChunk(chunk) => {
-                    if let AcpContentBlock::Text(text) = &chunk.content {
-                        self.prompts.push(
-                            chunk.message_id.as_ref().map(|id| id.0.as_ref()),
-                            &text.text,
-                        );
-                    }
+        match update {
+            SessionUpdate::UserMessageChunk(chunk) => {
+                if let AcpContentBlock::Text(text) = &chunk.content {
+                    self.prompts.push(
+                        chunk.message_id.as_ref().map(|id| id.0.as_ref()),
+                        &text.text,
+                    );
                 }
-                _ => self.prompts.close(),
             }
-            if let Some(action) = self.held_message_text(update) {
-                return action;
-            }
+            _ => self.prompts.close(),
+        }
+        if let Some(action) = self.held_message_text(update) {
+            return action;
         }
         match update {
             SessionUpdate::ToolCall(tool_call) => {
-                if !self.tool_calls.insert(tool_call.tool_call_id.0.to_string()) {
+                let id = tool_call.tool_call_id.0.to_string();
+                let settles = settles_tool_call(Some(&tool_call.status));
+                let new_call = self.tool_calls.insert(id.clone());
+                // A call the transcript holds is re-sent whole: only its
+                // settling, by an agent that settles a call by re-sending
+                // it, is new.
+                if !new_call && !(settles && !self.settled_tool_calls.contains(&id)) {
                     return LiveAction::Drop;
+                }
+                if settles {
+                    self.settled_tool_calls.insert(id);
                 }
                 self.past_boundary = true;
                 live_action_for_update(update)
             }
             SessionUpdate::ToolCallUpdate(tool_update) => {
                 let id = tool_update.tool_call_id.0.to_string();
-                if self.tool_results.contains(&id) {
+                if self.settled_tool_calls.contains(&id) {
                     return LiveAction::Drop;
                 }
+                // The call is new, or was still running when the transcript
+                // was written: its updates up to its settling are new (the
+                // writer updates the rows the transcript holds for it).
                 let action = live_action_for_update(update);
-                if let LiveAction::ToolCallUpdate {
-                    result: Some(_), ..
-                } = &action
+                let settles = settles_tool_call(tool_update.fields.status.as_ref());
+                if settles {
+                    self.settled_tool_calls.insert(id);
+                }
+                if settles
+                    || matches!(
+                        &action,
+                        LiveAction::ToolCallUpdate {
+                            result: Some(_),
+                            ..
+                        }
+                    )
                 {
-                    self.tool_results.insert(id);
                     self.past_boundary = true;
                 }
                 action
             }
-            SessionUpdate::AgentMessageChunk(chunk) if self.stage == CatchUpStage::Replay => {
+            SessionUpdate::AgentMessageChunk(chunk) => {
                 let AcpContentBlock::Text(text) = &chunk.content else {
                     return self.past_boundary_event(update);
                 };
@@ -495,17 +603,21 @@ impl CatchUpLedger {
                 append(chunk, unseen)
             }
             // The replayed prompts are the transcript's own user rows.
-            SessionUpdate::UserMessageChunk(_) if self.stage == CatchUpStage::Replay => {
-                LiveAction::Drop
-            }
-            _ if self.stage == CatchUpStage::Replay => self.past_boundary_event(update),
-            _ => live_action_for_update(update),
+            SessionUpdate::UserMessageChunk(_) => LiveAction::Drop,
+            _ => self.past_boundary_event(update),
         }
     }
 
     /// Keep a held text chunk that names its message, in case the replay
-    /// never re-sends that message.
+    /// never re-sends that message, and a held update that settles a tool
+    /// call, in case the replay leaves the call running.
     fn hold(&mut self, update: &SessionUpdate) {
+        if let Some(id) = settled_call_id(update) {
+            if !self.held_settlements.iter().any(|(held, _)| *held == id) {
+                self.held_settlements.push((id, update.clone()));
+            }
+            return;
+        }
         let SessionUpdate::AgentMessageChunk(chunk) = update else {
             return;
         };
@@ -582,7 +694,7 @@ impl CatchUpLedger {
 mod tests {
     use super::*;
     use agent_client_protocol::schema::v1::{
-        ToolCall, ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+        ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
     };
 
     fn boundary(
@@ -596,6 +708,15 @@ mod tests {
             content: content.to_string(),
             acp_message_id: message.map(str::to_string),
             acp_tool_call_id: tool.map(str::to_string),
+            acp_tool_status: None,
+        }
+    }
+
+    /// A stored tool call row with its last ACP status.
+    fn stored_call(id: &str, status: Option<&str>) -> ReplayBoundary {
+        ReplayBoundary {
+            acp_tool_status: status.map(str::to_string),
+            ..boundary("tool_call", "Run", None, Some(id))
         }
     }
 
@@ -622,12 +743,35 @@ mod tests {
     }
 
     fn tool_result(id: &str) -> SessionUpdate {
-        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-            ToolCallId::new(id),
-            ToolCallUpdateFields::new()
-                .status(ToolCallStatus::Completed)
-                .content(vec!["done".to_string().into()]),
-        ))
+        tool_update(id, Some(ToolCallStatus::Completed), Some("done"))
+    }
+
+    fn tool_update(
+        id: &str,
+        status: Option<ToolCallStatus>,
+        content: Option<&str>,
+    ) -> SessionUpdate {
+        let mut fields = ToolCallUpdateFields::new();
+        if let Some(status) = status {
+            fields = fields.status(status);
+        }
+        if let Some(content) = content {
+            fields = fields.content(vec![content.to_string().into()]);
+        }
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(ToolCallId::new(id), fields))
+    }
+
+    /// The result and status a tool call action records, or `None` for one
+    /// that records nothing.
+    fn recorded_tool(action: LiveAction) -> Option<(Option<String>, Option<String>)> {
+        match action {
+            LiveAction::ToolCallUpdate {
+                result, metadata, ..
+            } => Some((result, metadata.tool_status)),
+            LiveAction::RecordToolCall { metadata, .. } => Some((None, metadata.tool_status)),
+            LiveAction::Drop => None,
+            _ => panic!("expected a tool call action or nothing"),
+        }
     }
 
     fn appended(action: LiveAction) -> Option<String> {
@@ -804,21 +948,164 @@ mod tests {
             LiveAction::RecordToolCall { .. }
         ));
         ledger.set_stage(CatchUpStage::Live);
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_result("t3"))),
+            Some((Some("done".to_string()), Some("completed".to_string())))
+        );
+    }
+
+    /// The call that was running at the disconnect, as the Claude bridge
+    /// leaves it stored: `pending`, with its first content (a shell
+    /// command's description) as its result. Its replayed completion is
+    /// new, output and status alike; once recorded, a copy is not.
+    #[test]
+    fn a_stored_call_still_running_takes_its_replayed_completion() {
+        let mut ledger = replaying(&[
+            stored_call("t1", Some("pending")),
+            boundary("tool_result", "Run step 1", None, Some("t1")),
+        ]);
         assert!(matches!(
-            ledger.action_for(&tool_call("t3")),
+            ledger.action_for(&tool_call("t1")),
             LiveAction::Drop
         ));
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_update(
+                "t1",
+                Some(ToolCallStatus::Completed),
+                Some("step 1 done"),
+            ))),
+            Some((
+                Some("step 1 done".to_string()),
+                Some("completed".to_string())
+            ))
+        );
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_update(
+                "t1",
+                Some(ToolCallStatus::Completed),
+                Some("step 1 done"),
+            ))),
+            None
+        );
+
+        // An agent that streams a call's output before settling it: every
+        // update up to the settling lands, a status-only one included.
+        let mut ledger = replaying(&[
+            stored_call("t2", Some("in_progress")),
+            boundary("tool_result", "line 1", None, Some("t2")),
+        ]);
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_update(
+                "t2",
+                Some(ToolCallStatus::InProgress),
+                Some("line 1\nline 2"),
+            ))),
+            Some((
+                Some("line 1\nline 2".to_string()),
+                Some("in_progress".to_string())
+            ))
+        );
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_update(
+                "t2",
+                Some(ToolCallStatus::Failed),
+                None
+            ))),
+            Some((None, Some("failed".to_string())))
+        );
+    }
+
+    /// A call is settled by its stored status, or (stored with none) by its
+    /// stored result; its replayed frames are then all copies.
+    #[test]
+    fn a_settled_call_drops_everything_replayed_for_it() {
+        let mut ledger = replaying(&[
+            stored_call("done", Some("completed")),
+            stored_call("broke", Some("failed")),
+            stored_call("statusless", None),
+            boundary("tool_result", "output", None, Some("statusless")),
+            boundary("tool_result", "output", None, Some("orphan")),
+        ]);
+        for id in ["done", "broke", "statusless", "orphan"] {
+            assert!(
+                matches!(ledger.action_for(&tool_result(id)), LiveAction::Drop),
+                "{id}"
+            );
+            assert!(
+                matches!(
+                    ledger.action_for(&tool_update(id, None, Some("more"))),
+                    LiveAction::Drop
+                ),
+                "{id}"
+            );
+        }
+        // Stored with no status and no result: still running for all the
+        // transcript says.
+        let mut ledger = replaying(&[stored_call("t1", None)]);
+        assert!(recorded_tool(ledger.action_for(&tool_result("t1"))).is_some());
+    }
+
+    /// An agent that settles a call by re-sending it whole: the copy that
+    /// settles a call the transcript holds unsettled is new.
+    #[test]
+    fn a_resent_call_that_settles_a_stored_running_one_is_recorded() {
+        let mut ledger = replaying(&[stored_call("t1", Some("pending"))]);
+        let settled = SessionUpdate::ToolCall(
+            ToolCall::new(ToolCallId::new("t1"), "Run").status(ToolCallStatus::Completed),
+        );
+        assert_eq!(
+            recorded_tool(ledger.action_for(&settled)),
+            Some((None, Some("completed".to_string())))
+        );
+        assert_eq!(recorded_tool(ledger.action_for(&settled)), None);
+        assert_eq!(recorded_tool(ledger.action_for(&tool_result("t1"))), None);
+    }
+
+    /// Settling the call that was running at the disconnect is where the
+    /// replay passes the stored transcript: events after it are new.
+    #[test]
+    fn settling_the_running_call_passes_the_boundary() {
+        let mut ledger = replaying(&[stored_call("t1", Some("pending"))]);
+        let plan = SessionUpdate::Plan(agent_client_protocol::schema::v1::Plan::new(vec![]));
+        assert!(matches!(ledger.action_for(&plan), LiveAction::Drop));
+        // An update that neither settles the call nor carries a result says
+        // nothing about where the replay is.
+        ledger.action_for(&tool_update("t1", Some(ToolCallStatus::InProgress), None));
+        assert!(matches!(ledger.action_for(&plan), LiveAction::Drop));
+        ledger.action_for(&tool_result("t1"));
         assert!(matches!(
-            ledger.action_for(&tool_result("t3")),
-            LiveAction::ToolCallUpdate {
-                result: Some(_),
-                ..
-            }
+            ledger.action_for(&plan),
+            LiveAction::RecordAcpEvent(_)
         ));
-        assert!(matches!(
-            ledger.action_for(&tool_result("t3")),
-            LiveAction::Drop
-        ));
+    }
+
+    /// After the load every frame is live, recorded as a live turn records
+    /// it: the Claude bridge's call, its refinement (whose content, the
+    /// shell command's description, records as the result for now), and its
+    /// completion, which must not be taken for a copy of the refinement.
+    #[test]
+    fn live_tool_calls_are_recorded_update_by_update() {
+        let mut ledger = replaying(&[stored_call("t0", Some("completed"))]);
+        ledger.go_live();
+        assert!(recorded_tool(ledger.action_for(&tool_call("t1"))).is_some());
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_update("t1", None, Some("Run step 1")))),
+            Some((Some("Run step 1".to_string()), None))
+        );
+        assert_eq!(
+            recorded_tool(ledger.action_for(&tool_update(
+                "t1",
+                Some(ToolCallStatus::Completed),
+                Some("step 1 done"),
+            ))),
+            Some((
+                Some("step 1 done".to_string()),
+                Some("completed".to_string())
+            ))
+        );
+        // Live frames are never copies, even for a call the transcript holds
+        // settled.
+        assert!(recorded_tool(ledger.action_for(&tool_update("t0", None, Some("late")))).is_some());
     }
 
     #[test]
@@ -946,6 +1233,64 @@ mod tests {
             Some("Hello world".to_string())
         );
         assert!(ledger.go_live().is_empty());
+    }
+
+    /// A cancel sent before the load: the agent settles the running call
+    /// live. The replay, from the agent's transcript, settles it too, and
+    /// the held copy goes.
+    #[test]
+    fn a_held_settling_the_replay_repeats_is_dropped() {
+        let mut ledger = CatchUpLedger::new(&[stored_call("t1", Some("pending"))]);
+        let interrupted = tool_update("t1", Some(ToolCallStatus::Failed), Some("Interrupted"));
+        assert!(matches!(ledger.action_for(&interrupted), LiveAction::Drop));
+        ledger.set_stage(CatchUpStage::Replay);
+        assert_eq!(
+            recorded_tool(ledger.action_for(&interrupted)),
+            Some((Some("Interrupted".to_string()), Some("failed".to_string())))
+        );
+        assert!(ledger.go_live().is_empty());
+    }
+
+    /// The agent settled a running call live only (the Claude bridge closes
+    /// the calls a cancel left open), so the replay leaves it running: the
+    /// held settling is recorded once the replay is over, after the held
+    /// text. Settlings of calls nothing holds, or the transcript holds
+    /// settled, are not.
+    #[test]
+    fn a_held_settling_of_a_call_the_replay_leaves_running_is_recorded_after_it() {
+        let mut ledger = CatchUpLedger::new(&[
+            stored_call("t0", Some("completed")),
+            stored_call("t1", Some("in_progress")),
+            boundary("assistant", "Hello ", Some("m1"), None),
+        ]);
+        let closed = tool_update("t1", Some(ToolCallStatus::Failed), Some("Cancelled"));
+        for update in [
+            text(Some("m1"), "wor"),
+            tool_update("t1", None, Some("progress")),
+            closed.clone(),
+            tool_update("t1", Some(ToolCallStatus::Completed), Some("late")),
+            tool_update("t0", Some(ToolCallStatus::Failed), None),
+            tool_update("t9", Some(ToolCallStatus::Failed), None),
+        ] {
+            assert!(matches!(ledger.action_for(&update), LiveAction::Drop));
+        }
+        ledger.set_stage(CatchUpStage::Replay);
+        assert!(recorded_tool(ledger.action_for(&tool_call("t1"))).is_none());
+        let pending = ledger.go_live();
+        assert_eq!(pending.len(), 2, "{pending:?}");
+        assert_eq!(texts(&pending[..1]), vec!["wor"]);
+        assert_eq!(pending[1], closed, "the first settling wins");
+    }
+
+    /// A call the replay first shows is held settled the same way.
+    #[test]
+    fn a_held_settling_of_a_replayed_call_left_running_is_recorded() {
+        let mut ledger = CatchUpLedger::new(&[]);
+        let closed = tool_update("t1", Some(ToolCallStatus::Failed), Some("Cancelled"));
+        ledger.action_for(&closed);
+        ledger.set_stage(CatchUpStage::Replay);
+        assert!(recorded_tool(ledger.action_for(&tool_call("t1"))).is_some());
+        assert_eq!(ledger.go_live(), vec![closed]);
     }
 
     #[test]

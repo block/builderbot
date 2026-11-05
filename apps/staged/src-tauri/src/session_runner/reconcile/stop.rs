@@ -1,6 +1,7 @@
 //! Stopping a Blox turn no live connection can reach: a `disconnected` row's,
 //! and a running session's whose Stop went unanswered.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use acp_client::CancelOutcome;
@@ -49,10 +50,11 @@ impl Reconciler {
         }
     }
 
-    /// Cancel `target`'s remote turn, then end the row as read at
-    /// `observed`, `cancelled` for `reason`. When the workstation can't be
-    /// reached the row is ended anyway — the user asked — with a message
-    /// saying the turn may still be running.
+    /// Cancel `target`'s remote turn and catch its transcript up with the
+    /// turn's end, then end the row as read at `observed`, `cancelled` for
+    /// `reason`. When the workstation can't be reached the row is ended
+    /// anyway — the user asked — with a message saying the turn may still
+    /// be running.
     pub(super) fn stop_observed(
         &self,
         target: &ReconcileTarget,
@@ -78,18 +80,23 @@ impl Reconciler {
         RowOutcome::Done
     }
 
-    /// Cancel the turn over a fresh connection. `Some(message)` when it
-    /// couldn't be confirmed stopped.
+    /// Cancel the turn over a fresh connection, then backfill the
+    /// transcript from the session's replay, so the tool call the turn was
+    /// running ends as the agent ended it instead of running for good.
+    /// `Some(message)` when the cancel couldn't be confirmed stopped.
     pub(super) fn cancel_remote_turn(&self, target: &ReconcileTarget) -> Option<String> {
-        cancel_over_fresh_connection(self.blox.as_ref(), target)
+        cancel_over_fresh_connection(self.blox.as_ref(), target, Some(&self.store))
     }
 }
 
+/// Cancel `target`'s turn over a fresh connection, catching its transcript
+/// up through `backfill` once the turn is over (see [`ReconcileBlox::cancel`]).
 fn cancel_over_fresh_connection(
     blox: &dyn ReconcileBlox,
     target: &ReconcileTarget,
+    backfill: Option<&Arc<Store>>,
 ) -> Option<String> {
-    match blox.cancel(target, STOP_DEADLINE) {
+    match blox.cancel(target, backfill, STOP_DEADLINE) {
         Ok(CancelOutcome::Stopped) | Ok(CancelOutcome::ProcessGone { .. }) => None,
         Ok(outcome @ (CancelOutcome::Unconfirmed | CancelOutcome::TransportLost)) => {
             log::warn!(
@@ -148,7 +155,8 @@ pub(super) fn cancel_abandoned_turn_with(
         session.id
     );
     Some(std::thread::spawn(move || {
-        if let Some(message) = cancel_over_fresh_connection(blox.as_ref(), &target) {
+        // Nothing to backfill: the row is about to go.
+        if let Some(message) = cancel_over_fresh_connection(blox.as_ref(), &target, None) {
             log::warn!("[reconcile] Session {}: {message}", target.session_id);
         }
     }))
@@ -157,10 +165,11 @@ pub(super) fn cancel_abandoned_turn_with(
 /// A Stop on a running Blox session whose `session/cancel` went unanswered
 /// (see `acp_client::SessionSettled::cancel_unacknowledged`): the transport
 /// may be hung with the turn still going on the workstation, so cancel it
-/// again over a fresh connection. Returns the message for the `cancelled`
-/// row when that couldn't be confirmed either.
+/// again over a fresh connection, and backfill what the hung transport never
+/// delivered. Returns the message for the `cancelled` row when that couldn't
+/// be confirmed either.
 pub(crate) fn stop_unacknowledged_turn(
-    store: &Store,
+    store: &Arc<Store>,
     blox: &dyn ReconcileBlox,
     session_id: &str,
 ) -> Option<String> {
@@ -170,7 +179,7 @@ pub(crate) fn stop_unacknowledged_turn(
         .flatten()
         .and_then(|session| ReconcileTarget::resolve(store, &session).ok());
     match target {
-        Some(target) => cancel_over_fresh_connection(blox, &target),
+        Some(target) => cancel_over_fresh_connection(blox, &target, Some(store)),
         None => Some(MAY_STILL_RUN.to_string()),
     }
 }

@@ -118,6 +118,9 @@ pub(super) struct AttachTiming {
     /// How long an `IDLE` process gets for the session's own `idle` frame
     /// (and the `result` before it) to arrive, when the agent sends frames.
     pub(super) idle_drain: Duration,
+    /// How long [`AcpDriver::attach_cancel_and_catch_up`]'s `session/load`
+    /// gets, once the cancel is confirmed.
+    pub(super) cancel_catch_up: Duration,
 }
 
 impl Default for AttachTiming {
@@ -125,9 +128,14 @@ impl Default for AttachTiming {
         Self {
             poll: Duration::from_secs(5),
             idle_drain: Duration::from_secs(2),
+            cancel_catch_up: Duration::from_secs(30),
         }
     }
 }
+
+/// Where an attach-cancel's catch-up reads the stored transcript from, and
+/// records what it lacks through.
+type CatchUpThrough<'a> = (&'a Arc<dyn Store>, &'a Arc<dyn MessageWriter>);
 
 type ProxyStreams =
     ByteStreams<Compat<ChildStdin>, Compat<Box<dyn tokio::io::AsyncRead + Send + Unpin>>>;
@@ -278,46 +286,122 @@ impl AcpDriver {
             agent_session_id,
             command_id,
             working_dir,
+            None,
             deadline,
             AttachTiming::default(),
         )
         .await
     }
 
-    /// [`AcpDriver::attach_cancel`] with its pacing as a parameter (tests).
+    /// [`AcpDriver::attach_cancel`], then catch the transcript up with the
+    /// turn the cancel ended, as [`AcpDriver::attach`] does: once the turn
+    /// is confirmed over (or its process replaced), a `session/load` on the
+    /// same connection records what `store` lacks for `session_id` through
+    /// `writer` — the end of the tool call that was running included, which
+    /// would otherwise stay running in the transcript for good.
+    ///
+    /// The catch-up never holds up or fails the cancel: it goes out only
+    /// after the cancel, and a catch-up that fails or runs out of time is
+    /// logged, leaving the outcome as the cancel had it. Nothing is loaded
+    /// when the cancel is unconfirmed or the transport is lost.
+    ///
+    /// Must be called from within a Tokio `LocalSet`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn attach_cancel_and_catch_up(
+        &self,
+        session_id: &str,
+        agent_session_id: &str,
+        command_id: Option<&str>,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+        deadline: Duration,
+    ) -> Result<CancelOutcome, String> {
+        self.attach_cancel_with_timing(
+            session_id,
+            agent_session_id,
+            command_id,
+            working_dir,
+            Some((store, writer)),
+            deadline,
+            AttachTiming::default(),
+        )
+        .await
+    }
+
+    /// [`AcpDriver::attach_cancel`], catching up through `catch_up` when
+    /// given (see [`AcpDriver::attach_cancel_and_catch_up`]), with its
+    /// pacing as a parameter (tests).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn attach_cancel_with_timing(
         &self,
         session_id: &str,
         agent_session_id: &str,
         command_id: Option<&str>,
         working_dir: &Path,
+        catch_up: Option<CatchUpThrough<'_>>,
         deadline: Duration,
         timing: AttachTiming,
     ) -> Result<CancelOutcome, String> {
+        let catch_up = catch_up.and_then(|(store, writer)| {
+            match self.cancel_catch_up(session_id, working_dir, store, writer) {
+                Ok(catch_up) => Some(catch_up),
+                Err(e) => {
+                    log::warn!(
+                        "ACP session {agent_session_id}: cancelling without catching session \
+                         {session_id} up: {e}"
+                    );
+                    None
+                }
+            }
+        });
         let AttachProxy {
             mut child,
             transport,
             streams,
         } = self.spawn_attach_proxy(session_id, command_id, working_dir)?;
-        // Nothing is loaded, so nothing is recorded.
-        let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
-        let handler = Arc::new(
-            AcpNotificationHandler::new(writer, false, Vec::new(), CancellationToken::new())
-                .with_transport_monitor(Arc::clone(&transport)),
-        );
+        let (writer, handler) = match &catch_up {
+            Some(catch_up) => (
+                Arc::clone(&catch_up.writer),
+                AcpNotificationHandler::new(
+                    Arc::clone(&catch_up.writer),
+                    false,
+                    Vec::new(),
+                    CancellationToken::new(),
+                )
+                .catching_up(&catch_up.stored),
+            ),
+            // Nothing is loaded, so nothing is recorded.
+            None => {
+                let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+                let handler = AcpNotificationHandler::new(
+                    Arc::clone(&writer),
+                    false,
+                    Vec::new(),
+                    CancellationToken::new(),
+                );
+                (writer, handler)
+            }
+        };
+        let handler = Arc::new(handler.with_transport_monitor(Arc::clone(&transport)));
         let sent = std::cell::Cell::new(false);
+        let initialized = std::cell::RefCell::new(None);
         let protocol_result = staged_client(&handler)
             .connect_with(streams, async |connection| {
                 let cancel = async {
-                    initialize_connection(
-                        &connection,
-                        &handler,
-                        session_id,
-                        &self.agent_label,
-                        &[],
-                    )
-                    .await?;
-                    handler.name_session(agent_session_id).await;
+                    *initialized.borrow_mut() = Some(
+                        initialize_connection(
+                            &connection,
+                            &handler,
+                            session_id,
+                            &self.agent_label,
+                            &[],
+                        )
+                        .await?,
+                    );
+                    // A catch-up's frames stay held until its load: the
+                    // cancel's own frames would land ahead of the replay.
+                    handler.name_session_holding(agent_session_id).await;
                     if transport.process_replaced() {
                         return Ok(CancelOutcome::ProcessGone {
                             message: ended_message(self.blox_process.as_ref(), command_id).await,
@@ -346,26 +430,85 @@ impl AcpDriver {
                         },
                     )
                 };
-                match tokio::time::timeout(deadline, cancel).await {
-                    Ok(Ok(outcome)) => Ok(outcome),
-                    Ok(Err(e)) => Err(agent_client_protocol::util::internal_error(e)),
-                    Err(_) if sent.get() => Ok(CancelOutcome::Unconfirmed),
-                    Err(_) => Err(agent_client_protocol::util::internal_error(format!(
-                        "Timed out after {}s before session/cancel could be sent",
-                        deadline.as_secs()
-                    ))),
+                let outcome = match tokio::time::timeout(deadline, cancel).await {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(e)) => return Err(agent_client_protocol::util::internal_error(e)),
+                    Err(_) if sent.get() => CancelOutcome::Unconfirmed,
+                    Err(_) => {
+                        return Err(agent_client_protocol::util::internal_error(format!(
+                            "Timed out after {}s before session/cancel could be sent",
+                            deadline.as_secs()
+                        )))
+                    }
+                };
+                let initialized = initialized.borrow_mut().take();
+                if let (Some(catch_up), Some((init_response, mode))) = (&catch_up, initialized) {
+                    let over = matches!(
+                        outcome,
+                        CancelOutcome::Stopped | CancelOutcome::ProcessGone { .. }
+                    );
+                    if over && transport.first_signal().is_none() {
+                        let context = AcpSessionSetupContext {
+                            connection: &connection,
+                            working_dir: &catch_up.working_dir,
+                            store: &catch_up.store,
+                            handler: &handler,
+                            our_session_id: session_id,
+                            acp_session_id: Some(agent_session_id),
+                            config_options: &[],
+                            // As `initialize` was checked for: the
+                            // connection only reads the transcript.
+                            mcp_servers: &[],
+                            agent_label: &self.agent_label,
+                            auth_selection: None,
+                            unattended_session_mode: self.unattended_session_mode.as_deref(),
+                        };
+                        catch_up_after_cancel(
+                            &context,
+                            &init_response,
+                            mode,
+                            timing.cancel_catch_up,
+                        )
+                        .await;
+                    }
                 }
+                Ok(outcome)
             })
             .await
             .map_err(|e| format!("ACP protocol failed: {e:?}"));
 
         handler.cancel_pending_permissions();
+        writer.finalize().await;
         stop_proxy(&mut child, &transport).await;
         match protocol_result {
             Ok(outcome) => Ok(outcome),
             Err(_) if transport.first_signal().is_some() => Ok(CancelOutcome::TransportLost),
             Err(e) => Err(e),
         }
+    }
+
+    /// What [`AcpDriver::attach_cancel_and_catch_up`] needs before the proxy
+    /// spawns: the transcript stored for `session_id`, and the remote
+    /// checkout to load the session in.
+    fn cancel_catch_up(
+        &self,
+        session_id: &str,
+        working_dir: &Path,
+        store: &Arc<dyn Store>,
+        writer: &Arc<dyn MessageWriter>,
+    ) -> Result<CancelCatchUp, String> {
+        Ok(CancelCatchUp {
+            // Without what is stored, the whole replay would be recorded
+            // again.
+            stored: store.get_session_replay_boundaries(session_id)?,
+            working_dir: resolve_acp_working_dir(
+                working_dir,
+                true,
+                self.remote_working_dir.as_deref(),
+            )?,
+            store: Arc::clone(store),
+            writer: Arc::clone(writer),
+        })
     }
 
     /// Spawn `sq blox acp` for an attach: this driver's argv, pinned to
@@ -444,6 +587,63 @@ impl AcpDriver {
             transport,
             streams,
         })
+    }
+}
+
+/// An attach-cancel's catch-up (see [`AcpDriver::attach_cancel_and_catch_up`]).
+struct CancelCatchUp {
+    stored: Vec<ReplayBoundary>,
+    working_dir: PathBuf,
+    store: Arc<dyn Store>,
+    writer: Arc<dyn MessageWriter>,
+}
+
+/// The `session/load` of an attach-cancel's catch-up, on the connection the
+/// cancel went out on, bounded by `limit`. A failure is logged: the cancel
+/// stands either way.
+async fn catch_up_after_cancel(
+    context: &AcpSessionSetupContext<'_>,
+    init_response: &InitializeResponse,
+    task_tracking_mode: TaskTrackingMode,
+    limit: Duration,
+) {
+    let handler = context.handler;
+    let agent_session_id = context.acp_session_id.unwrap_or_default();
+    handler.begin_replay().await;
+    let load = tokio::time::timeout(
+        limit,
+        load_acp_session(context, agent_session_id, init_response, task_tracking_mode),
+    );
+    let loaded = tokio::select! {
+        loaded = load => loaded,
+        // A proxy that lost its remote process keeps stdout open.
+        _ = handler.transport.lost().cancelled() => {
+            log::warn!(
+                "ACP session {agent_session_id}: lost the transport catching session {} up \
+                 after the cancel",
+                context.our_session_id
+            );
+            return;
+        }
+    };
+    match loaded {
+        Ok(Ok(())) => {
+            handler.finish_catch_up().await;
+            log::info!(
+                "ACP session {agent_session_id}: caught session {} up after the cancel",
+                context.our_session_id
+            );
+        }
+        Ok(Err(e)) => log::warn!(
+            "ACP session {agent_session_id}: catching session {} up after the cancel failed: {e}",
+            context.our_session_id
+        ),
+        Err(_) => log::warn!(
+            "ACP session {agent_session_id}: catching session {} up after the cancel timed out \
+             after {}s",
+            context.our_session_id,
+            limit.as_secs()
+        ),
     }
 }
 

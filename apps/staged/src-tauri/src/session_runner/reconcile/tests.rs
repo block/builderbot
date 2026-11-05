@@ -37,8 +37,12 @@ struct FakeBlox {
     /// running the scripted attach, as one to a live process does.
     connects: std::sync::atomic::AtomicBool,
     cancel: Mutex<Result<CancelOutcome, String>>,
+    /// Runs inside a cancel that backfills, as its catch-up writes.
+    backfill: Mutex<Option<BackfillHook>>,
     calls: Mutex<Vec<String>>,
 }
+
+type BackfillHook = Box<dyn Fn(&ReconcileTarget, &Arc<Store>) + Send>;
 
 impl FakeBlox {
     fn new() -> Self {
@@ -50,6 +54,7 @@ impl FakeBlox {
             attach: Mutex::new(Arc::new(|_, _, _| Ok(ended_turn()))),
             connects: std::sync::atomic::AtomicBool::new(true),
             cancel: Mutex::new(Ok(CancelOutcome::Stopped)),
+            backfill: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -88,6 +93,10 @@ impl FakeBlox {
 
     fn set_cancel(&self, outcome: Result<CancelOutcome, String>) {
         *self.cancel.lock().unwrap() = outcome;
+    }
+
+    fn on_backfill(&self, hook: impl Fn(&ReconcileTarget, &Arc<Store>) + Send + 'static) {
+        *self.backfill.lock().unwrap() = Some(Box::new(hook));
     }
 
     fn log(&self, call: String) {
@@ -165,8 +174,21 @@ impl ReconcileBlox for FakeBlox {
         attach(target, store, control)
     }
 
-    fn cancel(&self, target: &ReconcileTarget, _: Duration) -> Result<CancelOutcome, String> {
-        self.log(format!("cancel:{}", target.agent_session_id));
+    /// Logged `cancel+backfill:` when it backfills.
+    fn cancel(
+        &self,
+        target: &ReconcileTarget,
+        backfill: Option<&Arc<Store>>,
+        _: Duration,
+    ) -> Result<CancelOutcome, String> {
+        let Some(store) = backfill else {
+            self.log(format!("cancel:{}", target.agent_session_id));
+            return self.cancel.lock().unwrap().clone();
+        };
+        self.log(format!("cancel+backfill:{}", target.agent_session_id));
+        if let Some(hook) = self.backfill.lock().unwrap().as_ref() {
+            hook(target, store);
+        }
         self.cancel.lock().unwrap().clone()
     }
 
@@ -1144,7 +1166,7 @@ fn a_stop_as_a_followed_turn_leaves_work_live_cancels_the_work() {
 
     fx.reconcile(&session);
 
-    assert!(fx.blox.called("cancel:acp-1"));
+    assert!(fx.blox.called("cancel+backfill:acp-1"));
     fx.assert_settled(
         &session,
         SessionStatus::Completed,
@@ -1550,6 +1572,32 @@ async fn the_queue_waits_while_disconnected_and_moves_once_completed() {
 // Stop
 // =============================================================================
 
+/// The Stop's cancel backfills the transcript before the row ends: the
+/// catch-up writes while the row is still `disconnected`, so the tool call
+/// the turn was running ends as the agent ended it, not "Running" for good.
+#[test]
+fn a_stop_backfills_the_transcript_before_the_row_ends() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_in_backfill = Arc::clone(&seen);
+    fx.blox.on_backfill(move |target, store| {
+        let row = store.get_session(&target.session_id).unwrap().unwrap();
+        seen_in_backfill.lock().unwrap().push(row.status);
+    });
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert_eq!(*seen.lock().unwrap(), vec![SessionStatus::Disconnected]);
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        None,
+        CompletionReason::Interrupted,
+    );
+}
+
 #[test]
 fn a_stop_on_a_disconnected_row_cancels_the_remote_turn_first() {
     let fx = Fixture::new();
@@ -1558,7 +1606,10 @@ fn a_stop_on_a_disconnected_row_cancels_the_remote_turn_first() {
     fx.reconciler
         .stop_blocking(&session.id, CompletionReason::Interrupted);
 
-    assert_eq!(fx.blox.calls(), vec!["workspace:ws-1", "cancel:acp-1"]);
+    assert_eq!(
+        fx.blox.calls(),
+        vec!["workspace:ws-1", "cancel+backfill:acp-1"]
+    );
     fx.assert_settled(
         &session,
         SessionStatus::Cancelled,
@@ -1811,7 +1862,7 @@ fn an_unacknowledged_remote_stop_is_retried_over_a_fresh_connection() {
         stop_unacknowledged_turn(&fx.store, fx.blox.as_ref(), &session.id),
         None
     );
-    assert_eq!(fx.blox.calls(), vec!["cancel:acp-1"]);
+    assert_eq!(fx.blox.calls(), vec!["cancel+backfill:acp-1"]);
 
     fx.blox.set_cancel(Err("connection refused".to_string()));
     assert_eq!(

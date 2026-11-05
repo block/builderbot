@@ -167,9 +167,17 @@ pub(crate) trait ReconcileBlox: Send + Sync {
     ) -> Result<AttachOutcome, String>;
 
     /// Cancel the session's turn over a fresh connection, waiting up to
-    /// `deadline` for it to stop.
-    fn cancel(&self, target: &ReconcileTarget, deadline: Duration)
-        -> Result<CancelOutcome, String>;
+    /// `deadline` for it to stop. With `backfill`, the transcript is then
+    /// caught up through it with the turn the cancel ended, the end of the
+    /// tool call that was running included (see
+    /// `AcpDriver::attach_cancel_and_catch_up`); best effort, it never
+    /// changes the outcome.
+    fn cancel(
+        &self,
+        target: &ReconcileTarget,
+        backfill: Option<&Arc<Store>>,
+        deadline: Duration,
+    ) -> Result<CancelOutcome, String>;
 
     /// The workstation the post-completion hooks read the checkout's HEAD
     /// on; `None` reads `target.working_dir` locally.
@@ -267,7 +275,7 @@ impl ReconcileBlox for LiveBlox {
         let driver = Self::driver(target)?;
         block_on_local(async {
             let store_trait: Arc<dyn acp_client::Store> = store.clone();
-            let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::new(
+            let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::catching_up(
                 target.session_id.clone(),
                 Arc::clone(store),
             ));
@@ -306,16 +314,39 @@ impl ReconcileBlox for LiveBlox {
     fn cancel(
         &self,
         target: &ReconcileTarget,
+        backfill: Option<&Arc<Store>>,
         deadline: Duration,
     ) -> Result<CancelOutcome, String> {
         let driver = Self::driver(target)?;
-        block_on_local(driver.attach_cancel(
-            &target.session_id,
-            &target.agent_session_id,
-            target.command_id.as_deref(),
-            &target.working_dir,
-            deadline,
-        ))?
+        block_on_local(async {
+            let Some(store) = backfill else {
+                return driver
+                    .attach_cancel(
+                        &target.session_id,
+                        &target.agent_session_id,
+                        target.command_id.as_deref(),
+                        &target.working_dir,
+                        deadline,
+                    )
+                    .await;
+            };
+            let store_trait: Arc<dyn acp_client::Store> = store.clone();
+            let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::catching_up(
+                target.session_id.clone(),
+                Arc::clone(store),
+            ));
+            driver
+                .attach_cancel_and_catch_up(
+                    &target.session_id,
+                    &target.agent_session_id,
+                    target.command_id.as_deref(),
+                    &target.working_dir,
+                    &store_trait,
+                    &writer,
+                    deadline,
+                )
+                .await
+        })?
     }
 
     fn checkout_workspace<'a>(&self, target: &'a ReconcileTarget) -> Option<&'a str> {

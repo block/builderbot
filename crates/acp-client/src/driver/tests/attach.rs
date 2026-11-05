@@ -6,8 +6,8 @@
 use super::*;
 use crate::driver::attach::AttachTiming;
 use crate::driver::{
-    AttachOutcome, BloxProcess, CancelOutcome, LatestPrompt, RemoteProcessProbe,
-    RemoteProcessStatus, TurnResult,
+    AcpToolCallMetadata, AttachOutcome, BloxProcess, CancelOutcome, LatestPrompt,
+    RemoteProcessProbe, RemoteProcessStatus, TurnResult,
 };
 use crate::types::BloxAcpCommand;
 use std::collections::VecDeque;
@@ -34,6 +34,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// - `hang`: the turn goes on after the load, silently.
 /// - `cancel`: `session/cancel` ends the turn with `result` and `idle`.
 /// - `cancel-silent`: `session/cancel` is accepted with no frames.
+/// - `interrupt`: as `cancel`, with the running tool call `t1` failed live
+///   first (Claude Code's interrupt result, between progress and a late
+///   completion that are not its end), which the replay of a later
+///   `session/load` holds too, as the agent wrote it to its transcript.
+/// - `close`: as `interrupt`, except that the replay leaves `t1` running
+///   (the Claude bridge closing a call the cancel left open writes nothing
+///   to the transcript).
 #[cfg(unix)]
 const FAKE_ATTACH_PROXY: &str = r#"
 log=$1; mode=$2
@@ -46,6 +53,7 @@ reply() { out '{"jsonrpc":"2.0","id":"'"$1"'","result":'"$2"'}'; }
 text() { update '{"sessionUpdate":"agent_message_chunk",'"$1"'"content":{"type":"text","text":"'"$2"'"}}'; }
 tool() { update '{"sessionUpdate":"tool_call","toolCallId":"'"$1"'","title":"Run","status":"pending"}'; }
 result() { update '{"sessionUpdate":"tool_call_update","toolCallId":"'"$1"'","status":"completed","content":[{"type":"content","content":{"type":"text","text":"'"$2"'"}}]}'; }
+failed() { update '{"sessionUpdate":"tool_call_update","toolCallId":"'"$1"'","status":"failed","content":[{"type":"content","content":{"type":"text","text":"'"$2"'"}}]}'; }
 idle() { sdk '{"type":"system","subtype":"session_state_changed","state":"idle","uuid":"idle-1"}'; }
 case "$mode" in
   replaced)
@@ -79,7 +87,11 @@ while IFS= read -r line; do
           tool t0
           result t0 'listed'
           text '"messageId":"m1",' 'Hello world'
-          tool t1 ;;
+          tool t1
+          if [ "$mode" = interrupt ]; then
+            failed t1 'Interrupted by user'
+            update '{"sessionUpdate":"user_message_chunk","messageId":"u2","content":{"type":"text","text":"[Request interrupted by user for tool use]"}}'
+          fi ;;
       esac
       reply "$id" '{}'
       case "$mode" in
@@ -103,10 +115,17 @@ while IFS= read -r line; do
         eof) echo 'INF Received EOF signal from orchestrator, connection closed' >&2 ;;
       esac ;;
     *'"method":"session/cancel"'*)
-      if [ "$mode" = cancel ]; then
-        sdk '{"type":"result","subtype":"error_during_execution","is_error":true,"stop_reason":"tool_use","terminal_reason":"aborted_tools","uuid":"result-2","parent_tool_use_id":null}'
-        idle
-      fi ;;
+      case "$mode" in
+        interrupt|close)
+          update '{"sessionUpdate":"tool_call_update","toolCallId":"t1","content":[{"type":"content","content":{"type":"text","text":"partial"}}]}'
+          failed t1 'Interrupted'
+          result t1 'late' ;;
+      esac
+      case "$mode" in
+        cancel|interrupt|close)
+          sdk '{"type":"result","subtype":"error_during_execution","is_error":true,"stop_reason":"tool_use","terminal_reason":"aborted_tools","uuid":"result-2","parent_tool_use_id":null}'
+          idle ;;
+      esac ;;
   esac
 done
 # A real proxy outlives its stdin until it is signalled: wait here, so the
@@ -125,6 +144,7 @@ fn stored_transcript() -> Vec<ReplayBoundary> {
             content: content.to_string(),
             acp_message_id: message.map(str::to_string),
             acp_tool_call_id: tool.map(str::to_string),
+            acp_tool_status: None,
         };
     vec![
         boundary("user", "hi", None, None),
@@ -193,6 +213,15 @@ impl MessageWriter for TranscriptLog {
         self.push(format!("tool_result:{tool_call_id}:{content}"));
     }
 
+    /// Only the statuses that end a call: every call starts `pending`.
+    async fn record_tool_call_metadata(&self, metadata: AcpToolCallMetadata) {
+        if let (Some(id), Some(status @ ("completed" | "failed"))) =
+            (&metadata.tool_call_id, metadata.tool_status.as_deref())
+        {
+            self.push(format!("status:{id}:{status}"));
+        }
+    }
+
     async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
         if metadata.event_kind.as_deref() == Some("response_result") {
             self.push("response_result".to_string());
@@ -239,6 +268,7 @@ impl RemoteProcessProbe for ScriptedProbe {
 const TIMING: AttachTiming = AttachTiming {
     poll: Duration::from_millis(50),
     idle_drain: Duration::from_millis(200),
+    cancel_catch_up: Duration::from_secs(10),
 };
 
 fn driver(log: &Path, mode: &str, probe: Arc<ScriptedProbe>, dedicated: bool) -> AcpDriver {
@@ -369,16 +399,35 @@ async fn attach_cancel(
     probe: Arc<ScriptedProbe>,
     deadline: Duration,
 ) -> (Result<CancelOutcome, String>, String) {
+    let (outcome, _, log) = attach_cancel_with(mode, probe, deadline, None).await;
+    (outcome, log)
+}
+
+/// [`attach_cancel`], catching up from a transcript holding `stored`:
+/// returns the rows the catch-up recorded too.
+async fn attach_cancel_with(
+    mode: &str,
+    probe: Arc<ScriptedProbe>,
+    deadline: Duration,
+    stored: Option<Vec<ReplayBoundary>>,
+) -> (Result<CancelOutcome, String>, Vec<String>, String) {
     let log = log_path(mode);
+    let transcript = Arc::new(TranscriptLog::default());
     let local = tokio::task::LocalSet::new();
     let outcome = local
         .run_until(async {
+            let catch_up = stored.map(|stored| {
+                let store: Arc<dyn Store> = Arc::new(TranscriptStore(stored));
+                let writer: Arc<dyn MessageWriter> = transcript.clone();
+                (store, writer)
+            });
             driver(&log, mode, probe, true)
                 .attach_cancel_with_timing(
                     "staged-session",
                     "sess-1",
                     Some("27294439"),
                     &std::env::temp_dir(),
+                    catch_up.as_ref().map(|(store, writer)| (store, writer)),
                     deadline,
                     TIMING,
                 )
@@ -387,7 +436,29 @@ async fn attach_cancel(
         .await;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
-    (outcome, text)
+    (outcome, transcript.rows(), text)
+}
+
+/// [`stored_transcript`] with the tool call that was running when the
+/// connection went: `t1`, its first update (a shell command's description)
+/// stored as its result.
+fn stored_with_running_call() -> Vec<ReplayBoundary> {
+    let mut stored = stored_transcript();
+    stored.push(ReplayBoundary {
+        role: "tool_call".to_string(),
+        content: "Run".to_string(),
+        acp_message_id: None,
+        acp_tool_call_id: Some("t1".to_string()),
+        acp_tool_status: Some("pending".to_string()),
+    });
+    stored.push(ReplayBoundary {
+        role: "tool_result".to_string(),
+        content: "Runs the tests".to_string(),
+        acp_message_id: None,
+        acp_tool_call_id: Some("t1".to_string()),
+        acp_tool_status: None,
+    });
+    stored
 }
 
 /// The full catch-up: only what the transcript lacks is recorded — the tail
@@ -420,6 +491,7 @@ async fn attach_records_only_what_the_transcript_lacks_and_settles_on_its_own_id
         [
             "text:world",
             "tool_call:t1",
+            "status:t1:completed",
             "tool_result:t1:ok",
             "text:Done",
             "text: now",
@@ -436,6 +508,40 @@ async fn attach_records_only_what_the_transcript_lacks_and_settles_on_its_own_id
         run.log.contains("SIGINT"),
         "a dedicated process's proxy is stopped gracefully: {}",
         run.log
+    );
+}
+
+/// The tool call was running when the connection went, so the transcript
+/// holds it `pending`, with its description as its result. The replay
+/// re-sends it unchanged, and its completion, live, is recorded as a live
+/// turn records it: the status and the output both land.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_stored_running_call_ends_with_its_live_completion() {
+    let run = attach_to(
+        "claude",
+        ScriptedProbe::running(),
+        true,
+        Some("27294439"),
+        false,
+        stored_with_running_call(),
+    )
+    .await;
+    assert!(
+        matches!(run.outcome, Ok(AttachOutcome::Ended { .. })),
+        "{:?}",
+        run.outcome
+    );
+    assert_eq!(
+        run.rows,
+        [
+            "text:world",
+            "status:t1:completed",
+            "tool_result:t1:ok",
+            "text:Done",
+            "text: now",
+            "response_result",
+        ]
     );
 }
 
@@ -467,6 +573,7 @@ async fn attach_reports_a_newest_prompt_the_agent_never_received() {
         content: "Now add a test".to_string(),
         acp_message_id: None,
         acp_tool_call_id: None,
+        acp_tool_status: None,
     });
     let run = attach_to(
         "claude",
@@ -678,4 +785,138 @@ async fn attach_cancel_on_a_replaced_process_sends_nothing() {
         })
     );
     assert!(!log.contains("session/cancel"), "{log}");
+}
+
+/// Stop on a disconnected session: the cancel goes out first, and once the
+/// session is idle a `session/load` on the same connection backfills what
+/// the transcript lacks. The running tool call ends as the agent's
+/// transcript has it, failed with the interrupt's result, which replaces
+/// the description stored as its result; the frames the cancel produced
+/// live are left to the replay.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_cancel_catches_up_after_the_cancel_and_ends_the_running_call() {
+    let (outcome, rows, log) = attach_cancel_with(
+        "interrupt",
+        ScriptedProbe::running(),
+        Duration::from_secs(10),
+        Some(stored_with_running_call()),
+    )
+    .await;
+    assert_eq!(outcome, Ok(CancelOutcome::Stopped));
+    assert_eq!(
+        rows,
+        [
+            "text:world",
+            "status:t1:failed",
+            "tool_result:t1:Interrupted by user",
+        ]
+    );
+    let cancel = log.find("\"method\":\"session/cancel\"").expect("{log}");
+    let load = log.find("\"method\":\"session/load\"").expect("{log}");
+    assert!(cancel < load, "the cancel goes out first: {log}");
+    assert!(log.contains("emitRawSDKMessages"), "{log}");
+}
+
+/// A call the agent settled live only, and the replay leaves running, ends
+/// with the settling the cancel produced.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_cancel_records_a_live_only_settling_the_replay_lacks() {
+    let (outcome, rows, _) = attach_cancel_with(
+        "close",
+        ScriptedProbe::running(),
+        Duration::from_secs(10),
+        Some(stored_with_running_call()),
+    )
+    .await;
+    assert_eq!(outcome, Ok(CancelOutcome::Stopped));
+    assert_eq!(
+        rows,
+        [
+            "text:world",
+            "status:t1:failed",
+            "tool_result:t1:Interrupted"
+        ]
+    );
+}
+
+/// An unconfirmed cancel loads nothing: the turn may still be going.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn an_unconfirmed_attach_cancel_does_not_catch_up() {
+    let (outcome, rows, log) = attach_cancel_with(
+        "cancel-silent",
+        ScriptedProbe::running(),
+        Duration::from_millis(1500),
+        Some(stored_with_running_call()),
+    )
+    .await;
+    assert_eq!(outcome, Ok(CancelOutcome::Unconfirmed));
+    assert!(rows.is_empty(), "{rows:?}");
+    assert!(!log.contains("session/load"), "{log}");
+}
+
+/// A replaced process sends no cancel, and the catch-up backfills from the
+/// new process's replay.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_cancel_on_a_replaced_process_catches_up_from_its_replay() {
+    let (outcome, rows, log) = attach_cancel_with(
+        "replaced",
+        ScriptedProbe::running(),
+        Duration::from_secs(10),
+        Some(stored_with_running_call()),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        Ok(CancelOutcome::ProcessGone {
+            message: Some("bloxlet restarted while command was running".to_string())
+        })
+    );
+    assert_eq!(rows, ["text:world"]);
+    assert!(!log.contains("session/cancel"), "{log}");
+    assert!(log.contains("\"method\":\"session/load\""), "{log}");
+}
+
+/// A transcript that can't be read costs the catch-up, never the cancel.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn an_unreadable_transcript_cancels_without_catching_up() {
+    struct UnreadableStore;
+    impl Store for UnreadableStore {
+        fn set_agent_session_id(&self, _: &str, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn get_session_replay_boundaries(&self, _: &str) -> Result<Vec<ReplayBoundary>, String> {
+            Err("database is locked".to_string())
+        }
+    }
+    let log = log_path("cancel");
+    let transcript = Arc::new(TranscriptLog::default());
+    let local = tokio::task::LocalSet::new();
+    let outcome = local
+        .run_until(async {
+            let store: Arc<dyn Store> = Arc::new(UnreadableStore);
+            let writer: Arc<dyn MessageWriter> = transcript.clone();
+            driver(&log, "cancel", ScriptedProbe::running(), true)
+                .attach_cancel_with_timing(
+                    "staged-session",
+                    "sess-1",
+                    Some("27294439"),
+                    &std::env::temp_dir(),
+                    Some((&store, &writer)),
+                    Duration::from_secs(10),
+                    TIMING,
+                )
+                .await
+        })
+        .await;
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    assert_eq!(outcome, Ok(CancelOutcome::Stopped));
+    assert!(text.contains("\"method\":\"session/cancel\""), "{text}");
+    assert!(!text.contains("session/load"), "{text}");
+    assert!(transcript.rows().is_empty());
 }

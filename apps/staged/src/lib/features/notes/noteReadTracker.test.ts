@@ -78,11 +78,8 @@ describe('NoteReadTracker', () => {
     tracker.show('branch', 'a');
     await flush();
 
-    await tracker.toggle('project-1');
-    expect(setNoteReadState).toHaveBeenCalledWith(
-      { kind: 'branch', noteId: 'a', projectId: 'project-1' },
-      false
-    );
+    await tracker.toggle();
+    expect(setNoteReadState).toHaveBeenCalledWith({ kind: 'branch', noteId: 'a' }, false);
     expect(tracker.unread).toBe(true);
 
     // The write's notes-changed echo, and the viewer's effect re-running.
@@ -99,14 +96,14 @@ describe('NoteReadTracker', () => {
     const tracker = await newTracker(note('a'), note('b'));
     tracker.show('branch', 'a');
     await flush();
-    await tracker.toggle('project-1');
+    await tracker.toggle();
 
     tracker.show('branch', 'b');
     tracker.show('branch', 'a');
     await flush();
     expect(rows.get('a')!.readAt).not.toBeNull();
 
-    await tracker.toggle('project-1');
+    await tracker.toggle();
     tracker.reset();
     tracker.show('branch', 'a');
     await flush();
@@ -149,7 +146,7 @@ describe('NoteReadTracker', () => {
     const tracker = await newTracker(note('a'));
     tracker.show('branch', 'a');
     await flush();
-    await tracker.toggle('project-1');
+    await tracker.toggle();
 
     tracker.observe(rows.get('a')!);
     await flush();
@@ -167,7 +164,7 @@ describe('NoteReadTracker', () => {
     const tracker = await newTracker(note('a'));
     tracker.show('branch', 'a');
     await flush();
-    await tracker.toggle('project-1');
+    await tracker.toggle();
 
     // An agent re-emit that only changes the suggested next steps keeps the
     // read state, but still moves `updatedAt`.
@@ -206,7 +203,7 @@ describe('NoteReadTracker', () => {
     await flush();
 
     expect(tracker.canToggle).toBe(false);
-    await tracker.toggle('project-1');
+    await tracker.toggle();
     expect(setNoteReadState).not.toHaveBeenCalled();
   });
 
@@ -223,10 +220,7 @@ describe('NoteReadTracker', () => {
     resolveA(write('a', true));
     await flush();
 
-    await tracker.toggle('project-1');
-    expect(setNoteReadState).toHaveBeenCalledWith(
-      { kind: 'branch', noteId: 'b', projectId: 'project-1' },
-      false
-    );
+    await tracker.toggle();
+    expect(setNoteReadState).toHaveBeenCalledWith({ kind: 'branch', noteId: 'b' }, false);
   });
 });

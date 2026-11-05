@@ -633,7 +633,7 @@
   }
 
   function setProjectNoteRead(noteId: string, read: boolean) {
-    void setNoteReadState({ kind: 'project', noteId, projectId: project.id }, read);
+    void setNoteReadState({ kind: 'project', noteId }, read);
   }
 
   function projectNoteContextMenuKey(note: ProjectNote): string {

@@ -659,7 +659,7 @@
       title={readToggleLabel}
       aria-label={readToggleLabel}
       disabled={readTracker.toggling}
-      onclick={() => readTracker.toggle(projectId)}
+      onclick={() => readTracker.toggle()}
     >
       {#if readTracker.unread}
         <MailOpen size={16} />

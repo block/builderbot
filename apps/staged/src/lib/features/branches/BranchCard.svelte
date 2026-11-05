@@ -2143,10 +2143,7 @@
               onDeletePendingCommit={handleDeletePendingCommit}
               onDeleteNote={handleDeleteNote}
               onSetNoteRead={(noteId, read) =>
-                void setNoteReadState(
-                  { kind: 'branch', noteId, projectId: branch.projectId },
-                  read
-                )}
+                void setNoteReadState({ kind: 'branch', noteId }, read)}
               onDeleteReview={handleDeleteReview}
               onImageClick={handleImageClick}
               onDeleteImage={handleDeleteImage}

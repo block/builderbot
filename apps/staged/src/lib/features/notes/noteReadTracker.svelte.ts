@@ -125,14 +125,14 @@ export class NoteReadTracker {
   }
 
   /** Flip the note on screen between read and unread at the user's request. */
-  async toggle(projectId: string | null | undefined): Promise<void> {
+  async toggle(): Promise<void> {
     const shown = this.shown;
     if (!shown || !this.canToggle || this.toggleInFlight) return;
     const generation = this.generation;
     this.toggleInFlight = true;
     try {
       const row = await setNoteReadState(
-        { kind: shown.kind, noteId: shown.noteId, projectId },
+        { kind: shown.kind, noteId: shown.noteId },
         isNoteUnread(shown)
       );
       if (row) this.apply(generation, row);

@@ -8,7 +8,8 @@
  * user is elsewhere. Reading the note again, however that happens, or deleting
  * it takes the dot away with it, unless another note marked unread still holds
  * it or the project was flagged some other way (see
- * `projectStateStore.markUnreadForNote`).
+ * `projectStateStore.markUnreadForNote`). The project flagged is the one the
+ * note is in, whichever project's view the user marked it from.
  */
 
 import { toast } from 'svelte-sonner';
@@ -25,8 +26,6 @@ export type NoteReadRow = BranchNote | ProjectNote;
 export interface NoteReadTarget {
   kind: NoteKind;
   noteId: string;
-  /** The project a branch note is in. A project note's row names its own. */
-  projectId?: string | null;
 }
 
 function noteKey(kind: NoteKind, noteId: string): string {
@@ -67,6 +66,24 @@ export function forgetDeletedNote(kind: NoteKind, noteId: string): void {
 }
 
 /**
+ * The project a note is in. A project note's row names it; a branch note's is
+ * its branch's, which a view may not have loaded — a `#note:<id>` reference
+ * can open a note from any project.
+ */
+async function owningProjectId(row: NoteReadRow): Promise<string | null> {
+  if ('projectId' in row) return row.projectId;
+  for (const [projectId, branches] of projectsDataStore.branchesByProject) {
+    if (branches.some((branch) => branch.id === row.branchId)) return projectId;
+  }
+  try {
+    return (await commands.getBranch(row.branchId))?.projectId ?? null;
+  } catch (error) {
+    console.warn('Failed to look up the note’s project', error);
+    return null;
+  }
+}
+
+/**
  * Set a note's read state at the user's request. Resolves to the row as it
  * now reads, or null once a failure has been toasted.
  */
@@ -83,9 +100,11 @@ export async function setNoteReadState(
     });
     return null;
   }
-  const projectId = 'projectId' in row ? row.projectId : target.projectId;
-  if (!read && projectId && !projectsDataStore.isProjectDeleting(projectId)) {
-    projectStateStore.markUnreadForNote(projectId, noteKey(target.kind, target.noteId));
+  if (!read) {
+    const projectId = await owningProjectId(row);
+    if (projectId && !projectsDataStore.isProjectDeleting(projectId)) {
+      projectStateStore.markUnreadForNote(projectId, noteKey(target.kind, target.noteId));
+    }
   }
   return row;
 }

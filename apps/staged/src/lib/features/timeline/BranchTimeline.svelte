@@ -280,6 +280,8 @@
     secondaryMeta?: string;
     tertiaryMeta?: string;
     deleting?: boolean;
+    /** Set on session-backed artifact rows (commits, notes, reviews) only. */
+    phase?: SessionRowPhase;
     /** Sort key in unix seconds. Commits pass their clamped `sortTimestamp`; displayed times come from `meta`. */
     timestamp: number;
     /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
@@ -686,19 +688,24 @@
         (!!commit.sha && deletingCommitIds.has(commit.sha));
       const liveHint = commit.sessionId ? liveSessionHints[commit.sessionId] : undefined;
 
+      let phase: SessionRowPhase;
       let type: TimelineItemType;
       let secondaryMeta: string | undefined;
 
       if (isFailed) {
+        phase = 'failed';
         type = 'failed-commit';
         secondaryMeta = failedArtifactSubtitle(commit.completionReason, 'commit');
       } else if (isQueued) {
+        phase = 'queued';
         type = 'queued-commit';
         secondaryMeta = 'Queued';
       } else if (isPending || isRunning) {
+        phase = 'running';
         type = 'pending-commit';
         secondaryMeta = liveHint ?? 'Generating commit';
       } else {
+        phase = 'done';
         type = 'commit';
         secondaryMeta = formatRelativeTimeSeconds(commit.timestamp, nowMs);
       }
@@ -717,6 +724,7 @@
         secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         tertiaryMeta: showAuthor ? commit.author : undefined,
         deleting: isDeleting,
+        phase,
         timestamp: commit.sortTimestamp,
         order: commit.order,
         sessionId: commit.sessionId ?? undefined,
@@ -769,6 +777,7 @@
         title: sessionRowTitle('note', note.title, undefined),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
+        phase,
         // Sort by when the content was last written, not queue time
         timestamp: Math.floor(noteLastWrittenAt(note) / 1000),
         order: 0,
@@ -800,19 +809,24 @@
 
       const badges = reviewBadges(review);
 
+      let phase: SessionRowPhase;
       let type: TimelineItemType;
       let meta: string | undefined;
 
       if (isFailed) {
+        phase = 'failed';
         type = 'failed-review';
         meta = failedArtifactSubtitle(review.completionReason, 'review');
       } else if (isQueued) {
+        phase = 'queued';
         type = 'queued-review';
         meta = 'Queued';
       } else if (isRunning) {
+        phase = 'running';
         type = 'generating-review';
         meta = liveHint ?? 'Generating review';
       } else {
+        phase = 'done';
         type = 'review';
         meta = formatRelativeTime(review.completedAt ?? review.createdAt, nowMs);
       }
@@ -829,6 +843,7 @@
         meta: isDeleting ? 'Deleting...' : meta,
         badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,
+        phase,
         // Use completedAt so completed reviews sort by completion time, not queue time
         timestamp: Math.floor((review.completedAt ?? review.createdAt) / 1000),
         order: 0,
@@ -1015,20 +1030,15 @@
     }
   }
 
-  /** The session phase a row's type shows. */
-  function rowPhase(type: TimelineItemType): SessionRowPhase {
-    if (type.startsWith('queued-')) return 'queued';
-    if (type === 'pending-commit' || type.startsWith('generating-')) return 'running';
-    if (type.startsWith('failed-')) return 'failed';
-    return 'done';
-  }
-
   function isResumable(item: DisplayItem): boolean {
+    // Only artifact rows carry a phase; git, image and provisioning rows
+    // have no session to resume.
+    if (!item.phase) return false;
     return canResumeRow({
       sessionId: item.sessionId,
       completionReason: item.completionReason,
       deleting: item.deleting,
-      phase: rowPhase(item.type),
+      phase: item.phase,
     });
   }
 

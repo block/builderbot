@@ -187,6 +187,20 @@ function listNotes(...notes: ProjectNote[]) {
   commandMocks.listProjectNotes.mockImplementation(async () => notes);
 }
 
+/** Answer the next note-by-session refetch with `note`. */
+function answerNoteFetch(note: ProjectNote | null) {
+  commandMocks.getProjectNoteBySession.mockImplementationOnce(async () => note);
+}
+
+/** Hold the next note-by-session refetch open until `release` is called with its result. */
+function holdNoteFetch(): (note: ProjectNote | null) => void {
+  let release!: (note: ProjectNote | null) => void;
+  commandMocks.getProjectNoteBySession.mockImplementationOnce(
+    () => new Promise<ProjectNote | null>((resolve) => (release = resolve))
+  );
+  return (note) => release(note);
+}
+
 function rowFor(sessionId: string): HTMLElement {
   const row = document.querySelector<HTMLElement>(
     `[data-testid="timeline-row"][data-session-id="${sessionId}"]`
@@ -292,7 +306,7 @@ describe('ProjectSection referring open', () => {
 });
 
 describe('ProjectSection note rows', () => {
-  it('offers Resume on a crashed note, resumes it with the plain prompt, and reloads it running', async () => {
+  it('offers Resume on a crashed note, resumes it with the plain prompt, and refetches it running', async () => {
     const crashed = failedNote('crashed', 'crashed');
     listNotes(crashed);
     const section = mountSection();
@@ -302,7 +316,7 @@ describe('ProjectSection note rows', () => {
     const resume = resumeButton('session-crashed');
     expect(resume).not.toBeNull();
 
-    listNotes({ ...crashed, sessionStatus: 'running', completionReason: null });
+    answerNoteFetch({ ...crashed, sessionStatus: 'running', completionReason: null });
     resume!.click();
     await settle();
 
@@ -312,7 +326,9 @@ describe('ProjectSection note rows', () => {
       undefined,
       null
     );
-    expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(2);
+    // Only this note is refetched; the list isn't reloaded.
+    expect(commandMocks.getProjectNoteBySession).toHaveBeenCalledWith('session-crashed');
+    expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(1);
     expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
     expect(resumeButton('session-crashed')).toBeNull();
 
@@ -383,6 +399,7 @@ describe('ProjectSection note rows', () => {
     expect(toastError).toHaveBeenCalledWith('Resume failed', {
       description: 'agent unavailable',
     });
+    expect(commandMocks.getProjectNoteBySession).not.toHaveBeenCalled();
     expect(commandMocks.listProjectNotes).toHaveBeenCalledTimes(1);
     expect(resumeButton('session-crashed')).not.toBeNull();
 
@@ -425,6 +442,102 @@ describe('ProjectSection note rows', () => {
     expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
     expect(resumeButton('session-crashed')).toBeNull();
 
+    unmount(section);
+  });
+
+  it('drops a held running refetch that lands after the terminal one, even across a later refetch', async () => {
+    // Regression: refetch numbers were per session and the newest landed
+    // fetch deleted its entry, so the next refetch for that session started
+    // at 1 again. A slow older fetch could then match the new number and
+    // overwrite fresher data, and the fetch it matched was dropped instead.
+    const crashed = failedNote('crashed', 'crashed');
+    const running = { ...crashed, sessionStatus: 'running', completionReason: null };
+    const written = {
+      ...crashed,
+      title: 'Written on resume',
+      content: 'Body',
+      sessionStatus: 'completed',
+      completionReason: 'turn_complete',
+    };
+    listNotes(crashed);
+    const section = mountSection();
+    await settle();
+    const handler = eventHandlers.get('session-status-changed')!;
+
+    // A: the session resumes; its running refetch stalls.
+    const releaseA = holdNoteFetch();
+    const eventA = handler({
+      sessionId: 'session-crashed',
+      status: 'running',
+      projectId: project.id,
+    });
+    await settle();
+    expect(rowFor('session-crashed').dataset.type).toBe('failed-note');
+
+    // B: the session finishes and its terminal refetch lands first.
+    answerNoteFetch(written);
+    await emitSessionStatus({
+      sessionId: 'session-crashed',
+      status: 'completed',
+      projectId: project.id,
+    });
+    expect(rowFor('session-crashed').dataset.type).toBe('note');
+    expect(rowFor('session-crashed').dataset.title).toBe('Written on resume');
+
+    // C: it is resumed again, and that refetch stalls too.
+    const releaseC = holdNoteFetch();
+    const eventC = handler({
+      sessionId: 'session-crashed',
+      status: 'running',
+      projectId: project.id,
+    });
+    await settle();
+
+    // A lands late: stale, so the row keeps B's note.
+    releaseA(running);
+    await eventA;
+    await settle();
+    expect(rowFor('session-crashed').dataset.type).toBe('note');
+    expect(rowFor('session-crashed').dataset.title).toBe('Written on resume');
+
+    // C lands: it is the latest, so it applies.
+    releaseC({ ...written, sessionStatus: 'running', completionReason: null });
+    await eventC;
+    await settle();
+    expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
+
+    unmount(section);
+  });
+
+  it('logs a failed refetch and lets the next one through', async () => {
+    const crashed = failedNote('crashed', 'crashed');
+    listNotes(crashed);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const section = mountSection();
+    await settle();
+
+    commandMocks.getProjectNoteBySession.mockRejectedValueOnce(new Error('store closed'));
+    // The listener resolves rather than rejecting out of the event handler.
+    await emitSessionStatus({
+      sessionId: 'session-crashed',
+      status: 'running',
+      projectId: project.id,
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      '[ProjectSection] Failed to refresh project note:',
+      expect.any(Error)
+    );
+    expect(rowFor('session-crashed').dataset.type).toBe('failed-note');
+
+    answerNoteFetch({ ...crashed, sessionStatus: 'running', completionReason: null });
+    await emitSessionStatus({
+      sessionId: 'session-crashed',
+      status: 'running',
+      projectId: project.id,
+    });
+    expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
+
+    consoleError.mockRestore();
     unmount(section);
   });
 

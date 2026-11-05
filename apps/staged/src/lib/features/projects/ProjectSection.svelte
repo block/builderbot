@@ -41,19 +41,15 @@
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { minuteNow } from '../../shared/relativeTime.svelte';
-  import { formatNoteTimestamp, noteLastWrittenAt } from '../notes/noteTimestamps';
+  import { noteLastWrittenAt } from '../notes/noteTimestamps';
   import { noteChatState } from '../sessions/noteFreshness';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
-  import { failedArtifactSubtitle } from '../timeline/sessionFailureCopy';
   import { canResumeRow, noteRowPhase } from '../timeline/sessionRowState';
   import { resumeSessionFromRow } from '../timeline/resumeSessionFromRow';
-  import {
-    buildChildSessionBadges,
-    runningChildSessionIds,
-    runningSecondaryMeta,
-  } from '../timeline/childSessionBadges';
+  import { buildChildSessionBadges, runningChildSessionIds } from '../timeline/childSessionBadges';
   import { nextActiveSessionIds } from './activeSessionIds';
+  import { projectNoteRow } from './projectNoteRow';
   import { projectDisplayName } from '../../shared/utils';
   import ProjectStatusPicker from './ProjectStatusPicker.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -403,7 +399,9 @@
         imageIdsToSend,
         data.acpConfigSelection ?? undefined
       );
-      activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
+      // The session's `running` event (emitted before this response) tracks
+      // it in activeSessionIds, and the reloaded stub does too. Adding it here
+      // as well would re-add a session whose terminal event already landed.
       sessionRegistry.register(response.sessionId, project.id, 'note');
       projectStateStore.addRunningSession(project.id, response.sessionId);
       // Reload notes immediately so the stub appears as "Generating note…"
@@ -419,8 +417,13 @@
   /** Notes whose Resume is in flight, so a second click can't resume twice. */
   let resumingNoteIds = $state<Set<string>>(new Set());
   let confirmDelete = $state<ConfirmDeleteRequest | null>(null);
-  /** Latest per-session note refetch, so an older one landing late is dropped. */
-  const noteRefreshGenerations = new Map<string, number>();
+  /**
+   * Per-session latest note refetch, numbered from one counter that never
+   * resets: an older fetch landing late is dropped, and clearing a landed
+   * fetch's entry can't let a later fetch inherit its number.
+   */
+  let noteRefreshSeq = 0;
+  const latestNoteRefreshes = new Map<string, number>();
 
   async function loadProjectNotes() {
     try {
@@ -432,13 +435,23 @@
 
   /** Surgically refetch the note a session writes instead of reloading them all. */
   async function refreshNoteForSession(sessionId: string) {
-    const generation = (noteRefreshGenerations.get(sessionId) ?? 0) + 1;
-    noteRefreshGenerations.set(sessionId, generation);
-    const updatedNote = await commands.getProjectNoteBySession(sessionId);
-    // A refetch started after this one (the session's terminal event racing
-    // its running one, say) owns the row now.
-    if (noteRefreshGenerations.get(sessionId) !== generation) return;
-    noteRefreshGenerations.delete(sessionId);
+    const seq = ++noteRefreshSeq;
+    latestNoteRefreshes.set(sessionId, seq);
+    let updatedNote: ProjectNote | null;
+    let superseded = false;
+    try {
+      updatedNote = await commands.getProjectNoteBySession(sessionId);
+    } catch (e) {
+      console.error('[ProjectSection] Failed to refresh project note:', e);
+      return;
+    } finally {
+      // A refetch started after this one (the session's terminal event racing
+      // its running one, say) owns the row now. Landed or failed, the latest
+      // fetch clears its own entry.
+      superseded = latestNoteRefreshes.get(sessionId) !== seq;
+      if (!superseded) latestNoteRefreshes.delete(sessionId);
+    }
+    if (superseded) return;
 
     if (updatedNote) {
       projectNotes = projectNotes.map((n) => (n.id === updatedNote.id ? updatedNote : n));
@@ -501,10 +514,12 @@
     resumingNoteIds = new Set([...resumingNoteIds, note.id]);
     try {
       if (!(await resumeSessionFromRow(sessionId, null))) return;
-      // Track it as running at once, as a fresh start does; the running
-      // event that does the same may land after the reload below.
-      activeSessionIds = nextActiveSessionIds(activeSessionIds, { sessionId, status: 'running' });
-      await loadProjectNotes();
+      // Only this note, through the ordering guard: a whole-list reload read
+      // while the session ran could land after its terminal refresh and leave
+      // the row spinning. The `running` event tracks the id in
+      // activeSessionIds; adding it here too could re-add a session whose
+      // terminal event beat this response.
+      await refreshNoteForSession(sessionId);
     } finally {
       const next = new Set(resumingNoteIds);
       next.delete(note.id);
@@ -856,18 +871,8 @@
       >
         <div class="notes-timeline">
           {#each timelineNotes as note, index (note.id)}
-            {@const phase = noteRowPhase(note)}
-            {@const isRunning = phase === 'running'}
-            {@const isQueued = phase === 'queued'}
-            {@const isFailed = phase === 'failed'}
+            {@const isRunning = isSessionActive(note.sessionStatus)}
             {@const isDeleting = deletingNoteIds.has(note.id)}
-            {@const noteType = isRunning
-              ? 'generating-note'
-              : isQueued
-                ? 'queued-note'
-                : isFailed
-                  ? 'failed-note'
-                  : 'note'}
             {@const liveHint =
               isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
             {@const liveTitle =
@@ -877,29 +882,24 @@
                 [],
               liveSessionTitles
             )}
+            {@const row = projectNoteRow(note, {
+              deleting: isDeleting,
+              nowMs,
+              liveTitle,
+              liveHint,
+              childBadges,
+            })}
             <TimelineRow
-              type={noteType}
-              title={isRunning
-                ? (liveTitle ?? 'Generating note…')
-                : isFailed
-                  ? failedArtifactSubtitle(note.completionReason, 'note')
-                  : note.title || 'Untitled note'}
-              secondaryMeta={isDeleting
-                ? 'Deleting...'
-                : isRunning
-                  ? runningSecondaryMeta(childBadges, liveHint)
-                  : isQueued
-                    ? 'Queued'
-                    : isFailed
-                      ? undefined
-                      : formatNoteTimestamp(note, nowMs)}
+              type={row.type}
+              title={row.title}
+              secondaryMeta={row.secondaryMeta}
               childSessionBadges={childBadges}
               onChildSessionClick={openChildSessionChat}
               deleting={isDeleting}
               isLast={false}
               sessionId={note.sessionId ?? undefined}
-              chatState={noteType === 'note' ? noteChatState(note) : 'none'}
-              onItemClick={noteType === 'note' ? () => openProjectNote(note) : undefined}
+              chatState={row.type === 'note' ? noteChatState(note) : 'none'}
+              onItemClick={row.type === 'note' ? () => openProjectNote(note) : undefined}
               onSessionClick={(sid) => {
                 openProjectNote({ ...note, sessionId: sid }, true);
               }}
@@ -909,7 +909,7 @@
                 sessionId: note.sessionId,
                 completionReason: note.completionReason,
                 deleting: isDeleting,
-                phase,
+                phase: noteRowPhase(note),
               }) && !resumingNoteIds.has(note.id)
                 ? () => handleResumeNote(note)
                 : undefined}

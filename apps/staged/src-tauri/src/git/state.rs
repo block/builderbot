@@ -916,11 +916,12 @@ pub fn compute_local_branch_git_state_with<T: Send>(
 /// `Err` instead of a state. The build would read a failed `git status` as a
 /// clean tree and a failed count as zero: during a cold capture, a checkout
 /// with LFS files and git-lfs missing from the inherited PATH would show no
-/// uncommitted changes and offer Pull. The caller keeps the state it has,
-/// and a refresh after the capture lands gets the real one. Nothing retries
-/// here: a retry with the captured env would wait out the capture this
-/// build exists not to wait for, and a second bounded read of the same
-/// capture returns at once without it.
+/// uncommitted changes and offer Pull. The caller keeps the state it has.
+/// `refresh_branch_git_state` then queues one follow-up refresh on the
+/// capture (`timeline::git_state_follow_up`), which runs once it lands and
+/// gets the real state. Nothing retries here: a retry with the captured env
+/// would wait out the capture this build exists not to wait for, and a
+/// second bounded read of the same capture returns at once without it.
 pub fn compute_local_branch_git_state_bounded(
     repo: &Path,
     branch_name: &str,

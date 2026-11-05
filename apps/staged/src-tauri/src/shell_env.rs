@@ -21,6 +21,9 @@
 //! it before anything else ([`prewarm_home_env`]), so worktree captures can
 //! never hold it up. A shell still running after [`SHELL_CAPTURE_TIMEOUT`] is
 //! killed, so a hung rc file can't keep a slot, or its root's entry, forever.
+//! What the shell started gets until [`LEFTOVER_GROUP_TIMEOUT`] to finish, and
+//! its root's lookups fail at once for [`TIMED_OUT_RETRY_AFTER`] rather than
+//! each wait out another timeout.
 //!
 //! A capture never belongs to a caller's future. Async callers, bounded
 //! reads and prewarms run it on a `shell-env-capture` thread; a sync caller
@@ -30,6 +33,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,6 +45,8 @@ use tokio::sync::watch;
 
 mod capture_slots;
 mod env_root;
+#[cfg(unix)]
+mod leftover_group;
 
 #[cfg(all(test, unix))]
 mod capture_limit_tests;
@@ -61,11 +67,52 @@ const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a capture's shell may run before it is killed and the capture
 /// fails. Well past the 23 s a cold first shell measured, so it only catches
-/// a shell that would never finish on its own: an rc file stuck on a
-/// keychain prompt, a network call with no timeout, or a stalled Hermit
-/// download. Failing frees the capture's slot and evicts its entry, so the
-/// next caller starts a fresh capture instead of joining the hung one.
+/// a shell that won't finish soon: an rc file stuck on a keychain prompt or a
+/// network call with no timeout, or a first-run step doing real work, such
+/// as a nix-direnv dev-shell build or an `nvm install` download.
+///
+/// Only the shell is killed. What it started keeps going until
+/// [`LEFTOVER_GROUP_TIMEOUT`], so a build or download can finish and fill
+/// its own cache for the next capture. Failing frees the capture's slot and
+/// replaces its entry with a timed-out mark (see [`TIMED_OUT_RETRY_AFTER`]),
+/// so nobody joins the dead capture.
 const SHELL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long, from its shell's start, what a timed-out capture's shell
+/// started may keep running before its whole process group is killed. Long
+/// enough for a dev-shell build or a download to finish, short enough that
+/// a `security` keychain prompt nobody answers doesn't sit there for good.
+const LEFTOVER_GROUP_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How long after a capture timed out its env root's lookups fail at once,
+/// so callers go on with the fallback env. Another shell started that soon
+/// would most likely time out too, and every caller joining it would wait
+/// the full [`SHELL_CAPTURE_TIMEOUT`] again. A capture after this has passed
+/// replaces the mark, as does [`ShellEnvCache::invalidate`].
+const TIMED_OUT_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+
+/// [`SHELL_CAPTURE_TIMEOUT`], [`LEFTOVER_GROUP_TIMEOUT`] and
+/// [`TIMED_OUT_RETRY_AFTER`] for one cache. Tests shorten them.
+#[derive(Clone, Copy, Debug)]
+struct CaptureTimeouts {
+    /// Kill the shell if it is still running after this long.
+    shell: Duration,
+    /// Kill what the killed shell started if it is still running this long
+    /// after the shell started.
+    group: Duration,
+    /// Fail lookups at once for this long after a capture timed out.
+    retry_after: Duration,
+}
+
+impl Default for CaptureTimeouts {
+    fn default() -> Self {
+        Self {
+            shell: SHELL_CAPTURE_TIMEOUT,
+            group: LEFTOVER_GROUP_TIMEOUT,
+            retry_after: TIMED_OUT_RETRY_AFTER,
+        }
+    }
+}
 
 /// A capture that took this long from start to finish, queue included, gets
 /// a warning. One shell measured about 9 s on its own and about 12 s with
@@ -372,7 +419,50 @@ pub fn env_vars_with_extended_path(shell_env: &HashMap<String, String>) -> Vec<(
 enum CachedEntry {
     Ready(ShellEnv),
     InFlight(InFlightHandle),
+    /// When the root's last capture timed out. Lookups fail at once until
+    /// [`CaptureTimeouts::retry_after`] has passed, then start afresh.
+    TimedOut(Instant),
 }
+
+/// The error a lookup gets while its env root's last capture timed out less
+/// than [`CaptureTimeouts::retry_after`] ago. See [`is_recent_timeout`].
+#[derive(Debug)]
+struct RecentTimeout {
+    ago: Duration,
+    retry_in: Duration,
+}
+
+impl fmt::Display for RecentTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the last shell env capture here timed out {}s ago; not trying again for {}s",
+            self.ago.as_secs(),
+            self.retry_in.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for RecentTimeout {}
+
+impl From<RecentTimeout> for io::Error {
+    fn from(timed_out: RecentTimeout) -> Self {
+        io::Error::new(io::ErrorKind::TimedOut, timed_out)
+    }
+}
+
+/// Whether `error` is from a lookup that failed at once because its env
+/// root's last capture timed out recently, rather than from a capture that
+/// ran and failed. That capture already warned when it timed out, so
+/// callers that look up often can log these quietly.
+pub fn is_recent_timeout(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<RecentTimeout>())
+}
+
+/// A callback for when a capture lands; see [`ShellEnvCache::after_capture`].
+type AfterCapture = Box<dyn FnOnce() + Send>;
 
 /// Coalescing primitive used by both `get` (async) and `get_blocking` (sync)
 /// callers waiting on the same in-flight capture. Async waiters subscribe to
@@ -395,6 +485,9 @@ struct InFlightPromise {
     /// Set once a caller waits on this capture without a bound, which moves
     /// it ahead of prewarms and bounded reads in the slot queue.
     urgency: Urgency,
+    /// Run when the capture lands, dropped if it fails. `None` once it has
+    /// finished either way (see [`InFlightPromise::after_landing`]).
+    after: Mutex<Option<Vec<AfterCapture>>>,
 }
 
 enum InFlightState {
@@ -477,7 +570,54 @@ impl InFlightPromise {
             bound_expired: AtomicBool::new(false),
             waits: Mutex::new(WaitStats::default()),
             urgency: Urgency::default(),
+            after: Mutex::new(Some(Vec::new())),
         })
+    }
+
+    /// Run `then` when this capture lands, or now if it already has; drop it
+    /// if the capture failed or was cancelled. Returns whether `then` ran or
+    /// is queued to. It doesn't wait, register as a waiter, or promote the
+    /// capture.
+    ///
+    /// The capture publishes its result before it takes the queue in
+    /// [`finish_landing`], so a `then` that finds the queue gone can read the
+    /// outcome from `state`, and one queued before that is run or dropped
+    /// there. Either way it is never lost.
+    ///
+    /// [`finish_landing`]: InFlightPromise::finish_landing
+    fn after_landing(&self, then: AfterCapture) -> bool {
+        let mut after = self.after.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(queued) = after.as_mut() {
+            queued.push(then);
+            return true;
+        }
+        drop(after);
+        let landed = matches!(
+            *self.state.lock().unwrap_or_else(PoisonError::into_inner),
+            InFlightState::Done(Ok(_))
+        );
+        if landed {
+            then();
+        }
+        landed
+    }
+
+    /// Run the [`after_landing`] callbacks if the capture `landed`, or drop
+    /// them, once its outcome is published.
+    ///
+    /// [`after_landing`]: InFlightPromise::after_landing
+    fn finish_landing(&self, landed: bool) {
+        let queued = self
+            .after
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .unwrap_or_default();
+        if landed {
+            for then in queued {
+                then();
+            }
+        }
     }
 
     fn set_done(&self, result: Result<ShellEnv, String>) {
@@ -611,8 +751,8 @@ pub struct ShellEnvCache {
     ttl: Duration,
     shell: PathBuf,
     temp_root: PathBuf,
-    /// [`SHELL_CAPTURE_TIMEOUT`], shorter in tests.
-    capture_timeout: Duration,
+    /// The defaults, shorter in tests.
+    timeouts: CaptureTimeouts,
 }
 
 /// What [`ShellEnvCache::lookup_or_start`] found for an env root.
@@ -622,6 +762,8 @@ enum Lookup {
     /// Nothing usable was cached, so this caller now owns a new `InFlight`
     /// entry and must run or spawn its capture.
     Start(CaptureJob),
+    /// The root's last capture timed out recently; fail without capturing.
+    TimedOut(RecentTimeout),
 }
 
 /// Where a capture ran, for its summary line.
@@ -657,8 +799,7 @@ struct CaptureJob {
     key: PathBuf,
     shell: PathBuf,
     temp_root: PathBuf,
-    /// Kill the shell if it is still running after this long.
-    timeout: Duration,
+    timeouts: CaptureTimeouts,
     /// `$HOME`'s capture runs without waiting for a slot.
     priority: bool,
     handle: InFlightHandle,
@@ -694,7 +835,7 @@ impl CaptureJob {
         // soon as it exits or is killed.
         let slot = (!self.priority).then(|| self.slots.acquire(&self.handle.promise.urgency));
         let started = Instant::now();
-        let outcome = capture_shell_env(&self.key, &self.shell, &self.temp_root, self.timeout);
+        let outcome = capture_shell_env(&self.key, &self.shell, &self.temp_root, self.timeouts);
         let finished = Instant::now();
         drop(slot);
 
@@ -706,7 +847,13 @@ impl CaptureJob {
                     Ok(env) => {
                         map.insert(self.key.clone(), CachedEntry::Ready(env.clone()));
                     }
-                    // No negative caching: the next caller starts afresh.
+                    // A shell that ran out the timeout would likely do so
+                    // again, so the root's lookups fail fast for a while.
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                        map.insert(self.key.clone(), CachedEntry::TimedOut(finished));
+                    }
+                    // A shell that failed quickly is worth trying again, so
+                    // the next caller starts afresh.
                     Err(_) => {
                         map.remove(&self.key);
                     }
@@ -720,6 +867,7 @@ impl CaptureJob {
         self.published = true;
         self.handle.promise.set_done(published.clone());
         let _ = self.tx.send(Some(published));
+        self.handle.promise.finish_landing(result.is_ok());
 
         log_capture(
             &self.key,
@@ -755,6 +903,7 @@ impl Drop for CaptureJob {
             }
         }
         self.handle.promise.set_cancelled();
+        self.handle.promise.finish_landing(false);
     }
 }
 
@@ -826,7 +975,7 @@ impl ShellEnvCache {
             ttl,
             shell,
             temp_root,
-            capture_timeout: SHELL_CAPTURE_TIMEOUT,
+            timeouts: CaptureTimeouts::default(),
         }
     }
 
@@ -839,11 +988,10 @@ impl ShellEnvCache {
         self
     }
 
-    /// Kill capture shells after `timeout` instead of
-    /// [`SHELL_CAPTURE_TIMEOUT`].
+    /// Use `timeouts` in place of the defaults.
     #[cfg(test)]
-    fn with_capture_timeout(mut self, timeout: Duration) -> Self {
-        self.capture_timeout = timeout;
+    fn with_capture_timeouts(mut self, timeouts: CaptureTimeouts) -> Self {
+        self.timeouts = timeouts;
         self
     }
 
@@ -872,8 +1020,9 @@ impl ShellEnvCache {
         key
     }
 
-    /// A fresh snapshot for `key`, the capture already running for it, or a
-    /// new `InFlight` entry for the caller to capture into.
+    /// A fresh snapshot for `key`, the capture already running for it, a
+    /// recent timeout, or a new `InFlight` entry for the caller to capture
+    /// into.
     fn lookup_or_start(&self, key: &Path) -> Lookup {
         let mut map = self.inner.lock().unwrap();
         match map.get(key) {
@@ -881,6 +1030,15 @@ impl ShellEnvCache {
                 return Lookup::Ready(env.clone());
             }
             Some(CachedEntry::InFlight(handle)) => return Lookup::InFlight(handle.clone()),
+            Some(CachedEntry::TimedOut(at)) => {
+                let ago = at.elapsed();
+                if ago < self.timeouts.retry_after {
+                    return Lookup::TimedOut(RecentTimeout {
+                        ago,
+                        retry_in: self.timeouts.retry_after - ago,
+                    });
+                }
+            }
             _ => {}
         }
         let (tx, async_rx) = watch::channel(None);
@@ -895,7 +1053,7 @@ impl ShellEnvCache {
             key: key.to_path_buf(),
             shell: self.shell.clone(),
             temp_root: self.temp_root.clone(),
-            timeout: self.capture_timeout,
+            timeouts: self.timeouts,
             priority: self.home.as_deref() == Some(key),
             handle,
             tx,
@@ -904,8 +1062,34 @@ impl ShellEnvCache {
         })
     }
 
+    /// Run `then` once `working_dir`'s env root has a fresh snapshot: now, if
+    /// one is cached, or when the capture in flight for it lands.
+    ///
+    /// This doesn't wait on the capture, so it neither moves it up the slot
+    /// queue nor counts as one of its waiters. `then` runs on the thread that
+    /// finished the capture, which may be a sync caller's, so it must not
+    /// block. It is dropped without running if that capture fails, or if
+    /// nothing is cached or being captured for the root. Returns whether
+    /// `then` ran or is queued to.
+    pub fn after_capture(&self, working_dir: &Path, then: impl FnOnce() + Send + 'static) -> bool {
+        let key = self.env_key(working_dir);
+        let promise = match self.inner.lock().unwrap().get(&key) {
+            Some(CachedEntry::Ready(env)) if env.captured_at.elapsed() < self.ttl => None,
+            Some(CachedEntry::InFlight(handle)) => Some(Arc::clone(&handle.promise)),
+            _ => return false,
+        };
+        match promise {
+            Some(promise) => promise.after_landing(Box::new(then)),
+            None => {
+                then();
+                true
+            }
+        }
+    }
+
     /// Start capturing `working_dir`'s env on a capture thread, unless it is
-    /// cached or already being captured, without waiting for it.
+    /// cached, already being captured, or timed out recently, without
+    /// waiting for it.
     pub fn prewarm(&self, working_dir: &Path) {
         let key = self.env_key(working_dir);
         if let Lookup::Start(job) = self.lookup_or_start(&key) {
@@ -924,6 +1108,9 @@ impl ShellEnvCache {
     /// capture. Dropping the future, or timing it out, stops only this
     /// caller's wait: the capture runs on and fills the cache.
     ///
+    /// For [`TIMED_OUT_RETRY_AFTER`] after the root's last capture timed out,
+    /// this and the other lookups fail at once ([`is_recent_timeout`]).
+    ///
     /// [`env_key`]: ShellEnvCache::env_key
     pub async fn get(&self, working_dir: &Path) -> io::Result<ShellEnv> {
         let key = self.env_key(working_dir);
@@ -937,6 +1124,7 @@ impl ShellEnvCache {
                 Lookup::Ready(env) => return Ok(env),
                 Lookup::InFlight(handle) => handle,
                 Lookup::Start(job) => job.spawn()?,
+                Lookup::TimedOut(timed_out) => return Err(timed_out.into()),
             };
             let _waiter = handle.promise.register_unbounded_waiter(&self.slots);
             let mut rx = handle.async_rx;
@@ -978,6 +1166,7 @@ impl ShellEnvCache {
                 Lookup::Ready(env) => return Ok(env),
                 Lookup::InFlight(handle) => handle.promise,
                 Lookup::Start(job) => return job.run_inline(),
+                Lookup::TimedOut(timed_out) => return Err(timed_out.into()),
             };
             let _waiter = promise.register_unbounded_waiter(&self.slots);
             match promise.wait_blocking() {
@@ -1029,6 +1218,7 @@ impl ShellEnvCache {
                 Lookup::InFlight(handle) => handle.promise,
                 // The capture has to outlive this caller's wait.
                 Lookup::Start(job) => job.spawn()?.promise,
+                Lookup::TimedOut(timed_out) => return Err(timed_out.into()),
             };
             let waiter = promise.register_waiter();
             match promise.wait_blocking_until(deadline) {
@@ -1046,8 +1236,9 @@ impl ShellEnvCache {
     }
 
     /// Drop the cached snapshot `working_dir` uses, which is its env root's
-    /// and so shared with every directory under that root, and resolve
-    /// `working_dir`'s root afresh (next `get` will recapture).
+    /// and so shared with every directory under that root, or the root's
+    /// timed-out mark, and resolve `working_dir`'s root afresh (next `get`
+    /// will recapture).
     pub fn invalidate(&self, working_dir: &Path) {
         let key = self.env_key(working_dir);
         self.env_keys.lock().unwrap().remove(working_dir);
@@ -1125,13 +1316,14 @@ fn parse_env_dump(bytes: &[u8]) -> Vec<(String, String)> {
 /// Run `$SHELL -ils` in `working_dir` and return the environment it ends up
 /// with. Blocks the current thread on the shell's startup; callers run it on
 /// a thread of its own (see [`CaptureJob`]). A shell still running after
-/// `timeout` is killed, with everything it started, and the capture fails
-/// with [`io::ErrorKind::TimedOut`].
+/// `timeouts.shell` is killed, and the capture fails with
+/// [`io::ErrorKind::TimedOut`]. What the shell started may run until
+/// `timeouts.group` (see [`kill_capture_shell`]).
 fn capture_shell_env(
     working_dir: &Path,
     shell: &Path,
     temp_root: &Path,
-    timeout: Duration,
+    timeouts: CaptureTimeouts,
 ) -> io::Result<Vec<(String, String)>> {
     use std::io::Write as _;
 
@@ -1167,7 +1359,8 @@ fn capture_shell_env(
         });
     }
 
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let group_deadline = started + timeouts.group;
     let mut child = cmd.spawn()?;
     let written = child
         .stdin
@@ -1179,15 +1372,19 @@ fn capture_shell_env(
             // Drop stdin → shell sees EOF after `exit` and terminates cleanly.
         });
     if let Err(error) = written {
-        kill_capture_shell(&mut child);
+        kill_capture_shell(&mut child, group_deadline);
         return Err(error);
     }
 
-    let Some(status) = wait_or_kill(&mut child, deadline)? else {
+    let Some(status) = wait_or_kill(&mut child, started + timeouts.shell, group_deadline)? else {
         let _ = std::fs::remove_file(&dump_path);
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            format!("Shell env capture still running after {timeout:?}; killed it"),
+            format!(
+                "Shell env capture still running after {:?}; killed the shell, leaving what \
+                 it started until {:?} after the shell's start",
+                timeouts.shell, timeouts.group
+            ),
         ));
     };
     if !status.success() {
@@ -1210,7 +1407,7 @@ fn capture_shell_env(
 }
 
 /// Wait for the capture shell to exit, or kill it at `deadline`. `None`
-/// means it was killed.
+/// means it was killed; what it started is left until `group_deadline`.
 ///
 /// Polls rather than blocking in `wait`, backing off to
 /// [`CAPTURE_POLL_MAX`]: std has no wait with a timeout, and a watchdog
@@ -1220,6 +1417,7 @@ fn capture_shell_env(
 fn wait_or_kill(
     child: &mut std::process::Child,
     deadline: Instant,
+    group_deadline: Instant,
 ) -> io::Result<Option<std::process::ExitStatus>> {
     let mut pause = Duration::from_millis(5);
     loop {
@@ -1227,13 +1425,13 @@ fn wait_or_kill(
             Ok(Some(status)) => return Ok(Some(status)),
             Ok(None) => {}
             Err(error) => {
-                kill_capture_shell(child);
+                kill_capture_shell(child, group_deadline);
                 return Err(error);
             }
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            kill_capture_shell(child);
+            kill_capture_shell(child, group_deadline);
             return Ok(None);
         }
         std::thread::sleep(pause.min(left));
@@ -1245,21 +1443,26 @@ fn wait_or_kill(
 /// capture's result can lag the shell's exit.
 const CAPTURE_POLL_MAX: Duration = Duration::from_millis(50);
 
-/// Kill a capture shell and whatever it is stuck on, then reap it.
-fn kill_capture_shell(child: &mut std::process::Child) {
-    // The shell called `setsid()`, so it leads a process group of its own,
-    // which holds whatever its rc files started: the `security` prompt or
-    // `curl` it is blocked on. Kill the group, not just the shell.
-    #[cfg(unix)]
-    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: `kill` has no memory-safety preconditions. The group is
-        // the unreaped child's own, so its id can't have been reused.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
+/// Kill a capture shell and reap it, leaving what it started to run until
+/// `group_deadline`.
+///
+/// Killing only the shell frees its slot and fails its capture, while what
+/// its rc files started can still finish useful work: a nix-direnv build,
+/// an `nvm install`, a Hermit download, each filling a cache that makes the
+/// next capture fast. The shell called `setsid()`, so it leads a process
+/// group of its own, and an interactive shell without a terminal has no job
+/// control, so what it started stays in that group.
+/// [`leftover_group::kill_at`] kills whatever is left there at
+/// `group_deadline`: a `security` prompt nobody answers, say.
+fn kill_capture_shell(child: &mut std::process::Child, group_deadline: Instant) {
     let _ = child.kill();
     let _ = child.wait();
+    #[cfg(unix)]
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        leftover_group::kill_at(pgid, group_deadline);
+    }
+    #[cfg(not(unix))]
+    let _ = group_deadline;
 }
 
 fn single_quote(value: &str) -> String {
@@ -1566,12 +1769,12 @@ mod tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         let counter = scratch.path().join("launches");
         let shell = counting_shell(&counter, "0.5");
-        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
-            shell.to_path_buf(),
-            Duration::from_secs(3600),
-        ));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir_path = dir.path().to_path_buf();
+        let cache = Arc::new(
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+                .with_home(scratch.path()),
+        );
+        let dir_path = scratch.path().join("wt");
+        std::fs::create_dir(&dir_path).expect("mkdir");
 
         let first = tokio::spawn({
             let cache = cache.clone();
@@ -1647,19 +1850,29 @@ mod tests {
         assert_ne!(b_first.captured_at(), b_second.captured_at());
     }
 
+    /// Two sibling dirs under a scratch dir that the cache treats as `$HOME`,
+    /// so the env-root walk stops there and each dir is its own key, whatever
+    /// checkout `TMPDIR` sits in.
+    fn sibling_dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let (a, b) = (scratch.path().join("a"), scratch.path().join("b"));
+        std::fs::create_dir(&a).expect("mkdir a");
+        std::fs::create_dir(&b).expect("mkdir b");
+        (scratch, a, b)
+    }
+
     /// A3: Two distinct working dirs are cached independently — each second
     /// `get` hits its own `Ready` entry without recapture.
     #[tokio::test]
     async fn different_dirs_cached_independently() {
-        let cache = ShellEnvCache::new();
-        let dir_a = std::env::temp_dir();
-        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let (scratch, dir_a, dir_b) = sibling_dirs();
+        let cache = ShellEnvCache::new().with_home(scratch.path());
 
         let a_first = cache.get(&dir_a).await.expect("capture a");
-        let b_first = cache.get(dir_b.path()).await.expect("capture b");
+        let b_first = cache.get(&dir_b).await.expect("capture b");
         // Per-dir cache hits.
         let a_second = cache.get(&dir_a).await.expect("a hit");
-        let b_second = cache.get(dir_b.path()).await.expect("b hit");
+        let b_second = cache.get(&dir_b).await.expect("b hit");
         assert_eq!(a_first.captured_at(), a_second.captured_at());
         assert_eq!(b_first.captured_at(), b_second.captured_at());
         // Distinct captures across dirs.
@@ -1669,19 +1882,15 @@ mod tests {
     /// A4: `invalidate(A)` must not disturb dir B's cached snapshot.
     #[tokio::test]
     async fn invalidate_only_affects_target_dir() {
-        let cache = ShellEnvCache::new();
-        let dir_a = std::env::temp_dir();
-        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let (scratch, dir_a, dir_b) = sibling_dirs();
+        let cache = ShellEnvCache::new().with_home(scratch.path());
         let a_first = cache.get(&dir_a).await.expect("capture a");
-        let b_first = cache.get(dir_b.path()).await.expect("capture b");
+        let b_first = cache.get(&dir_b).await.expect("capture b");
 
         cache.invalidate(&dir_a);
 
         let a_second = cache.get(&dir_a).await.expect("recapture a");
-        let b_second = cache
-            .get(dir_b.path())
-            .await
-            .expect("b should still be cached");
+        let b_second = cache.get(&dir_b).await.expect("b should still be cached");
 
         assert_ne!(
             a_first.captured_at(),
@@ -2283,11 +2492,11 @@ mod tests {
         let scratch = tempfile::tempdir().expect("tempdir");
         let counter = scratch.path().join("launches");
         let shell = counting_shell(&counter, "1");
-        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
-            shell.to_path_buf(),
-            Duration::from_secs(3600),
-        ));
-        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = Arc::new(
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+                .with_home(scratch.path()),
+        );
+        let dir = tempfile::tempdir_in(scratch.path()).expect("tempdir");
 
         let started = Instant::now();
         let first = cache

@@ -493,8 +493,18 @@ fn apply_captured_env_within(
     }
 }
 
+/// A lookup that failed fast on a recent timeout
+/// ([`crate::shell_env::is_recent_timeout`]) is only a debug line: the
+/// capture warned when it timed out, and every git op in the directory falls
+/// back the same way for a few minutes after.
 fn warn_capture_failed(repo: &Path, error: &std::io::Error) {
-    log::warn!(
+    let level = if crate::shell_env::is_recent_timeout(error) {
+        log::Level::Debug
+    } else {
+        log::Level::Warn
+    };
+    log::log!(
+        level,
         "Failed to capture shell env for {}: {error}; falling back to inherited env",
         repo.display()
     );

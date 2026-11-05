@@ -1,5 +1,6 @@
 //! The capture limit, the queue's tiers, home's place ahead of the queue,
-//! the capture timeout, per-capture bounds, and the per-capture wait summary.
+//! the capture timeout and what it leaves running, the timed-out mark,
+//! per-capture bounds, `after_capture`, and the per-capture wait summary.
 //!
 //! The fake shells here sleep for whatever a `.delay` file in the capture
 //! directory says when they start (none means no sleep), so one shell can
@@ -7,6 +8,7 @@
 
 use super::*;
 use crate::test_utils::write_fake_shell;
+use std::sync::mpsc;
 
 /// Fake `$SHELL` that reads its delay, then logs its directory to
 /// `log/launches` and, while it sleeps, keeps a marker file
@@ -114,6 +116,21 @@ fn entry_is_in_flight(cache: &ShellEnvCache, key: &Path) -> bool {
     )
 }
 
+/// Whether any process is left in process group `group`.
+fn group_exists(group: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks whether the group exists.
+    unsafe { libc::kill(-group, 0) == 0 }
+}
+
+/// [`tracking_cache_with`] with `timeouts`.
+fn timing_out_cache(
+    log: &Path,
+    home: &Path,
+    timeouts: CaptureTimeouts,
+) -> (Arc<ShellEnvCache>, tempfile::TempPath) {
+    tracking_cache_with(log, home, |cache| cache.with_capture_timeouts(timeouts))
+}
+
 fn in_flight_promise(cache: &ShellEnvCache, key: &Path) -> Arc<InFlightPromise> {
     match cache.inner.lock().unwrap().get(key) {
         Some(CachedEntry::InFlight(handle)) => handle.promise.clone(),
@@ -184,6 +201,8 @@ async fn captures_never_exceed_the_limit_across_paths() {
 
 /// L2: With two worktree captures holding both slots and a third queued,
 /// home's capture starts at once and finishes while they are still going.
+/// The worktrees sit under home, where the env-root walk stops, so each is
+/// its own key whatever checkout `TMPDIR` sits in.
 #[test]
 fn home_capture_skips_the_queue() {
     let log = tempfile::tempdir().expect("tempdir");
@@ -191,10 +210,10 @@ fn home_capture_skips_the_queue() {
     let home = dir_with_delay(scratch.path(), "home", "0");
     let (cache, _shell) = tracking_cache(log.path(), &home);
     let busy = [
-        dir_with_delay(scratch.path(), "wt-a", "3"),
-        dir_with_delay(scratch.path(), "wt-b", "3"),
+        dir_with_delay(&home, "wt-a", "3"),
+        dir_with_delay(&home, "wt-b", "3"),
     ];
-    let queued = dir_with_delay(scratch.path(), "wt-c", "0");
+    let queued = dir_with_delay(&home, "wt-c", "0");
 
     for dir in &busy {
         cache.prewarm(dir);
@@ -363,20 +382,27 @@ fn wait_summary_counts_every_waiter_once() {
     assert!(first_wait >= Duration::from_millis(30) && first_wait < summary.longest);
 }
 
-/// L6: A shell that never finishes is killed at the capture timeout, with
-/// what it started, whether the capture ran inline for a sync caller or on a
-/// capture thread for an async one. Each capture fails, frees its slot and
-/// evicts its entry, so the next caller for the same key starts afresh.
+/// L6: A shell that never finishes is killed at the capture timeout,
+/// whether the capture ran inline for a sync caller or on a capture thread
+/// for an async one. Each capture fails, frees its slot and leaves a
+/// timed-out mark where its entry was. Only the shells are killed then:
+/// the `sleep` each started keeps its process group going until the group
+/// deadline, when what is left of the group is killed.
 #[test]
 fn hung_shell_is_killed_at_the_capture_timeout() {
     let log = tempfile::tempdir().expect("tempdir");
     let scratch = tempfile::tempdir().expect("tempdir");
     // Short enough to keep the test quick, long enough that on a loaded
     // machine the hung shells get as far as their markers and the fresh
-    // captures at the end finish in time.
-    let timeout = Duration::from_secs(5);
+    // captures at the end finish in time. The marks expire at once, so
+    // those fresh captures can start.
+    let timeouts = CaptureTimeouts {
+        shell: Duration::from_secs(5),
+        group: Duration::from_secs(8),
+        retry_after: Duration::ZERO,
+    };
     let (cache, _shell) = tracking_cache_with(log.path(), scratch.path(), |cache| {
-        cache.with_capture_timeout(timeout)
+        cache.with_capture_timeouts(timeouts)
     });
     let inline_dir = dir_with_delay(scratch.path(), "wt-inline", "30");
     let async_dir = dir_with_delay(scratch.path(), "wt-async", "30");
@@ -406,20 +432,23 @@ fn hung_shell_is_killed_at_the_capture_timeout() {
         assert!(error.to_string().contains("still running after"), "{error}");
     }
     assert!(
-        waited >= timeout && waited < timeout * 3,
+        waited >= timeouts.shell && waited < timeouts.shell * 3,
         "each capture should end at its timeout: {waited:?}"
     );
     assert_eq!(cache.slots.in_use(), 0, "both slots are free again");
     for dir in [&inline_dir, &async_dir] {
         assert!(
-            cache.inner.lock().unwrap().get(dir).is_none(),
-            "{} kept its entry",
+            matches!(
+                cache.inner.lock().unwrap().get(dir),
+                Some(CachedEntry::TimedOut(_))
+            ),
+            "{} has no timed-out mark",
             dir.display()
         );
     }
 
     // Each killed shell left its marker behind, named for its pid, which is
-    // also its process group: nothing in either group survives the kill.
+    // also its process group. The `sleep` it was running is still in there.
     let groups: Vec<libc::pid_t> = std::fs::read_dir(log.path())
         .expect("read log dir")
         .flatten()
@@ -429,12 +458,21 @@ fn hung_shell_is_killed_at_the_capture_timeout() {
         })
         .collect();
     assert_eq!(groups.len(), 2, "one marker per killed shell");
-    for group in groups {
-        wait_until("the killed shell's process group to be gone", || {
-            // SAFETY: signal 0 only checks whether the group exists.
-            unsafe { libc::kill(-group, 0) == -1 }
-        });
+    for group in &groups {
+        assert!(
+            group_exists(*group),
+            "group {group} was killed with its shell"
+        );
     }
+    wait_until("the leftover groups to be killed", || {
+        groups.iter().all(|group| !group_exists(*group))
+    });
+    let gone_after = started.elapsed();
+    assert!(
+        gone_after < timeouts.group + Duration::from_secs(10),
+        "the groups outlived their deadline, so their `sleep 30`s ended on their own: \
+         {gone_after:?}"
+    );
 
     for dir in [&inline_dir, &async_dir] {
         std::fs::write(dir.join(".delay"), "0").expect("write .delay");
@@ -454,7 +492,7 @@ fn hung_shell_is_killed_at_the_capture_timeout() {
     assert_eq!(
         launch_dirs(log.path()).len(),
         4,
-        "a fresh shell per directory after the timeout"
+        "a fresh shell per directory once the marks expire"
     );
 }
 
@@ -654,7 +692,9 @@ fn capture_finishing_after_invalidate_leaves_the_newer_entry() {
             Arc::ptr_eq(&handle.promise, &newer),
             "the newer capture's entry was replaced"
         ),
-        Some(CachedEntry::Ready(_)) => panic!("the older capture overwrote the newer one"),
+        Some(CachedEntry::Ready(_) | CachedEntry::TimedOut(_)) => {
+            panic!("the older capture overwrote the newer one")
+        }
         None => panic!("the newer capture's entry was removed"),
     }
 
@@ -670,4 +710,204 @@ fn capture_finishing_after_invalidate_leaves_the_newer_entry() {
         _ => panic!("the newer capture didn't land"),
     }
     assert_eq!(launch_dirs(log.path()).len(), 2);
+}
+
+/// L10: The capture timeout kills the shell but not what it started. A
+/// child still at work when the shell is killed, as a dev-shell build or a
+/// download would be, carries on after the capture has failed and finishes.
+#[test]
+fn timeout_kills_the_shell_but_not_what_it_started() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let dir = scratch.path().join("wt");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    // The child says it started, waits for the test's go-ahead, and says it
+    // finished. The shell waits for the child to start, then hangs.
+    let marks = single_quote(&log.path().to_string_lossy());
+    let shell = write_fake_shell(&format!(
+        "#!/bin/sh\n\
+         PATH=/usr/bin:/bin\n\
+         export PATH\n\
+         ( : > {marks}/started; \
+           while [ ! -e {marks}/go ]; do sleep 0.05; done; \
+           : > {marks}/finished ) &\n\
+         while [ ! -e {marks}/started ]; do sleep 0.05; done\n\
+         exec sleep 30\n"
+    ));
+    let cache = ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600))
+        .with_home(scratch.path())
+        .with_capture_timeouts(CaptureTimeouts {
+            shell: Duration::from_secs(2),
+            group: Duration::from_secs(60),
+            retry_after: Duration::from_secs(60),
+        });
+
+    let error = cache
+        .get_blocking(&dir)
+        .map(|_| ())
+        .expect_err("the hung capture fails");
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+    assert_eq!(cache.slots.in_use(), 0);
+    wait_until("the child to start", || log.path().join("started").exists());
+    assert!(!log.path().join("finished").exists());
+
+    std::fs::write(log.path().join("go"), "").expect("write go");
+    wait_until("the child to finish after its shell was killed", || {
+        log.path().join("finished").exists()
+    });
+}
+
+/// L11: For a while after a capture times out, every lookup of its root
+/// fails at once with a recent-timeout error, and nothing launches another
+/// shell: not a bounded read, a sync or async caller, a prewarm, or
+/// `after_capture`. `invalidate` clears the mark, and the next caller
+/// captures afresh.
+#[test]
+fn lookups_fail_fast_after_a_timeout() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let dir = dir_with_delay(scratch.path(), "wt", "30");
+    let (cache, _shell) = timing_out_cache(
+        log.path(),
+        scratch.path(),
+        CaptureTimeouts {
+            shell: Duration::from_secs(1),
+            group: Duration::from_secs(2),
+            retry_after: Duration::from_secs(600),
+        },
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    let timed_out = cache.get_blocking(&dir).map(|_| ()).expect_err("times out");
+    assert!(!is_recent_timeout(&timed_out), "{timed_out}");
+
+    let fast = Duration::from_millis(500);
+    let started = Instant::now();
+    let bounded = cache
+        .get_blocking_within(&dir, Duration::from_secs(5))
+        .map(|_| ())
+        .expect_err("bounded read");
+    let sync = cache.get_blocking(&dir).map(|_| ()).expect_err("sync");
+    let async_ = runtime
+        .block_on(cache.get(&dir))
+        .map(|_| ())
+        .expect_err("async");
+    let took = started.elapsed();
+    for error in [&bounded, &sync, &async_] {
+        assert!(is_recent_timeout(error), "{error}");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+    assert!(took < fast, "three lookups took {took:?}");
+    cache.prewarm(&dir);
+    assert!(!cache.after_capture(&dir, || panic!("nothing will land")));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(launch_dirs(log.path()).len(), 1, "no second shell");
+
+    cache.invalidate(&dir);
+    std::fs::write(dir.join(".delay"), "0").expect("write .delay");
+    cache.get_blocking(&dir).expect("a fresh capture");
+    assert_eq!(launch_dirs(log.path()).len(), 2);
+}
+
+/// L12: The timed-out mark expires. Inside its window a lookup fails at
+/// once; after it the next caller starts a capture, whose snapshot replaces
+/// the mark.
+#[test]
+fn timed_out_mark_expires() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let dir = dir_with_delay(scratch.path(), "wt", "30");
+    let retry_after = Duration::from_secs(2);
+    let (cache, _shell) = timing_out_cache(
+        log.path(),
+        scratch.path(),
+        CaptureTimeouts {
+            shell: Duration::from_secs(1),
+            group: Duration::from_secs(2),
+            retry_after,
+        },
+    );
+
+    cache.get_blocking(&dir).map(|_| ()).expect_err("times out");
+    let marked = Instant::now();
+    std::fs::write(dir.join(".delay"), "0").expect("write .delay");
+    let early = cache
+        .get_blocking_within(&dir, Duration::from_secs(5))
+        .map(|_| ())
+        .expect_err("inside the window");
+    assert!(is_recent_timeout(&early), "{early}");
+    assert_eq!(launch_dirs(log.path()).len(), 1);
+
+    std::thread::sleep(retry_after.saturating_sub(marked.elapsed()) + Duration::from_millis(100));
+    let env = cache
+        .get_blocking(&dir)
+        .expect("a capture once the mark expires");
+    assert!(env.vars().iter().any(|(k, _)| k == "PATH"));
+    assert!(
+        entry_is_ready(&cache, &dir),
+        "the snapshot replaced the mark"
+    );
+    assert_eq!(launch_dirs(log.path()).len(), 2);
+}
+
+/// L13: `after_capture` neither waits on a capture nor moves it up the
+/// queue. With both slots held and two prewarms queued, a callback on the
+/// second leaves it behind the first and isn't counted as a waiter. The
+/// callback runs once, after the snapshot is cached. On a root with a fresh
+/// snapshot it runs at once, and with nothing cached or capturing it is
+/// dropped.
+#[test]
+fn after_capture_runs_once_the_capture_lands_without_promoting_it() {
+    let log = tempfile::tempdir().expect("tempdir");
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let (cache, _shell) = tracking_cache(log.path(), scratch.path());
+    let first = dir_with_delay(scratch.path(), "wt-first", "0");
+    let second = dir_with_delay(scratch.path(), "wt-second", "0");
+    let idle = dir_with_delay(scratch.path(), "wt-idle", "0");
+    let (ran, landed) = mpsc::channel();
+
+    let mut held = hold_every_slot(&cache);
+    cache.prewarm(&first);
+    wait_until("the first prewarm to queue", || cache.slots.queued() == 1);
+    cache.prewarm(&second);
+    wait_until("the second prewarm to queue", || cache.slots.queued() == 2);
+    assert!(cache.after_capture(&second, {
+        let (cache, dir, ran) = (cache.clone(), second.clone(), ran.clone());
+        move || ran.send(entry_is_ready(&cache, &dir)).expect("send")
+    }));
+    let waiters = in_flight_promise(&cache, &second)
+        .waits
+        .lock()
+        .unwrap()
+        .waiters;
+    assert_eq!(waiters, 0, "a callback isn't a waiter");
+    assert!(landed.try_recv().is_err());
+
+    // One slot frees up and the queue drains through it in turn.
+    drop(held.pop());
+    let ready = landed
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the callback ran");
+    assert!(ready, "the callback ran before the snapshot was cached");
+    assert!(
+        landed.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the callback ran twice"
+    );
+    assert_eq!(
+        launch_dirs(log.path()),
+        vec![canonical(&first), canonical(&second)],
+        "the callback moved its capture ahead"
+    );
+
+    assert!(cache.after_capture(&second, move || ran.send(true).expect("send")));
+    assert_eq!(
+        landed.try_recv(),
+        Ok(true),
+        "a fresh snapshot runs it at once"
+    );
+    assert!(!cache.after_capture(&idle, || panic!("nothing will land")));
+    drop(held);
 }

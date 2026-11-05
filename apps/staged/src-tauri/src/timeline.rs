@@ -8,6 +8,8 @@
 //! and emits a `git-state-updated` event that the frontend merges into the
 //! existing timeline.
 
+mod git_state_follow_up;
+
 use crate::git;
 use crate::session_runner;
 use crate::store::{CommentAuthor, CommentType, Review, Store};
@@ -751,12 +753,13 @@ pub(crate) fn refresh_branch_git_state_impl(
     } else if let Some(ref wd) = workdir {
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
-            // Display only, so the reads don't sit out a cold capture. A read
-            // the inherited env may have got wrong leaves the card on the
-            // state it has, and a refresh after the capture lands corrects
-            // it. The pull, reset and discard builds below keep the unbounded
-            // wait, because they guard a mutation that waits for the capture
-            // anyway.
+            // Display only, so the reads don't sit out a cold capture. If one
+            // the inherited env may have got wrong makes the build decline,
+            // the card keeps the state it has, and a follow-up refresh queued
+            // on the capture puts the real one there once it lands (see
+            // `git_state_follow_up`). The pull, reset and discard builds keep
+            // the unbounded wait, because they guard a mutation that waits
+            // for the capture anyway.
             match git::compute_local_branch_git_state_bounded(
                 worktree_path,
                 &branch.branch_name,
@@ -767,9 +770,20 @@ pub(crate) fn refresh_branch_git_state_impl(
             ) {
                 Ok(state) => Some(state),
                 Err(error) => {
+                    let follow_up = git_state_follow_up::refresh_after_capture(
+                        app,
+                        store,
+                        worktree_path,
+                        branch_id,
+                    );
                     log::info!(
-                        "Keeping branch {branch_id}'s git state until its shell env is captured: \
-                         {error}"
+                        "Keeping branch {branch_id}'s git state until its shell env is captured \
+                         ({}): {error}",
+                        if follow_up {
+                            "refreshing again once it lands"
+                        } else {
+                            "no capture left to wait for"
+                        }
                     );
                     None
                 }

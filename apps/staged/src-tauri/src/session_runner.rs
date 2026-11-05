@@ -3435,8 +3435,14 @@ async fn run_remote_pipeline_command(
     };
 
     let ws = workspace_name.to_string();
+    // Tracked: push runs pre-push hooks and a rebase can take minutes, well
+    // past the transient path's 60 s limit.
     let handle = tokio::task::spawn_blocking(move || {
-        crate::blox::ws_exec_output(&ws, &["sh", "-c", &shell_command])
+        crate::blox::ws_exec_output(
+            &ws,
+            crate::blox::ExecMode::Tracked,
+            &["sh", "-c", &shell_command],
+        )
     });
 
     // Check for pre-existing cancellation before waiting.

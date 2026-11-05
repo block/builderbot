@@ -515,25 +515,106 @@ pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
     serde_json::from_str(&stdout).map_err(|e| BloxError::ParseError(format!("{e}\nRaw: {stdout}")))
 }
 
+/// Whether Blox records a `ws exec` call in the workstation's command history.
+///
+/// Every exec must pick one, so the choice is made deliberately at each call
+/// site rather than inherited from a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecMode {
+    /// `ws exec --transient`: never written to `ws commands` or the Blox UI.
+    ///
+    /// Transient execution has hard limits, measured against `sq blox` 1.16:
+    /// - the server kills the command after 60 s;
+    /// - stdout must be valid UTF-8 (`ws_exec_bytes` and `ws_exec_output`
+    ///   base64-encode it on the workstation so binary output still works);
+    /// - output is buffered until exit, never streamed;
+    /// - it fails immediately when the workstation is disconnected.
+    ///
+    /// Use it for Staged's own plumbing: quick reads and writes the user did
+    /// not write themselves.
+    Transient,
+    /// Plain `ws exec`: recorded in the workstation's command history.
+    ///
+    /// Required for anything that can run past 60 s or streams its output, and
+    /// for commands the user wrote (repo actions).
+    Tracked,
+}
+
+/// `ws exec [--transient] <name> -- <args…>`, without the leading `blox`.
+fn ws_exec_argv<'a>(name: &'a str, mode: ExecMode, args: &[&'a str]) -> Vec<&'a str> {
+    let mut argv = vec!["ws", "exec"];
+    if mode == ExecMode::Transient {
+        argv.push("--transient");
+    }
+    argv.push(name);
+    argv.push("--");
+    argv.extend_from_slice(args);
+    argv
+}
+
+/// The full `sq` argv (starting with `blox`) for running `args` inside a
+/// workspace, for callers that spawn `sq` themselves (e.g. to stream output).
+pub fn ws_exec_command(name: &str, mode: ExecMode, args: &[&str]) -> Vec<String> {
+    std::iter::once("blox")
+        .chain(ws_exec_argv(name, mode, args))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Runs `"$@"` with stdout captured to a temp file, then prints that file as
+/// base64 and exits with the command's status. Transient execs reject
+/// non-UTF-8 stdout, so binary-returning calls go through this. A temp file
+/// rather than a pipe keeps the exit code without relying on `pipefail`.
+const BASE64_STDOUT_SCRIPT: &str =
+    r#"f=$(mktemp) || exit 125; "$@" >"$f"; rc=$?; base64 <"$f"; rm -f "$f"; exit $rc"#;
+
+/// Wrap `args` in [`BASE64_STDOUT_SCRIPT`] when `mode` needs it.
+fn binary_safe_args<'a>(mode: ExecMode, args: &[&'a str]) -> Vec<&'a str> {
+    match mode {
+        ExecMode::Tracked => args.to_vec(),
+        ExecMode::Transient => {
+            let mut wrapped = vec!["sh", "-c", BASE64_STDOUT_SCRIPT, "staged-b64"];
+            wrapped.extend_from_slice(args);
+            wrapped
+        }
+    }
+}
+
+/// Undo [`binary_safe_args`] on the command's stdout.
+fn decode_binary_safe_stdout(mode: ExecMode, stdout: Vec<u8>) -> Result<Vec<u8>, BloxError> {
+    match mode {
+        ExecMode::Tracked => Ok(stdout),
+        ExecMode::Transient => {
+            use base64::Engine as _;
+            // GNU `base64` wraps lines at 76 columns; strip all whitespace.
+            let compact: Vec<u8> = stdout
+                .into_iter()
+                .filter(|b| !b.is_ascii_whitespace())
+                .collect();
+            base64::engine::general_purpose::STANDARD
+                .decode(compact)
+                .map_err(|e| BloxError::ParseError(format!("invalid base64 from ws exec: {e}")))
+        }
+    }
+}
+
 /// Execute a command inside a Blox workspace.
 ///
-/// Runs: `sq blox ws exec <name> -- <args…>`
+/// Runs: `sq blox ws exec [--transient] <name> -- <args…>`
 ///
 /// Returns the command's stdout on success.
-pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
-    let mut full_args = vec!["ws", "exec", name, "--"];
-    full_args.extend_from_slice(args);
-    run(&full_args, EXEC_TIMEOUT)
+pub fn ws_exec(name: &str, mode: ExecMode, args: &[&str]) -> Result<String, BloxError> {
+    run(&ws_exec_argv(name, mode, args), EXEC_TIMEOUT)
 }
 
 /// Execute a command inside a Blox workspace, returning raw bytes.
 ///
 /// Like `ws_exec` but returns the raw stdout bytes without UTF-8 validation.
 /// Use this when the command may produce binary output (e.g. `git show` on image files).
-pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
-    let mut full_args = vec!["ws", "exec", name, "--"];
-    full_args.extend_from_slice(args);
-    run_bytes(&full_args, EXEC_TIMEOUT)
+pub fn ws_exec_bytes(name: &str, mode: ExecMode, args: &[&str]) -> Result<Vec<u8>, BloxError> {
+    let wrapped = binary_safe_args(mode, args);
+    let stdout = run_bytes(&ws_exec_argv(name, mode, &wrapped), EXEC_TIMEOUT)?;
+    decode_binary_safe_stdout(mode, stdout)
 }
 
 /// Output from a workspace command that preserves stdout, stderr, and exit
@@ -548,10 +629,17 @@ pub struct WsExecOutput {
 /// of exit code. Infrastructure errors (CLI not found, timeout, auth failure)
 /// still return `Err`, but a non-zero exit from the remote command returns
 /// `Ok(WsExecOutput { success: false, .. })`.
-pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
-    let mut full_args = vec!["ws", "exec", name, "--"];
-    full_args.extend_from_slice(args);
-    run_bytes_full(&full_args, EXEC_TIMEOUT)
+pub fn ws_exec_output(
+    name: &str,
+    mode: ExecMode,
+    args: &[&str],
+) -> Result<WsExecOutput, BloxError> {
+    let wrapped = binary_safe_args(mode, args);
+    let output = run_bytes_full(&ws_exec_argv(name, mode, &wrapped), EXEC_TIMEOUT)?;
+    Ok(WsExecOutput {
+        stdout: decode_binary_safe_stdout(mode, output.stdout)?,
+        ..output
+    })
 }
 
 /// A bootstrap command returned by `sq blox ws commands <name> --json`.
@@ -685,5 +773,74 @@ mod tests {
 
         assert_eq!(picked, Some(real));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ws_exec_argv_marks_only_transient_calls() {
+        assert_eq!(
+            ws_exec_argv("ws1", ExecMode::Transient, &["git", "status"]),
+            ["ws", "exec", "--transient", "ws1", "--", "git", "status"]
+        );
+        assert_eq!(
+            ws_exec_argv("ws1", ExecMode::Tracked, &["git", "status"]),
+            ["ws", "exec", "ws1", "--", "git", "status"]
+        );
+    }
+
+    #[test]
+    fn ws_exec_command_prefixes_blox() {
+        assert_eq!(
+            ws_exec_command("ws1", ExecMode::Tracked, &["sh", "-lc", "make test"]),
+            ["blox", "ws", "exec", "ws1", "--", "sh", "-lc", "make test"]
+        );
+    }
+
+    #[test]
+    fn tracked_binary_reads_are_not_wrapped() {
+        assert_eq!(
+            binary_safe_args(ExecMode::Tracked, &["git", "show", "HEAD:a.png"]),
+            ["git", "show", "HEAD:a.png"]
+        );
+        assert_eq!(
+            decode_binary_safe_stdout(ExecMode::Tracked, vec![0xff, 0xfe]).unwrap(),
+            [0xff, 0xfe]
+        );
+    }
+
+    /// Run the transient wrapper locally under each POSIX shell a workstation
+    /// might use, and check binary stdout and the exit code survive it.
+    #[test]
+    fn base64_wrapper_round_trips_binary_stdout_and_exit_code() {
+        let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let payload_path =
+            std::env::temp_dir().join(format!("blox-cli-b64-{}", std::process::id()));
+        std::fs::write(&payload_path, &payload).unwrap();
+        let payload_arg = payload_path.to_str().unwrap().to_string();
+        let script = "cat \"$0\"; echo oops >&2; exit 3";
+
+        let mut shells_run = 0;
+        for shell in ["/bin/sh", "/bin/dash"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            shells_run += 1;
+            let args = binary_safe_args(ExecMode::Transient, &["sh", "-c", script, &payload_arg]);
+            assert_eq!(args[0], "sh");
+            let output = Command::new(shell).args(&args[1..]).output().unwrap();
+            assert_eq!(output.status.code(), Some(3), "{shell}");
+            assert_eq!(String::from_utf8_lossy(&output.stderr), "oops\n", "{shell}");
+            assert!(std::str::from_utf8(&output.stdout).is_ok(), "{shell}");
+            let decoded = decode_binary_safe_stdout(ExecMode::Transient, output.stdout).unwrap();
+            assert_eq!(decoded, payload, "{shell}");
+        }
+        let _ = std::fs::remove_file(&payload_path);
+        assert!(shells_run > 0);
+    }
+
+    #[test]
+    fn base64_wrapper_decodes_empty_stdout() {
+        assert!(decode_binary_safe_stdout(ExecMode::Transient, Vec::new())
+            .unwrap()
+            .is_empty());
     }
 }

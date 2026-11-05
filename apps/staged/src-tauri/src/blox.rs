@@ -5,7 +5,9 @@
 
 use std::sync::OnceLock;
 
-pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput};
+pub use blox_cli::{
+    BloxError, ExecMode, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput,
+};
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -78,31 +80,35 @@ pub fn ws_list() -> Result<Vec<WorkspaceListEntry>, BloxError> {
 
 /// Execute a command inside a Blox workspace.
 ///
-/// Runs: `sq blox ws exec <name> -- <args…>`
+/// Runs: `sq blox ws exec [--transient] <name> -- <args…>`
 ///
 /// Returns the command's stdout on success.
-pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
+pub fn ws_exec(name: &str, mode: ExecMode, args: &[&str]) -> Result<String, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    blox_cli::ws_exec(name, args)
+    blox_cli::ws_exec(name, mode, args)
 }
 
 /// Execute a command inside a Blox workspace, returning raw bytes.
 ///
 /// Like `ws_exec` but returns the raw stdout bytes without UTF-8 validation.
 /// Use this when the command may produce binary output (e.g. `git show` on image files).
-pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
+pub fn ws_exec_bytes(name: &str, mode: ExecMode, args: &[&str]) -> Result<Vec<u8>, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    blox_cli::ws_exec_bytes(name, args)
+    blox_cli::ws_exec_bytes(name, mode, args)
 }
 
 /// Execute a command inside a Blox workspace, returning full output regardless
 /// of exit code. Infrastructure errors still return `Err`.
-pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+pub fn ws_exec_output(
+    name: &str,
+    mode: ExecMode,
+    args: &[&str],
+) -> Result<WsExecOutput, BloxError> {
     #[cfg(test)]
     record_ws_exec(name);
-    blox_cli::ws_exec_output(name, args)
+    blox_cli::ws_exec_output(name, mode, args)
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.
@@ -126,3 +132,7 @@ pub fn ws_commands(name: &str) -> Result<Vec<WorkspaceCommand>, BloxError> {
 pub fn ws_resume(name: &str) -> Result<(), BloxError> {
     blox_cli::ws_resume(name)
 }
+
+#[cfg(test)]
+#[path = "blox/tracked_exec_guard_tests.rs"]
+mod tracked_exec_guard_tests;

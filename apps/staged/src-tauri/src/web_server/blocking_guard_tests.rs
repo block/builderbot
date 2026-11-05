@@ -67,6 +67,12 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "start_pipeline_session",
         "resolve_pipeline_artifacts_without_ai(",
     ),
+    // Only builds the `sq blox ws exec` argv; `execute_remote` spawns it.
+    (
+        "actions/commands.rs",
+        "run_branch_action_impl",
+        "ws_exec_command(",
+    ),
     // Known gap: offloading it (and `AcpDriver::new`) needs an async `start_session`.
     ("session_runner.rs", "start_session", "discover_providers("),
 ];

@@ -1482,6 +1482,7 @@ pub(crate) async fn delete_commit_impl(
 
             blox::ws_exec(
                 ws_name,
+                blox::ExecMode::Transient,
                 &["sh", "-c", script, "_", &resolved_path, &commit_sha],
             )
             .map_err(|e| {

@@ -7,7 +7,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::actions::events::TauriExecutionListener;
 use crate::actions::{ActionExecutor, ActionRegistry, ActionType};
-use crate::blox;
+use crate::blox::{self, ExecMode};
 use crate::git;
 use crate::store::{self, Store};
 use crate::{BranchWithWorkdir, PollWorkspaceResult};
@@ -248,20 +248,36 @@ fn workspace_git_args(
     Ok(owned)
 }
 
+/// Run a git command inside a Blox workspace as Staged plumbing.
+///
+/// Always [`ExecMode::Transient`]: callers are quick reads and Staged-composed
+/// mutations, which would otherwise flood the workstation's Blox command
+/// history. Anything that can run past 60 s goes through
+/// [`run_workspace_git_async`] with an explicit mode instead.
 pub(crate) fn run_workspace_git(
     workspace_name: &str,
     repo_subpath: Option<&str>,
     git_args: &[&str],
 ) -> Result<String, blox::BloxError> {
+    run_workspace_git_with_mode(workspace_name, repo_subpath, ExecMode::Transient, git_args)
+}
+
+fn run_workspace_git_with_mode(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    mode: ExecMode,
+    git_args: &[&str],
+) -> Result<String, blox::BloxError> {
     let owned = workspace_git_args(workspace_name, repo_subpath, git_args)?;
     let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
-    blox::ws_exec(workspace_name, &borrowed)
+    blox::ws_exec(workspace_name, mode, &borrowed)
 }
 
 /// Execute a shell script inside a Blox workspace via `sh -c`.
 ///
 /// Positional arguments are passed as `$1`, `$2`, etc. This allows batching
-/// multiple git commands into a single `ws_exec` round-trip.
+/// multiple git commands into a single `ws_exec` round-trip. Always
+/// [`ExecMode::Transient`], like [`run_workspace_git`].
 pub(crate) fn run_workspace_shell(
     workspace_name: &str,
     script: &str,
@@ -275,9 +291,12 @@ pub(crate) fn run_workspace_shell(
     owned.push("_".to_string());
     owned.extend(args.iter().map(|arg| (*arg).to_string()));
     let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
-    blox::ws_exec(workspace_name, &borrowed)
+    blox::ws_exec(workspace_name, ExecMode::Transient, &borrowed)
 }
 
+/// Like [`run_workspace_git`], returning raw stdout bytes. Always
+/// [`ExecMode::Transient`]; `blox-cli` base64-encodes the output so binary
+/// blobs survive the transient path's UTF-8 requirement.
 pub(crate) fn run_workspace_git_bytes(
     workspace_name: &str,
     repo_subpath: Option<&str>,
@@ -285,7 +304,7 @@ pub(crate) fn run_workspace_git_bytes(
 ) -> Result<Vec<u8>, blox::BloxError> {
     let owned = workspace_git_args(workspace_name, repo_subpath, git_args)?;
     let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
-    blox::ws_exec_bytes(workspace_name, &borrowed)
+    blox::ws_exec_bytes(workspace_name, ExecMode::Transient, &borrowed)
 }
 
 pub(crate) async fn run_blox_blocking<T, F>(op: F) -> Result<T, blox::BloxError>
@@ -382,8 +401,14 @@ pub(crate) async fn resolve_remote_branch(store: &Arc<Store>, branch: &store::Br
     .unwrap_or(fallback)
 }
 
+/// Run `args` inside a Blox workspace on the blocking pool.
+///
+/// Unlike the sync plumbing helpers this takes a mode: its callers are
+/// workspace setup steps, where a clone or fetch can outlast the transient
+/// path's 60 s limit.
 pub(crate) async fn ws_exec_async(
     workspace_name: &str,
+    mode: ExecMode,
     args: &[&str],
 ) -> Result<String, blox::BloxError> {
     let ws_name = workspace_name.to_string();
@@ -393,14 +418,17 @@ pub(crate) async fn ws_exec_async(
         .collect::<Vec<_>>();
     run_blox_blocking(move || {
         let borrowed = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
-        blox::ws_exec(&ws_name, &borrowed)
+        blox::ws_exec(&ws_name, mode, &borrowed)
     })
     .await
 }
 
+/// [`run_workspace_git`] on the blocking pool, with an explicit mode for the
+/// same reason as [`ws_exec_async`].
 pub(crate) async fn run_workspace_git_async(
     workspace_name: &str,
     repo_subpath: Option<&str>,
+    mode: ExecMode,
     git_args: &[&str],
 ) -> Result<String, blox::BloxError> {
     let ws_name = workspace_name.to_string();
@@ -411,7 +439,7 @@ pub(crate) async fn run_workspace_git_async(
         .collect::<Vec<_>>();
     run_blox_blocking(move || {
         let borrowed_args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
-        run_workspace_git(&ws_name, subpath.as_deref(), &borrowed_args)
+        run_workspace_git_with_mode(&ws_name, subpath.as_deref(), mode, &borrowed_args)
     })
     .await
 }
@@ -617,15 +645,26 @@ pub(crate) async fn clone_repo_into_workspace(
         .map_err(|e| format!("Failed to resolve workspace repo path '{repo_subpath}': {e}"))?;
 
     // Clone only if the repo directory doesn't already exist.
-    match ws_exec_async(ws_name, &["test", "-d", &format!("{repo_path}/.git")]).await {
+    match ws_exec_async(
+        ws_name,
+        ExecMode::Transient,
+        &["test", "-d", &format!("{repo_path}/.git")],
+    )
+    .await
+    {
         Ok(_) => {}
         Err(blox::BloxError::CommandFailed(_)) => {
             let repo_url = format!("https://github.com/{repo_slug}.git");
-            ws_exec_async(ws_name, &["git", "clone", &repo_url, &repo_path])
-                .await
-                .map_err(|e| {
-                    format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}")
-                })?;
+            // Tracked: cloning a large repo outlasts the transient 60 s limit.
+            ws_exec_async(
+                ws_name,
+                ExecMode::Tracked,
+                &["git", "clone", &repo_url, &repo_path],
+            )
+            .await
+            .map_err(|e| {
+                format!("Failed to clone '{repo_slug}' into workspace '{ws_name}': {e}")
+            })?;
         }
         Err(e) => {
             return Err(format!(
@@ -639,19 +678,27 @@ pub(crate) async fn clone_repo_into_workspace(
     // workstations, so we redo the cheap config check on every visit).
     crate::git::config_apply::apply_to_blox_clone(ws_name, &repo_path).await;
 
-    run_workspace_git_async(ws_name, Some(repo_subpath), &["fetch", "origin", base_ref])
-        .await
+    // Tracked: a fetch on a large repo can outlast the transient 60 s limit.
+    run_workspace_git_async(
+        ws_name,
+        Some(repo_subpath),
+        ExecMode::Tracked,
+        &["fetch", "origin", base_ref],
+    )
+    .await
         .map_err(|e| format!(
             "Failed to fetch base branch '{base_ref}' for '{repo_slug}' in workspace '{ws_name}': {e}"
         ))?;
 
     // If the branch already exists on the remote (e.g. from an existing PR),
     // fetch it and start from there so we pick up its commits. Otherwise fall
-    // back to starting from the base branch.
+    // back to starting from the base branch. Tracked: a transient fetch killed
+    // at 60 s would read as "no remote branch" and silently branch from base.
     let has_remote_branch = if branch_name != base_ref {
         run_workspace_git_async(
             ws_name,
             Some(repo_subpath),
+            ExecMode::Tracked,
             &["fetch", "origin", branch_name],
         )
         .await
@@ -681,13 +728,18 @@ pub(crate) async fn clone_repo_into_workspace(
     };
     let checkout_args: Vec<&str> = checkout_args.iter().map(String::as_str).collect();
 
-    run_workspace_git_async(ws_name, Some(repo_subpath), &checkout_args)
-        .await
-        .map_err(|e| {
-            format!(
+    run_workspace_git_async(
+        ws_name,
+        Some(repo_subpath),
+        ExecMode::Transient,
+        &checkout_args,
+    )
+    .await
+    .map_err(|e| {
+        format!(
         "Failed to create branch '{branch_name}' for '{repo_slug}' in workspace '{ws_name}': {e}"
     )
-        })?;
+    })?;
 
     Ok(())
 }
@@ -2002,9 +2054,12 @@ pub async fn start_workspace(
             // If the branch already exists on the remote (e.g. from an
             // existing PR), fetch it and start from there so we pick up its
             // commits. Otherwise create a fresh branch from the base ref.
+            // Tracked: a transient fetch killed at 60 s would read as "no
+            // remote branch" and silently branch from base.
             let has_remote_branch = run_workspace_git_async(
                 ws_name,
                 repo_subpath.as_deref(),
+                ExecMode::Tracked,
                 &["fetch", "origin", &branch.branch_name],
             )
             .await
@@ -2015,6 +2070,7 @@ pub async fn start_workspace(
                 run_workspace_git_async(
                     ws_name,
                     repo_subpath.as_deref(),
+                    ExecMode::Transient,
                     &["checkout", "-B", &branch.branch_name, &remote_ref],
                 )
                 .await
@@ -2022,6 +2078,7 @@ pub async fn start_workspace(
                 run_workspace_git_async(
                     ws_name,
                     repo_subpath.as_deref(),
+                    ExecMode::Transient,
                     &["checkout", "-b", &branch.branch_name],
                 )
                 .await
@@ -3085,6 +3142,7 @@ pub async fn rename_branch(
                 if let Err(e) = run_workspace_git_async(
                     ws_name,
                     repo_subpath.as_deref(),
+                    ExecMode::Transient,
                     &["branch", "-m", new_name],
                 )
                 .await

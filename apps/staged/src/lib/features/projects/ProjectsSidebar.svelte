@@ -48,6 +48,7 @@
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
   import { neighbourAfterRemove } from './focusAfterRemove';
+  import { createScrollIfActive } from './activeRowScroll';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
@@ -175,31 +176,13 @@
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
-  function scrollIfActive(node: HTMLElement, active: boolean) {
-    let currentActive = active;
-    if (active) {
+  const scrollIfActive = createScrollIfActive({
+    activeRow: () => activeProjectRowEl,
+    setActiveRow: (node) => {
       activeProjectRowEl = node;
-    }
-    return {
-      update(nextActive: boolean) {
-        if (currentActive === nextActive) return;
-        currentActive = nextActive;
-        if (nextActive) {
-          activeProjectRowEl = node;
-          if (sidebarScrollRestored) {
-            node.scrollIntoView({ block: 'nearest' });
-          }
-        } else if (activeProjectRowEl === node) {
-          activeProjectRowEl = null;
-        }
-      },
-      destroy() {
-        if (activeProjectRowEl === node) {
-          activeProjectRowEl = null;
-        }
-      },
-    };
-  }
+    },
+    scrollRestored: () => sidebarScrollRestored,
+  });
 
   function handleSidebarScroll() {
     if (!sidebarBodyEl) return;

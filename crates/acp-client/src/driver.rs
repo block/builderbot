@@ -49,6 +49,7 @@ use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
 
+mod remote_routing;
 mod response_completion;
 
 static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -2230,17 +2231,16 @@ impl AcpDriver {
             .take()
             .ok_or_else(|| "Failed to get stdout".to_string())?;
 
-        let stdin_compat = stdin.compat_write();
-        let incoming_reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = if self.is_remote {
-            let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
-            tokio::task::spawn_local(async move {
-                if let Err(error) =
-                    normalize_remote_acp_stdout(stdout, normalized_stdout_writer).await
-                {
-                    log::error!("remote ACP stdout normalization failed: {error}");
-                }
-            });
-            Box::new(normalized_stdout_reader)
+        let (outgoing_writer, incoming_reader): (
+            Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+            Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+        ) = if self.is_remote {
+            // `sq blox acp` may attach this session to a workstation agent
+            // process other sessions already use, and then this pipe carries
+            // all of their frames too. Route it so only this session's
+            // frames reach the connection.
+            let streams = remote_routing::RemoteTransport::spawn(stdin, stdout).attach();
+            (Box::new(streams.outgoing), Box::new(streams.incoming))
         } else {
             // On the shell-spawn fallback, shell init (.zshrc, plugin banners,
             // Hermit activation) may write to stdout before `exec` replaces the
@@ -2255,8 +2255,9 @@ impl AcpDriver {
                     log::error!("local ACP stdout normalization failed: {error}");
                 }
             });
-            Box::new(normalized_stdout_reader)
+            (Box::new(stdin), Box::new(normalized_stdout_reader))
         };
+        let stdin_compat = outgoing_writer.compat_write();
         let stdout_compat = incoming_reader.compat();
 
         let is_resuming = agent_session_id.is_some();
@@ -2660,7 +2661,7 @@ fn remote_acp_segments(decoded_line: &str) -> impl Iterator<Item = &str> {
 
 async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
     stdout: R,
-    mut writer: tokio::io::DuplexStream,
+    mut emit: impl FnMut(String),
 ) -> Result<(), std::io::Error> {
     let mut reader = BufReader::new(stdout);
     let mut raw_line = Vec::new();
@@ -2680,10 +2681,7 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
 
         for segment in remote_acp_segments(&decoded_line) {
             match consume_remote_acp_line(&mut pending, segment) {
-                RemoteLineOutcome::Emit(line) => {
-                    writer.write_all(line.as_bytes()).await?;
-                    writer.write_all(b"\n").await?;
-                }
+                RemoteLineOutcome::Emit(line) => emit(line),
                 RemoteLineOutcome::Pending => {}
                 RemoteLineOutcome::Dropped => {
                     if !segment.trim().is_empty() {
@@ -2698,7 +2696,7 @@ async fn normalize_remote_acp_stdout<R: tokio::io::AsyncRead + Unpin>(
         log::warn!("Dropped incomplete ACP proxy output at EOF");
     }
 
-    writer.shutdown().await
+    Ok(())
 }
 
 /// Filter local ACP stdout, forwarding only valid JSON lines.
@@ -7425,6 +7423,7 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     mod real_bridge;
+    mod remote_routing;
     mod response_completion;
     mod settlement;
     mod turn_control;

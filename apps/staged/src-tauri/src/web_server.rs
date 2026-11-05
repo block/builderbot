@@ -4368,10 +4368,9 @@ mod tests {
         }
     }
 
-    /// A written-note save collects the media the edit removed, which the
-    /// shared body does after the store write (pinned by
-    /// `note_commands::tests`). An arm that saved through the store directly
-    /// would leak every attachment deleted in the web editor.
+    /// The web editor saves through the same body as the desktop one, so the
+    /// two can't drift apart; in particular, neither collects the media an
+    /// edit removed (see `note_commands::update_note_impl`).
     #[test]
     fn web_update_note_shares_the_tauri_body() {
         let arm = dispatch_arm_body(include_str!("web_server.rs"), "update_note");
@@ -4381,7 +4380,7 @@ mod tests {
         );
         assert!(
             !arm.contains("update_written_note("),
-            "the web `update_note` arm must not save around the media clean-up: {arm}"
+            "the web `update_note` arm must not save around the shared body: {arm}"
         );
     }
 

@@ -233,10 +233,7 @@ impl Store {
         Ok(())
     }
 
-    /// Rewrite a user-authored note's title and content, returning the saved row
-    /// and the content it replaced. The previous content is read under the same
-    /// lock as the write, so the caller can collect exactly the media this edit
-    /// dropped.
+    /// Rewrite a user-authored note's title and content, returning the saved row.
     ///
     /// Unlike [`Store::update_note_title_and_content`] (the session runner's path)
     /// this always advances `updated_at` — a user save is an explicit edit, not a
@@ -248,9 +245,9 @@ impl Store {
         id: &str,
         title: &str,
         content: &str,
-    ) -> Result<(Note, String), StoreError> {
+    ) -> Result<Note, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut existing = conn
+        let existing = conn
             .query_row(
                 "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id, subtype
                  FROM notes WHERE id = ?1",
@@ -286,15 +283,13 @@ impl Store {
             project_id: None,
         });
 
-        let previous_content = std::mem::take(&mut existing.content);
-        let saved = Note {
+        Ok(Note {
             title,
             content: content.to_string(),
             updated_at: now,
             completed_at,
             ..existing
-        };
-        Ok((saved, previous_content))
+        })
     }
 
     pub fn mark_note_completed(&self, id: &str) -> Result<(), StoreError> {

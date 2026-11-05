@@ -306,7 +306,7 @@ impl Store {
 
     /// Re-point media rows that move with note `note_id` at its destination,
     /// keeping their ids: each of `rows` is written over the row with its id
-    /// (scope, filename and owning session; the caller has already renamed
+    /// (scope, filename and owning session; the caller has already linked
     /// the file into the destination's media directory).
     ///
     /// A row some other note or a chat message has started using since the

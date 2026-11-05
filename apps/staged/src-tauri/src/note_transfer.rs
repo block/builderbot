@@ -9,16 +9,18 @@
 //!    and the note stays where it was. Adding takes long enough for a save to
 //!    land, so the note is read again afterwards and that row is what moves.
 //! 2. Put the note's media files in place in the target project's media
-//!    directory: copied, or on a move renamed (see below). Files are cheap
-//!    to put back and rows are not, so the filesystem goes first.
+//!    directory: copied, or on a move hard-linked (see below). Files are
+//!    cheap to put back and rows are not, so the filesystem goes first.
 //! 3. One transaction rewrites (move) or inserts (copy) the note row together
-//!    with the rows for its media. On failure the copied files are removed
-//!    and the renamed ones put back.
+//!    with the rows for its media. Once it commits, the paths re-homed rows
+//!    no longer name are unlinked; if it fails, the copies and links are
+//!    removed. A source file is never touched before the commit, so a row
+//!    finds its file at every point, and a crash leaves at worst a spare link.
 //! 4. A move then garbage-collects whatever source media the note no longer
 //!    references, under the same rules a note delete uses.
 //!
 //! A move takes media only the note uses along as it is: the row is re-homed
-//! in place and its file renamed into the destination, so the id survives.
+//! in place and its file linked into the destination, so the id survives.
 //! Anything that still holds it — the note's session repeating a reference
 //! on its next turn, a view opened before the move — keeps resolving. That
 //! is a row in the scope the note is leaving, with a session (a session-less
@@ -49,6 +51,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -412,6 +415,7 @@ fn finish<T>(
 ) -> Result<T, String> {
     match result {
         Ok(value) => {
+            media.commit();
             if mode == TransferMode::Move {
                 cleanup_unreferenced(store, refs::media_ids(previous_content));
             }
@@ -426,30 +430,37 @@ fn finish<T>(
 
 /// Media put in place on disk but not yet recorded: the rewritten note body,
 /// the copied rows to insert alongside it and the re-homed rows to re-point,
-/// and how to undo the files if that never happens.
+/// and the files to settle once the transaction commits or fails.
 struct StagedMedia {
     content: String,
     images: Vec<Image>,
     rehomed: Vec<Image>,
-    /// Copies written for `images`.
+    /// Files written for this transfer: a copy for each of `images` and a
+    /// hard link for each of `rehomed`.
     files: Vec<PathBuf>,
-    /// `(from, to)` for each file renamed for `rehomed`.
-    renames: Vec<(PathBuf, PathBuf)>,
+    /// The paths `rehomed` rows named before the move. Each shares its file
+    /// with a link in `files`, so it goes once the rows name the links.
+    superseded: Vec<PathBuf>,
 }
 
 impl StagedMedia {
+    /// The transaction recorded the rows: drop the paths re-homed rows no
+    /// longer name. One left behind is only a spare link to the same file.
+    fn commit(self) {
+        for path in self.superseded {
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != ErrorKind::NotFound {
+                    log::warn!("Failed to unlink moved media {}: {e}", path.display());
+                }
+            }
+        }
+    }
+
+    /// The transaction never happened: remove what was written for it. The
+    /// sources were left alone, so every row still finds its file.
     fn discard(self) {
         for path in self.files {
             let _ = std::fs::remove_file(path);
-        }
-        for (from, to) in self.renames.into_iter().rev() {
-            if let Err(e) = std::fs::rename(&to, &from) {
-                log::warn!(
-                    "Failed to put media back {} -> {}: {e}",
-                    to.display(),
-                    from.display()
-                );
-            }
         }
     }
 }
@@ -479,7 +490,7 @@ impl MoveSource<'_> {
 /// to record. The rows are owned by the note that will carry them:
 /// `owner_session` is that note's session, or `None` for a note without one.
 ///
-/// On a move (`rehome` set), media only the note uses is renamed into place
+/// On a move (`rehome` set), media only the note uses is linked into place
 /// and keeps its id and references; everything else is copied under a fresh
 /// id and its references are rewritten to the copy.
 ///
@@ -499,7 +510,7 @@ fn stage_media(
         images: Vec::new(),
         rehomed: Vec::new(),
         files: Vec::new(),
-        renames: Vec::new(),
+        superseded: Vec::new(),
     };
     let owner_session = owner_session.unwrap_or(NOTE_MEDIA_SESSION_ID);
     // How each source id is referenced from now on: `None` when it is
@@ -588,24 +599,52 @@ fn stage_media(
     Ok(staged)
 }
 
-/// Rename `source`'s file into `project_id`'s media directory, where its row
-/// will say it is once re-homed; the name is the id and extension, neither of
-/// which changes. Notes cannot embed PDFs, so there is no cached thumbnail
-/// beside it to carry. False when the file is already gone.
+/// Hard-link `source`'s file into `project_id`'s media directory, where its
+/// row will say it is once re-homed; the name is the id and extension, neither
+/// of which changes. The source path stays until the transaction commits
+/// ([`StagedMedia::commit`]), so whatever resolves the row in the meantime
+/// still finds the file. Notes cannot embed PDFs, so there is no cached
+/// thumbnail beside it to carry. False when the file is already gone.
 fn rehome_file(
     source_path: &Path,
     project_id: &str,
     source: &Image,
     staged: &mut StagedMedia,
 ) -> Result<bool, String> {
-    if !source_path.is_file() {
+    if !regular_file(source_path)? {
         return Ok(false);
     }
     let path = image_file_path(project_id, &source.id, &source.filename)?;
+    if path == source_path {
+        return Err("media is already in the destination project".into());
+    }
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::rename(source_path, &path).map_err(|e| e.to_string())?;
-    staged.renames.push((source_path.to_owned(), path));
+    if let Err(e) = std::fs::hard_link(source_path, &path) {
+        if e.kind() != ErrorKind::AlreadyExists {
+            return Err(e.to_string());
+        }
+        // A link an earlier attempt left when it never committed. The path is
+        // keyed by this row's id and the row names the source, so nothing
+        // else can be using it.
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        std::fs::hard_link(source_path, &path).map_err(|e| e.to_string())?;
+    }
+    staged.files.push(path);
+    staged.superseded.push(source_path.to_owned());
     Ok(true)
+}
+
+/// Whether the media file at `path` is there to transfer. Only a file that
+/// does not exist counts as already gone; any other failure to inspect it
+/// fails the transfer rather than leaving the note pointing at the source,
+/// and so does anything but a regular file.
+fn regular_file(path: &Path) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => Err("media must be a regular file".into()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot inspect media file: {e}")),
+    }
 }
 
 /// Copy `source`'s file to a fresh id in the destination and stage the row
@@ -622,12 +661,8 @@ fn copy_file(
     owner_session: &str,
     staged: &mut StagedMedia,
 ) -> Result<Option<Image>, String> {
-    match std::fs::metadata(source_path) {
-        Err(_) => return Ok(None),
-        Ok(metadata) if !metadata.is_file() => {
-            return Err("media must be a regular file".into());
-        }
-        Ok(_) => {}
+    if !regular_file(source_path)? {
+        return Ok(None);
     }
     let mut copy = Image::new(
         branch_id,
@@ -1310,7 +1345,8 @@ mod tests {
     }
 
     /// Media only the moving note uses goes with it as it is: the row is
-    /// re-homed and the file renamed, so the id — and any reference to it
+    /// re-homed and the file linked into the destination (and unlinked from
+    /// the source once the move commits), so the id — and any reference to it
     /// outside the note's body — survives the move.
     #[tokio::test]
     async fn move_takes_media_only_the_note_uses_along_with_its_id() {
@@ -1479,11 +1515,13 @@ mod tests {
         );
     }
 
-    /// The files are renamed before the transaction that re-homes their
-    /// rows. A transaction that fails puts them back, so the row that stayed
-    /// in the source still finds its file.
+    /// The files are linked into the destination before the transaction that
+    /// re-homes their rows, and the source path stays until it commits: the
+    /// file is at whichever path the row names throughout. A transaction that
+    /// fails removes the link, and the row that stayed in the source still
+    /// finds its file.
     #[test]
-    fn a_failed_move_puts_the_renamed_media_back() {
+    fn a_failed_move_leaves_the_media_where_its_row_says() {
         let f = fixture();
         let (note, image) = f.media_note();
         f.attach_repo(RepoKey {
@@ -1508,7 +1546,9 @@ mod tests {
             }),
         )
         .unwrap();
-        assert!(moved_path.exists() && !original_path.exists());
+        // Staged but not yet recorded: the row still names the source.
+        assert_eq!(std::fs::read(&original_path).unwrap(), PNG);
+        assert_eq!(std::fs::read(&moved_path).unwrap(), PNG);
         // The note left the branch the move was resolved from in the
         // meantime, so the transaction is refused.
         let result = f.store.move_note_to_branch(
@@ -1532,6 +1572,85 @@ mod tests {
             f.store.get_note(&note.id).unwrap().unwrap().branch_id,
             f.source_branch.id
         );
+    }
+
+    /// A process that died between linking and committing leaves a link at
+    /// the destination that no row names. Moving the note again replaces it
+    /// rather than failing on the existing path.
+    #[tokio::test]
+    async fn a_link_left_by_an_interrupted_move_does_not_block_the_next() {
+        let f = fixture();
+        let (note, image) = f.media_note();
+        let moved_path = image_file_path(&f.target.id, &image.id, &image.filename).unwrap();
+        std::fs::create_dir_all(moved_path.parent().unwrap()).unwrap();
+        std::fs::write(&moved_path, b"stale").unwrap();
+
+        let moved = transfer_branch_note(
+            &f.store,
+            &note.id,
+            &f.target.id,
+            TransferMode::Move,
+            |key| std::future::ready(f.attach_repo(key)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(moved.content, note.content);
+        assert_eq!(std::fs::read(&moved_path).unwrap(), PNG);
+        let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
+        assert!(!original_path.exists());
+    }
+
+    /// Only a file that does not exist is skipped as already gone. One that
+    /// is not a regular file, or that can't be inspected at all, fails the
+    /// transfer: carrying the reference over as it is would leave a copy
+    /// relying on the source project's media, or a moved note on a row that
+    /// stayed behind.
+    #[tokio::test]
+    async fn media_that_cannot_be_inspected_fails_the_transfer() {
+        let f = fixture();
+        let (note, image) = f.media_note();
+        let original_path = image_file_path(&f.source.id, &image.id, &image.filename).unwrap();
+        let images_dir = original_path.parent().unwrap().to_owned();
+        let not_a_file = || {
+            std::fs::remove_file(&original_path).unwrap();
+            std::fs::create_dir(&original_path).unwrap();
+        };
+        // Inspecting a path under a regular file fails with ENOTDIR, an error
+        // that is not "not found".
+        let unreadable = || {
+            std::fs::remove_dir_all(&images_dir).unwrap();
+            std::fs::write(&images_dir, b"").unwrap();
+        };
+        let cases: [(&dyn Fn(), &str); 2] = [
+            (&not_a_file, "media must be a regular file"),
+            (&unreadable, "cannot inspect media file"),
+        ];
+        for (break_source, expected) in cases {
+            break_source();
+            for mode in [TransferMode::Copy, TransferMode::Move] {
+                let err = transfer_branch_note(&f.store, &note.id, &f.target.id, mode, |key| {
+                    std::future::ready(f.attach_repo(key))
+                })
+                .await
+                .unwrap_err();
+                assert!(err.contains(expected), "{mode:?}: {err}");
+                assert_eq!(
+                    f.store.get_note(&note.id).unwrap().unwrap().branch_id,
+                    f.source_branch.id
+                );
+            }
+            // Put the source back as a regular file for the next case.
+            let _ = std::fs::remove_dir_all(&images_dir);
+            let _ = std::fs::remove_file(&images_dir);
+            std::fs::create_dir_all(&images_dir).unwrap();
+            std::fs::write(&original_path, PNG).unwrap();
+        }
+        assert!(f
+            .store
+            .list_notes_for_branch(&f.target_branch().unwrap().id)
+            .unwrap()
+            .is_empty());
     }
 
     /// Two attachments can share a filename in one scope. Their copies are

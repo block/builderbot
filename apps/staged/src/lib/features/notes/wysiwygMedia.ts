@@ -18,7 +18,8 @@
  */
 import { imageSchema } from '@milkdown/kit/preset/commonmark';
 import { DOMSerializer, type Node as ProseNode } from '@milkdown/kit/prose/model';
-import type { NodeView } from '@milkdown/kit/prose/view';
+import { NodeSelection } from '@milkdown/kit/prose/state';
+import type { EditorView, NodeView } from '@milkdown/kit/prose/view';
 import { $view } from '@milkdown/kit/utils';
 
 import { getMediaDimensions } from '../../api/commands';
@@ -31,27 +32,69 @@ import {
 } from '../../shared/markdown/mediaUrl';
 import type { ImageDimensions } from '../../types';
 
-export const stagedMediaView = $view(imageSchema.node, () => (node, view): NodeView => {
+export const stagedMediaView = $view(imageSchema.node, () => (node, view, getPos): NodeView => {
   const media = parseStagedMediaReference(node.attrs.src);
   if (!media) {
     const dom = DOMSerializer.fromSchema(view.state.schema).serializeNode(node) as HTMLElement;
     return { dom };
   }
   const dom = mediaFigure(node, media);
+  const video = dom.querySelector('video');
+  if (video) selectVideoLikeAnImage(video, view, getPos);
   return {
     dom,
     // Same node, same figure; anything else is redrawn from scratch.
     update: (updated) => updated.sameMarkup(node),
     // The figure is not editable and the browser owns the video's controls:
-    // clicks, keys and focus inside them must not become a node selection or
-    // a drag. Everything else (clicking an image, for one) stays with
-    // ProseMirror, so the usual select-then-delete applies.
-    stopEvent: (event) => dom.querySelector('video')?.contains(event.target as Element) ?? false,
-    // Nothing inside is document content; the dimension lookup below and the
-    // video's own state changes are not edits.
-    ignoreMutation: () => true,
+    // ProseMirror must not turn clicks, keys and focus inside them into a drag
+    // or a preventDefault (`selectVideoLikeAnImage` selects it instead).
+    // Everything else (clicking an image, for one) stays with ProseMirror, so
+    // the usual select-then-delete applies.
+    stopEvent: (event) => video?.contains(event.target as Element) ?? false,
+    // A leaf's DOM is not document content: the dimension lookup below and the
+    // video's own state changes are not edits. Selection changes still count,
+    // so drag-selecting a caption keeps ProseMirror's selection in step.
+    ignoreMutation: (mutation) => mutation.type !== 'selection',
   };
 });
+
+/**
+ * Give a video the click-then-delete an image has. Its events are kept from
+ * ProseMirror (see `stopEvent`), and a caption-less video's figure has no
+ * other surface to click, so the node view selects it itself. The selection
+ * follows the click rather than the press, as ProseMirror's own does, so the
+ * browser's handling of the press (focusing the video, scrubbing) is done by
+ * then; nothing is prevented, so the controls still work. Native controls are
+ * not in the light DOM, so a click on them selects the video too.
+ *
+ * The browser may keep focus on the video for its controls, where ProseMirror
+ * never sees a key, so Backspace and Delete there remove the selected video.
+ */
+function selectVideoLikeAnImage(
+  video: HTMLVideoElement,
+  view: EditorView,
+  getPos: () => number | undefined
+) {
+  const isSelected = () => {
+    const { selection } = view.state;
+    return selection instanceof NodeSelection && selection.from === getPos();
+  };
+  video.addEventListener('click', (event) => {
+    const pos = getPos();
+    if (event.button !== 0 || pos === undefined || !view.editable) return;
+    if (!isSelected()) {
+      view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)));
+    }
+    if (document.activeElement !== video) view.focus();
+  });
+  video.addEventListener('keydown', (event) => {
+    if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+    if (!view.editable || !isSelected()) return;
+    event.preventDefault();
+    view.dispatch(view.state.tr.deleteSelection().scrollIntoView());
+    view.focus();
+  });
+}
 
 /** The viewer's figure for one stored reference (see `renderMarkdownMedia`). */
 function mediaFigure(

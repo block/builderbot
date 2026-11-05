@@ -1,6 +1,5 @@
 //! Note commands — note CRUD operations for branches and projects.
 
-use crate::note_media::refs::media_ids;
 use crate::store::models::Note;
 use crate::store::Store;
 use crate::NoteTimelineItem;
@@ -97,26 +96,21 @@ pub fn update_note(
 
 /// The body of [`update_note`], shared with the web dispatcher's arm.
 ///
-/// A written note can carry media (a copied note brings its own), and the
-/// editor can delete it. Nothing else would ever collect a row only this note
-/// used, so once the save has committed, every id the old content embedded
-/// and the new content doesn't goes to `cleanup_unreferenced`, which keeps
-/// anything another note, a chat message or the branch timeline still uses. A
-/// rejected save returns before any of that runs.
+/// Media the edit removed is deliberately not collected here. The editor can
+/// still bring it back: undo after a save that left the dialog open (the
+/// transfer menu saves first), or a cut image pasted into another note. Either
+/// would then reference a row this save had deleted. Collection happens when
+/// a note is deleted ([`delete_note_impl`]), for the media it still embeds;
+/// a row an edit dropped for good is left behind, the cheaper failure.
 pub(crate) fn update_note_impl(
     store: &Store,
     note_id: &str,
     title: &str,
     content: &str,
 ) -> Result<NoteTimelineItem, String> {
-    let (note, previous_content) = store
+    let note = store
         .update_written_note(note_id, title, content)
         .map_err(|e| e.to_string())?;
-    let removed = media_ids(&previous_content)
-        .difference(&media_ids(&note.content))
-        .cloned()
-        .collect();
-    crate::note_media::cleanup_unreferenced(store, removed);
     Ok(standalone_note_to_timeline_item(note))
 }
 
@@ -154,7 +148,10 @@ pub(crate) fn delete_note_impl<R: tauri::Runtime>(
         .ok_or_else(|| format!("Note not found: {note_id}"))?;
 
     store.delete_note(note_id).map_err(|e| e.to_string())?;
-    crate::note_media::cleanup_unreferenced(store, media_ids(&note.content));
+    crate::note_media::cleanup_unreferenced(
+        store,
+        crate::note_media::refs::media_ids(&note.content),
+    );
 
     // The session keeps its `branch_id` after the note is gone, so a `queued`
     // row left behind would stay in the branch's queue with nothing to say
@@ -318,35 +315,10 @@ mod tests {
     use crate::note_media::files::store_media_file;
     use crate::note_media::tests::{Fixture, PNG};
     use crate::store::images::image_file_path;
-    use crate::store::{Image, MessageRole, ProjectNote, NOTE_MEDIA_SESSION_ID};
-
-    /// Media a written note owns, the way a copy lands it in its new scope.
-    fn note_media(f: &Fixture, filename: &str) -> Image {
-        stored(f, Some(NOTE_MEDIA_SESSION_ID), filename)
-    }
-
-    fn stored(f: &Fixture, session_id: Option<&str>, filename: &str) -> Image {
-        store_media_file(
-            &f.store,
-            Some(&f.branch.id),
-            &f.project.id,
-            session_id,
-            filename,
-            PNG,
-            true,
-        )
-        .unwrap()
-    }
+    use crate::store::{Image, NOTE_MEDIA_SESSION_ID};
 
     fn embed(image: &Image) -> String {
         format!("![{}](staged-media://{}.png)", image.filename, image.id)
-    }
-
-    fn written_note(f: &Fixture, content: &str) -> Note {
-        let mut note = Note::new_standalone(&f.branch.id, "Shots", content)
-            .with_subtype(Note::SUBTYPE_WRITTEN);
-        f.store.create_note_with_unique_title(&mut note).unwrap();
-        note
     }
 
     fn assert_kept(f: &Fixture, image: &Image) {
@@ -359,77 +331,39 @@ mod tests {
         assert!(path.exists(), "{} lost its file", image.filename);
     }
 
-    fn assert_deleted(f: &Fixture, image: &Image) {
-        assert!(
-            f.store.get_image(&image.id).unwrap().is_none(),
-            "{} kept its row",
-            image.filename
-        );
-        let path = image_file_path(&image.project_id, &image.id, &image.filename).unwrap();
-        assert!(!path.exists(), "{} kept its file", image.filename);
-    }
-
+    /// A save must not collect the media it dropped: the editor's undo history
+    /// and clipboard can still bring the reference back (see
+    /// [`update_note_impl`]).
     #[test]
-    fn saving_a_written_note_deletes_the_media_the_edit_removed() {
+    fn saving_a_written_note_keeps_the_media_the_edit_removed() {
         let f = Fixture::new();
-        let dropped = note_media(&f, "dropped.png");
-        let kept = note_media(&f, "kept.png");
-        let note = written_note(&f, &format!("{}\n\n{}", embed(&dropped), embed(&kept)));
+        // Media a written note owns, the way a copy lands it in its new scope.
+        let image = store_media_file(
+            &f.store,
+            Some(&f.branch.id),
+            &f.project.id,
+            Some(NOTE_MEDIA_SESSION_ID),
+            "shot.png",
+            PNG,
+            true,
+        )
+        .unwrap();
+        let with_image = format!("Before\n\n{}", embed(&image));
+        let mut note = Note::new_standalone(&f.branch.id, "Shots", &with_image)
+            .with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store.create_note_with_unique_title(&mut note).unwrap();
 
-        let saved = update_note_impl(&f.store, &note.id, "Shots", &embed(&kept)).unwrap();
-
-        assert_eq!(saved.content, embed(&kept));
-        assert_deleted(&f, &dropped);
-        assert_kept(&f, &kept);
-    }
-
-    #[test]
-    fn saving_a_written_note_keeps_removed_media_still_used_elsewhere() {
-        let f = Fixture::new();
-        let in_other_note = note_media(&f, "other-note.png");
-        let other = Note::new_standalone(&f.branch.id, "Other", &embed(&in_other_note));
-        f.store.create_note(&other).unwrap();
-        let in_project_note = note_media(&f, "project-note.png");
-        let plan = ProjectNote::new(&f.project.id, "Plan", &embed(&in_project_note));
-        f.store.create_project_note(&plan).unwrap();
-        let in_chat = stored(&f, Some(&f.session.id), "chat.png");
-        f.store
-            .add_session_message_with_images(
-                &f.session.id,
-                MessageRole::User,
-                "Screenshot",
-                std::slice::from_ref(&in_chat.id),
-            )
-            .unwrap();
-        // Session-less: a branch-timeline attachment the note quoted.
-        let on_timeline = stored(&f, None, "timeline.png");
-        // The control: proves this save did run the clean-up.
-        let only_here = note_media(&f, "only-here.png");
-        let shared = [&in_other_note, &in_project_note, &in_chat, &on_timeline];
-        let body = [shared.map(embed).join("\n\n"), embed(&only_here)].join("\n\n");
-        let note = written_note(&f, &body);
-
-        update_note_impl(&f.store, &note.id, "Shots", "Nothing embedded now").unwrap();
-
-        for image in shared {
-            assert_kept(&f, image);
-        }
-        assert_deleted(&f, &only_here);
-    }
-
-    #[test]
-    fn an_unchanged_save_deletes_no_media() {
-        let f = Fixture::new();
-        let image = note_media(&f, "shot.png");
-        let content = format!("Before\n\n{}\n\nAfter", embed(&image));
-        let note = written_note(&f, &content);
-
-        // The same body (a retitle), then the same media under new prose and
-        // alt text: the set of embedded ids is unchanged either way.
-        update_note_impl(&f.store, &note.id, "Renamed", &content).unwrap();
+        // The transfer menu saves the deletion but leaves the dialog open...
+        let saved = update_note_impl(&f.store, &note.id, "Shots", "Before").unwrap();
+        assert_eq!(saved.content, "Before");
         assert_kept(&f, &image);
-        let reworded = format!("Reworded\n\n![New alt](staged-media://{}.png)", image.id);
-        update_note_impl(&f.store, &note.id, "Renamed", &reworded).unwrap();
+
+        // ...so undo can restore the reference, or it can be pasted elsewhere.
+        update_note_impl(&f.store, &note.id, "Shots", &with_image).unwrap();
+        let mut pasted = Note::new_standalone(&f.branch.id, "Pasted", &embed(&image))
+            .with_subtype(Note::SUBTYPE_WRITTEN);
+        f.store.create_note_with_unique_title(&mut pasted).unwrap();
+        update_note_impl(&f.store, &note.id, "Shots", "Before").unwrap();
         assert_kept(&f, &image);
     }
 }

@@ -14,7 +14,7 @@ import { Editor, defaultValueCtx, editorViewCtx, rootCtx } from '@milkdown/kit/c
 import { history, undoCommand } from '@milkdown/kit/plugin/history';
 import { commonmark } from '@milkdown/kit/preset/commonmark';
 import { gfm } from '@milkdown/kit/preset/gfm';
-import { NodeSelection } from '@milkdown/kit/prose/state';
+import { NodeSelection, TextSelection } from '@milkdown/kit/prose/state';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { callCommand, getMarkdown } from '@milkdown/kit/utils';
 
@@ -113,5 +113,65 @@ describe('stagedMediaView', () => {
     expect(currentMarkdown()).toContain(`![Clip](${VIDEO})`);
     expect(figures()).toHaveLength(2);
     expect(figures()[1].querySelector('video')).not.toBeNull();
+  });
+
+  // A caption-less video's figure is all video, whose events ProseMirror never
+  // sees, so the node view has to select it on a click itself.
+  describe('a video without a caption', () => {
+    const bare = `# Note\n\n![](${VIDEO})\n\nafter`;
+
+    function backspace(target: Element): KeyboardEvent {
+      const event = new KeyboardEvent('keydown', {
+        key: 'Backspace',
+        bubbles: true,
+        cancelable: true,
+      });
+      target.dispatchEvent(event);
+      return event;
+    }
+
+    async function clickVideo(): Promise<{ view: EditorView; video: HTMLVideoElement }> {
+      const view = await createEditor(bare);
+      const video = document.querySelector<HTMLVideoElement>('.ProseMirror video')!;
+      expect(video.closest('figure')?.querySelector('figcaption')).toBeNull();
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      video.dispatchEvent(click);
+      // The browser still gets the click, for the controls.
+      expect(click.defaultPrevented).toBe(false);
+      expect(view.state.selection).toBeInstanceOf(NodeSelection);
+      expect(view.state.selection.from).toBe(positionOf(view, VIDEO));
+      expect(
+        document.querySelector('.markdown-media-video.ProseMirror-selectednode')
+      ).not.toBeNull();
+      return { view, video };
+    }
+
+    it('is selected by a click and deleted by Backspace while it has focus', async () => {
+      const { video } = await clickVideo();
+
+      expect(backspace(video).defaultPrevented).toBe(true);
+      expect(currentMarkdown()).not.toContain(VIDEO);
+      expect(currentMarkdown()).toContain('after');
+
+      editor!.action(callCommand(undoCommand.key));
+      expect(currentMarkdown()).toContain(`![](${VIDEO})`);
+      expect(figures()[0].querySelector('video')).not.toBeNull();
+    });
+
+    it('is deleted by Backspace in the editor once selected', async () => {
+      const { view } = await clickVideo();
+
+      backspace(view.dom);
+      expect(currentMarkdown()).not.toContain(VIDEO);
+      expect(currentMarkdown()).toContain('after');
+    });
+
+    it('keeps its keys for the browser when it is not selected', async () => {
+      const { view, video } = await clickVideo();
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1)));
+
+      expect(backspace(video).defaultPrevented).toBe(false);
+      expect(currentMarkdown()).toContain(VIDEO);
+    });
   });
 });

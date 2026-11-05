@@ -3,8 +3,17 @@
  *
  * Plain module (no runes, no store imports) so the matching rule stays
  * trivially unit-testable; the caller hands in what to search beyond the
- * project itself as a SearchContext. Applied after the chip filters in
+ * project names as a SearchContext. Applied after the chip filters in
  * ProjectsList.
+ *
+ * The work is split by how often it runs. `buildSearchSnapshot` runs when
+ * the data changes: it lower-cases every name, repo label, branch and title
+ * once, and hands back the previous snapshot when nothing matching reads has
+ * moved, so a PR status poll (fresh branch objects, same names and titles)
+ * doesn't re-run a search held on screen. `searchProjects` runs per
+ * keystroke: it parses the query once, tests the prepared strings in place,
+ * builds a label only for the item each result shows, and returns the
+ * matches and their reasons from one pass.
  *
  * `visibleProjects` is the whole composition the grid shows — chip filters,
  * sticky return-target card, then the query — lifted out of the component so
@@ -14,7 +23,7 @@
  */
 
 import type { Branch, Project, ProjectRepo, ProjectSearchItemKind } from '../../types';
-import { isNumberTerm, queryTerms } from '../../shared/textSearch';
+import { queryTerms, termPrNumber } from '../../shared/textSearch';
 import { projectDisplayName } from '../../shared/utils';
 
 /** One titled item of a project in the search index: titles only, no bodies. */
@@ -57,26 +66,53 @@ export interface MatchReason {
   more: number;
 }
 
-export interface ProjectMatch {
-  matched: boolean;
-  /** Null when the project matched on its identity (name and repos) alone. */
-  reason: MatchReason | null;
+/** A search's result: what it keeps, and why, from one pass. */
+export interface ProjectSearchResult {
+  /** The projects the query keeps, in input order; for a blank query, the
+   *  input array itself. */
+  projects: Project[];
+  /** Why each kept project matched, by id, when its name and repos alone
+   *  don't say. */
+  reasons: ReadonlyMap<string, MatchReason>;
 }
 
-/** A searchable thing inside a project, with its text already lower-cased. */
+/** A searchable thing inside a project, its text lower-cased in advance. */
 interface SearchItem {
   kind: MatchReasonKind;
-  label: string;
-  text: string[];
+  /** The branch name or title, as shown. */
+  name: string;
+  /** The PR's title, on a branch with a PR once a poll or link brings it. */
+  prTitle: string | null;
   /** Matched exactly by a number term, never as text: `12` must not find PR 123. */
   prNumber: number | null;
   updatedAt: number;
+  /** `name` and `prTitle` lower-cased: what the terms are tested against. */
+  texts: readonly string[];
 }
 
-/** A query term, with the PR number it stands for when it reads as one. */
+/** One project's prepared search data. */
+export interface SearchSnapshotEntry {
+  /** Name and repo labels, lower-cased. */
+  readonly identity: readonly string[];
+  readonly items: readonly SearchItem[];
+  /** The context lists `items` came from. Bookkeeping, updated in place when
+   *  an entry is kept, so an unchanged list skips the item-by-item compare. */
+  branches: readonly Branch[] | undefined;
+  indexItems: readonly ProjectSearchIndexItem[] | undefined;
+}
+
+/** Everything a search matches against, by project id (buildSearchSnapshot). */
+export interface SearchSnapshot {
+  readonly entries: ReadonlyMap<string, SearchSnapshotEntry>;
+}
+
+/** A query term, with what it stands for beyond its text. */
 interface Term {
   text: string;
+  /** The PR number it reads as (termPrNumber), matched exactly. */
   number: number | null;
+  /** A bare `pr`, as in `pr 123` or `PR #123`: any item with a PR has it. */
+  anyPr: boolean;
 }
 
 // Which item explains a match best, lowest first: branches and PRs, then
@@ -89,16 +125,8 @@ const KIND_PRIORITY: Record<MatchReasonKind, number> = {
   review: 3,
 };
 
-const NO_MATCH: ProjectMatch = { matched: false, reason: null };
-const IDENTITY_MATCH: ProjectMatch = { matched: true, reason: null };
+const NO_ITEMS: readonly SearchItem[] = [];
 const NO_REASONS: ReadonlyMap<string, MatchReason> = new Map();
-
-function parseTerms(terms: readonly string[]): Term[] {
-  return terms.map((text) => ({
-    text,
-    number: isNumberTerm(text) ? Number(text.replace('#', '')) : null,
-  }));
-}
 
 function repoPath(githubRepo: string, subpath: string | null): string {
   return subpath ? `${githubRepo}/${subpath}` : githubRepo;
@@ -109,69 +137,155 @@ function repoPath(githubRepo: string, subpath: string | null): string {
  * the path (and a fork PR's head repo) and the badge short name. Before the
  * project's repos hydrate, the primary repo stands in, as on the grid card.
  */
-function identityFields(project: Project, ctx: SearchContext | undefined): string[] {
-  const fields = [projectDisplayName(project)];
-  if (ctx) {
-    const addRepo = (githubRepo: string, subpath: string | null) => {
-      fields.push(repoPath(githubRepo, subpath));
-      const shortName = ctx.repoShortName?.(githubRepo, subpath);
-      if (shortName) fields.push(shortName);
-    };
-    const repos = ctx.reposByProject.get(project.id) ?? [];
-    for (const r of repos) {
-      addRepo(r.githubRepo, r.subpath);
-      if (r.headRepo) fields.push(repoPath(r.headRepo, r.subpath));
-    }
-    if (repos.length === 0 && project.githubRepo) addRepo(project.githubRepo, project.subpath);
+function identityFields(project: Project, ctx: SearchContext): string[] {
+  const fields = [projectDisplayName(project).toLowerCase()];
+  const addRepo = (githubRepo: string, subpath: string | null) => {
+    fields.push(repoPath(githubRepo, subpath).toLowerCase());
+    const shortName = ctx.repoShortName?.(githubRepo, subpath);
+    if (shortName) fields.push(shortName.toLowerCase());
+  };
+  const repos = ctx.reposByProject.get(project.id) ?? [];
+  for (const r of repos) {
+    addRepo(r.githubRepo, r.subpath);
+    if (r.headRepo) fields.push(repoPath(r.headRepo, r.subpath).toLowerCase());
   }
-  return fields.map((f) => f.toLowerCase());
+  if (repos.length === 0 && project.githubRepo) addRepo(project.githubRepo, project.subpath);
+  return fields;
 }
 
 /**
  * The project's items: one per branch (its name, PR number and PR title
  * together, so a query can't pair one branch's name with another's PR), then
- * whatever the index holds for it. A branch with a PR is labelled by the PR —
- * `PR #123 · <title>`, or the branch name until the first poll brings the
- * title.
+ * whatever the index holds for it.
  */
-function projectItems(projectId: string, ctx: SearchContext): SearchItem[] {
+function projectItems(
+  branches: readonly Branch[] | undefined,
+  indexItems: readonly ProjectSearchIndexItem[] | undefined
+): SearchItem[] {
   const items: SearchItem[] = [];
-  for (const b of ctx.branchesByProject.get(projectId) ?? []) {
-    const text = [b.branchName.toLowerCase()];
-    if (b.prNumber === null) {
-      items.push({
-        kind: 'branch',
-        label: b.branchName,
-        text,
-        prNumber: null,
-        updatedAt: b.updatedAt,
-      });
-      continue;
-    }
-    if (b.prTitle) text.push(b.prTitle.toLowerCase());
+  for (const b of branches ?? []) {
+    // A title left on a branch whose PR was unlinked isn't its own.
+    const prTitle = b.prNumber === null ? null : b.prTitle || null;
+    const name = b.branchName.toLowerCase();
     items.push({
-      kind: 'pr',
-      label: `PR #${b.prNumber} · ${b.prTitle || b.branchName}`,
-      text,
+      kind: b.prNumber === null ? 'branch' : 'pr',
+      name: b.branchName,
+      prTitle,
       prNumber: b.prNumber,
       updatedAt: b.updatedAt,
+      texts: prTitle ? [name, prTitle.toLowerCase()] : [name],
     });
   }
-  for (const item of ctx.index?.get(projectId) ?? []) {
+  for (const item of indexItems ?? []) {
     items.push({
       kind: item.kind,
-      label: item.title,
-      text: [item.text],
+      name: item.title,
+      prTitle: null,
       prNumber: null,
       updatedAt: item.updatedAt,
+      texts: [item.text],
     });
   }
   return items;
 }
 
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((s, i) => s === b[i]);
+}
+
+/** Whether two item lists match and label alike (`texts` follow from the rest). */
+function sameItems(a: readonly SearchItem[], b: readonly SearchItem[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((x, i) => {
+      const y = b[i];
+      return (
+        x.kind === y.kind &&
+        x.name === y.name &&
+        x.prTitle === y.prTitle &&
+        x.prNumber === y.prNumber &&
+        x.updatedAt === y.updatedAt
+      );
+    })
+  );
+}
+
+function projectEntry(
+  project: Project,
+  ctx: SearchContext,
+  prev: SearchSnapshotEntry | undefined
+): SearchSnapshotEntry {
+  const identity = identityFields(project, ctx);
+  const branches = ctx.branchesByProject.get(project.id);
+  const indexItems = ctx.index?.get(project.id);
+  let items: readonly SearchItem[];
+  if (prev && prev.branches === branches && prev.indexItems === indexItems) {
+    items = prev.items;
+  } else {
+    const built = projectItems(branches, indexItems);
+    items = prev && sameItems(prev.items, built) ? prev.items : built;
+  }
+  if (prev && items === prev.items && sameStrings(prev.identity, identity)) {
+    prev.branches = branches;
+    prev.indexItems = indexItems;
+    return prev;
+  }
+  return { identity, items, branches, indexItems };
+}
+
+/**
+ * `projects` and everything `ctx` holds for them, prepared for
+ * searchProjects: lower-cased once here rather than per keystroke.
+ *
+ * Pass the snapshot this returned last time as `previous`: when nothing a
+ * search reads — names, repo labels, branch names, PR numbers and titles,
+ * index titles, and the recency that ranks them — has changed, `previous`
+ * itself comes back, so a `$derived` over it doesn't invalidate the results
+ * when, say, a PR status poll replaces every branch object with one whose
+ * checks moved. Projects missing from the snapshot match on their name alone.
+ */
+export function buildSearchSnapshot(
+  projects: readonly Project[],
+  ctx: SearchContext,
+  previous?: SearchSnapshot | null
+): SearchSnapshot {
+  const entries = new Map<string, SearchSnapshotEntry>();
+  let unchanged = !!previous && previous.entries.size === projects.length;
+  for (const project of projects) {
+    const prev = previous?.entries.get(project.id);
+    const entry = projectEntry(project, ctx, prev);
+    if (entry !== prev) unchanged = false;
+    entries.set(project.id, entry);
+  }
+  return unchanged && previous ? previous : { entries };
+}
+
+function nameOnlyEntry(project: Project): SearchSnapshotEntry {
+  return {
+    identity: [projectDisplayName(project).toLowerCase()],
+    items: NO_ITEMS,
+    branches: undefined,
+    indexItems: undefined,
+  };
+}
+
+function parseTerms(terms: readonly string[]): Term[] {
+  return terms.map((text) => ({ text, number: termPrNumber(text), anyPr: text === 'pr' }));
+}
+
+function includedIn(fields: readonly string[], text: string): boolean {
+  for (const field of fields) if (field.includes(text)) return true;
+  return false;
+}
+
 function itemHasTerm(item: SearchItem, term: Term): boolean {
-  if (term.number !== null && item.prNumber === term.number) return true;
-  return item.text.some((t) => t.includes(term.text));
+  if (item.prNumber !== null && (term.anyPr || term.number === item.prNumber)) return true;
+  return includedIn(item.texts, term.text);
+}
+
+function itemHasEvery(item: SearchItem, terms: readonly Term[]): boolean {
+  for (const term of terms) if (!itemHasTerm(item, term)) return false;
+  return true;
 }
 
 function outranks(a: SearchItem, b: SearchItem): boolean {
@@ -180,7 +294,17 @@ function outranks(a: SearchItem, b: SearchItem): boolean {
 }
 
 /**
- * Whether `project` matches the query `terms` (queryTerms' output), and why.
+ * A branch with a PR is labelled by the PR — `PR #123 · <title>`, or the
+ * branch name until the first poll brings the title.
+ */
+function itemLabel(item: SearchItem): string {
+  if (item.prNumber === null) return item.name;
+  return `PR #${item.prNumber} · ${item.prTitle ?? item.name}`;
+}
+
+/**
+ * Whether the entry matches the parsed query: `null` for no, `undefined` for
+ * yes on its identity alone, else the reason.
  *
  * Every term must land somewhere, case-insensitively and in any order, but
  * not just anywhere: a project matches when its identity — name and repo
@@ -188,65 +312,60 @@ function outranks(a: SearchItem, b: SearchItem): boolean {
  * item does. So "staged login" finds a project in the staged repo with a
  * branch named fix-login, while "fix login" doesn't match a project just
  * because one branch says "fix" and another says "login". A number term
- * (`123`, `#123`) also matches a branch whose PR is exactly that number.
+ * (`123`, `#123`, `pr123`, `pr#123`) also matches a branch whose PR is
+ * exactly that number, and a bare `pr` any branch with a PR, so `pr 123` and
+ * `PR #123` find PR 123 the way its label reads.
  *
  * Matching on identity alone gives no reason: the name or repo badge on
  * screen already explains it. Otherwise the reason is the best matching item
  * by kind (KIND_PRIORITY), then recency, counting the rest as `more`.
- *
- * Without a context only the name is searched.
  */
-export function matchProject(
-  project: Project,
-  terms: readonly string[],
-  ctx?: SearchContext
-): ProjectMatch {
-  const identity = identityFields(project, ctx);
-  const missing = parseTerms(terms).filter((t) => !identity.some((f) => f.includes(t.text)));
-  if (missing.length === 0) return IDENTITY_MATCH;
-  if (!ctx) return NO_MATCH;
+function matchEntry(
+  entry: SearchSnapshotEntry,
+  terms: readonly Term[]
+): MatchReason | null | undefined {
+  let missing: Term[] | null = null;
+  for (const term of terms) {
+    if (!includedIn(entry.identity, term.text)) (missing ??= []).push(term);
+  }
+  if (!missing) return undefined;
 
   let best: SearchItem | null = null;
   let count = 0;
-  for (const item of projectItems(project.id, ctx)) {
-    if (!missing.every((t) => itemHasTerm(item, t))) continue;
+  for (const item of entry.items) {
+    if (!itemHasEvery(item, missing)) continue;
     count++;
     if (!best || outranks(item, best)) best = item;
   }
-  if (!best) return NO_MATCH;
-  return { matched: true, reason: { kind: best.kind, label: best.label, more: count - 1 } };
+  if (!best) return null;
+  return { kind: best.kind, label: itemLabel(best), more: count - 1 };
 }
 
 /**
- * The projects the query keeps, by matchProject's rule, in input order. An
- * empty (or whitespace-only) query matches every project and returns the
- * input array unchanged.
+ * The projects the query keeps, by matchEntry's rule, and why, in one pass.
+ * Without a snapshot only names are searched. An empty (or whitespace-only)
+ * query keeps every project — the input array, unchanged — and, like a query
+ * that matched only on identities, gets the same empty reasons map every
+ * time, so a `$derived` over it stays put.
  */
-export function searchProjects(projects: Project[], query: string, ctx?: SearchContext): Project[] {
-  const terms = queryTerms(query);
-  if (terms.length === 0) return projects;
-  return projects.filter((p) => matchProject(p, terms, ctx).matched);
-}
-
-/**
- * The match reason of each project in `shown` that has one, by project id.
- * Callers pass only the projects on screen, so a keystroke ranks items for
- * the results alone. A blank query always gets the same empty map, so a
- * `$derived` over it stays put while branches update and nobody is searching.
- */
-export function projectMatchReasons(
-  shown: Project[],
+export function searchProjects(
+  projects: Project[],
   query: string,
-  ctx: SearchContext
-): ReadonlyMap<string, MatchReason> {
-  const terms = queryTerms(query);
-  if (terms.length === 0) return NO_REASONS;
-  const reasons = new Map<string, MatchReason>();
-  for (const p of shown) {
-    const { reason } = matchProject(p, terms, ctx);
-    if (reason) reasons.set(p.id, reason);
+  snapshot?: SearchSnapshot | null
+): ProjectSearchResult {
+  const raw = queryTerms(query);
+  if (raw.length === 0) return { projects, reasons: NO_REASONS };
+  const terms = parseTerms(raw);
+  const kept: Project[] = [];
+  let reasons: Map<string, MatchReason> | null = null;
+  for (const project of projects) {
+    const entry = snapshot?.entries.get(project.id) ?? nameOnlyEntry(project);
+    const reason = matchEntry(entry, terms);
+    if (reason === null) continue;
+    kept.push(project);
+    if (reason) (reasons ??= new Map()).set(project.id, reason);
   }
-  return reasons;
+  return { projects: kept, reasons: reasons ?? NO_REASONS };
 }
 
 /**
@@ -279,16 +398,16 @@ export function withStickyProject(
  * card that doesn't match it is hidden.
  *
  * With no sticky re-insertion and an empty query, `chipFiltered` is returned
- * unchanged.
+ * unchanged as the result's `projects`.
  */
 export function visibleProjects(
   projects: Project[],
   chipFiltered: Project[],
   stickyId: string | null,
   query: string,
-  ctx?: SearchContext
-): Project[] {
-  return searchProjects(withStickyProject(projects, chipFiltered, stickyId), query, ctx);
+  snapshot?: SearchSnapshot | null
+): ProjectSearchResult {
+  return searchProjects(withStickyProject(projects, chipFiltered, stickyId), query, snapshot);
 }
 
 /**

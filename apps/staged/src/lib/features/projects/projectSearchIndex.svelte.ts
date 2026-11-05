@@ -9,11 +9,15 @@
  * lands.
  *
  * Freshness comes from the store change feed. A note, review, branch or
- * project write marks the index stale. While a search is active a stale
- * index refetches, coalesced so a burst of writes (a session filling in a
- * note, a branch move) costs one read; otherwise it waits for the next
- * search. The stale index keeps matching until the fresh one lands, so
- * results never blank out mid-search.
+ * project write marks the index stale, and so does anything that may have
+ * lost such an event: a listener going live after the first read started
+ * (Tauri registers asynchronously), a web-socket (re)connect, and the
+ * page-resume `cache-stale` recovery. While a search is active a stale index
+ * refetches, coalesced so a burst of writes (a session filling in a note, a
+ * branch move) costs one read; otherwise it waits for the next search. The
+ * stale index keeps matching until the fresh one lands, so results never
+ * blank out mid-search. A failed load stays stale too, so the search fields'
+ * next keystroke (each calls ensureLoaded) retries it.
  */
 
 import { getProjectSearchIndex } from '../../commands';
@@ -85,9 +89,16 @@ export class ProjectSearchIndexStore {
 
   private listen(): void {
     if (this.unlisteners.length > 0) return;
+    const markStale = () => this.markStale();
     for (const event of STALE_EVENTS) {
-      this.unlisteners.push(listenToEvent(event, () => this.markStale()));
+      // onEstablished: events sent before the listener went live (or while
+      // the web socket was down) are gone, and the read may predate them.
+      this.unlisteners.push(listenToEvent(event, markStale, { onEstablished: markStale }));
     }
+    // A page freeze or socket gap loses change-feed events for good; the
+    // recovery for that is this event, which every feed-fed store follows.
+    window.addEventListener('cache-stale', markStale);
+    this.unlisteners.push(() => window.removeEventListener('cache-stale', markStale));
   }
 
   private markStale(): void {
@@ -114,7 +125,8 @@ export class ProjectSearchIndexStore {
         this._index = groupSearchItems(items);
       })
       .catch((e) => {
-        // Retry on the next search rather than in a loop.
+        // Retry on the next ensureLoaded — a keystroke, focus or new search —
+        // rather than in a loop.
         this.stale = true;
         console.error('[projectSearchIndex] Failed to load the search index:', e);
       })

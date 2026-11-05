@@ -49,13 +49,8 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import {
-    projectMatchReasons,
-    projectShortcutNumbers,
-    visibleProjects,
-    withStickyProject,
-  } from './projectSearch';
-  import { projectSearchContext } from './projectSearchContext';
+  import { projectShortcutNumbers, visibleProjects, withStickyProject } from './projectSearch';
+  import { projectSearchSnapshots } from './projectSearchContext';
   import { projectSearchIndex } from './projectSearchIndex.svelte';
   import ProjectMatchReason from './ProjectMatchReason.svelte';
   import { queryTerms } from '../../shared/textSearch';
@@ -157,31 +152,36 @@
   let gridProjects = $derived(
     withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId)
   );
-  // The cards left on screen, in grid order: what ⌘1–9, the scroll restore
-  // and the empty state go by. See visibleProjects for the composition. The
-  // query reaches branches, PRs and repo labels too (matchProject), and only
-  // hides cards: the order never changes as you type.
-  let searchContext = $derived(projectSearchContext());
-  let filteredProjects = $derived(
+  let searchActive = $derived(gridQuery.current.trim().length > 0);
+  // What the query reaches beyond names: branches, PRs, repo labels and
+  // titles, prepared once per data change rather than per keystroke. Only
+  // built while searching, and the same object again after an update that
+  // moved nothing a search reads (a PR status poll), so neither an empty
+  // field nor a held query re-runs anything when branches update.
+  const searchSnapshot = projectSearchSnapshots();
+  let searchData = $derived(searchActive ? searchSnapshot() : null);
+  // The cards left on screen, in grid order, and why each matched when its
+  // name and repos don't say, from one pass. See visibleProjects for the
+  // composition. The query only hides cards: the order never changes as you
+  // type.
+  let search = $derived(
     visibleProjects(
       projects,
       projectFiltersStore.filteredProjects,
       effectiveStickyId,
       gridQuery.current,
-      searchContext
+      searchData
     )
   );
+  // What ⌘1–9, the scroll restore and the empty state go by.
+  let filteredProjects = $derived(search.projects);
   let shownProjectIds = $derived(new Set(filteredProjects.map((p) => p.id)));
-  // Why each card on screen matched, when its name and repos don't say.
   let searchTerms = $derived(queryTerms(gridQuery.current));
-  let matchReasons = $derived(
-    projectMatchReasons(filteredProjects, gridQuery.current, searchContext)
-  );
+  let matchReasons = $derived(search.reasons);
   // Hidden cards keep their {#each} slot, so the overlay numbers come from
   // the position on screen instead.
   let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
 
-  let searchActive = $derived(gridQuery.current.trim().length > 0);
   // Decides the empty-state copy: blame the query only when the grid would
   // have shown something without it. Judged against the sticky-adjusted base,
   // not the raw chip result, so a sticky card the chips excluded but the query
@@ -318,8 +318,10 @@
 
   // Titles (notes, project notes, reviews) come from the lazily loaded search
   // index: fetch it once a query starts, if focusing the field didn't already.
+  // Asked again on every keystroke, a no-op while the index is fresh, so a
+  // load that failed mid-search retries rather than leaving titles unmatched.
   $effect(() => {
-    if (!searchActive) return;
+    if (!gridQuery.current.trim()) return;
     untrack(() => projectSearchIndex.ensureLoaded());
   });
 

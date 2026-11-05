@@ -40,13 +40,12 @@
   import SidebarSectionHead from './SidebarSectionHead.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
   import {
-    matchingProjectIds,
     matchingRepoKeys,
     resultsLabel,
     sidebarPinnedRepos,
+    sidebarProjectMatches,
   } from './sidebarSearch';
-  import { projectMatchReasons } from './projectSearch';
-  import { projectSearchContext } from './projectSearchContext';
+  import { projectSearchSnapshots } from './projectSearchContext';
   import { projectSearchIndex } from './projectSearchIndex.svelte';
   import { queryTerms } from '../../shared/textSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
@@ -128,21 +127,18 @@
     }
     return filtered;
   });
-  // Matched on branches, PRs and repo labels too (projectSearch's
-  // matchProject); rows found that way say why on their meta line.
-  let searchContext = $derived(projectSearchContext());
-  let matchingProjects = $derived(
-    matchingProjectIds(sidebarProjects, searchQuery.current, searchContext)
+  // Matched on branches, PRs, repo labels and titles too (projectSearch),
+  // prepared once per data change and only while searching, like the grid;
+  // rows found that way say why on their meta line.
+  const searchSnapshot = projectSearchSnapshots();
+  let searchData = $derived(searching ? searchSnapshot() : null);
+  let projectMatches = $derived(
+    sidebarProjectMatches(sidebarProjects, searchQuery.current, searchData)
   );
+  let matchingProjects = $derived(projectMatches.ids);
   let visibleProjectCount = $derived(matchingProjects?.size ?? sidebarProjects.length);
   let searchTerms = $derived(queryTerms(searchQuery.current));
-  let matchReasons = $derived(
-    projectMatchReasons(
-      sidebarProjects.filter((p) => matchingProjects?.has(p.id)),
-      searchQuery.current,
-      searchContext
-    )
-  );
+  let matchReasons = $derived(projectMatches.reasons);
 
   // Branches are what a search reaches beyond names, and they only hydrate
   // per project on demand or via the store's idle drip. Pull the rest
@@ -156,8 +152,10 @@
 
   // Titles (notes, project notes, reviews) come from the lazily loaded search
   // index: fetch it once a query starts, if focusing the field didn't already.
+  // Asked again on every keystroke, a no-op while the index is fresh, so a
+  // load that failed mid-search retries rather than leaving titles unmatched.
   $effect(() => {
-    if (!searching) return;
+    if (!searchQuery.current.trim()) return;
     untrack(() => projectSearchIndex.ensureLoaded());
   });
 

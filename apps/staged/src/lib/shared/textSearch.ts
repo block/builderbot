@@ -30,12 +30,14 @@ export function matchesAllTerms(
 }
 
 /**
- * Whether a term reads as a PR number, `123` or `#123`. Callers match such a
- * term against PR numbers exactly (so `12` doesn't find PR 123) on top of the
- * usual substring match against text.
+ * The PR number a term reads as — `123`, `#123`, `pr123` or `pr#123` (terms
+ * are lower-cased) — or null. Callers match such a term against PR numbers
+ * exactly (so `12` doesn't find PR 123) on top of the usual substring match
+ * against text.
  */
-export function isNumberTerm(term: string): boolean {
-  return /^#?\d+$/.test(term);
+export function termPrNumber(term: string): number | null {
+  const digits = /^(?:pr)?#?(\d+)$/.exec(term)?.[1];
+  return digits === undefined ? null : Number(digits);
 }
 
 export interface HighlightSegment {

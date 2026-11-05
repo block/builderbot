@@ -1,9 +1,10 @@
 //! The project search index: every titled item project search matches on,
 //! across all projects.
 //!
-//! Titles only, never bodies, so the whole index is a few hundred short rows
-//! read in about a millisecond. The frontend loads it once per search and does
-//! the matching itself, which keeps each keystroke synchronous.
+//! Titles only, never bodies, each cut to [`MAX_TITLE_CHARS`], so the whole
+//! index is a few hundred short rows read in about a millisecond. The
+//! frontend loads it once per search and does the matching itself, which
+//! keeps each keystroke synchronous.
 
 use rusqlite::Connection;
 use serde::Serialize;
@@ -35,27 +36,37 @@ pub struct ProjectSearchItem {
     pub updated_at: i64,
 }
 
+/// The longest title the index carries, in characters. A branch note's
+/// session stub is titled with the prompt that started it, which can run to
+/// kilobytes and stays that way if the session errors or is cancelled. The
+/// frontend shows one line of a title, so the rest only costs transfer and
+/// matching.
+const MAX_TITLE_CHARS: i64 = 300;
+
 /// `(sql, kind)` for each item kind. Each statement selects
-/// `id, project_id, branch_id, title, updated_at` and skips untitled rows:
-/// session stubs a note session hasn't titled yet, and untitled reviews.
+/// `id, project_id, branch_id, title, updated_at`, the title cut to `?1`
+/// characters, and skips untitled rows: a project note's session stub before
+/// its session titles it, and untitled reviews. A branch note's stub is
+/// titled with its prompt from the start, so it is listed, as the timeline
+/// shows it.
 /// A review's stored title is used as is: the timeline's rules for showing a
 /// review (its commit still on the branch, a running review's live ACP title)
 /// need git or the session, which a title read doesn't touch.
 const ITEM_QUERIES: [(&str, ProjectSearchItemKind); 3] = [
     (
-        "SELECT n.id, b.project_id, n.branch_id, n.title, n.updated_at
+        "SELECT n.id, b.project_id, n.branch_id, substr(n.title, 1, ?1), n.updated_at
          FROM notes n JOIN branches b ON b.id = n.branch_id
          WHERE n.title <> ''",
         ProjectSearchItemKind::Note,
     ),
     (
-        "SELECT id, project_id, NULL, title, updated_at
+        "SELECT id, project_id, NULL, substr(title, 1, ?1), updated_at
          FROM project_notes
          WHERE title <> ''",
         ProjectSearchItemKind::ProjectNote,
     ),
     (
-        "SELECT r.id, b.project_id, r.branch_id, r.title, r.updated_at
+        "SELECT r.id, b.project_id, r.branch_id, substr(r.title, 1, ?1), r.updated_at
          FROM reviews r JOIN branches b ON b.id = r.branch_id
          WHERE r.title IS NOT NULL AND r.title <> ''",
         ProjectSearchItemKind::Review,
@@ -82,7 +93,7 @@ fn collect_items(
     items: &mut Vec<ProjectSearchItem>,
 ) -> Result<(), StoreError> {
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map([MAX_TITLE_CHARS], |row| {
         Ok(ProjectSearchItem {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -196,6 +207,24 @@ mod tests {
         f.store.create_review(&untitled).unwrap();
 
         assert!(f.store.list_project_search_items().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lists_a_prompt_titled_branch_note_stub_with_its_title_cut() {
+        let f = fixture();
+        // A note session's stub carries its prompt as the title; one whose
+        // session failed keeps it. Multi-byte characters count as one.
+        let prompt = format!("Écris {}", "a long prompt ".repeat(100));
+        let stub = Note::new(&f.branch.id, &prompt, "");
+        f.store.create_note(&stub).unwrap();
+        let short = ProjectNote::new(&f.project.id, "Login plan", "body");
+        f.store.create_project_note(&short).unwrap();
+
+        let items = items_by_id(&f.store);
+        let title = item(&items, &stub.id).title;
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS as usize);
+        assert!(prompt.starts_with(&title));
+        assert_eq!(item(&items, &short.id).title, "Login plan");
     }
 
     #[test]

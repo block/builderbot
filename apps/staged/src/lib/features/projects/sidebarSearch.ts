@@ -5,8 +5,9 @@
  *
  * Plain module (no runes, no store imports) like projectSearch.ts, so the
  * matching stays unit-testable. Projects reuse searchProjects and its
- * SearchContext (branches, PRs, repo labels); this file owns the repo side,
- * the match sets the sidebar hides rows by, and the shared header copy.
+ * SearchSnapshot (branches, PRs, repo labels, titles); this file owns the
+ * repo side, the match sets the sidebar hides rows by, and the shared header
+ * copy.
  *
  * The sidebar doesn't render the narrowed lists. Each segment renders its
  * whole list and hides what the query rules out (the match sets below): a
@@ -19,7 +20,7 @@
 
 import type { Project, RepoHomeItem } from '../../types';
 import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
-import { searchProjects, type SearchContext } from './projectSearch';
+import { searchProjects, type MatchReason, type SearchSnapshot } from './projectSearch';
 import { repoKey } from './repoReorder';
 
 /**
@@ -58,17 +59,23 @@ export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<stri
   return new Set(searchRepos(repos, query).map(repoKey));
 }
 
-/**
- * Ids of the projects the query keeps (searchProjects' rule), or null when
- * the query is blank and every row shows.
- */
-export function matchingProjectIds(
+export interface SidebarProjectMatches {
+  /** Ids of the projects the query keeps, or null when the query is blank
+   *  and every row shows. */
+  ids: Set<string> | null;
+  /** Why each kept project matched, when its name and repos don't say. */
+  reasons: ReadonlyMap<string, MatchReason>;
+}
+
+/** The project rows the query keeps (searchProjects' rule), and why. */
+export function sidebarProjectMatches(
   projects: Project[],
   query: string,
-  ctx?: SearchContext
-): Set<string> | null {
-  if (queryTerms(query).length === 0) return null;
-  return new Set(searchProjects(projects, query, ctx).map((p) => p.id));
+  snapshot?: SearchSnapshot | null
+): SidebarProjectMatches {
+  const { projects: kept, reasons } = searchProjects(projects, query, snapshot);
+  const ids = queryTerms(query).length === 0 ? null : new Set(kept.map((p) => p.id));
+  return { ids, reasons };
 }
 
 /** "1 result" / "n results" — the count a section header shows while searching. */

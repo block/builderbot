@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Branch, Project, RepoHomeItem } from '../../types';
-import type { SearchContext } from './projectSearch';
+import { buildSearchSnapshot, type SearchSnapshot } from './projectSearch';
 import { repoKey } from './repoReorder';
 import {
-  matchingProjectIds,
   matchingRepoKeys,
   resultsLabel,
   searchRepos,
   sidebarPinnedRepos,
+  sidebarProjectMatches,
 } from './sidebarSearch';
 
 // ── Fixtures ──
@@ -141,36 +141,51 @@ describe('matchingRepoKeys', () => {
   });
 });
 
-describe('matchingProjectIds', () => {
+describe('sidebarProjectMatches', () => {
   const alpha = project({ id: 'p1', name: 'Alpha Service' });
   const beta = project({ id: 'p2', name: 'beta-tools' });
   const projects = [alpha, beta];
+  const ids = (query: string, snapshot?: SearchSnapshot) =>
+    sidebarProjectMatches(projects, query, snapshot).ids;
 
   it('is null for an empty or whitespace query, so every row shows', () => {
-    expect(matchingProjectIds(projects, '')).toBeNull();
-    expect(matchingProjectIds(projects, '  ')).toBeNull();
+    expect(ids('')).toBeNull();
+    expect(ids('  ')).toBeNull();
   });
 
   it('holds the ids searchProjects keeps', () => {
-    expect(matchingProjectIds(projects, 'ALPHA')).toEqual(new Set(['p1']));
-    expect(matchingProjectIds(projects, 'a')).toEqual(new Set(['p1', 'p2']));
+    expect(ids('ALPHA')).toEqual(new Set(['p1']));
+    expect(ids('a')).toEqual(new Set(['p1', 'p2']));
   });
 
   it('is an empty set, not null, when a query matches nothing', () => {
-    expect(matchingProjectIds(projects, 'zzz')).toEqual(new Set());
+    expect(ids('zzz')).toEqual(new Set());
   });
 
-  it('matches branches and PR numbers through a search context', () => {
-    const ctx: SearchContext = {
+  it('matches branches and PR numbers through a search snapshot', () => {
+    const snapshot = buildSearchSnapshot(projects, {
       branchesByProject: new Map([
         ['p2', [{ branchName: 'fix-login', prNumber: 123, updatedAt: 0 } as Branch]],
       ]),
       reposByProject: new Map(),
-    };
-    expect(matchingProjectIds(projects, 'login', ctx)).toEqual(new Set(['p2']));
-    expect(matchingProjectIds(projects, '#123', ctx)).toEqual(new Set(['p2']));
-    expect(matchingProjectIds(projects, '12', ctx)).toEqual(new Set());
-    expect(matchingProjectIds(projects, 'login')).toEqual(new Set());
+    });
+    expect(ids('login', snapshot)).toEqual(new Set(['p2']));
+    expect(ids('#123', snapshot)).toEqual(new Set(['p2']));
+    expect(ids('12', snapshot)).toEqual(new Set());
+    expect(ids('login')).toEqual(new Set());
+  });
+
+  it('gives the reasons from the same pass', () => {
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject: new Map([
+        ['p2', [{ branchName: 'fix-login', prNumber: null, updatedAt: 0 } as Branch]],
+      ]),
+      reposByProject: new Map(),
+    });
+    expect(sidebarProjectMatches(projects, 'login', snapshot).reasons).toEqual(
+      new Map([['p2', { kind: 'branch', label: 'fix-login', more: 0 }]])
+    );
+    expect(sidebarProjectMatches(projects, 'beta', snapshot).reasons.size).toBe(0);
   });
 });
 

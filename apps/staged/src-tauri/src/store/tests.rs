@@ -5053,7 +5053,7 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
 
     let project = Project::new("test-owner/test-repo");
     store.create_project(&project).unwrap();
-    let branch = Branch::new(&project.id, "feature", "main");
+    let branch = Branch::new(&project.id, "feature", "main").with_pr(1);
     store.create_branch(&branch).unwrap();
     while rx.try_recv().is_ok() {}
 
@@ -5065,6 +5065,7 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
         store
             .update_branch_pr_status(
                 &branch.id,
+                Some(1),
                 Some("OPEN".to_string()),
                 Some(checks.to_string()),
                 Some("APPROVED".to_string()),
@@ -5095,7 +5096,7 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
     // The clear path (PR gone) nulls the fields — also a real change.
     store
         .update_branch_pr_status(
-            &branch.id, None, None, None, None, None, None, None, None, None,
+            &branch.id, None, None, None, None, None, None, None, None, None, None,
         )
         .unwrap();
     assert_eq!(rx.try_recv().unwrap(), expected);
@@ -5103,7 +5104,7 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
     // Clearing an already-cleared branch is a no-op poll echo.
     store
         .update_branch_pr_status(
-            &branch.id, None, None, None, None, None, None, None, None, None,
+            &branch.id, None, None, None, None, None, None, None, None, None, None,
         )
         .unwrap();
     assert!(rx.try_recv().is_err());
@@ -5117,9 +5118,16 @@ fn change_feed_pr_status_publishes_only_on_domain_change() {
 
 /// A PR status fetch with everything but the title held fixed.
 fn poll_pr_title(store: &Store, branch_id: &str, title: Option<&str>) {
+    poll_pr(store, branch_id, 1, title);
+}
+
+/// A PR status fetch for PR `pr_number`, with everything but the title held
+/// fixed. Returns whether the write landed.
+fn poll_pr(store: &Store, branch_id: &str, pr_number: u64, title: Option<&str>) -> bool {
     store
         .update_branch_pr_status(
             branch_id,
+            Some(pr_number),
             Some("OPEN".to_string()),
             Some("SUCCESS".to_string()),
             None,
@@ -5130,7 +5138,7 @@ fn poll_pr_title(store: &Store, branch_id: &str, title: Option<&str>) {
             Some("abc123".to_string()),
             title.map(str::to_string),
         )
-        .unwrap();
+        .unwrap()
 }
 
 fn stored_pr_title(store: &Store, branch_id: &str) -> Option<String> {
@@ -5192,7 +5200,7 @@ fn clearing_pr_status_after_a_push_keeps_the_pr_title() {
 
     store
         .update_branch_pr_status(
-            &branch.id, None, None, None, None, None, None, None, None, None,
+            &branch.id, None, None, None, None, None, None, None, None, None, None,
         )
         .unwrap();
 
@@ -5250,6 +5258,73 @@ fn update_branch_pr_number_sets_keeps_or_drops_the_pr_title() {
     let unlinked = store.get_branch(&branch.id).unwrap().unwrap();
     assert_eq!(unlinked.pr_number, None);
     assert_eq!(unlinked.pr_title, None);
+}
+
+#[test]
+fn pr_status_poll_for_a_relinked_or_unlinked_pr_writes_nothing() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main").with_pr(7);
+    store.create_branch(&branch).unwrap();
+    assert!(poll_pr(&store, &branch.id, 7, Some("Fix login")));
+
+    // A poll reads PR 7, and while `gh` answers, the branch is relinked to PR
+    // 8 with its own title. The late answer about PR 7 must not land.
+    store
+        .update_branch_pr_number(&branch.id, Some(8), Some("Add metrics"))
+        .unwrap();
+    while rx.try_recv().is_ok() {}
+    let before = store.get_branch(&branch.id).unwrap().unwrap();
+    let written = store
+        .update_branch_pr_status(
+            &branch.id,
+            Some(7),
+            Some("MERGED".to_string()),
+            Some("FAILURE".to_string()),
+            Some("APPROVED".to_string()),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            Some("def456".to_string()),
+            Some("Fix login".to_string()),
+        )
+        .unwrap();
+    assert!(!written);
+    let after = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(after.pr_number, Some(8));
+    assert_eq!(after.pr_title.as_deref(), Some("Add metrics"));
+    assert_eq!(after.pr_state, before.pr_state);
+    assert_eq!(after.pr_checks_status, before.pr_checks_status);
+    assert_eq!(after.pr_head_sha, before.pr_head_sha);
+    assert_eq!(after.updated_at, before.updated_at);
+    assert!(rx.try_recv().is_err());
+
+    // A poll for the PR the branch now links lands as usual.
+    assert!(poll_pr(&store, &branch.id, 8, Some("Add metrics v2")));
+    assert_eq!(
+        stored_pr_title(&store, &branch.id).as_deref(),
+        Some("Add metrics v2")
+    );
+
+    // Unlinked during the fetch: still nothing written.
+    store
+        .update_branch_pr_number(&branch.id, None, None)
+        .unwrap();
+    let before = store.get_branch(&branch.id).unwrap().unwrap();
+    assert!(!poll_pr(&store, &branch.id, 8, Some("Add metrics v3")));
+    let unlinked = store.get_branch(&branch.id).unwrap().unwrap();
+    assert_eq!(unlinked.pr_title, None);
+    assert_eq!(unlinked.updated_at, before.updated_at);
+
+    // The clear after a push names no PR, so it writes regardless.
+    assert!(store
+        .update_branch_pr_status(
+            &branch.id, None, None, None, None, None, None, None, None, None, None,
+        )
+        .unwrap());
 }
 
 #[test]

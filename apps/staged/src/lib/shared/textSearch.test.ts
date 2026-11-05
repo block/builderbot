@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { highlightSegments, isNumberTerm, matchesAllTerms, queryTerms } from './textSearch';
+import { highlightSegments, matchesAllTerms, queryTerms, termPrNumber } from './textSearch';
 
 describe('queryTerms', () => {
   it('splits on any whitespace and lower-cases', () => {
@@ -47,18 +47,24 @@ describe('matchesAllTerms', () => {
   });
 });
 
-describe('isNumberTerm', () => {
-  it('accepts bare and #-prefixed digits', () => {
-    expect(isNumberTerm('123')).toBe(true);
-    expect(isNumberTerm('#123')).toBe(true);
+describe('termPrNumber', () => {
+  it('reads bare, #- and pr-prefixed digits', () => {
+    expect(termPrNumber('123')).toBe(123);
+    expect(termPrNumber('#123')).toBe(123);
+    expect(termPrNumber('pr123')).toBe(123);
+    expect(termPrNumber('pr#123')).toBe(123);
+    expect(termPrNumber('#007')).toBe(7);
   });
 
   it('rejects anything else', () => {
-    expect(isNumberTerm('#')).toBe(false);
-    expect(isNumberTerm('12a')).toBe(false);
-    expect(isNumberTerm('pr#12')).toBe(false);
-    expect(isNumberTerm('##12')).toBe(false);
-    expect(isNumberTerm('')).toBe(false);
+    expect(termPrNumber('#')).toBeNull();
+    expect(termPrNumber('pr')).toBeNull();
+    expect(termPrNumber('pr#')).toBeNull();
+    expect(termPrNumber('12a')).toBeNull();
+    expect(termPrNumber('#pr12')).toBeNull();
+    expect(termPrNumber('xpr12')).toBeNull();
+    expect(termPrNumber('##12')).toBeNull();
+    expect(termPrNumber('')).toBeNull();
   });
 });
 

@@ -258,10 +258,18 @@ impl Store {
     /// Unlike the other fields, a `None` `pr_title` keeps the stored title: a
     /// fetch always carries one, so `None` only comes from the clear after a
     /// push, which leaves the PR's title as it was.
+    ///
+    /// `polled_pr_number` is the PR a fetch asked `gh` about. With `Some`, the
+    /// write only lands while the branch still links that PR: a poll reads
+    /// the number, then waits seconds on `gh`, and a relink or unlink in that
+    /// window must not get the old PR's status and title written over it.
+    /// `None` (the clear after a push) writes regardless. Returns whether the
+    /// row was written, so a caller can skip emitting a status it dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn update_branch_pr_status(
         &self,
         id: &str,
+        polled_pr_number: Option<u64>,
         pr_state: Option<String>,
         pr_checks_status: Option<String>,
         pr_review_decision: Option<String>,
@@ -271,7 +279,7 @@ impl Store {
         pr_updated_at: Option<i64>,
         pr_head_sha: Option<String>,
         pr_title: Option<String>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
         // Snapshot the domain fields before the write. `None` means the row is
@@ -303,7 +311,7 @@ impl Store {
                 pr_head_sha = ?9,
                 updated_at = ?10,
                 pr_title = COALESCE(?12, pr_title)
-             WHERE id = ?11",
+             WHERE id = ?11 AND (?13 IS NULL OR pr_number = ?13)",
             params![
                 incoming.state,
                 incoming.checks_status,
@@ -317,6 +325,7 @@ impl Store {
                 now,
                 id,
                 incoming.title,
+                polled_pr_number.map(|n| n as i64),
             ],
         )?;
         if rows > 0 && previous.as_ref() != Some(&incoming) {
@@ -325,7 +334,7 @@ impl Store {
                 project_id: Self::branch_project_id(&conn, id),
             });
         }
-        Ok(())
+        Ok(rows > 0)
     }
 
     /// Read the PR fields that carry domain state, for the

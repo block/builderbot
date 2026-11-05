@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Branch, Project, ProjectRepo } from '../../types';
 import {
-  matchProject,
-  projectMatchReasons,
+  buildSearchSnapshot,
   projectShortcutNumbers,
   searchProjects,
   visibleProjects,
@@ -10,7 +9,6 @@ import {
   type ProjectSearchIndexItem,
   type SearchContext,
 } from './projectSearch';
-import { queryTerms } from '../../shared/textSearch';
 
 // ── Fixtures ──
 
@@ -35,52 +33,52 @@ const all = [alpha, beta, gamma];
 
 describe('searchProjects', () => {
   it('returns the same array for an empty query', () => {
-    expect(searchProjects(all, '')).toBe(all);
+    expect(searchProjects(all, '').projects).toBe(all);
   });
 
   it('treats a whitespace-only query as empty', () => {
-    expect(searchProjects(all, '   ')).toBe(all);
+    expect(searchProjects(all, '   ').projects).toBe(all);
   });
 
   it('matches by substring of the name, case-insensitively', () => {
-    expect(searchProjects(all, 'ALPHA')).toEqual([alpha]);
-    expect(searchProjects(all, 'tool')).toEqual([beta]);
-    expect(searchProjects(all, 'a')).toEqual([alpha, beta, gamma]);
+    expect(searchProjects(all, 'ALPHA').projects).toEqual([alpha]);
+    expect(searchProjects(all, 'tool').projects).toEqual([beta]);
+    expect(searchProjects(all, 'a').projects).toEqual([alpha, beta, gamma]);
   });
 
   it('trims whitespace around the query before matching', () => {
-    expect(searchProjects(all, '  beta ')).toEqual([beta]);
+    expect(searchProjects(all, '  beta ').projects).toEqual([beta]);
   });
 
   it('matches every whitespace-separated term, in any order', () => {
     const oneTwoThree = project({ id: 'p4', name: 'one two three' });
     const list = [...all, oneTwoThree];
-    expect(searchProjects(list, 'one three')).toEqual([oneTwoThree]);
-    expect(searchProjects(list, 'three one')).toEqual([oneTwoThree]);
-    expect(searchProjects(list, 'one four')).toEqual([]);
-    expect(searchProjects(list, 'two')).toEqual([oneTwoThree]);
+    expect(searchProjects(list, 'one three').projects).toEqual([oneTwoThree]);
+    expect(searchProjects(list, 'three one').projects).toEqual([oneTwoThree]);
+    expect(searchProjects(list, 'one four').projects).toEqual([]);
+    expect(searchProjects(list, 'two').projects).toEqual([oneTwoThree]);
   });
 
   it('is case-insensitive across every term', () => {
     const oneTwoThree = project({ id: 'p4', name: 'One Two THREE' });
-    expect(searchProjects([...all, oneTwoThree], 'oNe tHree')).toEqual([oneTwoThree]);
+    expect(searchProjects([...all, oneTwoThree], 'oNe tHree').projects).toEqual([oneTwoThree]);
   });
 
   it('ignores how the query and name space their words', () => {
-    expect(searchProjects(all, 'gamma  web')).toEqual([gamma]);
-    expect(searchProjects(all, 'gamma web')).toEqual([gamma]);
+    expect(searchProjects(all, 'gamma  web').projects).toEqual([gamma]);
+    expect(searchProjects(all, 'gamma web').projects).toEqual([gamma]);
   });
 
   it('returns an empty list when nothing matches', () => {
-    expect(searchProjects(all, 'zeta')).toEqual([]);
+    expect(searchProjects(all, 'zeta').projects).toEqual([]);
   });
 
   it('does not match on the repo slug without a context', () => {
-    expect(searchProjects(all, 'org/')).toEqual([]);
+    expect(searchProjects(all, 'org/').projects).toEqual([]);
   });
 
   it('preserves input order', () => {
-    expect(searchProjects([gamma, alpha, beta], 'a')).toEqual([gamma, alpha, beta]);
+    expect(searchProjects([gamma, alpha, beta], 'a').projects).toEqual([gamma, alpha, beta]);
   });
 });
 
@@ -156,11 +154,13 @@ function context(
   };
 }
 
+/** Whether `p` matches `query`, and why, through searchProjects. */
 function match(p: Project, query: string, ctx?: SearchContext) {
-  return matchProject(p, queryTerms(query), ctx);
+  const { projects, reasons } = searchProjects([p], query, ctx && buildSearchSnapshot([p], ctx));
+  return { matched: projects.length === 1, reason: reasons.get(p.id) ?? null };
 }
 
-describe('matchProject', () => {
+describe('the matching rule', () => {
   const app = project({ id: 'p1', name: 'Checkout', githubRepo: 'block/builderbot' });
 
   describe('identity: name and repo labels', () => {
@@ -272,6 +272,64 @@ describe('matchProject', () => {
     });
   });
 
+  describe('PR queries written the way the label reads', () => {
+    const ctx = context({
+      branches: {
+        p1: [
+          branch({ id: 'b1', branchName: 'fix-login-redirect', prNumber: 123, updatedAt: 1 }),
+          branch({ id: 'b2', branchName: 'tidy-typos', updatedAt: 2 }),
+          branch({ id: 'b3', branchName: 'add-metrics', prNumber: 77, updatedAt: 3 }),
+        ],
+      },
+    });
+
+    it('matches `pr123`, `pr#123`, `PR #123` and `pr 123` to PR 123', () => {
+      for (const query of ['pr123', 'pr#123', 'PR#123', 'PR #123', 'pr 123', 'Pr 123']) {
+        expect(match(app, query, ctx).reason, query).toEqual({
+          kind: 'pr',
+          label: 'PR #123 · fix-login-redirect',
+          more: 0,
+        });
+      }
+    });
+
+    it('still requires the exact number', () => {
+      for (const query of ['pr12', 'pr#12', 'PR #12', 'pr 12', 'pr 1234']) {
+        expect(match(app, query, ctx).matched, query).toBe(false);
+      }
+    });
+
+    it('lets a bare `pr` match any branch with a PR, not one without', () => {
+      expect(match(app, 'pr', ctx).reason).toEqual({
+        kind: 'pr',
+        label: 'PR #77 · add-metrics',
+        more: 1,
+      });
+      expect(match(app, 'pr login', ctx).reason?.label).toBe('PR #123 · fix-login-redirect');
+      // tidy-typos has no PR, and `pr` can't pair with another branch's.
+      expect(match(app, 'pr typos', ctx).matched).toBe(false);
+    });
+
+    it('cannot match `pr` on a project without a PR', () => {
+      const noPrs = context({ branches: { p1: [branch({ branchName: 'tidy-typos' })] } });
+      expect(match(app, 'pr', noPrs).matched).toBe(false);
+      expect(match(app, 'pr123', noPrs).matched).toBe(false);
+    });
+
+    it('still matches `pr` and `pr123` as text', () => {
+      const texts = context({
+        index: {
+          p1: [
+            indexItem({ id: 'n1', title: 'Improve caching' }),
+            indexItem({ id: 'n2', title: 'Notes on pr123' }),
+          ],
+        },
+      });
+      expect(match(app, 'pr', texts).reason?.label).toBe('Improve caching');
+      expect(match(app, 'pr123', texts).reason?.label).toBe('Notes on pr123');
+    });
+  });
+
   describe('PR titles', () => {
     const ctx = context({
       branches: {
@@ -365,39 +423,54 @@ describe('matchProject', () => {
   });
 });
 
-describe('searchProjects with a context', () => {
-  const ctx = context({
-    branches: {
-      p1: [branch({ branchName: 'add-metrics', prNumber: 42 })],
-      p3: [branch({ projectId: 'p3', branchName: 'metrics-dashboard' })],
-    },
-  });
+describe('searchProjects with a snapshot', () => {
+  const snapshot = buildSearchSnapshot(
+    all,
+    context({
+      branches: {
+        p1: [branch({ branchName: 'add-metrics', prNumber: 42 })],
+        p3: [branch({ projectId: 'p3', branchName: 'metrics-dashboard' })],
+      },
+    })
+  );
 
   it('keeps the input order whatever each project matched on', () => {
-    expect(searchProjects([gamma, beta, alpha], 'metrics', ctx)).toEqual([gamma, alpha]);
-    expect(searchProjects(all, 'metrics', ctx)).toEqual([alpha, gamma]);
+    expect(searchProjects([gamma, beta, alpha], 'metrics', snapshot).projects).toEqual([
+      gamma,
+      alpha,
+    ]);
+    expect(searchProjects(all, 'metrics', snapshot).projects).toEqual([alpha, gamma]);
   });
 
   it('still matches names', () => {
-    expect(searchProjects(all, 'beta', ctx)).toEqual([beta]);
+    expect(searchProjects(all, 'beta', snapshot).projects).toEqual([beta]);
   });
 
   it('is applied by visibleProjects', () => {
-    expect(visibleProjects(all, all, null, '#42', ctx)).toEqual([alpha]);
-    expect(visibleProjects(all, all, null, '#42')).toEqual([]);
+    expect(visibleProjects(all, all, null, '#42', snapshot).projects).toEqual([alpha]);
+    expect(visibleProjects(all, all, null, '#42').projects).toEqual([]);
+  });
+
+  it('matches a project missing from the snapshot on its name alone', () => {
+    const late = project({ id: 'p9', name: 'Metrics late' });
+    expect(searchProjects([late], 'metrics', snapshot).projects).toEqual([late]);
+    expect(searchProjects([late], 'org/alpha', snapshot).projects).toEqual([]);
   });
 });
 
-describe('projectMatchReasons', () => {
-  const ctx = context({
-    branches: {
-      p1: [branch({ branchName: 'add-metrics' })],
-      p2: [branch({ projectId: 'p2', branchName: 'metrics-beta' })],
-    },
-  });
+describe('searchProjects reasons', () => {
+  const snapshot = buildSearchSnapshot(
+    all,
+    context({
+      branches: {
+        p1: [branch({ branchName: 'add-metrics' })],
+        p2: [branch({ projectId: 'p2', branchName: 'metrics-beta' })],
+      },
+    })
+  );
 
-  it('holds a reason for each shown project matched through an item', () => {
-    expect(projectMatchReasons(all, 'metrics', ctx)).toEqual(
+  it('holds a reason for each kept project matched through an item', () => {
+    expect(searchProjects(all, 'metrics', snapshot).reasons).toEqual(
       new Map([
         [alpha.id, { kind: 'branch', label: 'add-metrics', more: 0 }],
         [beta.id, { kind: 'branch', label: 'metrics-beta', more: 0 }],
@@ -407,17 +480,86 @@ describe('projectMatchReasons', () => {
 
   it('leaves out projects matched by identity alone', () => {
     // beta matches "beta" by name; its branch matching too doesn't add a reason.
-    expect(projectMatchReasons(all, 'beta', ctx).size).toBe(0);
+    expect(searchProjects(all, 'beta', snapshot).reasons.size).toBe(0);
   });
 
   it('only covers the projects passed in', () => {
-    expect([...projectMatchReasons([beta], 'metrics', ctx).keys()]).toEqual([beta.id]);
+    expect([...searchProjects([beta], 'metrics', snapshot).reasons.keys()]).toEqual([beta.id]);
   });
 
   it('is the same empty map for every blank query', () => {
-    expect(projectMatchReasons(all, '  ', ctx).size).toBe(0);
-    expect(projectMatchReasons(all, '', context())).toBe(projectMatchReasons(all, '  ', ctx));
+    const blank = searchProjects(all, '  ', snapshot).reasons;
+    expect(blank.size).toBe(0);
+    expect(searchProjects(all, '').reasons).toBe(blank);
   });
+});
+
+describe('buildSearchSnapshot', () => {
+  const linked = branch({ id: 'b1', branchName: 'fix-login', prNumber: 123, prTitle: 'Fix it' });
+  const repos = { p1: [projectRepo()] };
+  const notes = { p1: [indexItem({ id: 'n1', title: 'Login research' })] };
+  const base = () =>
+    context({ branches: { p1: [linked] }, repos, index: notes, shortNames: { 'org/alpha': 'al' } });
+
+  it('hands back the previous snapshot when a PR status poll moved nothing it reads', () => {
+    const first = buildSearchSnapshot(all, base());
+    // A poll flush: a new map and list, a new branch object, new status fields.
+    const polled = base();
+    polled.branchesByProject = new Map([
+      ['p1', [{ ...linked, prState: 'MERGED', prChecksStatus: 'SUCCESS', prFetchedAt: 9 }]],
+    ]);
+    expect(buildSearchSnapshot(all, polled, first)).toBe(first);
+    // Same lists again: the fast path.
+    expect(buildSearchSnapshot(all, base(), first)).toBe(first);
+  });
+
+  it('hands back the previous snapshot when the index refetches the same titles', () => {
+    const first = buildSearchSnapshot(all, base());
+    const refetched = base();
+    refetched.index = new Map([['p1', [indexItem({ id: 'n1', title: 'Login research' })]]]);
+    expect(buildSearchSnapshot(all, refetched, first)).toBe(first);
+  });
+
+  it('builds a new snapshot when something a search reads changed', () => {
+    const first = buildSearchSnapshot(all, base());
+    const changes: Array<[string, Partial<SearchContext>]> = [
+      ['branch name', { branchesByProject: branchesWith({ branchName: 'fix-auth' }) }],
+      ['PR number', { branchesByProject: branchesWith({ prNumber: 124 }) }],
+      ['PR title', { branchesByProject: branchesWith({ prTitle: 'Fix it again' }) }],
+      ['recency', { branchesByProject: branchesWith({ updatedAt: 5 }) }],
+      ['a new branch', { branchesByProject: new Map([['p1', [linked, branch()]]]) }],
+      [
+        'an index title',
+        { index: new Map([['p1', [indexItem({ id: 'n1', title: 'Login plan' })]]]) },
+      ],
+      ['a badge short name', { repoShortName: () => 'alp' }],
+      ['a repo', { reposByProject: new Map([['p1', [projectRepo({ headRepo: 'fork/x' })]]]) }],
+    ];
+    for (const [what, change] of changes) {
+      expect(buildSearchSnapshot(all, { ...base(), ...change }, first), what).not.toBe(first);
+    }
+  });
+
+  it('builds a new snapshot when a project is renamed, added or removed', () => {
+    const first = buildSearchSnapshot(all, base());
+    const renamed = [project({ id: 'p1', name: 'Renamed' }), beta, gamma];
+    expect(buildSearchSnapshot(renamed, base(), first)).not.toBe(first);
+    expect(buildSearchSnapshot([alpha, beta], base(), first)).not.toBe(first);
+    expect(buildSearchSnapshot([...all, project({ id: 'p4' })], base(), first)).not.toBe(first);
+  });
+
+  it('matches by the fresh data after a rebuild', () => {
+    const first = buildSearchSnapshot(all, base());
+    const ctx = base();
+    ctx.branchesByProject = branchesWith({ prTitle: 'Speed up search' });
+    const next = buildSearchSnapshot(all, ctx, first);
+    expect(searchProjects(all, 'speed', first).projects).toEqual([]);
+    expect(searchProjects(all, 'speed', next).projects).toEqual([alpha]);
+  });
+
+  function branchesWith(overrides: Partial<Branch>) {
+    return new Map([['p1', [{ ...linked, ...overrides }]]]);
+  }
 });
 
 // Chips excluded beta: the typical "Unread" case after visiting it.
@@ -446,7 +588,7 @@ describe('withStickyProject', () => {
   // chips — is what emptied the grid.
   it('is non-empty when the chips matched nothing but the sticky card was re-inserted', () => {
     expect(withStickyProject(all, [], beta.id)).toEqual([beta]);
-    expect(visibleProjects(all, [], beta.id, 'alpha')).toEqual([]);
+    expect(visibleProjects(all, [], beta.id, 'alpha').projects).toEqual([]);
   });
 });
 
@@ -454,52 +596,60 @@ describe('withStickyProject', () => {
 describe('visibleProjects', () => {
   describe('without a sticky card', () => {
     it('returns the chip-filtered list unchanged for an empty query', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, null, '')).toBe(chipsWithoutBeta);
+      expect(visibleProjects(all, chipsWithoutBeta, null, '').projects).toBe(chipsWithoutBeta);
     });
 
     it('applies the query to the chip-filtered list', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, null, 'gamma')).toEqual([gamma]);
+      expect(visibleProjects(all, chipsWithoutBeta, null, 'gamma').projects).toEqual([gamma]);
       // beta matches the query but the chips excluded it.
-      expect(visibleProjects(all, chipsWithoutBeta, null, 'beta')).toEqual([]);
+      expect(visibleProjects(all, chipsWithoutBeta, null, 'beta').projects).toEqual([]);
     });
   });
 
   describe('with a sticky card the chips already include', () => {
     it('returns the chip-filtered list unchanged for an empty query', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, '')).toBe(chipsWithoutBeta);
+      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, '').projects).toBe(chipsWithoutBeta);
     });
 
     it('applies the query to the chip-filtered list', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, 'alpha')).toEqual([alpha]);
+      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, 'alpha').projects).toEqual([alpha]);
     });
 
     it('hides the sticky card when it does not match the query', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, 'gamma')).toEqual([gamma]);
+      expect(visibleProjects(all, chipsWithoutBeta, alpha.id, 'gamma').projects).toEqual([gamma]);
     });
   });
 
   describe('with a sticky card the chips excluded', () => {
     it('re-inserts it at its position in the full list', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, beta.id, '')).toEqual([alpha, beta, gamma]);
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, '').projects).toEqual([
+        alpha,
+        beta,
+        gamma,
+      ]);
     });
 
     it('re-inserts it and then applies the query', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'beta')).toEqual([beta]);
-      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'a')).toEqual([alpha, beta, gamma]);
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'beta').projects).toEqual([beta]);
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'a').projects).toEqual([
+        alpha,
+        beta,
+        gamma,
+      ]);
     });
 
     it('hides the sticky card when it does not match the query', () => {
-      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'gamma')).toEqual([gamma]);
+      expect(visibleProjects(all, chipsWithoutBeta, beta.id, 'gamma').projects).toEqual([gamma]);
     });
 
     it('re-inserts it even when the chips matched nothing', () => {
-      expect(visibleProjects(all, [], beta.id, '')).toEqual([beta]);
-      expect(visibleProjects(all, [], beta.id, 'alpha')).toEqual([]);
+      expect(visibleProjects(all, [], beta.id, '').projects).toEqual([beta]);
+      expect(visibleProjects(all, [], beta.id, 'alpha').projects).toEqual([]);
     });
 
     it('leaves the list alone when the sticky id is no longer a project', () => {
       // A deleted return target: nothing to re-insert.
-      expect(visibleProjects(all, chipsWithoutBeta, 'gone', '')).toEqual(chipsWithoutBeta);
+      expect(visibleProjects(all, chipsWithoutBeta, 'gone', '').projects).toEqual(chipsWithoutBeta);
     });
   });
 });
@@ -519,7 +669,7 @@ describe('projectShortcutNumbers', () => {
 
   it('skips cards the query hid, so the numbers match what ⌘N opens', () => {
     // alpha, first in the grid, is hidden: beta is the first card on screen.
-    const shown = visibleProjects(all, all, null, 'b');
+    const shown = visibleProjects(all, all, null, 'b').projects;
     expect(shown).toEqual([beta, gamma]);
     expect(projectShortcutNumbers(shown)).toEqual(
       new Map([

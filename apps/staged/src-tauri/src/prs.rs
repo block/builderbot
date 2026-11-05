@@ -1832,9 +1832,10 @@ pub(crate) async fn refresh_pr_status_impl(
     let mergeable = pr_status.mergeable == "MERGEABLE";
     let pr_fetched_at = store::now_timestamp();
 
-    store
+    let written = store
         .update_branch_pr_status(
             &branch_id,
+            Some(pr_number),
             Some(pr_status.state.clone()),
             Some(pr_status.checks_summary.state.clone()),
             pr_status.review_decision.clone(),
@@ -1846,6 +1847,11 @@ pub(crate) async fn refresh_pr_status_impl(
             pr_status.title.clone(),
         )
         .map_err(|e| e.to_string())?;
+    if !written {
+        // Relinked or unlinked during the fetch: this status is another PR's.
+        log::debug!("refresh_pr_status: branch_id={branch_id} no longer links PR #{pr_number}");
+        return Ok(());
+    }
 
     crate::web_server::emit_to_all(
         &app_handle,
@@ -1963,8 +1969,9 @@ pub(crate) async fn refresh_project_pr_statuses(
                     let mergeable = pr_status.mergeable == "MERGEABLE";
                     let pr_fetched_at = store::now_timestamp();
 
-                    if let Err(e) = store.update_branch_pr_status(
+                    match store.update_branch_pr_status(
                         &branch_id,
+                        Some(pr_number),
                         Some(pr_status.state.clone()),
                         Some(pr_status.checks_summary.state.clone()),
                         pr_status.review_decision.clone(),
@@ -1975,8 +1982,18 @@ pub(crate) async fn refresh_project_pr_statuses(
                         pr_status.head_sha.clone(),
                         pr_status.title.clone(),
                     ) {
-                        log::warn!("Failed to update PR status for branch {}: {}", branch_id, e);
-                        return Ok::<bool, String>(false);
+                        Ok(true) => {}
+                        // Relinked or unlinked during the fetch: this status
+                        // is another PR's, so don't emit it either.
+                        Ok(false) => return Ok::<bool, String>(false),
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to update PR status for branch {}: {}",
+                                branch_id,
+                                e
+                            );
+                            return Ok::<bool, String>(false);
+                        }
                     }
 
                     crate::web_server::emit_to_all(
@@ -2088,7 +2105,7 @@ pub(crate) fn clear_branch_pr_status_impl(
 ) -> Result<(), String> {
     store
         .update_branch_pr_status(
-            branch_id, None, None, None, None, None, None, None, None, None,
+            branch_id, None, None, None, None, None, None, None, None, None, None,
         )
         .map_err(|e| e.to_string())?;
 

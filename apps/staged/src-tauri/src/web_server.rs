@@ -3997,8 +3997,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     Ok(pr_status) => {
                         let mergeable = pr_status.mergeable == "MERGEABLE";
                         let pr_fetched_at = store::now_timestamp();
-                        if let Err(e) = store.update_branch_pr_status(
+                        match store.update_branch_pr_status(
                             &branch.id,
+                            Some(pr_number),
                             Some(pr_status.state.clone()),
                             Some(pr_status.checks_summary.state.clone()),
                             pr_status.review_decision.clone(),
@@ -4009,12 +4010,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             pr_status.head_sha.clone(),
                             pr_status.title.clone(),
                         ) {
-                            log::warn!(
-                                "Failed to update PR status for branch {}: {}",
-                                branch.id,
-                                e
-                            );
-                            continue;
+                            Ok(true) => {}
+                            // Relinked or unlinked during the fetch: this
+                            // status is another PR's, so don't emit it either.
+                            Ok(false) => continue,
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to update PR status for branch {}: {}",
+                                    branch.id,
+                                    e
+                                );
+                                continue;
+                            }
                         }
 
                         refreshed_count += 1;

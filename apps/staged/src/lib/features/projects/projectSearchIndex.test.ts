@@ -6,6 +6,8 @@ type Handler = (payload: unknown) => void;
 let getProjectSearchIndex: ReturnType<typeof vi.fn>;
 let handlers: Map<string, Handler[]>;
 let unlistened: string[];
+/** Each listener's onEstablished, to fire as the transport would. */
+let established: Array<() => void>;
 
 function item(overrides: Partial<ProjectSearchItem> = {}): ProjectSearchItem {
   return {
@@ -37,13 +39,16 @@ beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   vi.stubGlobal('$state', (initial: unknown) => initial);
+  vi.stubGlobal('window', new EventTarget());
   handlers = new Map();
   unlistened = [];
+  established = [];
   getProjectSearchIndex = vi.fn().mockResolvedValue([item()]);
   vi.doMock('../../commands', () => ({ getProjectSearchIndex }));
   vi.doMock('../../transport', () => ({
-    listenToEvent: (event: string, handler: Handler) => {
+    listenToEvent: (event: string, handler: Handler, opts?: { onEstablished?: () => void }) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+      if (opts?.onEstablished) established.push(opts.onEstablished);
       return () => unlistened.push(event);
     },
   }));
@@ -178,6 +183,71 @@ describe('ProjectSearchIndexStore', () => {
     await flush();
     expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
     expect(store.index?.get('p1')?.[0]).toMatchObject({ text: 'fresh' });
+  });
+
+  it('during a search, cache-stale refetches after the delay', async () => {
+    const store = await makeStore({ value: true });
+    store.ensureLoaded();
+    await flush();
+    const { REFETCH_DELAY_MS } = await import('./projectSearchIndex.svelte');
+
+    // A page freeze or socket gap: change-feed events may be gone for good.
+    getProjectSearchIndex.mockResolvedValue([item({ title: 'Renamed during the gap' })]);
+    window.dispatchEvent(new Event('cache-stale'));
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+    expect(store.index?.get('p1')?.[0]).toMatchObject({ text: 'renamed during the gap' });
+  });
+
+  it('outside a search, cache-stale waits for the next ensureLoaded', async () => {
+    const store = await makeStore({ value: false });
+    store.ensureLoaded();
+    await flush();
+
+    window.dispatchEvent(new Event('cache-stale'));
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(1);
+
+    store.ensureLoaded();
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops following cache-stale once stopped', async () => {
+    const store = await makeStore({ value: false });
+    store.ensureLoaded();
+    await flush();
+    store.stop();
+
+    window.dispatchEvent(new Event('cache-stale'));
+    // Re-listens, but nothing marked it stale while stopped.
+    store.ensureLoaded();
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('a listener going live after the first read started marks it stale', async () => {
+    const searching = { value: true };
+    const store = await makeStore(searching);
+    store.ensureLoaded();
+    await flush();
+    const { REFETCH_DELAY_MS } = await import('./projectSearchIndex.svelte');
+    expect(established).toHaveLength(4);
+
+    // Tauri registers asynchronously: a write between the read and the
+    // listener going live reached neither. Every listener's establishment
+    // coalesces into one refetch.
+    for (const onEstablished of established) onEstablished();
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(2);
+
+    // A web-socket reconnect re-establishes them all: one more read.
+    for (const onEstablished of established) onEstablished();
+    await vi.advanceTimersByTimeAsync(REFETCH_DELAY_MS);
+    await flush();
+    expect(getProjectSearchIndex).toHaveBeenCalledTimes(3);
   });
 
   it('a failed load is retried on the next ensureLoaded, not in a loop', async () => {

@@ -4001,9 +4001,10 @@ fn test_update_written_note_rewrites_title_and_content() {
     store.create_note_with_unique_title(&mut note).unwrap();
     let created_completed_at = note.completed_at;
 
-    let updated = store
+    let (updated, previous_content) = store
         .update_written_note(&note.id, "Final", "# Final\n\nbody")
         .unwrap();
+    assert_eq!(previous_content, "# Draft");
     assert_eq!(updated.title, "Final");
     assert_eq!(updated.content, "# Final\n\nbody");
     // Completion is write-once: the note has been readable since it was saved.
@@ -4033,7 +4034,7 @@ fn test_update_written_note_completes_a_note_with_an_empty_body() {
     note.completed_at = None; // a row predating the 0031 backfill
     store.create_note_with_unique_title(&mut note).unwrap();
 
-    let updated = store
+    let (updated, _) = store
         .update_written_note(&note.id, "Reminder, trimmed", "")
         .unwrap();
     assert_eq!(updated.content, "");
@@ -4057,13 +4058,13 @@ fn test_update_written_note_keeps_its_own_title_but_avoids_others() {
     store.create_note(&other).unwrap();
 
     // Re-saving under the same title must not accumulate " (2)" suffixes.
-    let resaved = store
+    let (resaved, _) = store
         .update_written_note(&note.id, "Notes", "body v2")
         .unwrap();
     assert_eq!(resaved.title, "Notes");
 
     // Renaming onto another note's title still disambiguates.
-    let renamed = store
+    let (renamed, _) = store
         .update_written_note(&note.id, "Other", "body v3")
         .unwrap();
     assert_eq!(renamed.title, "Other (2)");

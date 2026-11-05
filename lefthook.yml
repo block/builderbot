@@ -19,6 +19,6 @@ pre-push:
     crates-test:
       run: cargo test --workspace
     staged-ci:
-      run: just app staged ci
+      run: just app staged ci-local
     differ-ci:
       run: just app differ ci

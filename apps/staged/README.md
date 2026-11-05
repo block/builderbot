@@ -164,7 +164,8 @@ just typecheck  # Type check TypeScript + Svelte + Rust
 just check-all  # Format, lint, typecheck — run before pushing
 
 # CI (non-modifying)
-just ci         # Verify formatting, lint, typecheck — for CI/hooks
+just ci         # Verify formatting, lint, typecheck, tests — what CI runs
+just ci-local   # Pre-push hook: same checks, frontend and Rust in parallel; skips Rust if no Rust file changed
 
 # Maintenance
 just clean      # Remove build artifacts

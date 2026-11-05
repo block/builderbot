@@ -7,9 +7,11 @@
 
   Shared between the sidebar's project rows and pickers that list projects
   (MoveBranchDialog), so a project reads the same everywhere. Everything is
-  derived from the shared stores; parents only say which project. Parents
-  theme the meta line through --project-row-meta-color (the sidebar's active
-  row brightens it).
+  derived from the shared stores; parents only say which project, and, while
+  a search found it through a branch or PR, why (the meta line shows the
+  match reason instead, keeping the row's height). Parents theme the meta
+  line through --project-row-meta-color (the sidebar's active row brightens
+  it).
 -->
 <script lang="ts">
   import type { Project } from '../../types';
@@ -19,15 +21,21 @@
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { getProjectStatus } from './projectStatus';
+  import type { MatchReason } from './projectSearch';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
+  import ProjectMatchReason from './ProjectMatchReason.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
   import RemoteProjectIcon from './RemoteProjectIcon.svelte';
 
   interface Props {
     project: Project;
+    /** Why the active search matched this project, if not by name or repo. */
+    matchReason?: MatchReason | null;
+    /** The search's terms, highlighted in the match reason. */
+    matchTerms?: readonly string[];
   }
 
-  let { project }: Props = $props();
+  let { project, matchReason = null, matchTerms = [] }: Props = $props();
 
   let branches = $derived(projectsDataStore.branchesByProject.get(project.id) ?? []);
   let status = $derived(
@@ -63,7 +71,9 @@
     <RemoteProjectIcon size={12} />
   {/if}
   <div class="row-meta">
-    {#if badges.length > 0}
+    {#if matchReason}
+      <ProjectMatchReason reason={matchReason} terms={matchTerms} iconSize={11} />
+    {:else if badges.length > 0}
       <span class="badge-row">
         {#each badges as badge}
           <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
@@ -98,7 +108,8 @@
     min-width: 0;
   }
 
-  .row-main :global(svg) {
+  /* The status icon only: the match reason's icon keeps its own size. */
+  .row-main > :global(svg) {
     width: 16px;
   }
 

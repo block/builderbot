@@ -18,7 +18,15 @@ struct PrStatusFields {
     url: Option<String>,
     updated_at: Option<i64>,
     head_sha: Option<String>,
+    title: Option<String>,
 }
+
+/// The `branches` columns [`Store::row_to_branch`] reads, in its order.
+const BRANCH_COLUMNS: &str = "id, project_id, project_repo_id, branch_name, base_branch, pr_number,
+    branch_type, workspace_name, workspace_status,
+    pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
+    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete,
+    created_at, updated_at, pr_title";
 
 impl Store {
     pub fn create_branch(&self, branch: &Branch) -> Result<(), StoreError> {
@@ -27,8 +35,9 @@ impl Store {
             "INSERT INTO branches (id, project_id, project_repo_id, branch_name, base_branch, pr_number,
                 branch_type, workspace_name, workspace_status,
                 pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete, created_at, updated_at,
+                pr_title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 branch.id,
                 branch.project_id,
@@ -51,6 +60,7 @@ impl Store {
                 if branch.setup_complete { 1 } else { 0 },
                 branch.created_at,
                 branch.updated_at,
+                branch.pr_title,
             ],
         ) {
             if is_duplicate_branch_error(&e) {
@@ -77,26 +87,16 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         Self::row_to_branch_query(
             &conn,
-            "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
-                    branch_type, workspace_name, workspace_status,
-                    pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete,
-                    created_at, updated_at
-             FROM branches WHERE id = ?1",
+            &format!("SELECT {BRANCH_COLUMNS} FROM branches WHERE id = ?1"),
             params![id],
         )
     }
 
     pub fn list_branches_for_project(&self, project_id: &str) -> Result<Vec<Branch>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, project_repo_id, branch_name, base_branch, pr_number,
-                    branch_type, workspace_name, workspace_status,
-                    pr_state, pr_checks_status, pr_review_decision, pr_mergeable, pr_draft,
-                    pr_url, pr_updated_at, pr_fetched_at, pr_head_sha, setup_complete,
-                    created_at, updated_at
-             FROM branches WHERE project_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BRANCH_COLUMNS} FROM branches WHERE project_id = ?1 ORDER BY created_at ASC"
+        ))?;
         let rows = stmt.query_map(params![project_id], Self::row_to_branch)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -210,15 +210,32 @@ impl Store {
     }
 
     /// Update the PR number for a branch.
+    ///
+    /// `pr_title` is the PR's title when the caller already has it in hand —
+    /// detection and linking read it from the PR list they fetch — so the
+    /// title is searchable before the next status poll. `None` keeps the
+    /// stored title if the branch keeps its PR and drops it otherwise, so a
+    /// branch relinked (or unlinked) never shows another PR's title.
     pub fn update_branch_pr_number(
         &self,
         id: &str,
         pr_number: Option<u64>,
+        pr_title: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        // SET expressions read the row as it was, so `pr_number IS ?1` asks
+        // whether the PR is unchanged.
         conn.execute(
-            "UPDATE branches SET pr_number = ?1, updated_at = ?2 WHERE id = ?3",
-            params![pr_number.map(|n| n as i64), now_timestamp(), id],
+            "UPDATE branches SET
+                pr_number = ?1,
+                pr_title = CASE
+                    WHEN ?2 IS NOT NULL THEN ?2
+                    WHEN pr_number IS ?1 THEN pr_title
+                    ELSE NULL
+                END,
+                updated_at = ?3
+             WHERE id = ?4",
+            params![pr_number.map(|n| n as i64), pr_title, now_timestamp(), id],
         )?;
         self.publish_with(|| StoreChange::Branch {
             branch_id: id.to_string(),
@@ -231,15 +248,28 @@ impl Store {
     ///
     /// The PR poll scheduler calls this after *every* `gh` fetch, so the write
     /// itself is unconditional — `pr_fetched_at` and `updated_at` always
-    /// advance — but the change feed only speaks up when the eight domain
+    /// advance — but the change feed only speaks up when the nine domain
     /// fields actually move. A timestamp-only refresh is deliberately silent:
     /// publishing it would drop every window's timeline and diff caches for
     /// every branch with a PR, once per poll cycle. Freshness reaches the UI
-    /// through the cheap in-place `pr-status-changed` event instead.
+    /// through the cheap in-place `pr-status-changed` event instead. A title
+    /// edit does publish, since the event doesn't carry the title.
+    ///
+    /// Unlike the other fields, a `None` `pr_title` keeps the stored title: a
+    /// fetch always carries one, so `None` only comes from the clear after a
+    /// push, which leaves the PR's title as it was.
+    ///
+    /// `polled_pr_number` is the PR a fetch asked `gh` about. With `Some`, the
+    /// write only lands while the branch still links that PR: a poll reads
+    /// the number, then waits seconds on `gh`, and a relink or unlink in that
+    /// window must not get the old PR's status and title written over it.
+    /// `None` (the clear after a push) writes regardless. Returns whether the
+    /// row was written, so a caller can skip emitting a status it dropped.
     #[allow(clippy::too_many_arguments)]
     pub fn update_branch_pr_status(
         &self,
         id: &str,
+        polled_pr_number: Option<u64>,
         pr_state: Option<String>,
         pr_checks_status: Option<String>,
         pr_review_decision: Option<String>,
@@ -248,9 +278,15 @@ impl Store {
         pr_url: Option<String>,
         pr_updated_at: Option<i64>,
         pr_head_sha: Option<String>,
-    ) -> Result<(), StoreError> {
+        pr_title: Option<String>,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
+        // Snapshot the domain fields before the write. `None` means the row is
+        // gone or unreadable, which compares as "changed" — the `rows > 0`
+        // guard below is what suppresses the publish for a missing branch, so
+        // a failed read never swallows a real change.
+        let previous = Self::read_pr_status_fields(&conn, id);
         let incoming = PrStatusFields {
             state: pr_state,
             checks_status: pr_checks_status,
@@ -260,12 +296,8 @@ impl Store {
             url: pr_url,
             updated_at: pr_updated_at,
             head_sha: pr_head_sha,
+            title: pr_title.or_else(|| previous.as_ref().and_then(|p| p.title.clone())),
         };
-        // Snapshot the domain fields before the write. `None` means the row is
-        // gone or unreadable, which compares as "changed" — the `rows > 0`
-        // guard below is what suppresses the publish for a missing branch, so
-        // a failed read never swallows a real change.
-        let previous = Self::read_pr_status_fields(&conn, id);
         let rows = conn.execute(
             "UPDATE branches SET
                 pr_state = ?1,
@@ -277,8 +309,9 @@ impl Store {
                 pr_updated_at = ?7,
                 pr_fetched_at = ?8,
                 pr_head_sha = ?9,
-                updated_at = ?10
-             WHERE id = ?11",
+                updated_at = ?10,
+                pr_title = COALESCE(?12, pr_title)
+             WHERE id = ?11 AND (?13 IS NULL OR pr_number = ?13)",
             params![
                 incoming.state,
                 incoming.checks_status,
@@ -290,7 +323,9 @@ impl Store {
                 now,
                 incoming.head_sha,
                 now,
-                id
+                id,
+                incoming.title,
+                polled_pr_number.map(|n| n as i64),
             ],
         )?;
         if rows > 0 && previous.as_ref() != Some(&incoming) {
@@ -299,7 +334,7 @@ impl Store {
                 project_id: Self::branch_project_id(&conn, id),
             });
         }
-        Ok(())
+        Ok(rows > 0)
     }
 
     /// Read the PR fields that carry domain state, for the
@@ -308,7 +343,7 @@ impl Store {
     fn read_pr_status_fields(conn: &Connection, id: &str) -> Option<PrStatusFields> {
         conn.query_row(
             "SELECT pr_state, pr_checks_status, pr_review_decision, pr_mergeable,
-                    pr_draft, pr_url, pr_updated_at, pr_head_sha
+                    pr_draft, pr_url, pr_updated_at, pr_head_sha, pr_title
              FROM branches WHERE id = ?1",
             params![id],
             |row| {
@@ -321,6 +356,7 @@ impl Store {
                     url: row.get(5)?,
                     updated_at: row.get(6)?,
                     head_sha: row.get(7)?,
+                    title: row.get(8)?,
                 })
             },
         )
@@ -394,6 +430,7 @@ impl Store {
             setup_complete: setup_complete != 0,
             created_at: row.get(19)?,
             updated_at: row.get(20)?,
+            pr_title: row.get(21)?,
         })
     }
 

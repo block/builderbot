@@ -296,6 +296,15 @@ export function listProjectNotes(projectId: string): Promise<import('./types').P
   return invokeCommand('list_project_notes', { projectId });
 }
 
+/**
+ * Every note, project-note and review title across all projects: the index
+ * project search matches on beyond names, branches and repos. Titles only, so
+ * it is small; projectSearchIndex loads it lazily rather than through the cache.
+ */
+export function getProjectSearchIndex(): Promise<import('./types').ProjectSearchItem[]> {
+  return invokeCommand('get_project_search_index');
+}
+
 export function createProjectNote(
   projectId: string,
   title: string,

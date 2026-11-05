@@ -85,6 +85,8 @@ export interface Branch {
   prUpdatedAt: number | null;
   prFetchedAt: number | null;
   prHeadSha: string | null;
+  /** The PR's title on GitHub as of the last fetch; null until the first one. */
+  prTitle: string | null;
   /** Number of finalized commits on this branch (populated by list_branches_for_project). */
   commitCount?: number;
 }
@@ -422,6 +424,24 @@ export interface ProjectNote {
 export interface ProjectSessionResponse {
   sessionId: string;
   noteId: string;
+}
+
+// =============================================================================
+// Project search
+// =============================================================================
+
+export type ProjectSearchItemKind = 'note' | 'projectNote' | 'review';
+
+/** One titled item of a project in the search index: titles only, no bodies. */
+export interface ProjectSearchItem {
+  /** For branch notes and reviews, the branch's current project. */
+  projectId: string;
+  /** The branch a note or review is on; null for project notes. */
+  branchId: string | null;
+  kind: ProjectSearchItemKind;
+  id: string;
+  title: string;
+  updatedAt: number;
 }
 
 // =============================================================================

@@ -13,15 +13,27 @@
   interface Props {
     value?: string;
     placeholder?: string;
+    /** The input took focus; the owner prefetches what a query will search. */
+    onfocus?: () => void;
+    /** A key went down in the input, before its default action (Escape
+     *  aside, which clears the query). */
+    onkeydown?: (event: KeyboardEvent) => void;
   }
 
-  let { value = $bindable(''), placeholder = 'Search repos & projects' }: Props = $props();
+  let {
+    value = $bindable(''),
+    placeholder = 'Search repos & projects',
+    onfocus,
+    onkeydown,
+  }: Props = $props();
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape' && value) {
       e.preventDefault();
       value = '';
+      return;
     }
+    onkeydown?.(e);
   }
 </script>
 
@@ -35,6 +47,7 @@
     autocomplete="off"
     spellcheck="false"
     onkeydown={handleKeydown}
+    {onfocus}
   />
   {#if value}
     <button type="button" class="clear" aria-label="Clear search" onclick={() => (value = '')}>

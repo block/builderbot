@@ -2689,6 +2689,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(notes).unwrap())
         }
+        "get_project_search_index" => {
+            let store = get_store(store_mutex)?;
+            let items = store
+                .list_project_search_items()
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(items).unwrap())
+        }
         "get_project_note" => {
             let store = get_store(store_mutex)?;
             let project_note_id: String = arg(&args, "projectNoteId")?;
@@ -3914,7 +3921,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let pr_number: Option<u64> = opt_arg(&args, "prNumber")?;
             store
-                .update_branch_pr_number(&branch_id, pr_number)
+                .update_branch_pr_number(&branch_id, pr_number, None)
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
@@ -3990,8 +3997,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     Ok(pr_status) => {
                         let mergeable = pr_status.mergeable == "MERGEABLE";
                         let pr_fetched_at = store::now_timestamp();
-                        if let Err(e) = store.update_branch_pr_status(
+                        match store.update_branch_pr_status(
                             &branch.id,
+                            Some(pr_number),
                             Some(pr_status.state.clone()),
                             Some(pr_status.checks_summary.state.clone()),
                             pr_status.review_decision.clone(),
@@ -4000,13 +4008,22 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             None,
                             None,
                             pr_status.head_sha.clone(),
+                            pr_status.title.clone(),
                         ) {
-                            log::warn!(
-                                "Failed to update PR status for branch {}: {}",
-                                branch.id,
-                                e
-                            );
-                            continue;
+                            Ok(true) => {}
+                            // Relinked or unlinked during the fetch: this
+                            // status is another PR's, so don't emit or count
+                            // it — neutral, as `BranchRefresh::Skipped` is in
+                            // `prs::refresh_project_pr_statuses`.
+                            Ok(false) => continue,
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to update PR status for branch {}: {}",
+                                    branch.id,
+                                    e
+                                );
+                                continue;
+                            }
                         }
 
                         refreshed_count += 1;

@@ -395,7 +395,11 @@ pub(crate) async fn detect_branch_pr_impl(
 
     if let PrDetectionResult::Found { pr_number, .. } = &result {
         store
-            .update_branch_pr_number(&branch_id, Some(*pr_number))
+            .update_branch_pr_number(
+                &branch_id,
+                Some(*pr_number),
+                candidate_title(&candidates, *pr_number),
+            )
             .map_err(|e| e.to_string())?;
         log::info!(
             "detect_branch_pr: linked PR #{} in {} to branch_id={}",
@@ -454,7 +458,7 @@ pub(crate) async fn link_branch_pr_impl(
     let pr = pick_candidate_to_link(&candidates, pr_number, &expected, &remote_branch)?;
 
     store
-        .update_branch_pr_number(&branch_id, Some(pr.number))
+        .update_branch_pr_number(&branch_id, Some(pr.number), Some(&pr.title))
         .map_err(|e| e.to_string())?;
     log::info!(
         "link_branch_pr: linked PR #{} in {} to branch_id={} (PR base {}, branch base {})",
@@ -481,6 +485,15 @@ pub async fn link_branch_pr(
 ) -> Result<LinkedBranchPr, String> {
     let store = crate::get_store(&store)?;
     link_branch_pr_impl(store, branch_id, pr_number).await
+}
+
+/// The title of candidate PR `number`, which the list already carries, so a
+/// newly linked branch is searchable by it before the next status poll.
+fn candidate_title(candidates: &[git::HeadBranchPr], number: u64) -> Option<&str> {
+    candidates
+        .iter()
+        .find(|pr| pr.number == number)
+        .map(|pr| pr.title.as_str())
 }
 
 /// The open PR recovery may adopt without asking: only a full match, never
@@ -537,7 +550,11 @@ pub(crate) async fn recover_branch_pr_impl(
     };
 
     store
-        .update_branch_pr_number(&branch_id, Some(pr_number))
+        .update_branch_pr_number(
+            &branch_id,
+            Some(pr_number),
+            candidate_title(&open, pr_number),
+        )
         .map_err(|e| e.to_string())?;
     log::info!(
         "recover_branch_pr: recovered PR #{} in {} for branch_id={}",
@@ -576,6 +593,7 @@ mod tests {
             head_repo: head_repo.map(str::to_string),
             draft: false,
             author: "octocat".to_string(),
+            title: format!("PR {number}"),
         }
     }
 

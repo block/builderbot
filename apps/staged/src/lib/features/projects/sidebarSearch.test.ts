@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { Project, RepoHomeItem } from '../../types';
+import type { Branch, Project, RepoHomeItem } from '../../types';
+import { buildSearchSnapshot, type SearchSnapshot } from './projectSearch';
 import { repoKey } from './repoReorder';
 import {
-  matchingProjectIds,
   matchingRepoKeys,
   resultsLabel,
   searchRepos,
   sidebarPinnedRepos,
+  sidebarProjectMatches,
 } from './sidebarSearch';
 
 // ── Fixtures ──
@@ -140,23 +141,93 @@ describe('matchingRepoKeys', () => {
   });
 });
 
-describe('matchingProjectIds', () => {
+describe('sidebarProjectMatches', () => {
   const alpha = project({ id: 'p1', name: 'Alpha Service' });
   const beta = project({ id: 'p2', name: 'beta-tools' });
   const projects = [alpha, beta];
+  const ids = (query: string, snapshot?: SearchSnapshot) => {
+    const rank = sidebarProjectMatches(projects, query, snapshot).rank;
+    return rank && new Set(rank.keys());
+  };
 
   it('is null for an empty or whitespace query, so every row shows', () => {
-    expect(matchingProjectIds(projects, '')).toBeNull();
-    expect(matchingProjectIds(projects, '  ')).toBeNull();
+    expect(ids('')).toBeNull();
+    expect(ids('  ')).toBeNull();
   });
 
-  it('holds the ids searchProjects keeps', () => {
-    expect(matchingProjectIds(projects, 'ALPHA')).toEqual(new Set(['p1']));
-    expect(matchingProjectIds(projects, 'a')).toEqual(new Set(['p1', 'p2']));
+  it('ranks the ids searchProjects keeps', () => {
+    expect(ids('ALPHA')).toEqual(new Set(['p1']));
+    expect(ids('a')).toEqual(new Set(['p1', 'p2']));
   });
 
   it('is an empty set, not null, when a query matches nothing', () => {
-    expect(matchingProjectIds(projects, 'zzz')).toEqual(new Set());
+    expect(ids('zzz')).toEqual(new Set());
+  });
+
+  it('matches branches and PR numbers through a search snapshot', () => {
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject: new Map([
+        ['p2', [{ branchName: 'fix-login', prNumber: 123, updatedAt: 0 } as Branch]],
+      ]),
+      reposByProject: new Map(),
+    });
+    expect(ids('login', snapshot)).toEqual(new Set(['p2']));
+    expect(ids('#123', snapshot)).toEqual(new Set(['p2']));
+    expect(ids('12', snapshot)).toEqual(new Set());
+    expect(ids('login')).toEqual(new Set());
+  });
+
+  it('gives the reasons from the same pass', () => {
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject: new Map([
+        ['p2', [{ branchName: 'fix-login', prNumber: null, updatedAt: 0 } as Branch]],
+      ]),
+      reposByProject: new Map(),
+    });
+    expect(sidebarProjectMatches(projects, 'login', snapshot).reasons).toEqual(
+      new Map([['p2', { kind: 'branch', label: 'fix-login', more: 0, itemTerms: ['login'] }]])
+    );
+    expect(sidebarProjectMatches(projects, 'beta', snapshot).reasons.size).toBe(0);
+  });
+
+  it('matches terms spread across branches', () => {
+    const snapshot = buildSearchSnapshot(projects, {
+      branchesByProject: new Map([
+        [
+          'p1',
+          [
+            { branchName: 'fix-login', prNumber: null, updatedAt: 0 } as Branch,
+            { branchName: 'tidy-typos', prNumber: null, updatedAt: 1 } as Branch,
+          ],
+        ],
+      ]),
+      reposByProject: new Map(),
+    });
+    expect(ids('login typos', snapshot)).toEqual(new Set(['p1']));
+  });
+
+  it('ranks rows best first, ties in row order, for the rows’ CSS order', () => {
+    const gamma = project({ id: 'p3', name: 'Gamma' });
+    const rows = [alpha, beta, gamma];
+    const snapshot = buildSearchSnapshot(rows, {
+      branchesByProject: new Map([
+        ['p1', [{ branchName: 'tools-upgrade', prNumber: null, updatedAt: 0 } as Branch]],
+        ['p3', [{ branchName: 'tools-cleanup', prNumber: null, updatedAt: 0 } as Branch]],
+      ]),
+      reposByProject: new Map(),
+    });
+    // beta has "tools" in its name; alpha and gamma only in a branch.
+    expect(sidebarProjectMatches(rows, 'tools', snapshot).rank).toEqual(
+      new Map([
+        ['p2', 0],
+        ['p1', 1],
+        ['p3', 2],
+      ])
+    );
+  });
+
+  it('has no rank for a blank query, so rows keep their own order', () => {
+    expect(sidebarProjectMatches(projects, '').rank).toBeNull();
   });
 });
 

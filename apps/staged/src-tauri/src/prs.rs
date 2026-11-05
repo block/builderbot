@@ -1771,7 +1771,7 @@ pub fn update_branch_pr(
     pr_number: Option<u64>,
 ) -> Result<(), String> {
     get_store(&store)?
-        .update_branch_pr_number(&branch_id, pr_number)
+        .update_branch_pr_number(&branch_id, pr_number, None)
         .map_err(|e| e.to_string())
 }
 
@@ -1832,9 +1832,10 @@ pub(crate) async fn refresh_pr_status_impl(
     let mergeable = pr_status.mergeable == "MERGEABLE";
     let pr_fetched_at = store::now_timestamp();
 
-    store
+    let written = store
         .update_branch_pr_status(
             &branch_id,
+            Some(pr_number),
             Some(pr_status.state.clone()),
             Some(pr_status.checks_summary.state.clone()),
             pr_status.review_decision.clone(),
@@ -1843,8 +1844,14 @@ pub(crate) async fn refresh_pr_status_impl(
             None,
             None,
             pr_status.head_sha.clone(),
+            pr_status.title.clone(),
         )
         .map_err(|e| e.to_string())?;
+    if !written {
+        // Relinked or unlinked during the fetch: this status is another PR's.
+        log::debug!("refresh_pr_status: branch_id={branch_id} no longer links PR #{pr_number}");
+        return Ok(());
+    }
 
     crate::web_server::emit_to_all(
         &app_handle,
@@ -1962,8 +1969,9 @@ pub(crate) async fn refresh_project_pr_statuses(
                     let mergeable = pr_status.mergeable == "MERGEABLE";
                     let pr_fetched_at = store::now_timestamp();
 
-                    if let Err(e) = store.update_branch_pr_status(
+                    match store.update_branch_pr_status(
                         &branch_id,
+                        Some(pr_number),
                         Some(pr_status.state.clone()),
                         Some(pr_status.checks_summary.state.clone()),
                         pr_status.review_decision.clone(),
@@ -1972,9 +1980,21 @@ pub(crate) async fn refresh_project_pr_statuses(
                         None,
                         None,
                         pr_status.head_sha.clone(),
+                        pr_status.title.clone(),
                     ) {
-                        log::warn!("Failed to update PR status for branch {}: {}", branch_id, e);
-                        return Ok::<bool, String>(false);
+                        Ok(true) => {}
+                        // Relinked or unlinked during the fetch: this status
+                        // is another PR's, so don't emit it either. Nothing
+                        // failed — the relink already wrote newer state.
+                        Ok(false) => return Ok(BranchRefresh::Skipped),
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to update PR status for branch {}: {}",
+                                branch_id,
+                                e
+                            );
+                            return Ok(BranchRefresh::Failed);
+                        }
                     }
 
                     crate::web_server::emit_to_all(
@@ -1993,7 +2013,7 @@ pub(crate) async fn refresh_project_pr_statuses(
                         },
                     );
 
-                    Ok(true)
+                    Ok::<BranchRefresh, String>(BranchRefresh::Refreshed)
                 }
                 Err(e) => {
                     log::warn!(
@@ -2002,7 +2022,7 @@ pub(crate) async fn refresh_project_pr_statuses(
                         pr_number,
                         e
                     );
-                    Ok(false)
+                    Ok(BranchRefresh::Failed)
                 }
             }
         }));
@@ -2015,9 +2035,25 @@ pub(crate) async fn refresh_project_pr_statuses(
     Ok(refreshed_count)
 }
 
+/// How one branch's PR status refresh in [`refresh_project_pr_statuses`]
+/// ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchRefresh {
+    /// Fetched, written and emitted.
+    Refreshed,
+    /// Fetched, but the branch was relinked or unlinked during the fetch, so
+    /// the status belonged to a PR it no longer links and wasn't written.
+    /// Neither refreshed nor failed, as in the web `refresh_all_pr_statuses`
+    /// arm: a project whose only PR branch was relinked mid-poll hasn't had a
+    /// failed poll.
+    Skipped,
+    /// The fetch or the write failed.
+    Failed,
+}
+
 async fn collect_branch_refresh_results<T, E>(tasks: Vec<T>) -> Result<u32, String>
 where
-    T: std::future::Future<Output = Result<Result<bool, String>, E>>,
+    T: std::future::Future<Output = Result<Result<BranchRefresh, String>, E>>,
     E: std::fmt::Display,
 {
     let mut refreshed_count = 0u32;
@@ -2026,13 +2062,9 @@ where
 
     for task in tasks {
         match task.await {
-            Ok(Ok(refreshed)) => {
-                if refreshed {
-                    refreshed_count += 1;
-                } else {
-                    failed_branch_count += 1;
-                }
-            }
+            Ok(Ok(BranchRefresh::Refreshed)) => refreshed_count += 1,
+            Ok(Ok(BranchRefresh::Skipped)) => {}
+            Ok(Ok(BranchRefresh::Failed)) => failed_branch_count += 1,
             Ok(Err(e)) => {
                 log::warn!("PR status refresh task failed: {e}");
                 task_errors.push(e);
@@ -2085,7 +2117,9 @@ pub(crate) fn clear_branch_pr_status_impl(
     branch_id: &str,
 ) -> Result<(), String> {
     store
-        .update_branch_pr_status(branch_id, None, None, None, None, None, None, None, None)
+        .update_branch_pr_status(
+            branch_id, None, None, None, None, None, None, None, None, None, None,
+        )
         .map_err(|e| e.to_string())?;
 
     crate::web_server::emit_to_all(app_handle, "pr-status-cleared", branch_id);
@@ -3398,16 +3432,22 @@ mod tests {
         assert_eq!(steps.len(), 2);
     }
 
+    fn branch_task(
+        outcome: BranchRefresh,
+    ) -> tokio::task::JoinHandle<Result<BranchRefresh, String>> {
+        tokio::spawn(async move { Ok(outcome) })
+    }
+
     #[tokio::test]
     async fn collect_branch_refresh_results_tolerates_partial_task_failure() {
         let tasks = vec![
-            tokio::spawn(async { Ok::<bool, String>(true) }),
+            branch_task(BranchRefresh::Refreshed),
             tokio::spawn(async {
                 panic!("simulated branch task panic");
                 #[allow(unreachable_code)]
-                Ok::<bool, String>(true)
+                Ok::<BranchRefresh, String>(BranchRefresh::Refreshed)
             }),
-            tokio::spawn(async { Ok::<bool, String>(false) }),
+            branch_task(BranchRefresh::Failed),
         ];
 
         let refreshed_count = collect_branch_refresh_results(tasks).await.unwrap();
@@ -3418,11 +3458,13 @@ mod tests {
     #[tokio::test]
     async fn collect_branch_refresh_results_fails_when_all_tasks_fail() {
         let tasks = vec![
-            tokio::spawn(async { Err::<bool, String>("simulated semaphore failure".to_string()) }),
+            tokio::spawn(async {
+                Err::<BranchRefresh, String>("simulated semaphore failure".to_string())
+            }),
             tokio::spawn(async {
                 panic!("simulated branch task panic");
                 #[allow(unreachable_code)]
-                Ok::<bool, String>(true)
+                Ok::<BranchRefresh, String>(BranchRefresh::Refreshed)
             }),
         ];
 
@@ -3435,14 +3477,40 @@ mod tests {
     #[tokio::test]
     async fn collect_branch_refresh_results_fails_when_all_branches_fail() {
         let tasks = vec![
-            tokio::spawn(async { Ok::<bool, String>(false) }),
-            tokio::spawn(async { Ok::<bool, String>(false) }),
+            branch_task(BranchRefresh::Failed),
+            branch_task(BranchRefresh::Failed),
         ];
 
         let err = collect_branch_refresh_results(tasks).await.unwrap_err();
 
         assert!(err.contains("all PR status refresh tasks failed"));
         assert!(err.contains("2 branch refreshes failed"));
+    }
+
+    #[tokio::test]
+    async fn collect_branch_refresh_results_does_not_fail_a_skipped_write() {
+        // Every PR branch relinked or unlinked mid-poll: nothing refreshed,
+        // but nothing failed either, so the poll scheduler records a success.
+        let tasks = vec![
+            branch_task(BranchRefresh::Skipped),
+            branch_task(BranchRefresh::Skipped),
+        ];
+        assert_eq!(collect_branch_refresh_results(tasks).await.unwrap(), 0);
+
+        // Alongside a refresh it isn't counted as one.
+        let tasks = vec![
+            branch_task(BranchRefresh::Refreshed),
+            branch_task(BranchRefresh::Skipped),
+        ];
+        assert_eq!(collect_branch_refresh_results(tasks).await.unwrap(), 1);
+
+        // Alongside a failure, only the failure is reported.
+        let tasks = vec![
+            branch_task(BranchRefresh::Skipped),
+            branch_task(BranchRefresh::Failed),
+        ];
+        let err = collect_branch_refresh_results(tasks).await.unwrap_err();
+        assert!(err.contains("1 branch refreshes failed"));
     }
 
     #[test]

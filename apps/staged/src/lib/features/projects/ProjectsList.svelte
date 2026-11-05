@@ -49,7 +49,17 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { projectShortcutNumbers, visibleProjects, withStickyProject } from './projectSearch';
+  import {
+    projectShortcutNumbers,
+    searchOrderHold,
+    visibleProjects,
+    withStickyProject,
+  } from './projectSearch';
+  import { projectSearchSnapshots } from './projectSearchContext';
+  import { projectSearchIndex } from './projectSearchIndex.svelte';
+  import { searchRowOrder } from './searchRowOrder.svelte';
+  import ProjectMatchReason from './ProjectMatchReason.svelte';
+  import { queryTerms } from '../../shared/textSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -148,22 +158,50 @@
   let gridProjects = $derived(
     withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId)
   );
-  // The cards left on screen, in grid order: what ⌘1–9, the scroll restore
-  // and the empty state go by. See visibleProjects for the composition.
-  let filteredProjects = $derived(
-    visibleProjects(
-      projects,
-      projectFiltersStore.filteredProjects,
-      effectiveStickyId,
-      gridQuery.current
+  let searchActive = $derived(gridQuery.current.trim().length > 0);
+  // What the query reaches beyond names: branches, PRs, repo labels and
+  // titles, prepared once per data change rather than per keystroke. Only
+  // built while searching, and the same object again after an update that
+  // moved nothing a search reads (a PR status poll), so neither an empty
+  // field nor a held query re-runs anything when branches update.
+  const searchSnapshot = projectSearchSnapshots();
+  let searchData = $derived(searchActive ? searchSnapshot() : null);
+  // The cards left on screen, best match first, and why each matched when
+  // its name and repos don't say, from one pass. See visibleProjects for the
+  // composition. Ranked when the query or the chips are edited and only then:
+  // a data change under a held query, a visit's read-state change included,
+  // hides or appends cards but never moves one (searchOrderHold).
+  const holdOrder = searchOrderHold();
+  let search = $derived(
+    holdOrder(
+      gridQuery.current,
+      projectFiltersStore.activeFilters,
+      visibleProjects(
+        projects,
+        projectFiltersStore.filteredProjects,
+        effectiveStickyId,
+        gridQuery.current,
+        searchData
+      )
     )
   );
-  let shownProjectIds = $derived(new Set(filteredProjects.map((p) => p.id)));
-  // Hidden cards keep their {#each} slot, so the overlay numbers come from
-  // the position on screen instead.
+  // What ⌘1–9, the scroll restore and the empty state go by.
+  let filteredProjects = $derived(search.projects);
+  // Null while the query is blank: every card shows, unordered.
+  let searchRank = $derived(search.rank);
+  let searchTerms = $derived(queryTerms(gridQuery.current));
+  let matchReasons = $derived(search.reasons);
+  // Cards keep their {#each} slot whether hidden or moved, so the overlay
+  // numbers come from the position on screen (rank order) instead.
   let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
+  // The order the {#each} renders the cards in: per keystroke the cards stay
+  // put and CSS `order` moves them; once the query settles they are re-keyed
+  // into rank order, so tab and reading order match the screen.
+  const cardOrder = searchRowOrder(
+    () => gridProjects,
+    () => searchRank
+  );
 
-  let searchActive = $derived(gridQuery.current.trim().length > 0);
   // Decides the empty-state copy: blame the query only when the grid would
   // have shown something without it. Judged against the sticky-adjusted base,
   // not the raw chip result, so a sticky card the chips excluded but the query
@@ -298,6 +336,16 @@
     untrack(() => void projectsDataStore.ensureProjectsHydrated());
   });
 
+  // Titles (notes, project notes, reviews) come from the lazily loaded search
+  // index: fetch it once a query starts, if focusing the field didn't already.
+  // Asked again on every keystroke so a load that failed mid-search retries
+  // rather than leaving titles unmatched; writes during the search wait for
+  // the index's coalesced refetch instead (projectSearchIndex).
+  $effect(() => {
+    if (!gridQuery.current.trim()) return;
+    untrack(() => projectSearchIndex.ensureLoaded());
+  });
+
   // Keep run-action state hydrated for the status badges; the store call
   // dedupes branches it has already queried.
   $effect(() => {
@@ -323,7 +371,7 @@
       filteredProjects.map((p) => p.id),
       project.id,
       (projectId) =>
-        shownProjectIds.has(projectId)
+        searchRank === null || searchRank.has(projectId)
           ? projectCardElements.get(projectId)?.querySelector<HTMLElement>('.project-card')
           : null
     );
@@ -471,8 +519,10 @@
           <SearchField
             bind:ref={searchInputEl}
             bind:value={projectsListViewState.searchQuery}
-            placeholder="Search projects"
+            placeholder="Search projects, branches, PRs, notes"
             clearable
+            onfocus={() => projectSearchIndex.ensureLoaded()}
+            onkeydown={cardOrder.fieldKeydown}
           />
         </div>
 
@@ -498,8 +548,8 @@
             </span>
           {/if}
         </div>
-        <div class="projects-grid">
-          {#each gridProjects as project (project.id)}
+        <div class="projects-grid" onpointerdowncapture={cardOrder.rowsPointerdown}>
+          {#each cardOrder.rows as project (project.id)}
             {@const status = getProjectStatus(
               project.id,
               deletingProjectNames,
@@ -514,9 +564,11 @@
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
             {@const shortcut = shortcutNumbers.get(project.id)}
+            {@const matchReason = matchReasons.get(project.id)}
             <div
               class="project-card-wrapper"
-              hidden={!shownProjectIds.has(project.id)}
+              hidden={searchRank !== null && !searchRank.has(project.id)}
+              style:order={cardOrder.orderOf(project.id)}
               use:trackProjectCard={project.id}
             >
               <ContextMenu.Root>
@@ -573,6 +625,11 @@
                       />
                       <span>{projectDisplayName(project)}</span>
                     </div>
+                    {#if matchReason}
+                      <div class="card-match">
+                        <ProjectMatchReason reason={matchReason} terms={searchTerms} />
+                      </div>
+                    {/if}
                     {#if activity}
                       <div class="card-activity">
                         {activity}
@@ -763,6 +820,9 @@
     margin-bottom: 14px;
   }
 
+  /* A grid, not just for the columns: until a query settles, each shown
+     card's inline `order` lays the cards out by rank without moving them in
+     the DOM. */
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -833,6 +893,12 @@
 
   .card-header :global(svg) {
     flex-shrink: 0;
+  }
+
+  .card-match {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
   }
 
   /* Pinned to the bottom of the card. A remote project's cloud leads the repo

@@ -4,9 +4,10 @@
  * the landing-page grid, so the two surfaces always narrow together.
  *
  * Plain module (no runes, no store imports) like projectSearch.ts, so the
- * matching stays unit-testable. Projects reuse searchProjects; this file owns
- * the repo side, the match sets the sidebar hides rows by, and the shared
- * header copy.
+ * matching stays unit-testable. Projects reuse searchProjects and its
+ * SearchSnapshot (branches, PRs, repo labels, titles); this file owns the
+ * repo side, the match sets the sidebar hides rows by, and the shared header
+ * copy.
  *
  * The sidebar doesn't render the narrowed lists. Each segment renders its
  * whole list and hides what the query rules out (the match sets below): a
@@ -14,12 +15,14 @@
  * filters out and rebuilds it on the next backspace, and a row is costly to
  * build — a context menu per project, and per repo card an actions IPC wave
  * plus three backend event subscriptions. Hiding turns a keystroke into a
- * `hidden` flip on rows that already exist.
+ * `hidden` flip on rows that already exist, and the project rows' ranking
+ * into a CSS `order` on each until the query settles (searchRowOrder). Repo
+ * cards keep their pin order.
  */
 
 import type { Project, RepoHomeItem } from '../../types';
 import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
-import { searchProjects } from './projectSearch';
+import { searchProjects, type ProjectSearchResult, type SearchSnapshot } from './projectSearch';
 import { repoKey } from './repoReorder';
 
 /**
@@ -59,12 +62,17 @@ export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<stri
 }
 
 /**
- * Ids of the projects the query keeps (searchProjects' rule), or null when
- * the query is blank and every row shows.
+ * The project rows the query keeps, by searchProjects' rule: `rank` places
+ * each kept row on screen (rows it doesn't hold are hidden; null for a blank
+ * query, every row in its own order), and `reasons` says why each matched
+ * when its name and repos don't.
  */
-export function matchingProjectIds(projects: Project[], query: string): Set<string> | null {
-  if (queryTerms(query).length === 0) return null;
-  return new Set(searchProjects(projects, query).map((p) => p.id));
+export function sidebarProjectMatches(
+  projects: Project[],
+  query: string,
+  snapshot?: SearchSnapshot | null
+): ProjectSearchResult {
+  return searchProjects(projects, query, snapshot);
 }
 
 /** "1 result" / "n results" — the count a section header shows while searching. */

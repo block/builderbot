@@ -91,4 +91,80 @@ describe('resumeSessionFromRow', () => {
     await expect(resumeSessionFromRow('session-1', null)).resolves.toBe(true);
     expect(resumeSession).toHaveBeenCalledTimes(2);
   });
+
+  describe('afterResume', () => {
+    /** An `afterResume` held open until `release` runs or `fail` rejects it. */
+    function heldRefresh() {
+      let release!: () => void;
+      let fail!: (e: Error) => void;
+      const refresh = vi.fn(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            release = resolve;
+            fail = reject;
+          })
+      );
+      return { refresh, release: () => release(), fail: (e: Error) => fail(e) };
+    }
+
+    it('keeps the session in flight until the refresh lands', async () => {
+      const held = heldRefresh();
+      const firstClick = resumeSessionFromRow('session-1', 'branch-1', held.refresh);
+      await vi.waitFor(() => expect(held.refresh).toHaveBeenCalledTimes(1));
+
+      // The branch card's button is still up until its timeline reloads; a
+      // click now must not reach the backend or toast.
+      await expect(resumeSessionFromRow('session-1', 'branch-1', held.refresh)).resolves.toBe(
+        false
+      );
+      expect(resumeSession).toHaveBeenCalledTimes(1);
+      expect(held.refresh).toHaveBeenCalledTimes(1);
+      expect(toastError).not.toHaveBeenCalled();
+
+      held.release();
+      await expect(firstClick).resolves.toBe(true);
+
+      await expect(resumeSessionFromRow('session-1', 'branch-1')).resolves.toBe(true);
+      expect(resumeSession).toHaveBeenCalledTimes(2);
+    });
+
+    it('runs the refresh only after the session resumed', async () => {
+      const first = holdNextResume();
+      const refresh = vi.fn();
+      const firstClick = resumeSessionFromRow('session-1', null, refresh);
+      await Promise.resolve();
+      expect(refresh).not.toHaveBeenCalled();
+
+      first.release();
+      await expect(firstClick).resolves.toBe(true);
+      expect(refresh).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the refresh when the resume fails', async () => {
+      resumeSession.mockRejectedValueOnce(new Error('agent unavailable'));
+      const refresh = vi.fn();
+
+      await expect(resumeSessionFromRow('session-1', null, refresh)).resolves.toBe(false);
+      expect(refresh).not.toHaveBeenCalled();
+      expect(toastError).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs a failed refresh without a "Resume failed" toast and frees the session', async () => {
+      const held = heldRefresh();
+      const firstClick = resumeSessionFromRow('session-1', 'branch-1', held.refresh);
+      await vi.waitFor(() => expect(held.refresh).toHaveBeenCalledTimes(1));
+      held.fail(new Error('timeline read failed'));
+
+      // The session did resume; only the refresh failed.
+      await expect(firstClick).resolves.toBe(true);
+      expect(toastError).not.toHaveBeenCalled();
+      expect(console.error).toHaveBeenCalledWith(
+        'Failed to refresh after resuming session:',
+        expect.objectContaining({ message: 'timeline read failed' })
+      );
+
+      await expect(resumeSessionFromRow('session-1', 'branch-1')).resolves.toBe(true);
+      expect(resumeSession).toHaveBeenCalledTimes(2);
+    });
+  });
 });

@@ -368,11 +368,13 @@ describe('ProjectSection note rows', () => {
   });
 
   it('withholds Resume while a resume is in flight, so a double click resumes once', async () => {
-    listNotes(failedNote('crashed', 'crashed'));
+    const crashed = failedNote('crashed', 'crashed');
+    listNotes(crashed);
     let finishResume!: () => void;
     commandMocks.resumeSession.mockImplementation(
       () => new Promise<void>((resolve) => (finishResume = resolve))
     );
+    const releaseFetch = holdNoteFetch();
     const section = mountSection();
     await settle();
 
@@ -380,9 +382,17 @@ describe('ProjectSection note rows', () => {
     flushSync();
     expect(resumeButton('session-crashed')).toBeNull();
 
+    // The button stays down through the refetch that follows the resume too.
     finishResume();
     await settle();
+    expect(commandMocks.getProjectNoteBySession).toHaveBeenCalledTimes(1);
+    expect(resumeButton('session-crashed')).toBeNull();
+
+    releaseFetch({ ...crashed, sessionStatus: 'running', completionReason: null });
+    await settle();
     expect(commandMocks.resumeSession).toHaveBeenCalledTimes(1);
+    expect(rowFor('session-crashed').dataset.type).toBe('generating-note');
+    expect(resumeButton('session-crashed')).toBeNull();
 
     unmount(section);
   });

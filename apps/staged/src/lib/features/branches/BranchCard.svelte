@@ -2126,9 +2126,9 @@
                 }
               }}
               onResumeClick={(sid) => {
-                void resumeSessionFromRow(sid, branch.id).then((resumed) => {
-                  if (resumed) loadTimeline();
-                });
+                // The Resume button stays up until this reload lands, so the
+                // reload runs inside the resume's in-flight guard.
+                void resumeSessionFromRow(sid, branch.id, () => loadTimeline());
               }}
               onCommitClick={handleCommitClick}
               onNoteClick={handleNoteClick}

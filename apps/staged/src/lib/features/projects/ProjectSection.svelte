@@ -513,13 +513,12 @@
     if (!sessionId || resumingNoteIds.has(note.id)) return;
     resumingNoteIds = new Set([...resumingNoteIds, note.id]);
     try {
-      if (!(await resumeSessionFromRow(sessionId, null))) return;
-      // Only this note, through the ordering guard: a whole-list reload read
-      // while the session ran could land after its terminal refresh and leave
-      // the row spinning. The `running` event tracks the id in
-      // activeSessionIds; adding it here too could re-add a session whose
+      // Refetch only this note, through the ordering guard: a whole-list
+      // reload read while the session ran could land after its terminal
+      // refresh and leave the row spinning. The `running` event tracks the id
+      // in activeSessionIds; adding it here too could re-add a session whose
       // terminal event beat this response.
-      await refreshNoteForSession(sessionId);
+      await resumeSessionFromRow(sessionId, null, () => refreshNoteForSession(sessionId));
     } finally {
       const next = new Set(resumingNoteIds);
       next.delete(note.id);

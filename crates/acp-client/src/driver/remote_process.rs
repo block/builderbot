@@ -21,6 +21,10 @@
 //! its output ends while sessions are attached, or when bloxlet reports the
 //! agent process stopped (see [`super::remote_liveness`]). Each session then
 //! ends with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the cause.
+//! When only the proxy went — `sq` exited while bloxlet still runs a process
+//! it had reused — the sessions end with a
+//! [`super::REMOTE_AGENT_DETACHED_PREFIX`] error instead, so their turns can
+//! be reattached to.
 //!
 //! A session a previous app instance left running reattaches through the same
 //! proxy, so `sq` attaches to the agent process still serving its turn; a
@@ -36,10 +40,11 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, Command};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use super::remote_liveness::{self, Liveness};
-use super::remote_routing::{RemoteTransport, RoutedClientStreams};
+use super::remote_routing::{RemoteLoss, RemoteTransport, RoutedClientStreams};
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -98,6 +103,9 @@ struct SharedProcess {
     pid: Option<u32>,
     transport: RemoteTransport,
     report: Mutex<ProxyReport>,
+    /// Woken when the proxy's log says bloxlet should be asked about the
+    /// agent right away.
+    check_now: Notify,
     /// Cancelled to interrupt the proxy.
     stop: CancellationToken,
     /// Cancelled once the proxy is observed to be gone.
@@ -150,6 +158,9 @@ impl SharedProcess {
 pub(super) struct RemoteProcessLease {
     key: ProxyKey,
     process: Arc<SharedProcess>,
+    /// This lease started the proxy, rather than joining one already
+    /// running, so what `sq` said about its process is about this session.
+    created_proxy: bool,
     released: bool,
 }
 
@@ -160,17 +171,20 @@ impl RemoteProcessLease {
         &self.process.exited
     }
 
-    /// Why the agent was lost under the attached sessions, if it was.
-    pub(super) fn lost_cause(&self) -> Option<String> {
-        self.process.transport.lost_cause()
+    /// How the agent was lost under the attached sessions, if it was.
+    pub(super) fn loss(&self) -> Option<RemoteLoss> {
+        self.process.transport.loss()
     }
 
-    /// For a session reattaching to a turn a previous app instance started:
-    /// a watch on that turn, when bloxlet can be asked about its agent.
-    pub(super) fn reattached_turn(&self) -> Option<ReattachedTurn> {
+    /// For a session reattaching to a turn prompted at `prompted_at` (ms
+    /// since the epoch) by an app instance that is gone: a watch on that
+    /// turn, when bloxlet can be asked about its agent.
+    pub(super) fn reattached_turn(&self, prompted_at: i64) -> Option<ReattachedTurn> {
         Some(ReattachedTurn {
             process: Arc::clone(&self.process),
             target: remote_liveness::Target::of(&self.key.program, &self.key.args)?,
+            trust_attachment: self.created_proxy,
+            prompted_at_secs: prompted_at.div_euclid(1000),
         })
     }
 
@@ -248,6 +262,11 @@ impl Drop for RemoteProcessLease {
 pub(super) struct ReattachedTurn {
     process: Arc<SharedProcess>,
     target: remote_liveness::Target,
+    /// Whether the proxy was started for this session, so that `sq` starting
+    /// or reusing a process answers whether the turn's process survived.
+    trust_attachment: bool,
+    /// When the turn was prompted, in seconds since the epoch.
+    prompted_at_secs: i64,
 }
 
 impl ReattachedTurn {
@@ -257,42 +276,60 @@ impl ReattachedTurn {
     ///
     /// Fails, naming the cause, when the process that ran the turn is gone:
     /// `sq` found none to attach to and started a new one, or bloxlet reports
-    /// it stopped.
+    /// it stopped. Also fails when the proxy loses its connection to it.
     pub(super) async fn ended(self) -> Result<(), String> {
         let command_id = self.surviving_command().await?;
         log::info!(
             "{}: reattached to agent process (command {command_id}); waiting for its turn to end",
             self.process.describe()
         );
-        loop {
-            match remote_liveness::check(&self.target, &command_id).await {
-                Ok(Liveness::Idle) => return Ok(()),
-                Ok(Liveness::Running) => {}
-                Ok(Liveness::Gone(cause)) => return Err(cause),
-                Err(error) => log::warn!(
-                    "{}: could not check command {command_id}: {error}",
-                    self.process.describe()
-                ),
+        let closed = self.process.transport.closed().clone();
+        let poll = async {
+            loop {
+                match remote_liveness::check(&self.target, &command_id).await {
+                    Ok(Liveness::Idle) => return Ok(()),
+                    Ok(Liveness::Running) => {}
+                    Ok(Liveness::Gone(cause)) => return Err(cause),
+                    Err(error) => log::warn!(
+                        "{}: could not check command {command_id}: {error}",
+                        self.process.describe()
+                    ),
+                }
+                tokio::time::sleep(remote_liveness::REATTACHED_TURN_POLL).await;
             }
-            tokio::time::sleep(remote_liveness::REATTACHED_TURN_POLL).await;
+        };
+        tokio::select! {
+            ended = poll => ended,
+            // Nothing streams the rest of the turn to the session any more.
+            _ = closed.cancelled() => Err(self
+                .process
+                .transport
+                .loss()
+                .map(|loss| loss.cause)
+                .unwrap_or_else(|| "the remote agent proxy stopped".to_string())),
         }
     }
 
     /// bloxlet's id for the agent process `sq` attached to, provided it was
-    /// already running rather than started for this attachment.
+    /// already running when the turn was prompted.
     async fn surviving_command(&self) -> Result<String, String> {
         // `sq` logs which process it attached to before it relays any frame,
         // so by the time the session is set up it has normally been read.
         let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        let command_id = loop {
             {
                 let report = self.process.report.lock().unwrap();
                 match (report.attachment, &report.command_id) {
-                    (Attachment::Reused, Some(command_id)) => return Ok(command_id.clone()),
-                    (Attachment::Started, _) => {
+                    (Attachment::Reused, Some(command_id)) if self.trust_attachment => {
+                        return Ok(command_id.clone())
+                    }
+                    (Attachment::Started, _) if self.trust_attachment => {
                         return Err("the agent process that ran it is gone: `sq blox acp` \
                                     found none to reattach to and started a new one"
                             .to_string())
+                    }
+                    (Attachment::Started | Attachment::Reused, Some(command_id)) => {
+                        break command_id.clone()
                     }
                     _ => {}
                 }
@@ -305,6 +342,26 @@ impl ReattachedTurn {
                 );
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        // The session joined a proxy that was already running, so whether
+        // `sq` started or reused its process says nothing about this turn
+        // (another app instance may have run it on a process that has since
+        // died). The process serving the workspace now ran the turn only if
+        // it was already running when the turn was prompted.
+        match remote_liveness::command_started_at(&self.target, &command_id).await {
+            Ok(Some(started_at)) if started_at <= self.prompted_at_secs => Ok(command_id),
+            Ok(Some(_)) => Err(format!(
+                "the agent process that ran it is gone: the one serving the workspace now \
+                 (command {command_id}) started after the turn was prompted"
+            )),
+            Ok(None) => Err(format!(
+                "bloxlet does not say when agent process {command_id} started, so whether \
+                 it is the one that ran the turn is unknown"
+            )),
+            Err(error) => Err(format!(
+                "whether agent process {command_id} is the one that ran the turn is \
+                 unknown: {error}"
+            )),
         }
     }
 }
@@ -325,7 +382,10 @@ pub(super) async fn attach(
             let mut registry = registry();
             match registry.get_mut(&key) {
                 // Lost its agent and about to stop: start another once it has.
-                Some(Entry::Live { process, .. }) if process.transport.closed().is_cancelled() => {
+                Some(Entry::Live { process, .. })
+                    if process.transport.closed().is_cancelled()
+                        || process.transport.output_ended().is_cancelled() =>
+                {
                     process.stopped.clone()
                 }
                 Some(Entry::Live { process, leases }) => {
@@ -335,7 +395,7 @@ pub(super) async fn attach(
                         process.describe(),
                         *leases - 1
                     );
-                    return Ok(lease(key, Arc::clone(process)));
+                    return Ok(lease(key, Arc::clone(process), false));
                 }
                 Some(Entry::Stopping { stopped, .. }) => stopped.clone(),
                 None => {
@@ -350,7 +410,7 @@ pub(super) async fn attach(
                             leases: 1,
                         },
                     );
-                    return Ok(lease(key, process));
+                    return Ok(lease(key, process, true));
                 }
             }
         };
@@ -359,11 +419,16 @@ pub(super) async fn attach(
     }
 }
 
-fn lease(key: ProxyKey, process: Arc<SharedProcess>) -> (RemoteProcessLease, RoutedClientStreams) {
+fn lease(
+    key: ProxyKey,
+    process: Arc<SharedProcess>,
+    created_proxy: bool,
+) -> (RemoteProcessLease, RoutedClientStreams) {
     let streams = process.transport.attach();
     let lease = RemoteProcessLease {
         key,
         process,
+        created_proxy,
         released: false,
     };
     (lease, streams)
@@ -423,6 +488,7 @@ async fn run_proxy(
         pid: child.id(),
         transport: RemoteTransport::spawn(stdin, stdout),
         report: Mutex::new(ProxyReport::default()),
+        check_now: Notify::new(),
         stop: CancellationToken::new(),
         exited: CancellationToken::new(),
         stopped: CancellationToken::new(),
@@ -432,12 +498,15 @@ async fn run_proxy(
         // Nobody holds a lease, so nobody would ever stop it.
         process.stop.cancel();
     }
-    let watch = remote_liveness::Target::of(&key.program, &key.args)
+    let target = remote_liveness::Target::of(&key.program, &key.args).map(Arc::new);
+    let watch = target
+        .clone()
         .map(|target| tokio::spawn(watch_liveness(Arc::clone(&process), target)));
 
     tokio::select! {
         _ = process.stop.cancelled() => {}
         _ = process.exited.cancelled() => {}
+        _ = process.transport.output_ended().cancelled() => {}
         _ = process.transport.closed().cancelled() => {}
     }
     if let Some(watch) = watch {
@@ -447,16 +516,19 @@ async fn run_proxy(
     if process.stop.is_cancelled() {
         // Stopping on purpose: its output ending is no loss to report.
         process.transport.close();
-    } else {
-        process
-            .transport
-            .lose("the `sq blox acp` proxy exited".to_string());
+    } else if !process.transport.closed().is_cancelled() {
+        process.explain_exit(attached, target.as_deref()).await;
     }
-    if attached > 0 {
+    if let Some(loss) = process.transport.loss().filter(|_| attached > 0) {
         log::warn!(
-            "{}: lost its agent with {attached} session(s) attached: {}",
+            "{}: {} with {attached} session(s) attached: {}",
             process.describe(),
-            process.transport.lost_cause().unwrap_or_default()
+            if loss.agent_may_survive {
+                "lost its connection to the agent"
+            } else {
+                "lost its agent"
+            },
+            loss.cause
         );
     }
     super::graceful_stop(&mut child, true).await;
@@ -466,31 +538,87 @@ async fn run_proxy(
     process.stopped.cancel();
 }
 
+impl SharedProcess {
+    /// The proxy's output ended (or `sq` exited) without being asked to
+    /// stop: end the attached sessions, telling them whether their agent
+    /// went with it.
+    ///
+    /// `sq` stops a process it started when it exits, so that one is gone.
+    /// A process it only reused outlives it — a local `sq` crash, an expired
+    /// login or a stray kill takes nothing on the workstation down — so
+    /// bloxlet is asked first, and while it still runs the process (or
+    /// cannot say) the sessions are detached rather than failed, for their
+    /// turns to be reattached to.
+    async fn explain_exit(&self, attached: usize, target: Option<&remote_liveness::Target>) {
+        let cause = if self.exited.is_cancelled() {
+            "the `sq blox acp` proxy exited".to_string()
+        } else {
+            self.transport
+                .output_end()
+                .unwrap_or_else(|| "the remote agent's output stream ended".to_string())
+        };
+        let (attachment, command_id) = {
+            let report = self.report.lock().unwrap();
+            (report.attachment, report.command_id.clone())
+        };
+        let (true, Attachment::Reused, Some(command_id), Some(target)) =
+            (attached > 0, attachment, command_id, target)
+        else {
+            self.transport.lose(cause);
+            return;
+        };
+        log::info!(
+            "{}: {cause}; asking bloxlet whether the agent process it reused \
+             (command {command_id}) still runs",
+            self.describe()
+        );
+        let verdict = tokio::time::timeout(
+            remote_liveness::QUICK_CHECK_TIMEOUT,
+            remote_liveness::check(target, &command_id),
+        )
+        .await
+        .unwrap_or_else(|_| Err("`sq blox ws commands` timed out".to_string()));
+        match verdict {
+            Ok(Liveness::Running | Liveness::Idle) => self.transport.detach_sessions(format!(
+                "{cause}, but bloxlet still runs the agent process (command {command_id})"
+            )),
+            Ok(Liveness::Gone(gone)) => self.transport.lose(gone),
+            Err(error) => self.transport.detach_sessions(format!(
+                "{cause}, and whether the agent process (command {command_id}) still runs \
+                 is unknown: {error}"
+            )),
+        }
+    }
+}
+
 /// While sessions are attached, ask bloxlet whether the agent process still
-/// runs whenever its stream recently disconnected or a session's tool call
-/// has gone quiet, and fail the sessions once it does not.
-async fn watch_liveness(process: Arc<SharedProcess>, target: remote_liveness::Target) {
+/// runs whenever its stream recently disconnected or ended, or a session's
+/// prompt has gone quiet, and fail the sessions once it does not.
+async fn watch_liveness(process: Arc<SharedProcess>, target: Arc<remote_liveness::Target>) {
     let mut last_check: Option<Instant> = None;
     let mut reported_no_command_id = false;
     let mut tick = tokio::time::interval(remote_liveness::WATCH_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        tick.tick().await;
+        let check_now = tokio::select! {
+            _ = tick.tick() => false,
+            _ = process.check_now.notified() => true,
+        };
         let since_check = last_check.map(|at| at.elapsed());
         let last_disconnect = process.report.lock().unwrap().last_disconnect;
-        let reason = if last_disconnect
-            .is_some_and(|at| at.elapsed() < remote_liveness::DISCONNECT_WATCH)
+        let reason = if check_now {
+            "`sq` reports the orchestrator ended the agent's output stream"
+        } else if last_disconnect.is_some_and(|at| at.elapsed() < remote_liveness::DISCONNECT_WATCH)
             && since_check
                 .is_none_or(|elapsed| elapsed >= remote_liveness::CHECK_AFTER_DISCONNECT_EVERY)
         {
             "its output stream disconnected"
-        } else if since_check
-            .is_none_or(|elapsed| elapsed >= remote_liveness::STALLED_TOOL_CALL_AFTER)
+        } else if since_check.is_none_or(|elapsed| elapsed >= remote_liveness::STALLED_PROMPT_AFTER)
             && process
                 .transport
-                .has_stalled_tool_call(remote_liveness::STALLED_TOOL_CALL_AFTER)
+                .has_stalled_prompt(remote_liveness::STALLED_PROMPT_AFTER)
         {
-            "a session's tool call has gone quiet"
+            "a session's prompt has gone quiet"
         } else {
             continue;
         };
@@ -536,11 +664,14 @@ async fn drain_stderr(stderr: ChildStderr, process: Arc<SharedProcess>) {
         if line.trim().is_empty() {
             continue;
         }
-        process
+        let check_now = process
             .report
             .lock()
             .unwrap()
             .note(&blox_cli::strip_ansi_escape_sequences(&line));
+        if check_now {
+            process.check_now.notify_one();
+        }
         match process.pid {
             Some(pid) => log::warn!("[{} stderr][proxy pid {pid}] {line}", process.label),
             None => log::warn!("[{} stderr] {line}", process.label),
@@ -552,7 +683,9 @@ async fn drain_stderr(stderr: ChildStderr, process: Arc<SharedProcess>) {
 }
 
 impl ProxyReport {
-    fn note(&mut self, line: &str) {
+    /// Take in one line of the proxy's log, returning whether bloxlet should
+    /// be asked about the agent right away.
+    fn note(&mut self, line: &str) -> bool {
         if let Some(attachment) = attachment_reported_by(line) {
             self.attachment = attachment;
             if let Some(command_id) =
@@ -566,6 +699,14 @@ impl ProxyReport {
         {
             self.last_disconnect = Some(Instant::now());
         }
+        // The orchestrator ends the output stream when the agent process
+        // has exited. `sq` then only logs this and keeps its stdout open
+        // until its stdin closes, so nothing else would tell the sessions.
+        if line.contains("Received EOF signal from orchestrator") {
+            self.last_disconnect = Some(Instant::now());
+            return true;
+        }
+        false
     }
 }
 

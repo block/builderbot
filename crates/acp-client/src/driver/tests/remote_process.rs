@@ -1,7 +1,9 @@
 //! Sessions sharing one remote agent process through one `sq` proxy.
 
 use super::*;
-use crate::driver::{is_remote_agent_lost_error, SessionConnection};
+use crate::driver::{
+    is_remote_agent_detached_error, is_remote_agent_lost_error, ReattachTurn, SessionConnection,
+};
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 use std::os::unix::fs::PermissionsExt;
@@ -18,6 +20,8 @@ const WAIT: Duration = Duration::from_secs(30);
 /// - "hold me": answered only once cancelled;
 /// - "stall": starts a tool call and goes quiet;
 /// - "disconnect": logs a stream disconnect and goes quiet;
+/// - "orchestrator eof": answers, then logs that the orchestrator ended its
+///   output stream, as `sq` does once the agent process exits;
 /// - "exit": ends its output.
 ///
 /// A session it loads while reusing a process is one an earlier connection
@@ -66,6 +70,10 @@ while IFS= read -r line; do
       continue ;;
     *'"method":"session/prompt"'*'disconnect'*)
       echo '  9.10s WRN Stream disconnected, retrying error="stream error: unavailable"' >&2
+      continue ;;
+    *'"method":"session/prompt"'*'orchestrator eof'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"stopReason":"end_turn"}}\n' "$id"
+      echo '  9.10s INF Received EOF signal from orchestrator, connection closed' >&2
       continue ;;
     *'"method":"session/prompt"'*'exit'*) exit 0 ;;
     *'"method":"session/prompt"'*) result='{"stopReason":"end_turn"}' ;;
@@ -396,8 +404,128 @@ async fn sessions_fail_as_remote_agent_lost_when_the_agent_output_ends() {
         .await;
 }
 
+/// `sq` reattached to a process it did not start, so its exiting leaves that
+/// process running: while bloxlet still runs it, the sessions are detached
+/// (for their turns to be reattached to) rather than failed.
 #[tokio::test(flavor = "current_thread")]
-async fn sessions_fail_as_remote_agent_lost_once_bloxlet_reports_a_quiet_tool_calls_agent_failed() {
+async fn sessions_detach_when_sq_exits_while_bloxlet_still_runs_the_reused_agent() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reused-exit");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_RUNNING"}]"#,
+                "[]",
+            );
+            let driver = sq.workspace_driver();
+            let first = Session::connect(&driver, &sq, "first").await;
+            let second = Session::connect(&driver, &sq, "second").await;
+
+            let first = prompt_in_background(first, "hold me");
+            wait_until("the agent holds the first prompt", || {
+                !sq.received("session/prompt").is_empty()
+            })
+            .await;
+            let second = prompt_in_background(second, "exit");
+
+            let (_, first) = first.await.unwrap();
+            let (_, second) = second.await.unwrap();
+            let error = first.expect_err("the proxy went");
+            assert!(
+                is_remote_agent_detached_error(&error) && !is_remote_agent_lost_error(&error),
+                "{error}"
+            );
+            assert!(
+                error.contains("bloxlet still runs the agent process (command cmd-earlier)"),
+                "{error}"
+            );
+            assert_eq!(second, Err(error));
+            assert!(
+                sq.checks() > 0,
+                "bloxlet is asked before anything is failed"
+            );
+            assert!(
+                sq.received("session/cancel").is_empty(),
+                "detached turns are left running for a reattachment"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_fail_as_remote_agent_lost_when_sq_exits_and_bloxlet_reports_the_reused_agent_gone(
+) {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reused-exit-gone");
+            sq.reuse("cmd-earlier");
+            sq.set_commands(
+                "[]",
+                r#"[{"commandId":"cmd-earlier","status":"COMMAND_STATUS_FAILED","message":"agent crashed"}]"#,
+            );
+            let driver = sq.workspace_driver();
+            let first = Session::connect(&driver, &sq, "first").await;
+            let second = Session::connect(&driver, &sq, "second").await;
+
+            let first = prompt_in_background(first, "hold me");
+            wait_until("the agent holds the first prompt", || {
+                !sq.received("session/prompt").is_empty()
+            })
+            .await;
+            let second = prompt_in_background(second, "exit");
+
+            assert_both_lost(
+                first,
+                second,
+                &["bloxlet reports the agent process (command cmd-earlier) as failed: agent crashed"],
+            )
+            .await;
+        })
+        .await;
+}
+
+/// `sq` only logs that the orchestrator ended the agent's output stream and
+/// keeps its own stdout open, so that line alone prompts asking bloxlet —
+/// here with no prompt in flight that could have gone quiet.
+#[tokio::test(flavor = "current_thread")]
+async fn the_orchestrator_ending_the_agent_stream_prompts_an_immediate_bloxlet_check() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("orchestrator-eof");
+            let driver = sq.workspace_driver();
+            let mut first = Session::connect(&driver, &sq, "first").await;
+            // Keeps the proxy up once the first session's turn is over.
+            let mut second = Session::connect(&driver, &sq, "second").await;
+            let command = sq.command_id().await;
+            sq.set_commands(
+                "[]",
+                &format!(
+                    r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_FAILED","message":"agent exited"}}]"#
+                ),
+            );
+
+            let outcome = first.prompt("orchestrator eof").await;
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "{outcome:?}"
+            );
+            wait_until("bloxlet is asked about the agent", || sq.checks() > 0).await;
+            wait_until("the proxy is stopped", || sq.interrupted()).await;
+
+            let error = second.prompt("next").await.expect_err("the agent is gone");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(error.contains("agent exited"), "{error}");
+            assert_eq!(
+                sq.received("session/prompt").len(),
+                1,
+                "the second session's prompt never reached the lost agent"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sessions_fail_as_remote_agent_lost_once_bloxlet_reports_a_quiet_prompts_agent_failed() {
     LocalSet::new()
         .run_until(async {
             let sq = FakeSq::new("stalled");
@@ -410,9 +538,10 @@ async fn sessions_fail_as_remote_agent_lost_once_bloxlet_reports_a_quiet_tool_ca
                 "[]",
             );
 
+            // One goes quiet mid tool call, the other without starting one.
             let first = prompt_in_background(first, "stall");
             let second = prompt_in_background(second, "hold me");
-            wait_until("bloxlet is asked about the quiet tool call", || {
+            wait_until("bloxlet is asked about the quiet prompts", || {
                 sq.checks() > 0
             })
             .await;
@@ -475,6 +604,22 @@ fn reattach_in_background(
     sq: &FakeSq,
     writer: Arc<BasicMessageWriter>,
 ) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
+    reattach_turn_in_background(driver, sq, writer, now_ms())
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+fn reattach_turn_in_background(
+    driver: AcpDriver,
+    sq: &FakeSq,
+    writer: Arc<BasicMessageWriter>,
+    prompted_at: i64,
+) -> tokio::task::JoinHandle<Result<AgentRunOutcome, String>> {
     let dir = sq.dir.clone();
     tokio::task::spawn_local(async move {
         let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
@@ -487,7 +632,10 @@ fn reattach_in_background(
                 &store,
                 &writer,
                 &CancellationToken::new(),
-                "sess-earlier",
+                &ReattachTurn {
+                    agent_session_id: "sess-earlier".to_string(),
+                    prompted_at,
+                },
             ),
         )
         .await
@@ -599,6 +747,59 @@ async fn reattaching_to_a_turn_bloxlet_reports_failed_fails_as_remote_agent_lost
                 ),
                 "{error}"
             );
+        })
+        .await;
+}
+
+/// A reattachment that joins a proxy another session already holds cannot
+/// tell from `sq` whether the process it attached to ran the turn, so it asks
+/// bloxlet when that process started.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reattachment_joining_a_running_proxy_checks_the_process_predates_the_turn() {
+    LocalSet::new()
+        .run_until(async {
+            let sq = FakeSq::new("reattach-joined");
+            let driver = sq.workspace_driver();
+            // Another session's proxy started a fresh process.
+            let _holder = Session::connect(&driver, &sq, "holder").await;
+            let command = sq.command_id().await;
+            sq.set_commands(
+                &format!(
+                    r#"[{{"commandId":"{command}","status":"COMMAND_STATUS_IDLE","startedAt":"2026-11-05T01:00:00Z"}}]"#
+                ),
+                "[]",
+            );
+            let started_at_ms = 1_793_840_400_000;
+
+            let error = reattach_turn_in_background(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+                started_at_ms - 60_000,
+            )
+            .await
+            .unwrap()
+            .expect_err("the process serving the workspace started after the turn");
+            assert!(is_remote_agent_lost_error(&error), "{error}");
+            assert!(
+                error.contains("started after the turn was prompted"),
+                "{error}"
+            );
+
+            let outcome = reattach_turn_in_background(
+                sq.workspace_driver(),
+                &sq,
+                Arc::new(BasicMessageWriter::new()),
+                started_at_ms + 60_000,
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(outcome, Ok(AgentRunOutcome::Completed)),
+                "a process already running when the turn was prompted is the one that ran it: \
+                 {outcome:?}"
+            );
+            assert_eq!(sq.launches().len(), 1, "both reattachments joined the proxy");
         })
         .await;
 }

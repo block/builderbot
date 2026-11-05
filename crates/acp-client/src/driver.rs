@@ -54,6 +54,8 @@ mod remote_process;
 mod remote_routing;
 mod response_completion;
 
+use remote_routing::RemoteLoss;
+
 static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // =============================================================================
@@ -2047,14 +2049,14 @@ impl AcpDriver {
             agent_session_id,
             config_options,
             auth_selection,
-            false,
+            None,
         )
         .await
     }
 
-    /// Reattach to remote session `agent_session_id`, whose turn a previous
-    /// app instance prompted and was then gone before it ended, and wait for
-    /// that turn to end.
+    /// Reattach to `turn` of a remote session, which an earlier connection
+    /// prompted and was then gone before it ended, and wait for that turn to
+    /// end.
     ///
     /// The session is loaded through the shared proxy (so `sq` attaches to
     /// the agent process still serving the turn) and the rest of the turn is
@@ -2069,7 +2071,7 @@ impl AcpDriver {
         store: &Arc<dyn Store>,
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
-        agent_session_id: &str,
+        turn: &ReattachTurn,
     ) -> Result<AgentRunOutcome, String> {
         if !self.is_remote {
             return Err("Only a remote session's turn can be reattached to".to_string());
@@ -2081,10 +2083,10 @@ impl AcpDriver {
                 store,
                 writer,
                 cancel_token,
-                Some(agent_session_id),
+                Some(&turn.agent_session_id),
                 &[],
                 None,
-                true,
+                Some(turn),
             )
             .await?;
         let Some(settled) = connection.take_settled_receiver() else {
@@ -2108,7 +2110,7 @@ impl AcpDriver {
         agent_session_id: Option<&str>,
         config_options: &[AcpSessionConfigOptionSelection],
         auth_selection: Option<&AcpAuthenticationSelection>,
-        reattach: bool,
+        reattach: Option<&ReattachTurn>,
     ) -> Result<SessionConnection, String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
         let acp_working_dir = resolve_acp_working_dir(
@@ -2347,9 +2349,9 @@ impl AcpDriver {
                 Box::new(normalized_stdout_reader),
             )
         };
-        let reattached_turn = match &agent_process {
-            AgentProcess::Remote(lease) if reattach => {
-                Some(lease.reattached_turn().ok_or_else(|| {
+        let reattached_turn = match (&agent_process, reattach) {
+            (AgentProcess::Remote(lease), Some(turn)) => {
+                Some(lease.reattached_turn(turn.prompted_at).ok_or_else(|| {
                     "This remote agent's workspace is unknown, so its turn cannot be reattached to"
                         .to_string()
                 })?)
@@ -2525,13 +2527,27 @@ impl AcpDriver {
                 .map_err(|e| format!("ACP protocol failed: {e:?}"));
             // A remote agent lost under the session ends its connection with
             // whatever error the cut-off stream produced; report the loss.
-            let protocol_result = match (protocol_result, agent_process.lost_cause()) {
-                (Err(error), Some(cause)) if !cancel_token.is_cancelled() => {
+            let protocol_result = match (protocol_result, agent_process.loss()) {
+                (Err(error), Some(loss)) if !cancel_token.is_cancelled() => {
+                    let RemoteLoss {
+                        cause,
+                        agent_may_survive,
+                    } = loss;
                     log::warn!(
-                        "Session {our_session_id}: remote agent lost ({cause}); \
-                         its connection ended with: {error}"
+                        "Session {our_session_id}: {} ({cause}); its connection ended \
+                         with: {error}",
+                        if agent_may_survive {
+                            "lost its connection to the remote agent"
+                        } else {
+                            "remote agent lost"
+                        }
                     );
-                    Err(format!("{REMOTE_AGENT_LOST_PREFIX}{cause}"))
+                    let prefix = if agent_may_survive {
+                        REMOTE_AGENT_DETACHED_PREFIX
+                    } else {
+                        REMOTE_AGENT_LOST_PREFIX
+                    };
+                    Err(format!("{prefix}{cause}"))
                 }
                 (result, _) => result,
             };
@@ -2642,11 +2658,11 @@ enum AgentProcess {
 }
 
 impl AgentProcess {
-    /// Why the remote agent was lost under this session, if it was.
-    fn lost_cause(&self) -> Option<String> {
+    /// How the remote agent was lost under this session, if it was.
+    fn loss(&self) -> Option<RemoteLoss> {
         match self {
             Self::Local(_) => None,
-            Self::Remote(lease) => lease.lost_cause(),
+            Self::Remote(lease) => lease.loss(),
         }
     }
 
@@ -6607,6 +6623,27 @@ const REMOTE_AGENT_LOST_PREFIX: &str = "Remote agent lost: ";
 /// rather than the agent failing the session.
 pub fn is_remote_agent_lost_error(error: &str) -> bool {
     error.contains(REMOTE_AGENT_LOST_PREFIX)
+}
+
+/// Starts the error a session ends with when the `sq` proxy connecting it to
+/// its remote agent went while bloxlet still runs (or cannot say whether it
+/// runs) the agent process, followed by the cause. The turn may still be
+/// going there; [`AcpDriver::reattach`] can pick it back up.
+const REMOTE_AGENT_DETACHED_PREFIX: &str = "Remote agent detached: ";
+
+/// Whether a session error means it lost its connection to a remote agent
+/// that may still be serving its turn.
+pub fn is_remote_agent_detached_error(error: &str) -> bool {
+    error.contains(REMOTE_AGENT_DETACHED_PREFIX)
+}
+
+/// The turn [`AcpDriver::reattach`] picks back up.
+#[derive(Clone, Debug)]
+pub struct ReattachTurn {
+    /// The agent's id for the session the turn is on.
+    pub agent_session_id: String,
+    /// When the turn was prompted, in ms since the epoch.
+    pub prompted_at: i64,
 }
 
 // Fragment shared by `setup_acp_session`'s required-transport check and

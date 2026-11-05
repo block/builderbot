@@ -3,6 +3,7 @@
 use super::*;
 use crate::driver::remote_routing::{RemoteSessionRouter, RemoteTransport};
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 fn attach(router: &RemoteSessionRouter) -> (u64, mpsc::UnboundedReceiver<String>) {
@@ -249,38 +250,112 @@ fn tool_call(session: &str, kind: &str, status: &str) -> String {
 }
 
 #[test]
-fn a_session_stalls_only_while_a_quiet_tool_call_is_running() {
+fn a_session_stalls_while_its_prompt_hears_nothing() {
     let router = RemoteSessionRouter::new();
     let (client, _rx) = attach(&router);
-    router.outgoing(client, &prompt(1, "sess-a"));
     let quiet = Duration::from_millis(50);
 
+    router.incoming(&chunk("sess-a", "replayed history"));
+    std::thread::sleep(quiet);
+    assert!(
+        !router.has_stalled_prompt(quiet),
+        "a quiet session with no prompt in flight has not stalled"
+    );
+
+    let request = router.outgoing(client, &prompt(1, "sess-a"));
+    assert!(
+        !router.has_stalled_prompt(quiet),
+        "a prompt that was just sent has not stalled, however long the session was quiet"
+    );
+    std::thread::sleep(quiet);
+    assert!(
+        router.has_stalled_prompt(quiet),
+        "a prompt the agent never answered has stalled, with or without a tool call"
+    );
+
     router.incoming(&chunk("sess-a", "thinking"));
+    assert!(!router.has_stalled_prompt(quiet));
+    router.incoming(&tool_call("sess-a", "tool_call", "in_progress"));
     std::thread::sleep(quiet);
+    assert!(router.has_stalled_prompt(quiet));
+
+    router.incoming(&chunk("sess-b", "another session's output"));
     assert!(
-        !router.has_stalled_tool_call(quiet),
-        "a quiet session with no tool call running has not stalled"
+        router.has_stalled_prompt(quiet),
+        "only the prompted session's own frames count"
     );
 
-    router.incoming(&tool_call("sess-a", "tool_call", "pending"));
-    router.incoming(&tool_call("sess-a", "tool_call_update", "in_progress"));
-    assert!(
-        !router.has_stalled_tool_call(quiet),
-        "a tool call that just started has not stalled"
-    );
+    router.incoming(&response(
+        &wire_id(&request),
+        json!({"stopReason": "end_turn"}),
+    ));
     std::thread::sleep(quiet);
-    assert!(router.has_stalled_tool_call(quiet));
+    assert!(!router.has_stalled_prompt(quiet), "the turn has ended");
 
-    router.incoming(&tool_call("sess-a", "tool_call_update", "completed"));
-    std::thread::sleep(quiet);
-    assert!(!router.has_stalled_tool_call(quiet));
-
-    router.incoming(&tool_call("sess-a", "tool_call_update", "in_progress"));
+    router.outgoing(client, &prompt(2, "sess-a"));
     router.detach(client);
     std::thread::sleep(quiet);
     assert!(
-        !router.has_stalled_tool_call(quiet),
-        "a detached session's tool calls are not watched"
+        !router.has_stalled_prompt(quiet),
+        "a detached session's prompts are not watched"
+    );
+}
+
+#[test]
+fn detaching_names_the_sessions_left_with_a_prompt_in_flight() {
+    let router = RemoteSessionRouter::new();
+    let (a, _a_rx) = attach(&router);
+    let (b, _b_rx) = attach(&router);
+    let answered = router.outgoing(a, &prompt(1, "sess-a-done"));
+    router.incoming(&response(
+        &wire_id(&answered),
+        json!({"stopReason": "end_turn"}),
+    ));
+    router.outgoing(a, &prompt(2, "sess-a"));
+    router.outgoing(a, &session_new(3));
+    router.outgoing(b, &prompt(1, "sess-b"));
+
+    assert_eq!(router.detach(a), ["sess-a"]);
+    assert_eq!(router.detach(a), Vec::<String>::new(), "already detached");
+
+    router.close();
+    assert_eq!(
+        router.detach(b),
+        Vec::<String>::new(),
+        "nothing can be cancelled once the agent's output has ended"
+    );
+}
+
+/// A connection that goes away mid-turn cancels its prompt on the shared
+/// agent, which would otherwise keep serving a turn nobody waits on.
+#[tokio::test(flavor = "current_thread")]
+async fn a_connection_detaching_mid_turn_cancels_its_prompt() {
+    let (transport_stdin, agent_stdin) = tokio::io::duplex(64 * 1024);
+    let (_agent_stdout, transport_stdout) = tokio::io::duplex(64 * 1024);
+    let transport = RemoteTransport::spawn(transport_stdin, transport_stdout);
+    let mut agent_stdin = BufReader::new(agent_stdin).lines();
+
+    let streams = transport.attach();
+    let mut outgoing = streams.outgoing;
+    outgoing
+        .write_all(format!("{}\n", prompt(7, "sess-a")).as_bytes())
+        .await
+        .unwrap();
+    let sent: Value =
+        serde_json::from_str(&agent_stdin.next_line().await.unwrap().unwrap()).unwrap();
+    assert_eq!(sent["method"], "session/prompt");
+
+    drop(outgoing);
+    drop(streams.incoming);
+    let cancel: Value = tokio::time::timeout(Duration::from_secs(5), agent_stdin.next_line())
+        .await
+        .expect("the detached prompt is cancelled")
+        .unwrap()
+        .map(|line| serde_json::from_str::<Value>(&line).unwrap())
+        .unwrap();
+    assert_eq!(
+        cancel,
+        json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": "sess-a"}})
     );
 }
 

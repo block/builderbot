@@ -1,6 +1,6 @@
 //! Reading bloxlet's view of a remote agent process.
 
-use crate::driver::remote_liveness::{parse_commands, CommandRecord, Target};
+use crate::driver::remote_liveness::{parse_commands, parse_utc_timestamp, CommandRecord, Target};
 use std::ffi::OsString;
 
 fn record(id: &str, status: &str, message: &str) -> CommandRecord {
@@ -8,6 +8,7 @@ fn record(id: &str, status: &str, message: &str) -> CommandRecord {
         id: id.to_string(),
         status: status.to_string(),
         message: message.to_string(),
+        started_at: None,
     }
 }
 
@@ -32,6 +33,38 @@ fn reads_protojson_command_summaries() {
             ),
         ]
     );
+}
+
+#[test]
+fn reads_when_a_command_started() {
+    let commands = parse_commands(
+        br#"[
+            {"commandId":"cmd-1","status":"COMMAND_STATUS_RUNNING",
+             "createdAt":"2026-11-05T01:02:03Z","startedAt":"2026-11-05T01:02:04.250Z"},
+            {"commandId":"cmd-2","status":"COMMAND_STATUS_RUNNING",
+             "createdAt":"2026-11-05T01:02:03.999999Z"},
+            {"commandId":"cmd-3","status":"COMMAND_STATUS_RUNNING","startedAt":"soon"}
+        ]"#,
+    )
+    .unwrap();
+
+    let started: Vec<_> = commands.iter().map(|c| c.started_at).collect();
+    assert_eq!(started, [Some(1_793_840_524), Some(1_793_840_523), None]);
+}
+
+#[test]
+fn parses_utc_timestamps_to_epoch_seconds() {
+    assert_eq!(parse_utc_timestamp("1970-01-01T00:00:00Z"), Some(0));
+    assert_eq!(
+        parse_utc_timestamp("2000-03-01T00:00:00Z"),
+        Some(951_868_800)
+    );
+    assert_eq!(
+        parse_utc_timestamp("2026-11-05T01:02:03.456789Z"),
+        Some(1_793_840_523)
+    );
+    assert_eq!(parse_utc_timestamp("2026-11-05T01:02:03+11:00"), None);
+    assert_eq!(parse_utc_timestamp("2026-11-05"), None);
 }
 
 #[test]

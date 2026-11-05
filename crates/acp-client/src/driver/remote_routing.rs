@@ -15,9 +15,11 @@
 //! than written into some other session's transcript.
 //!
 //! It also notes when each session last heard from the agent and which of
-//! its tool calls are running, so a session stuck mid-tool-call on an agent
-//! that died without closing the stream can be noticed (see
-//! [`RemoteSessionRouter::has_stalled_tool_call`]).
+//! its prompts are in flight, so a session waiting on an agent that died
+//! without closing the stream can be noticed (see
+//! [`RemoteSessionRouter::has_stalled_prompt`]). A client that detaches with
+//! a prompt still in flight has that session cancelled: the shared process
+//! would otherwise keep serving a turn nobody is waiting on.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,6 +45,7 @@ const MAX_EARLY_FRAMES: usize = 256;
 const CLIENT_PIPE_BYTES: usize = 64 * 1024;
 
 const SESSION_NEW_METHOD: &str = "session/new";
+const SESSION_PROMPT_METHOD: &str = "session/prompt";
 const CANCEL_REQUEST_METHOD: &str = "$/cancel_request";
 
 /// Demultiplexes one agent process's frames across the clients sharing it.
@@ -63,25 +66,31 @@ struct RouterState {
     early_frames: VecDeque<EarlyFrame>,
     /// Unowned session ids already reported, so each is logged once.
     reported_unowned: HashSet<String>,
-    /// What each session's agent last did.
-    activity: HashMap<String, SessionActivity>,
+    /// When the agent last sent a frame naming each session.
+    last_frame_at: HashMap<String, Instant>,
     /// The agent's output has ended; nothing more will be routed.
     closed: bool,
-    /// Why the agent was lost, when its output ended other than by
-    /// [`RemoteSessionRouter::close`].
-    lost: Option<String>,
+    /// How the attached sessions lost their agent, when the router closed
+    /// other than by [`RemoteSessionRouter::close`].
+    loss: Option<RemoteLoss>,
 }
 
-struct SessionActivity {
-    last_frame_at: Instant,
-    /// Tool calls the agent reported `in_progress` and has not finished.
-    running_tool_calls: HashSet<String>,
+/// How the sessions on a remote transport lost their agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RemoteLoss {
+    pub(super) cause: String,
+    /// Only the proxy went: bloxlet still runs (or may still run) the agent
+    /// process, so its turns can be reattached to.
+    pub(super) agent_may_survive: bool,
 }
 
 struct PendingRequest {
     client: RemoteClientId,
     original_id: Value,
     opens_session: bool,
+    /// The session a `session/prompt` request prompts.
+    prompts: Option<String>,
+    sent_at: Instant,
 }
 
 struct EarlyFrame {
@@ -112,22 +121,39 @@ impl RemoteSessionRouter {
         client
     }
 
-    /// Forget a client along with its sessions and in-flight requests.
-    pub(super) fn detach(&self, client: RemoteClientId) {
+    /// Forget a client along with its sessions and in-flight requests,
+    /// returning the sessions it still had a prompt in flight on, unless the
+    /// agent's output has already ended.
+    pub(super) fn detach(&self, client: RemoteClientId) -> Vec<String> {
         let mut state = self.state();
         let state = &mut *state;
         state.clients.remove(&client);
         state.owners.retain(|session_id, owner| {
             let keep = *owner != client;
             if !keep {
-                state.activity.remove(session_id);
+                state.last_frame_at.remove(session_id);
             }
             keep
         });
-        state.pending.retain(|_, pending| pending.client != client);
+        let mut abandoned = Vec::new();
+        state.pending.retain(|_, pending| {
+            if pending.client != client {
+                return true;
+            }
+            if let Some(session_id) = pending.prompts.take() {
+                abandoned.push(session_id);
+            }
+            false
+        });
         if !state.session_new_pending() {
             state.drop_early_frames();
         }
+        if state.closed {
+            abandoned.clear();
+        }
+        abandoned.sort();
+        abandoned.dedup();
+        abandoned
     }
 
     /// Drop every client's delivery channel, so each sees end-of-stream.
@@ -137,33 +163,38 @@ impl RemoteSessionRouter {
         state.clients.clear();
     }
 
-    /// Close because the agent was lost, recording why unless the router was
+    /// Close because the agent was lost, recording how unless the router was
     /// already closed.
-    pub(super) fn lose(&self, cause: String) {
+    pub(super) fn lose(&self, loss: RemoteLoss) {
         let mut state = self.state();
         if state.closed {
             return;
         }
-        state.lost = Some(cause);
+        state.loss = Some(loss);
         state.closed = true;
         state.clients.clear();
     }
 
-    /// Why the agent was lost, if it was.
-    pub(super) fn lost_cause(&self) -> Option<String> {
-        self.state().lost.clone()
+    /// How the agent was lost, if it was.
+    pub(super) fn loss(&self) -> Option<RemoteLoss> {
+        self.state().loss.clone()
     }
 
-    /// Whether an attached session has a tool call running and has heard
-    /// nothing from the agent for `quiet_for`. That is how a session on an
-    /// agent that died mid-tool-call looks while the stream stays open.
-    pub(super) fn has_stalled_tool_call(&self, quiet_for: Duration) -> bool {
+    /// Whether a session has a prompt in flight and has heard nothing from
+    /// the agent for `quiet_for` since sending it. That is how a session on
+    /// an agent that died mid-turn looks while the stream stays open,
+    /// whether the agent was running a tool or still generating.
+    pub(super) fn has_stalled_prompt(&self, quiet_for: Duration) -> bool {
         let state = self.state();
-        state.owners.keys().any(|session_id| {
-            state.activity.get(session_id).is_some_and(|activity| {
-                !activity.running_tool_calls.is_empty()
-                    && activity.last_frame_at.elapsed() >= quiet_for
-            })
+        state.pending.values().any(|pending| {
+            let Some(session_id) = &pending.prompts else {
+                return false;
+            };
+            let heard_at = state
+                .last_frame_at
+                .get(session_id)
+                .map_or(pending.sent_at, |at| (*at).max(pending.sent_at));
+            heard_at.elapsed() >= quiet_for
         })
     }
 
@@ -186,12 +217,17 @@ impl RemoteSessionRouter {
         match (method.as_deref(), id) {
             (Some(method), Some(original_id)) => {
                 let wire_id = wire_request_id(client, &original_id);
+                let prompts = (method == SESSION_PROMPT_METHOD)
+                    .then(|| session_id_in(&frame, "params").map(str::to_owned))
+                    .flatten();
                 state.pending.insert(
                     wire_id.clone(),
                     PendingRequest {
                         client,
                         original_id,
                         opens_session: method == SESSION_NEW_METHOD,
+                        prompts,
+                        sent_at: Instant::now(),
                     },
                 );
                 frame.insert("id".to_string(), Value::String(wire_id));
@@ -231,7 +267,9 @@ impl RemoteSessionRouter {
         let is_request = frame.get("id").is_some_and(|id| !id.is_null());
         match session_id_in(&frame, "params") {
             Some(session_id) => {
-                state.note_activity(session_id, &frame);
+                state
+                    .last_frame_at
+                    .insert(session_id.to_string(), Instant::now());
                 state.route_session_frame(session_id, line);
             }
             None if is_request => state.route_sessionless_request(method, line),
@@ -253,31 +291,6 @@ impl RouterState {
                     "Remote ACP session {session_id} moved from client {previous} to client {client}"
                 );
             }
-        }
-    }
-
-    fn note_activity(&mut self, session_id: &str, frame: &Map<String, Value>) {
-        let activity = self
-            .activity
-            .entry(session_id.to_string())
-            .or_insert_with(|| SessionActivity {
-                last_frame_at: Instant::now(),
-                running_tool_calls: HashSet::new(),
-            });
-        activity.last_frame_at = Instant::now();
-        let Some(update) = frame.get("params").and_then(|params| params.get("update")) else {
-            return;
-        };
-        let (Some(tool_call_id), Some(status)) = (
-            update.get("toolCallId").and_then(Value::as_str),
-            update.get("status").and_then(Value::as_str),
-        ) else {
-            return;
-        };
-        if status == "in_progress" {
-            activity.running_tool_calls.insert(tool_call_id.to_string());
-        } else {
-            activity.running_tool_calls.remove(tool_call_id);
         }
     }
 
@@ -407,6 +420,10 @@ fn wire_request_id(client: RemoteClientId, original_id: &Value) -> String {
 pub(super) struct RemoteTransport {
     router: Arc<RemoteSessionRouter>,
     to_agent: mpsc::UnboundedSender<String>,
+    /// Cancelled once the agent's output has ended, which the transport
+    /// leaves for its owner to explain (see [`Self::output_end`]).
+    output_ended: CancellationToken,
+    output_end: Arc<Mutex<Option<String>>>,
     /// Cancelled once the transport has closed: every client has been told
     /// the agent's output ended.
     closed: CancellationToken,
@@ -430,23 +447,39 @@ impl RemoteTransport {
     {
         let router = Arc::new(RemoteSessionRouter::new());
         let (to_agent, to_agent_rx) = mpsc::unbounded_channel();
-        let closed = CancellationToken::new();
+        let output_ended = CancellationToken::new();
+        let output_end = Arc::new(Mutex::new(None));
         tokio::spawn(write_agent_stdin(stdin, to_agent_rx));
         tokio::spawn(read_agent_stdout(
             stdout,
             Arc::clone(&router),
-            closed.clone(),
+            Arc::clone(&output_end),
+            output_ended.clone(),
         ));
         Self {
             router,
             to_agent,
-            closed,
+            output_ended,
+            output_end,
+            closed: CancellationToken::new(),
         }
     }
 
     /// Cancelled once the transport has closed.
     pub(super) fn closed(&self) -> &CancellationToken {
         &self.closed
+    }
+
+    /// Cancelled once the agent's output has ended. The clients' streams stay
+    /// open until the owner closes the transport, having found out whether
+    /// the agent is gone with it.
+    pub(super) fn output_ended(&self) -> &CancellationToken {
+        &self.output_ended
+    }
+
+    /// How the agent's output ended, once it has.
+    pub(super) fn output_end(&self) -> Option<String> {
+        self.output_end.lock().unwrap().clone()
     }
 
     /// End every attached client's stream.
@@ -457,18 +490,34 @@ impl RemoteTransport {
 
     /// End every attached client's stream because the agent was lost.
     pub(super) fn lose(&self, cause: String) {
-        self.router.lose(cause);
+        self.end(RemoteLoss {
+            cause,
+            agent_may_survive: false,
+        });
+    }
+
+    /// End every attached client's stream because the connection to the
+    /// agent was lost while the agent itself may still be running.
+    pub(super) fn detach_sessions(&self, cause: String) {
+        self.end(RemoteLoss {
+            cause,
+            agent_may_survive: true,
+        });
+    }
+
+    fn end(&self, loss: RemoteLoss) {
+        self.router.lose(loss);
         self.closed.cancel();
     }
 
-    /// Why the agent was lost, if it was.
-    pub(super) fn lost_cause(&self) -> Option<String> {
-        self.router.lost_cause()
+    /// How the agent was lost, if it was.
+    pub(super) fn loss(&self) -> Option<RemoteLoss> {
+        self.router.loss()
     }
 
-    /// See [`RemoteSessionRouter::has_stalled_tool_call`].
-    pub(super) fn has_stalled_tool_call(&self, quiet_for: Duration) -> bool {
-        self.router.has_stalled_tool_call(quiet_for)
+    /// See [`RemoteSessionRouter::has_stalled_prompt`].
+    pub(super) fn has_stalled_prompt(&self, quiet_for: Duration) -> bool {
+        self.router.has_stalled_prompt(quiet_for)
     }
 
     /// Attach one ACP connection. It detaches once it stops writing.
@@ -509,7 +558,8 @@ async fn write_agent_stdin<W: AsyncWrite + Unpin>(
 async fn read_agent_stdout<R: AsyncRead + Unpin>(
     stdout: R,
     router: Arc<RemoteSessionRouter>,
-    closed: CancellationToken,
+    output_end: Arc<Mutex<Option<String>>>,
+    output_ended: CancellationToken,
 ) {
     let cause =
         match super::normalize_remote_acp_stdout(stdout, |line| router.incoming(&line)).await {
@@ -519,10 +569,8 @@ async fn read_agent_stdout<R: AsyncRead + Unpin>(
                 format!("reading the remote agent's output failed: {error}")
             }
         };
-    // Unless the proxy was being stopped (which closes the router first),
-    // the sessions still attached have lost their agent.
-    router.lose(cause);
-    closed.cancel();
+    *output_end.lock().unwrap() = Some(cause);
+    output_ended.cancel();
 }
 
 async fn forward_client_frames(
@@ -547,7 +595,27 @@ async fn forward_client_frames(
             }
         }
     }
-    router.detach(client);
+    // Nobody is waiting on these sessions' turns any more. Unlike a process
+    // of its own, the shared agent would keep serving them — using memory,
+    // and perhaps committing to a branch Staged has given up on — until the
+    // last session on it is done, which can be hours.
+    for session_id in router.detach(client) {
+        log::info!(
+            "Cancelling remote ACP session {session_id}: its connection detached with a \
+             prompt in flight"
+        );
+        let _ = to_agent.send(session_cancel_frame(&session_id));
+    }
+}
+
+/// A `session/cancel` notification for `session_id`.
+pub(super) fn session_cancel_frame(session_id: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/cancel",
+        "params": {"sessionId": session_id},
+    })
+    .to_string()
 }
 
 async fn deliver_client_frames(

@@ -1925,10 +1925,33 @@ pub fn start_session(
             }
         }
 
+        // The `sq` proxy went while bloxlet still runs the agent, which may
+        // still be finishing the turn: pick it back up there. The reattached
+        // turn ends like a dead owner's does, with no settle reason.
+        let (result, settle_reason) = match result {
+            Err(error)
+                if acp_client::is_remote_agent_detached_error(&error)
+                    && !cancel_token.is_cancelled() =>
+            {
+                let result = local.block_on(
+                    &rt,
+                    reattach_detached_turn(
+                        &store_for_status,
+                        &config,
+                        turn_start_message_id,
+                        &cancel_token,
+                        error,
+                    ),
+                );
+                (result, None)
+            }
+            result => (result, settle_reason.get()),
+        };
+
         finish_session_run(
             &config,
             result,
-            settle_reason.get(),
+            settle_reason,
             turn_start_message_id,
             &cancel_token,
             registration,
@@ -3818,7 +3841,8 @@ async fn reattach_turn(
                 .find(|message| message.role == MessageRole::User)
         });
     let turn_start_message_id = turn_start.as_ref().map_or(0, |message| message.id);
-    if let Some(turn_started_at) = turn_start.map(|message| message.created_at) {
+    let turn_started_at = turn_start.map(|message| message.created_at);
+    if let Some(turn_started_at) = turn_started_at {
         if store
             .get_commit_by_session(&config.session_id)
             .ok()
@@ -3854,37 +3878,108 @@ async fn reattach_turn(
         }
     }
 
-    let result = async {
-        let agent_session_id = config
-            .agent_session_id
-            .clone()
-            .ok_or("The session has no agent session to reattach to")?;
-        let workspace_name = config
-            .workspace_name
-            .as_deref()
-            .ok_or("The session is not on a remote workspace")?;
-        let mut driver = AcpDriver::for_workspace(workspace_name, config.provider.as_deref())?;
-        if let Some(ref remote_dir) = config.remote_working_dir {
-            driver = driver.with_remote_working_dir(remote_dir.clone());
-        }
-        let store_trait: Arc<dyn acp_client::Store> = store.clone();
+    let prompted_at = turn_started_at.unwrap_or(0);
+    let result = reattach_agent(store, &config, cancel_token, prompted_at).await;
+    (config, turn_start_message_id, result)
+}
+
+/// How many times [`reattach_agent`] reconnects to a turn whose `sq` proxy
+/// keeps going while bloxlet still runs its agent, before failing with that.
+const DETACHED_TURN_REATTACH_LIMIT: usize = 3;
+
+/// Reattach to the turn of remote session `config` prompted at `prompted_at`
+/// (ms since the epoch) and wait for it to end (see
+/// [`AcpDriver::reattach`]), reconnecting when its `sq` proxy goes again
+/// while bloxlet still runs the agent.
+async fn reattach_agent(
+    store: &Arc<Store>,
+    config: &SessionConfig,
+    cancel_token: &CancellationToken,
+    prompted_at: i64,
+) -> Result<AgentRunOutcome, String> {
+    let agent_session_id = config
+        .agent_session_id
+        .clone()
+        .or_else(|| {
+            stored_agent_session_id(store, &config.session_id)
+                .ok()
+                .flatten()
+        })
+        .ok_or("The session has no agent session to reattach to")?;
+    let workspace_name = config
+        .workspace_name
+        .as_deref()
+        .ok_or("The session is not on a remote workspace")?;
+    let mut driver = AcpDriver::for_workspace(workspace_name, config.provider.as_deref())?;
+    if let Some(ref remote_dir) = config.remote_working_dir {
+        driver = driver.with_remote_working_dir(remote_dir.clone());
+    }
+    let store_trait: Arc<dyn acp_client::Store> = store.clone();
+    let turn = acp_client::ReattachTurn {
+        agent_session_id,
+        prompted_at,
+    };
+    let mut attempt = 1;
+    loop {
         let writer: Arc<dyn acp_client::MessageWriter> = Arc::new(MessageWriter::new(
             config.session_id.clone(),
             Arc::clone(store),
         ));
-        driver
+        let result = driver
             .reattach(
                 &config.session_id,
                 &config.working_dir,
                 &store_trait,
                 &writer,
                 cancel_token,
-                &agent_session_id,
+                &turn,
             )
-            .await
+            .await;
+        match result {
+            Err(error)
+                if acp_client::is_remote_agent_detached_error(&error)
+                    && !cancel_token.is_cancelled()
+                    && attempt < DETACHED_TURN_REATTACH_LIMIT =>
+            {
+                log::warn!(
+                    "Session {}: {error}; reattaching to its turn again",
+                    config.session_id
+                );
+                attempt += 1;
+            }
+            result => return result,
+        }
     }
-    .await;
-    (config, turn_start_message_id, result)
+}
+
+/// Pick up the turn `config` prompted (its prompt is row
+/// `turn_start_message_id`) after its `sq` proxy went with `error` while
+/// bloxlet still ran the agent, rather than failing a turn the agent may
+/// still be finishing.
+async fn reattach_detached_turn(
+    store: &Arc<Store>,
+    config: &SessionConfig,
+    turn_start_message_id: i64,
+    cancel_token: &CancellationToken,
+    error: String,
+) -> Result<AgentRunOutcome, String> {
+    let prompted_at = store
+        .get_session_messages_since(&config.session_id, turn_start_message_id, &[])
+        .ok()
+        .and_then(|messages| {
+            messages
+                .into_iter()
+                .find(|message| message.id == turn_start_message_id)
+        })
+        .map(|message| message.created_at);
+    let Some(prompted_at) = prompted_at else {
+        return Err(error);
+    };
+    log::warn!(
+        "Session {}: {error}; reattaching to its turn",
+        config.session_id
+    );
+    reattach_agent(store, config, cancel_token, prompted_at).await
 }
 
 /// The branch's HEAD as of `at` (ms since the epoch): its newest commit made
@@ -4471,7 +4566,11 @@ fn queued_follow_up_should_start(completed_successfully: bool, cancel_requested:
 /// Why a session whose run failed ended: its remote agent was lost under it,
 /// or the agent failed it.
 fn failed_run_completion_reason(error: &str) -> CompletionReason {
-    if acp_client::is_remote_agent_lost_error(error) {
+    // A turn still detached once reattaching gave up lost its agent as far
+    // as the session can tell.
+    if acp_client::is_remote_agent_lost_error(error)
+        || acp_client::is_remote_agent_detached_error(error)
+    {
         CompletionReason::RemoteAgentLost
     } else {
         CompletionReason::Crashed
@@ -5132,6 +5231,14 @@ mod tests {
                  as failed: bloxlet restarted while command was running"
             ),
             CompletionReason::RemoteAgentLost
+        );
+        assert_eq!(
+            failed_run_completion_reason(
+                "Remote agent detached: the `sq blox acp` proxy exited, and whether the agent \
+                 process (command 27101663) still runs is unknown: `sq blox ws commands` timed out"
+            ),
+            CompletionReason::RemoteAgentLost,
+            "a turn reattaching could not pick back up is lost as far as the session can tell"
         );
         assert_eq!(
             failed_run_completion_reason("ACP protocol failed: server shut down unexpectedly"),

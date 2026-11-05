@@ -2,7 +2,8 @@
   ProjectRowContent.svelte — how a project introduces itself in a row: a state
   icon on the left (see ProjectStatusIcon), the name, and a meta line of
   colored repo badges with any running activity — falling back to a repo count
-  while badges haven't landed.
+  while badges haven't landed. A remote project also gets a muted cloud
+  (RemoteProjectIcon) under its state icon, on the meta line.
 
   Shared between the sidebar's project rows and pickers that list projects
   (MoveBranchDialog), so a project reads the same everywhere. Everything is
@@ -20,6 +21,7 @@
   import { getProjectStatus } from './projectStatus';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import ProjectStatusIcon from './ProjectStatusIcon.svelte';
+  import RemoteProjectIcon from './RemoteProjectIcon.svelte';
 
   interface Props {
     project: Project;
@@ -50,8 +52,16 @@
 </script>
 
 <div class="row-main">
-  <ProjectStatusIcon {project} {branches} size={14} />
+  <ProjectStatusIcon
+    {project}
+    {branches}
+    hydrated={projectsDataStore.isProjectHydrated(project.id)}
+    size={14}
+  />
   <span class="project-name">{projectDisplayName(project)}</span>
+  {#if project.location === 'remote'}
+    <RemoteProjectIcon size={12} />
+  {/if}
   <div class="row-meta">
     {#if badges.length > 0}
       <span class="badge-row">
@@ -76,7 +86,8 @@
     /*
       Icon column + text column. The icon and the name share the first grid
       row, so centring aligns the 14px icon on the name's line box rather than
-      on the whole two-line block; the meta line sits below the name.
+      on the whole two-line block; the meta line sits below the name, with a
+      remote project's cloud beside it in the icon column.
     */
     display: grid;
     grid-template-columns: 16px minmax(0, 1fr);

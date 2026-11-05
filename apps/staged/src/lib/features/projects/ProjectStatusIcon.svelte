@@ -1,8 +1,8 @@
 <!--
   ProjectStatusIcon.svelte — the one icon a project leads with: its chosen
-  status option, or else its computed status (aggregate PR state for local
-  projects, workspace state for remote ones). See projectStatusDisplay.ts for
-  the precedence rules.
+  status option, or else its computed status (aggregate PR state), whether the
+  project is local or remote. See projectStatusDisplay.ts for the precedence
+  rules.
 
   Shared by the sidebar rows, the project grid cards and the detail-page
   status picker so a project reads the same everywhere. Renders the bare SVG

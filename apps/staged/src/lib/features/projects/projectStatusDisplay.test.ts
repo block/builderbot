@@ -161,7 +161,7 @@ describe('resolveProjectStatus', () => {
     expect(status).toEqual({ kind: 'override', option: blocked });
   });
 
-  it('lets an override win over the cloud status', () => {
+  it('lets an override win for a remote project', () => {
     const status = resolveProjectStatus(
       project({ location: 'remote', statusOverride: 'blocked' }),
       [branch({ branchType: 'remote', workspaceStatus: 'running' })],
@@ -184,15 +184,18 @@ describe('resolveProjectStatus', () => {
     expect(status).toEqual({ kind: 'pr', prStatus: null, hasCodeChanges: true });
   });
 
-  it('shows the cloud status for remote projects, hydrated or not', () => {
+  it('resolves a remote project from its PR status, like a local one', () => {
     const remote = project({ location: 'remote' });
+    const remoteBranch = branch({ branchType: 'remote', workspaceStatus: 'running' });
     expect(
-      resolveProjectStatus(remote, [branch({ workspaceStatus: 'starting' })], options)
-    ).toEqual({ kind: 'cloud', workspaceStatus: 'starting' });
-    expect(resolveProjectStatus(remote, [], options, false)).toEqual({
-      kind: 'cloud',
-      workspaceStatus: null,
+      resolveProjectStatus(remote, [{ ...remoteBranch, prNumber: 1, prState: 'OPEN' }], options)
+    ).toEqual({ kind: 'pr', prStatus: 'open', hasCodeChanges: false });
+    expect(resolveProjectStatus(remote, [{ ...remoteBranch, commitCount: 3 }], options)).toEqual({
+      kind: 'pr',
+      prStatus: null,
+      hasCodeChanges: true,
     });
+    expect(resolveProjectStatus(remote, [], options, false)).toEqual({ kind: 'placeholder' });
   });
 
   it('shows a placeholder for an unhydrated local project', () => {
@@ -209,7 +212,7 @@ describe('resolveProjectStatus', () => {
 
 describe('computedStatusLabel', () => {
   function labelFor(branches: Branch[]): string {
-    return computedStatusLabel(resolveComputedProjectStatus(project(), branches));
+    return computedStatusLabel(resolveComputedProjectStatus(branches));
   }
 
   it('labels each PR status', () => {
@@ -222,11 +225,8 @@ describe('computedStatusLabel', () => {
     expect(labelFor([])).toBe('No changes yet');
   });
 
-  it('labels remote workspace states', () => {
-    expect(computedStatusLabel({ kind: 'cloud', workspaceStatus: 'running' })).toBe(
-      'Workspace running'
-    );
-    expect(computedStatusLabel({ kind: 'cloud', workspaceStatus: null })).toBe('Remote workspace');
+  it('labels a project still loading', () => {
+    expect(computedStatusLabel(resolveComputedProjectStatus([], false))).toBe('Loading…');
   });
 });
 

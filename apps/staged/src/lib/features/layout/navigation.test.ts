@@ -25,7 +25,7 @@ async function importNavigation() {
 beforeEach(() => {
   vi.resetModules();
   // Runes compile away in the app build; under vitest they stay plain global
-  // calls, so stub $state as identity (projectsData.test.ts precedent).
+  // calls, so stub $state as identity (agent.test.ts precedent).
   vi.stubGlobal('$state', (initial: unknown) => initial);
 
   windowLabel = 'main';

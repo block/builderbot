@@ -175,12 +175,17 @@ class ProjectsDataStore {
    * confirmed delete hides the project here at once rather than when the
    * backend's worktree teardown finishes, and projectDeleteFailed brings it
    * back by clearing the marker. See the project-delete lifecycle below.
+   *
+   * Derived rather than a getter: half a dozen lists and counts read it per
+   * pass, so it filters once per change and hands them all the same array,
+   * which keeps their own $deriveds from seeing a new list on every read.
+   * With nothing deleting it is projects itself.
    */
-  get liveProjects(): Project[] {
+  readonly liveProjects: Project[] = $derived.by(() => {
     const deleting = this._deletingProjectNames;
     if (deleting.size === 0) return this._projects;
     return this._projects.filter((project) => !deleting.has(project.id));
-  }
+  });
 
   get branchesByProject(): Map<string, Branch[]> {
     return this._branchesByProject;

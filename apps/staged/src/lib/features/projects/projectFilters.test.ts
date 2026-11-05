@@ -39,7 +39,7 @@ const never = () => false;
 //
 // Only the pure helpers are under test, but importing the module also
 // instantiates the store singleton, which pulls in the global data stores —
-// mock those out and stub $state the way projectsData.test.ts does.
+// mock those out and stub $state the way agent.test.ts does.
 
 async function importHelpers() {
   return await import('./projectFilters.svelte');
@@ -48,7 +48,7 @@ async function importHelpers() {
 beforeEach(() => {
   vi.resetModules();
   // The store's runes compile away in the app build; under vitest they stay
-  // plain global calls, so stub $state as identity (projectsData.test.ts
+  // plain global calls, so stub $state as identity (agent.test.ts
   // precedent). $derived needs the same treatment for the store's derived
   // fields, and since the stub evaluates them eagerly at construction the
   // mocked data stores have to carry the shape those fields read.

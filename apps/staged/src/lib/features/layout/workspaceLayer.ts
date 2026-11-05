@@ -52,3 +52,13 @@ export function setWorkspaceLayer(layer: WorkspaceLayerState): void {
 export function useWorkspaceLayer(): WorkspaceLayerState {
   return getContext<WorkspaceLayerState | undefined>(KEY) ?? OUTSIDE_LAYER;
 }
+
+/**
+ * The host of the layer the base route shows: focusable (tabindex -1) and the
+ * place focus goes when the control it belongs on is gone. Layers don't carry
+ * aria-hidden for the parked state (the workspace above them does), so this
+ * resolves under settings / diff too.
+ */
+export function activeLayerHost(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.workspace-layer:not([aria-hidden])');
+}

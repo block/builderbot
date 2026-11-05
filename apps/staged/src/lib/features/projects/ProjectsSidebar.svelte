@@ -7,6 +7,7 @@
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
+  import type { Project } from '../../types';
   import {
     followWhileVisible,
     goHome,
@@ -46,6 +47,7 @@
   } from './sidebarSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
+  import { neighbourAfterRemove } from './focusAfterRemove';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
@@ -143,6 +145,22 @@
     );
     if (status.kind === 'deleting') return;
     selectProject(projectId);
+  }
+
+  // The row goes as soon as the remove is confirmed, taking focus with it, so
+  // focus moves on to the row that takes its place.
+  function removeProject(project: Project) {
+    const shownIds = sidebarProjects
+      .filter((p) => matchingProjects === null || matchingProjects.has(p.id))
+      .map((p) => p.id);
+    const focusAfterRemove = neighbourAfterRemove(shownIds, project.id, (projectId) =>
+      matchingProjects === null || matchingProjects.has(projectId)
+        ? [...(sidebarBodyEl?.querySelectorAll<HTMLElement>('.project-row') ?? [])].find(
+            (row) => row.dataset.projectId === projectId
+          )
+        : null
+    );
+    void projectActions.requestRemoveProject(project, focusAfterRemove);
   }
 
   function openAllProjects() {
@@ -488,17 +506,14 @@
                      element superlinearly (100 rows ~550 ms vs ~27 ms). -->
                 <ContextMenu.Trigger
                   class="contents"
-                  disabled={status.kind === 'deleting'}
                   hidden={matchingProjects !== null && !matchingProjects.has(project.id)}
                 >
                   <button
                     class="project-row project-item"
+                    data-project-id={project.id}
                     use:scrollIfActive={layerProjectId === project.id}
                     class:active={layerProjectId === project.id}
-                    class:deleting={status.kind === 'deleting'}
                     onclick={() => openProject(project.id)}
-                    disabled={status.kind === 'deleting'}
-                    title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
                   >
                     <ProjectRowContent {project} />
                     <div class="row-status">
@@ -536,30 +551,17 @@
                           in:fade={{ duration: 300, delay: 150 }}
                           out:fade={{ duration: 150 }}
                         ></span>
-                      {:else if status.kind === 'deleting'}
-                        <span
-                          class="status-deleting"
-                          in:fade={{ duration: 300, delay: 150 }}
-                          out:fade={{ duration: 150 }}>Deleting…</span
-                        >
                       {/if}
                     </div>
                   </button>
                 </ContextMenu.Trigger>
                 <ContextMenu.Content class="min-w-[172px]">
-                  <ContextMenu.Item
-                    disabled={status.kind === 'deleting'}
-                    onSelect={() => projectActions.markProjectUnread(project)}
-                  >
+                  <ContextMenu.Item onSelect={() => projectActions.markProjectUnread(project)}>
                     <Mail size={14} /> Mark as Unread
                   </ContextMenu.Item>
-                  <ProjectStatusSubmenu {project} disabled={status.kind === 'deleting'} />
+                  <ProjectStatusSubmenu {project} />
                   <ContextMenu.Separator />
-                  <ContextMenu.Item
-                    variant="destructive"
-                    disabled={status.kind === 'deleting'}
-                    onSelect={() => projectActions.requestRemoveProject(project)}
-                  >
+                  <ContextMenu.Item variant="destructive" onSelect={() => removeProject(project)}>
                     <Trash2 size={14} /> Remove Project
                   </ContextMenu.Item>
                 </ContextMenu.Content>
@@ -745,16 +747,6 @@
     stroke: var(--text-primary);
   }
 
-  .project-row.deleting {
-    opacity: 0.7;
-    cursor: not-allowed;
-  }
-
-  .project-row:disabled:hover {
-    color: var(--text-muted);
-    background-color: transparent;
-  }
-
   .project-row.project-item {
     min-height: 52px;
   }
@@ -780,12 +772,6 @@
     height: 8px;
     border-radius: 50%;
     background-color: var(--ui-accent);
-  }
-
-  .status-deleting {
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-faint);
-    font-weight: 600;
   }
 
   .all-repos-link {

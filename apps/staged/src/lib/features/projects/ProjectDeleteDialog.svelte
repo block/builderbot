@@ -10,13 +10,22 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { projectDisplayName } from '../../shared/utils';
   import { projectActions } from './projectActions.svelte';
+
+  // A confirmed remove has just unmounted the card or row the dialog would
+  // return focus to, so focus goes where the remove's list says instead.
+  function handleCloseAutoFocus(event: Event) {
+    const target = projectActions.takeFocusAfterRemove();
+    if (!target) return;
+    event.preventDefault();
+    target.focus({ preventScroll: true });
+  }
 </script>
 
 <AlertDialog.Root
   open={projectActions.pendingDelete !== null}
   onOpenChange={(v) => !v && projectActions.cancelPendingDelete()}
 >
-  <AlertDialog.Content>
+  <AlertDialog.Content onCloseAutoFocus={handleCloseAutoFocus}>
     {#if projectActions.pendingDelete}
       <AlertDialog.Header>
         <AlertDialog.Title>Remove Project</AlertDialog.Title>

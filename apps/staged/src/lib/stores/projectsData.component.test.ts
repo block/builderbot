@@ -1,3 +1,8 @@
+// Runs in the "component" vitest project for its svelte plugin, not for a
+// DOM: the store's $state and $derived fields have to compile for the client,
+// as in the app, or liveProjects ($derived.by) would never follow a delete.
+// jsdom is what gets the client build (a node environment compiles for the
+// server, where a $derived recomputes on every read and effects never run).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   Branch,
@@ -8,6 +13,8 @@ import type {
   SessionStatusPayload,
 } from '../types';
 import type { SwrResult } from '../cache';
+import { flushSync } from 'svelte';
+import { readReactively } from './testStubs/readReactively.svelte';
 
 // ── Fixtures ──
 
@@ -146,9 +153,10 @@ async function importStore() {
 
 beforeEach(() => {
   vi.resetModules();
-  // The store's runes compile away in the app build; under vitest they stay
-  // plain global calls, so stub $state as identity (agent.test.ts precedent).
-  vi.stubGlobal('$state', (initial: unknown) => initial);
+  // The store batches its flushes on requestAnimationFrame where there is one,
+  // and jsdom has one; the tests' ticks wait on the setTimeout it falls back
+  // to without.
+  vi.stubGlobal('requestAnimationFrame', undefined);
   windowTarget = new EventTarget();
   vi.stubGlobal('window', windowTarget);
 
@@ -1284,6 +1292,37 @@ describe('project-delete lifecycle', () => {
 
     store.projectDeleteFailed('p2');
     expect(store.liveProjects.map((p) => p.id)).toEqual(['p1', 'p2', 'p3']);
+  });
+
+  it('filters once per change while a delete is in flight, not once per read', async () => {
+    listProjects.mockResolvedValue(
+      swr([project(), project({ id: 'p2', name: 'Beta' }), project({ id: 'p3', name: 'Gamma' })])
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+    // Read it the way the grid and the sidebar do, from an effect.
+    const stop = readReactively(() => store.liveProjects);
+    try {
+      store.projectDeleteStarted('p2', 'Beta');
+      flushSync();
+      const live = store.liveProjects;
+      expect(live.map((p) => p.id)).toEqual(['p1', 'p3']);
+      // Every list reading it in the same pass gets the same array...
+      expect(store.liveProjects).toBe(live);
+
+      // ...and so does one re-run by state it doesn't read.
+      store.setBranchesByProject(new Map());
+      flushSync();
+      expect(store.liveProjects).toBe(live);
+
+      // A change it does read is a new list.
+      store.projectDeleteStarted('p3', 'Gamma');
+      flushSync();
+      expect(store.liveProjects).not.toBe(live);
+      expect(store.liveProjects.map((p) => p.id)).toEqual(['p1']);
+    } finally {
+      stop();
+    }
   });
 
   it('tracks the deleting project until the post-delete refetch prunes it', async () => {

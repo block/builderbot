@@ -406,6 +406,8 @@ async fn attach_cancel(
 /// What [`attach_cancel_with`] saw.
 struct CaughtUp {
     outcome: Result<CancelOutcome, String>,
+    /// Whether the catch-up's replay held the newest stored prompt.
+    latest_prompt: Option<LatestPrompt>,
     /// The rows the catch-up recorded.
     rows: Vec<String>,
     /// The agent's log of what it was sent.
@@ -421,6 +423,18 @@ async fn attach_cancel_with(
     probe: Arc<ScriptedProbe>,
     deadline: Duration,
     stored: Option<Vec<ReplayBoundary>>,
+) -> CaughtUp {
+    attach_cancel_loading_in(mode, probe, deadline, stored, None).await
+}
+
+/// [`attach_cancel_with`], loading the session in `checkout` once it
+/// resolves, as a caller still resolving it passes it.
+async fn attach_cancel_loading_in(
+    mode: &str,
+    probe: Arc<ScriptedProbe>,
+    deadline: Duration,
+    stored: Option<Vec<ReplayBoundary>>,
+    checkout: Option<Result<PathBuf, String>>,
 ) -> CaughtUp {
     let log = log_path(mode);
     let transcript = Arc::new(TranscriptLog::default());
@@ -449,6 +463,13 @@ async fn attach_cancel_with(
                                 std::fs::read_to_string(&log).unwrap_or_default(),
                             ));
                         }),
+                        checkout: checkout.map(|checkout| -> crate::PendingCheckout<'_> {
+                            Box::pin(async move {
+                                // Resolved after the cancel went out.
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                checkout
+                            })
+                        }),
                     }),
                     deadline,
                     TIMING,
@@ -458,8 +479,10 @@ async fn attach_cancel_with(
         .await;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
+    let latest_prompt = outcome.as_ref().ok().map(|(_, latest)| *latest);
     CaughtUp {
-        outcome,
+        outcome: outcome.map(|(outcome, _)| outcome),
+        latest_prompt,
         rows: transcript.rows(),
         log: text,
         heard: heard.into_inner(),
@@ -825,6 +848,7 @@ async fn attach_cancel_on_a_replaced_process_sends_nothing() {
 async fn attach_cancel_catches_up_after_the_cancel_and_ends_the_running_call() {
     let CaughtUp {
         outcome,
+        latest_prompt,
         rows,
         log,
         heard,
@@ -836,6 +860,8 @@ async fn attach_cancel_catches_up_after_the_cancel_and_ends_the_running_call() {
     )
     .await;
     assert_eq!(outcome, Ok(CancelOutcome::Stopped));
+    // The replay re-sent the newest stored prompt, as an attach would say.
+    assert_eq!(latest_prompt, Some(LatestPrompt::Replayed));
     assert_eq!(
         rows,
         [
@@ -883,6 +909,71 @@ async fn attach_cancel_records_a_live_only_settling_the_replay_lacks() {
     );
 }
 
+/// The catch-up loads the session in the checkout its caller resolved
+/// alongside the cancel; one that can't be resolved costs the catch-up,
+/// never the cancel.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_cancel_loads_in_a_checkout_resolved_alongside_it() {
+    let caught_up = attach_cancel_loading_in(
+        "interrupt",
+        ScriptedProbe::running(),
+        Duration::from_secs(10),
+        Some(stored_with_running_call()),
+        Some(Ok(PathBuf::from("/home/bloxer/other-repo"))),
+    )
+    .await;
+    assert_eq!(caught_up.outcome, Ok(CancelOutcome::Stopped));
+    assert_eq!(caught_up.latest_prompt, Some(LatestPrompt::Replayed));
+    let load = caught_up
+        .log
+        .lines()
+        .find(|line| line.contains("\"method\":\"session/load\""))
+        .unwrap_or_else(|| panic!("no load: {}", caught_up.log));
+    assert!(
+        load.contains("\"cwd\":\"/home/bloxer/other-repo\""),
+        "{load}"
+    );
+    assert!(!caught_up.rows.is_empty());
+
+    let caught_up = attach_cancel_loading_in(
+        "interrupt",
+        ScriptedProbe::running(),
+        Duration::from_secs(10),
+        Some(stored_with_running_call()),
+        Some(Err("`ws exec` failed".to_string())),
+    )
+    .await;
+    assert_eq!(caught_up.outcome, Ok(CancelOutcome::Stopped));
+    assert_eq!(caught_up.latest_prompt, Some(LatestPrompt::Unknown));
+    assert!(!caught_up.log.contains("session/load"), "{}", caught_up.log);
+    assert!(caught_up.rows.is_empty(), "{:?}", caught_up.rows);
+}
+
+/// A replay that ends on the prompt before the newest stored one says the
+/// agent never received it, as an attach's does.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn attach_cancel_says_when_the_newest_prompt_never_arrived() {
+    let mut stored = stored_with_running_call();
+    stored.push(ReplayBoundary {
+        role: "user".to_string(),
+        content: "Now add a test".to_string(),
+        acp_message_id: None,
+        acp_tool_call_id: None,
+        acp_tool_status: None,
+    });
+    let caught_up = attach_cancel_with(
+        "close",
+        ScriptedProbe::running(),
+        Duration::from_secs(10),
+        Some(stored),
+    )
+    .await;
+    assert_eq!(caught_up.outcome, Ok(CancelOutcome::Stopped));
+    assert_eq!(caught_up.latest_prompt, Some(LatestPrompt::Missing));
+}
+
 /// An unconfirmed cancel loads nothing: the turn may still be going.
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
@@ -892,6 +983,7 @@ async fn an_unconfirmed_attach_cancel_does_not_catch_up() {
         rows,
         log,
         heard,
+        ..
     } = attach_cancel_with(
         "cancel-silent",
         ScriptedProbe::running(),
@@ -964,6 +1056,7 @@ async fn an_unreadable_transcript_cancels_without_catching_up() {
                         store: &store,
                         writer: &writer,
                         on_cancelled: Box::new(|_: &CancelOutcome| {}),
+                        checkout: None,
                     }),
                     Duration::from_secs(10),
                     TIMING,
@@ -973,7 +1066,11 @@ async fn an_unreadable_transcript_cancels_without_catching_up() {
         .await;
     let text = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&log);
-    assert_eq!(outcome, Ok(CancelOutcome::Stopped));
+    assert_eq!(
+        outcome,
+        Ok((CancelOutcome::Stopped, LatestPrompt::Unknown)),
+        "nothing loaded tells nothing about the prompt"
+    );
     assert!(text.contains("\"method\":\"session/cancel\""), "{text}");
     assert!(!text.contains("session/load"), "{text}");
     assert!(transcript.rows().is_empty());

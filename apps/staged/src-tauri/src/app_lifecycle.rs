@@ -705,7 +705,11 @@ struct OwnedSessionSignals {
 
 /// Stop every session this process is running, recording `AppQuit` as the
 /// reason — except a connected Blox session, which is detached and keeps
-/// running on its workstation (see [`SessionRegistry::detach`]).
+/// running on its workstation (see [`SessionRegistry::detach`]). So does one
+/// reattaching to its remote turn with no connection up to detach: waiting
+/// between attempts, or before its first is up. Cancelling it would end the
+/// row `cancelled` with the turn still running on the workstation, out of
+/// reconcile's reach.
 ///
 /// Detach is SIGKILL-only by design. A SIGINT to the `blox acp` proxy that
 /// started the remote agent stops that agent and every turn on it, even with

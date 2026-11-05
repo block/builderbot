@@ -6,8 +6,9 @@
 -- had no base to find the commits its remote turn made.
 --
 -- `blox_command_id` is the Blox `ws` command id of the remote agent process
--- serving the session. Nullable and not yet populated; reserved for
--- reconnecting a disconnected session.
+-- serving the session. Nullable: reconcile pins it once a listing names the
+-- disconnected session's process, so later reads and attaches reach that
+-- process rather than a replacement, and a new turn clears it.
 --
 -- `sessions.status` has no CHECK constraint, so `disconnected` needs no schema
 -- change of its own.

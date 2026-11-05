@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::driver::{
+    is_remote_agent_detached_error, is_remote_agent_lost_error, is_remote_session_cut_off_error,
     is_transport_loss_error, DetachHandle, ProxyStop, TransportLoss, TransportLossPhase,
     TransportMonitor, TransportSignal,
 };
@@ -13,6 +14,19 @@ fn turn_loss() -> Option<TransportLoss> {
     Some(TransportLoss {
         phase: TransportLossPhase::Turn,
     })
+}
+
+/// Which of the shared proxy's verdicts an error carries, for asserting a
+/// run's error kind: the runner (`run_leaves_session_disconnected`) reads
+/// them before the transport loss.
+fn verdict_of(outcome: &Result<AgentRunOutcome, String>) -> &'static str {
+    match outcome {
+        Err(error) if is_remote_agent_lost_error(error) => "lost",
+        Err(error) if is_remote_agent_detached_error(error) => "detached",
+        Err(error) if is_remote_session_cut_off_error(error) => "cut off",
+        Err(_) => "plain error",
+        Ok(_) => "ok",
+    }
 }
 
 // =============================================================================
@@ -765,7 +779,14 @@ async fn detaching_mid_turn_sends_no_cancel_and_no_sigint() {
     let run = fake_proxy::run("hang", Some("PROMPT")).await;
     assert_eq!(run.settled.reason, SessionSettleReason::Detached);
     assert_eq!(run.settled.transport_loss, turn_loss());
-    assert!(run.settled.outcome.is_err(), "{:?}", run.settled.outcome);
+    // A detach on purpose is no verdict on the agent: the proxy was stopped,
+    // not lost.
+    assert_eq!(
+        verdict_of(&run.settled.outcome),
+        "plain error",
+        "{:?}",
+        run.settled.outcome
+    );
     assert!(run.turn.is_err(), "{:?}", run.turn);
     assert!(run.log.contains("PROMPT"), "{}", run.log);
     assert!(!run.log.contains("session/cancel"), "{}", run.log);
@@ -799,7 +820,23 @@ async fn the_proxys_orchestrator_eof_line_is_a_turn_loss() {
     let run = fake_proxy::run("orchestrator-eof", None).await;
     assert_eq!(run.settled.reason, SessionSettleReason::Failed);
     assert_eq!(run.settled.transport_loss, turn_loss());
-    assert!(run.settled.outcome.is_err());
+    // This proxy is no `sq blox acp`, so there is no bloxlet to ask whether
+    // the agent survived: the loss is final (`sq`'s own exits ask bloxlet,
+    // see `tests::remote_process`).
+    assert_eq!(
+        verdict_of(&run.settled.outcome),
+        "lost",
+        "{:?}",
+        run.settled.outcome
+    );
+    assert!(
+        run.settled
+            .outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("the orchestrator ended the agent's output stream")),
+        "{:?}",
+        run.settled.outcome
+    );
     assert!(!run.log.contains("SIGINT"), "{}", run.log);
     assert!(!run.log.contains("session/cancel"), "{}", run.log);
 }
@@ -832,6 +869,14 @@ async fn stdout_closing_mid_turn_is_a_turn_loss() {
     let run = fake_proxy::run("exit", None).await;
     assert_eq!(run.settled.reason, SessionSettleReason::Failed);
     assert_eq!(run.settled.transport_loss, turn_loss());
+    // No bloxlet to ask, as above: lost, not detached.
+    assert_eq!(
+        verdict_of(&run.settled.outcome),
+        "lost",
+        "{:?}",
+        run.settled.outcome
+    );
+    assert_eq!(run.turn, run.settled.outcome);
 }
 
 /// Errors the agent *answered* stay plain failures, even when the bridge
@@ -843,7 +888,12 @@ async fn errors_the_agent_answered_are_not_transport_loss() {
         let run = fake_proxy::run(mode, None).await;
         assert_eq!(run.settled.reason, SessionSettleReason::Failed, "{mode}");
         assert_eq!(run.settled.transport_loss, None, "{mode}");
-        assert!(run.settled.outcome.is_err(), "{mode}");
+        assert_eq!(
+            verdict_of(&run.settled.outcome),
+            "plain error",
+            "{mode}: {:?}",
+            run.settled.outcome
+        );
     }
 }
 

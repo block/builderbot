@@ -193,7 +193,7 @@ fn command_in_dir(dir: Option<&Path>, cmd: &str) -> Option<PathBuf> {
 }
 
 /// What `blox acp` runs on the workstation when given no `--command`.
-const BLOX_DEFAULT_ACP_ARGV: &[&str] = &["goose", "acp"];
+pub(crate) const BLOX_DEFAULT_ACP_ARGV: &[&str] = &["goose", "acp"];
 
 /// The workstation process one Staged session's agent runs as.
 ///

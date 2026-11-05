@@ -11,8 +11,15 @@
 //! session, which an open pane re-fetches the transcript on — and a resume of
 //! the session waits for it ([`stop_backfill_finished`]), so the turn it
 //! starts can't interleave with the stopped one's tail. The exceptions are
-//! the Stops that complete a turn rather than cancel it ([`HeldWork`]), whose
-//! completion hooks read the transcript: they backfill first.
+//! the Stops that complete a turn rather than cancel it — a turn already over
+//! on the workstation, its session perhaps still working after it
+//! ([`HeldWork`]) — whose completion hooks read the transcript: they claim the
+//! row first, and backfill before it settles.
+//!
+//! The branch's checkout on the workstation, which the backfill's
+//! `session/load` needs, is resolved on a thread of its own alongside the
+//! Stop's other Blox calls ([`Checkout`]): resolving it first would hold the
+//! `session/cancel` up by a `ws exec`.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -20,7 +27,7 @@ use std::time::Duration;
 
 use acp_client::{CancelOutcome, LatestPrompt, RecordedTurn, RemoteProcessStatus};
 
-use super::blox::Backfill;
+use super::blox::{Backfill, CheckoutRx};
 use super::row::{from_ended_turn, recorded_result, shows_held_work, Verdict};
 use super::{
     ReconcileBlox, ReconcilePhase, ReconcileReasonKind, ReconcileTarget, Reconciler, RowOutcome,
@@ -53,6 +60,18 @@ pub(super) enum HeldWork {
     Held,
     /// The attempt the Stop reached found it not.
     NotHeld,
+}
+
+/// The branch's checkout on the workstation, for a Stop's backfill and the
+/// hooks of a turn the Stop completes.
+pub(super) enum Checkout {
+    /// In the target already, or nothing to resolve: a branch with no
+    /// project repo.
+    Known,
+    /// Being resolved on a thread of its own.
+    Resolving(CheckoutRx),
+    /// Couldn't be resolved: the Stop cancels without a backfill.
+    Unresolved,
 }
 
 impl Reconciler {
@@ -93,8 +112,8 @@ impl Reconciler {
     /// backfill of the turn's end follows (see the module docs). When the
     /// workstation can't be reached the row is ended anyway — the user asked
     /// — with a message saying the turn may still be running. A row whose
-    /// session is still working after its turn completes instead (see
-    /// [`HeldWork`]).
+    /// turn is already over on the workstation completes instead (see
+    /// [`Self::turn_already_over`]).
     pub(super) fn stop_observed(
         &self,
         target: &ReconcileTarget,
@@ -106,10 +125,13 @@ impl Reconciler {
         let message = match self.blox.workspace(&target.workspace_name) {
             WorkspaceProbe::Running => {
                 let mut target = target.clone();
-                if let Some(recorded) = self.held_turn(&mut target, held) {
-                    return self.stop_held(&target, observed, reason, recorded);
+                let checkout = self.start_checkout(&target);
+                if let Some(recorded) = self.turn_already_over(&mut target, held) {
+                    // The hooks read the turn's commit in the checkout.
+                    let checkout = await_checkout(&mut target, checkout);
+                    return self.stop_over_turn(&target, observed, reason, recorded, checkout);
                 }
-                self.cancel_then_settle(&target, |message| {
+                self.cancel_then_settle_with(&target, checkout, |message| {
                     self.settle_unclaimed(
                         &target,
                         observed,
@@ -136,10 +158,17 @@ impl Reconciler {
         RowOutcome::Done
     }
 
-    /// The turn as its recording has it, when the Stop is one on a session
-    /// still working after its turn; `None` for an ordinary Stop. Pins
-    /// `target` to the process it looked at.
-    fn held_turn(&self, target: &mut ReconcileTarget, held: HeldWork) -> Option<RecordedTurn> {
+    /// The turn as its recording has it, when the Stop reaches one already
+    /// over on the workstation: one whose session is still working after it,
+    /// or one that simply ended, its process `IDLE` and nothing left running.
+    /// `None` for an ordinary Stop, on a turn still running. Pins `target` to
+    /// the process it looked at, so the cancel's attach reaches that one
+    /// without looking it up again.
+    fn turn_already_over(
+        &self,
+        target: &mut ReconcileTarget,
+        held: HeldWork,
+    ) -> Option<RecordedTurn> {
         let known_held = match held {
             HeldWork::NotHeld => return None,
             HeldWork::Held => true,
@@ -162,17 +191,21 @@ impl Reconciler {
                     return Some(RecordedTurn::Unknown);
                 }
             };
-            // A process with a prompt in flight is running a turn, not work
-            // left after one.
-            if !known_held && process.status != RemoteProcessStatus::Idle {
-                return None;
-            }
+            let idle = process.status == RemoteProcessStatus::Idle;
             if target.command_id.is_none() {
                 target.command_id = process.command_id;
             }
+            // A process with a prompt in flight is running a turn, not one
+            // that is over.
+            if !known_held && !idle {
+                return None;
+            }
         }
         let recorded = self.read_recorded_turn(target);
-        (known_held || shows_held_work(&recorded)).then_some(recorded)
+        let over = known_held
+            || shows_held_work(&recorded)
+            || matches!(recorded, RecordedTurn::Ended { .. });
+        over.then_some(recorded)
     }
 
     /// Whether the row's last check found its session still working after
@@ -186,24 +219,29 @@ impl Reconciler {
             .is_some_and(|reason| reason.kind == ReconcileReasonKind::BackgroundWork)
     }
 
-    /// A Stop on a session still working after its turn: as during the live
-    /// hold, the work the turn left running is cancelled and the turn, over
-    /// already, completes from its recorded result (`hold_stopped`: the wait
-    /// for its work was cut short), with its hooks, and without draining the
-    /// queued follow-up. The cancel backfills the transcript before the row
-    /// settles: nothing attached to this turn, and the hooks read it.
-    fn stop_held(
+    /// A Stop on a turn already over on the workstation (see
+    /// [`Self::turn_already_over`]): as during the live hold, the work the
+    /// turn left running, if any, is cancelled and the turn completes from its
+    /// recorded result — `hold_stopped` when the Stop cut the wait for its
+    /// work short — with its hooks, and without draining the queued
+    /// follow-up.
+    ///
+    /// The row is claimed before the cancel, as an attempt claims it before
+    /// its attach: nothing the backfill writes meanwhile (a session title)
+    /// can then move the row from under the Stop. The backfill is done
+    /// before the row settles — nothing attached to this turn, and the hooks
+    /// read the transcript — and its replay says whether the newest prompt
+    /// ever reached the workstation: when not, the recording is an earlier
+    /// turn's, and the row ends resumable instead.
+    fn stop_over_turn(
         &self,
         target: &ReconcileTarget,
         observed: i64,
         reason: CompletionReason,
         recorded: RecordedTurn,
+        checkout: Checkout,
     ) -> RowOutcome {
         let session_id = target.session_id.as_str();
-        log::info!("[reconcile] Session {session_id}: stopping the work its turn left running");
-        if let Some(message) = self.cancel_remote_turn(target) {
-            log::warn!("[reconcile] Session {session_id}: {message}");
-        }
         // Registered before the claim, like every owner of a `running` row.
         let (token, epoch) = self.registry.register(session_id);
         let claimed = self
@@ -215,30 +253,43 @@ impl Reconciler {
             });
         if !claimed {
             self.registry.deregister(session_id, epoch);
+            // The row moved since it was read: the Stop goes to it as it is
+            // now, as an attempt that loses its claim passes one on.
+            if self.disconnected_row(session_id).is_some() {
+                return self.stop_disconnected(session_id, reason, HeldWork::Unknown);
+            }
+            self.host.restop(session_id);
             return RowOutcome::Done;
         }
         // The Stop's own reason on the entry: a Stop, so nothing queued runs.
         self.registry
             .cancel_with_completion_reason(session_id, reason.clone());
-        let verdict = held_stop_verdict(recorded, reason);
+        log::info!("[reconcile] Session {session_id}: stopping its turn, over on the workstation");
+        let mut message = None;
+        let latest_prompt = self.cancel_then_settle_with(target, checkout, |m| message = m);
+        if let Some(message) = message {
+            log::warn!("[reconcile] Session {session_id}: {message}");
+        }
+        let verdict = over_turn_stop_verdict(recorded, latest_prompt, reason);
         self.settle_claimed(target, epoch, &token, verdict)
     }
 
-    /// The store to backfill `target`'s transcript through, once its
-    /// checkout on the workstation is known: the session is loaded in it.
-    /// `None`, cancelling without a backfill, when that can't be resolved.
-    fn backfill_store(&self, target: &mut ReconcileTarget) -> Option<&Arc<Store>> {
-        match target.resolve_remote_working_dir(self.blox.as_ref()) {
-            Ok(()) => Some(&self.store),
-            Err(e) => {
-                log::warn!(
-                    "[reconcile] Session {}: couldn't resolve its checkout on the workstation, \
-                     so the Stop won't backfill its transcript: {e}",
-                    target.session_id
-                );
-                None
-            }
+    /// Start resolving `target`'s checkout on the workstation on a thread of
+    /// its own, unless it is known.
+    fn start_checkout(&self, target: &ReconcileTarget) -> Checkout {
+        if target.remote_working_dir.is_some() {
+            return Checkout::Known;
         }
+        let Some(subpath) = target.workspace_subpath.clone() else {
+            return Checkout::Known;
+        };
+        let (resolved, checkout) = tokio::sync::oneshot::channel();
+        let blox = Arc::clone(&self.blox);
+        let workspace_name = target.workspace_name.clone();
+        std::thread::spawn(move || {
+            let _ = resolved.send(blox.remote_working_dir(&workspace_name, &subpath));
+        });
+        Checkout::Resolving(checkout)
     }
 
     /// Cancel the turn over a fresh connection, then backfill the
@@ -252,9 +303,24 @@ impl Reconciler {
         target: &ReconcileTarget,
         settle: impl FnOnce(Option<String>),
     ) {
-        let mut target = target.clone();
-        let backfill = self.backfill_store(&mut target);
-        cancel_then_backfill(self.blox.as_ref(), &target, backfill, settle);
+        self.cancel_then_settle_with(target, self.start_checkout(target), settle);
+    }
+
+    /// [`Self::cancel_then_settle`], backfilling in `checkout`, and returning
+    /// whether the backfill's replay showed the agent receiving the newest
+    /// prompt.
+    fn cancel_then_settle_with(
+        &self,
+        target: &ReconcileTarget,
+        checkout: Checkout,
+        settle: impl FnOnce(Option<String>),
+    ) -> LatestPrompt {
+        let (backfill, checkout) = match checkout {
+            Checkout::Known => (Some(&self.store), None),
+            Checkout::Resolving(checkout) => (Some(&self.store), Some(checkout)),
+            Checkout::Unresolved => (None, None),
+        };
+        cancel_then_backfill(self.blox.as_ref(), target, backfill, checkout, settle)
     }
 
     /// [`Self::cancel_then_settle`], for a caller that settles only once the
@@ -267,17 +333,43 @@ impl Reconciler {
     }
 }
 
-/// The verdict for a Stop on a session still working after its turn: the
-/// turn's own, from its recording, with a completed turn's wait for its work
-/// cut short — unless the recording shows the work over by now. The replay
-/// was never read, so nothing says the newest prompt went unreceived.
-fn held_stop_verdict(recorded: RecordedTurn, reason: CompletionReason) -> Verdict {
+/// Wait for `checkout`, into `target`, for a Stop that needs it in hand:
+/// one completing a turn, whose hooks read the turn's commit in it.
+fn await_checkout(target: &mut ReconcileTarget, checkout: Checkout) -> Checkout {
+    let Checkout::Resolving(checkout) = checkout else {
+        return checkout;
+    };
+    let resolved = checkout
+        .blocking_recv()
+        .unwrap_or_else(|_| Err("resolving it ended without an answer".to_string()));
+    match resolved {
+        Ok(dir) => {
+            target.remote_working_dir = Some(dir);
+            Checkout::Known
+        }
+        Err(e) => {
+            log::warn!(
+                "[reconcile] Session {}: couldn't resolve its checkout on the workstation, \
+                 so the Stop won't backfill its transcript: {e}",
+                target.session_id
+            );
+            Checkout::Unresolved
+        }
+    }
+}
+
+/// The verdict for a Stop on a turn already over on the workstation: the
+/// turn's own, from its recording, with a held turn's wait for its work cut
+/// short — unless the recording shows the work over by now. `latest_prompt`
+/// is what the cancel's backfill replayed: a newest prompt the agent never
+/// received makes the recording an earlier turn's, and this one never ran.
+fn over_turn_stop_verdict(
+    recorded: RecordedTurn,
+    latest_prompt: LatestPrompt,
+    reason: CompletionReason,
+) -> Verdict {
     let work_over = matches!(recorded, RecordedTurn::Ended { .. });
-    let verdict = from_ended_turn(
-        recorded_result(recorded),
-        LatestPrompt::Unknown,
-        Some(reason),
-    );
+    let verdict = from_ended_turn(recorded_result(recorded), latest_prompt, Some(reason));
     if work_over {
         verdict
     } else {
@@ -311,21 +403,25 @@ fn cancel_message(
 }
 
 /// Cancel `target`'s turn over a fresh connection, then, with `backfill`,
-/// catch its transcript up (see [`ReconcileBlox::cancel`]). `settle` gets
-/// the message for the row as soon as the cancel's outcome is known, before
-/// the backfill; this returns once the backfill is over too.
+/// catch its transcript up, in `checkout` when that is still being resolved
+/// (see [`ReconcileBlox::cancel`]). `settle` gets the message for the row as
+/// soon as the cancel's outcome is known, before the backfill; this returns
+/// once the backfill is over too, with whether its replay showed the agent
+/// receiving the newest prompt.
 fn cancel_then_backfill(
     blox: &dyn ReconcileBlox,
     target: &ReconcileTarget,
     backfill: Option<&Arc<Store>>,
+    checkout: Option<CheckoutRx>,
     settle: impl FnOnce(Option<String>),
-) {
+) -> LatestPrompt {
     let Some(store) = backfill else {
         settle(cancel_message(
             target,
-            blox.cancel(target, None, STOP_DEADLINE),
+            blox.cancel(target, None, STOP_DEADLINE)
+                .map(|(outcome, _)| outcome),
         ));
-        return;
+        return LatestPrompt::Unknown;
     };
     // `settle` may end the row with the backfill still going.
     let _backfilling = BackfillInFlight::start(&target.session_id);
@@ -340,6 +436,7 @@ fn cancel_then_backfill(
                 Some(Backfill {
                     store,
                     on_cancelled: Box::new(on_cancelled),
+                    checkout,
                 }),
                 STOP_DEADLINE,
             )
@@ -351,14 +448,22 @@ fn cancel_then_backfill(
         };
         // Closed without a message when the cancel ended with no outcome to
         // hear (an `Err`).
-        match heard_rx.recv() {
+        let cancelled = match heard_rx.recv() {
             Ok(outcome) => {
                 settle(cancel_message(target, Ok(outcome)));
-                let _ = joined(cancel);
+                joined(cancel)
             }
-            Err(_) => settle(cancel_message(target, joined(cancel))),
-        }
-    });
+            Err(_) => {
+                let cancelled = joined(cancel);
+                settle(cancel_message(
+                    target,
+                    cancelled.clone().map(|(outcome, _)| outcome),
+                ));
+                cancelled
+            }
+        };
+        cancelled.map_or(LatestPrompt::Unknown, |(_, latest_prompt)| latest_prompt)
+    })
 }
 
 /// Cancel a `disconnected` row's remote turn, best effort and in the
@@ -402,7 +507,9 @@ pub(super) fn cancel_abandoned_turn_with(
     );
     Some(std::thread::spawn(move || {
         // Nothing to backfill: the row is about to go.
-        let cancelled = blox.cancel(&target, None, STOP_DEADLINE);
+        let cancelled = blox
+            .cancel(&target, None, STOP_DEADLINE)
+            .map(|(outcome, _)| outcome);
         if let Some(message) = cancel_message(&target, cancelled) {
             log::warn!("[reconcile] Session {}: {message}", target.session_id);
         }
@@ -430,7 +537,11 @@ pub(crate) fn stop_unacknowledged_turn(
         return Some(MAY_STILL_RUN.to_string());
     };
     if !backfills {
-        return cancel_message(&target, blox.cancel(&target, None, STOP_DEADLINE));
+        return cancel_message(
+            &target,
+            blox.cancel(&target, None, STOP_DEADLINE)
+                .map(|(outcome, _)| outcome),
+        );
     }
     let (heard_tx, heard_rx) = std::sync::mpsc::channel();
     let store = Arc::clone(store);
@@ -446,12 +557,13 @@ pub(crate) fn stop_unacknowledged_turn(
                 Some(Backfill {
                     store: &store,
                     on_cancelled: Box::new(on_cancelled),
+                    checkout: None,
                 }),
                 STOP_DEADLINE,
             );
             drop(backfilling);
             announce(&backfilled_event(&target));
-            cancelled
+            cancelled.map(|(outcome, _)| outcome)
         })
     };
     // Closed without a message when the cancel ended with no outcome to hear.
@@ -481,7 +593,7 @@ pub(crate) fn stop_outliving_work(
         return Some(MAY_STILL_RUN.to_string());
     };
     let mut message = None;
-    cancel_then_backfill(blox, &target, backfills.then_some(store), |m| {
+    cancel_then_backfill(blox, &target, backfills.then_some(store), None, |m| {
         message = m;
     });
     message

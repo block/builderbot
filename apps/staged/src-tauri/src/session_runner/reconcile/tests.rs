@@ -63,8 +63,17 @@ struct FakeBlox {
     backfill: Mutex<Option<BackfillHook>>,
     /// The checkout each backfilling cancel loaded the session in.
     backfill_dirs: Mutex<Vec<Option<std::path::PathBuf>>>,
+    /// What a cancel's backfill says of the newest prompt.
+    backfill_latest_prompt: Mutex<LatestPrompt>,
+    /// The process each cancel was pinned to.
+    cancel_pins: Mutex<Vec<Option<String>>>,
+    /// The checkout each run of the completion hooks read the commit in.
+    hook_dirs: Mutex<Vec<Option<std::path::PathBuf>>>,
     /// `Some` fails resolving the branch's checkout on the workstation.
     working_dir_error: Mutex<Option<String>>,
+    /// Resolving the checkout answers only once a cancel has gone out, and
+    /// fails if none does.
+    working_dir_after_cancel: AtomicBool,
     calls: Mutex<Vec<String>>,
 }
 
@@ -82,7 +91,11 @@ impl FakeBlox {
             cancel: Mutex::new(Ok(CancelOutcome::Stopped)),
             backfill: Mutex::new(None),
             backfill_dirs: Mutex::new(Vec::new()),
+            backfill_latest_prompt: Mutex::new(LatestPrompt::Replayed),
+            cancel_pins: Mutex::new(Vec::new()),
+            hook_dirs: Mutex::new(Vec::new()),
             working_dir_error: Mutex::new(None),
+            working_dir_after_cancel: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -109,6 +122,22 @@ impl FakeBlox {
 
     fn backfill_dirs(&self) -> Vec<Option<std::path::PathBuf>> {
         self.backfill_dirs.lock().unwrap().clone()
+    }
+
+    fn set_backfill_latest_prompt(&self, latest_prompt: LatestPrompt) {
+        *self.backfill_latest_prompt.lock().unwrap() = latest_prompt;
+    }
+
+    fn cancel_pins(&self) -> Vec<Option<String>> {
+        self.cancel_pins.lock().unwrap().clone()
+    }
+
+    fn hook_dirs(&self) -> Vec<Option<std::path::PathBuf>> {
+        self.hook_dirs.lock().unwrap().clone()
+    }
+
+    fn resolve_working_dir_after_cancel(&self) {
+        self.working_dir_after_cancel.store(true, Ordering::SeqCst);
     }
 
     fn set_recorded(&self, recorded: RecordedTurn) {
@@ -200,6 +229,15 @@ impl ReconcileBlox for FakeBlox {
     }
 
     fn remote_working_dir(&self, _: &str, subpath: &str) -> Result<std::path::PathBuf, String> {
+        if self.working_dir_after_cancel.load(Ordering::SeqCst) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !self.called("cancel") {
+                if std::time::Instant::now() > deadline {
+                    return Err("no cancel went out while the checkout resolved".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         match self.working_dir_error.lock().unwrap().clone() {
             Some(e) => Err(e),
             None => Ok(subpath.into()),
@@ -230,40 +268,54 @@ impl ReconcileBlox for FakeBlox {
         attach(target, store, control)
     }
 
-    /// Logged `cancel+backfill:` when it backfills.
+    /// Logged `cancel+backfill:` when it is asked to backfill, whether or
+    /// not its checkout resolves.
     fn cancel(
         &self,
         target: &ReconcileTarget,
         backfill: Option<super::blox::Backfill<'_>>,
         _: Duration,
-    ) -> Result<CancelOutcome, String> {
+    ) -> Result<(CancelOutcome, LatestPrompt), String> {
+        self.cancel_pins
+            .lock()
+            .unwrap()
+            .push(target.command_id.clone());
         let cancelled = self.cancel.lock().unwrap().clone();
         let Some(super::blox::Backfill {
             store,
             on_cancelled,
+            checkout,
         }) = backfill
         else {
             self.log(format!("cancel:{}", target.agent_session_id));
-            return cancelled;
+            return cancelled.map(|outcome| (outcome, LatestPrompt::Unknown));
         };
         self.log(format!("cancel+backfill:{}", target.agent_session_id));
-        self.backfill_dirs
-            .lock()
-            .unwrap()
-            .push(target.remote_working_dir.clone());
         // As the real one: a cancel that fails outright tells nothing, and
         // backfills nothing.
-        let Ok(outcome) = &cancelled else {
-            return cancelled;
+        let outcome = cancelled?;
+        on_cancelled(&outcome);
+        // The checkout is waited for only now, and without one there is no
+        // backfill.
+        let dir = match checkout {
+            Some(checkout) => match checkout.blocking_recv() {
+                Ok(Ok(dir)) => Some(dir),
+                _ => return Ok((outcome, LatestPrompt::Unknown)),
+            },
+            None => target.remote_working_dir.clone(),
         };
-        on_cancelled(outcome);
+        self.backfill_dirs.lock().unwrap().push(dir);
         if let Some(hook) = self.backfill.lock().unwrap().as_ref() {
             hook(target, store);
         }
-        cancelled
+        Ok((outcome, *self.backfill_latest_prompt.lock().unwrap()))
     }
 
-    fn checkout_workspace<'a>(&self, _: &'a ReconcileTarget) -> Option<&'a str> {
+    fn checkout_workspace<'a>(&self, target: &'a ReconcileTarget) -> Option<&'a str> {
+        self.hook_dirs
+            .lock()
+            .unwrap()
+            .push(target.remote_working_dir.clone());
         // The test checkout is local.
         None
     }
@@ -1379,8 +1431,9 @@ fn a_stop_as_a_followed_turn_leaves_work_live_cancels_the_work() {
 
 /// A Stop on a row held for its session's work ends the work and completes
 /// the turn, over already, as a Stop during the live hold does — not a
-/// cancelled row. The work's cancel backfills the transcript before the row
-/// settles: the completion hooks read it.
+/// cancelled row. The row is claimed before the work's cancel, which
+/// backfills the transcript before the row settles: the completion hooks
+/// read it, and the turn's commit in the branch's checkout.
 #[test]
 fn a_stop_on_a_held_row_ends_its_work_and_completes_the_turn() {
     let fx = Fixture::new();
@@ -1398,13 +1451,15 @@ fn a_stop_on_a_held_row_ends_its_work_and_completes_the_turn() {
     fx.reconciler
         .stop_blocking(&session.id, CompletionReason::Interrupted);
 
-    assert_eq!(*seen.lock().unwrap(), vec![SessionStatus::Disconnected]);
+    assert_eq!(*seen.lock().unwrap(), vec![SessionStatus::Running]);
     fx.assert_settled(
         &session,
         SessionStatus::Completed,
         None,
         CompletionReason::HoldStopped,
     );
+    assert_eq!(fx.blox.backfill_dirs(), vec![Some("home:test-repo".into())]);
+    assert_eq!(fx.blox.hook_dirs(), vec![Some("home:test-repo".into())]);
     assert!(!fx.blox.called("attach"));
     assert_eq!(
         fx.host.side_effects.lock().unwrap().clone(),
@@ -1455,6 +1510,153 @@ fn a_stop_finds_held_work_in_the_recording_with_no_check_behind_it() {
     fx.reconciler
         .stop_blocking(&session.id, CompletionReason::Interrupted);
 
+    assert!(!fx.blox.called("recorded"), "{:?}", fx.blox.calls());
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        None,
+        CompletionReason::Interrupted,
+    );
+}
+
+/// What the work's cancel backfills meanwhile — a session title, which
+/// moves the row's `updated_at` — can't take the Stop from the row: it is
+/// claimed before the cancel, and settles as the Stop says, holding the
+/// queued follow-up back.
+#[test]
+fn a_held_stop_keeps_its_claim_through_what_the_backfill_writes() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox.set_recorded(holding(&["t1"]));
+    fx.reconcile(&session);
+    assert_held(&fx, &session);
+    fx.blox.on_backfill(|target, store| {
+        // A write later than the row's last.
+        std::thread::sleep(Duration::from_millis(5));
+        store
+            .update_session_acp_title(&target.session_id, Some("Commit the change"))
+            .unwrap();
+    });
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::HoldStopped,
+    );
+    assert_eq!(
+        fx.row(&session.id).acp_title.as_deref(),
+        Some("Commit the change")
+    );
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)],
+        "a Stop starts nothing queued"
+    );
+}
+
+/// A Stop that finds held work in a recording an earlier turn left — the
+/// newest prompt was lost before it reached the workstation, as the cancel's
+/// backfill replay shows — ends the row resumable, as an attach that finds
+/// the prompt missing does: the turn never ran, so nothing completes and no
+/// commit is linked.
+#[test]
+fn a_held_stop_whose_newest_prompt_never_arrived_ends_resumable() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.repo
+        .write_file("README.md", "an earlier turn's change\n");
+    fx.repo.commit("earlier change");
+    fx.blox.set_recorded(holding(&["devserver"]));
+    fx.blox.set_backfill_latest_prompt(LatestPrompt::Missing);
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert!(fx.blox.called("cancel+backfill:acp-1"));
+    fx.assert_settled(
+        &session,
+        SessionStatus::Cancelled,
+        Some(PROMPT_NOT_RECEIVED),
+        CompletionReason::Interrupted,
+    );
+    assert!(fx.blox.hook_dirs().is_empty(), "no completion hook ran");
+    let commit = fx
+        .store
+        .get_commit_by_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(commit.sha, None);
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)]
+    );
+}
+
+/// A Stop that finds the turn simply over on the workstation — its process
+/// `IDLE`, its recording showing it ended, nothing left running — completes
+/// it, its commit linked, rather than cancelling a turn that finished.
+#[test]
+fn a_stop_on_a_turn_that_already_ended_completes_it() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.repo.write_file("README.md", "changed offline\n");
+    let offline_commit = fx.repo.commit("offline change");
+    fx.blox.set_recorded(RecordedTurn::Ended {
+        result: Some(TurnResult::Stopped(StopReason::EndTurn)),
+    });
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert_eq!(
+        fx.blox.calls(),
+        vec![
+            "workspace:ws-1",
+            "process:None",
+            "recorded:cmd-1",
+            "cancel+backfill:acp-1"
+        ]
+    );
+    fx.assert_settled(
+        &session,
+        SessionStatus::Completed,
+        None,
+        CompletionReason::TurnComplete,
+    );
+    let commit = fx
+        .store
+        .get_commit_by_session(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(commit.sha.as_deref(), Some(offline_commit.as_str()));
+    assert_eq!(fx.blox.hook_dirs(), vec![Some("home:test-repo".into())]);
+    assert_eq!(
+        fx.host.drains(),
+        vec![(session.id.clone(), Some(fx.branch.id.clone()), false)],
+        "a Stop starts nothing queued"
+    );
+}
+
+/// A Stop on a turn still running pins its cancel to the process the
+/// lookup found, and resolves the branch's checkout alongside the cancel —
+/// only the backfill's `session/load` needs it — rather than before it.
+#[test]
+fn a_stop_on_a_running_turn_pins_its_cancel_and_resolves_the_checkout_alongside() {
+    let fx = Fixture::new();
+    let session = fx.disconnected_commit_session();
+    fx.blox
+        .set_process(RemoteProcessStatus::Running, Some("cmd-live"));
+    fx.blox.resolve_working_dir_after_cancel();
+
+    fx.reconciler
+        .stop_blocking(&session.id, CompletionReason::Interrupted);
+
+    assert_eq!(fx.blox.cancel_pins(), vec![Some("cmd-live".to_string())]);
+    assert_eq!(fx.blox.backfill_dirs(), vec![Some("home:test-repo".into())]);
     assert!(!fx.blox.called("recorded"), "{:?}", fx.blox.calls());
     fx.assert_settled(
         &session,
@@ -2009,8 +2211,12 @@ fn a_stop_backfills_in_the_branch_s_checkout_or_cancels_without_one() {
     fx.reconciler
         .stop_blocking(&session.id, CompletionReason::Interrupted);
 
-    assert!(fx.blox.called("cancel:acp-1"), "{:?}", fx.blox.calls());
-    assert!(!fx.blox.called("cancel+backfill"));
+    assert!(
+        fx.blox.called("cancel+backfill:acp-1"),
+        "{:?}",
+        fx.blox.calls()
+    );
+    assert!(fx.blox.backfill_dirs().is_empty(), "nothing backfilled");
     fx.assert_settled(
         &session,
         SessionStatus::Cancelled,

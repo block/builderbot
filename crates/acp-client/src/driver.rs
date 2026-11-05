@@ -61,7 +61,7 @@ mod remote_routing;
 mod response_completion;
 mod transport_loss;
 
-pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, TurnResult};
+pub use attach::{AttachOutcome, AttachedSession, CancelOutcome, PendingCheckout, TurnResult};
 pub(crate) use blox_process::BloxProcess;
 #[cfg(test)]
 pub(crate) use blox_process::RemoteProcessProbe;
@@ -7385,8 +7385,8 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
 }
 
 /// Starts the error a session ends with when its remote agent process was
-/// lost under it — its output ended, or bloxlet reports it stopped — followed
-/// by the cause.
+/// lost under it — bloxlet reports it stopped, or the output of a proxy with
+/// no bloxlet to ask ended — followed by the cause.
 const REMOTE_AGENT_LOST_PREFIX: &str = "Remote agent lost: ";
 
 /// Whether a session error means its remote agent process was lost under it,

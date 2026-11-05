@@ -18,15 +18,18 @@
 //! reuse.
 //!
 //! The proxy also fails every attached session when its agent is lost: when
-//! its output ends while sessions are attached, or when bloxlet reports the
-//! agent process stopped (see [`super::remote_liveness`]). Each session then
-//! ends with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming the cause.
-//! When only the proxy went — `sq` exited while bloxlet still runs a process
-//! it had reused — the sessions end with a
+//! bloxlet reports the agent process stopped, whether the proxy's output
+//! ended or not (see [`super::remote_liveness`]), or when the output of a
+//! proxy that is not `sq blox acp`, so has no bloxlet to ask, ends. Each
+//! session then ends with a [`super::REMOTE_AGENT_LOST_PREFIX`] error naming
+//! the cause. When only the proxy went — `sq` exited, or its output ended,
+//! while bloxlet still runs the agent process, whether `sq` started or
+//! reused it, or bloxlet can't be asked — the sessions end with a
 //! [`super::REMOTE_AGENT_DETACHED_PREFIX`] error instead, so their turns can
-//! be reattached to. Once `sq` says the orchestrator ended the agent's
-//! output stream, nothing more comes through the proxy, so it takes no new
-//! sessions and is made to exit (see [`SharedProcess::end_stream`]).
+//! be reattached to (see [`SharedProcess::explain_exit`]). Once `sq` says the
+//! orchestrator ended the agent's output stream, nothing more comes through
+//! the proxy, so it takes no new sessions and is made to exit (see
+//! [`SharedProcess::end_stream`]).
 //!
 //! A session a previous app instance left running reattaches through the same
 //! proxy, so `sq` attaches to the agent process still serving its turn; a
@@ -928,12 +931,13 @@ impl SharedProcess {
     /// stop: end the attached sessions, telling them whether their agent
     /// went with it.
     ///
-    /// `sq` stops a process it started when it exits, so that one is gone.
-    /// A process it only reused outlives it — a local `sq` crash, an expired
-    /// login or a stray kill takes nothing on the workstation down — so
-    /// bloxlet is asked first, and while it still runs the process (or
-    /// cannot say) the sessions are detached rather than failed, for their
-    /// turns to be reattached to.
+    /// Only an interrupted `sq` stops the process it started; one SIGKILLed,
+    /// crashed or cut off by the network leaves it running, as it always
+    /// leaves a process it reused. So whichever it reached, bloxlet is asked
+    /// first, and while it still runs the process — or cannot say — the
+    /// sessions are detached rather than failed, for their turns to be
+    /// reattached to. When `sq` never logged which process it reached,
+    /// bloxlet is asked about the one the proxy's arguments name.
     async fn explain_exit(&self, attached: usize, target: Option<&remote_liveness::Target>) {
         let cause = if self.stream_ended.is_cancelled() {
             "the orchestrator ended the agent's output stream".to_string()
@@ -948,31 +952,39 @@ impl SharedProcess {
             let report = self.report.lock().unwrap();
             (report.attachment, report.command_id.clone())
         };
-        let (true, Attachment::Reused, Some(command_id), Some(target)) =
-            (attached > 0, attachment, command_id, target)
-        else {
+        let (true, Some(target)) = (attached > 0, target) else {
             self.transport.lose(cause);
             return;
         };
+        let process = match &command_id {
+            Some(command_id) => format!("command {command_id}"),
+            None => target.requested(),
+        };
         log::info!(
-            "{}: {cause}; asking bloxlet whether the agent process it reused \
-             (command {command_id}) still runs",
-            self.describe()
+            "{}: {cause}; asking bloxlet whether the agent process it {} ({process}) still runs",
+            self.describe(),
+            match attachment {
+                Attachment::Started => "started",
+                Attachment::Reused => "reused",
+                Attachment::Unknown => "reached",
+            }
         );
-        let verdict = tokio::time::timeout(
-            remote_liveness::QUICK_CHECK_TIMEOUT,
-            remote_liveness::check(target, &command_id),
-        )
+        let verdict = tokio::time::timeout(remote_liveness::QUICK_CHECK_TIMEOUT, async {
+            match &command_id {
+                Some(command_id) => remote_liveness::check(target, command_id).await,
+                None => remote_liveness::check_requested(target).await,
+            }
+        })
         .await
         .unwrap_or_else(|_| Err("`sq blox ws commands` timed out".to_string()));
         match verdict {
             Ok(Liveness::Running | Liveness::Idle) => self.transport.detach_sessions(format!(
-                "{cause}, but bloxlet still runs the agent process (command {command_id})"
+                "{cause}, but bloxlet still runs the agent process ({process})"
             )),
             Ok(Liveness::Gone(gone)) => self.transport.lose(gone),
             Err(error) => self.transport.detach_sessions(format!(
-                "{cause}, and whether the agent process (command {command_id}) still runs \
-                 is unknown: {error}"
+                "{cause}, and whether the agent process ({process}) still runs is unknown: \
+                 {error}"
             )),
         }
     }

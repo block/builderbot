@@ -3354,206 +3354,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let session_registry = Arc::clone(session_registry);
             let action_executor = Arc::clone(action_executor);
             let action_registry = Arc::clone(action_registry);
+            // The desktop command's path, `prepare_resume` included: a
+            // resume waits out a Stop's backfill, and refuses a
+            // `disconnected` row. Detached, so a client that goes mid-resume
+            // can't leave the row claimed with no run behind it.
             detached(async move {
-                let session = store
-                    .get_session(&session_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-                let provider = session.provider.clone();
-                let pending_start_agent_id =
-                    session_commands::pending_branch_start_agent_id(session.agent_id.as_deref())
-                        .map(ToString::to_string);
-                let agent_session_id =
-                    session_commands::resumable_agent_session_id(session.agent_id.as_deref());
-                let working_dir = std::path::PathBuf::from(&session.working_dir);
-                let effective_acp_config_selection =
-                    session_commands::resolve_resume_acp_config_selection(
-                        &store,
-                        &session,
-                        acp_config_selection,
-                    );
-                let acp_config_selection_to_persist = effective_acp_config_selection.clone();
-
-                let project_note = store
-                    .get_project_note_by_session(&session_id)
-                    .ok()
-                    .flatten();
-                let mcp_project_id = project_note.as_ref().map(|note| note.project_id.clone());
-                let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
-                let linked_note = store.get_note_by_session(&session_id).ok().flatten();
-                let linked_review = store.get_review_by_session(&session_id).ok().flatten();
-
-                let branch_from_id = branch_id
-                    .as_deref()
-                    .and_then(|bid| store.get_branch(bid).ok().flatten());
-
-                let linked_branch = if branch_from_id.is_some() {
-                    branch_from_id.clone()
-                } else if let Some(commit) = &linked_commit {
-                    store.get_branch(&commit.branch_id).ok().flatten()
-                } else if let Some(note) = &linked_note {
-                    store.get_branch(&note.branch_id).ok().flatten()
-                } else if let Some(review) = &linked_review {
-                    store.get_branch(&review.branch_id).ok().flatten()
-                } else {
-                    None
-                };
-
-                let session_type = if project_note.is_some() {
-                    Some("note".to_string())
-                } else if linked_commit.is_some() {
-                    Some("commit".to_string())
-                } else if linked_note.is_some() {
-                    Some("note".to_string())
-                } else if linked_review.is_some() {
-                    Some("review".to_string())
-                } else {
-                    session_commands::infer_branch_resume_session_type(&session.prompt)
-                        .map(str::to_string)
-                };
-                let event_branch_id = linked_branch.as_ref().map(|branch| branch.id.clone());
-                let event_project_id = if let Some(note) = &project_note {
-                    Some(note.project_id.clone())
-                } else {
-                    linked_branch
-                        .as_ref()
-                        .map(|branch| branch.project_id.clone())
-                };
-
-                let (pre_head_sha, workspace_name) = {
-                    if let Some(ref branch) = linked_branch {
-                        let ws_name = branch.workspace_name.clone();
-                        let head = if linked_commit.is_some() {
-                            crate::branches::branch_head_sha(&store, branch, &working_dir)
-                                .await
-                                .ok()
-                        } else {
-                            None
-                        };
-                        (head, ws_name)
-                    } else {
-                        (None, None)
-                    }
-                };
-
-                let remote_working_dir = if let Some(ref branch) = linked_branch {
-                    if branch.workspace_name.is_some() {
-                        let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
-                        let store_for_resolve = Arc::clone(&store);
-                        let branch_for_resolve = branch.clone();
-                        match tokio::task::spawn_blocking(move || {
-                            crate::branches::resolve_branch_workspace_subpath(
-                                &store_for_resolve,
-                                &branch_for_resolve,
-                            )
-                            .ok()
-                            .flatten()
-                            .and_then(|subpath| {
-                                crate::branches::resolve_workspace_repo_path(&ws_name, &subpath)
-                                    .ok()
-                            })
-                        })
-                        .await
-                        {
-                            Ok(Some(path)) => Some(std::path::PathBuf::from(path)),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                // Live from before the `running` write until the runner has
-                // registered (see `SessionRegistry::hold`).
-                let _liveness = session_registry.hold(&session_id);
-                let transitioned = store
-                    .transition_to_running_clearing_agent_id(
-                        &session_id,
-                        pending_start_agent_id.as_deref(),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if !transitioned {
-                    return Err("Session is already running".to_string());
-                }
-
-                let config_branch_id = event_branch_id.clone();
-                let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
-                // Note follow-ups (project notes or local branch notes) get the
-                // pikchr tool; remote branch notes can't reach localhost.
-                let expose_pikchr_tools = session_commands::local_note_pikchr_tools_available(
-                    project_note.is_some() || linked_note.is_some(),
-                    workspace_name.as_deref(),
-                );
-
-                emit_to_all(
-                    &app_handle,
-                    "session-status-changed",
-                    session_runner::SessionStatusEvent {
-                        session_id: session_id.clone(),
-                        status: "running".to_string(),
-                        error_message: None,
-                        completion_reason: None,
-                        branch_id: event_branch_id,
-                        project_id: event_project_id.or(mcp_project_id.clone()),
-                        session_type,
-                        dependency_skipped: false,
-                    },
-                );
-
-                // Persist the effective selection before spawning the run: on an
-                // unavailable-config failure the run clears the stored selection,
-                // so persisting afterwards could resurrect the stale value it
-                // just cleared.
-                if acp_config_selection_to_persist != session.acp_config_selection {
-                    store
-                        .set_session_acp_config_selection(
-                            &session_id,
-                            acp_config_selection_to_persist.as_ref(),
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-
-                session_runner::start_session(
-                    SessionConfig {
-                        session_id: session_id.clone(),
-                        prompt,
-                        working_dir,
-                        agent_session_id,
-                        pre_head_sha,
-                        provider,
-                        workspace_name,
-                        extra_env: vec![],
-                        mcp_project_id: mcp_project_id.clone(),
-                        action_executor: if mcp_project_id.is_some() {
-                            Some(Arc::clone(&action_executor))
-                        } else {
-                            None
-                        },
-                        action_registry: if mcp_project_id.is_some() {
-                            Some(Arc::clone(&action_registry))
-                        } else {
-                            None
-                        },
-                        remote_working_dir,
-                        image_ids: image_ids.unwrap_or_default(),
-                        queued_message_id: None,
-                        acp_config_selection: effective_acp_config_selection,
-                        branch_id: config_branch_id,
-                        project_id: config_project_id,
-                        expose_pikchr_tools,
-                        // When resuming a project session, keep its parent project note
-                        // in scope so `child_note` repo sessions still attach to it.
-                        parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
-                        background_hold: session_commands::default_background_hold(),
-                    },
-                    Arc::clone(&store),
-                    app_handle.clone(),
-                    Arc::clone(&session_registry),
-                )?;
-
+                session_commands::resume_session_for_store(
+                    store,
+                    session_registry,
+                    action_executor,
+                    action_registry,
+                    app_handle,
+                    session_id,
+                    prompt,
+                    image_ids,
+                    branch_id,
+                    acp_config_selection,
+                    None,
+                )
+                .await?;
                 Ok(Value::Null)
             })
             .await
@@ -4446,6 +4265,23 @@ mod tests {
         );
     }
 
+    /// A web resume goes through the desktop command's body, `prepare_resume`
+    /// included, so it waits out a Stop's backfill and refuses a
+    /// `disconnected` row as the desktop one does, instead of a copy that
+    /// drifts from it.
+    #[test]
+    fn web_resume_session_shares_the_tauri_body() {
+        let arm = dispatch_arm_body(include_str!("web_server.rs"), "resume_session");
+        assert!(
+            arm.contains("session_commands::resume_session_for_store("),
+            "the web `resume_session` arm must call the shared body: {arm}"
+        );
+        assert!(
+            !arm.contains("start_session("),
+            "the web `resume_session` arm must not start the run around the shared body: {arm}"
+        );
+    }
+
     /// Arms that write a `running` session row or a workspace status and then
     /// await must run that work through [`detached`]: the request future is
     /// dropped at its next `.await` when the client disconnects (see the module
@@ -4463,6 +4299,7 @@ mod tests {
             "_pipeline_for_branch(",
             "pull_or_queue_branch_for_branch(",
             "start_queued_session_now_for_branch(",
+            "resume_session_for_store(",
         ];
         /// Arms whose bodies run through `detached`.
         const DETACHED: &[&str] = &[

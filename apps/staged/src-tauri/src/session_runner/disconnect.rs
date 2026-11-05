@@ -38,12 +38,15 @@ use crate::store::{CompletionReason, Session, Store};
 /// never qualifies, because its agent went down with the connection.
 ///
 /// The shared proxy's own verdicts count too. Its agent lost for good (bloxlet
-/// reports the process gone, or `sq` exited having started it) leaves nothing
-/// to come back for, and neither does a session cut off for falling behind,
-/// whose turn was cancelled on the agent: both stay failures. Its agent
-/// detached (only `sq` went, and the agent may still run) is a lost transport
-/// like any other — reached here once reattaching in place has given up. A
-/// detach on purpose wins over all of them.
+/// reports the process gone) leaves nothing to come back for, and neither
+/// does a session cut off for falling behind, whose turn was cancelled on the
+/// agent: both stay failures. Its agent detached is a lost transport like any
+/// other — reached here once reattaching in place has given up: only `sq`
+/// went, and bloxlet still runs the agent process, whether `sq` started it or
+/// reused it (an `sq` SIGKILLed or cut off by the network leaves even a
+/// process it started running), or bloxlet couldn't be asked, which leaves
+/// the row for reconcile's backoff to settle. A detach on purpose wins over
+/// all of them.
 pub(crate) fn run_leaves_session_disconnected(
     is_remote: bool,
     cancel_requested: bool,
@@ -61,6 +64,24 @@ pub(crate) fn run_leaves_session_disconnected(
     let lost_holding_live_work = background_work_left
         && transport_loss.is_some_and(|loss| loss.phase == TransportLossPhase::Hold);
     is_remote && !cancel_requested && (lost_in_turn || lost_holding_live_work)
+}
+
+/// Whether a run whose connection ended with `error` picks its turn back up
+/// on the agent rather than settling: its `sq` proxy went while bloxlet still
+/// runs the agent ([`acp_client::is_remote_agent_detached_error`]). Not after
+/// a Stop, which ends the turn, nor after a quit's detach, which leaves it
+/// running: its SIGKILL of the proxy can read as the proxy going, when
+/// bloxlet is asked about it first (`settle_reason` says which it was). A
+/// quit in progress is checked by the caller, once it can be told the quit
+/// apart from the reattach's own.
+pub(crate) fn run_picks_up_detached_turn(
+    error: &str,
+    stopped: bool,
+    settle_reason: Option<SessionSettleReason>,
+) -> bool {
+    acp_client::is_remote_agent_detached_error(error)
+        && !stopped
+        && settle_reason != Some(SessionSettleReason::Detached)
 }
 
 /// Deregister a run that left its session `disconnected`, returning the Stop
@@ -189,6 +210,39 @@ mod tests {
             Some(SessionSettleReason::Detached),
             TURN,
             false
+        ));
+    }
+
+    /// A run picks a turn its `sq` proxy dropped back up on the agent — but
+    /// not one a quit detached, whose SIGKILL of the proxy reads as the proxy
+    /// going when bloxlet is asked about it first; nor after a Stop; nor
+    /// for a loss that isn't `sq` alone.
+    #[test]
+    fn only_a_proxy_that_went_by_itself_is_reattached_to() {
+        let detached = "Remote agent detached: the `sq blox acp` proxy exited, but bloxlet \
+                        still runs the agent process (command 27294439)";
+        assert!(run_picks_up_detached_turn(
+            detached,
+            false,
+            Some(SessionSettleReason::Failed)
+        ));
+        assert!(run_picks_up_detached_turn(detached, false, None));
+
+        let quit = format!("Detached with the turn still in flight ({detached})");
+        assert!(!run_picks_up_detached_turn(
+            &quit,
+            false,
+            Some(SessionSettleReason::Detached)
+        ));
+        assert!(!run_picks_up_detached_turn(
+            detached,
+            true,
+            Some(SessionSettleReason::Failed)
+        ));
+        assert!(!run_picks_up_detached_turn(
+            LOST,
+            false,
+            Some(SessionSettleReason::Failed)
         ));
     }
 
@@ -330,13 +384,44 @@ mod tests {
             );
         }
         // Only `sq` went: once reattaching in place gives up, the turn is
-        // still taken to be running on the agent.
-        assert!(run_leaves_session_disconnected(
+        // still taken to be running on the agent — whether `sq` started the
+        // process or reused it, and when bloxlet couldn't say.
+        for error in [
+            "Remote agent detached: the `sq blox acp` proxy exited",
+            "Remote agent detached: the `sq blox acp` proxy exited, but bloxlet still runs \
+             the agent process (command cmd-1)",
+            "Remote agent detached: the `sq blox acp` proxy exited, and whether the agent \
+             process (running `goose acp`) still runs is unknown: `sq blox ws commands` \
+             timed out",
+        ] {
+            assert!(
+                run_leaves_session_disconnected(
+                    true,
+                    false,
+                    Some(error),
+                    Some(SessionSettleReason::Failed),
+                    TURN,
+                    false
+                ),
+                "{error}"
+            );
+        }
+        // bloxlet confirmed the process gone, whichever `sq` reached.
+        assert!(!run_leaves_session_disconnected(
+            true,
+            false,
+            Some("Remote agent lost: bloxlet lists no running agent process running `goose acp`"),
+            Some(SessionSettleReason::Failed),
+            TURN,
+            false
+        ));
+        // Lost while setting up: no prompt went out, so nothing runs.
+        assert!(!run_leaves_session_disconnected(
             true,
             false,
             Some("Remote agent detached: the `sq blox acp` proxy exited"),
-            None,
-            TURN,
+            Some(SessionSettleReason::Failed),
+            loss(TransportLossPhase::Setup),
             false
         ));
     }

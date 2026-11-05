@@ -76,26 +76,63 @@ pub(super) const QUICK_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// reach back through to find a stopped agent's record.
 const COMMAND_HISTORY_LIMIT: &str = "500";
 
-/// Where to ask: the `sq` the proxy runs, and the workspace it attaches to.
+/// Where to ask: the `sq` the proxy runs, the workspace it attaches to, and
+/// the agent process it asks `sq` for.
 pub(super) struct Target {
     program: OsString,
     workspace: String,
+    requested: Requested,
+}
+
+/// The agent process a proxy's arguments ask `sq` for: what bloxlet is asked
+/// about when `sq` never logged which process it reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Requested {
+    /// `--command-id=<id>`: that process.
+    Command(String),
+    /// `--command=<argv>` (comma-separated), or Blox's default without one:
+    /// the active ACP process running exactly that argv, as `sq` matches it.
+    Argv(Vec<String>),
 }
 
 impl Target {
     /// The target for a proxy running `program args…`, if those are `blox acp
     /// <workspace> …` arguments.
     pub(super) fn of(program: &OsStr, args: &[OsString]) -> Option<Self> {
-        let [blox, acp, workspace, ..] = args else {
+        let [blox, acp, workspace, flags @ ..] = args else {
             return None;
         };
         if blox != "blox" || acp != "acp" {
             return None;
         }
+        let flag = |name: &str| {
+            flags
+                .iter()
+                .find_map(|arg| Some(arg.to_str()?.strip_prefix(name)?.to_string()))
+        };
+        let requested = match flag("--command-id=") {
+            Some(command_id) => Requested::Command(command_id),
+            None => Requested::Argv(match flag("--command=") {
+                Some(command) => command.split(',').map(str::to_string).collect(),
+                None => crate::types::BLOX_DEFAULT_ACP_ARGV
+                    .iter()
+                    .map(|arg| arg.to_string())
+                    .collect(),
+            }),
+        };
         Some(Self {
             program: program.to_owned(),
             workspace: workspace.to_str()?.to_string(),
+            requested,
         })
+    }
+
+    /// The agent process the proxy asks `sq` for, for a log line.
+    pub(super) fn requested(&self) -> String {
+        match &self.requested {
+            Requested::Command(command_id) => format!("command {command_id}"),
+            Requested::Argv(argv) => format!("running `{}`", argv.join(" ")),
+        }
     }
 }
 
@@ -152,6 +189,28 @@ pub(super) async fn check(target: &Target, command_id: &str) -> Result<Liveness,
     }))
 }
 
+/// Whether bloxlet still runs the agent process the proxy asked `sq` for,
+/// found the way `sq` finds it: for when `sq` never logged which process it
+/// reached. An error means the check itself failed and says nothing about
+/// the process.
+pub(super) async fn check_requested(target: &Target) -> Result<Liveness, String> {
+    let argv = match &target.requested {
+        Requested::Command(command_id) => return check(target, command_id).await,
+        Requested::Argv(argv) => argv,
+    };
+    let stdout = run_listing(target, &["--status=active"], CHECK_TIMEOUT).await?;
+    let active: Vec<blox_cli::WorkstationCommand> = serde_json::from_slice(&stdout)
+        .map_err(|error| format!("unreadable `sq blox ws commands` output: {error}"))?;
+    Ok(match blox_cli::find_acp_process(&active, None, argv) {
+        Some(command) if command.status == blox_cli::CommandStatus::Idle => Liveness::Idle,
+        Some(_) => Liveness::Running,
+        None => Liveness::Gone(format!(
+            "bloxlet lists no running agent process {}",
+            target.requested()
+        )),
+    })
+}
+
 /// What bloxlet says about when a command started.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum CommandStart {
@@ -197,6 +256,15 @@ async fn list_commands(
     filter: &[&str],
     timeout: Duration,
 ) -> Result<Vec<CommandRecord>, String> {
+    parse_commands(&run_listing(target, filter, timeout).await?)
+}
+
+/// The stdout of `sq blox ws commands <workspace> --json <filter…>`.
+async fn run_listing(
+    target: &Target,
+    filter: &[&str],
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new(&target.program);
     cmd.args(["blox", "ws", "commands", &target.workspace, "--json"])
         .args(filter)
@@ -213,7 +281,7 @@ async fn list_commands(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    parse_commands(&output.stdout)
+    Ok(output.stdout)
 }
 
 /// Parse `sq blox ws commands --json`: protojson command summaries, so
@@ -284,4 +352,43 @@ pub(super) fn parse_utc_timestamp(text: &str) -> Option<i64> {
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     let days = era * 146_097 + day_of_era - 719_468;
     Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(args: &[&str]) -> Option<Target> {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        Target::of(OsStr::new("sq"), &args)
+    }
+
+    /// The process a proxy asks `sq` for, as bloxlet is asked about it when
+    /// `sq` never names the one it reached.
+    #[test]
+    fn a_target_names_the_process_its_arguments_ask_for() {
+        let pinned = target(&[
+            "blox",
+            "acp",
+            "ws",
+            "--command=goose,acp",
+            "--command-id=42",
+        ]);
+        assert_eq!(pinned.unwrap().requested(), "command 42");
+        let dedicated = target(&[
+            "blox",
+            "acp",
+            "ws",
+            "--command=claude-agent-acp,--staged-session=s1",
+            "--env-vars=A=1",
+        ]);
+        assert_eq!(
+            dedicated.unwrap().requested(),
+            "running `claude-agent-acp --staged-session=s1`"
+        );
+        let default = target(&["blox", "acp", "ws"]).unwrap();
+        assert_eq!(default.workspace, "ws");
+        assert_eq!(default.requested(), "running `goose acp`");
+        assert!(target(&["-c", "script", "fake-proxy"]).is_none());
+    }
 }

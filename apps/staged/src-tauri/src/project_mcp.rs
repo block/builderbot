@@ -1090,7 +1090,7 @@ impl ProjectToolsHandler {
         )
         .await
         {
-            Ok(repo) => repo,
+            Ok(added) => added.repo,
             Err(e) => return format!("Error adding repo: {e}"),
         };
 

@@ -9,6 +9,14 @@ use crate::store::repo_affinities::repo_affinity_key;
 use crate::store::{self, Store};
 use crate::{blox, branches, git};
 
+/// A repo just added to a project.
+pub(crate) struct AddedProjectRepo {
+    pub repo: store::ProjectRepo,
+    /// Whether the repo's branch provisions the project's Blox workspace: the
+    /// first repo of a remote project created without one.
+    pub provisions_workspace: bool,
+}
+
 /// Core logic for adding a GitHub repository to a project.
 ///
 /// Called by both the `add_project_repo` Tauri command and the MCP tool.
@@ -24,7 +32,7 @@ pub(crate) async fn add_project_repo_impl(
     pr_number: Option<u64>,
     default_branch: Option<String>,
     head_repo: Option<String>,
-) -> Result<store::ProjectRepo, String> {
+) -> Result<AddedProjectRepo, String> {
     crate::project_transfer::ensure_project_not_transferring(&project_id)?;
     // Use the frontend-prefetched default branch when available to avoid
     // a ~500ms-2s GitHub API round-trip. The fallback runs `gh`, so it goes
@@ -98,19 +106,24 @@ pub(crate) async fn add_project_repo_impl(
     // it is cloned into it, so it must be running. A project created without
     // a repo has no workspace yet: this repo's branch provisions it, created
     // `Starting` like `create_project`'s initial branch and started the same
-    // way (`start_workspace`, with this repo as the source). The claim is
-    // held until that branch row is written.
-    let _provisioning_claim = if project.location == store::ProjectLocation::Remote {
-        match claim_remote_workspace(&store, &project)? {
-            RemoteWorkspace::Provision(claim) => Some(claim),
-            RemoteWorkspace::Existing(ws_name) => {
-                ensure_workspace_running(&ws_name).await?;
-                None
+    // way (`start_workspace`, with this repo as the source), and named the
+    // way `create_project` names it: after that branch. The claim is held
+    // until that branch row is written.
+    let (remote_workspace, provisioning_claim) =
+        if project.location == store::ProjectLocation::Remote {
+            match claim_remote_workspace(&store, &project)? {
+                RemoteWorkspace::Provision(claim) => (
+                    Some(branches::infer_workspace_name(&repo.branch_name)),
+                    Some(claim),
+                ),
+                RemoteWorkspace::Existing(ws_name) => {
+                    ensure_workspace_running(&ws_name).await?;
+                    (Some(ws_name), None)
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            (None, None)
+        };
 
     // Again, now the awaits are behind us: a transfer that began during them
     // reads the project's repos without this one and switches the location
@@ -163,32 +176,23 @@ pub(crate) async fn add_project_repo_impl(
         repo.is_primary = true;
     }
 
-    let branch = match project.location {
-        store::ProjectLocation::Local => {
-            let mut b = store::Branch::new(&project_id, &repo.branch_name, &effective_base)
-                .with_project_repo(&repo.id);
-            if let Some(pr) = pr_number {
-                b = b.with_pr(pr);
-            }
-            b
+    let mut branch = match &remote_workspace {
+        None => store::Branch::new(&project_id, &repo.branch_name, &effective_base),
+        Some(ws_name) => {
+            store::Branch::new_remote(&project_id, &repo.branch_name, &effective_base, ws_name)
         }
-        store::ProjectLocation::Remote => {
-            let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
-            let mut b = store::Branch::new_remote(
-                &project_id,
-                &repo.branch_name,
-                &effective_base,
-                &ws_name,
-            )
-            .with_project_repo(&repo.id);
-            if let Some(pr) = pr_number {
-                b = b.with_pr(pr);
-            }
-            b
-        }
-    };
+    }
+    .with_project_repo(&repo.id);
+    if let Some(pr) = pr_number {
+        branch = branch.with_pr(pr);
+    }
     store.create_branch(&branch).map_err(|e| e.to_string())?;
-    Ok(repo)
+    let provisions_workspace = provisioning_claim.is_some();
+    drop(provisioning_claim);
+    Ok(AddedProjectRepo {
+        repo,
+        provisions_workspace,
+    })
 }
 
 /// Remote projects whose first repo is being added right now: from the check
@@ -277,12 +281,14 @@ async fn ensure_workspace_running(ws_name: &str) -> Result<(), String> {
 
 /// Background worktree + prerun-actions setup for a repo that was just added
 /// to a project — fire and forget. Shared by the `add_project_repo` command and
-/// the note move that adds a repo on the way.
+/// the note move that adds a repo on the way. `provisions_workspace` is
+/// [`AddedProjectRepo::provisions_workspace`].
 pub(crate) fn spawn_project_repo_setup(
     app_handle: tauri::AppHandle,
     store: Arc<Store>,
     project_id: String,
     repo_id: String,
+    provisions_workspace: bool,
 ) {
     log::info!(
         "[add_project_repo] spawning background setup for repo {repo_id} in project {project_id}"
@@ -290,29 +296,22 @@ pub(crate) fn spawn_project_repo_setup(
     tauri::async_runtime::spawn(async move {
         crate::web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
 
-        let branches = match store.list_branches_for_project(&project_id) {
-            Ok(branches) => branches,
+        let branch = match store.list_branches_for_project(&project_id) {
+            Ok(branches) => branches
+                .into_iter()
+                .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str())),
             Err(e) => {
                 log::warn!("[add_project_repo] failed to list branches: {e}");
                 return;
             }
         };
-        let branch = match branches
-            .iter()
-            .find(|b| b.project_repo_id.as_deref() == Some(repo_id.as_str()))
-        {
-            Some(b) => b.clone(),
+        let branch = match branch {
+            Some(b) => b,
             None => {
                 log::warn!("[add_project_repo] no branch found for repo {repo_id}");
                 return;
             }
         };
-        // A remote branch alone on its workspace is a remote project's first
-        // repo, whose branch provisions the workspace (`add_project_repo_impl`).
-        let provisions_workspace = branch.workspace_name.is_some()
-            && !branches
-                .iter()
-                .any(|b| b.id != branch.id && b.workspace_name == branch.workspace_name);
 
         if branch.workspace_name.is_none() {
             // Local branch: set up git worktree and run prerun actions.
@@ -412,19 +411,20 @@ mod tests {
 
     /// A remote project created without a repo has no workspace, so its first
     /// repo isn't held to a running one: it gets the branch that provisions
-    /// the workspace, `Starting` like `create_project`'s initial branch. With
-    /// `sq` asked nothing — a `ws info` on the workspace that doesn't exist
-    /// yet would fail the add.
+    /// the workspace, `Starting` like `create_project`'s initial branch and
+    /// named, as there, after that branch rather than the project. With `sq`
+    /// asked nothing — a `ws info` on the workspace that doesn't exist yet
+    /// would fail the add.
     #[test]
     fn the_first_repo_of_a_remote_project_without_a_workspace_provisions_it() {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = remote_project(&store, "Cloud only");
 
-        let repo = tauri::async_runtime::block_on(add_project_repo_impl(
+        let added = tauri::async_runtime::block_on(add_project_repo_impl(
             Arc::clone(&store),
             project.id.clone(),
             "acme/widgets".to_string(),
-            Some("cloud-only".to_string()),
+            Some("fix-login".to_string()),
             None,
             None,
             None,
@@ -434,6 +434,8 @@ mod tests {
         ))
         .unwrap();
 
+        assert!(added.provisions_workspace);
+        let repo = added.repo;
         assert!(repo.is_primary);
         let project = store.get_project(&project.id).unwrap().unwrap();
         assert_eq!(project.github_repo.as_deref(), Some("acme/widgets"));
@@ -446,7 +448,7 @@ mod tests {
             branch.workspace_status,
             Some(store::WorkspaceStatus::Starting)
         );
-        assert_eq!(branch.workspace_name.as_deref(), Some("stg-cloud-only"));
+        assert_eq!(branch.workspace_name.as_deref(), Some("stg-fix-login"));
         assert_eq!(branch.base_branch, "origin/main");
         // The claim went with the add, so the project isn't left looking busy.
         assert!(!provisioning_projects()

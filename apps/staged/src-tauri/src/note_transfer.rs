@@ -654,7 +654,7 @@ pub(crate) async fn add_repo_to_project(
     project_id: String,
     key: RepoKey,
 ) -> Result<(), String> {
-    let repo = crate::project_commands::add_project_repo_impl(
+    let added = crate::project_commands::add_project_repo_impl(
         Arc::clone(&store),
         project_id.clone(),
         key.github_repo,
@@ -667,7 +667,13 @@ pub(crate) async fn add_repo_to_project(
         None,
     )
     .await?;
-    crate::project_commands::spawn_project_repo_setup(app_handle, store, project_id, repo.id);
+    crate::project_commands::spawn_project_repo_setup(
+        app_handle,
+        store,
+        project_id,
+        added.repo.id,
+        added.provisions_workspace,
+    );
     Ok(())
 }
 

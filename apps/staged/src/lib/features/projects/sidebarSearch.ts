@@ -4,9 +4,9 @@
  * the landing-page grid, so the two surfaces always narrow together.
  *
  * Plain module (no runes, no store imports) like projectSearch.ts, so the
- * matching stays unit-testable. Projects reuse searchProjects; this file owns
- * the repo side, the match sets the sidebar hides rows by, and the shared
- * header copy.
+ * matching stays unit-testable. Projects reuse searchProjects and its
+ * SearchContext (branches, PRs, repo labels); this file owns the repo side,
+ * the match sets the sidebar hides rows by, and the shared header copy.
  *
  * The sidebar doesn't render the narrowed lists. Each segment renders its
  * whole list and hides what the query rules out (the match sets below): a
@@ -19,7 +19,7 @@
 
 import type { Project, RepoHomeItem } from '../../types';
 import { matchesAllTerms, queryTerms } from '../../shared/textSearch';
-import { searchProjects } from './projectSearch';
+import { searchProjects, type SearchContext } from './projectSearch';
 import { repoKey } from './repoReorder';
 
 /**
@@ -62,9 +62,13 @@ export function matchingRepoKeys(repos: RepoHomeItem[], query: string): Set<stri
  * Ids of the projects the query keeps (searchProjects' rule), or null when
  * the query is blank and every row shows.
  */
-export function matchingProjectIds(projects: Project[], query: string): Set<string> | null {
+export function matchingProjectIds(
+  projects: Project[],
+  query: string,
+  ctx?: SearchContext
+): Set<string> | null {
   if (queryTerms(query).length === 0) return null;
-  return new Set(searchProjects(projects, query).map((p) => p.id));
+  return new Set(searchProjects(projects, query, ctx).map((p) => p.id));
 }
 
 /** "1 result" / "n results" — the count a section header shows while searching. */

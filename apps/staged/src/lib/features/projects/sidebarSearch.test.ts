@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { Project, RepoHomeItem } from '../../types';
+import type { Branch, Project, RepoHomeItem } from '../../types';
+import type { SearchContext } from './projectSearch';
 import { repoKey } from './repoReorder';
 import {
   matchingProjectIds,
@@ -157,6 +158,19 @@ describe('matchingProjectIds', () => {
 
   it('is an empty set, not null, when a query matches nothing', () => {
     expect(matchingProjectIds(projects, 'zzz')).toEqual(new Set());
+  });
+
+  it('matches branches and PR numbers through a search context', () => {
+    const ctx: SearchContext = {
+      branchesByProject: new Map([
+        ['p2', [{ branchName: 'fix-login', prNumber: 123, updatedAt: 0 } as Branch]],
+      ]),
+      reposByProject: new Map(),
+    };
+    expect(matchingProjectIds(projects, 'login', ctx)).toEqual(new Set(['p2']));
+    expect(matchingProjectIds(projects, '#123', ctx)).toEqual(new Set(['p2']));
+    expect(matchingProjectIds(projects, '12', ctx)).toEqual(new Set());
+    expect(matchingProjectIds(projects, 'login')).toEqual(new Set());
   });
 });
 

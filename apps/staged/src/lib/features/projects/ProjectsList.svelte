@@ -49,7 +49,15 @@
   import { badgeBg, badgeFg } from '../../shared/badgeColors';
   import { projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
-  import { projectShortcutNumbers, visibleProjects, withStickyProject } from './projectSearch';
+  import {
+    projectMatchReasons,
+    projectShortcutNumbers,
+    visibleProjects,
+    withStickyProject,
+  } from './projectSearch';
+  import { projectSearchContext } from './projectSearchContext';
+  import ProjectMatchReason from './ProjectMatchReason.svelte';
+  import { queryTerms } from '../../shared/textSearch';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -149,16 +157,25 @@
     withStickyProject(projects, projectFiltersStore.filteredProjects, effectiveStickyId)
   );
   // The cards left on screen, in grid order: what ⌘1–9, the scroll restore
-  // and the empty state go by. See visibleProjects for the composition.
+  // and the empty state go by. See visibleProjects for the composition. The
+  // query reaches branches, PRs and repo labels too (matchProject), and only
+  // hides cards: the order never changes as you type.
+  let searchContext = $derived(projectSearchContext());
   let filteredProjects = $derived(
     visibleProjects(
       projects,
       projectFiltersStore.filteredProjects,
       effectiveStickyId,
-      gridQuery.current
+      gridQuery.current,
+      searchContext
     )
   );
   let shownProjectIds = $derived(new Set(filteredProjects.map((p) => p.id)));
+  // Why each card on screen matched, when its name and repos don't say.
+  let searchTerms = $derived(queryTerms(gridQuery.current));
+  let matchReasons = $derived(
+    projectMatchReasons(filteredProjects, gridQuery.current, searchContext)
+  );
   // Hidden cards keep their {#each} slot, so the overlay numbers come from
   // the position on screen instead.
   let shortcutNumbers = $derived(projectShortcutNumbers(filteredProjects));
@@ -471,7 +488,7 @@
           <SearchField
             bind:ref={searchInputEl}
             bind:value={projectsListViewState.searchQuery}
-            placeholder="Search projects"
+            placeholder="Search projects, branches, PRs"
             clearable
           />
         </div>
@@ -514,6 +531,7 @@
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
             {@const shortcut = shortcutNumbers.get(project.id)}
+            {@const matchReason = matchReasons.get(project.id)}
             <div
               class="project-card-wrapper"
               hidden={!shownProjectIds.has(project.id)}
@@ -573,6 +591,11 @@
                       />
                       <span>{projectDisplayName(project)}</span>
                     </div>
+                    {#if matchReason}
+                      <div class="card-match">
+                        <ProjectMatchReason reason={matchReason} terms={searchTerms} />
+                      </div>
+                    {/if}
                     {#if activity}
                       <div class="card-activity">
                         {activity}
@@ -833,6 +856,12 @@
 
   .card-header :global(svg) {
     flex-shrink: 0;
+  }
+
+  .card-match {
+    min-width: 0;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
   }
 
   /* Pinned to the bottom of the card. A remote project's cloud leads the repo

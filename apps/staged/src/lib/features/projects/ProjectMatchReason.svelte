@@ -1,0 +1,88 @@
+<!--
+  ProjectMatchReason.svelte — the one line a search result shows when the
+  project matched through something other than its name or repos: the
+  matching item's icon and label with the query's terms highlighted, and how
+  many other items matched besides (see matchProject).
+
+  Shared by the landing-grid cards and the sidebar rows. Single line,
+  ellipsised; the parent sets the font size and colour.
+-->
+<script lang="ts">
+  import FileSearch from '@lucide/svelte/icons/file-search';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+  import { highlightSegments } from '../../shared/textSearch';
+  import type { MatchReason, MatchReasonKind } from './projectSearch';
+
+  interface Props {
+    reason: MatchReason;
+    /** The query's terms (queryTerms), highlighted in the label. */
+    terms: readonly string[];
+    iconSize?: number;
+  }
+
+  let { reason, terms, iconSize = 12 }: Props = $props();
+
+  const ICONS = {
+    branch: GitBranch,
+    pr: GitPullRequest,
+    note: FileText,
+    projectNote: FileText,
+    review: FileSearch,
+  } satisfies Record<MatchReasonKind, unknown>;
+
+  const KIND_NAMES: Record<MatchReasonKind, string> = {
+    branch: 'Branch',
+    pr: 'Pull request',
+    note: 'Note',
+    projectNote: 'Project note',
+    review: 'Review',
+  };
+
+  let Icon = $derived(ICONS[reason.kind]);
+  let segments = $derived(highlightSegments(reason.label, terms));
+</script>
+
+<span class="match-reason" title="{KIND_NAMES[reason.kind]}: {reason.label}">
+  <Icon size={iconSize} />
+  <span class="sr-only">{KIND_NAMES[reason.kind]}:</span>
+  <span class="match-label"
+    >{#each segments as segment}{#if segment.match}<mark>{segment.text}</mark
+        >{:else}{segment.text}{/if}{/each}</span
+  >
+  {#if reason.more > 0}
+    <span class="match-more">+{reason.more} more</span>
+  {/if}
+</span>
+
+<style>
+  .match-reason {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .match-reason :global(svg) {
+    flex-shrink: 0;
+  }
+
+  .match-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .match-label mark {
+    background-color: var(--search-match-bg);
+    border-radius: 2px;
+    color: inherit;
+  }
+
+  .match-more {
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+</style>

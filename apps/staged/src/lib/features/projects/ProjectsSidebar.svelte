@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { quintIn } from 'svelte/easing';
   import { fade } from 'svelte/transition';
   import Plus from '@lucide/svelte/icons/plus';
@@ -45,6 +45,9 @@
     resultsLabel,
     sidebarPinnedRepos,
   } from './sidebarSearch';
+  import { projectMatchReasons } from './projectSearch';
+  import { projectSearchContext } from './projectSearchContext';
+  import { queryTerms } from '../../shared/textSearch';
   import { projectsListViewState } from './projectsListViewState.svelte';
   import { projectActions } from './projectActions.svelte';
   import { neighbourAfterRemove } from './focusAfterRemove';
@@ -124,8 +127,31 @@
     }
     return filtered;
   });
-  let matchingProjects = $derived(matchingProjectIds(sidebarProjects, searchQuery.current));
+  // Matched on branches, PRs and repo labels too (projectSearch's
+  // matchProject); rows found that way say why on their meta line.
+  let searchContext = $derived(projectSearchContext());
+  let matchingProjects = $derived(
+    matchingProjectIds(sidebarProjects, searchQuery.current, searchContext)
+  );
   let visibleProjectCount = $derived(matchingProjects?.size ?? sidebarProjects.length);
+  let searchTerms = $derived(queryTerms(searchQuery.current));
+  let matchReasons = $derived(
+    projectMatchReasons(
+      sidebarProjects.filter((p) => matchingProjects?.has(p.id)),
+      searchQuery.current,
+      searchContext
+    )
+  );
+
+  // Branches are what a search reaches beyond names, and they only hydrate
+  // per project on demand or via the store's idle drip. Pull the rest
+  // forward once a search starts so it covers every project; the store
+  // dedupes the ones already fetched.
+  $effect(() => {
+    if (!searching || !projectsDataStore.loaded) return;
+    void projectsDataStore.projects;
+    untrack(() => void projectsDataStore.ensureProjectsHydrated());
+  });
 
   // Keep run-action state hydrated for the row status dots and the Running
   // filter — on the repos route this is the only mounted surface that can
@@ -502,7 +528,11 @@
                     class:active={layerProjectId === project.id}
                     onclick={() => openProject(project.id)}
                   >
-                    <ProjectRowContent {project} />
+                    <ProjectRowContent
+                      {project}
+                      matchReason={matchReasons.get(project.id)}
+                      matchTerms={searchTerms}
+                    />
                     <div class="row-status">
                       {#if status.runActionPhase === 'running' && busy}
                         <span

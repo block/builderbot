@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// One client (one Staged session's ACP connection) on a router.
 pub(super) type RemoteClientId = u64;
@@ -56,6 +57,8 @@ struct RouterState {
     early_frames: VecDeque<EarlyFrame>,
     /// Unowned session ids already reported, so each is logged once.
     reported_unowned: HashSet<String>,
+    /// The agent's output has ended; nothing more will be routed.
+    closed: bool,
 }
 
 struct PendingRequest {
@@ -80,10 +83,15 @@ impl RemoteSessionRouter {
         self.state.lock().unwrap()
     }
 
-    /// Register a client; frames routed to it are sent on `inbound`.
+    /// Register a client; frames routed to it are sent on `inbound`. Once the
+    /// router is closed, `inbound` is dropped at once, so the client sees
+    /// end-of-stream instead of waiting on output that will never come.
     pub(super) fn attach(&self, inbound: mpsc::UnboundedSender<String>) -> RemoteClientId {
         let client = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
-        self.state().clients.insert(client, inbound);
+        let mut state = self.state();
+        if !state.closed {
+            state.clients.insert(client, inbound);
+        }
         client
     }
 
@@ -100,7 +108,9 @@ impl RemoteSessionRouter {
 
     /// Drop every client's delivery channel, so each sees end-of-stream.
     pub(super) fn close(&self) {
-        self.state().clients.clear();
+        let mut state = self.state();
+        state.closed = true;
+        state.clients.clear();
     }
 
     /// Prepare one frame `client` is sending to the agent, returning the line
@@ -311,9 +321,13 @@ fn wire_request_id(client: RemoteClientId, original_id: &Value) -> String {
 
 /// One agent process's stdio, routed: clients attach to get their own
 /// streams for an ACP connection.
+#[derive(Clone)]
 pub(super) struct RemoteTransport {
     router: Arc<RemoteSessionRouter>,
     to_agent: mpsc::UnboundedSender<String>,
+    /// Cancelled once the agent's stdout has ended and every client has been
+    /// told so.
+    closed: CancellationToken,
 }
 
 /// One client's ends of a [`RemoteTransport`], for `ByteStreams`.
@@ -334,9 +348,28 @@ impl RemoteTransport {
     {
         let router = Arc::new(RemoteSessionRouter::new());
         let (to_agent, to_agent_rx) = mpsc::unbounded_channel();
+        let closed = CancellationToken::new();
         tokio::spawn(write_agent_stdin(stdin, to_agent_rx));
-        tokio::spawn(read_agent_stdout(stdout, Arc::clone(&router)));
-        Self { router, to_agent }
+        tokio::spawn(read_agent_stdout(
+            stdout,
+            Arc::clone(&router),
+            closed.clone(),
+        ));
+        Self {
+            router,
+            to_agent,
+            closed,
+        }
+    }
+
+    /// Cancelled once the agent's stdout has ended.
+    pub(super) fn closed(&self) -> &CancellationToken {
+        &self.closed
+    }
+
+    /// End every attached client's stream.
+    pub(super) fn close(&self) {
+        self.router.close();
     }
 
     /// Attach one ACP connection. It detaches once it stops writing.
@@ -374,13 +407,18 @@ async fn write_agent_stdin<W: AsyncWrite + Unpin>(
     }
 }
 
-async fn read_agent_stdout<R: AsyncRead + Unpin>(stdout: R, router: Arc<RemoteSessionRouter>) {
+async fn read_agent_stdout<R: AsyncRead + Unpin>(
+    stdout: R,
+    router: Arc<RemoteSessionRouter>,
+    closed: CancellationToken,
+) {
     if let Err(error) =
         super::normalize_remote_acp_stdout(stdout, |line| router.incoming(&line)).await
     {
         log::error!("remote ACP stdout normalization failed: {error}");
     }
     router.close();
+    closed.cancel();
 }
 
 async fn forward_client_frames(

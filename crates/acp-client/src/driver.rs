@@ -49,6 +49,7 @@ use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
 
+mod remote_process;
 mod remote_routing;
 mod response_completion;
 
@@ -2158,90 +2159,101 @@ impl AcpDriver {
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
-        let mut child = cmd.spawn().map_err(|e| {
+        let spawn_error = |e: std::io::Error| {
             format!(
                 "Failed to spawn {} (binary: {}, cwd: {}): {e}",
                 self.agent_label,
                 self.binary_path.display(),
                 spawn_working_dir.display()
             )
-        })?;
+        };
 
-        // Fires when the agent process is observed to be gone (stderr EOF).
-        // The post-turn holding wait keys its involuntary-exit trigger off
-        // this: a dead bridge otherwise looks identical to a quiet one, and
-        // the hold would burn its full cap waiting on a process that can
-        // never report its background tasks again.
-        let child_exited = CancellationToken::new();
-
-        // Drain the agent's stderr to the log so spawn/shebang failures are
-        // visible instead of vanishing into a generic "server shut down".
-        if let Some(stderr) = child.stderr.take() {
-            let agent_label = self.agent_label.clone();
-            let session_id = session_id.to_string();
-            let exited = child_exited.clone();
-            tokio::task::spawn_local(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    log::warn!("[{agent_label} stderr][session {session_id}] {line}");
-                }
-                // stderr EOF (or a read error) means the agent process has
-                // exited or torn down its stderr — either way it can no
-                // longer be trusted to report background state.
-                exited.cancel();
-            });
-        }
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "Failed to get stdin".to_string())?;
-
-        // For the shell-spawn fallback, write the exec command to stdin. By the
-        // time the shell reads from stdin, init is complete and `precmd` has
-        // fired in the working directory (activating Hermit). `exec` replaces
-        // the shell with the agent binary — from this point on, stdin belongs
-        // to the agent's JSON-RPC transport. When a snapshot was applied the
-        // agent binary is already the child process, so there is nothing to
-        // exec.
-        if use_shell_spawn {
-            // If the fallback shell's initialized PATH already provides an
-            // env-shebang interpreter, keep it unchanged. Otherwise add the
-            // agent bin dir only as an interpreter fallback, preserving broad
-            // toolchain dirs behind project-managed PATH entries.
-            let exec_line = shell_exec_line(
-                &self.binary_path,
-                &self.acp_args,
-                self.interpreter_env_snapshot.as_deref(),
-            );
-            stdin
-                .write_all(exec_line.as_bytes())
-                .await
-                .map_err(|e| format!("Failed to write exec command to shell stdin: {e}"))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| format!("Failed to flush shell stdin: {e}"))?;
-        }
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "Failed to get stdout".to_string())?;
-
-        let (outgoing_writer, incoming_reader): (
+        // `child_exited` fires when the agent process is observed to be gone
+        // (stderr EOF). The post-turn holding wait keys its involuntary-exit
+        // trigger off this: a dead bridge otherwise looks identical to a quiet
+        // one, and the hold would burn its full cap waiting on a process that
+        // can never report its background tasks again.
+        let (agent_process, child_exited, outgoing_writer, incoming_reader): (
+            AgentProcess,
+            CancellationToken,
             Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
             Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         ) = if self.is_remote {
-            // `sq blox acp` may attach this session to a workstation agent
-            // process other sessions already use, and then this pipe carries
-            // all of their frames too. Route it so only this session's
-            // frames reach the connection.
-            let streams = remote_routing::RemoteTransport::spawn(stdin, stdout).attach();
-            (Box::new(streams.outgoing), Box::new(streams.incoming))
+            // `sq blox acp` attaches every session on this workspace and
+            // agent to one workstation process, so they share one proxy that
+            // stops only when the last of them is done, and its output is
+            // routed so only this session's frames reach this connection.
+            let (lease, streams) = remote_process::attach(cmd, &self.agent_label)
+                .await
+                .map_err(spawn_error)?;
+            let exited = lease.exited().clone();
+            (
+                AgentProcess::Remote(lease),
+                exited,
+                Box::new(streams.outgoing),
+                Box::new(streams.incoming),
+            )
         } else {
+            let mut child = cmd.spawn().map_err(spawn_error)?;
+            let child_exited = CancellationToken::new();
+
+            // Drain the agent's stderr to the log so spawn/shebang failures are
+            // visible instead of vanishing into a generic "server shut down".
+            if let Some(stderr) = child.stderr.take() {
+                let agent_label = self.agent_label.clone();
+                let session_id = session_id.to_string();
+                let exited = child_exited.clone();
+                tokio::task::spawn_local(async move {
+                    let mut lines = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        log::warn!("[{agent_label} stderr][session {session_id}] {line}");
+                    }
+                    // stderr EOF (or a read error) means the agent process has
+                    // exited or torn down its stderr — either way it can no
+                    // longer be trusted to report background state.
+                    exited.cancel();
+                });
+            }
+
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "Failed to get stdin".to_string())?;
+
+            // For the shell-spawn fallback, write the exec command to stdin. By the
+            // time the shell reads from stdin, init is complete and `precmd` has
+            // fired in the working directory (activating Hermit). `exec` replaces
+            // the shell with the agent binary — from this point on, stdin belongs
+            // to the agent's JSON-RPC transport. When a snapshot was applied the
+            // agent binary is already the child process, so there is nothing to
+            // exec.
+            if use_shell_spawn {
+                // If the fallback shell's initialized PATH already provides an
+                // env-shebang interpreter, keep it unchanged. Otherwise add the
+                // agent bin dir only as an interpreter fallback, preserving broad
+                // toolchain dirs behind project-managed PATH entries.
+                let exec_line = shell_exec_line(
+                    &self.binary_path,
+                    &self.acp_args,
+                    self.interpreter_env_snapshot.as_deref(),
+                );
+                stdin
+                    .write_all(exec_line.as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write exec command to shell stdin: {e}"))?;
+                stdin
+                    .flush()
+                    .await
+                    .map_err(|e| format!("Failed to flush shell stdin: {e}"))?;
+            }
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| "Failed to get stdout".to_string())?;
+
             // On the shell-spawn fallback, shell init (.zshrc, plugin banners,
             // Hermit activation) may write to stdout before `exec` replaces the
             // shell. Filter out any non-JSON lines so they don't reach the
@@ -2255,7 +2267,12 @@ impl AcpDriver {
                     log::error!("local ACP stdout normalization failed: {error}");
                 }
             });
-            (Box::new(stdin), Box::new(normalized_stdout_reader))
+            (
+                AgentProcess::Local(child),
+                child_exited,
+                Box::new(stdin),
+                Box::new(normalized_stdout_reader),
+            )
         };
         let stdin_compat = outgoing_writer.compat_write();
         let stdout_compat = incoming_reader.compat();
@@ -2313,14 +2330,13 @@ impl AcpDriver {
         let mcp_servers = self.mcp_servers.clone();
         let agent_label = self.agent_label.clone();
         let steering_disabled = self.steering_disabled;
-        let is_remote = self.is_remote;
         let background_hold = self.background_hold.clone();
         let background_hold_observer = self.background_hold_observer.clone();
 
         let connection_task = tokio::task::spawn_local(async move {
             // Reply sender for the turn in flight, stashed by the session
             // loop. The outcome is delivered only after finalize() +
-            // graceful_stop() below, so `SessionConnection::prompt` resumes
+            // release() below, so `SessionConnection::prompt` resumes
             // with the child already stopped — the old per-turn ordering.
             let pending_reply: RefCell<Option<oneshot::Sender<SessionTurnResult>>> =
                 RefCell::new(None);
@@ -2431,7 +2447,7 @@ impl AcpDriver {
             reject_queued_turn_control_requests(&mut turn_control_rx, "the ACP connection closed");
 
             writer.finalize().await;
-            graceful_stop(&mut child, is_remote).await;
+            agent_process.release().await;
 
             let (result, settle_reason) = match protocol_result {
                 Ok((outcome, reason)) => (Ok(outcome), reason),
@@ -2446,7 +2462,7 @@ impl AcpDriver {
             };
 
             // The settled event marks actual teardown: finalize() and
-            // graceful_stop() have run, so post-completion work keyed off it
+            // release() have run, so post-completion work keyed off it
             // cannot race still-live background continuations.
             let _ = settled_tx.send(SessionSettled {
                 outcome: result.clone(),
@@ -2518,6 +2534,25 @@ impl AgentDriver for AcpDriver {
                 Err(_) => turn_result,
             },
             None => turn_result,
+        }
+    }
+}
+
+/// The agent process behind one session's connection.
+enum AgentProcess {
+    /// A local agent this session spawned and owns.
+    Local(tokio::process::Child),
+    /// This session's lease on a remote agent proxy other sessions may share.
+    Remote(remote_process::RemoteProcessLease),
+}
+
+impl AgentProcess {
+    /// Stop a local agent; detach from a remote one, which stops only once no
+    /// other session is attached.
+    async fn release(self) {
+        match self {
+            Self::Local(mut child) => graceful_stop(&mut child, false).await,
+            Self::Remote(lease) => lease.release().await,
         }
     }
 }
@@ -7423,6 +7458,8 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     mod real_bridge;
+    #[cfg(unix)]
+    mod remote_process;
     mod remote_routing;
     mod response_completion;
     mod settlement;

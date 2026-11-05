@@ -623,7 +623,12 @@
     };
   }
 
-  async function loadChildHashtagItems(parentProjectNoteId: string) {
+  /**
+   * Load the open note's children. On the first load a failure leaves the
+   * (already empty) state alone; on a `refresh` it keeps what loaded before,
+   * since stale-but-right beats blank, and only logs.
+   */
+  async function loadChildHashtagItems(parentProjectNoteId: string, refresh = false) {
     const generation = ++childHashtagLoadGeneration;
     try {
       const children = await commands.listChildNotes(parentProjectNoteId);
@@ -635,20 +640,24 @@
       if (generation !== childHashtagLoadGeneration) return;
       if (openNote?.noteId !== parentProjectNoteId) return;
       console.error('[ProjectSection] Failed to load child notes:', e);
-      openNoteChildCount = 0;
-      childHashtagItems = [];
+      if (!refresh) {
+        openNoteChildCount = 0;
+        childHashtagItems = [];
+      }
     }
   }
 
   /**
-   * Re-read the open note's children. Called when its session leaves an
-   * active status (a resumed session may have spawned children) and on the
-   * project-notes invalidation a branch move or a child delete raises, so
-   * the `#note:` references and the move picker see the same children the
-   * backend would move.
+   * Re-read the open note's children, so the `#note:` references and the
+   * move picker see the same children the backend would move. Called when
+   * the note's session leaves an active status (a resumed session may have
+   * spawned children), on the project-notes invalidation a branch move
+   * raises when it detaches children, and on the timeline invalidation a
+   * child's own create, delete or move raises (those publish branch-scoped
+   * changes only).
    */
   function refreshOpenNoteChildren() {
-    if (openNote) void loadChildHashtagItems(openNote.noteId);
+    if (openNote) void loadChildHashtagItems(openNote.noteId, true);
   }
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
@@ -824,6 +833,7 @@
     // Refresh hashtag items when branch timelines are invalidated (e.g. branch session completion)
     const onTimelineInvalidated = (event: Event) => {
       hashtagVersion++;
+      refreshOpenNoteChildren();
 
       // Queuing a child through `start_repo_session` publishes no session
       // event — the queued row is a session-family write — but its artifact

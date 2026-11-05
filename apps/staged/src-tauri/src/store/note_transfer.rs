@@ -317,9 +317,19 @@ impl Store {
                 existing.title
             )));
         }
+        // The parent's own session is keyed on too: the caller checked it was
+        // settled, but a resume from another window can land before this
+        // write, and a running project session keeps creating child notes in
+        // the project it started in — which would be the wrong one after the
+        // move. Zero rows means either a live session or a parent that left
+        // the expected project; the second read tells them apart.
         let changed = tx.execute(
             "UPDATE project_notes SET project_id = ?1, content = ?2, updated_at = ?3
-             WHERE id = ?4 AND project_id = ?5",
+             WHERE id = ?4 AND project_id = ?5
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions s
+                    WHERE s.id = project_notes.session_id
+                      AND s.status IN ('queued', 'running'))",
             params![
                 target_project_id,
                 content,
@@ -329,7 +339,16 @@ impl Store {
             ],
         )?;
         if changed != 1 {
-            return Err(relocated_during_transfer(&existing.title));
+            let still_here: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM project_notes WHERE id = ?1 AND project_id = ?2)",
+                params![note_id, expected_project_id],
+                |row| row.get(0),
+            )?;
+            return Err(if still_here {
+                session_resumed_during_transfer(&existing.title)
+            } else {
+                relocated_during_transfer(&existing.title)
+            });
         }
         tx.commit()?;
 
@@ -448,8 +467,6 @@ fn media_changed_during_transfer(title: &str) -> StoreError {
     ))
 }
 
-/// The note was not where the caller last saw it, so the destination it
-/// resolved no longer applies.
 /// Re-home a note's session with the note. The caller checked the session
 /// was settled before planning, but a resume can land between that read and
 /// this write, and a live drain must not have its session handed to a branch
@@ -479,11 +496,19 @@ fn move_settled_session(
     if !exists {
         return Ok(());
     }
-    Err(StoreError(format!(
-        "The session of '{note_title}' started again during the transfer; wait for it to finish before moving the note."
-    )))
+    Err(session_resumed_during_transfer(note_title))
 }
 
+/// The note's session went live again between the caller's check and the
+/// transaction; the move has to wait for it.
+fn session_resumed_during_transfer(title: &str) -> StoreError {
+    StoreError(format!(
+        "The session of '{title}' started again during the transfer; wait for it to finish before moving the note."
+    ))
+}
+
+/// The note was not where the caller last saw it, so the destination it
+/// resolved no longer applies.
 fn relocated_during_transfer(title: &str) -> StoreError {
     StoreError(format!(
         "Note '{title}' was moved or deleted during the transfer."
@@ -945,6 +970,68 @@ mod tests {
                 child.parent_project_note_id.as_deref(),
                 Some(note.id.as_str())
             );
+            assert_eq!(
+                f.store.get_branch_id_for_session(&session.id).unwrap(),
+                Some(f.source_branch.id.clone())
+            );
+            assert!(f.store.get_image(&image.id).unwrap().is_none());
+        }
+    }
+
+    /// The parent's own session, resumed after the plan was made, fails the
+    /// move inside the transaction like a child's would.
+    #[test]
+    fn project_note_move_is_refused_when_the_parent_session_resumed_after_planning() {
+        let f = fixture();
+        let parent_session =
+            crate::store::Session::new_running("plan", std::path::Path::new("/tmp"));
+        f.store.create_session(&parent_session).unwrap();
+        f.store
+            .update_session_status(&parent_session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let note = ProjectNote::new(&f.source.id, "Plan", "body").with_session(&parent_session.id);
+        f.store.create_project_note(&note).unwrap();
+        let session = crate::store::Session::new_running("child", std::path::Path::new("/tmp"))
+            .with_branch(&f.source_branch.id);
+        f.store.create_session(&session).unwrap();
+        f.store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+        let child = Note::new_standalone(&f.source_branch.id, "Child", "body")
+            .with_parent_project_note(&note.id)
+            .with_session(&session.id);
+        f.store.create_note(&child).unwrap();
+        let plan = child_move(&child, &f.target_branch.id);
+        let image = Image::new(None, &f.target.id, "shot.png", "image/png", 3, false);
+
+        for status in [SessionStatus::Queued, SessionStatus::Running] {
+            f.store
+                .update_session_status(&parent_session.id, status, None, None)
+                .unwrap();
+
+            let err = f
+                .store
+                .move_project_note_to_project(
+                    &note.id,
+                    &f.source.id,
+                    &f.target.id,
+                    "new body",
+                    std::slice::from_ref(&image),
+                    std::slice::from_ref(&plan),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "The session of 'Plan' started again during the transfer; wait for it to finish before moving the note."
+            );
+            let stored = f.store.get_project_note(&note.id).unwrap().unwrap();
+            assert_eq!(stored.project_id, f.source.id);
+            assert_eq!(stored.content, "body");
+            // The child's move ran first in the same transaction and rolled
+            // back with it.
+            let child = f.store.get_note(&child.id).unwrap().unwrap();
+            assert_eq!(child.branch_id, f.source_branch.id);
             assert_eq!(
                 f.store.get_branch_id_for_session(&session.id).unwrap(),
                 Some(f.source_branch.id.clone())

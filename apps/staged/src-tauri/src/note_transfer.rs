@@ -484,7 +484,9 @@ fn move_project_note_now(
     finish_all(store, mode, &previous_contents, staged, result)
 }
 
-/// A failure after step 1 left `added` tracked by `target`; say so.
+/// A failure after step 1 left `added` tracked by `target`; say so. Errors
+/// from the repo add (and from git underneath it) rarely end in a period, so
+/// one is supplied where needed to keep the two sentences apart.
 fn with_added_repos(err: String, added: &[RepoKey], target: &Project) -> String {
     let mut names: Vec<String> = added.iter().map(RepoKey::describe).collect();
     let (list, verb, remain) = match names.len() {
@@ -495,8 +497,14 @@ fn with_added_repos(err: String, added: &[RepoKey], target: &Project) -> String 
             (format!("{} and {last}", names.join(", ")), "were", "remain")
         }
     };
+    let err = err.trim_end();
+    let stop = if err.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
     format!(
-        "{err} {list} {verb} added to {} along the way and {remain} tracked there.",
+        "{err}{stop} {list} {verb} added to {} along the way and {remain} tracked there.",
         target.name
     )
 }
@@ -2595,6 +2603,15 @@ mod tests {
             "Boom. acme/widgets at apps/web was added to target along the way and remains tracked there."
         );
         assert_eq!(
+            with_added_repos("Boom.".into(), std::slice::from_ref(&widgets), &target),
+            "Boom. acme/widgets at apps/web was added to target along the way and remains tracked there."
+        );
+        // An error that ends mid-sentence gets its full stop.
+        assert_eq!(
+            with_added_repos("Workspace is not running".into(), std::slice::from_ref(&widgets), &target),
+            "Workspace is not running. acme/widgets at apps/web was added to target along the way and remains tracked there."
+        );
+        assert_eq!(
             with_added_repos("Boom.".into(), &[widgets, gadgets, tools], &target),
             "Boom. acme/widgets at apps/web, acme/gadgets and acme/tools were added to target along the way and remain tracked there."
         );
@@ -2705,7 +2722,7 @@ mod tests {
         assert_eq!(
             err,
             format!(
-                "Could not add {} to target: Workspace is not running {} was added to target along the way and remains tracked there.",
+                "Could not add {} to target: Workspace is not running. {} was added to target along the way and remains tracked there.",
                 calls[1].describe(),
                 calls[0].describe()
             )
